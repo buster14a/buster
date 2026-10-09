@@ -36,7 +36,8 @@
 // compiler_driver_test_aarch64_assembly_round_trip reassembles AArch64 -S listings.
 // compiler_driver_test_assembly_private_labels checks ELF .L drops and NOTYPE labels.
 // compiler_driver_test_assembly_section_start_round_trip checks -S/-c leaves no undefined `.text`.
-// compiler_driver_test_assembly_x86_64_object_semantics compares -c with -S then -c: weak, priority, PLT.
+// compiler_driver_test_assembly_x86_64_object_semantics compares -c with -S then -c: weak, hidden, priority, PLT, section symbols, TLS-GD padding.
+// compiler_driver_test_assembly_x86_64_tls_general_dynamic_padding checks the TLS-GD padding bytes in -S text.
 // compiler_driver_test_assembly_control_labels checks full atomic-pair text and
 // the optional independent Clang cross-assembly observer.
 // compiler_driver_test_static_literal_addresses checks original literal bytes
@@ -6792,10 +6793,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_section_start_r
     return result;
 }
 
-// GitHub #1281 (x86-64 ELF slice): -S text states weak binding, constructor and
-// destructor priority, and PLT calls, so assembling it yields the symbol
-// bindings, initializer order and relocations the -c object for the same source
-// has. The -c object is compared with the object Buster's own assembler builds
+// GitHub #1281 (x86-64 ELF slice): -S text states weak binding, hidden
+// visibility, constructor and destructor priority, PLT calls and the
+// general-dynamic TLS padding, and prints no label for a section symbol (`.text`,
+// `.debug_*`), so assembling it yields the symbol bindings, initializer order
+// and relocations the -c object for the same source has. The -c object is compared with the object Buster's own assembler builds
 // from the listing, symbol by symbol and relocation by relocation.
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_object_section_is_unwind(ObjectFile* object, u32 section)
 {
@@ -6840,7 +6842,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_x86_64_object_s
            "__attribute__((destructor(65535))) static void object_last(void) { puts(\"last\"); }\n"
            "__attribute__((destructor(200))) void object_first(void) { puts(\"first\"); }\n"
            "__attribute__((destructor)) static void object_unprioritized(void) { puts(\"none\"); }\n"
-           "int object_entry(void) { object_weak_call(); puts(\"entry\"); return object_weak_data; }\n")))))
+           "extern int object_hidden_call(int);\n"
+           "int object_hidden_value = 5;\n"
+           "int object_hidden_function(void) { return 2; }\n"
+           "__asm__(\".hidden object_hidden_call\\n.hidden object_hidden_value\\n.hidden object_hidden_function\\n\");\n"
+           "int object_entry(void) { object_weak_call(); puts(\"entry\"); return object_weak_data + object_hidden_call(object_hidden_value); }\n")))))
     {
         String8 direct_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-g0"), S8("-c"), source, S8("-o"), direct};
         CompilerDriverResult compiled = compiler_driver_execute_invocation(arena,
@@ -6866,6 +6872,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_x86_64_object_s
             BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.section .fini_array,\"aw\",@fini_array\n")) != BUSTER_STRING_NO_MATCH);
             BUSTER_TEST(arguments, string_first_sequence(text, S8("call \"puts\"@PLT\n")) != BUSTER_STRING_NO_MATCH);
             BUSTER_TEST(arguments, string_first_sequence(text, S8("call \"object_weak_call\"@PLT\n")) != BUSTER_STRING_NO_MATCH);
+            // Hidden visibility on a definition and on an undefined reference;
+            // none of the weak or default-visibility names is hidden.
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.hidden object_hidden_value\n")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.hidden object_hidden_function\n")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.extern object_hidden_call\n\t.hidden object_hidden_call\n")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.hidden object_entry")) == BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.hidden object_weak")) == BUSTER_STRING_NO_MATCH);
+            // The assembler owns each section's symbol: a label, `.type` or
+            // `.size` for it is "symbol .text is already defined".
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\n.text:\n")) == BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8(".type .text,")) == BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8(".size .text,")) == BUSTER_STRING_NO_MATCH);
             String8 assemble_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-c"), listing, S8("-o"), reassembled};
             CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
                 compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble_command)));
@@ -6897,6 +6915,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_x86_64_object_s
                         }
                     }
                     BUSTER_TEST(arguments, weak_symbols == 4);
+                    u32 hidden_symbols = 0;
+                    for (u32 index = 0; index < expected.symbol_count; index += 1)
+                    {
+                        hidden_symbols += expected.symbols[index].hidden ? 1 : 0;
+                    }
+                    BUSTER_TEST(arguments, hidden_symbols == 3);
                     u32 expected_relocations = 0;
                     u32 plt_relocations = 0;
                     for (u32 index = 0; index < expected.relocation_count; index += 1)
@@ -6936,11 +6960,146 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_x86_64_object_s
                 file_map_unmap(round_map);
             }
         }
+        // With debug information every `.debug_*` section has its own symbol
+        // too: none is printed as a label, the listing still assembles, and
+        // each DWARF section is reproduced byte for byte.
+        String8 debug_direct_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-g"), S8("-c"), source, S8("-o"), direct};
+        CompilerDriverResult debug_compiled = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(debug_direct_command)));
+        BUSTER_TEST_RAW(arguments, debug_compiled.error == COMPILER_DRIVER_ERROR_NONE, debug_compiled.diagnostic);
+        String8 debug_print_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-g"), S8("-S"), source, S8("-o"), listing};
+        CompilerDriverResult debug_printed = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(debug_print_command)));
+        BUSTER_TEST_RAW(arguments, debug_printed.error == COMPILER_DRIVER_ERROR_NONE, debug_printed.diagnostic);
+        if (debug_compiled.error == COMPILER_DRIVER_ERROR_NONE && debug_printed.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 text = BYTE_SLICE_TO_STRING(8, file_read(arena, listing, (FileReadOptions){0}));
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.section .debug_info\n")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\n.debug_")) == BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8(".type .debug_")) == BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8(".size .debug_")) == BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\n.text:\n")) == BUSTER_STRING_NO_MATCH);
+            String8 debug_assemble_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-c"), listing, S8("-o"), reassembled};
+            CompilerDriverResult debug_assembled = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(debug_assemble_command)));
+            BUSTER_TEST_RAW(arguments, debug_assembled.error == COMPILER_DRIVER_ERROR_NONE && debug_assembled.has_object, debug_assembled.diagnostic);
+            if (debug_assembled.error == COMPILER_DRIVER_ERROR_NONE && debug_assembled.has_object)
+            {
+                FileMapRead direct_map = file_map_read(arena, direct, (FileReadOptions){0});
+                FileMapRead round_map = file_map_read(arena, reassembled, (FileReadOptions){0});
+                ObjectFile expected = object_read(arena, direct_map.bytes, target);
+                ObjectFile actual = object_read(arena, round_map.bytes, target);
+                if (BUSTER_REQUIRE(arguments, expected.error == OBJECT_ERROR_NONE && actual.error == OBJECT_ERROR_NONE))
+                {
+                    u32 debug_sections = 0;
+                    for (u32 index = 0; index < expected.section_count; index += 1)
+                    {
+                        ObjectSection const* want = expected.sections + index;
+                        if (want->name.length > 7 && string_equal((String8){.pointer = want->name.pointer, .length = 7}, S8(".debug_")) && want->data.length)
+                        {
+                            debug_sections += 1;
+                            bool found = false;
+                            for (u32 other = 0; other < actual.section_count && !found; other += 1)
+                            {
+                                ObjectSection const* got = actual.sections + other;
+                                found = string_equal(got->name, want->name);
+                                BUSTER_TEST(arguments, !found || (got->data.length == want->data.length &&
+                                                                  !memcmp(got->data.pointer, want->data.pointer, want->data.length)));
+                            }
+                            BUSTER_TEST(arguments, found);
+                        }
+                    }
+                    BUSTER_TEST(arguments, debug_sections >= 4);
+                }
+                file_map_unmap(direct_map);
+                file_map_unmap(round_map);
+            }
+        }
     }
     os_file_delete(source);
     os_file_delete(listing);
     os_file_delete(direct);
     os_file_delete(reassembled);
+    scratch_end(temporary);
+    return result;
+}
+
+// GitHub #1281: the general-dynamic TLS access `data16 lea rdi, x@tlsgd[rip];
+// data16 data16 rex64 call __tls_get_addr@PLT` is a fixed 16-byte sequence the
+// linker rewrites in place, so the listing keeps the padding bytes an assembler
+// cannot infer. Buster's assembler has no @TLSGD yet, so the text is checked
+// here and the full round trip is observed with the host assemblers by hand.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_x86_64_tls_general_dynamic_padding(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = buster_test_temporary_path(arena, S8("tls-gd-source"), S8(".c"));
+    String8 listing = buster_test_temporary_path(arena, S8("tls-gd-listing"), S8(".s"));
+    String8 object = buster_test_temporary_path(arena, S8("tls-gd-direct"), S8(".o"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(
+        S8("extern __thread int tls_gd_external;\n__thread int tls_gd_local = 7;\n"
+           "int tls_gd_read(void) { return tls_gd_external + tls_gd_local; }\n")))))
+    {
+        String8 print_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-g0"), S8("-fPIC"), S8("-S"), source, S8("-o"), listing};
+        CompilerDriverResult printed = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(print_command)));
+        BUSTER_TEST_RAW(arguments, printed.error == COMPILER_DRIVER_ERROR_NONE, printed.diagnostic);
+        String8 direct_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-g0"), S8("-fPIC"), S8("-c"), source, S8("-o"), object};
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(direct_command)));
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+        if (printed.error == COMPILER_DRIVER_ERROR_NONE && compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+        {
+            String8 text = BYTE_SLICE_TO_STRING(8, file_read(arena, listing, (FileReadOptions){0}));
+            String8 lea_external = S8("\t.byte 0x66\n\tlea rdi, [rip + \"tls_gd_external\"@TLSGD]\n\t.byte 0x66, 0x66, 0x48\n\tcall \"__tls_get_addr\"@PLT\n");
+            String8 lea_local = S8("\t.byte 0x66\n\tlea rdi, [rip + \"tls_gd_local\"@TLSGD]\n\t.byte 0x66, 0x66, 0x48\n\tcall \"__tls_get_addr\"@PLT\n");
+            BUSTER_TEST(arguments, string_first_sequence(text, lea_external) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, lea_local) != BUSTER_STRING_NO_MATCH);
+            // Padding appears only on the TLS sequence: two pairs, no other prefix bytes.
+            u64 pad16 = 0;
+            u64 pad_call = 0;
+            u64 search = 0;
+            while (search < text.length)
+            {
+                u64 found = string_first_sequence((String8){.pointer = text.pointer + search, .length = text.length - search}, S8("\t.byte 0x66\n"));
+                if (found == BUSTER_STRING_NO_MATCH) break;
+                pad16 += 1;
+                search += found + 1;
+            }
+            search = 0;
+            while (search < text.length)
+            {
+                u64 found = string_first_sequence((String8){.pointer = text.pointer + search, .length = text.length - search}, S8("\t.byte 0x66, 0x66, 0x48\n"));
+                if (found == BUSTER_STRING_NO_MATCH) break;
+                pad_call += 1;
+                search += found + 1;
+            }
+            BUSTER_TEST(arguments, pad16 == 2 && pad_call == 2);
+            // The direct object has the same bytes the padding spells.
+            Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+            FileMapRead map = file_map_read(arena, object, (FileReadOptions){0});
+            ObjectFile direct = object_read(arena, map.bytes, target);
+            if (BUSTER_REQUIRE(arguments, direct.error == OBJECT_ERROR_NONE))
+            {
+                u8 const lea_bytes[] = {0x66, 0x48, 0x8d, 0x3d};
+                u8 const call_bytes[] = {0x66, 0x66, 0x48, 0xe8};
+                ByteSlice code = direct.sections[OBJECT_SECTION_TEXT].data;
+                u32 lea_count = 0;
+                u32 call_count = 0;
+                for (u64 offset = 0; offset + 4 <= code.length; offset += 1)
+                {
+                    lea_count += !memcmp(code.pointer + offset, lea_bytes, 4) ? 1 : 0;
+                    call_count += !memcmp(code.pointer + offset, call_bytes, 4) ? 1 : 0;
+                }
+                BUSTER_TEST(arguments, lea_count == 2 && call_count == 2);
+            }
+            file_map_unmap(map);
+        }
+    }
+    os_file_delete(source);
+    os_file_delete(listing);
+    os_file_delete(object);
     scratch_end(temporary);
     return result;
 }
@@ -27661,6 +27820,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_private_labels);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_section_start_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_x86_64_object_semantics);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_x86_64_tls_general_dynamic_padding);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_macho_assembly_symbol_names);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
@@ -28816,6 +28976,38 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(incompatible_assembly_syntax_command_line));
     BUSTER_TEST(arguments, incompatible_assembly_syntax.error == COMPILER_DRIVER_ERROR_ARGUMENT);
     BUSTER_STRING_TEST(arguments, incompatible_assembly_syntax.diagnostic, S8("assembly syntax is incompatible with target: intel"));
+    // x86-64 -S prints Intel syntax only (#1281): the AT&T request is refused
+    // for a C input on every x86-64 target, while -c, -masm=intel and an
+    // assembly input (where -masm names the dialect it is read in) stay valid.
+    String8 att_listing_targets[] = {S8("--target=x86_64-linux"), S8("--target=x86_64-windows"), S8("--target=x86_64-macos")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(att_listing_targets); target_index += 1)
+    {
+        String8 att_listing_command_line[] = {att_listing_targets[target_index], S8("-S"), S8("-masm=att"), S8("source.c")};
+        CompilerDriverInvocation att_listing =
+            compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(att_listing_command_line));
+        BUSTER_TEST(arguments, att_listing.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        BUSTER_STRING_TEST(arguments, att_listing.diagnostic, S8("-masm=att is not supported with -S: x86-64 assembly listings are Intel syntax"));
+    }
+    String8 att_listing_separated_command_line[] = {S8("--target=x86_64-linux"), S8("-masm"), S8("att"), S8("source.c"), S8("-S")};
+    CompilerDriverInvocation att_listing_separated =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(att_listing_separated_command_line));
+    BUSTER_TEST(arguments, att_listing_separated.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    String8 intel_listing_command_line[] = {S8("--target=x86_64-linux"), S8("-S"), S8("-masm=intel"), S8("source.c")};
+    CompilerDriverInvocation intel_listing =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(intel_listing_command_line));
+    BUSTER_TEST(arguments, intel_listing.error == COMPILER_DRIVER_ERROR_NONE && intel_listing.assembly_syntax == ASSEMBLY_SYNTAX_INTEL);
+    String8 att_object_command_line[] = {S8("--target=x86_64-linux"), S8("-c"), S8("-masm=att"), S8("source.c")};
+    CompilerDriverInvocation att_object =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(att_object_command_line));
+    BUSTER_TEST(arguments, att_object.error == COMPILER_DRIVER_ERROR_NONE && att_object.assembly_syntax == ASSEMBLY_SYNTAX_ATT);
+    String8 att_assembly_listing_command_line[] = {S8("--target=x86_64-linux"), S8("-S"), S8("-masm=att"), S8("source.s")};
+    CompilerDriverInvocation att_assembly_listing =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(att_assembly_listing_command_line));
+    BUSTER_TEST(arguments, att_assembly_listing.error == COMPILER_DRIVER_ERROR_NONE && att_assembly_listing.assembly_syntax == ASSEMBLY_SYNTAX_ATT);
+    String8 att_default_listing_command_line[] = {S8("--target=x86_64-linux"), S8("-S"), S8("source.c")};
+    CompilerDriverInvocation att_default_listing =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(att_default_listing_command_line));
+    BUSTER_TEST(arguments, att_default_listing.error == COMPILER_DRIVER_ERROR_NONE);
     String8 no_debug_command_line[] = {S8("-g0"), S8("-c"), S8("source.c")};
     CompilerDriverInvocation no_debug_invocation =
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(no_debug_command_line));
