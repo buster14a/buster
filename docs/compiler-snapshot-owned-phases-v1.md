@@ -101,3 +101,21 @@ proofs, closure manifests and exported lab/corpus data for 90 days. The fixture
 also exercises a complete corpus regression with real exit 1 and three
 incomplete exit-1 cases, each proving no later child and retained failed data.
 These are functional diagnostics and never performance qualification.
+
+The native five-series qualifier uses the same exact corpus-only distinction.
+Its typed corpus adapter constructs the frozen native command itself, checks
+normal raw status 0 or 256, validates both bounded JSON documents with the
+existing duplicate-key-rejecting native parser, and binds both raw hashes to
+the native cleanup record before any binary-after probe or next series.
+Generic build, lab and probe commands retain zero-only completion. Raw 256
+remains a native failed state; a complete phase ledger means complete report
+data, not a successful zero exit or statistical qualification. The data
+adapter replays the exact raw status, policy and report bytes independently.
+
+Historical disabled staging heads #3221 and #3217 contain the original
+zero-only corpus behavior. The coherent disabled integration must include
+this follow-up before native qualification or utility acquisition runs.
+The full five-series regression-exit diagnostic uses a fixed hosted-only
+synthetic corpus charge; its true phase wall must contain every declared raw
+sample wall. It refuses the protected host and physical request environment.
+No physical margin, cell count, profile or acceptance criterion is relaxed.

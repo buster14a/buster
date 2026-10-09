@@ -781,6 +781,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operati
 #include "compiler_preparation.c"
 #include "compiler_closure_owned_phase.c"
 #include "compiler_closure_test.c"
+#include "compiler_corpus_contract_test.c"
 #include "compiler_ordinary_fixture.c"
 
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_main(Arena* arena, SliceString8 arguments)
@@ -795,6 +796,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_main(Arena* arena, SliceStrin
     else if (signals && arguments.length == 3 && string_equal(arguments.pointer[0], S8("ordinary-fixture-initialize")))
     {
         result = compiler_closure_ordinary_fixture_initialize(arena, arguments.pointer[1], arguments.pointer[2]);
+    }
+    else if (signals && arguments.length == 1 && string_equal(arguments.pointer[0], S8("corpus-contract-self-test")))
+    {
+        result = compiler_closure_corpus_contract_self_test(arena);
     }
     else if (signals && arguments.length == 2 && string_equal(arguments.pointer[0], S8("containment-self-test")))
     {

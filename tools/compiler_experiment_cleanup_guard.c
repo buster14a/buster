@@ -20,8 +20,10 @@ struct CompilerExperimentCleanupLease
 
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_read(char const* path, char8* bytes, u64 capacity, u64* length)
 {
-    int descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    bool result = descriptor >= 0;
+    int descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    struct stat observed = {0};
+    bool result = descriptor >= 0 && bytes && capacity && length &&
+        fstat(descriptor, &observed) == 0 && S_ISREG(observed.st_mode);
     u64 used = 0;
     bool eof = false;
     while (result && !eof)
@@ -40,8 +42,6 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_read(char const* path, char
     return result && eof;
 }
 
-// Foreign hosted diagnostics never consult or create the physical markers.
-// An unavailable/truncated CPU observation refuses a native physical boundary.
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_physical(bool* physical)
 {
     char8 bytes[262145];
@@ -182,17 +182,54 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_context(String8* values)
 
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_record_read(Arena* arena, char const* active, String8* record)
 {
-    struct stat directory = {0}, file = {0};
-    bool result = lstat(active, &directory) == 0 && S_ISDIR(directory.st_mode) &&
+    struct stat directory = {0}, opened_directory = {0}, final_directory = {0};
+    struct stat file = {0}, opened_file = {0}, final_file = {0}, final_name = {0};
+    bool result = record && lstat(active, &directory) == 0 && S_ISDIR(directory.st_mode) &&
         (directory.st_mode & 0777) == 0700 && directory.st_uid == getuid();
-    String8 path = string_format_z(arena, S8("{S8}/owner.tsv"), ((String8){(char8*)active, (u64)strlen(active)}));
-    result = result && lstat((char const*)path.pointer, &file) == 0 && S_ISREG(file.st_mode) &&
+    int owner_directory = result ? open(active, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
+    result = result && owner_directory >= 0 && fstat(owner_directory, &opened_directory) == 0 &&
+        opened_directory.st_dev == directory.st_dev && opened_directory.st_ino == directory.st_ino &&
+        opened_directory.st_mode == directory.st_mode && opened_directory.st_uid == directory.st_uid &&
+        fstatat(owner_directory, "owner.tsv", &file, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(file.st_mode) &&
         (file.st_mode & 0777) == 0600 && file.st_uid == getuid() && file.st_size > 0 &&
         (u64)file.st_size < BUSTER_EXPERIMENT_CLEANUP_RECORD_LIMIT;
+    int descriptor = result ? openat(owner_directory, "owner.tsv", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
+    result = result && descriptor >= 0 && fstat(descriptor, &opened_file) == 0 && S_ISREG(opened_file.st_mode) &&
+        opened_file.st_dev == file.st_dev && opened_file.st_ino == file.st_ino &&
+        opened_file.st_mode == file.st_mode && opened_file.st_uid == file.st_uid && opened_file.st_size == file.st_size &&
+        opened_file.st_mtim.tv_sec == file.st_mtim.tv_sec && opened_file.st_mtim.tv_nsec == file.st_mtim.tv_nsec &&
+        opened_file.st_ctim.tv_sec == file.st_ctim.tv_sec && opened_file.st_ctim.tv_nsec == file.st_ctim.tv_nsec;
     char8* bytes = result ? arena_allocate(arena, char8, BUSTER_EXPERIMENT_CLEANUP_RECORD_LIMIT) : 0;
     u64 length = 0;
-    result = result && compiler_experiment_cleanup_read((char const*)path.pointer, bytes, BUSTER_EXPERIMENT_CLEANUP_RECORD_LIMIT, &length) &&
-        length == (u64)file.st_size;
+    bool eof = false;
+    while (result && !eof)
+    {
+        ssize_t got = read(descriptor, bytes + length, (size_t)(BUSTER_EXPERIMENT_CLEANUP_RECORD_LIMIT - length));
+        if (got > 0)
+        {
+            length += (u64)got;
+            result = length < BUSTER_EXPERIMENT_CLEANUP_RECORD_LIMIT;
+        }
+        else if (!got) eof = true;
+        else result = errno == EINTR;
+    }
+    result = result && eof && length == (u64)file.st_size && fstat(descriptor, &final_file) == 0 &&
+        fstatat(owner_directory, "owner.tsv", &final_name, AT_SYMLINK_NOFOLLOW) == 0 &&
+        final_file.st_dev == file.st_dev && final_file.st_ino == file.st_ino &&
+        final_file.st_mode == file.st_mode && final_file.st_uid == file.st_uid && final_file.st_size == file.st_size &&
+        final_file.st_mtim.tv_sec == file.st_mtim.tv_sec && final_file.st_mtim.tv_nsec == file.st_mtim.tv_nsec &&
+        final_file.st_ctim.tv_sec == file.st_ctim.tv_sec && final_file.st_ctim.tv_nsec == file.st_ctim.tv_nsec &&
+        final_name.st_dev == file.st_dev && final_name.st_ino == file.st_ino &&
+        final_name.st_mode == file.st_mode && final_name.st_uid == file.st_uid && final_name.st_size == file.st_size &&
+        final_name.st_mtim.tv_sec == file.st_mtim.tv_sec && final_name.st_mtim.tv_nsec == file.st_mtim.tv_nsec &&
+        final_name.st_ctim.tv_sec == file.st_ctim.tv_sec && final_name.st_ctim.tv_nsec == file.st_ctim.tv_nsec &&
+        lstat(active, &final_directory) == 0 &&
+        final_directory.st_dev == directory.st_dev && final_directory.st_ino == directory.st_ino &&
+        final_directory.st_mode == directory.st_mode && final_directory.st_uid == directory.st_uid &&
+        final_directory.st_mtim.tv_sec == directory.st_mtim.tv_sec && final_directory.st_mtim.tv_nsec == directory.st_mtim.tv_nsec &&
+        final_directory.st_ctim.tv_sec == directory.st_ctim.tv_sec && final_directory.st_ctim.tv_nsec == directory.st_ctim.tv_nsec;
+    if (descriptor >= 0) result = close(descriptor) == 0 && result;
+    if (owner_directory >= 0) result = close(owner_directory) == 0 && result;
     if (result) *record = (String8){bytes, length};
     return result;
 }
@@ -222,11 +259,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_record_matches(Arena* arena
 
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_guard_at(Arena* arena, char const* unknown, char const* active)
 {
-    if (!compiler_experiment_cleanup_missing(unknown)) return false;
-    if (compiler_experiment_cleanup_missing(active)) return true;
-    String8 record = {0};
-    return compiler_experiment_cleanup_record_read(arena, active, &record) &&
-        compiler_experiment_cleanup_record_matches(arena, record, false);
+    bool result = compiler_experiment_cleanup_missing(unknown);
+    if (result && !compiler_experiment_cleanup_missing(active))
+    {
+        String8 record = {0};
+        result = compiler_experiment_cleanup_record_read(arena, active, &record) &&
+            compiler_experiment_cleanup_record_matches(arena, record, false);
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_write_file(char const* path, String8 record)
@@ -247,64 +287,84 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_write_file(char const* path
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_latch_at(Arena* arena, char const* unknown, String8 reason)
 {
     bool created = mkdir(unknown, 0700) == 0;
-    if (!created) return !compiler_experiment_cleanup_missing(unknown);
-    String8 path = string_format_z(arena, S8("{S8}/reason.tsv"), ((String8){(char8*)unknown, (u64)strlen(unknown)}));
-    String8 record = string_format(arena, S8("schema\tbuster-9700x-cleanup-unknown-v1\nstate\tunknown\nowner_pid\t{u64}\nreason\t{S8}\n"),
-        (u64)getpid(), reason);
-    // The directory itself is the fail-closed admission latch even if export fails.
-    bool written = compiler_experiment_cleanup_write_file((char const*)path.pointer, record);
-    int directory = open(unknown, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    bool durable = directory >= 0 && fsync(directory) == 0;
-    if (directory >= 0) durable = close(directory) == 0 && durable;
-    return written && durable;
+    bool result = !compiler_experiment_cleanup_missing(unknown);
+    if (created)
+    {
+        String8 path = string_format_z(arena, S8("{S8}/reason.tsv"), ((String8){(char8*)unknown, (u64)strlen(unknown)}));
+        String8 record = string_format(arena, S8("schema\tbuster-9700x-cleanup-unknown-v1\nstate\tunknown\nowner_pid\t{u64}\nreason\t{S8}\n"),
+            (u64)getpid(), reason);
+        // The directory itself is the fail-closed admission latch even if export fails.
+        bool written = compiler_experiment_cleanup_write_file((char const*)path.pointer, record);
+        int directory = open(unknown, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        bool durable = directory >= 0 && fsync(directory) == 0;
+        if (directory >= 0) durable = close(directory) == 0 && durable;
+        result = written && durable;
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_begin_at(Arena* arena, char const* unknown, char const* active,
     CompilerExperimentCleanupLease* lease)
 {
     bool valid = lease && !lease->enabled && compiler_experiment_cleanup_guard_at(arena, unknown, active);
-    if (!valid) return false;
-    lease->enabled = true;
-    if (!compiler_experiment_cleanup_missing(active))
-        return compiler_experiment_cleanup_record_read(arena, active, &lease->record);
-    String8 values[11] = {0}; u64 parent = 0, started = 0; char8 boot[64]; u64 boot_length = 0;
-    valid = compiler_experiment_cleanup_context(values) &&
-        compiler_experiment_cleanup_process(arena, (u64)getpid(), &parent, &started) &&
-        compiler_experiment_cleanup_boot(boot, &boot_length);
-    if (!valid) return false;
-    lease->owner_pid = (u64)getpid();
-    lease->record = string_format(arena,
-        S8("schema\tbuster-9700x-native-active-v1\nowner_pid\t{u64}\nowner_start_ticks\t{u64}\nboot_id\t{S8}\n"
-           "request_run_id\t{S8}\nexecutor_run_id\t{S8}\nexecutor_attempt\t{S8}\nrequest_head\t{S8}\n"
-           "repository\t{S8}\njob\t{S8}\npolicy_revision\t{S8}\n"),
-        lease->owner_pid, started, ((String8){boot, boot_length}), values[4], values[5], values[6], values[7], values[8], values[9], values[10]);
-    valid = mkdir(active, 0700) == 0;
-    // A failed/partial publication leaves ACTIVE consumed; there is no rollback.
-    lease->owned = valid;
-    String8 path = string_format_z(arena, S8("{s}/owner.tsv"), active);
-    valid = valid && compiler_experiment_cleanup_write_file((char const*)path.pointer, lease->record);
-    int directory = valid ? open(active, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    valid = valid && directory >= 0 && fsync(directory) == 0;
-    if (directory >= 0) valid = close(directory) == 0 && valid;
+    if (valid)
+    {
+        lease->enabled = true;
+        if (!compiler_experiment_cleanup_missing(active))
+        {
+            // Validate the exact second read being borrowed, including live ancestry
+            // and all context; an earlier guard read cannot authorize changed bytes.
+            valid = compiler_experiment_cleanup_record_read(arena, active, &lease->record) &&
+                compiler_experiment_cleanup_record_matches(arena, lease->record, false);
+        }
+        else
+        {
+            String8 values[11] = {0}; u64 parent = 0, started = 0; char8 boot[64]; u64 boot_length = 0;
+            valid = compiler_experiment_cleanup_context(values) &&
+                compiler_experiment_cleanup_process(arena, (u64)getpid(), &parent, &started) &&
+                compiler_experiment_cleanup_boot(boot, &boot_length);
+            if (valid)
+            {
+                lease->owner_pid = (u64)getpid();
+                lease->record = string_format(arena,
+                    S8("schema\tbuster-9700x-native-active-v1\nowner_pid\t{u64}\nowner_start_ticks\t{u64}\nboot_id\t{S8}\n"
+                       "request_run_id\t{S8}\nexecutor_run_id\t{S8}\nexecutor_attempt\t{S8}\nrequest_head\t{S8}\n"
+                       "repository\t{S8}\njob\t{S8}\npolicy_revision\t{S8}\n"),
+                    lease->owner_pid, started, ((String8){boot, boot_length}), values[4], values[5], values[6], values[7], values[8], values[9], values[10]);
+                valid = mkdir(active, 0700) == 0;
+                // A failed/partial publication leaves ACTIVE consumed; there is no rollback.
+                lease->owned = valid;
+                String8 path = string_format_z(arena, S8("{S8}/owner.tsv"), ((String8){(char8*)active, (u64)strlen(active)}));
+                valid = valid && compiler_experiment_cleanup_write_file((char const*)path.pointer, lease->record);
+                int directory = valid ? open(active, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
+                valid = valid && directory >= 0 && fsync(directory) == 0;
+                if (directory >= 0) valid = close(directory) == 0 && valid;
+            }
+        }
+    }
     return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_finish_at(Arena* arena, char const* unknown, char const* active,
     CompilerExperimentCleanupLease* lease, bool quiet)
 {
-    if (!lease || !lease->enabled) return quiet;
-    String8 observed = {0};
-    bool valid = quiet && compiler_experiment_cleanup_guard_at(arena, unknown, active) &&
-        compiler_experiment_cleanup_record_read(arena, active, &observed) && string_equal(observed, lease->record) &&
-        compiler_experiment_cleanup_record_matches(arena, observed, lease->owned);
-    if (valid && lease->owned)
+    bool valid = quiet;
+    if (lease && lease->enabled)
     {
-        String8 path = string_format_z(arena, S8("{s}/owner.tsv"), active);
-        valid = unlink((char const*)path.pointer) == 0 && rmdir(active) == 0;
+        String8 observed = {0};
+        valid = quiet && compiler_experiment_cleanup_guard_at(arena, unknown, active) &&
+            compiler_experiment_cleanup_record_read(arena, active, &observed) && string_equal(observed, lease->record) &&
+            compiler_experiment_cleanup_record_matches(arena, observed, lease->owned);
+        if (valid && lease->owned)
+        {
+            String8 path = string_format_z(arena, S8("{S8}/owner.tsv"), ((String8){(char8*)active, (u64)strlen(active)}));
+            valid = unlink((char const*)path.pointer) == 0 && rmdir(active) == 0;
+        }
+        if (!valid) compiler_experiment_cleanup_latch_at(arena, unknown, S8("owned-native-cleanup-unproven"));
     }
-    if (!valid) compiler_experiment_cleanup_latch_at(arena, unknown, S8("owned-native-cleanup-unproven"));
     return valid;
 }
+
 #endif
 
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_guard(Arena* arena)

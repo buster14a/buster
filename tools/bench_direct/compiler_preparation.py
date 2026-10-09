@@ -15,7 +15,7 @@ import hashlib
 import json
 import math
 import re
-from compiler_receipt import PROFILE, THROUGHPUT_PROFILE, classify, classify_throughput, validate_closure
+from compiler_receipt import PROFILE, THROUGHPUT_PROFILE, classify, classify_throughput, classify_throughput_exit, validate_closure
 
 SELECTOR = "compiler-baseline-closure-qualification-v1"
 REQUEST_LINE = "profile: " + SELECTOR
@@ -191,10 +191,11 @@ def parse_ledger(record: dict, raw: object, wanted: tuple[str, ...] | None = Non
             ordinal, finished, elapsed, status = (int(fields[index]) for index in (1, 3, 4, 6))
             if ordinal != pending["stage"] or fields[2] != pending["phase"] or finished < pending["start"] or \
                     finished > (1 << 64) - 1 or elapsed != finished - pending["start"] or \
-                    fields[5] != "complete" or status != 0 or \
+                    fields[5] != "complete" or (status != 0 and not (status == 256 and
+                        pending["phase"] in {name + "-throughput" for _, name, _ in SERIES})) or \
                     (pending["phase"] == "secondary-pins" and (not three or secondary != 2)):
                 raise ValueError("phase ledger finish failed or mismatched")
-            stages.append(dict(pending, finish=finished, elapsed=elapsed))
+            stages.append(dict(pending, finish=finished, elapsed=elapsed, status=status))
             previous = finished
             pending = None
         else:
@@ -617,6 +618,30 @@ def preparation_reasons(expected: dict, arm_name: str, arm: object, wanted_phase
                     reasons.append(arm_name + "/" + phase + " child argv changed the pinned recipe")
                 cleanup = json_object(files.get(stem + ".cleanup.json"))
                 reasons.extend(arm_name + "/" + phase + ": " + item for item in cleanup_reasons(cleanup))
+                if stage["status"] != 0 or cleanup.get("exit_policy") == "corpus-report-only-v1":
+                    if phase not in {name + "-throughput" for _, name, _ in SERIES}:
+                        raise ValueError("nonzero or corpus policy belongs to a non-corpus phase")
+                    pair = arm.get(phase[:-len("-throughput")])
+                    pair = pair if isinstance(pair, dict) else {}
+                    corpus_raw, metadata_raw = pair.get("throughput_raw"), pair.get("metadata_raw")
+                    corpus_report, metadata_report = json_object(corpus_raw), json_object(metadata_raw)
+                    if not exact(corpus_report, pair.get("throughput")) or not exact(metadata_report, pair.get("metadata")) or \
+                            cleanup.get("exit_policy") != "corpus-report-only-v1" or \
+                            cleanup.get("exit_status_encoding") != "posix-wait-status" or \
+                            not exact(cleanup.get("exit_status"), stage["status"]) or \
+                            cleanup.get("state") != ("complete" if stage["status"] == 0 else "failed") or \
+                            cleanup.get("corpus_summary_sha256") != sha(corpus_raw) or \
+                            cleanup.get("corpus_metadata_sha256") != sha(metadata_raw) or \
+                            any(not exact(cleanup.get(key), 0) for key in ("capture_failed", "output_truncated", "tree_cleanup_failed")):
+                        raise ValueError("corpus native status/report policy/raw hash classification mismatch")
+                    provenance = metadata_report.get("compiler_provenance")
+                    if not isinstance(provenance, list) or len(provenance) != 2:
+                        raise ValueError("corpus native status binary provenance missing")
+                    declared = {role: {"sha256": row.get("sha256") if isinstance(row, dict) else None}
+                                for role, row in zip(("baseline", "candidate"), provenance)}
+                    errors = classify_throughput_exit(stage["status"] // 256, corpus_report, metadata_report, declared)
+                    if errors:
+                        raise ValueError("corpus native exit classification incomplete: " + "; ".join(errors))
                 for stream in ("stdout", "stderr"):
                     raw_stream = files.get(stem + "." + stream)
                     if not isinstance(raw_stream, bytes) or len(raw_stream) > LOG_LIMIT:

@@ -76,6 +76,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          ./build.sh compiler_closure corpus-contract-self-test
           ./build.sh compiler_closure containment-self-test timeout
           ./build.sh compiler_closure containment-self-test SIGTERM
           ./build.sh compiler_closure containment-self-test SIGINT

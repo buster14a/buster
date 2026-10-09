@@ -247,7 +247,89 @@ def fixture(qualification=True, count=2, policy="snapshot-v1"):
     return expected, bundles[arms[0]]["prepared"], bundles[arms[0]]
 
 
+def regression_fixture():
+    expected, receipt, bundles = fixture()
+    for arm, name, _ in contract.SERIES:
+        row = bundles[arm][name]
+        for cell in row["throughput"]["comparisons"]:
+            cell["decision"] = "regression"
+        row["throughput"]["confirmed_regressions"] = len(row["throughput"]["comparisons"])
+        row["throughput_raw"] = encoded(row["throughput"])
+        row["metadata_raw"] = encoded(row["metadata"])
+        data = bundles[arm]
+        phase = name + "-throughput"
+        lines = data["ledger"].decode().splitlines()
+        ordinal = None
+        for index, line in enumerate(lines):
+            fields = line.split("\t")
+            if fields[0] == "finish" and fields[2] == phase:
+                ordinal = fields[1]
+                fields[6] = "256"
+                lines[index] = "\t".join(fields)
+        data["ledger"] = ("\n".join(lines) + "\n").encode()
+        data["files"]["phases.tsv"] = data["ledger"]
+        data["prepared"]["ledger_sha256"] = digest(data["ledger"])
+        stem = ordinal + "-" + phase
+        cleanup = json.loads(data["files"][stem + ".cleanup.json"])
+        cleanup.update(state="failed", exit_policy="corpus-report-only-v1", exit_status_encoding="posix-wait-status", exit_status=256,
+            corpus_summary_sha256=digest(row["throughput_raw"]), corpus_metadata_sha256=digest(row["metadata_raw"]),
+            capture_failed=0, output_truncated=0, tree_cleanup_failed=0)
+        data["files"][stem + ".cleanup.json"] = encoded(cleanup)
+    for arm, data in bundles.items():
+        data["files"]["prepared.json"] = encoded(data["prepared"])
+        bind_cost(data)
+        receipt["preparation_costs"][arm] = {"receipt_sha256": digest(data["files"]["preparation-cost.json"]),
+            "receipt_publication_us": 17, "total_us": json.loads(data["files"]["preparation-cost.json"])["total_us"] + 17,
+            "complete_cost_available": True}
+    return expected, receipt, bundles
+
+
 class ContractTest(unittest.TestCase):
+    def test_native_corpus_report_only_exit_requires_exact_raw_data_and_status(self):
+        expected, receipt, raw = regression_fixture()
+        self.assertEqual(contract.validate(expected, receipt, raw), [])
+        for case in ("missing-raw", "tampered-raw", "zero-count", "policy", "status", "state", "capture", "tree", "foreign-phase"):
+            changed = copy.deepcopy(raw)
+            row = changed["legacy"]["ab"]
+            key = next(key for key in changed["legacy"]["files"] if key.endswith("-ab-throughput.cleanup.json"))
+            cleanup = json.loads(changed["legacy"]["files"][key])
+            if case == "missing-raw":
+                row.pop("throughput_raw")
+            elif case == "tampered-raw":
+                row["metadata_raw"] += b" "
+            elif case == "zero-count":
+                for cell in row["throughput"]["comparisons"]:
+                    cell["decision"] = "no substantial regression detected"
+                row["throughput"]["confirmed_regressions"] = 0
+                row["throughput_raw"] = encoded(row["throughput"])
+                cleanup["corpus_summary_sha256"] = digest(row["throughput_raw"])
+            elif case == "policy":
+                cleanup["exit_policy"] = "allow-any-nonzero"
+            elif case == "status":
+                cleanup["exit_status"] = 512
+            elif case == "state":
+                cleanup["state"] = "complete"
+            elif case == "capture":
+                cleanup["capture_failed"] = 1
+            elif case == "tree":
+                cleanup["tree_cleanup_failed"] = 1
+            else:
+                data = changed["legacy"]
+                lines = data["ledger"].decode().splitlines()
+                for index, line in enumerate(lines):
+                    fields = line.split("\t")
+                    if fields[0] == "finish" and fields[2] == "candidate-build":
+                        fields[6] = "256"
+                        lines[index] = "\t".join(fields)
+                data["ledger"] = ("\n".join(lines) + "\n").encode()
+                data["files"]["phases.tsv"] = data["ledger"]
+                data["prepared"]["ledger_sha256"] = digest(data["ledger"])
+                data["files"]["prepared.json"] = encoded(data["prepared"])
+                bind_cost(data)
+            changed["legacy"]["files"][key] = encoded(cleanup)
+            with self.subTest(case=case):
+                self.assertTrue(contract.validate(expected, receipt, changed))
+
     def test_complete_original_population_and_all_controls(self):
         expected, receipt, raw = fixture()
         self.assertEqual(contract.validate(expected, receipt, raw), [])
