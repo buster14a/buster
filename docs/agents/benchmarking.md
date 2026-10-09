@@ -2,6 +2,69 @@
 
 [Agent instructions](../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
+## Request decisions and examples
+
+Routine compiler bug fixes and CI work use the post-merge main comparison
+by default (#3087). A request to fix a bug, make CI green, resolve conflicts
+or refresh a branch does not by itself authorize a PR benchmark request.
+Do not mechanically edit `compiler-compare.request` for every compiler PR.
+The A/B recipe below describes a planned experiment; it is not an unconditional
+per-PR validation step.
+
+Answer three independent questions in the issue/PR handoff:
+
+1. **Correctness CI:** which required correctness and policy checks passed on
+   the submitted revision? `Benchmark service workflow policy` validates
+   access/routing policy; it is not physical benchmark execution.
+2. **Performance claim:** is there complete actual Ryzen 7 9700X evidence for
+   the candidate, baseline, workload and configuration being claimed?
+   Without it, report performance validation as **incomplete/unvalidated**
+   (#2761). Hosted timing, static analysis and green policy checks are diagnostic.
+3. **Task acceptance:** does the owner's request or owning issue explicitly
+   require applicable measurements before acceptance or merge? Record that
+   reference and the outstanding cells. A real hold remains in force even
+   when correctness CI is green; routine post-merge scheduling does not waive it.
+
+An affirmative owner request for a standalone workload, compiler comparison,
+scaling experiment or task-specific performance acceptance uses the existing
+owner-only path. An already authorized request needs no second unrelated
+manual approval. Record the request/acceptance reference, exact candidate and
+baseline, selected profile, workload/configuration, request run/attempt,
+measurement run/attempt and evidence link in the handoff. The trusted authorizer
+continues to bind fresh changes at the exact source head relative to every
+parent, owner identity, repository and trusted-main execution; see
+[admission](../../benchmarks/9700x/ADMISSION.md#scheduling-policy).
+
+Before creating another request, read the exact-head check and its matching
+workflow run/attempt and published receipt. Reuse complete evidence for its
+original source/binary, baseline, workload, profile and configuration identities.
+An old comment saying "queued" does not override a completed check. Missing,
+failed, cancelled or superseded evidence remains unavailable; request a retry
+only within an authorized experiment, retaining the earlier attempt.
+A changed head or input cannot borrow the earlier result. Record the new
+performance claim as unvalidated; create a fresh request only when the owner
+experiment or explicit acceptance requirement applies to that new candidate.
+Deliberately requested new inputs or experiments retain distinct identities.
+
+| Scenario | Request action and handoff |
+| --- | --- |
+| Ordinary compiler bug fix | Run applicable correctness CI; leave the request file unchanged. Routine measurement follows the landed main commit. Any performance claim remains unvalidated until relevant evidence exists. |
+| CI-only edit | Validate the changed CI/policy behavior on hosted infrastructure. It does not manufacture a physical benchmark request. |
+| Branch refresh or conflict repair | Validate the new source revision. Refresh alone is not an explicit experiment; do not append a request line just because the head changed. |
+| Owner-requested standalone workload | Add/change the requested C workload or data at the exact head through the existing owner gate; retain the request reference and workload/data identity with its report. |
+| Explicit compiler comparison | Add a fresh request line for the authorized candidate experiment; retain its exact head/base, profile, run/attempt and published evidence. |
+| Issue-specific pre-merge performance hold | Keep the issue's hold until all required relevant 9700X cells are complete. A report-only workflow verdict and green correctness CI do not release that hold. |
+| Already measured exact head | Read the completed check, matching attempt and receipt; reuse that evidence for those same identities. Stale "queued" prose is not a rerun request. |
+| Changed head | Keep earlier results attached to the earlier identities. The new claim is unvalidated; request new evidence when the experiment or hold applies, otherwise use the routine post-merge default. |
+
+These examples govern whether an agent creates a request. A source-path
+classifier cannot infer human intent. Existing event/admission fixtures prove
+machine-verifiable freshness, provenance and routing, including rejection of
+implicit PR/merge-group host execution; they do not prove arbitrary future intent.
+Documentation-only corrections need documentation/link and policy checks,
+with no physical experiment. Preserve required protected checks, existing
+request history and other issues' acceptance holds.
+
 ## Benchmarking and diagnostics
 
 Record source debug flags explicitly in benchmark recipes and comparisons:
@@ -270,6 +333,10 @@ captures (#2741).
   counter the line still prints its units and omits the ratios. Only ever add
   keys to the metrics file: readers take the fields they know and must keep
   working against a newer compiler's file.
+  The file also always carries the `c_type_layout.*` work counts from the
+  `-v` `C_TYPE_LAYOUT` line; build.c gates stage 1's `solves` and
+  `pass_state_types` against fixed ceilings (see
+  [self-host work ceilings](build.md#self-host-work-ceilings)).
 - **The stages' preprocessed token streams are a fixed point too**, gated
   beside the executable bytes. `test_self_host` fails when the two stages
   disagree on `preprocessed.tokens` or `preprocessed.bytes`, and when the
@@ -481,15 +548,18 @@ captures (#2741).
   frozen `compiler-compare-v1`
   profile, report-only, merging never waits). Each comparison is published as
   the `9700X compiler benchmark` check on that main commit, queued before the
-  run starts and in progress while the 9700X measures (#2803), plus one
-  maintained report comment on the commit (#2804). During merge bursts only
+  run starts and completed by trusted terminal publication/recovery (#2803),
+  plus one maintained report comment on the commit (#2804). The linked
+  Actions `compare` job supplies live preparation/measurement state; a queued
+  custom check does not prove that the physical job has not started. During merge bursts only
   the newest pending commit is measured; the others' checks read
   **Not measured** and name the range comparison that covers their change.
   A range result does not isolate one commit. See the
   [admission guide](../../benchmarks/9700x/ADMISSION.md#main-compiler-comparison).
-  An owner pull request can request the same comparison of its head against
-  its merge base before merging by changing
-  `benchmarks/9700x/compiler-compare.request` (#2769); see the
+  An explicitly requested owner experiment can compare a pull request head
+  with its merge base before merging by adding a fresh request line to
+  `benchmarks/9700x/compiler-compare.request` (#2769). Apply the
+  [request decision](#request-decisions-and-examples) first; see the
   [workload guide](../../benchmarks/9700x/README.md#compiler-comparison-of-a-pull-request).
   These are the only sanctioned compiler A/B paths on that host; they run no
   profile steps and no A/A. `native-retirement-performance-v1` remains blocked,
@@ -705,6 +775,30 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
        [--min-effect PCT] [--no-fresh-copy]
    python3 tools/uarch_lab.py report "$session_root/ab-attempt-1"     # re-render report.md and summary.json
    ```
+
+   **Issue #48 opt-in self-hosting comparison.** The existing owner-authorized
+   pull-compare route accepts the exact standalone line
+   `canonical-inline-self-host-v1` in
+   `benchmarks/9700x/compiler-compare.request`. Add it only after the trusted
+   harness dependency has landed; the feature pull request can then request its
+   own 9700X evidence without changing the ordinary baseline/head profile or
+   its workflow and authorization gates.
+
+   After the tests-off candidate compiler is built, the harness runs this
+   bounded profile before checking out the merge base for the ordinary
+   comparison. It keeps candidate HEAD and that build's `build/generated`
+   headers in place, hashes `src/` and `build/generated` before and after,
+   and refuses changed inputs, symlinks or special files. Both stages compile
+   the same candidate-HEAD unity source. Stage 1 uses the exact same candidate
+   compiler binary for A and B, with A omitting `-fcanonical-inline` and B
+   passing it. Stage 2 uses those two stage-1 outputs as compilers with the
+   same respective modes. Each stage is 12 ABBA pairs after one warmup. The
+   report records wall time, retired instructions when perf can count them,
+   peak RSS and executable-section code bytes; unavailable hardware counters
+   remain NA. Each mode must reproduce its own stage-1 compiler byte-for-byte
+   in stage 2; off/on outputs do not need to match one another. A failed or
+   incomplete profile makes the requested evidence incomplete, while a
+   slower result remains report-only.
 
    **Without perf (#2768).** Before the first timed run the lab runs
    `perf stat -- true` once (`probe_counters`). If perf is missing, exits

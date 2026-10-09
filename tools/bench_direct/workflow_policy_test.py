@@ -22,6 +22,7 @@ DIRECT = WORKFLOWS / "9700x-direct-bench.yml"
 DIRECT_REQUEST = WORKFLOWS / "9700x-direct-request.yml"
 COMPILER_REQUEST = WORKFLOWS / "9700x-compiler-request.yml"
 COMPILER_REPORT = WORKFLOWS / "9700x-compiler-report.yml"
+LIFECYCLE = WORKFLOWS / "9700x-lifecycle.yml"
 ACTIONLINT = ROOT / ".github" / "actionlint.yaml"
 BENCHMARKING = ROOT / "docs" / "agents" / "benchmarking.md"
 ADMISSION_GUIDE = ROOT / "benchmarks" / "9700x" / "ADMISSION.md"
@@ -313,14 +314,14 @@ COMPILER_REQUEST_TRIGGER = (
 # the request bridge hold checks: write and never touch the 9700X.
 START_PULL_BLOCKS = (
     ("    needs: authorize", PULL_RUN_IF, "    runs-on: ubuntu-24.04", "    permissions:", "      actions: read",
-     "      checks: write", "      pull-requests: read", "    timeout-minutes: 25"),
+     "      checks: write", "      pull-requests: read", "    timeout-minutes: 5"),
     TRUSTED_TOOLS_CHECKOUT,
     ("          GH_TOKEN: ${{ github.token }}", "          BQ_MODE: pull"),
     ("        run: python3 -B tools/bench_direct/compiler_github.py start",),
 )
 START_COMPILER_BLOCKS = (
     ("    needs: authorize-compiler", COMPILER_RUN_IF, "    runs-on: ubuntu-24.04", "    permissions:",
-     "      actions: read", "      checks: write", "      contents: read", "    timeout-minutes: 25"),
+     "      actions: read", "      checks: write", "      contents: read", "    timeout-minutes: 5"),
     TRUSTED_TOOLS_CHECKOUT,
     ("          GH_TOKEN: ${{ github.token }}", "          BQ_MODE: main"),
     ("        run: python3 -B tools/bench_direct/compiler_github.py start",),
@@ -359,7 +360,8 @@ COMMENT_BLOCKS = (
 ANNOUNCE_BLOCKS = (
     ("    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && vars.BENCH_COMPILER_ENABLED == 'true' }}",
      "    runs-on: ubuntu-24.04", "    permissions:", "      checks: write", "    timeout-minutes: 3",
-     "    continue-on-error: true"),
+     "    concurrency:", "      group: buster-9700x-check-writer", "      cancel-in-progress: false",
+     "      queue: max", "    continue-on-error: true"),
     TRUSTED_TOOLS_CHECKOUT,
     ("          GH_TOKEN: ${{ github.token }}", "          BQ_REPOSITORY: ${{ github.repository }}",
      "          BQ_HEAD_COMMIT: ${{ github.sha }}", "          BQ_REQUEST_RUN_ID: ${{ github.run_id }}",
@@ -426,6 +428,70 @@ DOCUMENTATION_REQUIREMENTS = {
 }
 
 
+LIFECYCLE_EXPECTED = """name: 9700X terminal lifecycle recovery
+on:
+  workflow_run:
+    workflows: [9700X direct workload benchmark, 9700X compiler benchmark request]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Completed benchmark executor or failed main request run ID
+        required: true
+        type: string
+      run_attempt:
+        description: Exact completed run attempt
+        required: true
+        type: string
+permissions: {}
+concurrency:
+  group: buster-9700x-terminal-${{ github.event.workflow_run.id || inputs.run_id }}-${{ github.event.workflow_run.run_attempt || inputs.run_attempt }}
+  cancel-in-progress: false
+jobs:
+  reconcile:
+    name: Reconcile the exact completed benchmark attempt
+    if: ${{ github.repository == 'buster14a/buster' && ((github.event_name == 'workflow_run' && github.event.workflow_run.head_repository.full_name == github.repository && (github.event.workflow_run.path == '.github/workflows/9700x-direct-bench.yml' || (github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion != 'success'))) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == 'davidgmbb' && github.actor_id == '39247043' && github.triggering_actor == 'davidgmbb')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency:
+      group: buster-9700x-check-writer
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: ubuntu-24.04
+      - name: Check out the trusted lifecycle controller
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Compile the trusted native controller
+        run: clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/lifecycle.c -lm -o "$RUNNER_TEMP/9700x-lifecycle"
+      - name: Reconcile terminal checks and record separate Actions costs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LC_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+          LC_ATTEMPT: ${{ github.event.workflow_run.run_attempt || inputs.run_attempt }}
+        shell: bash
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/9700x-lifecycle" recover "$LC_RUN_ID" "$LC_ATTEMPT" | tee "$RUNNER_TEMP/9700x-lifecycle.jsonl"
+      - name: Retain bounded lifecycle observations
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: 9700x-lifecycle-${{ github.event.workflow_run.id || inputs.run_id }}-${{ github.event.workflow_run.run_attempt || inputs.run_attempt }}
+          path: ${{ runner.temp }}/9700x-lifecycle.jsonl
+          if-no-files-found: warn
+          retention-days: 90"""
+
+
 def main() -> int:
     errors: list[str] = []
     for path, markers in DOCUMENTATION_REQUIREMENTS.items():
@@ -443,11 +509,20 @@ def main() -> int:
     texts.update({path: path.read_text(encoding="utf-8")
                   for path in (*actions.rglob("*.yml"), *actions.rglob("*.yaml"))})
     check_runner_routes(errors, texts)
+    check_lifecycle(errors, texts.get(LIFECYCLE, ""))
     check_postmerge_diagnostics(errors)
     check_premerge_checks(errors)
     check_direct_workflow(errors)
     check_compiler_path(errors)
     return report(errors)
+
+
+def check_lifecycle(errors: list[str], workflow: str) -> None:
+    """Only exact completion callbacks or owner/main hosted attempt replay."""
+    active = "\n".join(line for line in workflow.splitlines()
+                       if line.strip() and not line.lstrip().startswith("#"))
+    if active != LIFECYCLE_EXPECTED:
+        errors.append("terminal lifecycle recovery must match the exact reviewed completion/replay hosted workflow")
 
 
 def trigger_block(workflow: str) -> tuple[str, ...]:
@@ -474,10 +549,10 @@ def check_runner_routes(errors: list[str], texts: dict[Path, str]) -> None:
             for marker in ("buster-zen5", "ryzen-9700x", "buster-9700x-service-dispatch", "self-hosted"):
                 if marker in active:
                     errors.append(f"unreviewed benchmark runner route {marker}: {path.name}")
-            if ".github/workflows/9700x-direct-bench.yml" in active:
+            if path != LIFECYCLE and ".github/workflows/9700x-direct-bench.yml" in active:
                 errors.append(f"direct benchmark cannot be called or dispatched indirectly: {path.name}")
         for name in ("9700X direct workload request", "9700X compiler benchmark request"):
-            if path not in (DIRECT, DIRECT_REQUEST, COMPILER_REQUEST) and name in active:
+            if path not in (DIRECT, DIRECT_REQUEST, COMPILER_REQUEST, LIFECYCLE) and name in active:
                 errors.append(f"only the direct workflow may follow the request workflow: {path.name}")
         if "pull_request_target" in active:
             errors.append(f"pull_request_target is forbidden repository-wide: {path.name}")
@@ -750,6 +825,27 @@ def check_visibility(errors: list[str], jobs: dict[str, list[str]]) -> None:
                                             if name == "comment-compiler" else ("contents: write",))):
             if any(marker in line for line in job):
                 errors.append(f"{name} job must not use: {marker}")
+    # All hosted check writers share one short-lived retaining queue. This
+    # includes cross-attempt orphan reconciliation, so fresh-read/PATCH cannot
+    # race a newer start job. GitHub bounds queue:max at 100 pending jobs.
+    lock = (
+        "    concurrency:",
+        "      group: buster-9700x-check-writer",
+        "      cancel-in-progress: false",
+        "      queue: max",
+    )
+    for name in ("start-pull", "start-compiler", "publish-pull", "publish-compiler"):
+        if not contains_block(jobs.get(name, []), lock):
+            errors.append(f"{name} must serialize all hosted check writers without pending replacement")
+    request_jobs = job_blocks(COMPILER_REQUEST.read_text(encoding="utf-8"))
+    if not contains_block(request_jobs.get("announce", []), lock):
+        errors.append("request announce must share the hosted check writer retaining queue")
+    recovery_jobs = job_blocks(LIFECYCLE.read_text(encoding="utf-8"))
+    if not contains_block(recovery_jobs.get("reconcile", []), lock):
+        errors.append("terminal recovery must share the hosted check writer retaining queue")
+    writer = (ROOT / "tools" / "bench_direct" / "compiler_github.py").read_text(encoding="utf-8")
+    if any(marker in writer for marker in ("wait_for_host", "START_SECONDS", "POLL_SECONDS")):
+        errors.append("compiler check setup must not poll physical-runner scheduling")
     if [line for line in jobs.get("publish-compiler", []) if line.strip().startswith(("comment:", "head:"))] != \
             ["      comment: ${{ steps.publish.outputs.comment }}", "      head: ${{ steps.publish.outputs.head }}"]:
         errors.append("publish-compiler must expose exactly its comment entry and head outputs")

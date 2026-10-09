@@ -151,6 +151,15 @@ order. The RAX ADD immediate alternative in the TLS oracle is a concrete reason:
 a six-byte accumulator form and a seven-byte group form are both legal, but only
 the latter fits this existing seven-byte in-place rewrite contract.
 
+ALU immediate source spellings may choose the short accumulator opcode when it
+is the shortest legal form. Default machine queries retain their existing
+encodings and fixed ModRM envelopes, including numeric immediates. The symbolic
+TLS RAX ADD recipe therefore remains seven bytes for its in-place rewrite.
+Checked exact-form emission preserves an explicitly requested source
+accumulator projection; layout and emission use the same operand width,
+including REX.W for RAX. Machine exact requests retain their implicit-operand
+and fixed-envelope contract.
+
 Feature predicates must express conjunctions, alternatives, mode restrictions
 and explicit exclusions. Compile them to masks/ranges or small checked programs;
 do not repeatedly compare feature strings in the hot emitter. A mnemonic is not

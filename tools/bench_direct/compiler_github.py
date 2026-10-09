@@ -4,16 +4,16 @@
 Ownership: `tools/bench_direct`, trusted `main` only, run by hosted jobs only;
 the 9700X never receives a token. One check run per measurement attempt,
 named check_name(mode) with external ID attempt_marker(...), moves
-queued -> in_progress -> completed and never backwards:
+queued -> completed and never backwards (legacy in_progress is also owned):
 
     announce  `9700x-compiler-request.yml` (push to main, `checks: write`)
               creates the queued check before the bench run exists, so the
               wait for the main comparison's concurrency group is visible.
     start     `start-compiler` / `start-pull` of `9700x-direct-bench.yml`
               (after this attempt's authorization) reconciles orphans, adopts
-              or creates the attempt's check, then polls this attempt's jobs
-              (bounded by START_SECONDS) and marks the check in_progress when
-              the 9700X job actually starts.
+              or creates the attempt's check in one bounded pass. Native
+              Actions job state is the authoritative live execution indicator;
+              the custom check waits for validated terminal evidence.
     publish   `compiler_publish.py` completes the same check (complete_check).
 
 Ownership of a check run is the GitHub Actions app ID, the exact name, the
@@ -21,12 +21,12 @@ exact head and the exact attempt marker together; an external ID alone is not
 trusted. A completed check is never rewritten, so a late or repeated writer of
 an older attempt cannot replace a result.
 
-Orphans (reconcile_main, reconcile_pull): a main run displaced while pending
-under the sampling policy, or cancelled before any job ran, never executes,
-so the next main attempt (main runs are serialized by one concurrency group)
-completes earlier main commits' open checks as "skipped" / "Not measured". A
-pull request head's open checks are completed as superseded by the next
-requested head of the same pull request.
+Orphans (reconcile_main, reconcile_pull): adopted or announced main checks
+carry a stable native protocol annotation and defer to terminal recovery, which reads
+the exact terminal provenance. Queued custom checks do not identify physical
+job state. Checks without the native protocol annotation retain the bounded legacy
+backstop with neutral conclusion and explicit execution uncertainty. A pull request head's open checks are
+superseded by the next requested head of the same pull request.
 
 Range baseline (#2752): a main commit is compared with the nearest
 first-parent ancestor, at most RECONCILE_DEPTH back, whose own main check
@@ -39,7 +39,7 @@ ancestor, which is trusted code; authorize_compiler verifies the ancestry.
 Map: Api (bounded GET with retries, POST/PATCH/DELETE, pages, download),
 owns, owned_checks, measured, write_check, ensure_check, advance,
 complete_check, queued_output, parse_chain, first_parent_chain,
-baseline_label, reconcile_main, reconcile_pull, wait_for_host, announce,
+baseline_label, reconcile_main, reconcile_pull, announce,
 start, main.
 """
 
@@ -65,15 +65,11 @@ TEXT_LIMIT = 60000
 STATUS_ORDER = {"queued": 0, "in_progress": 1, "completed": 2}
 COMPARE_JOBS = {"main": "Compare the main commit compiler", "pull": "Compare the pull request compiler"}
 BENCH_WORKFLOW = ".github/workflows/9700x-direct-bench.yml"
+NATIVE_LIFECYCLE = "Lifecycle protocol: terminal-native-v1."
 # How many earlier first-parent main commits, or earlier heads of the same
 # pull request, a start job reconciles, and how far back the authorizer looks
 # for a measured range baseline. Bounded reads; older orphans stay.
 RECONCILE_DEPTH = 15
-# The start job's display-only wait for the 9700X job: bounded, and it exits
-# as soon as that job starts. A longer runner wait leaves the check queued
-# with its last observation; the publisher still completes it.
-START_SECONDS = 20 * 60
-POLL_SECONDS = 15
 
 
 class Api:
@@ -81,6 +77,7 @@ class Api:
         self.repository = repository
         self.prefix = f"{API}/repos/{repository}"
         self.token = token
+        self.requests = 0
 
     def request(self, path: str, data: dict | None = None, method: str = "") -> object:
         """One API call. Only GET retries; writes are made idempotent by their callers' lookups."""
@@ -95,6 +92,7 @@ class Api:
                     "X-GitHub-Api-Version": "2022-11-28",
                 })
             try:
+                self.requests += 1
                 with urllib.request.urlopen(request, timeout=30) as response:
                     payload = response.read()
                 result = json.loads(payload) if payload else None
@@ -231,7 +229,7 @@ def run_url(repository: str, run_id: str, attempt: str = "") -> str:
 def queued_output(mode: str, head: str, lines: list[str]) -> dict:
     return {"title": "Queued: waiting for the 9700X comparison",
             "summary": "\n".join([f"**{check_name(mode)}: queued** (report-only; it never blocks merging)", "",
-                                  f"Candidate `{head}`.", *lines])[:TEXT_LIMIT]}
+                                  NATIVE_LIFECYCLE, f"Candidate `{head}`.", *lines])[:TEXT_LIMIT]}
 
 
 def parse_chain(rows: object, head: str) -> list[str]:
@@ -265,14 +263,16 @@ def close_orphans(api: Api, commits: list[str], mode: str, fields_for) -> list[i
     for sha in commits:
         for row in owned_checks(api, sha, mode, ""):
             if row["status"] != "completed":
-                write_check(api, row, fields_for(row))
-                closed.append(row["id"])
+                fields = fields_for(row)
+                if fields is not None:
+                    write_check(api, row, fields)
+                    closed.append(row["id"])
     return closed
 
 
 def reconcile_main(api: Api, head: str, base: str, reconciler: str, now: str, chain: list[str] | None = None) \
         -> list[int]:
-    """Close earlier main commits' open checks: no other main attempt can still advance them.
+    """Reconcile earlier legacy main checks; exact bound attempts belong to native terminal recovery.
 
     A closed commit strictly between base and head is named as covered by
     this attempt's range comparison; it still has no measurement of its own.
@@ -280,20 +280,28 @@ def reconcile_main(api: Api, head: str, base: str, reconciler: str, now: str, ch
     chain = first_parent_chain(api, head) if chain is None else chain
     covered = chain[:chain.index(base)] if base in chain else []
 
-    def fields(row: dict) -> dict:
-        started = row["status"] == "in_progress"
-        cause = ("its 9700X job started but no publisher completed this attempt (cancelled, timed out or "
-                 "failed); its workflow run has the details") if started else \
-            ("its comparison never started: a newer main commit displaced the pending run under the sampling "
-             "policy (only the newest pending main commit is kept), or the run was cancelled before any job ran")
-        cover = (f" Its change is inside the range comparison of `{head}` against `{base}`, which started now; "
-                 "that result covers the whole range and does not isolate this commit.") \
+    def fields(row: dict) -> dict | None:
+        # The custom check stays queued during physical execution. Tagged rows
+        # must be classified by the one native terminal provenance authority,
+        # even if a newer start wins the shared writer lock before recovery.
+        output = row.get("output")
+        summary = output.get("summary", "") if isinstance(output, dict) else ""
+        if isinstance(summary, str) and NATIVE_LIFECYCLE in summary.splitlines():
+            print(f"BENCH_COMPILER_ORPHAN_DEFERRED check_run={row['id']}: native terminal recovery",
+                  file=sys.stderr)
+            return None
+        cause = ("a legacy open check was displaced by this newer request; its exact execution metadata "
+                 "is unavailable, so this cleanup records no measurement")
+        cover = (f" Its change is inside the range comparison of `{head}` against `{base}`, which is now requested; "
+                 "any validated result covers the whole range and does not isolate this commit.") \
             if row["head_sha"] in covered else ""
-        return {"status": "completed", "conclusion": "cancelled" if started else "skipped", "completed_at": now,
+        prior = row.get("output", {}).get("summary", "") if isinstance(row.get("output"), dict) else ""
+        baseline = "\n".join(line for line in prior.splitlines() if line.startswith("Baseline"))
+        return {"status": "completed", "conclusion": "neutral", "completed_at": now,
                 "output": {"title": "Not measured", "summary": (
-                    f"**{check_name('main')}: not measured.** This commit has no 9700X compiler measurement: "
-                    f"{cause}. This is not a performance result.{cover} Closed while starting the comparison of "
-                    f"`{head}`: {reconciler}")[:TEXT_LIMIT]}}
+                    f"**{check_name('main')}: not measured.** This commit has no validated 9700X compiler measurement: "
+                    f"{cause}. This is not a performance result.{cover} Closed while preparing the comparison of "
+                    f"`{head}`: {reconciler}\n{baseline}")[:TEXT_LIMIT]}}
     return close_orphans(api, chain, "main", fields)
 
 
@@ -307,29 +315,9 @@ def reconcile_pull(api: Api, pull: str, head: str, reconciler: str, now: str) ->
         return {"status": "completed", "conclusion": "neutral", "completed_at": now,
                 "output": {"title": "Superseded: a newer pull request head was requested", "summary": (
                     f"**{check_name('pull')}: superseded.** A comparison of a newer head `{head}` of pull "
-                    f"request #{pull} started, so this attempt was cancelled or ended without publishing. It is "
+                    f"request #{pull} was requested; this earlier head has no validated publication. It is "
                     f"not a measurement. {reconciler}")[:TEXT_LIMIT]}}
     return close_orphans(api, commits[-RECONCILE_DEPTH:], "pull", fields)
-
-
-def wait_for_host(api: Api, run_id: str, attempt: str, mode: str, deadline: float,
-                  clock=time.monotonic, sleep=time.sleep) -> dict | None:
-    """This attempt's 9700X job once it has started, or None at the deadline or if it never ran."""
-    found = None
-    waiting = True
-    while waiting:
-        listing = api.request(f"/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
-        rows = [job for job in (listing.get("jobs", []) if isinstance(listing, dict) else [])
-                if isinstance(job, dict) and job.get("name") == COMPARE_JOBS[mode]]
-        job = rows[0] if len(rows) == 1 else None
-        if job is not None and job.get("status") in ("in_progress", "completed"):
-            found = job if isinstance(job.get("started_at"), str) and job.get("conclusion") != "skipped" else None
-            waiting = False
-        elif clock() + POLL_SECONDS > deadline:
-            waiting = False
-        else:
-            sleep(POLL_SECONDS)
-    return found
 
 
 def stamp() -> str:
@@ -356,12 +344,11 @@ def announce(api: Api, environment: dict) -> list[dict]:
                                                     "output": queued_output("main", head, lines)})
 
 
-def start(api: Api, environment: dict, clock=time.monotonic, sleep=time.sleep) -> list[dict]:
-    """Bench start job: reconcile, adopt or create this attempt's check, then mark it running."""
+def start(api: Api, environment: dict) -> list[dict]:
+    """One pass: reconcile, adopt or create this attempt's check; never await host scheduling."""
     get = lambda key: environment.get(key, "")  # noqa: E731
     mode, head, run_id, attempt = get("BQ_MODE"), get("BQ_HEAD_COMMIT"), get("BQ_RUN_ID"), get("BQ_RUN_ATTEMPT")
     marker = attempt_marker(head, mode, get("BQ_REQUEST_RUN_ID"), get("BQ_REQUEST_ATTEMPT"), attempt)
-    deadline = clock() + START_SECONDS
     here = run_url(api.repository, run_id, attempt)
     relation = "first parent or nearest measured first-parent ancestor" if mode == "main" else \
         f"merge base of pull request #{get('BQ_PULL')}"
@@ -382,28 +369,19 @@ def start(api: Api, environment: dict, clock=time.monotonic, sleep=time.sleep) -
         f"Request run {get('BQ_REQUEST_RUN_ID')} attempt {get('BQ_REQUEST_ATTEMPT')}; trusted harness "
         f"`{get('BQ_TRUSTED_REVISION')}`.",
         "",
-        f"Authorized at {stamp()}; waiting for the 9700X runner, which runs one job at a time.",
+        f"Authorized at {stamp()}; awaiting validated terminal evidence. Native Actions job state at {here} "
+        "is authoritative for runner queueing and live execution; this short setup does not claim measurement.",
     ]
-    queued = {"status": "queued", "details_url": here, "output": queued_output(mode, head, lines)}
+    output = queued_output(mode, head, lines)
+    output["title"] = "Awaiting validated terminal evidence; see live Actions progress"
+    queued = {"status": "queued", "details_url": here, "output": output}
     rows = advance(api, ensure_check(api, head, mode, marker, queued), queued)
-    job = wait_for_host(api, run_id, attempt, mode, deadline, clock, sleep)
-    if job is not None:
-        lines[-1] = (f"The 9700X job started at {job['started_at']} on runner `{job.get('runner_name') or 'NA'}`. "
-                     "It prepares first (checkouts and three Release builds, a few minutes), then measures "
-                     f"(about 10 minutes of pairs). Live step progress: {job.get('html_url') or here}")
-        rows = advance(api, rows, {"status": "in_progress", "started_at": job["started_at"], "details_url": here,
-                                   "output": {"title": "Running on the 9700X",
-                                              "summary": queued_output(mode, head, lines)["summary"].replace(
-                                                  ": queued**", ": running**", 1)}})
-    else:
-        lines[-1] += f" Still waiting at {stamp()}; this display job stopped polling. The publisher completes " \
-                     "the check when the attempt ends."
-        rows = advance(api, rows, dict(queued, output=queued_output(mode, head, lines)))
     return rows
 
 
 def main() -> int:
     """Display only: a failure is reported and never fails the request or the measurement."""
+    control_started = time.monotonic()
     environment = dict(os.environ)
     command = sys.argv[1] if len(sys.argv) == 2 else ""
     repository, head, token = (environment.get(key, "") for key in ("BQ_REPOSITORY", "BQ_HEAD_COMMIT", "GH_TOKEN"))
@@ -416,7 +394,8 @@ def main() -> int:
             raise ValueError("invalid workflow inputs")
         api = Api(repository, token)
         rows = announce(api, environment) if command == "announce" else start(api, environment)
-        print(f"BENCH_COMPILER_CHECK {command} " + ", ".join(f"{row.get('id')}:{row.get('status')}" for row in rows))
+        print(f"BENCH_COMPILER_CHECK {command} " + ", ".join(f"{row.get('id')}:{row.get('status')}" for row in rows)
+              + f" api_requests={api.requests} control_execution_seconds={time.monotonic() - control_started:.6f}")
     except Exception as error:  # noqa: BLE001 - display only: report every failure, never fail the run
         print(f"::warning::9700X compiler benchmark check {command or 'command'} failed: {error!r}")
     return 0

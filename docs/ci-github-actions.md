@@ -665,3 +665,34 @@ append-only data-branch retention, and advisory CPU-aware reports. It preserves
 `github_ci_time.py require-jobs`, existing queue/wait definitions and coverage.
 Its guide records schema, commands, raw metric boundaries, missing context,
 retention/recovery, statistical policy and outstanding live acceptance.
+
+## No-code classification and staged admission (#3107)
+
+The native build driver exposes `ci_no_code --repo PATH --base SHA --head SHA
+--tested SHA --policy SHA --event pull_request|merge_group`. Its deterministic
+`buster-ci-no-code-v1` record distinguishes `no-code` from `full`; it is a
+classification decision, never execution or coverage evidence. The PR head,
+event base, actual tested merge and independently trusted policy are separate
+identities. Merge groups are independently evaluated against their actual base
+and complete synthetic head.
+
+The initial exact allowlist is `README.md`, `docs/compiler-lifetime.md`,
+`docs/diagnostics.md`, and `docs/incremental-compilation.md`. Arbitrary Markdown,
+agent instructions, executable policy under docs, source, tests, fixtures,
+runtime assets, build inputs and workflow changes retain ordinary validation.
+Only regular mode-100644 blobs are eligible. Additions/deletions are supported;
+Git rename collapsing is disabled so both paths of a move are checked. Mode,
+type and gitlink changes always select full validation. A bounded Git capture
+failure, missing object, malformed raw diff or stale merge identity selects full
+validation with a reason. No comment/whitespace stripping is attempted.
+
+`./build.sh ci_no_code --self-test` exercises the raw parser. Hosted
+`No-code classifier controls` also exercises authentic Git PR/group graphs,
+mixed changes, a prose-only final commit on a code PR, and missing/stale objects.
+The immutable trusted-base reader is installed before automatic omission.
+During the transition it continues accepting genuinely executed legacy gates;
+once producers declare no-code plans, deliberately omitted gates must be skipped
+without runner allocation and their exact-attempt classifier must succeed.
+Normal code changes still require every current gate. No-code records cannot
+substitute for native-retirement execution, benchmarks or full queue-to-main
+coverage. Explicit workflow dispatch continues to request normal/full work.

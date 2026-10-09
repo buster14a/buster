@@ -136,8 +136,13 @@ history), then the relevant methods in
 Clang-built compiler; self-built stages validate the fixed point. Compare the
 same inputs, flags, target, and machine. Report compile time and useful work,
 not just a proxy or generated-program runtime.
-For a compiler change, run `tools/uarch_lab.py compare` (A/B; `run`
-profiles one binary) and read the verdict in its `summary.json`.
+Routine compiler and CI work uses the asynchronous, report-only comparison
+**after the commit lands on main** (#3087); do not create a PR benchmark request
+merely to fix a bug, make CI green, resolve conflicts, or refresh a branch.
+An affirmative owner experiment or a task explicitly requiring measured
+performance evidence keeps its existing request and acceptance requirements.
+See [request decisions and examples](docs/agents/benchmarking.md#request-decisions-and-examples)
+for correctness, performance-claim and task-acceptance handoffs.
 
 Every performance-validation test requires actual execution of its relevant
 workload on the approved Zen 5 host (Ryzen 7 9700X). Without complete evidence
@@ -146,14 +151,19 @@ validation as incomplete. Hosted, simulated and static evidence is diagnostic.
 [docs/performance-validation-v1.json](docs/performance-validation-v1.json)
 lists each entry point's route; a new one needs a row (#2761).
 
-To time a small standalone C workload on the dedicated Ryzen 7 9700X, add it
-under `benchmarks/9700x/` in a pull request opened with the owner's
-credentials; the run starts by itself and reports every run's timings and
-output. Follow [the workload guide](benchmarks/9700x/README.md). It measures
-that one program's process latency, not a compiler change. For a compiler
-change, change `benchmarks/9700x/compiler-compare.request` in such a pull
-request: the 9700X then runs `uarch_lab.py compare` of its head against its
-merge base, without merging.
+For an explicitly requested standalone C experiment, add its workload under
+`benchmarks/9700x/` in an owner pull request, following
+[the workload guide](benchmarks/9700x/README.md). For an explicitly requested
+compiler comparison, add a fresh request line to
+`benchmarks/9700x/compiler-compare.request` in that head commit. Existing
+actor, repository, every-parent freshness and trusted-main controls still apply;
+an already authorized experiment needs no second unrelated approval.
+Before requesting again, read the exact-head check and its run/attempt. Reuse
+complete published evidence only for its recorded identities; a changed head
+needs new evidence for a performance claim, but does not itself authorize a new
+experiment. Preserve explicit pre-merge holds and record their request or
+acceptance reference in the handoff. Neither green correctness CI nor a stale
+comment saying "queued" proves or requires another measurement.
 
 Record an audit with `tools/new_audit.py`: it writes one new file under
 `docs/performance-audits/` and nothing else. Never add a line to the closed
