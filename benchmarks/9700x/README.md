@@ -94,11 +94,16 @@ gate applies, and these jobs follow `authorize`:
   the same two binaries (#2761, #3053). Historical four-mode v1 receipts keep
   their original identity. A head
   that moved before measurement is recorded as superseded.
-- `start-pull` (hosted) shows the check
-  `9700X compiler benchmark (pull request)` on the head commit as soon as the
-  request is authorized: queued while the 9700X is busy, then in progress
-  with a link to the live job once `compare-pull` starts. It also closes the
-  open check of an earlier head of the same pull request as superseded.
+- `start-pull` (hosted) creates or adopts the exact attempt's queued
+  `9700X compiler benchmark (pull request)` check after authorization, then
+  exits in one short pass. It does not wait for a runner. Follow the linked
+  Actions `compare-pull` job for live scheduling, preparation and measurement;
+  the custom check remains queued until trusted terminal publication or
+  terminal-only recovery. Earlier open heads are reconciled as superseded
+  without rewriting a completed result. The trusted hosted
+  `9700X terminal lifecycle recovery` workflow closes unresolved cancelled
+  attempts even when no later request arrives; it starts no measurement and
+  never synthesizes a successful result.
 - `publish-pull` (hosted) validates the evidence, including that the observed
   CPU is the Ryzen 7 9700X, and completes that same check. Its summary
   states the identities, the pair count, the verdict with its 95% CI, the

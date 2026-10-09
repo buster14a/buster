@@ -360,7 +360,8 @@ COMMENT_BLOCKS = (
 ANNOUNCE_BLOCKS = (
     ("    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && vars.BENCH_COMPILER_ENABLED == 'true' }}",
      "    runs-on: ubuntu-24.04", "    permissions:", "      checks: write", "    timeout-minutes: 3",
-     "    continue-on-error: true"),
+     "    concurrency:", "      group: buster-9700x-check-writer", "      cancel-in-progress: false",
+     "      queue: max", "    continue-on-error: true"),
     TRUSTED_TOOLS_CHECKOUT,
     ("          GH_TOKEN: ${{ github.token }}", "          BQ_REPOSITORY: ${{ github.repository }}",
      "          BQ_HEAD_COMMIT: ${{ github.sha }}", "          BQ_REQUEST_RUN_ID: ${{ github.run_id }}",

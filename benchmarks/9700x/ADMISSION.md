@@ -241,16 +241,16 @@ request's verified head, never the trusted harness revision `github.sha`.
   decides whether the comparison starts. For a pull request, `start-pull`
   creates the check after authorization; that path has no workflow-level
   wait, because a new push cancels the older run.
-- **In progress.** `start-compiler` / `start-pull` (`actions: read`,
-  `checks: write`, plus `contents: read` or `pull-requests: read` for
-  reconciliation) share the host job's gate, so they run only after this
-  attempt's authorization. Each adopts the attempt's check, or creates it,
-  and polls this attempt's jobs through the Actions API. It marks the check
-  in progress with the 9700X job's own `started_at` and a link to its live
-  steps (preparation: checkouts and builds; then measurement). It stops
-  polling at the latest after 20 minutes and leaves the check queued if the
-  runner is still busy. These are the only display-only jobs; they never fail
-  the run.
+- **Queued setup and live execution.** `start-compiler` / `start-pull` share
+  the host job's authorization gate. Each creates or adopts this exact
+  attempt's queued check in one short hosted pass, performs the existing
+  bounded reconciliation, and exits. Neither waits, sleeps or polls for the
+  9700X scheduler. The custom check can remain queued while the host is
+  running: the linked Actions `compare` / `compare-pull` job is the
+  authoritative live record of runner wait, preparation and measurement.
+  A successful setup job proves bookkeeping only, not that a measurement
+  started or passed. Its log records `api_requests` and
+  `control_execution_seconds`.
 - **Completed.** `publish-compiler` / `publish-pull` complete the same check:
   success for a valid measurement, failure for a refused authorization or
   missing or invalid evidence, neutral for a superseded pull request head.
@@ -265,17 +265,33 @@ request's verified head, never the trusted harness revision `github.sha`.
   completed check is never rewritten, so a late or repeated older attempt
   cannot replace a newer result. A deliberate re-run of either workflow is a
   new attempt with its own check; GitHub shows the newest.
-- **Orphans.** Main runs are serialized, so when a main comparison starts,
-  `start-compiler` completes the open checks of up to 15 earlier first-parent
-  main commits. A check that never started is `skipped` / **Not measured**
-  (displaced while pending, or cancelled before any job ran). One whose host
-  job started but which no publisher completed is `cancelled`. `start-pull`
-  completes an open check of an earlier head of the same pull request as
-  superseded. An `always()` publisher already finishes a cancelled run that
-  started, so reconciliation is the backstop for runs that never ran. A
-  commit's check stays queued only until the next main comparison starts,
-  and it stays queued indefinitely only if `BENCH_COMPILER_ENABLED` is turned
-  off in between.
+
+  Keep the request workflow's run/attempt distinct from the benchmark
+  executor's run/attempt. Recovery re-reads the exact attempt endpoints and
+  binds the executor's trusted run name,
+  `9700X request REQUEST.ATTEMPT head HEAD`, to the original request and
+  measured head. Its own recovery run is separate bookkeeping provenance;
+  it does not replace either original identity. All six hosted check-writing
+  jobs serialize under `buster-9700x-check-writer`, with
+  `cancel-in-progress: false` and `queue: max`. Completed checks are immutable:
+  duplicate, delayed or out-of-order setup/recovery cannot reopen them or
+  overwrite a newer attempt. Queue saturation beyond GitHub's 100 pending
+  jobs is visible cancellation and incomplete validation, never success.
+- **Orphans and cancellation.** The existing bounded first-parent/range and
+  earlier-PR-head reconciliation remains a backstop. Completion of the bench
+  workflow also starts the short trusted
+  `.github/workflows/9700x-lifecycle.yml` recovery workflow; a non-successful
+  main request completion starts it even when no benchmark executor follows.
+  Thus the final cancelled request is reconciled without waiting for a later
+  request. Recovery uses `tools/bench_direct/lifecycle.c` with
+  `recover RUN ATTEMPT` and re-reads that exact attempt's API records. For an
+  unresolved owned check, a non-successful source request takes precedence
+  over the executor outcome: cancelled is `cancelled`, skipped is `skipped`,
+  and an unpublished success or failure is `failure`. Recovery never creates
+  a successful measurement; successful publication still requires the
+  existing evidence validator. Unavailable provenance/API records are
+  reported as unavailable, never as a pass. No host job is started and the
+  9700X receives no publication credential.
 - **Commit report.** `comment-compiler`, the only bench job with
   `contents: write` (the permission of the commit-comment API), upserts one
   general comment on the main commit with `compiler_comment.py`. It downloads
@@ -308,6 +324,31 @@ request's verified head, never the trusted harness revision `github.sha`.
   `run_id=37486885378`, `run_attempt=1`; its comment records the original
   measurement run and trusted harness, and the recovery run separately as a
   publication.
+
+### Lifecycle cost observations
+
+Keep control bookkeeping separate from physical measurements. Setup logs
+record `api_requests` and `control_execution_seconds`; native recovery pass
+records additionally expose `api_retries`, `api_failures`, `closed`,
+`already_terminal`, `other_executor` and `unavailable`.
+
+Per-job JSONL observations use schema `buster-9700x-lifecycle-cost-v1`, role
+`hosted-control` or `physical`, and separate `queue_delay_seconds` and
+`execution_seconds` fields. Derive them from matching Actions job records:
+
+| Quantity | Interval |
+| --- | --- |
+| Hosted control queue delay | Control job `created_at` to `started_at` |
+| Hosted control execution | Control job `started_at` to `completed_at` |
+| Physical job queue delay | `compare` / `compare-pull` `created_at` to `started_at` |
+| Physical occupancy | Physical job `started_at` to `completed_at` |
+
+Name the original request and executor run/attempt beside each observation;
+recovery has its own hosted Actions job record. Missing timestamps are `null`
+(unavailable), never zero. Physical occupancy includes preparation,
+measurement and export; report retained preparation/timed-phase observations
+separately and do not add them to that occupancy. These are per-attempt costs,
+not proof of a repository-wide speedup or of performance acceptance.
 
 ## Administrator steps
 

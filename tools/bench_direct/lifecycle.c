@@ -254,7 +254,11 @@ BUSTER_GLOBAL_LOCAL int lc_observe(CmTransport *t, const LcIdentity *id)
             cm_equal(name, "Compare the pull request compiler") || cm_equal(name, "bench");
         printf("{\"schema\":\"buster-9700x-lifecycle-cost-v1\",\"run_id\":%" PRIu64 ",\"attempt\":%" PRIu64 ",\"job_id\":%" PRIu64 ",\"job\":",
             id->executor, id->request_only ? id->request_attempt : id->attempt, cm_number(&jobs, row, "id"));
-        cm_quote(stdout, name); fputs(",\"role\":", stdout); cm_quote(stdout, physical ? "physical" : "hosted-control");
+        cm_quote(stdout, name);
+        printf(",\"request_run_id\":%" PRIu64 ",\"request_attempt\":%" PRIu64, id->request, id->request_attempt);
+        fputs(",\"source_head\":", stdout); cm_quote(stdout, id->head);
+        fputs(",\"trusted_revision\":", stdout); cm_quote(stdout, id->trusted[0] ? id->trusted : "unavailable");
+        fputs(",\"role\":", stdout); cm_quote(stdout, physical ? "physical" : "hosted-control");
         fputs(",\"queue_delay_seconds\":", stdout); lc_seconds(stdout, cm_get(&jobs, row, "created_at"), cm_get(&jobs, row, "started_at"));
         fputs(",\"execution_seconds\":", stdout); lc_seconds(stdout, cm_get(&jobs, row, "started_at"), cm_get(&jobs, row, "completed_at"));
         fputs(",\"status\":", stdout); cm_quote(stdout, cm_get(&jobs, row, "status"));

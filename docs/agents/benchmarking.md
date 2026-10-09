@@ -485,8 +485,10 @@ captures (#2741).
   frozen `compiler-compare-v1`
   profile, report-only, merging never waits). Each comparison is published as
   the `9700X compiler benchmark` check on that main commit, queued before the
-  run starts and in progress while the 9700X measures (#2803), plus one
-  maintained report comment on the commit (#2804). During merge bursts only
+  run starts and completed by trusted terminal publication/recovery (#2803),
+  plus one maintained report comment on the commit (#2804). The linked
+  Actions `compare` job supplies live preparation/measurement state; a queued
+  custom check does not prove that the physical job has not started. During merge bursts only
   the newest pending commit is measured; the others' checks read
   **Not measured** and name the range comparison that covers their change.
   A range result does not isolate one commit. See the
