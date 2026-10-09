@@ -21479,6 +21479,49 @@ BUSTER_C_INTERNAL bool c_parse_typeof_statement_expression_after(CParseResult* r
     return found;
 }
 
+// The "previous declaration at" text of a redefinition or conflicting
+// declaration: the line and column of the earlier site, prefixed with its path
+// when it lies in another file than the diagnostic (an included header, or a
+// `#line` that renamed the file), so it cannot be read as a line of this one.
+BUSTER_GLOBAL_LOCAL String8 c_parse_previous_site_text(Arena* arena, CPreprocessResult const* preprocess, CSourceLocation at, CSourceLocation previous)
+{
+    String8 text;
+    if (previous.file != at.file && previous.file < preprocess->file_count)
+    {
+        text = string_format(arena, S8("{S8}:{u32}:{u32}"), preprocess->files[previous.file], previous.line, previous.column);
+    }
+    else
+    {
+        text = string_format(arena, S8("{u32}:{u32}"), previous.line, previous.column);
+    }
+    return text;
+}
+
+// An enumerator whose name another entity already holds, reported at the later
+// of the two so the site it names is always the earlier one. The file-scope
+// publish runs after every object and function, so an enumerator declared
+// first meets an entity that follows it in the source. Order is the final token
+// stream's: a mapped offset is not source order across an included file.
+BUSTER_GLOBAL_LOCAL void c_parse_enumerator_redefinition(CParseResult* result, Arena* arena, CPreprocessResult const* preprocess, CEnumMember const* member,
+                                                         CEntity const* entity)
+{
+    String8 name = member->name;
+    CSourceLocation member_at = c_preprocess_site_location(preprocess, member->location);
+    CSourceLocation entity_at = c_preprocess_site_location(preprocess, entity->location);
+    if (entity->declaration_token_plus_one > member->token_index + 1)
+    {
+        c_parse_diagnostic(result, entity_at, C_DIAGNOSTIC_REDEFINITION,
+                           string_format(arena, S8("redefinition of '{S8}' (previous declaration at {S8})"), name,
+                                         c_parse_previous_site_text(arena, preprocess, entity_at, member_at)));
+    }
+    else
+    {
+        c_parse_diagnostic(result, member_at, C_DIAGNOSTIC_REDEFINITION,
+                           string_format(arena, S8("redefinition of enumerator '{S8}' (previous declaration at {S8})"), name,
+                                         c_parse_previous_site_text(arena, preprocess, member_at, entity_at)));
+    }
+}
+
 // Declares in `scope` the enumeration constants a block-scope type parse
 // appended from `member_start` on: the specifiers of a local declaration, or
 // an enum a controlling expression or direct expression type name defines.
@@ -21495,10 +21538,7 @@ BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CPrepr
         CEntityId prior_entity = c_parse_lookup_entity_in_scope(result, scope, member->symbol, member->name);
         if (prior_entity.value != C_ID_UNDERLYING_INVALID)
         {
-            CSourceLocation prior = c_preprocess_site_location(&preprocess, result->entities[prior_entity.value].location);
-            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, member->location), C_DIAGNOSTIC_REDEFINITION,
-                               string_format(result->arena, S8("redefinition of enumerator '{S8}' (previous declaration at {u32}:{u32})"), member->name,
-                                             prior.line, prior.column));
+            c_parse_enumerator_redefinition(result, result->arena, &preprocess, member, result->entities + prior_entity.value);
             continue;
         }
         CEntityId entity = {
@@ -22102,17 +22142,18 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             // finds declaration statements through their individual ranges.
             if (is_typedef || !(is_extern || declares_function) || previous->kind != C_ENTITY_LOCAL || !previous->is_extern)
             {
-                CSourceLocation prior = c_preprocess_site_location(&preprocess, previous->location);
-                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_REDEFINITION,
-                                   string_format(arena, S8("redefinition of '{S8}' (previous declaration at {u32}:{u32})"), declared_name, prior.line, prior.column));
+                CSourceLocation at = c_preprocess_token_location(&preprocess, name);
+                c_parse_diagnostic(result, at, C_DIAGNOSTIC_REDEFINITION,
+                                   string_format(arena, S8("redefinition of '{S8}' (previous declaration at {S8})"), declared_name,
+                                                 c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, previous->location))));
                 return false;
             }
             if (!c_parse_types_compatible(arena, result, preprocess, previous->type, type) || previous->is_thread_local != is_thread_local)
             {
-                CSourceLocation prior = c_preprocess_site_location(&preprocess, previous->location);
-                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
-                                   string_format(arena, S8("conflicting declaration of '{S8}' (previous declaration at {u32}:{u32})"), declared_name,
-                                                 prior.line, prior.column));
+                CSourceLocation at = c_preprocess_token_location(&preprocess, name);
+                c_parse_diagnostic(result, at, C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                                   string_format(arena, S8("conflicting declaration of '{S8}' (previous declaration at {S8})"), declared_name,
+                                                 c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, previous->location))));
                 return false;
             }
             bool requested = false;
@@ -33746,22 +33787,29 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             {
                 if (declares_static && !existing->has_internal_linkage)
                 {
-                    c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
-                                       string_format(arena, S8("static declaration of '{S8}' follows non-static declaration"), declaration->name));
+                    CSourceLocation at = c_preprocess_site_location(&preprocess, declaration->location);
+                    c_parse_diagnostic(&result, at, C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                                       string_format(arena, S8("static declaration of '{S8}' follows non-static declaration (previous declaration at {S8})"),
+                                                     declaration->name,
+                                                     c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, existing->location))));
                 }
                 else if (!declares_static && !declares_extern && existing->has_internal_linkage && entity_kind == C_ENTITY_OBJECT &&
                          !declares_function_type)
                 {
-                    c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
-                                       string_format(arena, S8("non-static declaration of '{S8}' follows static declaration"), declaration->name));
+                    CSourceLocation at = c_preprocess_site_location(&preprocess, declaration->location);
+                    c_parse_diagnostic(&result, at, C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                                       string_format(arena, S8("non-static declaration of '{S8}' follows static declaration (previous declaration at {S8})"),
+                                                     declaration->name,
+                                                     c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, existing->location))));
                 }
             }
             if (existing->is_definition && declaration->is_definition &&
                 !(existing->definition_is_gnu_inline_only && !declaration->is_gnu_inline_only))
             {
-                CSourceLocation prior = c_preprocess_site_location(&preprocess, existing->location);
-                c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_REDEFINITION,
-                                   string_format(arena, S8("redefinition of '{S8}' (previous declaration at {u32}:{u32})"), declaration->name, prior.line, prior.column));
+                CSourceLocation at = c_preprocess_site_location(&preprocess, declaration->location);
+                c_parse_diagnostic(&result, at, C_DIAGNOSTIC_REDEFINITION,
+                                   string_format(arena, S8("redefinition of '{S8}' (previous declaration at {S8})"), declaration->name,
+                                                 c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, existing->location))));
             }
             else if (declaration->is_definition)
             {
@@ -33799,13 +33847,13 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             declaration->entity = (CEntityId){
                 .value = (u32)(conflicting - result.entities),
             };
-            CSourceLocation prior = c_preprocess_site_location(&preprocess, conflicting->location);
-            c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
-                               string_format(arena, S8("conflicting declaration of '{S8}' (previous type '{S8}', new type '{S8}', previous declaration at {u32}:{u32})"),
+            CSourceLocation at = c_preprocess_site_location(&preprocess, declaration->location);
+            c_parse_diagnostic(&result, at, C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                               string_format(arena, S8("conflicting declaration of '{S8}' (previous type '{S8}', new type '{S8}', previous declaration at {S8})"),
                                              declaration->name,
                                              c_parse_assignment_conversion_type_name(arena, &result, preprocess, conflicting->type, false),
                                              c_parse_assignment_conversion_type_name(arena, &result, preprocess, declaration->type, false),
-                                             prior.line, prior.column));
+                                             c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, conflicting->location))));
             continue;
         }
         CEntityId entity = {
@@ -33872,10 +33920,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                                                                   member_symbol, member->name);
             if (prior_entity.value != C_ID_UNDERLYING_INVALID)
             {
-                CSourceLocation prior = c_preprocess_site_location(&preprocess, result.entities[prior_entity.value].location);
-                c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, member->location), C_DIAGNOSTIC_REDEFINITION,
-                                   string_format(arena, S8("redefinition of enumerator '{S8}' (previous declaration at {u32}:{u32})"), member->name,
-                                                 prior.line, prior.column));
+                c_parse_enumerator_redefinition(&result, arena, &preprocess, member, result.entities + prior_entity.value);
                 continue;
             }
             CEntityId entity = {

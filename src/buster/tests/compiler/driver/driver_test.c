@@ -2832,6 +2832,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_spelled_byte_metrics_on_
     return result;
 }
 
+// A message that names a file (a redefinition's previous site in an included
+// header) holds the temporary path; `label` stands in for it so the text is stable.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_record_message_path(Arena* arena, String8 message, String8 path, String8 label)
+{
+    String8 result = message;
+    u64 at = path.length ? string_first_sequence(message, path) : BUSTER_STRING_NO_MATCH;
+    if (at != BUSTER_STRING_NO_MATCH)
+    {
+        result = string_format(arena, S8("{S8}{S8}{S8}"), string_slice(message, 0, at), label, string_slice(message, at + path.length, message.length));
+    }
+    return result;
+}
+
 // Every structured record of a compilation, one line each, with the input's
 // temporary paths replaced by `main` and `header` so the text is stable.
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_record_dump(Arena* arena, CompilerDriverResult result, String8 main_path, String8 header_path)
@@ -2852,7 +2865,8 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_record_dump(Arena* arena, Compi
                                          severity, diagnostic.code, path, diagnostic.primary.position.line, diagnostic.primary.position.column,
                                          diagnostic.primary.range.source.value, diagnostic.primary.range.length, (u32)diagnostic.primary.has_range, original,
                                          diagnostic.primary.original_position.line, diagnostic.primary.original_position.column, diagnostic.note_count,
-                                         diagnostic.message);
+                                         compiler_driver_test_record_message_path(arena, compiler_driver_test_record_message_path(arena, diagnostic.message, header_path, S8("header")),
+                                                                                   main_path, S8("main")));
     }
     return string_join_arena(arena, (SliceString8){.pointer = lines, .length = (u64)result.diagnostic_count + 1}, false);
 }
@@ -2906,7 +2920,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_record_diagnostic_equiva
         {S8("static_vla"), S8("-std=gnu17"), {0}, S8("int f(int n)\n{\n    static int a[n];\n    return a[0];\n}\n"), S8("error=6 records=1\nerror c.unsupported-semantics main:3:5 source=0 length=0 range=1 original=main:3:5 notes=0 | in function 'f': variable-length array cannot have static storage duration\n"), S8("error=6 records=1\nerror c.unsupported-semantics main:3:5 source=0 length=0 range=1 original=main:3:5 notes=0 | in function 'f': variable-length array cannot have static storage duration\n")},
         {S8("undeclared_identifier"), S8("-std=gnu17"), {0}, S8("int f(void) { return missing; }\n"), S8("error=6 records=1\nerror c.undeclared-identifier main:1:22 source=0 length=0 range=1 original=main:1:22 notes=0 | use of undeclared identifier 'missing'\n"), S8("error=6 records=1\nerror c.undeclared-identifier main:1:22 source=0 length=0 range=1 original=main:1:22 notes=0 | use of undeclared identifier 'missing'\n")},
         {S8("type_assignment"), S8("-std=gnu17"), {0}, S8("int g(void)\n{\n    int x;\n    x = \"t\";\n    return x;\n}\n"), S8("error=6 records=1\nerror c.unsupported-semantics main:4:9 source=0 length=0 range=1 original=main:4:9 notes=0 | in function 'g': cannot convert from 'char *' to 'int'\n"), S8("error=6 records=1\nerror c.unsupported-semantics main:4:9 source=0 length=0 range=1 original=main:4:9 notes=0 | in function 'g': cannot convert from 'char *' to 'int'\n")},
-        {S8("header_redefinition"), S8("-std=gnu17"), S8("int dup = 1;\n"), S8("int dup = 2;\n"), S8("error=6 records=1\nerror c.redefinition main:2:5 source=0 length=0 range=1 original=main:2:5 notes=0 | redefinition of 'dup' (previous declaration at 1:5)\n"), S8("error=6 records=1\nerror c.redefinition main:2:5 source=0 length=0 range=1 original=main:2:5 notes=0 | redefinition of 'dup' (previous declaration at 1:5)\n")},
+        {S8("header_redefinition"), S8("-std=gnu17"), S8("int dup = 1;\n"), S8("int dup = 2;\n"), S8("error=6 records=1\nerror c.redefinition main:2:5 source=0 length=0 range=1 original=main:2:5 notes=0 | redefinition of 'dup' (previous declaration at header:1:5)\n"), S8("error=6 records=1\nerror c.redefinition main:2:5 source=0 length=0 range=1 original=main:2:5 notes=0 | redefinition of 'dup' (previous declaration at header:1:5)\n")},
+        {S8("header_enumerator_object"), S8("-std=gnu17"), S8("enum { A };\n"), S8("int A;\n"), S8("error=6 records=1\nerror c.redefinition main:2:5 source=0 length=0 range=1 original=main:2:5 notes=0 | redefinition of 'A' (previous declaration at header:1:8)\n"), S8("error=6 records=1\nerror c.redefinition main:2:5 source=0 length=0 range=1 original=main:2:5 notes=0 | redefinition of 'A' (previous declaration at header:1:8)\n")},
+        {S8("header_object_enumerator"), S8("-std=gnu17"), S8("int A;\n"), S8("enum { A };\n"), S8("error=6 records=1\nerror c.redefinition main:2:8 source=0 length=0 range=1 original=main:2:8 notes=0 | redefinition of enumerator 'A' (previous declaration at header:1:5)\n"), S8("error=6 records=1\nerror c.redefinition main:2:8 source=0 length=0 range=1 original=main:2:8 notes=0 | redefinition of enumerator 'A' (previous declaration at header:1:5)\n")},
+        {S8("header_static_conflict"), S8("-std=gnu17"), S8("static int y;\n"), S8("int y;\n"), S8("error=6 records=1\nerror c.conflicting-declaration main:2:5 source=0 length=0 range=1 original=main:2:5 notes=0 | non-static declaration of 'y' follows static declaration (previous declaration at header:1:12)\n"), S8("error=6 records=1\nerror c.conflicting-declaration main:2:5 source=0 length=0 range=1 original=main:2:5 notes=0 | non-static declaration of 'y' follows static declaration (previous declaration at header:1:12)\n")},
         {S8("header_member"), S8("-std=gnu17"), S8("struct S\n{\n    void v;\n};\n"), S8("int ok;\n"), S8("error=6 records=1\nerror c.invalid-void-object header:3:10 source=1 length=0 range=1 original=header:3:10 notes=0 | a member may not have type 'void'\n"), S8("error=6 records=1\nerror c.invalid-void-object header:3:10 source=1 length=0 range=1 original=header:3:10 notes=0 | a member may not have type 'void'\n")},
         {S8("header_line_directive"), S8("-std=gnu17"), S8("#line 7 \"renamed.h\"\nint dup;\nlong dup;\n"), S8("int ok;\n"), S8("error=6 records=1\nerror c.conflicting-declaration renamed.h:8:6 source=1 length=0 range=1 original=header:3:6 notes=0 | conflicting declaration of 'dup' (previous type 'int', new type 'long', previous declaration at 7:5)\n"), S8("error=6 records=1\nerror c.conflicting-declaration renamed.h:8:6 source=1 length=0 range=1 original=header:3:6 notes=0 | conflicting declaration of 'dup' (previous type 'int', new type 'long', previous declaration at 7:5)\n")},
         {S8("macro_redefinition"), S8("-std=gnu17"), {0}, S8("#define DECLARE(name) int name = 1; int name = 2;\n\nDECLARE(twice)\n"), S8("error=6 records=1\nerror c.redefinition main:3:1 source=0 length=0 range=1 original=main:3:1 notes=0 | redefinition of 'twice' (previous declaration at 3:1)\n"), S8("error=6 records=1\nerror c.redefinition main:3:1 source=0 length=0 range=1 original=main:3:1 notes=0 | redefinition of 'twice' (previous declaration at 3:1)\n")},
