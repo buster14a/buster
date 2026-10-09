@@ -697,7 +697,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
         wall, complete ? S8("complete") : S8("failed"), (u64)wait.timed_out, (u64)!cleanup, wall <= allocation ? S8("true") : S8("false"), (u64)cancelled);
     String8 persistent = path_join(arena, path_join(arena, options.ledger_root, options.freeze_sha256),
         string_format(arena, S8("{S8}-{u64}"), options.phase, options.packet));
-    bool written = file_write(path_join(arena, options.output, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(owner)) &&
+    bool supervisor_written = compiler_sampling_supervision_receipt(arena,
+        path_join(arena, options.output, S8("owner-supervision.tsv")), supervisor, cleanup, wall);
+    bool written = supervisor_written && file_write(path_join(arena, options.output, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(owner)) &&
         file_write(path_join(arena, persistent, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(owner));
     if (!complete || wall > allocation || !written)
     {
