@@ -174,6 +174,8 @@ struct CompilerDriverWarningPolicy
     bool werror;
     // -Wno-<g>; -W<g> and -Werror=<g> clear it.
     bool disabled[COMPILER_DRIVER_WARNING_GROUP_COUNT];
+    // -Wno-everything was given; a later -Weverything then enables nothing.
+    bool everything_off;
     CompilerDriverWarningPromotion promotion[COMPILER_DRIVER_WARNING_GROUP_COUNT];
 };
 

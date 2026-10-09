@@ -1292,8 +1292,11 @@ a group or the global flag wins:
   again.
 - A parent name acts on each of its members: `gnu` covers `gnu-designator`
   and `everything` (Clang) covers every group, so `-Wno-everything`,
-  `-Wno-gnu`, `-Werror=gnu` and `-Wno-error=everything` behave as if each
-  member were named, in the same left-to-right order.
+  `-Wno-gnu` and `-Werror=gnu` behave as if each member were named, in the
+  same left-to-right order. As in Clang, `everything` is only a `-W`/`-Wno-`
+  name: `-Werror=everything` and `-Wno-error=everything` name nothing and are
+  ignored, and `-Wno-everything` is sticky, so a later `-Weverything`
+  re-enables nothing while a named group (`-Wcpp`, `-Werror=cpp`) still does.
 - `-Werror` makes every enabled warning an error, including one with no group;
   `-Wno-error` undoes it.
 - `-Werror=<group>` promotes one group and `-Wno-error=<group>` exempts one.
@@ -1307,11 +1310,13 @@ fails with the tokenizer error, so `-c`, `-S`, `-E`, `-fsyntax-only`, a link
 and a batch of several inputs all return failure and write no output; the
 failed-unit rules above decide which later results are discarded. Its record
 in `CompilerDriverResult.diagnostics` and the per-input `error_count` are those
-of an error, and `tokenizer_warning_count` no longer counts it.
+of an error, and `tokenizer_warning_count` no longer counts it. The count
+still includes a warning that `-w` or `-Wno-<group>` dropped, as it did for `-w`
+before this policy existed; only the promoted ones are subtracted.
 
 Every other `-W...` spelling is still accepted and ignored: `-Wall`, `-Wextra`,
-and names that are neither a group nor a parent of one (`-Werror=unused-variable`
-neither enables nor promotes anything). Diagnosing unknown or unimplemented names is a
+and names that are neither a group nor a parent of one (`-Werror=unused-variable`,
+`-Werror=` and `-Wno-` neither enable nor promote anything). Diagnosing unknown or unimplemented names is a
 separate decision (#1574). The parser and lowering still have no warning
 channel, so signed-overflow in constant expressions is not yet a warning that
 `-Werror` can promote.

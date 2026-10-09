@@ -308,11 +308,18 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWarningGroup compiler_driver_warning_group_of_
 // Applies one -W argument. -Werror, -Wno-error, -Werror=<g>, -Wno-error=<g>,
 // -Wno-<g> and -W<g> change the policy, where <g> is a group or a parent name
 // (gnu, everything) that acts on each member; every other spelling (-Wall,
-// -Wextra, a name no warning here has) is accepted and changes nothing.
+// -Wextra, a name no warning here has) is accepted and changes nothing. As in
+// Clang, everything is only a -W/-Wno- name: -Werror=everything and
+// -Wno-error=everything name nothing, and -Wno-everything is sticky, so a later
+// -Weverything re-enables nothing while a named group still does.
 BUSTER_GLOBAL_LOCAL void compiler_driver_warning_policy_apply(CompilerDriverWarningPolicy* policy, String8 argument)
 {
     String8 option = string_slice(argument, 2, argument.length);
+    String8 everything = S8("everything");
     u32 groups = 0;
+    bool disable = false;
+    bool apply_disabled = false;
+    CompilerDriverWarningPromotion promotion = COMPILER_DRIVER_WARNING_PROMOTION_DEFAULT;
     if (string_equal(option, S8("error")))
     {
         policy->werror = true;
@@ -323,36 +330,47 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_warning_policy_apply(CompilerDriverWarn
     }
     else if (string_starts_with_sequence(option, S8("error=")))
     {
-        groups = compiler_driver_warning_group_find(string_slice(option, 6, option.length));
-        for (u32 group = 0; group < COMPILER_DRIVER_WARNING_GROUP_COUNT; group += 1)
-        {
-            if (groups & COMPILER_DRIVER_WARNING_GROUP_BIT(group))
-            {
-                policy->promotion[group] = COMPILER_DRIVER_WARNING_PROMOTION_ERROR;
-                policy->disabled[group] = false;
-            }
-        }
+        String8 name = string_slice(option, 6, option.length);
+        groups = string_equal(name, everything) ? 0 : compiler_driver_warning_group_find(name);
+        promotion = COMPILER_DRIVER_WARNING_PROMOTION_ERROR;
     }
     else if (string_starts_with_sequence(option, S8("no-error=")))
     {
-        groups = compiler_driver_warning_group_find(string_slice(option, 9, option.length));
-        for (u32 group = 0; group < COMPILER_DRIVER_WARNING_GROUP_COUNT; group += 1)
-        {
-            if (groups & COMPILER_DRIVER_WARNING_GROUP_BIT(group))
-            {
-                policy->promotion[group] = COMPILER_DRIVER_WARNING_PROMOTION_WARNING;
-            }
-        }
+        String8 name = string_slice(option, 9, option.length);
+        groups = string_equal(name, everything) ? 0 : compiler_driver_warning_group_find(name);
+        promotion = COMPILER_DRIVER_WARNING_PROMOTION_WARNING;
     }
     else
     {
-        bool disable = string_starts_with_sequence(option, S8("no-"));
-        groups = compiler_driver_warning_group_find(disable ? string_slice(option, 3, option.length) : option);
-        for (u32 group = 0; group < COMPILER_DRIVER_WARNING_GROUP_COUNT; group += 1)
+        disable = string_starts_with_sequence(option, S8("no-"));
+        String8 name = disable ? string_slice(option, 3, option.length) : option;
+        groups = compiler_driver_warning_group_find(name);
+        apply_disabled = true;
+        if (string_equal(name, everything))
         {
-            if (groups & COMPILER_DRIVER_WARNING_GROUP_BIT(group))
+            if (disable)
+            {
+                policy->everything_off = true;
+            }
+            else if (policy->everything_off)
+            {
+                groups = 0;
+            }
+        }
+    }
+    for (u32 group = 0; group < COMPILER_DRIVER_WARNING_GROUP_COUNT; group += 1)
+    {
+        if (groups & COMPILER_DRIVER_WARNING_GROUP_BIT(group))
+        {
+            if (apply_disabled)
             {
                 policy->disabled[group] = disable;
+            }
+            else
+            {
+                policy->promotion[group] = promotion;
+                // -Werror=<g> enables the group; -Wno-error=<g> leaves it as it was.
+                policy->disabled[group] = promotion == COMPILER_DRIVER_WARNING_PROMOTION_ERROR ? false : policy->disabled[group];
             }
         }
     }
@@ -5326,7 +5344,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             result.parser_diagnostic_count = tree.diagnostic_count;
             result.error = COMPILER_DRIVER_ERROR_PARSE;
             result.diagnostic = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, tree.diagnostics, tree.diagnostic_count,
-                                                                      invocation.input_paths[0], (String8){0});
+                                                                      invocation.input_paths[0], (String8){0}, 0);
             goto end;
         }
     }
