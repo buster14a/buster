@@ -460,14 +460,21 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_guard_test_concurrent(Arena
 // empty object; the ordinary link-safe deleter handles the remaining tree.
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_guard_test_remove_irregular(Arena* arena, String8 root)
 {
-    String8 parent = path_join(arena, root, S8("directory-record/active"));
+    // summary_self_test_claim_directory returns an owned relative build path.
+    // Resolve that spelling lexically, then require its actual canonical match.
+    String8 absolute = os_path_absolute_lexical(arena, root, true);
+    String8 parent = path_join(arena, absolute, S8("directory-record/active"));
     String8 record = string_format_z(arena, S8("{S8}/owner.tsv"), parent);
     struct stat status = {0};
-    bool result = root.length && string_equal(root, os_path_absolute(arena, root, true)) &&
-        string_equal(parent, os_path_absolute(arena, parent, true)) &&
-        lstat((char const*)record.pointer, &status) == 0 && S_ISDIR(status.st_mode) &&
-        status.st_uid == geteuid() && (status.st_mode & 0777) == 0600 &&
-        rmdir((char const*)record.pointer) == 0;
+    bool canonical = absolute.length && string_equal(absolute, os_path_absolute(arena, root, true)) &&
+        string_equal(parent, os_path_absolute(arena, parent, true));
+    bool identified = canonical && lstat((char const*)record.pointer, &status) == 0 && S_ISDIR(status.st_mode) &&
+        status.st_uid == geteuid() && (status.st_mode & 0777) == 0600;
+    bool result = identified && rmdir((char const*)record.pointer) == 0;
+    u64 remove_error = identified && !result ? (u64)errno : 0;
+    string_print(S8("COMPILER_EXPERIMENT_CLEANUP_GUARD_PRIVATE_RECORD canonical={u64} "
+        "owned_irregular_directory={u64} removed={u64} remove_errno={u64}\n"),
+        (u64)canonical, (u64)identified, (u64)result, remove_error);
     return result;
 }
 #endif

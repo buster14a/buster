@@ -207,6 +207,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_self_test(
         bool owned = result && public_refused && summary_self_test_claim_directory(arena, S8("closure-utility"), &directory);
         if (owned)
         {
+            // The shared claim helper returns a relative build path; actual
+            // production raw export requires an observed canonical directory.
+            String8 lexical = os_path_absolute_lexical(arena, directory, true);
+            String8 canonical = os_path_absolute(arena, directory, true);
+            owned = canonical.length && string_equal(lexical, canonical);
+            if (owned) directory = canonical;
+        }
+        if (owned)
+        {
             CompilerClosureUtilityControllerResolved fixture = {0};
             fixture.valid = true;
             fixture.diagnostic = true;
@@ -233,6 +242,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_self_test(
                 compiler_closure_utility_fixture_signals(arena, S8("SIGINT")) &&
                 compiler_closure_utility_fixture_signals(arena, S8("SIGTERM"));
             result = once && raw && first && failed && stopped && signals;
+            string_print(S8("COMPILER_CLOSURE_UTILITY_DIAGNOSTIC_CONTROLS worker_once={u64} "
+                "full_raw_export={u64} successful_owned_phase={u64} failed_phase_retained={u64} "
+                "no_next_phase={u64} timeout_SIGINT_SIGTERM_cleanup={u64} physical_qualification=false\n"),
+                (u64)once, (u64)raw, (u64)first, (u64)failed, (u64)stopped, (u64)signals);
             String8 status = S8("{\"schema\":\"buster-compiler-closure-utility-diagnostic-v1\",\"diagnostic_fixture\":true,"
                 "\"qualification_state\":\"unqualified\",\"physical_qualification\":false}\n");
             result = file_write(path_join(arena, directory, S8("fixture-status.json")), BUSTER_SLICE_TO_BYTE_SLICE(status)) && result;
