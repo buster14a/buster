@@ -1725,11 +1725,14 @@ def review_terminal_authority(api, repository: str, original_request_attempt: di
                     ensure_ascii=True).encode("ascii")
                 if len(retained) <= 8 * 1024 * 1024:
                     diagnostic.update({"api_observations": observations, "diagnostic_envelope": retained,
-                                       "diagnostic_sha256": hashlib.sha256(retained).hexdigest()})
+                                       "diagnostic_sha256": hashlib.sha256(retained).hexdigest(),
+                                       "diagnostic_bytes": len(retained)})
                 else:
-                    diagnostic["diagnostic_envelope_unavailable"] = "API observations exceed the 8 MiB data bound"
+                    diagnostic.update({"envelope_unavailable": True,
+                                       "diagnostic_envelope_unavailable": "API observations exceed the 8 MiB data bound"})
             except (TypeError, ValueError, OverflowError):
-                diagnostic["diagnostic_envelope_unavailable"] = "API observations are not bounded JSON data"
+                diagnostic.update({"envelope_unavailable": True,
+                                   "diagnostic_envelope_unavailable": "API observations are not bounded JSON data"})
         raise
 
 
