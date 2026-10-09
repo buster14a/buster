@@ -1706,6 +1706,7 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_function(DwarfModelWriter* writer, u32
         DebugScope* scope = writer->model->scopes + function->scope;
         has_children = scope->variable_count != 0 || dwarf_model_scope_has_child(writer, function->scope);
     }
+    has_children |= function->static_count != 0;
     for (u32 inline_index = 0; inline_index < writer->model->inline_site_count; inline_index += 1)
     {
         if (writer->model->inline_sites[inline_index].function == function)
@@ -1724,6 +1725,13 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_function(DwarfModelWriter* writer, u32
     if (has_children && function->scope < writer->model->scope_count)
     {
         dwarf_model_emit_scope_variables(writer, writer->model->scopes + function->scope);
+    }
+    // A function-scope static is a variable DIE of its subprogram, so a name
+    // lookup inside another function does not find it (#2719).
+    for (u32 static_index = 0; static_index < function->static_count && function->static_start + static_index < writer->model->variable_count;
+         static_index += 1)
+    {
+        dwarf_model_emit_global(writer, writer->model->variables + function->static_start + static_index);
     }
     for (u32 inline_index = 0; has_children && inline_index < writer->model->inline_site_count; inline_index += 1)
     {
@@ -1917,7 +1925,7 @@ DwarfResult dwarf_build_model(Arena* arena, DwarfInput input)
                 for (u32 variable_index = 0; variable_index < model->variable_count; variable_index += 1)
                 {
                     DebugVariable* variable = model->variables + variable_index;
-                    if (variable->kind == DEBUG_VARIABLE_GLOBAL)
+                    if (variable->kind == DEBUG_VARIABLE_GLOBAL && !variable->is_static_local)
                     {
                         dwarf_model_emit_global(&writer, variable);
                     }

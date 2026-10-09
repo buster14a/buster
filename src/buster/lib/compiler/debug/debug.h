@@ -316,7 +316,11 @@ struct DebugVariable
     u32 location_count;
     bool is_artificial;
     bool is_internal;
-    u8 reserved[2];
+    // A function-scope static: a DEBUG_VARIABLE_GLOBAL owned by one function
+    // (DebugFunction.static_start/static_count), which DWARF nests in the
+    // subprogram and CodeView emits inside the procedure scope (#2719).
+    bool is_static_local;
+    u8 reserved;
 };
 
 typedef struct DebugScope DebugScope;
@@ -347,6 +351,10 @@ struct DebugFunction
     // record, not a global one (#2719).
     bool is_internal;
     u8 reserved[3];
+    // The function-scope statics this function owns: a contiguous run of
+    // DebugModel.variables that are DEBUG_VARIABLE_GLOBAL with is_static_local.
+    u32 static_start;
+    u32 static_count;
 };
 
 typedef struct DebugInlineSite DebugInlineSite;

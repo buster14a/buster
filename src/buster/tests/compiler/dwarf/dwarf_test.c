@@ -878,9 +878,121 @@ BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_incomplete_declarations(UnitTestAr
     return result;
 }
 
+// Two functions each declare `static int calls`: the variable DIEs are children
+// of their own subprogram, not file-scope DIEs a debugger would find by name
+// from the wrong function (#2719). A file-scope variable stays a CU child.
+BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_function_static_nesting(UnitTestArguments* arguments)
+{
+    enum {TEST_TAG_VARIABLE = 0x34, TEST_TAG_SUBPROGRAM = 0x2e, TEST_AT_NAME = 0x03, TEST_MAX_DEPTH = 8};
+    UnitTestResult result = {0};
+    String8 path = S8("nesting.c");
+    DebugType type = {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4};
+    DebugScope scopes[] = {
+        {.parent = DEBUG_ID_INVALID, .kind = DEBUG_SCOPE_LEXICAL},
+        {.parent = 0, .kind = DEBUG_SCOPE_FUNCTION},
+        {.parent = 0, .kind = DEBUG_SCOPE_FUNCTION},
+        {.parent = 0, .kind = DEBUG_SCOPE_FUNCTION},
+    };
+    DebugVariable variables[] = {
+        {.name = S8("file_scope"), .linkage_name = S8("file_scope"), .symbol = {.value = 10}, .kind = DEBUG_VARIABLE_GLOBAL, .is_internal = true},
+        {.name = S8("calls"), .linkage_name = S8(".L.first.calls.1"), .symbol = {.value = 11}, .kind = DEBUG_VARIABLE_GLOBAL,
+         .is_internal = true, .is_static_local = true},
+        {.name = S8("calls"), .linkage_name = S8(".L.second.calls.2"), .symbol = {.value = 12}, .kind = DEBUG_VARIABLE_GLOBAL,
+         .is_internal = true, .is_static_local = true},
+    };
+    DebugFunction functions[] = {
+        {.name = S8("first"), .symbol = {.value = 1}, .scope = 1, .code_size = 8, .static_start = 1, .static_count = 1},
+        {.name = S8("second"), .symbol = {.value = 2}, .scope = 2, .code_offset = 8, .code_size = 8, .static_start = 2, .static_count = 1},
+        {.name = S8("plain"), .symbol = {.value = 3}, .scope = 3, .code_offset = 16, .code_size = 8},
+    };
+    DebugModel model = {.types = &type, .type_count = 1, .variables = variables, .variable_count = BUSTER_ARRAY_LENGTH(variables),
+                        .scopes = scopes, .scope_count = BUSTER_ARRAY_LENGTH(scopes), .root_scope = 0, .functions = functions,
+                        .function_count = BUSTER_ARRAY_LENGTH(functions), .valid = true};
+    DwarfResult built = dwarf_build(arguments->arena, (DwarfInput){.model = &model, .file_paths = &path, .file_count = 1,
+        .producer = S8("buster"), .comp_dir = S8("."), .target = {.cpu_arch = CPU_ARCH_X86_64}});
+    if (BUSTER_REQUIRE(arguments, built.valid))
+    {
+        ByteSlice info = built.sections[DWARF_SECTION_INFO];
+        ByteSlice abbreviations = built.sections[DWARF_SECTION_ABBREV];
+        ByteSlice strings = built.sections[DWARF_SECTION_STR];
+        for (u32 index = 0; index < built.relocation_count; index += 1)
+        {
+            DwarfRelocation relocation = built.relocations[index];
+            if (!relocation.address && relocation.section == DWARF_SECTION_INFO && relocation.target == DWARF_SECTION_STR &&
+                relocation.offset + 4 <= info.length)
+            {
+                u32 string_offset = (u32)relocation.addend;
+                memcpy(info.pointer + relocation.offset, &string_offset, sizeof(string_offset));
+            }
+        }
+        String8 parents[TEST_MAX_DEPTH] = {0};
+        u32 depth = 0;
+        u32 nested_first = 0;
+        u32 nested_second = 0;
+        u32 unit_level_file_scope = 0;
+        u32 unit_level_calls = 0;
+        u64 cursor = 11;
+        bool valid = true;
+        while (valid && cursor < info.length)
+        {
+            u64 number = 0;
+            valid = dwarf_test_read_uleb128(info, &cursor, &number);
+            if (valid && !number)
+            {
+                valid = depth != 0;
+                depth -= valid ? 1 : 0;
+            }
+            else if (valid)
+            {
+                DwarfTestAbbrev abbreviation = {0};
+                valid = dwarf_test_find_abbrev(abbreviations, (u32)number, &abbreviation);
+                String8 name = {0};
+                for (u32 index = 0; valid && index < abbreviation.attribute_count; index += 1)
+                {
+                    if (abbreviation.attributes[index] == TEST_AT_NAME && abbreviation.forms[index] == DWARF_TEST_FORM_STRP && cursor + 4 <= info.length)
+                    {
+                        u32 offset = 0;
+                        memcpy(&offset, info.pointer + cursor, sizeof(offset));
+                        u64 end = offset;
+                        while (end < strings.length && strings.pointer[end]) end += 1;
+                        if (offset < strings.length && end < strings.length)
+                        {
+                            name = (String8){.pointer = (char8*)strings.pointer + offset, .length = end - offset};
+                        }
+                    }
+                    valid = dwarf_test_skip_form(info, &cursor, abbreviation.forms[index]);
+                }
+                if (valid && abbreviation.tag == TEST_TAG_VARIABLE)
+                {
+                    bool calls = string_equal(name, S8("calls"));
+                    nested_first += calls && depth == 2 && string_equal(parents[2], S8("first"));
+                    nested_second += calls && depth == 2 && string_equal(parents[2], S8("second"));
+                    unit_level_calls += calls && depth == 1;
+                    unit_level_file_scope += string_equal(name, S8("file_scope")) && depth == 1;
+                }
+                if (valid && abbreviation.children)
+                {
+                    valid = depth + 1 < TEST_MAX_DEPTH;
+                    if (valid)
+                    {
+                        depth += 1;
+                        parents[depth] = name;
+                    }
+                }
+            }
+        }
+        BUSTER_TEST(arguments, valid && cursor == info.length && depth == 0);
+        BUSTER_TEST(arguments, nested_first == 1 && nested_second == 1 && unit_level_calls == 0 && unit_level_file_scope == 1);
+    }
+    return result;
+}
+
 UnitTestResult dwarf_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = dwarf_test_list_bases(arguments);
+    UnitTestResult nesting = dwarf_test_function_static_nesting(arguments);
+    result.test_count += nesting.test_count;
+    result.succeeded_test_count += nesting.succeeded_test_count;
     UnitTestResult declarations = dwarf_test_incomplete_declarations(arguments);
     result.test_count += declarations.test_count;
     result.succeeded_test_count += declarations.succeeded_test_count;

@@ -477,6 +477,13 @@ struct IrSymbol
     // ir_call_returns_twice beside its name list. A call through a function
     // pointer carries no symbol, so the attribute is not tracked there.
     bool is_returns_twice;
+    // A function-scope `static` object: the function whose body declares it.
+    // Debug info nests the variable in that function's subprogram instead of
+    // the compilation unit, so same-named statics of two functions do not
+    // collide in a debugger's name lookup (#2719). Valid only when
+    // has_owner_function is set; the link name does not depend on it.
+    bool has_owner_function;
+    IrSymbolId owner_function;
 };
 
 // One symbol that is a second name for another: __attribute__((alias("t"))).

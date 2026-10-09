@@ -935,7 +935,7 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
             for (u32 variable_index = 0; variable_index < input.model->variable_count; variable_index += 1)
             {
                 DebugVariable* variable = input.model->variables + variable_index;
-                if (variable->kind == DEBUG_VARIABLE_GLOBAL)
+                if (variable->kind == DEBUG_VARIABLE_GLOBAL && !variable->is_static_local)
                 {
                     if (!globals)
                     {
@@ -994,6 +994,15 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
             if (input.model && input.model->valid && function_index < input.model->function_count)
             {
                 DebugFunction* debug_function = input.model->functions + function_index;
+                // A function-scope static is a data record inside its procedure
+                // scope, before the nested records, closed by the S_END below.
+                for (u32 static_index = 0; static_index < debug_function->static_count &&
+                                           debug_function->static_start + static_index < input.model->variable_count;
+                     static_index += 1)
+                {
+                    codeview_emit_global_variable(&symbols, input.model, input.model->variables + debug_function->static_start + static_index,
+                                                  result.relocations, &result.relocation_count);
+                }
                 if (debug_function->scope < input.model->scope_count)
                 {
                     codeview_emit_scope_variables(&symbols, input.model, input.model->scopes + debug_function->scope, function->code_offset,

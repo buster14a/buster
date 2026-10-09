@@ -772,16 +772,24 @@ without facts for identical bitcode and diagnostics.
 - `debug_add_canonical_globals` carries the defining IR symbol's internal
   linkage into the debug variable. File-scope static data then uses a DWARF
   variable DIE without `DW_AT_external` and CodeView `S_LDATA32`; public data
-  retains `DW_AT_external` and `S_GDATA32`. This mapping does not reparent
-  function-scope statics (#2719). PDB remaps both data-record type indices
-  independently per module during type merging; `S_LDATA32` stays in its
-  module stream.
+  retains `DW_AT_external` and `S_GDATA32`. PDB remaps both data-record type
+  indices independently per module during type merging; `S_LDATA32` stays in
+  its module stream.
 - A function-scope static keeps its unique `.L.<function>.<name>.<n>` spelling
   as `IrSymbol.link_name`, which object files and debug relocations use, but
   `IrSymbol.name` is the source spelling, so debug info names it `calls` rather
-  than `.L.compute.calls.8`. Two functions' same-named statics therefore share
-  a debug name and stay distinct link symbols. Debug info does not nest them in
-  their subprogram yet (#2719).
+  than `.L.compute.calls.8`. The C frontend also records the declaring
+  function in `IrSymbol.owner_function` (valid when `has_owner_function`). The
+  name change must not land without the nesting: two functions' same-named
+  statics would otherwise be file-scope variables with one name, and a
+  debugger would resolve it to the wrong one. `debug_add_canonical_globals`
+  therefore groups each static after the file-scope data, by owning debug
+  function with a counting sort, and marks it `DebugVariable.is_static_local`;
+  `DebugFunction.static_start`/`static_count` name that function's run. DWARF
+  emits the variable DIE (abbreviation 30) as a child of the subprogram, and
+  CodeView emits `S_LDATA32` between the procedure record and its `S_END`; the
+  file-scope loops skip these variables. A static whose function has no debug
+  function stays a file-scope variable (#2719).
 - `debug_fill_ir_type` marks a struct or union whose canonical layout is
   unresolved at the end of lowering (a tag never completed in the unit) as
   `DebugType.is_declaration`; a tag completed later keeps its complete

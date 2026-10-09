@@ -27649,7 +27649,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
                 for (u32 index = 0; index < debug.function_count; index += 1)
                 {
                     DebugFunction* function = debug.functions + index;
-                    internal_functions += function->is_internal && (string_equal(function->name, S8("counter_a")) || string_equal(function->name, S8("counter_b")));
+                    bool is_counter = string_equal(function->name, S8("counter_a")) || string_equal(function->name, S8("counter_b"));
+                    internal_functions += function->is_internal && is_counter;
                     public_functions += !function->is_internal && string_equal(function->name, S8("api"));
                 }
                 BUSTER_TEST(arguments, debug.function_count == 3 && internal_functions == 2 && public_functions == 1);
@@ -27668,6 +27669,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
                     }
                 }
                 BUSTER_TEST(arguments, static_locals == 2);
+                // Each static is owned by the function that declares it (a
+                // contiguous run of function-scope statics); api owns none.
+                u32 owned_statics = 0;
+                u32 marked_statics = 0;
+                for (u32 index = 0; index < debug.function_count; index += 1)
+                {
+                    DebugFunction* function = debug.functions + index;
+                    bool valid_run = function->static_start <= debug.variable_count && function->static_count <= debug.variable_count - function->static_start;
+                    for (u32 offset = 0; valid_run && offset < function->static_count; offset += 1)
+                    {
+                        DebugVariable* variable = debug.variables + function->static_start + offset;
+                        IrSymbol* symbol = ir_symbol_from_id(&declaration_ir.program->symbols, variable->symbol);
+                        owned_statics += symbol && variable->kind == DEBUG_VARIABLE_GLOBAL && variable->is_static_local && symbol->has_owner_function &&
+                                         symbol->owner_function.value == function->symbol.value && string_equal(variable->name, S8("calls"));
+                    }
+                    BUSTER_TEST(arguments, valid_run && function->static_count == (string_equal(function->name, S8("api")) ? 0u : 1u));
+                }
+                for (u32 index = 0; index < debug.variable_count; index += 1)
+                {
+                    marked_statics += debug.variables[index].is_static_local;
+                }
+                BUSTER_TEST(arguments, owned_statics == 2 && marked_statics == 2);
                 // The two same-named statics stay distinct link symbols.
                 u32 distinct_links = 0;
                 for (u32 left = 0; left < declaration_ir.program->symbols.count; left += 1)
