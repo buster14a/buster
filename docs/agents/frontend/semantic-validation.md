@@ -112,45 +112,10 @@ naming the enumerator as the previous site. The text is formatted only when the
 diagnostic is emitted. `c_test_redefinition_names_previous_site` checks the
 spellings and both orders; `compiler_driver_test_record_diagnostic_equivalence`
 pins them for syntax-only and object output, including a header-first case.
-Residue: the previous site is not yet the first definition, and `duplicate member`
-and tag redefinitions carry no site (#1432).
-
-Windows target predefines in `c_source.c` preserve the `__inline` spelling and
-map `__forceinline` to it, without injecting a storage class. The existing needed
-function dependency walk decides which header bodies are reachable; the two late
-body decisions retain those Windows definitions, including transitive UCRT option
-helpers. The existing entity-definition map shares that decision across every
-redeclaration, including later prototypes. Unused header bodies stay omitted.
-Ordinary `inline`, GNU `__inline__`,
-explicit GNU-inline attributes and non-Windows targets retain their rules.
-`static __inline` and `extern __inline` retain source storage; duplicate and
-conflicting classes remain rejected. This bounded compatibility policy does not
-provide full MSVC mixed-spelling synonyms or multi-TU COMDAT coalescing.
-
-`c_parse_parameter_list_names_validate` checks a completed parameter list before
-its names can overwrite function parameter bindings. A scratch hash table belongs
-to one published list and reports its first repeated name at the later parameter,
-including the earlier declaration's line and column. Unnamed parameters are
-skipped, and separate prototype scopes, nested function-pointer lists and C23
-unnamed definitions retain their existing rules. Direct, parenthesized and block
-local declarators use the same check. The local suffix reader reserves its outer
-parameter range before parsing nested declarators, keeping child names outside
-that list. `c_test_duplicate_parameter_names` checks syntax-only/lowering
-parity, both frontend forms and symbol/spelling lookup, and inspects the outer
-parameter names of nested block-local prototypes.
-
-File-scope object and function, block-scope and enumerator (file and block scope)
-redefinitions, and conflicting declarations, name the entity and print the line
-and column of the earlier declaration, in the `(previous declaration at L:C)` form
-parameters use: `redefinition of 'x' (previous declaration at 1:5)`,
-`redefinition of enumerator 'RED' (previous declaration at 1:10)`. The site is the
-entity's first declaration (a prototype before the first definition, not the
-definition) mapped through the preprocessor source map, so `#line` and macro
-expansion sites read as the diagnostic's own do; it carries no file name, so a
-site in an included header is a line and column in that header. The text is
-formatted only when the diagnostic is emitted. `c_test_redefinition_names_previous_site`
-checks the spellings; `compiler_driver_test_record_diagnostic_equivalence` pins them
-for syntax-only and object output.
+Residue: the previous site is not yet the first definition, `duplicate member`
+and tag redefinitions carry no site, and a header included twice (or a macro
+expanded twice) maps both declarations to one source position, so the previous
+site equals the diagnostic's own (#1432).
 
 Windows target predefines in `c_source.c` normalize `__inline` and `__forceinline`
 to the function specifier `inline`, without injecting a storage class. UCRT-style
