@@ -50,8 +50,18 @@ fixture as well as compiling both architectures.
   Rejected neighbours cover byte-width bit counts, mismatched operand widths,
   and extra operands on `vzeroupper`, with no partial bytes.
   Matching native hosts execute optional instructions only when supported.
+- Selection emits canonical blocks in reverse postorder from the entry
+  (`machine_selection_canonical_layout`), not in IR creation order. The C
+  frontend creates a `for` step and an `if` join before the nested blocks that
+  reach them, and FAST/QUALITY read any jump to a lower block as a loop back
+  edge. Reverse postorder puts every reachable block after its dominators, so
+  only real back edges jump down. A conditional's first target follows its
+  source, and unreachable blocks keep canonical order at the end. Asm-goto
+  continuations move with their source block's expansion.
+  `machine_test_reverse_postorder_layout` checks that every reached block has a
+  lower predecessor.
 - Selection retains a canonical-block-to-MIR-entry projection when expansion
-  or entry-first layout changes block IDs. Parameter-edge splitting composes
+  or layout changes block IDs. Parameter-edge splitting composes
   that projection through its block renumbering before reclaiming scratch,
   including when the prior projection was identity. Module label-address initializers
   and label differences (`IrGlobalLabelDifference`, written into the data image by
