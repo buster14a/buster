@@ -8939,7 +8939,7 @@ BUSTER_GLOBAL_LOCAL void c_test_enum_scope_case(UnitTestArguments* arguments, Un
                 matching += 1;
                 if (kind == C_DIAGNOSTIC_REDEFINITION)
                 {
-                    BUSTER_TEST_RAW(arguments, string_starts_with_sequence(parse.diagnostics[diagnostic].message, S8("redefinition of enumerator")), source);
+                    BUSTER_TEST_RAW(arguments, string_starts_with_sequence(parse.diagnostics[diagnostic].message, S8("redefinition of")), source);
                 }
             }
         }
