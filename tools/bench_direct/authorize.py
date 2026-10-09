@@ -1178,6 +1178,11 @@ def bind_historical_original_transport(authority: dict, files: dict[str, bytes],
                 (name != "facts.tsv" and value != raw[name]):
             raise ValueError("original transport differs from committed data or its exact first-attempt prefix")
         original[name] = value
+    current_records = {key: value.decode("utf-8") for key, value in records.items()}
+    reviewed = sampling_review_native(current_records) if kind == "sampling" else \
+        prerequisite_review_native(current_records, utility=kind == "utility")
+    if reviewed != admitted:
+        raise ValueError("current historical data differs from the fixed native API validation")
     root = Path(__file__).resolve().parents[2]
     with tempfile.TemporaryDirectory(prefix="compiler-historical-original-facts-") as temporary:
         directory = Path(temporary)
