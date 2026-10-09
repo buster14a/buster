@@ -1740,6 +1740,176 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_block_local_storage(UnitTe
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_local_seed_coverage(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("int sink;\n"
+                        "int g(int x) { return x + 100; }\n"
+                        "int debug_values(int v, int take)\n"
+                        "{\n"
+                        "    int x;\n"
+                        "    sink = 0;\n"
+                        "    x = v + 1;\n"
+                        "    if (take) x = x + 2;\n"
+                        "    else x = x + 3;\n"
+                        "    sink = x;\n"
+                        "    x = x + 4;\n"
+                        "    sink = x;\n"
+                        "    return sink;\n"
+                        "}\n"
+                        "int copies(int v)\n"
+                        "{\n"
+                        "    int a = v * 2;\n"
+                        "    int b = v;\n"
+                        "    int c = g(v);\n"
+                        "    int d = 5;\n"
+                        "    int e = v + c;\n"
+                        "    long long w = (long long)v << 40;\n"
+                        "    sink = a + b + c + d + e + (int)(w >> 40);\n"
+                        "    return sink;\n"
+                        "}\n"
+                        "int reassigned(int v)\n"
+                        "{\n"
+                        "    int once = v * 2;\n"
+                        "    int twice = v * 3;\n"
+                        "    sink = once + twice;\n"
+                        "    twice = twice + 1;\n"
+                        "    sink = once + twice;\n"
+                        "    return sink;\n"
+                        "}\n"
+                        "int branch_only(int take)\n"
+                        "{\n"
+                        "    int later;\n"
+                        "    if (take) later = 41;\n"
+                        "    else later = 42;\n"
+                        "    sink = later;\n"
+                        "    return sink;\n"
+                        "}\n");
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    for (u32 frontend = 0; frontend < 2; frontend += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("debug-local-seed-coverage.c"), tokens, parsed, target,
+            (CIRLowerOptions){.disable_direct_ssa = frontend != 0, .pin_debug_locals = true});
+        if (BUSTER_REQUIRE(arguments, tokens.error_count == 0 && parsed.diagnostic_count == 0 && lowered.diagnostic_count == 0 &&
+                                     lowered.program && lowered.program->modules))
+        {
+            IrModule* module = lowered.program->modules;
+            IrValidationResult validated = ir_validate_canonical_module(lowered.program, module);
+            IrFunction* function = codegen_test_c_function_find(module, S8("debug_values"));
+            IrLocalId x = IR_LOCAL_ID_INVALID;
+            for (u32 local_index = 0; function && local_index < function->debug_local_count; local_index += 1)
+            {
+                if (string_equal(function->debug_locals[local_index].name, S8("x")))
+                {
+                    x = function->debug_locals[local_index].id;
+                }
+            }
+            BUSTER_TEST(arguments, validated.error == IR_VALIDATION_NONE && function && x.value != IR_ID_UNDERLYING_INVALID);
+            lowered.program->pin_debug_locals = true;
+            lowered.program->disable_target_local_promotion = true;
+            for (u32 allocator = 0; function && x.value != IR_ID_UNDERLYING_INVALID &&
+                                    allocator < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; allocator += 1)
+            {
+                CodegenModule generated = codegen_generate_canonical_module(temporary.arena, lowered.program, module, target,
+                    (CodegenModuleOptions){.debug_info = true, .assume_validated = true, .verify_invariants = true,
+                                           .register_allocator = (u8)allocator});
+                CodegenFunctionDescriptor const* descriptor = 0;
+                for (u32 function_index = 0; generated.error == CODEGEN_ERROR_NONE && function_index < generated.function_count; function_index += 1)
+                {
+                    if (generated.functions[function_index].symbol.value == function->symbol.value)
+                    {
+                        descriptor = generated.functions + function_index;
+                    }
+                }
+                u32 after_initialization = UINT32_MAX;
+                u32 after_join = UINT32_MAX;
+                u32 after_overwrite = UINT32_MAX;
+                for (u32 line_index = 0; descriptor && line_index < generated.line_entry_count; line_index += 1)
+                {
+                    CodegenLineEntry line = generated.line_entries[line_index];
+                    bool within_function = line.code_offset >= descriptor->code_offset &&
+                                           line.code_offset < descriptor->code_offset + descriptor->code_size;
+                    if (within_function && line.line == 8)
+                    {
+                        after_initialization = BUSTER_MIN(after_initialization, line.code_offset);
+                    }
+                    if (within_function && line.line == 10)
+                    {
+                        after_join = BUSTER_MIN(after_join, line.code_offset);
+                    }
+                    if (within_function && line.line == 12)
+                    {
+                        after_overwrite = BUSTER_MIN(after_overwrite, line.code_offset);
+                    }
+                }
+                bool covered_after_initialization = false;
+                bool covered_after_join = false;
+                bool covered_after_overwrite = false;
+                bool advertised_before_initialization = false;
+                for (u32 seed_index = 0; generated.error == CODEGEN_ERROR_NONE && seed_index < generated.debug_location_count; seed_index += 1)
+                {
+                    DebugLocationSeed const* seed = generated.debug_locations + seed_index;
+                    if (seed->function_symbol.value != function->symbol.value || seed->local.value != x.value ||
+                        seed->location.kind == DEBUG_LOCATION_UNAVAILABLE)
+                    {
+                        continue;
+                    }
+                    advertised_before_initialization |= after_initialization != UINT32_MAX && seed->start < after_initialization;
+                    covered_after_initialization |= after_initialization != UINT32_MAX && seed->start <= after_initialization &&
+                                                   after_initialization < seed->end;
+                    covered_after_join |= after_join != UINT32_MAX && seed->start <= after_join && after_join < seed->end;
+                    covered_after_overwrite |= after_overwrite != UINT32_MAX && seed->start <= after_overwrite && after_overwrite < seed->end;
+                }
+                String8 label = string_format(temporary.arena, S8("frontend={u32} allocator={u32} error={u32}"), frontend, allocator,
+                                              (u32)generated.error);
+                BUSTER_TEST_RAW(arguments, generated.error == CODEGEN_ERROR_NONE && descriptor && after_initialization != UINT32_MAX &&
+                                           after_join != UINT32_MAX && after_overwrite != UINT32_MAX, label);
+                BUSTER_TEST_RAW(arguments, !advertised_before_initialization && covered_after_initialization && covered_after_join &&
+                                           covered_after_overwrite, label);
+                String8 const coverage_function_names[] = {
+                    S8("debug_values"), S8("copies"), S8("reassigned"), S8("branch_only"),
+                };
+                for (u32 coverage_index = 0; generated.error == CODEGEN_ERROR_NONE && coverage_index < BUSTER_ARRAY_LENGTH(coverage_function_names);
+                     coverage_index += 1)
+                {
+                    IrFunction* coverage_function = codegen_test_c_function_find(module, coverage_function_names[coverage_index]);
+                    bool found_function = coverage_function != 0;
+                    BUSTER_TEST_RAW(arguments, found_function, coverage_function_names[coverage_index]);
+                    for (u32 local_index = 0; coverage_function && local_index < coverage_function->debug_local_count; local_index += 1)
+                    {
+                        IrDebugLocal const* local = coverage_function->debug_locals + local_index;
+                        if (local->id.value == IR_ID_UNDERLYING_INVALID)
+                        {
+                            continue;
+                        }
+                        bool found_available = false;
+                        bool found_unavailable = false;
+                        for (u32 seed_index = 0; seed_index < generated.debug_location_count; seed_index += 1)
+                        {
+                            DebugLocationSeed const* seed = generated.debug_locations + seed_index;
+                            if (seed->function_symbol.value == coverage_function->symbol.value && seed->local.value == local->id.value)
+                            {
+                                found_available |= seed->location.kind != DEBUG_LOCATION_UNAVAILABLE;
+                                found_unavailable |= seed->location.kind == DEBUG_LOCATION_UNAVAILABLE;
+                            }
+                        }
+                        bool path_only_local = string_equal(coverage_function_names[coverage_index], S8("branch_only")) &&
+                                               string_equal(local->name, S8("later"));
+                        String8 local_label = string_format(temporary.arena, S8("frontend={u32} allocator={u32} {S8}.{S8}"), frontend,
+                                                            allocator, coverage_function_names[coverage_index], local->name);
+                        BUSTER_TEST_RAW(arguments, path_only_local ? found_unavailable && !found_available : found_available, local_label);
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // Dynamic canonical seeds must survive when their output is the first thread
 // scratch arena, including subsequent function and object allocations there.
 BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_first_scratch_storage(UnitTestArguments* arguments)
@@ -3434,6 +3604,9 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     UnitTestResult machine_debug = codegen_test_machine_debug_locations(arguments);
     result.succeeded_test_count += machine_debug.succeeded_test_count;
     result.test_count += machine_debug.test_count;
+    UnitTestResult local_seed_coverage = codegen_test_debug_local_seed_coverage(arguments);
+    result.succeeded_test_count += local_seed_coverage.succeeded_test_count;
+    result.test_count += local_seed_coverage.test_count;
     UnitTestResult reused_home_debug = codegen_test_machine_debug_reused_home_boundary(arguments);
     result.succeeded_test_count += reused_home_debug.succeeded_test_count;
     result.test_count += reused_home_debug.test_count;
