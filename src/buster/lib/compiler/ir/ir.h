@@ -717,6 +717,9 @@ struct IrFunction
     IrTypeId canonical_type;
     IrFunctionId id;
     IrBlockId entry;
+    // Zero for ordinary functions; otherwise the canonical handler block ID + 1.
+    // This is a second semantic root, not a predecessor edge from `entry`.
+    u32 exception_entry_plus_one;
     IrBlock* blocks;
     IrPublishedCfg const* published_cfg;
     IrInstruction* instructions;
@@ -975,6 +978,8 @@ typedef enum IrValidationError
     IR_VALIDATION_INSTRUCTION_OWNERSHIP,
     IR_VALIDATION_ALIAS_TARGET,
     IR_VALIDATION_INITIALIZER_TARGET,
+    // Invalid or unsupported shape for the separate Windows exception root.
+    IR_VALIDATION_EXCEPTION_ROOT,
     IR_VALIDATION_COUNT,
 } IrValidationError;
 
@@ -1168,6 +1173,9 @@ BUSTER_F_DECL bool ir_inline_assembly_jump_target(IrFunction* function, IrInstru
 // its consumer; backends read published spans instead of owner arrays.
 BUSTER_F_DECL IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBlockId* owners);
 BUSTER_F_DECL IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module);
+// True when a module contains canonical exception-root metadata. Consumers that
+// do not model separate roots must refuse it before producing output.
+BUSTER_F_DECL bool ir_module_has_exception_root(IrModule const* module);
 // Requires canonical validation (or a producer/pass contract) for instruction
 // semantics. Independently checks exact CFG/list extents before publication;
 // it is not a semantic certificate. Publication provides one instruction ID

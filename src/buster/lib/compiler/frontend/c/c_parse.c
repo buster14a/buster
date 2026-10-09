@@ -22966,12 +22966,61 @@ typedef enum CParseStatementSuffix
 {
     C_PARSE_STATEMENT_SUFFIX_ELSE,
     C_PARSE_STATEMENT_SUFFIX_DO_WHILE,
+    C_PARSE_STATEMENT_SUFFIX_SEH_HANDLER,
 } CParseStatementSuffix;
 
 BUSTER_C_INTERNAL bool c_parse_statement_keyword_at(CPreprocessResult preprocess, u32 index, u32 end, CSymbolWellKnown keyword)
 {
     return index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
            c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[index], keyword);
+}
+
+BUSTER_C_INTERNAL bool c_parse_windows_seh_target(Target target)
+{
+    return target.os == OPERATING_SYSTEM_WINDOWS && target.cpu_arch == CPU_ARCH_X86_64;
+}
+
+BUSTER_C_INTERNAL bool c_parse_seh_marker_at(CPreprocessResult preprocess, u32 index, u32 end)
+{
+    bool result = false;
+    if (c_parse_windows_seh_target(preprocess.target) && index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
+    {
+        CToken token = preprocess.tokens[index];
+        if (c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SEH_TRY))
+        {
+            result = index + 1 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACE);
+        }
+        else if ((c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SEH_EXCEPT) ||
+                  c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SEH_FINALLY)) &&
+                 index && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            u32 depth = 0;
+            u32 open = UINT32_MAX;
+            for (u32 cursor = index; cursor && open == UINT32_MAX;)
+            {
+                cursor -= 1;
+                CToken previous = preprocess.tokens[cursor];
+                if (c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_BRACE))
+                {
+                    depth += 1;
+                }
+                else if (c_token_is_punctuator(&previous, C_PUNCTUATOR_LEFT_BRACE))
+                {
+                    if (depth == 1)
+                    {
+                        open = cursor;
+                    }
+                    else if (depth)
+                    {
+                        depth -= 1;
+                    }
+                }
+            }
+            result = open != UINT32_MAX && open > 0 &&
+                     c_parse_statement_keyword_at(preprocess, open - 1, end, C_SYMBOL_WELL_KNOWN_SEH_TRY);
+        }
+    }
+    return result;
 }
 
 // The matching-closer table for statement walks, or zero when it cannot stand in for a
@@ -23139,6 +23188,19 @@ BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 co
                     cursor += 1;
                 }
             }
+            else if (c_parse_windows_seh_target(preprocess.target) &&
+                     c_token_is_well_known(preprocess.spelling_base, cursor_token, C_SYMBOL_WELL_KNOWN_SEH_TRY))
+            {
+                if (suffix_count == suffix_capacity)
+                {
+                    failed = true;
+                }
+                else
+                {
+                    suffix[suffix_count++] = C_PARSE_STATEMENT_SUFFIX_SEH_HANDLER;
+                    cursor += 1;
+                }
+            }
             else if (cursor + 1 < end && c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_COLON))
             {
                 cursor += 2;
@@ -23235,6 +23297,36 @@ BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 co
                             suffix_count -= 1;
                             c_parse_statement_ends_finish(memo, &pending_count, suffix_count, cursor);
                         }
+                    }
+                }
+                else if (suffix[suffix_count - 1] == C_PARSE_STATEMENT_SUFFIX_SEH_HANDLER)
+                {
+                    bool except_handler = c_parse_statement_keyword_at(preprocess, cursor, end, C_SYMBOL_WELL_KNOWN_SEH_EXCEPT);
+                    bool finally_handler = c_parse_statement_keyword_at(preprocess, cursor, end, C_SYMBOL_WELL_KNOWN_SEH_FINALLY);
+                    u32 handler_start = UINT32_MAX;
+                    if (except_handler && cursor + 1 < end &&
+                        c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        u32 filter_close = c_parse_statement_delimiter_close(preprocess, matching, cursor + 1, end,
+                                                                             C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                                             C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                        handler_start = filter_close < end ? filter_close + 1 : UINT32_MAX;
+                    }
+                    else if (finally_handler)
+                    {
+                        handler_start = cursor + 1;
+                    }
+                    if (handler_start >= end ||
+                        !c_token_is_punctuator(&preprocess.tokens[handler_start], C_PUNCTUATOR_LEFT_BRACE))
+                    {
+                        failed = true;
+                    }
+                    else
+                    {
+                        cursor = handler_start;
+                        suffix_count -= 1;
+                        c_parse_statement_ends_finish(memo, &pending_count, suffix_count, cursor);
+                        continued = true;
                     }
                 }
                 else
@@ -23981,8 +24073,9 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                                    C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
                                    S8("type name '__fp16' used where an expression argument is required"));
             }
+            bool contextual_seh_marker = c_parse_seh_marker_at(preprocess, index, body_end);
             if (!(declaration_type_identifier_bound && index == declaration_type_start) && !member && !previous_keyword && !label && !asm_goto_label &&
-                !declaration_keyword &&
+                !declaration_keyword && !contextual_seh_marker &&
                 !(index > body_start &&
                   c_parse_label_address_prefix_with_typedef(result, &preprocess, scope_stack[scope_count - 1], body_start, index - 1)) &&
                 !(asm_operand_range_start != UINT32_MAX &&

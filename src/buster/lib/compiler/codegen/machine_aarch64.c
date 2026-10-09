@@ -6008,9 +6008,12 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
 {
     MachineSelectResult result = {
         .failed_opcode = IR_OPCODE_COUNT,
+        .failure_detail = function && function->exception_entry_plus_one &&
+                          (target.cpu_arch != CPU_ARCH_X86_64 || target.os != OPERATING_SYSTEM_WINDOWS)
+                              ? S8("catch-all exception helpers require Windows x64 native code generation") : (String8){0},
     };
     if (arena && program && function && target.cpu_arch == CPU_ARCH_AARCH64 && function->state == IR_FUNCTION_LOWERED && function->block_count &&
-        function->entry.value < function->block_count)
+        function->entry.value < function->block_count && !function->exception_entry_plus_one)
     {
         IrType* function_type = ir_type_from_id(&program->types, function->canonical_type);
         result.signature_rejected = function_type && function_type->kind == IR_TYPE_FUNCTION;

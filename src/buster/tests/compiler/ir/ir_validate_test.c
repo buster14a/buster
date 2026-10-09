@@ -1164,3 +1164,274 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_equivalence_tests(UnitTestArgumen
     BUSTER_TEST(arguments, random_applied >= IR_VALIDATE_TEST_RANDOM_ROUNDS * 8);
     return result;
 }
+
+BUSTER_GLOBAL_LOCAL IrValidateTestBuilder ir_validate_test_exception_builder(Arena* arena)
+{
+    IrValidateTestBuilder builder = ir_validate_test_builder(arena);
+    IrTypeId data_pointer_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_POINTER, .element_type = builder.i32_type,
+        .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true}});
+    IrTypeId* callback_parameter_types = arena_allocate(arena, IrTypeId, 2);
+    callback_parameter_types[0] = data_pointer_type;
+    callback_parameter_types[1] = builder.bool_type;
+    IrTypeId callback_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_FUNCTION, .return_type = builder.void_type,
+        .parameter_types = callback_parameter_types, .parameter_count = 2, .calling_convention = IR_CALLING_CONVENTION_C,
+        .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true}});
+    IrTypeId callback_pointer_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_POINTER, .element_type = callback_type,
+        .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true}});
+    IrTypeId* function_parameter_types = arena_allocate(arena, IrTypeId, 2);
+    function_parameter_types[0] = callback_pointer_type;
+    function_parameter_types[1] = data_pointer_type;
+    IrTypeId function_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_FUNCTION, .return_type = builder.bool_type,
+        .parameter_types = function_parameter_types, .parameter_count = 2, .calling_convention = IR_CALLING_CONVENTION_C,
+        .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true}});
+    builder.function->canonical_type = function_type;
+    u32 normal = ir_validate_test_block(&builder);
+    u32 exception = ir_validate_test_block(&builder);
+    builder.function->entry = (IrBlockId){.value = normal};
+    builder.function->exception_entry_plus_one = exception + 1;
+    IrValueId callback = ir_validate_test_value(&builder, callback_pointer_type, IR_VALUE_VALUE);
+    u64* callback_index = arena_allocate(arena, u64, 1);
+    callback_index[0] = 0;
+    ir_validate_test_row(&builder, normal, (IrInstruction){.opcode = IR_OPCODE_ARGUMENT, .canonical_type = callback_pointer_type,
+        .result = callback, .immediates = callback_index, .immediate_count = 1});
+    IrValueId captured_pointer = ir_validate_test_value(&builder, data_pointer_type, IR_VALUE_VALUE);
+    u64* captured_index = arena_allocate(arena, u64, 1);
+    captured_index[0] = 1;
+    ir_validate_test_row(&builder, normal, (IrInstruction){.opcode = IR_OPCODE_ARGUMENT, .canonical_type = data_pointer_type,
+        .result = captured_pointer, .immediates = captured_index, .immediate_count = 1});
+    IrValueId normal_value = ir_validate_test_constant(&builder, normal, builder.bool_type, 0);
+    IrValueId* call_operands = arena_allocate(arena, IrValueId, 3);
+    call_operands[0] = callback;
+    call_operands[1] = captured_pointer;
+    call_operands[2] = normal_value;
+    ir_validate_test_row(&builder, normal, (IrInstruction){.opcode = IR_OPCODE_CALL, .canonical_type = builder.void_type,
+        .result = IR_VALUE_ID_INVALID, .symbol = IR_SYMBOL_ID_INVALID, .operands = call_operands, .operand_count = 3});
+    ir_validate_test_return(&builder, normal, normal_value);
+    IrValueId exception_value = ir_validate_test_constant(&builder, exception, builder.bool_type, 1);
+    ir_validate_test_return(&builder, exception, exception_value);
+    ir_validate_test_seal(&builder);
+    return builder;
+}
+
+BUSTER_GLOBAL_LOCAL IrValidateTestBuilder ir_validate_test_exception_returns_twice_builder(Arena* arena, bool attribute)
+{
+    IrValidateTestBuilder builder = ir_validate_test_builder(arena);
+    IrTypeId exception_function_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_FUNCTION,
+        .return_type = builder.bool_type, .calling_convention = IR_CALLING_CONVENTION_C,
+        .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true}});
+    IrTypeId returns_twice_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_FUNCTION,
+        .return_type = builder.void_type, .calling_convention = IR_CALLING_CONVENTION_C,
+        .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true}});
+    IrSymbolId returns_twice_symbol = ir_program_add_symbol(&builder.program, (IrSymbol){
+        .name = attribute ? S8("custom_returns_twice") : S8("setjmp"),
+        .type = returns_twice_type,
+        .kind = IR_SYMBOL_FUNCTION,
+        .linkage = IR_LINKAGE_EXTERNAL,
+        .is_returns_twice = attribute,
+    });
+    builder.function->canonical_type = exception_function_type;
+    u32 normal = ir_validate_test_block(&builder);
+    u32 exception = ir_validate_test_block(&builder);
+    builder.function->entry = (IrBlockId){.value = normal};
+    builder.function->exception_entry_plus_one = exception + 1;
+    IrValueId callee = ir_validate_test_value(&builder, returns_twice_type, IR_VALUE_VALUE);
+    ir_validate_test_row(&builder, normal, (IrInstruction){.opcode = IR_OPCODE_FUNCTION, .canonical_type = returns_twice_type,
+        .result = callee, .symbol = returns_twice_symbol});
+    IrValueId normal_value = ir_validate_test_constant(&builder, normal, builder.bool_type, 0);
+    IrValueId* call_operands = arena_allocate(arena, IrValueId, 1);
+    call_operands[0] = callee;
+    ir_validate_test_row(&builder, normal, (IrInstruction){.opcode = IR_OPCODE_CALL, .canonical_type = builder.void_type,
+        .result = IR_VALUE_ID_INVALID, .symbol = returns_twice_symbol, .operands = call_operands, .operand_count = 1});
+    ir_validate_test_return(&builder, normal, normal_value);
+    IrValueId exception_value = ir_validate_test_constant(&builder, exception, builder.bool_type, 1);
+    ir_validate_test_return(&builder, exception, exception_value);
+    ir_validate_test_seal(&builder);
+    return builder;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_exception_root_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    IrValidateTestBuilder ordinary = ir_validate_test_builder(temporary.arena);
+    ir_validate_test_shape(&ordinary, IR_VALIDATE_TEST_SHAPE_LINEAR);
+    BUSTER_TEST_RAW(arguments, !ir_module_has_exception_root(ordinary.program.modules),
+                    "ordinary canonical modules do not claim an exception root");
+    scratch_end(temporary);
+    temporary = arena_begin_temporal(arguments->arena);
+    IrValidateTestBuilder valid = ir_validate_test_exception_builder(temporary.arena);
+    IrValidationResult fused = ir_validate_canonical_module(&valid.program, valid.program.modules);
+    IrValidationResult reference = ir_test_validate_canonical_module_reference(&valid.program, valid.program.modules);
+    BUSTER_TEST_RAW(arguments, fused.error == IR_VALIDATION_NONE && reference.error == IR_VALIDATION_NONE,
+                    "canonical exception root accepts captured arguments and a call before its false return");
+    BUSTER_TEST_RAW(arguments, ir_module_has_exception_root(valid.program.modules), "canonical module reports an exception root");
+    BUSTER_TEST_RAW(arguments, valid.function->blocks[1].predecessor_count == 0,
+                    "handler is a separate root with no invented predecessor");
+    IrValidationResult publication = ir_function_publish_cfg(temporary.arena, valid.function);
+    BUSTER_TEST_RAW(arguments, publication.error == IR_VALIDATION_NONE && valid.function->published_cfg &&
+                                valid.function->published_cfg->blocks[1].predecessor_count == 0,
+                    "CFG publication preserves the root without adding an edge");
+    fused = ir_validate_canonical_module(&valid.program, valid.program.modules);
+    reference = ir_test_validate_canonical_module_reference(&valid.program, valid.program.modules);
+    BUSTER_TEST_RAW(arguments, fused.error == IR_VALIDATION_NONE && reference.error == IR_VALIDATION_NONE,
+                    "published canonical exception root remains valid");
+    u32 valid_root_block = valid.function->exception_entry_plus_one - 1;
+    u32 valid_normal_entry = valid.function->entry.value;
+    IrValidationResult prepared = ir_prepare_canonical_module(&valid.program, valid.program.modules, false);
+    fused = ir_validate_canonical_module(&valid.program, valid.program.modules);
+    reference = ir_test_validate_canonical_module_reference(&valid.program, valid.program.modules);
+    BUSTER_TEST_RAW(arguments, prepared.error == IR_VALIDATION_NONE && fused.error == IR_VALIDATION_NONE &&
+                                reference.error == IR_VALIDATION_NONE &&
+                                valid.function->exception_entry_plus_one == valid_root_block + 1 &&
+                                valid.function->entry.value == valid_normal_entry &&
+                                valid.function->blocks[valid_root_block].predecessor_count == 0,
+                    "publish, validate, prepare and revalidate preserve the second root");
+    scratch_end(temporary);
+
+    for (u32 returns_twice_case = 0; returns_twice_case < 2; returns_twice_case += 1)
+    {
+        temporary = arena_begin_temporal(arguments->arena);
+        IrValidateTestBuilder returns_twice =
+            ir_validate_test_exception_returns_twice_builder(temporary.arena, returns_twice_case != 0);
+        u32 root_block = returns_twice.function->exception_entry_plus_one - 1;
+        fused = ir_validate_canonical_module(&returns_twice.program, returns_twice.program.modules);
+        reference = ir_test_validate_canonical_module_reference(&returns_twice.program, returns_twice.program.modules);
+        BUSTER_TEST_RAW(arguments, fused.error == IR_VALIDATION_EXCEPTION_ROOT && reference.error == IR_VALIDATION_EXCEPTION_ROOT,
+                        string_format(temporary.arena, S8("returns-twice root call {u32} is refused"), returns_twice_case));
+        BUSTER_TEST_RAW(arguments, fused.function.value == returns_twice.function->id.value &&
+                                    fused.block.value == root_block &&
+                                    fused.instruction.value == IR_ID_UNDERLYING_INVALID &&
+                                    reference.function.value == returns_twice.function->id.value &&
+                                    reference.block.value == root_block &&
+                                    reference.instruction.value == IR_ID_UNDERLYING_INVALID,
+                        "exception-root refusal preserves structured function and root-block context");
+        scratch_end(temporary);
+    }
+
+    String8 promotion_barrier_sources[] = {
+        S8("int setjmp(void*);int test(void* p){int value=1;setjmp(p);value=2;return value;}"),
+        S8("int custom_twice(void*) __attribute__((returns_twice));int test(void* p){int value=1;custom_twice(p);value=2;return value;}"),
+    };
+    for (u32 barrier_case = 0; barrier_case < BUSTER_ARRAY_LENGTH(promotion_barrier_sources); barrier_case += 1)
+    {
+        temporary = arena_begin_temporal(arguments->arena);
+        CIRLowerResult lowered = ir_promotion_lower(temporary.arena, promotion_barrier_sources[barrier_case], target_native);
+        BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
+        if (lowered.program && !lowered.diagnostic_count)
+        {
+            IrModule* module = lowered.program->modules;
+            IrFunction* function = 0;
+            for (u32 index = 0; index < module->function_count; index += 1)
+            {
+                if (string_equal(module->functions[index].name, S8("test"))) function = module->functions + index;
+            }
+            BUSTER_TEST(arguments, function != 0);
+            if (function)
+            {
+                u32 instruction_count = function->instruction_count;
+                u32 value_count = function->value_count;
+                u32 local_count = ir_test_opcode_count(function, IR_OPCODE_LOCAL);
+                u32 store_count = ir_test_opcode_count(function, IR_OPCODE_STORE);
+                u32 load_count = ir_test_opcode_count(function, IR_OPCODE_LOAD);
+                bool returns_twice_call = false;
+                for (u32 index = 0; index < instruction_count; index += 1)
+                {
+                    IrInstruction* row = function->instructions + index;
+                    returns_twice_call |= row->opcode == IR_OPCODE_CALL && ir_call_returns_twice(lowered.program, row);
+                }
+                BUSTER_TEST(arguments, local_count && store_count && load_count && returns_twice_call);
+                IrInstruction* instruction_snapshot = arena_allocate(temporary.arena, IrInstruction, instruction_count);
+                IrValue* value_snapshot = arena_allocate(temporary.arena, IrValue, value_count);
+                memcpy(instruction_snapshot, function->instructions, sizeof(*instruction_snapshot) * instruction_count);
+                memcpy(value_snapshot, function->values, sizeof(*value_snapshot) * value_count);
+                lowered.program->fast_passes = 0;
+                IrValidationResult promotion = ir_prepare_canonical_module(lowered.program, module, false);
+                BUSTER_TEST(arguments, promotion.error == IR_VALIDATION_NONE && module->local_promotion_complete);
+                BUSTER_TEST(arguments, module->local_promotion.promoted_locals == 0 && module->local_promotion.barrier_functions == 1);
+                BUSTER_TEST(arguments, function->instruction_count == instruction_count && function->value_count == value_count &&
+                                            ir_test_opcode_count(function, IR_OPCODE_LOCAL) == local_count &&
+                                            ir_test_opcode_count(function, IR_OPCODE_STORE) == store_count &&
+                                            ir_test_opcode_count(function, IR_OPCODE_LOAD) == load_count);
+                bool instructions_unchanged = function->instruction_count == instruction_count;
+                for (u32 index = 0; index < instruction_count && instructions_unchanged; index += 1)
+                {
+                    IrInstruction before_row = instruction_snapshot[index];
+                    IrInstruction after_row = function->instructions[index];
+                    bool payload_unchanged = before_row.operand_count == after_row.operand_count &&
+                                             before_row.target_count == after_row.target_count &&
+                                             before_row.immediate_count == after_row.immediate_count;
+                    for (u32 operand = 0; operand < before_row.operand_count && payload_unchanged; operand += 1)
+                    {
+                        payload_unchanged = before_row.operands[operand].value == after_row.operands[operand].value;
+                    }
+                    for (u32 target = 0; target < before_row.target_count && payload_unchanged; target += 1)
+                    {
+                        payload_unchanged = before_row.targets[target].value == after_row.targets[target].value;
+                    }
+                    for (u32 immediate = 0; immediate < before_row.immediate_count && payload_unchanged; immediate += 1)
+                    {
+                        payload_unchanged = before_row.immediates[immediate] == after_row.immediates[immediate];
+                    }
+                    before_row.next = after_row.next;
+                    before_row.operands = after_row.operands;
+                    before_row.targets = after_row.targets;
+                    before_row.immediates = after_row.immediates;
+                    instructions_unchanged = payload_unchanged && memory_compare(&before_row, &after_row, sizeof(before_row));
+                }
+                BUSTER_TEST(arguments, instructions_unchanged && memory_compare(value_snapshot, function->values,
+                                                                                 sizeof(*value_snapshot) * value_count));
+            }
+        }
+        scratch_end(temporary);
+    }
+
+    for (u32 mutation = 0; mutation < 5; mutation += 1)
+    {
+        temporary = arena_begin_temporal(arguments->arena);
+        IrValidateTestBuilder builder = ir_validate_test_exception_builder(temporary.arena);
+        IrFunction* function = builder.function;
+        u32 root_block = function->exception_entry_plus_one - 1;
+        if (mutation == 0)
+        {
+            function->exception_entry_plus_one = function->block_count + 1;
+        }
+        else if (mutation == 1)
+        {
+            function->exception_entry_plus_one = function->entry.value + 1;
+        }
+        else if (mutation == 2)
+        {
+            u32 return_row = function->blocks[function->entry.value].last_instruction.value;
+            IrBlockId* targets = arena_allocate(temporary.arena, IrBlockId, 1);
+            targets[0] = (IrBlockId){.value = root_block};
+            function->instructions[return_row] = (IrInstruction){.opcode = IR_OPCODE_BRANCH, .canonical_type = builder.void_type,
+                .result = IR_VALUE_ID_INVALID, .next = IR_INSTRUCTION_ID_INVALID, .targets = targets, .target_count = 1};
+            function->blocks[root_block].predecessor_count = 0;
+            function->blocks[root_block].first_predecessor = 0;
+            function->blocks[root_block].last_predecessor = 0;
+            ir_validate_test_seal(&builder);
+        }
+        else if (mutation == 3)
+        {
+            IrValueId live_in = ir_validate_test_value(&builder, builder.bool_type, IR_VALUE_VALUE);
+            ir_validate_test_parameter(&builder, root_block, live_in);
+        }
+        else
+        {
+            u32 constant_row = function->blocks[root_block].first_instruction.value;
+            function->instructions[constant_row].immediates[0] = 0;
+        }
+        fused = ir_validate_canonical_module(&builder.program, builder.program.modules);
+        reference = ir_test_validate_canonical_module_reference(&builder.program, builder.program.modules);
+        BUSTER_TEST_RAW(arguments, fused.error == IR_VALIDATION_EXCEPTION_ROOT && reference.error == IR_VALIDATION_EXCEPTION_ROOT,
+                        string_format(temporary.arena, S8("exception-root mutation {u32} is rejected by both validators"), mutation));
+        if (mutation == 2)
+        {
+            publication = ir_function_publish_cfg(temporary.arena, function);
+            BUSTER_TEST_RAW(arguments, publication.error == IR_VALIDATION_EXCEPTION_ROOT && !function->published_cfg,
+                            "CFG publication refuses a normal edge into the exception root");
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}

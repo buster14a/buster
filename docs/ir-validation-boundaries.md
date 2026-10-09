@@ -12,6 +12,49 @@ This contract complements the [frontend guide](agents/frontend/foundations.md),
 for machine metadata work (#45). Dense canonical finalization is described in
 [canonical CFG publication](canonical-cfg-publication.md).
 
+## Windows exception roots
+
+The C frontend's bounded SEH filter helper carries a second semantic root in
+`IrFunction.exception_entry_plus_one`: zero means no exception root; otherwise
+the value is the canonical handler block ID plus one. This field does not add
+a CFG predecessor or change `entry`, which remains the ordinary function
+entry. See [#3276](https://github.com/buster14a/buster/issues/3276).
+
+The canonical verifier admits only a two-block `BOOL` helper. The normal
+entry may contain function-argument rows, captured-place loads, and the full
+protected call-expression evaluation, including nested calls and side effects.
+It must end in a return whose operand is a boolean zero constant defined in
+that same normal block; the zero row may precede the return when a call also
+uses it. The distinct exception root contains only a boolean true constant and
+its return. Both blocks have no parameters or predecessors, and no branch,
+indirect branch, or label-address path can reach the handler. Label metadata is
+rejected. The helper excludes dynamic stack allocation, stack save/restore,
+inline assembly, and direct calls known by symbol attribute or spelling to have
+returns-twice or nonlocal-control semantics. Unknown indirect callbacks remain
+permitted because the canonical call row carries no direct callee symbol; this
+is a bounded representation rule, not a proof that an indirect callback cannot
+return twice. Malformed metadata or helper shape is
+`IR_VALIDATION_EXCEPTION_ROOT`.
+
+The error remains a structured `IrValidationResult`: function ID and root-block
+ID identify a function-level rejection, and the instruction ID is invalid.
+Preparation adds its scan boundary without discarding those IDs. Registered
+`ir_validate_exception_root_tests` checks the structured refusal for both a
+known `setjmp` spelling and a `returns_twice` declaration, and revalidates the
+same function after CFG publication and preparation. Its companion promotion
+controls begin with live `LOCAL`, `STORE`, and `LOAD` rows and verify that
+preparation retains their instruction/value records unchanged for both call
+forms.
+
+Reachability and local-initialization facts from the ordinary entry must not be
+copied into the exception root. Local promotion skips marked helpers; any
+transform that removes blocks must either preserve both semantic roots or
+refuse the function. Consumers that do not model the root return a named
+unsupported-exception-root diagnostic before producing output: LLVM bitcode,
+eBPF, WebAssembly, and SPIR-V currently refuse it. Native selection carries
+the root into machine IR; the current native acceptance is Windows x64, while
+other target support must be explicitly proved or refused.
+
 ## Integer constant rows
 
 A `CONSTANT_INTEGER` row spells a signed number as `immediates[0]` plus

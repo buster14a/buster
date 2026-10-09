@@ -6759,6 +6759,55 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_canonical_block_offsets(u32* offsets, I
     return result;
 }
 
+// Scope publication consumes encoder-owned coordinates while machine scratch
+// is alive. A guarded return PC in an epilogue would skip the language handler.
+BUSTER_GLOBAL_LOCAL bool codegen_machine_exception_scope(CodegenFunctionDescriptor* descriptor, IrFunction* function,
+                                                          MachineSelectResult* selected, MachineEncodeResult* encoded)
+{
+    bool result = !function->exception_entry_plus_one;
+    if (!result)
+    {
+        u32 canonical_entry = function->exception_entry_plus_one - 1u;
+        bool canonical_valid = canonical_entry < function->block_count;
+        u32 machine_entry = canonical_valid && selected->canonical_block_entries
+                                ? selected->canonical_block_entries[canonical_entry] : canonical_entry;
+        result = canonical_valid && descriptor && encoded->valid && encoded->block_offsets && encoded->call_return_offsets &&
+                 encoded->epilog_offsets && encoded->epilog_count == 2u && selected->function.block_count == 2u &&
+                 machine_entry == 1u && selected->function.exception_entry_plus_one == machine_entry + 1u;
+        u32 begin = result ? BUSTER_MAX(descriptor->prolog_size, encoded->block_offsets[0]) : 0;
+        u32 handler = result ? encoded->block_offsets[machine_entry] : 0;
+        result = result && begin < handler && handler < encoded->byte_count &&
+                 encoded->epilog_offsets[0] >= begin && encoded->epilog_offsets[0] < handler &&
+                 encoded->epilog_offsets[1] >= handler && encoded->epilog_offsets[1] < encoded->byte_count;
+        u32 guarded_calls = 0;
+        for (u32 row = 0; result && row < selected->function.instruction_count; row += 1)
+        {
+            u32 return_pc = encoded->call_return_offsets[row];
+            if (return_pc)
+            {
+                result = return_pc > begin && return_pc < handler && return_pc < encoded->epilog_offsets[0];
+                guarded_calls += 1u;
+            }
+        }
+        result = result && guarded_calls != 0;
+        if (result)
+        {
+            descriptor->exception_scope_begin = begin;
+            descriptor->exception_entry_offset = handler;
+        }
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool codegen_test_exception_scope(CodegenFunctionDescriptor* descriptor, IrFunction* function,
+                                   MachineSelectResult* selected, MachineEncodeResult* encoded)
+{
+    bool result = codegen_machine_exception_scope(descriptor, function, selected, encoded);
+    return result;
+}
+#endif
+
 // Writes `function`'s label differences into `generated`'s data image as
 // little- or big-endian integers of their declared width, truncating as a
 // C conversion does. Differences owned by other functions are left for them.
@@ -7045,6 +7094,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 continue;
             }
         }
+        if (function->exception_entry_plus_one &&
+            (target.cpu_arch != CPU_ARCH_X86_64 || target.os != OPERATING_SYSTEM_WINDOWS))
+        {
+            buffer.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+            result.failure_reason = S8("catch-all exception helpers require Windows x64 native code generation");
+        }
         // Share the target-derived executable padding policy with source
         // alignment. x86 remains one bulk memset, not one encoding per byte.
         u64 alignment = target.cpu_arch == CPU_ARCH_AARCH64 ? 4 : 16;
@@ -7145,7 +7200,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 fallback_reason = selected.signature_rejected ? CODEGEN_FALLBACK_SIGNATURE
                                   : fallback_opcode < IR_OPCODE_COUNT ? CODEGEN_FALLBACK_OPCODE
                                                                       : CODEGEN_FALLBACK_SELECTION_OTHER;
-                if (fallback_reason == CODEGEN_FALLBACK_OPCODE && selected.failure_detail.length)
+                if ((fallback_reason == CODEGEN_FALLBACK_OPCODE || function->exception_entry_plus_one) && selected.failure_detail.length)
                 {
                     // The selector's scratch arena ends below. Keep the exact
                     // refusal in this attempt's output arena for the driver.
@@ -7602,6 +7657,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                                 codegen_record_machine_line_marks(program, function, &result, line_entry_capacity, line_source_limit,
                                                                   &selected.function, encoded.row_offsets, (u32)buffer.count);
+                                descriptor->prolog_size = machine_prologue_cursor;
+                                if (!codegen_machine_exception_scope(descriptor, function, &selected, &encoded))
+                                {
+                                    buffer.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                    result.failure_reason = S8("Windows x64 catch-all helper has unsafe emitted exception coordinates");
+                                }
                                 u32 machine_frame_base_offset = encoded.frame_pointer_offset ? placement.frame_size : 0;
                                 // Same emitted-range sizing as the AArch64 path
                                 // above.
@@ -7655,7 +7716,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             }
             scratch_end(machine_scratch);
         }
-        if (machine_function_emitted)
+        if (machine_function_emitted && buffer.error == CODEGEN_ERROR_NONE)
         {
             for (u32 side_index = 0; side_index < label_address_relocation_count; side_index += 1)
             {
@@ -7707,7 +7768,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         }
         if (buffer.error != CODEGEN_ERROR_NONE)
         {
-            result.failure_reason = codegen_fallback_reason_string(fallback_reason);
+            result.failure_reason = result.failure_reason.length ? result.failure_reason : codegen_fallback_reason_string(fallback_reason);
             result.error = buffer.error;
             return result;
         }
@@ -7908,9 +7969,13 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
 CodegenExecutable codegen_make_executable(CodegenFunction function)
 {
     CodegenExecutable result = {0};
-    if (function.error != CODEGEN_ERROR_NONE || !function.code.length)
+    if (function.error != CODEGEN_ERROR_NONE || !function.code.length ||
+        function.descriptor.exception_entry_offset || function.descriptor.exception_scope_begin)
     {
-        result.error = function.error ? function.error : CODEGEN_ERROR_INVALID_IR;
+        // This raw-code JIT API registers no Windows handler/function table.
+        result.error = function.error ? function.error
+                       : function.descriptor.exception_entry_offset || function.descriptor.exception_scope_begin
+                           ? CODEGEN_ERROR_UNSUPPORTED_ABI : CODEGEN_ERROR_INVALID_IR;
         return result;
     }
     u64 page_size = os_get_page_size();

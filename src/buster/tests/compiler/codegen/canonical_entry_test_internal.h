@@ -2,7 +2,8 @@
 
 // Renumber blocks without changing the graph, instruction chains, or values.
 // These fixtures have no address-taken labels, so every block reference is an
-// entry, instruction target, predecessor, or block-parameter incoming edge.
+// entry, optional exception root, instruction target, predecessor, or
+// block-parameter incoming edge.
 BUSTER_GLOBAL_LOCAL void codegen_test_rotate_blocks(Arena* arena, IrFunction* function, u32 rotation)
 {
     ir_function_invalidate_cfg(function);
@@ -36,6 +37,11 @@ BUSTER_GLOBAL_LOCAL void codegen_test_rotate_blocks(Arena* arena, IrFunction* fu
         }
     }
     function->entry.value = (function->entry.value + rotation) % count;
+    if (function->exception_entry_plus_one)
+    {
+        u32 exception_root = function->exception_entry_plus_one - 1;
+        function->exception_entry_plus_one = ((exception_root + rotation) % count) + 1;
+    }
 }
 
 BUSTER_GLOBAL_LOCAL u64 codegen_test_entry_expected(u32 fixture, u64 first, u64 second)

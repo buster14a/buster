@@ -1392,6 +1392,10 @@ struct MachineFunction
     // exactly the stack pointer a call sees.
     u32 outgoing_bytes;
     u32 outgoing_slot;
+    // Zero for ordinary functions, otherwise the Windows x64 catch-all
+    // exception-entry MIR block ID plus one. This is a separate CFG root,
+    // never an invented normal predecessor edge.
+    u32 exception_entry_plus_one;
     // Selector proof that no canonical row has volatile memory semantics.
     // Unknown/manual/structural-replay functions leave this false. Consumers
     // that introduce volatile accesses must clear it; scheduling and CFG/SSA
@@ -1728,10 +1732,14 @@ struct MachineEncodeResult
     // ahead of its reload edits, parallel to the instruction array.
     u32* row_offsets;
     MachineCallSite* call_sites;
+    // EH-only, parallel to MIR rows: the actual instruction end of a direct
+    // or indirect CALL, zero for other rows. Includes no subsequent edits.
+    u32* call_return_offsets;
     MachineInlineAssemblyRelocation* inline_assembly_relocations;
     // Function-relative offset of each emitted epilogue's first
     // instruction, one per return row; the AArch64 encoder fills these for
-    // the Windows unwind data, the x86-64 encoder leaves them empty.
+    // the Windows unwind data. The x86-64 encoder also retains them for
+    // catch-all helpers so guarded return PCs can exclude epilogues.
     u32* epilog_offsets;
     u32 call_site_count;
     u32 inline_assembly_relocation_count;
@@ -1801,7 +1809,8 @@ struct MachineFunctionBuilder
     u32 open_block_first_instruction;
     bool block_is_open;
     bool point_capacity_exceeded;
-    u8 reserved[6];
+    u8 reserved[2];
+    u32 exception_entry_plus_one;
 };
 
 typedef enum MachineVerifyError

@@ -741,7 +741,7 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
     statistics->instructions_before += function->instruction_count;
     statistics->values_before += function->value_count;
     u32 local_count = 0;
-    bool barrier = function->label_metadata_count != 0;
+    bool barrier = function->label_metadata_count != 0 || function->exception_entry_plus_one != 0;
     // Direct frontend SSA emits no LOCAL rows for promoted owners. Use the
     // producer's conservative opcode summary to avoid a redundant FAST-path
     // discovery scan. Hand-built/uncertified functions still scan normally.

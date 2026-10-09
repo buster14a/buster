@@ -2,6 +2,8 @@
 #include <buster/lib/compiler/object/object.h>
 
 #if BUSTER_INCLUDE_TESTS
+// Direct private-builder result for malformed exception-coordinate controls.
+BUSTER_F_DECL ByteSlice object_test_windows_x64_unwind(Arena* arena, CodegenFunctionDescriptor* functions, u32 count);
 // Compare indexed printer queries against original-table scan semantics.
 BUSTER_F_DECL bool object_assembly_test_index_queries(Arena* arena, ObjectFile* object);
 // The ELF64 plan alone. It never reads payloads, and only compares bounded

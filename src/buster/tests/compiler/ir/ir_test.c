@@ -1914,6 +1914,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     result.test_count += protocol.test_count;
     result.succeeded_test_count += protocol.succeeded_test_count;
     BUSTER_TEST_FIXTURE(arguments, ir_validate_equivalence_tests);
+    BUSTER_TEST_FIXTURE(arguments, ir_validate_exception_root_tests);
 
     IrFieldAccessPiece expected_field_access[][IR_FIELD_ACCESS_PIECE_CAPACITY] = {
         {{.offset = 0, .size = 1}},

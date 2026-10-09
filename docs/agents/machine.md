@@ -1143,3 +1143,42 @@ independently, and that every payload byte arrives, including a read after GP
 exhaustion, in both compiler directions and every allocator/frontend
 combination. The retired direct emitter had no such path; current `none`
 selects MIR-stack.
+
+## Windows x64 protected helpers
+
+The finite C SEH profile outlines each admitted protected expression into a
+private canonical Boolean helper. `IrFunction.exception_entry_plus_one` names
+its separate terminal catch-all root; zero remains ordinary code. Selection
+projects the canonical block through the existing block map, and builder finish,
+edge splitting and scheduling retain the derived MIR root. No ordinary CFG
+predecessor is invented. The catch root has no live-ins, calls or frame accesses.
+The current native profile is Windows x64 only; AArch64 and other targets refuse
+the fact. Structural MIR replay explicitly refuses it because its versioned
+schema does not carry exception or unwind semantics.
+
+The x64 encoder retains actual direct/indirect CALL return PCs and epilogue
+starts only for protected helpers. Scope publication requires the return PCs
+inside the emitted ordinary-body range and before its epilogue. Unsafe
+coordinates produce a named refusal before the module publishes bytes.
+`CodegenFunctionDescriptor` carries the checked function-relative scope start
+and exception-entry offset. The object writer retains the existing unwind
+actions and emits EHANDLER/UHANDLER, `__C_specific_handler`, and one scope row:
+inclusive Begin RVA, exclusive End RVA, literal catch-all 1, and Target RVA.
+The personality and three code coordinates use ADDR32NB relocations; the
+function's complete xdata tail remains in its associative contribution.
+
+The raw codegen executable API refuses protected descriptors, and the standalone
+object mapper refuses Windows xdata ADDR32NB handler/scope relocations before
+reserving executable memory. Neither API registers Windows runtime function
+tables. Ordinary unwind-only mappings retain their existing behavior.
+
+Protected helpers must not be inlined into ordinary functions without preserving
+their canonical exception-root contract. These format and admission rules do
+not by themselves establish runtime acceptance; hosted external-link and actual
+exception/resumption controls qualify that separately.
+
+The two x64 handler flags follow the pinned Clang ABI: LLVM
+[`WinException.cpp` at `llvmorg-23.1.3`](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.3/llvm/lib/CodeGen/AsmPrinter/WinException.cpp#L237)
+calls `emitWinEHHandler(..., true, true)` for the personality. Its
+`emitCSpecificHandlerTable` emits the literal-1 catch-all scope row. This is a
+format reference, not copied runtime or compiler implementation.

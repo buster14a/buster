@@ -2,6 +2,7 @@
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/codegen/machine.h>
+#include <buster/lib/compiler/codegen/codegen_internal.h>
 #include <buster/lib/compiler/jit/jit.h>
 #include <buster/tests/compiler/codegen/ebpf_test_internal.h>
 #include <buster/tests/compiler/codegen/ebpf_call_test_internal.h>
@@ -3546,6 +3547,149 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_home_truth(UnitTes
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_windows_exception_scope(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS};
+    String8 source = S8("void marker(int);\n"
+                       "void protected_direct(int* p) { __try { marker(*p); } __except(1) {} return; }\n"
+                       "void protected_indirect(void(*f)(void*), void* p) { __try { f(p); } __except(1) {} return; }\n");
+    codegen_prewarm_for_target(target);
+    for (u32 frontend = 0; frontend < 2; frontend += 1)
+    {
+        for (u32 rotated = 0; rotated < 2; rotated += 1)
+        {
+            CPreprocessResult tokens = c_preprocess(arguments->arena, source, (CPreprocessOptions){.target = target});
+            CParseResult parsed = c_parse(arguments->arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(arguments->arena, S8("windows-exception-scope.c"), tokens, parsed, target,
+                                                                 (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+            if (BUSTER_REQUIRE(arguments, !tokens.error_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+            {
+                IrProgram* program = lowered.program;
+                IrModule* module = program->modules;
+                u32 guarded = 0;
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    IrFunction* function = module->functions + function_index;
+                    if (function->exception_entry_plus_one)
+                    {
+                        guarded += 1u;
+                        if (BUSTER_REQUIRE(arguments, function->block_count == 2 && function->entry.value == 0 &&
+                                                       function->exception_entry_plus_one == 2))
+                        {
+                            if (rotated)
+                            {
+                                ir_function_invalidate_cfg(function);
+                                IrBlock normal = function->blocks[0];
+                                function->blocks[0] = function->blocks[1];
+                                function->blocks[1] = normal;
+                                function->blocks[0].id.value = 0;
+                                function->blocks[1].id.value = 1;
+                                function->entry.value = 1;
+                                function->exception_entry_plus_one = 1;
+                            }
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, guarded == 2);
+                program->fast_passes = IR_FAST_ALL;
+                IrValidationResult prepared = ir_prepare_canonical_module(program, module, false);
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+                if (prepared.error == IR_VALIDATION_NONE)
+                {
+                    for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                    {
+                        CodegenModule generated = codegen_generate_canonical_module(arguments->arena, program, module, target,
+                            (CodegenModuleOptions){.verify_invariants = true, .register_allocator = (u8)mode});
+                        if (BUSTER_REQUIRE(arguments, generated.error == CODEGEN_ERROR_NONE && generated.code.length != 0))
+                        {
+                            u32 scopes = 0;
+                            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                            {
+                                IrFunction* function = module->functions + function_index;
+                                if (!function->exception_entry_plus_one) continue;
+                                CodegenFunctionDescriptor* descriptor = codegen_test_c_descriptor_find(&generated, function->symbol);
+                                if (BUSTER_REQUIRE(arguments, descriptor && descriptor->exception_scope_begin >= descriptor->prolog_size &&
+                                                               descriptor->exception_scope_begin < descriptor->exception_entry_offset &&
+                                                               descriptor->exception_entry_offset < descriptor->code_size))
+                                {
+                                    scopes += 1u;
+                                    ByteSlice body = {.pointer = generated.code.pointer + descriptor->code_offset, .length = descriptor->code_size};
+                                    u32 calls = 0;
+                                    bool decoded = true;
+                                    for (u64 offset = descriptor->exception_scope_begin; decoded && offset < descriptor->exception_entry_offset;)
+                                    {
+                                        CodegenTestX64Instruction instruction = {0};
+                                        decoded = codegen_test_x64_decode_instruction(body, offset, descriptor->exception_entry_offset, &instruction);
+                                        if (decoded && instruction.call)
+                                        {
+                                            u64 return_pc = offset + instruction.length;
+                                            BUSTER_TEST(arguments, return_pc < descriptor->exception_entry_offset);
+                                            CodegenTestX64Instruction next = {0};
+                                            bool next_valid = return_pc < descriptor->exception_entry_offset &&
+                                                codegen_test_x64_decode_instruction(body, return_pc, descriptor->exception_entry_offset, &next);
+                                            BUSTER_TEST(arguments, next_valid && !next.add_rsp && !next.lea_rsp_frame &&
+                                                                   !(next.opcode >= 0x58 && next.opcode <= 0x5f) && next.opcode != 0xc3);
+                                            calls += 1u;
+                                        }
+                                        if (decoded) offset += instruction.length;
+                                    }
+                                    BUSTER_TEST(arguments, decoded && calls == 1);
+                                    MachineSelectResult selected = machine_select_canonical_function(arguments->arena, program, function, target);
+                                    if (BUSTER_REQUIRE(arguments, selected.supported && selected.function.exception_entry_plus_one == 2))
+                                    {
+                                        MachineStackPlacement placement = machine_fast_placement_build(arguments->arena, &selected.function);
+                                        MachineEncodeResult encoded = machine_encode_x86_64(arguments->arena, &selected.function, &placement);
+                                        CodegenFunctionDescriptor coordinates = {.prolog_size = encoded.block_offsets ? encoded.block_offsets[0] : 0};
+                                        if (BUSTER_REQUIRE(arguments, encoded.valid && codegen_test_exception_scope(&coordinates, function, &selected, &encoded)))
+                                        {
+                                            u32 call_row = UINT32_MAX;
+                                            for (u32 row = 0; row < selected.function.instruction_count; row += 1)
+                                                if (encoded.call_return_offsets[row]) call_row = row;
+                                            if (BUSTER_REQUIRE(arguments, call_row != UINT32_MAX))
+                                            {
+                                                u32 actual_pc = encoded.call_return_offsets[call_row];
+                                                u32 bad_pcs[3] = {coordinates.exception_scope_begin, encoded.epilog_offsets[0],
+                                                                 coordinates.exception_entry_offset};
+                                                for (u32 mutation = 0; mutation < BUSTER_ARRAY_LENGTH(bad_pcs); mutation += 1)
+                                                {
+                                                    CodegenFunctionDescriptor refused = {.prolog_size = coordinates.prolog_size};
+                                                    encoded.call_return_offsets[call_row] = bad_pcs[mutation];
+                                                    BUSTER_TEST(arguments, !codegen_test_exception_scope(&refused, function, &selected, &encoded) &&
+                                                                           !refused.exception_scope_begin && !refused.exception_entry_offset);
+                                                }
+                                                encoded.call_return_offsets[call_row] = actual_pc;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            BUSTER_TEST(arguments, scopes == 2);
+                        }
+                    }
+                    IrFunction* protected_function = 0;
+                    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                        if (module->functions[function_index].exception_entry_plus_one) protected_function = module->functions + function_index;
+                    Target unsupported[] = {
+                        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+                    };
+                    for (u32 target_index = 0; protected_function && target_index < BUSTER_ARRAY_LENGTH(unsupported); target_index += 1)
+                    {
+                        MachineSelectResult refused = machine_select_canonical_function(arguments->arena, program, protected_function, unsupported[target_index]);
+                        BUSTER_TEST(arguments, !refused.supported && refused.failure_detail.length != 0);
+                        CodegenModule no_output = codegen_generate_canonical_module(arguments->arena, program, module, unsupported[target_index],
+                            (CodegenModuleOptions){.verify_invariants = true});
+                        BUSTER_TEST(arguments, no_output.error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION && no_output.failure_reason.length != 0 &&
+                                               no_output.code.length == 0 && no_output.entry_count == 0 && no_output.function_count == 0);
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}
+
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codegen_test_ebpf_symbols(arguments);
@@ -3560,6 +3704,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     result.succeeded_test_count += machine_debug.succeeded_test_count;
     result.test_count += machine_debug.test_count;
     BUSTER_TEST_FIXTURE(arguments, codegen_test_machine_debug_home_truth);
+    BUSTER_TEST_FIXTURE(arguments, codegen_test_windows_exception_scope);
     UnitTestResult reused_home_debug = codegen_test_machine_debug_reused_home_boundary(arguments);
     result.succeeded_test_count += reused_home_debug.succeeded_test_count;
     result.test_count += reused_home_debug.test_count;

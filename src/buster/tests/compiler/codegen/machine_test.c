@@ -9942,6 +9942,131 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_origin_transfer_guards(UnitTestA
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_windows_exception_root(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    codegen_prewarm_for_target((Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS});
+    for (u32 indirect = 0; indirect < 2; indirect += 1)
+    {
+        MachineFunctionBuilder builder = machine_function_builder_begin(arguments->arena);
+        builder.exception_entry_plus_one = 2;
+        u32 normal = machine_builder_virtual_register(&builder, (MachineVirtualRegister){
+            .definition_point = machine_point_make(1, MACHINE_POINT_AFTER),
+            .register_class = MACHINE_REGISTER_CLASS_GENERAL, .typed_origin = IR_ID_UNDERLYING_INVALID,
+        });
+        u32 caught = machine_builder_virtual_register(&builder, (MachineVirtualRegister){
+            .definition_point = machine_point_make(4, MACHINE_POINT_AFTER),
+            .register_class = MACHINE_REGISTER_CLASS_GENERAL, .typed_origin = IR_ID_UNDERLYING_INVALID,
+        });
+        machine_builder_block_begin(&builder);
+        machine_builder_instruction(&builder, (MachineInstruction){
+            .opcode = (u16)(indirect ? MACHINE_X64_CALL_INDIRECT : MACHINE_X64_CALL_DIRECT),
+            .operands = {indirect ? machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RCX) : MACHINE_REF_NONE_VALUE},
+        });
+        machine_builder_instruction(&builder, (MachineInstruction){
+            .opcode = MACHINE_X64_MOV_RI,
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, normal), machine_ref_make(MACHINE_REF_IMMEDIATE, 0)},
+        });
+        machine_builder_instruction(&builder, (MachineInstruction){
+            .opcode = MACHINE_X64_MOV_RR,
+            .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, normal)},
+        });
+        machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+        machine_builder_block_end(&builder, (MachineBlock){0});
+        machine_builder_block_begin(&builder);
+        machine_builder_instruction(&builder, (MachineInstruction){
+            .opcode = MACHINE_X64_MOV_RI,
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, caught), machine_ref_make(MACHINE_REF_IMMEDIATE, 1)},
+        });
+        machine_builder_instruction(&builder, (MachineInstruction){
+            .opcode = MACHINE_X64_MOV_RR,
+            .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, caught)},
+        });
+        machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+        machine_builder_block_end(&builder, (MachineBlock){0});
+        MachineFunction function = machine_function_builder_finish(arguments->arena, &builder);
+        u64 immediates[2] = {0, 1};
+        u32 slot_size = 32;
+        u32 slot_alignment = 16;
+        IrSymbolId target = {.value = 0};
+        function.target = machine_target_x86_64_windows();
+        function.immediates = immediates;
+        function.immediate_count = 2;
+        function.stack_slot_sizes = &slot_size;
+        function.stack_slot_alignments = &slot_alignment;
+        function.stack_slot_count = 1;
+        function.outgoing_bytes = 32;
+        function.call_targets = &target;
+        function.call_target_count = 1;
+        BUSTER_TEST(arguments, function.exception_entry_plus_one == 2);
+        BUSTER_TEST(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE);
+        BUSTER_TEST(arguments, machine_function_split_parameter_edges(arguments->arena, &function));
+        BUSTER_TEST(arguments, function.exception_entry_plus_one == 2 && !function.edge_count);
+        MachineScheduleResult scheduled = machine_schedule_function(arguments->arena, &function);
+        BUSTER_TEST(arguments, scheduled.function.exception_entry_plus_one == 2 &&
+                               machine_verify_function(&scheduled.function).error == MACHINE_VERIFY_NONE);
+        for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+        {
+            MachineStackPlacement placement = mode == CODEGEN_REGISTER_ALLOCATOR_QUALITY
+                ? machine_quality_placement_build(arguments->arena, &function) : machine_fast_placement_build(arguments->arena, &function);
+            BUSTER_TEST(arguments, placement.valid);
+            if (placement.valid)
+            {
+                MachineEncodeResult encoded = machine_encode_x86_64(arguments->arena, &function, &placement);
+                if (BUSTER_REQUIRE(arguments, encoded.valid && encoded.call_return_offsets && encoded.epilog_offsets && encoded.epilog_count == 2))
+                {
+                    u32 pc = encoded.call_return_offsets[0];
+                    BUSTER_TEST(arguments, pc > encoded.block_offsets[0] && pc < encoded.epilog_offsets[0] &&
+                                           encoded.epilog_offsets[0] < encoded.block_offsets[1] &&
+                                           encoded.block_offsets[1] <= encoded.epilog_offsets[1] && encoded.epilog_offsets[1] < encoded.byte_count);
+                    if (indirect)
+                    {
+                        BUSTER_TEST(arguments, pc >= 2 && encoded.bytes[pc - 2u] == 0xff && encoded.bytes[pc - 1u] == 0xd1);
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, encoded.call_site_count == 1 && pc >= 5 && encoded.bytes[pc - 5u] == 0xe8 &&
+                                               encoded.call_sites[0].code_offset + 4u == pc);
+                    }
+                }
+            }
+        }
+        BUSTER_TEST(arguments, machine_replay_serialize(arguments->arena, &function).length == 0);
+        function.exception_entry_plus_one = 0;
+        ByteSlice replay = machine_replay_serialize(arguments->arena, &function);
+        MachineFunction restored = {0};
+        BUSTER_TEST(arguments, replay.length != 0 && machine_replay_deserialize(arguments->arena, replay, &restored));
+        ByteSlice rewritten = machine_replay_serialize(arguments->arena, &restored);
+        BUSTER_TEST(arguments, restored.exception_entry_plus_one == 0 && replay.length != 0 && replay.pointer && rewritten.pointer &&
+                               rewritten.length == replay.length && memory_compare(rewritten.pointer, replay.pointer, replay.length));
+        function.exception_entry_plus_one = 2;
+        for (u32 bad = 0; bad < 2; bad += 1)
+        {
+            immediates[1] = bad ? 2u : 0u;
+            BUSTER_TEST(arguments, machine_verify_function(&function).error != MACHINE_VERIFY_NONE);
+        }
+        immediates[1] = 1;
+        function.instructions[4].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, function.immediate_count);
+        BUSTER_TEST(arguments, machine_verify_function(&function).error != MACHINE_VERIFY_NONE);
+        function.instructions[4].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 1);
+        MachineRef original = function.instructions[5].operands[1];
+        function.instructions[5].operands[1] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, normal);
+        BUSTER_TEST(arguments, machine_verify_function(&function).error != MACHINE_VERIFY_NONE);
+        function.instructions[5].operands[1] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RCX);
+        BUSTER_TEST(arguments, machine_verify_function(&function).error != MACHINE_VERIFY_NONE);
+        function.instructions[5].operands[1] = original;
+        function.instructions[5].operands[0] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RDX);
+        BUSTER_TEST(arguments, machine_verify_function(&function).error != MACHINE_VERIFY_NONE);
+        function.instructions[5].operands[0] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX);
+        function.exception_entry_plus_one = 1;
+        BUSTER_TEST(arguments, machine_verify_function(&function).error != MACHINE_VERIFY_NONE);
+        function.exception_entry_plus_one = 2;
+        function.target = machine_target_x86_64();
+        BUSTER_TEST(arguments, machine_verify_function(&function).error != MACHINE_VERIFY_NONE);
+    }
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9958,6 +10083,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_differential);
     BUSTER_TEST_FIXTURE(arguments, machine_test_normalized_parameter_origin);
     BUSTER_TEST_FIXTURE(arguments, machine_test_origin_transfer_guards);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_windows_exception_root);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_sparse_work);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_traffic);

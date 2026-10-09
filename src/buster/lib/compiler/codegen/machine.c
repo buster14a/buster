@@ -2238,6 +2238,7 @@ MachineFunction machine_function_builder_finish(Arena* arena, MachineFunctionBui
         .edge_count = builder->edges.total_count,
         .block_parameter_count = builder->block_parameters.total_count,
         .edge_copy_source_count = builder->edge_copy_sources.total_count,
+        .exception_entry_plus_one = builder->exception_entry_plus_one,
     };
     return function;
 }
@@ -2283,7 +2284,8 @@ BUSTER_GLOBAL_LOCAL u32 machine_function_parameter_edge_target(u32 const* old_to
 bool machine_function_split_parameter_edges_with_canonical_map(Arena* arena, MachineFunction* function,
                                                                 u32** canonical_entries, u32 canonical_count)
 {
-    bool result = function && function->target && function->target->unconditional_branch_opcode != MACHINE_OPCODE_INVALID;
+    bool result = function && function->target && function->target->unconditional_branch_opcode != MACHINE_OPCODE_INVALID &&
+                  (!function->exception_entry_plus_one || function->exception_entry_plus_one <= function->block_count);
     u32 split_count = 0;
     if (result)
     {
@@ -2586,6 +2588,10 @@ bool machine_function_split_parameter_edges_with_canonical_map(Arena* arena, Mac
             {
                 function->instructions = instructions;
                 function->instruction_count = new_instruction_count;
+                if (function->exception_entry_plus_one)
+                {
+                    function->exception_entry_plus_one = old_to_new[function->exception_entry_plus_one - 1u] + 1u;
+                }
                 function->blocks = blocks;
                 function->block_count = new_block_count;
                 function->edges = edges;
@@ -4449,6 +4455,46 @@ String8 machine_verify_error_name(MachineVerifyError error)
     return result;
 }
 
+// The bounded native catch root has no exceptional live-ins and returns
+// Boolean true through RAX. Its exact constant/copy/return chain is also the
+// raw/manual MIR contract, not merely an allowed-opcode list.
+BUSTER_GLOBAL_LOCAL bool machine_exception_entry_valid(MachineFunction const* function)
+{
+    bool result = !function->exception_entry_plus_one;
+    if (!result)
+    {
+        result = function->target == machine_target_x86_64_windows() && function->block_count == 2u &&
+                 function->exception_entry_plus_one == 2u && !function->edge_count && !function->block_parameter_count &&
+                 function->blocks && function->instructions && function->virtual_registers && function->immediates;
+        MachineBlock const* entry = result ? function->blocks + 1 : 0;
+        result = result && entry->instruction_count == 3u && !entry->parameter_count &&
+                 !entry->predecessor_count && !entry->successor_count && entry->first_instruction <= function->instruction_count &&
+                 entry->instruction_count <= function->instruction_count - entry->first_instruction;
+        if (result)
+        {
+            MachineInstruction const* constant = function->instructions + entry->first_instruction;
+            MachineInstruction const* copy = constant + 1;
+            MachineInstruction const* terminator = constant + 2;
+            u32 reg = machine_ref_payload(constant->operands[0]);
+            u32 immediate = machine_ref_payload(constant->operands[1]);
+            result = constant->opcode == MACHINE_X64_MOV_RI && !constant->flags && !constant->payload &&
+                     machine_ref_kind(constant->operands[0]) == MACHINE_REF_VIRTUAL_REGISTER &&
+                     machine_ref_kind(constant->operands[1]) == MACHINE_REF_IMMEDIATE &&
+                     !constant->operands[2] && !constant->operands[3] && reg < function->virtual_register_count &&
+                     immediate < function->immediate_count && function->immediates[immediate] == 1u &&
+                     function->virtual_registers[reg].register_class == MACHINE_REGISTER_CLASS_GENERAL &&
+                     !function->virtual_registers[reg].flags &&
+                     function->virtual_registers[reg].definition_point == machine_point_make(entry->first_instruction, MACHINE_POINT_AFTER) &&
+                     copy->opcode == MACHINE_X64_MOV_RR && !copy->flags && !copy->payload &&
+                     copy->operands[0] == machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX) &&
+                     copy->operands[1] == constant->operands[0] && !copy->operands[2] && !copy->operands[3] &&
+                     terminator->opcode == MACHINE_X64_RET && !terminator->flags && !terminator->payload &&
+                     !terminator->operands[0] && !terminator->operands[1] && !terminator->operands[2] && !terminator->operands[3];
+        }
+    }
+    return result;
+}
+
 MachineVerifyResult machine_verify_function(MachineFunction* function)
 {
     MachineVerifyResult result = {0};
@@ -4467,7 +4513,8 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
         (function->va_arg_count && !function->va_args) ||
         (function->inline_assembly_count && !function->inline_assemblies) ||
         (function->inline_assembly_operand_count && !function->inline_assembly_operands) ||
-        (function->inline_assembly_relocation_count && !function->inline_assembly_relocations))
+        (function->inline_assembly_relocation_count && !function->inline_assembly_relocations) ||
+        !machine_exception_entry_valid(function))
     {
         result.error = MACHINE_VERIFY_STORAGE;
         return result;
@@ -5044,11 +5091,13 @@ BUSTER_CT_CHECK(sizeof(MachineReplayHeader) == 32);
 
 ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* function)
 {
-    if ((function->instruction_count && !function->instructions) || (function->virtual_register_count && !function->virtual_registers) ||
+    if (function->exception_entry_plus_one ||
+        (function->instruction_count && !function->instructions) || (function->virtual_register_count && !function->virtual_registers) ||
         (function->block_count && !function->blocks) || (function->edge_count && !function->edges) ||
         (function->block_parameter_count && !function->block_parameters) ||
         (function->edge_copy_source_count && !function->edge_copy_sources))
     {
+        // Structural replay has no exception-entry or Windows unwind schema.
         return (ByteSlice){0};
     }
     u64 instruction_bytes = (u64)function->instruction_count * sizeof(MachineInstruction);

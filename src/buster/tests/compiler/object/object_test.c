@@ -7988,6 +7988,267 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         }
     }
 
+    // Independently specified Win64 helper: call ends at13, false-result
+    // instruction ends at18, normal epilogue [18,24), catch entry24 and
+    // true-result instruction [24,29). The scope [8,24) contains the return PC.
+    {
+        u8 seh_code[] = {
+            0x55, 0x48, 0x89, 0xe5, 0x48, 0x83, 0xec, 0x20,
+            0xe8, 0, 0, 0, 0, 0xb8, 0, 0, 0, 0,
+            0x48, 0x83, 0xc4, 0x20, 0x5d, 0xc3,
+            0xb8, 1, 0, 0, 0, 0x48, 0x83, 0xc4, 0x20, 0x5d, 0xc3,
+        };
+        CodegenUnwindAction seh_actions[] = {
+            {.code_offset = 1, .kind = CODEGEN_UNWIND_ACTION_PUSH_REGISTER, .register_index = 5},
+            {.code_offset = 4, .kind = CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, .register_index = 5},
+            {.code_offset = 8, .value = 32, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK},
+        };
+        CodegenFunctionDescriptor seh_function = {
+            .symbol = separate_entry.symbol, .code_size = sizeof(seh_code), .prolog_size = 8,
+            .unwind_actions = seh_actions, .unwind_action_count = BUSTER_ARRAY_LENGTH(seh_actions),
+            .exception_scope_begin = 8, .exception_entry_offset = 24,
+        };
+        CodegenModule seh_module = windows_unwind_module;
+        seh_module.code = BUSTER_ARRAY_TO_SLICE(seh_code);
+        seh_module.functions = &seh_function;
+        ByteSlice raw = object_test_windows_x64_unwind(arguments->arena, &seh_function, 1);
+        u8 raw_prefix[] = {0x19, 8, 2, 0, 8, 0x32, 1, 0x50};
+        if (BUSTER_REQUIRE(arguments, raw.length == 32))
+        {
+            BUSTER_TEST(arguments, memory_compare(raw.pointer, raw_prefix, sizeof(raw_prefix)));
+            u32 fields[6] = {0};
+            memcpy(fields, raw.pointer + 8, sizeof(fields));
+            BUSTER_TEST(arguments, fields[0] == 0 && fields[1] == 1 && fields[2] == 8 &&
+                                   fields[3] == 24 && fields[4] == 1 && fields[5] == 24);
+        }
+        ObjectFile seh_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &seh_module, windows_unwind_target);
+        if (BUSTER_REQUIRE(arguments, seh_object.error == OBJECT_ERROR_NONE && seh_object.relocation_count == 7))
+        {
+            u32 xdata_fields[4] = {8, 16, 20, 28};
+            s64 code_addends[3] = {8, 24, 24};
+            u32 found_fields = 0;
+            for (u32 seh_relocation = 0; seh_relocation < seh_object.relocation_count; seh_relocation += 1)
+            {
+                ObjectRelocation* row = seh_object.relocations + seh_relocation;
+                BUSTER_TEST(arguments, row->kind == OBJECT_RELOCATION_COFF_ADDR32NB);
+                if (row->section == OBJECT_SECTION_WINDOWS_XDATA)
+                {
+                    BUSTER_TEST(arguments, found_fields < 4);
+                    if (found_fields < 4)
+                    {
+                        BUSTER_TEST(arguments, row->offset == xdata_fields[found_fields] && row->symbol < seh_object.symbol_count);
+                        if (!found_fields && row->symbol < seh_object.symbol_count)
+                        {
+                            ObjectSymbol* personality = seh_object.symbols + row->symbol;
+                            BUSTER_TEST(arguments, string_equal(personality->name, S8("__C_specific_handler")) &&
+                                                   personality->section == OBJECT_SECTION_UNDEFINED && personality->global &&
+                                                   personality->kind == OBJECT_SYMBOL_FUNCTION && row->addend == 0);
+                        }
+                        else
+                        {
+                            BUSTER_TEST(arguments, row->symbol == 0 && row->addend == code_addends[found_fields - 1u]);
+                        }
+                    }
+                    found_fields += 1u;
+                }
+            }
+            BUSTER_TEST(arguments, found_fields == 4);
+            ObjectArtifact artifact = object_write(arguments->arena, &seh_object, OBJECT_FORMAT_COFF);
+            BUSTER_TEST(arguments, artifact.error == OBJECT_ERROR_NONE && artifact.bytes.length != 0);
+            ObjectFile restored = object_read(arguments->arena, artifact.bytes, windows_unwind_target);
+            BUSTER_TEST(arguments, restored.error == OBJECT_ERROR_NONE && restored.relocation_count == 7);
+            ObjectArtifact rewritten = object_write(arguments->arena, &restored, OBJECT_FORMAT_COFF);
+            BUSTER_TEST(arguments, rewritten.error == OBJECT_ERROR_NONE);
+            ObjectFile again = object_read(arguments->arena, rewritten.bytes, windows_unwind_target);
+            BUSTER_TEST(arguments, again.error == OBJECT_ERROR_NONE && again.relocation_count == 7);
+            if (BUSTER_REQUIRE(arguments, again.error == OBJECT_ERROR_NONE && again.sections && again.section_count > OBJECT_SECTION_WINDOWS_XDATA &&
+                                         again.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == 32))
+            {
+                ByteSlice bytes = again.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+                BUSTER_TEST(arguments, memory_compare(bytes.pointer, raw_prefix, sizeof(raw_prefix)));
+                u32 scope_count = 0;
+                u32 filter = 0;
+                memcpy(&scope_count, bytes.pointer + 12, sizeof(scope_count));
+                memcpy(&filter, bytes.pointer + 24, sizeof(filter));
+                BUSTER_TEST(arguments, scope_count == 1 && filter == 1);
+                u32 begin_rva = 0;
+                u32 end_rva = 0;
+                u32 target_rva = 0;
+                memcpy(&begin_rva, bytes.pointer + 16, sizeof(begin_rva));
+                memcpy(&end_rva, bytes.pointer + 20, sizeof(end_rva));
+                memcpy(&target_rva, bytes.pointer + 28, sizeof(target_rva));
+                BUSTER_TEST(arguments, begin_rva == 8 && end_rva == 24 && target_rva == 24);
+                u32 roundtrip_fields = 0;
+                for (u32 seh_relocation = 0; seh_relocation < again.relocation_count; seh_relocation += 1)
+                {
+                    ObjectRelocation* row = again.relocations + seh_relocation;
+                    if (row->section == OBJECT_SECTION_WINDOWS_XDATA)
+                    {
+                        BUSTER_TEST(arguments, row->kind == OBJECT_RELOCATION_COFF_ADDR32NB && row->symbol < again.symbol_count);
+                        BUSTER_TEST(arguments, row->offset == 8 || row->offset == 16 || row->offset == 20 || row->offset == 28);
+                        if (row->offset == 16) BUSTER_TEST(arguments, row->addend == 8);
+                        if (row->offset == 20 || row->offset == 28) BUSTER_TEST(arguments, row->addend == 24);
+                        roundtrip_fields += 1u;
+                    }
+                }
+                BUSTER_TEST(arguments, roundtrip_fields == 4);
+            }
+            ObjectExecutable refused = object_link_executable(&seh_object);
+            BUSTER_TEST(arguments, refused.error == OBJECT_ERROR_UNSUPPORTED_TARGET && refused.address == 0 && refused.allocation_size == 0);
+        }
+        CodegenExecutable raw_refused = codegen_make_executable((CodegenFunction){.code = seh_module.code, .descriptor = seh_function});
+        BUSTER_TEST(arguments, raw_refused.error == CODEGEN_ERROR_UNSUPPORTED_ABI && raw_refused.address == 0 && raw_refused.allocation_size == 0);
+        // A following ordinary function forces both protected contributions
+        // to move on COFF readback: ordinary text has 14 bytes (gap plus RET),
+        // so ANY text starts at16; its ordinary four-byte xdata precedes the
+        // complete 32-byte associative EH record, which therefore starts at4.
+        {
+            IrSymbolId seh_neighbor = ir_program_add_symbol(&separate_program, (IrSymbol){
+                .name = S8("seh_ordinary_neighbor"), .kind = IR_SYMBOL_FUNCTION,
+                .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true,
+            });
+            u8 seh_group_code[49] = {0};
+            memcpy(seh_group_code, seh_code, sizeof(seh_code));
+            seh_group_code[48] = 0xc3;
+            CodegenModuleEntry seh_group_entries[2] = {
+                {.symbol = defined_symbol}, {.symbol = seh_neighbor, .offset = 48},
+            };
+            CodegenFunctionDescriptor seh_group_functions[2] = {
+                seh_function, {.symbol = seh_neighbor, .code_offset = 48, .code_size = 1},
+            };
+            CodegenModule seh_group_module = seh_module;
+            seh_group_module.code = BUSTER_ARRAY_TO_SLICE(seh_group_code);
+            seh_group_module.entries = seh_group_entries;
+            seh_group_module.entry_count = BUSTER_ARRAY_LENGTH(seh_group_entries);
+            seh_group_module.functions = seh_group_functions;
+            seh_group_module.function_count = BUSTER_ARRAY_LENGTH(seh_group_functions);
+            IrSymbol* seh_group_symbol = ir_symbol_from_id(&separate_program.symbols, defined_symbol);
+            bool seh_was_link_once = seh_group_symbol->is_link_once;
+            seh_group_symbol->is_link_once = true;
+            ObjectFile seh_grouped = object_from_canonical_codegen_module(arguments->arena, &separate_program, &seh_group_module,
+                                                                          windows_unwind_target);
+            seh_group_symbol->is_link_once = seh_was_link_once;
+            BUSTER_TEST(arguments, seh_grouped.error == OBJECT_ERROR_NONE);
+            ObjectArtifact seh_group_bytes = object_write(arguments->arena, &seh_grouped, OBJECT_FORMAT_COFF);
+            for (u32 seh_round = 0; seh_round < 2; seh_round += 1)
+            {
+                if (BUSTER_REQUIRE(arguments, seh_group_bytes.error == OBJECT_ERROR_NONE && seh_group_bytes.bytes.length != 0))
+                {
+                    ObjectFile seh_read = object_read(arguments->arena, seh_group_bytes.bytes, windows_unwind_target);
+                    if (BUSTER_REQUIRE(arguments, seh_read.error == OBJECT_ERROR_NONE && seh_read.comdat_count == 3 &&
+                                                 seh_read.sections && seh_read.symbols && seh_read.relocations &&
+                                                 seh_read.section_count > OBJECT_SECTION_WINDOWS_XDATA))
+                    {
+                        u32 seh_parent = UINT32_MAX;
+                        u32 seh_xdata_group = UINT32_MAX;
+                        u32 seh_pdata_group = UINT32_MAX;
+                        for (u32 seh_group = 0; seh_group < seh_read.comdat_count; seh_group += 1)
+                        {
+                            ObjectComdat* contribution = seh_read.comdats + seh_group;
+                            if (contribution->selection == OBJECT_COMDAT_SELECTION_ANY &&
+                                string_equal(contribution->key, S8("defined_function")))
+                                seh_parent = seh_group;
+                        }
+                        for (u32 seh_group = 0; seh_group < seh_read.comdat_count; seh_group += 1)
+                        {
+                            ObjectComdat* contribution = seh_read.comdats + seh_group;
+                            if (contribution->selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE && contribution->associated == seh_parent)
+                            {
+                                if (contribution->section == OBJECT_SECTION_WINDOWS_XDATA) seh_xdata_group = seh_group;
+                                if (contribution->section == OBJECT_SECTION_WINDOWS_PDATA) seh_pdata_group = seh_group;
+                            }
+                        }
+                        if (BUSTER_REQUIRE(arguments, seh_parent != UINT32_MAX && seh_xdata_group != UINT32_MAX && seh_pdata_group != UINT32_MAX))
+                        {
+                            ObjectComdat* seh_code_group = seh_read.comdats + seh_parent;
+                            ObjectComdat* seh_unwind_group = seh_read.comdats + seh_xdata_group;
+                            ObjectComdat* seh_table_group = seh_read.comdats + seh_pdata_group;
+                            BUSTER_TEST(arguments, seh_code_group->section == OBJECT_SECTION_TEXT && seh_code_group->offset == 16 &&
+                                                   seh_code_group->size == sizeof(seh_code));
+                            BUSTER_TEST(arguments, seh_table_group->size == 12 && seh_table_group->relocation_count == 3);
+                            BUSTER_TEST(arguments, seh_unwind_group->offset == 4 && seh_unwind_group->size == 32 &&
+                                                   seh_unwind_group->relocation_count == 4);
+                            ByteSlice seh_xdata = seh_read.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+                            bool seh_tail_bounded = seh_xdata.pointer && seh_unwind_group->offset <= seh_xdata.length &&
+                                                    seh_unwind_group->size == 32 &&
+                                                    seh_unwind_group->size <= seh_xdata.length - seh_unwind_group->offset;
+                            if (BUSTER_REQUIRE(arguments, seh_tail_bounded))
+                            {
+                                u8* seh_record = seh_xdata.pointer + seh_unwind_group->offset;
+                                u32 seh_tail_fields[6] = {0};
+                                memcpy(seh_tail_fields, seh_record + 8, sizeof(seh_tail_fields));
+                                BUSTER_TEST(arguments, memory_compare(seh_record, raw_prefix, sizeof(raw_prefix)));
+                                BUSTER_TEST(arguments, seh_tail_fields[0] == 0 && seh_tail_fields[1] == 1 &&
+                                                       seh_tail_fields[2] == 8 && seh_tail_fields[3] == 24 &&
+                                                       seh_tail_fields[4] == 1 && seh_tail_fields[5] == 24);
+                            }
+                            u32 seh_scope_relocations = 0;
+                            u32 seh_scope_mask = 0;
+                            for (u32 seh_row = 0; seh_row < seh_read.relocation_count; seh_row += 1)
+                            {
+                                ObjectRelocation* seh_coordinate = seh_read.relocations + seh_row;
+                                if (seh_coordinate->comdat != seh_xdata_group + 1u) continue;
+                                seh_scope_relocations += 1u;
+                                bool seh_coordinate_bounded = seh_coordinate->section == OBJECT_SECTION_WINDOWS_XDATA &&
+                                    seh_coordinate->kind == OBJECT_RELOCATION_COFF_ADDR32NB &&
+                                    seh_coordinate->symbol < seh_read.symbol_count &&
+                                    seh_coordinate->offset >= seh_unwind_group->offset &&
+                                    seh_coordinate->offset - seh_unwind_group->offset <= seh_unwind_group->size - 4u;
+                                if (BUSTER_REQUIRE(arguments, seh_coordinate_bounded))
+                                {
+                                    u64 seh_field = seh_coordinate->offset - seh_unwind_group->offset;
+                                    ObjectSymbol* seh_target = seh_read.symbols + seh_coordinate->symbol;
+                                    if (seh_field == 8)
+                                    {
+                                        seh_scope_mask |= 1u;
+                                        BUSTER_TEST(arguments, string_equal(seh_target->name, S8("__C_specific_handler")) &&
+                                                               seh_target->global && seh_target->kind == OBJECT_SYMBOL_FUNCTION &&
+                                                               seh_target->section == OBJECT_SECTION_UNDEFINED && seh_coordinate->addend == 0);
+                                    }
+                                    else
+                                    {
+                                        u32 seh_bit = seh_field == 16 ? 2u : seh_field == 20 ? 4u : seh_field == 28 ? 8u : 0u;
+                                        seh_scope_mask |= seh_bit;
+                                        BUSTER_TEST(arguments, seh_bit != 0 && string_equal(seh_target->name, S8("defined_function")) &&
+                                                               seh_target->comdat == seh_parent + 1u && seh_target->section == OBJECT_SECTION_TEXT &&
+                                                               seh_target->value == seh_code_group->offset &&
+                                                               seh_coordinate->addend == (seh_field == 16 ? 8 : 24));
+                                    }
+                                }
+                            }
+                            BUSTER_TEST(arguments, seh_scope_relocations == 4 && seh_scope_mask == 15);
+                        }
+                        seh_group_bytes = object_write(arguments->arena, &seh_read, OBJECT_FORMAT_COFF);
+                    }
+                }
+            }
+        }
+        struct {u32 begin; u32 handler;} malformed[] = {
+            {7, 24}, {24, 24}, {25, 24}, {8, sizeof(seh_code)}, {8, UINT32_MAX}, {8, 0},
+        };
+        for (u32 mutation = 0; mutation < BUSTER_ARRAY_LENGTH(malformed); mutation += 1)
+        {
+            CodegenFunctionDescriptor invalid = seh_function;
+            invalid.exception_scope_begin = malformed[mutation].begin;
+            invalid.exception_entry_offset = malformed[mutation].handler;
+            ByteSlice invalid_raw = object_test_windows_x64_unwind(arguments->arena, &invalid, 1);
+            BUSTER_TEST(arguments, invalid_raw.pointer == 0 && invalid_raw.length == 0);
+            CodegenModule invalid_module = seh_module;
+            invalid_module.functions = &invalid;
+            ObjectFile invalid_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &invalid_module, windows_unwind_target);
+            BUSTER_TEST(arguments, invalid_object.error == OBJECT_ERROR_INVALID_INPUT && invalid_object.section_count == 0);
+        }
+        Target unsupported[] = {
+            {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+            {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        };
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(unsupported); target_index += 1)
+        {
+            ObjectFile refused = object_from_canonical_codegen_module(arguments->arena, &separate_program, &seh_module, unsupported[target_index]);
+            BUSTER_TEST(arguments, refused.error == OBJECT_ERROR_INVALID_INPUT && refused.section_count == 0);
+        }
+    }
+
     u8 windows_arm64_code[64] = {0};
     u32 windows_arm64_epilog = 48;
     CodegenUnwindAction windows_arm64_actions[] = {

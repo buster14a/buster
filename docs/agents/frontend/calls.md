@@ -572,6 +572,41 @@ static/extern storage, function address and local option-word identity, and unus
 nondefinitions. Original inline sources and real Windows `<stdio.h>` formatting
 run in both frontend forms and all four native allocator modes.
 
+## Windows x64 protected calls
+
+On Windows x64, `__try`, `__except` and `__finally` are recognized as
+contextual identifiers by the C frontend. They remain ordinary identifiers on
+other targets and in ordinary expressions; they are not global keywords or
+builtins.
+
+The bounded outlined form is a protected compound containing exactly one
+ordinary call-expression statement, followed by an `__except` with a filter
+that is conservatively accepted as the integer constant expression `1`.
+Arguments may contain nested calls and ordinary loads. The protected call and
+all of its argument evaluation run inside the outlined helper, so a fault in a
+nested call or argument load reaches the original caller's handler. The helper
+receives automatic locals and parameters referenced by the protected expression
+as pointers to their original storage; it does not snapshot their values.
+Capture discovery happens before local SSA decisions, keeping captured objects
+addressable and preserving their ordinary C types and scopes.
+
+The helper has a normal `false` return and a separate exception-entry root
+that returns `true`. Only the true result branches to the original
+`__except` handler in the caller. The handler is therefore kept in the
+original function's control flow. A protected call with no exception continues
+after the construct.
+
+This lowering deliberately accepts only the one-call shape. It reports a
+`Windows SEH:` diagnostic for nested protected constructs, `__finally`,
+filters outside its conservative constant-expression check (including comma
+operators, calls or automatic-object references), protected expressions that
+require control-flow splits, protected-body branches or additional statements,
+and captures whose lifetime or storage cannot be safely represented. This
+includes register, cleanup-managed, variably-modified and frame-sensitive
+compound-literal objects. Unsupported transfers and calls known to return
+twice are rejected as well. Off-target uses follow ordinary C name lookup and
+syntax rules.
+
 ## Calls through returned function pointers
 
 A function-pointer result is a call target, including when its producing call

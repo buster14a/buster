@@ -388,6 +388,19 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_published_cfg(IrFunction* fun
     bool valid = cfg && cfg->block_count == function->block_count && cfg->instruction_count == function->instruction_count && cfg->blocks &&
                  (!cfg->edge_count || (cfg->edges && cfg->predecessors)) && (!cfg->parameter_count || cfg->parameters) &&
                  (!cfg->argument_count || cfg->arguments);
+    bool invalid_exception_root = valid && function->exception_entry_plus_one &&
+                                  (function->exception_entry_plus_one > cfg->block_count ||
+                                   function->exception_entry_plus_one - 1 == function->entry.value ||
+                                   cfg->blocks[function->exception_entry_plus_one - 1].predecessor_count != 0 ||
+                                   cfg->blocks[function->exception_entry_plus_one - 1].parameter_count != 0);
+    if (invalid_exception_root)
+    {
+        u32 root_block = function->exception_entry_plus_one <= cfg->block_count ? function->exception_entry_plus_one - 1
+                                                                                 : IR_ID_UNDERLYING_INVALID;
+        result = ir_validation_error(IR_VALIDATION_EXCEPTION_ROOT, function,
+                                     (IrBlockId){.value = root_block}, IR_INSTRUCTION_ID_INVALID);
+    }
+    valid = valid && !invalid_exception_root;
     u32 rows = 0;
     u32 successors = 0;
     u32 predecessors = 0;
@@ -461,7 +474,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_published_cfg(IrFunction* fun
         valid = valid && arguments == cfg->argument_count;
         scratch_end(scratch);
     }
-    if (!valid)
+    if (!valid && result.error == IR_VALIDATION_NONE)
     {
         result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
     }
@@ -475,6 +488,15 @@ IrValidationResult ir_function_publish_cfg(Arena* arena, IrFunction* function)
         (function->value_count && !function->values) || function->entry.value >= function->block_count)
     {
         result.error = IR_VALIDATION_INVALID_ID;
+    }
+    else if (function->exception_entry_plus_one &&
+             (function->exception_entry_plus_one > function->block_count ||
+              function->exception_entry_plus_one - 1 == function->entry.value))
+    {
+        u32 root_block = function->exception_entry_plus_one <= function->block_count ? function->exception_entry_plus_one - 1
+                                                                                     : IR_ID_UNDERLYING_INVALID;
+        result = ir_validation_error(IR_VALIDATION_EXCEPTION_ROOT, function,
+                                     (IrBlockId){.value = root_block}, IR_INSTRUCTION_ID_INVALID);
     }
     else if (!function->published_cfg)
     {
@@ -535,6 +557,15 @@ IrValidationResult ir_function_publish_cfg(Arena* arena, IrFunction* function)
                 {
                     result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, block->id, block->last_instruction);
                 }
+            }
+        }
+        if (result.error == IR_VALIDATION_NONE && function->exception_entry_plus_one)
+        {
+            u32 root_block = function->exception_entry_plus_one - 1;
+            if (blocks[root_block].predecessor_count || blocks[root_block].parameter_count)
+            {
+                result = ir_validation_error(IR_VALIDATION_EXCEPTION_ROOT, function,
+                                             (IrBlockId){.value = root_block}, IR_INSTRUCTION_ID_INVALID);
             }
         }
         u64 argument_count = 0;
@@ -693,6 +724,10 @@ IrValidationResult ir_function_publish_cfg(Arena* arena, IrFunction* function)
             }
         }
         scratch_end(temporary);
+    }
+    else if (function->exception_entry_plus_one)
+    {
+        result = ir_validate_published_cfg(function);
     }
     if (result.error != IR_VALIDATION_NONE)
     {

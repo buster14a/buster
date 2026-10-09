@@ -157,9 +157,9 @@ expected-failure entry to turn an audit failure green.
 
 `ide cc -fbootstrap-trace=<prefix>` supports exactly one native C input and
 object or executable output. It creates `<prefix>.tokens`, `.ir` and `.mir`.
-The v1 envelope is an eight-byte little-endian string length, the string
-`BUSTER bootstrap trace v1`, the similarly encoded phase name, explicit
-semantic fields, and the eight-byte completion footer `BSTREND1`.
+The v2 envelope is an eight-byte little-endian string length, the string
+`BUSTER bootstrap trace v2`, the similarly encoded phase name, explicit
+semantic fields, and the eight-byte completion footer `BSTREND2`.
 All scalar fields are little-endian u64; byte strings carry u64 lengths.
 The producer is the field-order specification in
 `src/buster/lib/compiler/codegen/bootstrap_trace.c`.
@@ -169,8 +169,12 @@ format. They do not serialize pointers, padding, capacity, lazy ABI caches or
 physical source byte offsets. Canonical IDs/types/values/blocks/instructions,
 floating-format identity, binary16 and bfloat16 target layouts,
 edge arguments, symbols/globals/relocations, and selected machine instructions,
-registers/blocks/edges/copy sources and side tables are explicit. Line-mark
-instruction IDs are included. Debug-bearing compiler executables are compared
+registers/blocks/edges/copy sources and side tables are explicit. The canonical
+function record and selected machine function record each include the separate
+exception-root block ID plus one. Line-mark instruction IDs are included.
+Trace v2 intentionally omits the `IrFunction.debug_locals` and
+`MachineFunction.debug_values` tables. This diagnostic projection remains
+unchanged; the exception-root work does not expand its schema. Debug-bearing compiler executables are compared
 in full: executable bytes are not stripped or normalized to obtain a pass.
 Code-generation retry boundaries are recorded rather than silently concatenated.
 

@@ -4932,6 +4932,16 @@ IrSourceId ir_program_add_source(IrProgram* program, IrSource source)
     return result;
 }
 
+bool ir_module_has_exception_root(IrModule const* module)
+{
+    bool result = false;
+    for (u32 index = 0; module && module->functions && index < module->function_count && !result; index += 1)
+    {
+        result = module->functions[index].exception_entry_plus_one != 0;
+    }
+    return result;
+}
+
 IrFunction* ir_module_add_function(Arena* arena, IrModule* module, IrFunction function)
 {
     IrFunction* result;
@@ -5611,12 +5621,14 @@ BUSTER_GLOBAL_LOCAL bool ir_validate_unordered_relocations_overlap_free(IrProgra
 // Each label difference names two blocks of one lowered function and a whole
 // power-of-two integer slot of a byte image, still zero, for the backend to
 // fill once the blocks are placed.
-BUSTER_GLOBAL_LOCAL bool ir_validate_label_differences(IrProgram* program, IrModule* module, IrGlobal* global, IrType* type,
+BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_label_differences(IrProgram* program, IrModule* module, IrGlobal* global, IrType* type,
                                                        IrLabelOwnerIndex* label_owners)
 {
-    bool valid = global->label_differences && global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && global->bytes.pointer &&
-                 global->bytes.length == type->layout.size;
-    for (u32 index = 0; valid && index < global->label_difference_count; index += 1)
+    IrValidationError error = global->label_differences && global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && global->bytes.pointer &&
+                                      global->bytes.length == type->layout.size
+                                  ? IR_VALIDATION_NONE
+                                  : IR_VALIDATION_OPERATION;
+    for (u32 index = 0; error == IR_VALIDATION_NONE && index < global->label_difference_count; index += 1)
     {
         IrGlobalLabelDifference* difference = global->label_differences + index;
         IrSymbol* owner_symbol = ir_symbol_from_id(&program->symbols, difference->symbol);
@@ -5624,15 +5636,28 @@ BUSTER_GLOBAL_LOCAL bool ir_validate_label_differences(IrProgram* program, IrMod
                                 ? ir_module_function_for_symbol(program, module, label_owners, difference->symbol)
                                 : 0;
         u32 size = difference->size;
-        valid = owner && owner->state == IR_FUNCTION_LOWERED && difference->label_block.value < owner->block_count &&
-                difference->base_block.value < owner->block_count && (size == 1 || size == 2 || size == 4 || size == 8) &&
-                difference->offset <= global->bytes.length && size <= global->bytes.length - difference->offset;
-        for (u32 byte = 0; valid && byte < size; byte += 1)
+        bool valid = owner && owner->state == IR_FUNCTION_LOWERED && difference->label_block.value < owner->block_count &&
+                     difference->base_block.value < owner->block_count && (size == 1 || size == 2 || size == 4 || size == 8) &&
+                     difference->offset <= global->bytes.length && size <= global->bytes.length - difference->offset;
+        if (valid && owner->exception_entry_plus_one &&
+            (difference->label_block.value == owner->exception_entry_plus_one - 1 ||
+             difference->base_block.value == owner->exception_entry_plus_one - 1))
         {
-            valid = global->bytes.pointer[difference->offset + byte] == 0;
+            error = IR_VALIDATION_EXCEPTION_ROOT;
+        }
+        else if (!valid)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+        for (u32 byte = 0; error == IR_VALIDATION_NONE && byte < size; byte += 1)
+        {
+            if (global->bytes.pointer[difference->offset + byte] != 0)
+            {
+                error = IR_VALIDATION_OPERATION;
+            }
         }
     }
-    return valid;
+    return error;
 }
 
 // One global's alignment, initializer, and relocation table. Nothing here names
@@ -5737,6 +5762,11 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
                         {
                             error = IR_VALIDATION_OPERATION;
                         }
+                        else if (owner->exception_entry_plus_one &&
+                                 relocation->label_block.value == owner->exception_entry_plus_one - 1)
+                        {
+                            error = IR_VALIDATION_EXCEPTION_ROOT;
+                        }
                     }
                 }
                 if (error == IR_VALIDATION_NONE)
@@ -5755,10 +5785,9 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
             {
                 error = IR_VALIDATION_OPERATION;
             }
-            if (error == IR_VALIDATION_NONE && global->label_difference_count &&
-                !ir_validate_label_differences(program, module, global, type, label_owners))
+            if (error == IR_VALIDATION_NONE && global->label_difference_count)
             {
-                error = IR_VALIDATION_OPERATION;
+                error = ir_validate_label_differences(program, module, global, type, label_owners);
             }
         }
     }
@@ -7002,6 +7031,109 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_scope(IrProgram* pr
 // recorded tail) while it checks each row and the value that row defines;
 // parameters are checked with their block; the sweep that follows reaches
 // only the values nothing defined. Scratch is one byte per row and per value.
+// The Windows SEH filter helper has one ordinary entry and one explicit
+// exception root. The root is metadata, not a CFG predecessor. Its handler
+// has no live-ins and returns true; the ordinary body returns a local boolean
+// zero after its protected call-expression rows. Keep this verifier narrow
+// until a backend can model more general exception flow.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_exception_root(IrProgram* program, IrFunction* function)
+{
+    IrValidationResult result = ir_validation_ok();
+    if (function->exception_entry_plus_one)
+    {
+        u32 root_block = function->exception_entry_plus_one <= function->block_count
+                             ? function->exception_entry_plus_one - 1
+                             : IR_ID_UNDERLYING_INVALID;
+        IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
+        IrType* return_type = signature ? ir_type_from_id(&program->types, signature->return_type) : 0;
+        bool valid = function->state == IR_FUNCTION_LOWERED && function->block_count == 2 &&
+                     function->entry.value < function->block_count && function->exception_entry_plus_one <= function->block_count &&
+                     root_block != function->entry.value && signature && signature->kind == IR_TYPE_FUNCTION &&
+                     return_type && return_type->kind == IR_TYPE_BOOLEAN && !function->label_metadata_count;
+        if (valid)
+        {
+            IrBlock* normal = function->blocks + function->entry.value;
+            IrBlock* handler = function->blocks + root_block;
+            valid = normal->id.value == function->entry.value && handler->id.value == root_block &&
+                    !normal->parameter_count && !handler->parameter_count && !normal->predecessor_count &&
+                    !handler->predecessor_count;
+            IrInstructionId handler_constant_id = handler->first_instruction;
+            IrInstructionId handler_return_id =
+                handler_constant_id.value < function->instruction_count ? ir_block_next_instruction(function, handler, handler_constant_id)
+                                                                        : IR_INSTRUCTION_ID_INVALID;
+            IrInstruction* handler_constant = handler_constant_id.value < function->instruction_count
+                                                  ? function->instructions + handler_constant_id.value
+                                                  : 0;
+            IrInstruction* handler_return = handler_return_id.value < function->instruction_count
+                                                ? function->instructions + handler_return_id.value
+                                                : 0;
+            valid = valid && handler_constant && handler_return &&
+                    handler_constant->opcode == IR_OPCODE_CONSTANT_INTEGER &&
+                    handler_constant->canonical_type.value == signature->return_type.value &&
+                    handler_constant->result.value < function->value_count && !handler_constant->operand_count &&
+                    !handler_constant->target_count && handler_constant->immediate_count == 1 && handler_constant->immediates &&
+                    !handler_constant->immediate_is_negative && handler_constant->immediates[0] == 1 &&
+                    handler_return->opcode == IR_OPCODE_RETURN && handler_return->result.value == IR_ID_UNDERLYING_INVALID &&
+                    handler_return->operand_count == 1 && handler_return->operands &&
+                    handler_return->operands[0].value == handler_constant->result.value && !handler_return->target_count &&
+                    ir_block_next_instruction(function, handler, handler_return_id).value == IR_ID_UNDERLYING_INVALID &&
+                    handler->last_instruction.value == handler_return_id.value;
+
+            IrInstructionId normal_return_id = normal->last_instruction;
+            IrInstruction* normal_return = normal_return_id.value < function->instruction_count
+                                               ? function->instructions + normal_return_id.value
+                                               : 0;
+            bool normal_return_valid = normal_return && normal_return->opcode == IR_OPCODE_RETURN &&
+                                       normal_return->result.value == IR_ID_UNDERLYING_INVALID &&
+                                       normal_return->operand_count == 1 && normal_return->operands && !normal_return->target_count;
+            IrValueId normal_return_value = normal_return_valid ? normal_return->operands[0] : IR_VALUE_ID_INVALID;
+            IrValue* normal_value = normal_return_value.value < function->value_count ? function->values + normal_return_value.value : 0;
+            IrInstructionId zero_constant_id = normal_value ? normal_value->definition : IR_INSTRUCTION_ID_INVALID;
+            bool zero_constant_found = false;
+            bool forbidden_operation = false;
+            u32 normal_row_count = 0;
+            IrInstructionId current_id = normal->first_instruction;
+            IrInstructionId last_id = IR_INSTRUCTION_ID_INVALID;
+            while (valid && current_id.value < function->instruction_count)
+            {
+                IrInstruction* row = function->instructions + current_id.value;
+                bool forbidden = row->opcode == IR_OPCODE_STACK_ALLOCATE || row->opcode == IR_OPCODE_STACK_SAVE ||
+                                 row->opcode == IR_OPCODE_STACK_RESTORE || row->opcode == IR_OPCODE_INLINE_ASSEMBLY ||
+                                 row->opcode == IR_OPCODE_LABEL_ADDRESS || row->opcode == IR_OPCODE_BRANCH ||
+                                 row->opcode == IR_OPCODE_BRANCH_IF || row->opcode == IR_OPCODE_SWITCH ||
+                                 row->opcode == IR_OPCODE_INDIRECT_BRANCH;
+                if (row->opcode == IR_OPCODE_CALL)
+                {
+                    forbidden |= ir_call_returns_twice(program, row);
+                }
+                forbidden_operation |= forbidden;
+                if (current_id.value == zero_constant_id.value)
+                {
+                    zero_constant_found = row->opcode == IR_OPCODE_CONSTANT_INTEGER &&
+                                          row->canonical_type.value == signature->return_type.value &&
+                                          row->result.value == normal_return_value.value && !row->operand_count &&
+                                          !row->target_count && row->immediate_count == 1 && row->immediates &&
+                                          !row->immediate_is_negative && row->immediates[0] == 0;
+                }
+                last_id = current_id;
+                current_id = ir_block_next_instruction(function, normal, current_id);
+                if (normal_row_count < 2) normal_row_count += 1;
+            }
+            valid = valid && !forbidden_operation && current_id.value == IR_ID_UNDERLYING_INVALID &&
+                    normal_return_valid && normal_return_id.value == last_id.value && normal_row_count >= 2 &&
+                    zero_constant_found && normal_value &&
+                    normal_value->canonical_type.value == signature->return_type.value &&
+                    ir_block_next_instruction(function, normal, normal_return_id).value == IR_ID_UNDERLYING_INVALID;
+        }
+        if (!valid)
+        {
+            result = ir_validation_error(IR_VALIDATION_EXCEPTION_ROOT, function,
+                                         (IrBlockId){.value = root_block}, IR_INSTRUCTION_ID_INVALID);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_function(IrProgram* program, IrFunction* function)
 {
     IrValidationResult result = ir_validation_ok();
@@ -7032,6 +7164,15 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_function(IrProgram*
          !ir_type_from_id(&program->types, signature->return_type) || function->entry.value >= function->block_count))
     {
         result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+    }
+    if (result.error == IR_VALIDATION_NONE && function->exception_entry_plus_one &&
+        (function->exception_entry_plus_one > function->block_count ||
+         function->exception_entry_plus_one - 1 == function->entry.value))
+    {
+        u32 root_block = function->exception_entry_plus_one <= function->block_count ? function->exception_entry_plus_one - 1
+                                                                                     : IR_ID_UNDERLYING_INVALID;
+        result = ir_validation_error(IR_VALIDATION_EXCEPTION_ROOT, function,
+                                     (IrBlockId){.value = root_block}, IR_INSTRUCTION_ID_INVALID);
     }
     if (result.error == IR_VALIDATION_NONE)
     {
@@ -7089,6 +7230,10 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_function(IrProgram*
         }
         scratch_end(temporary);
     }
+    if (result.error == IR_VALIDATION_NONE && function->exception_entry_plus_one)
+    {
+        result = ir_validate_exception_root(program, function);
+    }
     return result;
 }
 
@@ -7100,10 +7245,16 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
         IrFunction* function = module->functions + function_index;
         if (function->state != IR_FUNCTION_LOWERED)
         {
+            // A non-lowered declaration cannot own a body-specific exception root.
+            if (function->exception_entry_plus_one)
+            {
+                result = ir_validation_error(IR_VALIDATION_EXCEPTION_ROOT, function,
+                                             (IrBlockId){.value = IR_ID_UNDERLYING_INVALID}, IR_INSTRUCTION_ID_INVALID);
+            }
             // A non-lowered declaration or definition is still part of this
             // module's symbol contract, even though it has no body to validate.
             IrSymbol* symbol = ir_symbol_from_id(&program->symbols, function->symbol);
-            if (symbol && symbol->is_link_once &&
+            if (result.error == IR_VALIDATION_NONE && symbol && symbol->is_link_once &&
                 (symbol->kind != IR_SYMBOL_FUNCTION || !symbol->is_definition || symbol->linkage != IR_LINKAGE_EXTERNAL ||
                  symbol->is_weak || symbol->is_thread_local || symbol->section_name.length))
             {
@@ -7274,11 +7425,16 @@ IrValidationResult ir_test_validate_canonical_module_reference(IrProgram* progra
         IrFunction* function = module->functions + function_index;
         if (function->state != IR_FUNCTION_LOWERED)
         {
+            if (function->exception_entry_plus_one)
+            {
+                result = ir_validation_error(IR_VALIDATION_EXCEPTION_ROOT, function,
+                                             (IrBlockId){.value = IR_ID_UNDERLYING_INVALID}, IR_INSTRUCTION_ID_INVALID);
+            }
             IrSymbol* symbol = ir_symbol_from_id(&program->symbols, function->symbol);
             bool invalid_link_once = symbol && symbol->is_link_once &&
                                      (symbol->kind != IR_SYMBOL_FUNCTION || !symbol->is_definition || symbol->linkage != IR_LINKAGE_EXTERNAL ||
                                       symbol->is_weak || symbol->is_thread_local || symbol->section_name.length);
-            if (invalid_link_once)
+            if (result.error == IR_VALIDATION_NONE && invalid_link_once)
             {
                 result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
             }
@@ -7301,6 +7457,10 @@ IrValidationResult ir_test_validate_canonical_module_reference(IrProgram* progra
                 if (result.error == IR_VALIDATION_NONE)
                 {
                     result = ir_validate_function_blocks(program, function, signature);
+                }
+                if (result.error == IR_VALIDATION_NONE && function->exception_entry_plus_one)
+                {
+                    result = ir_validate_exception_root(program, function);
                 }
             }
         }

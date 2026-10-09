@@ -534,6 +534,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_ast_kind_names[C_AST_KIND_COUNT] = {
     [C_AST_DESIGNATOR_MEMBER] = S8_INITIALIZER("designator_member"),
     [C_AST_DESIGNATOR_INDEX] = S8_INITIALIZER("designator_index"),
     [C_AST_DESIGNATOR_RANGE] = S8_INITIALIZER("designator_range"),
+    [C_AST_SEH_TRY_EXCEPT] = S8_INITIALIZER("seh_try_except"),
 };
 
 #define C_AST_CONTRACT_ENTRY(name, contract, a, b) (u8)C_AST_CONTRACT_##contract,
@@ -637,6 +638,7 @@ typedef enum CAstFrameKind
     C_AST_FRAME_DEFAULT,
     C_AST_FRAME_ATTR_STATEMENT,
     C_AST_FRAME_SIMPLE_STATEMENT,
+    C_AST_FRAME_SEH_TRY,
     C_AST_FRAME_COUNT,
 } CAstFrameKind;
 
@@ -743,6 +745,7 @@ struct CAstBuilder
     u32 info_count;
     u32 scope_depth;
     u32 parameter_depth;
+    bool seh_active;
     // ---- dialect.
     CPreprocessDialect dialect;
     bool c23;
@@ -957,6 +960,13 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_ast_advance(CAstBuilder* builder)
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_is_punctuator(CToken token, CPunctuator punctuator)
 {
     return token.punctuator == (u8)punctuator;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_is_windows_x64(CAstBuilder* builder)
+{
+    Target target = builder->preprocess.target;
+    bool result = target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_WINDOWS;
+    return result;
 }
 
 // "expected <what>, found <token>" at the cursor.
@@ -4795,6 +4805,15 @@ enum
 
 enum
 {
+    C_AST_SEH_TRY_OPEN,
+    C_AST_SEH_TRY_AFTER_BODY,
+    C_AST_SEH_TRY_AFTER_FILTER,
+    C_AST_SEH_TRY_HANDLER_OPEN,
+    C_AST_SEH_TRY_AFTER_HANDLER,
+};
+
+enum
+{
     C_AST_TRANSLATION_UNIT_ITEMS,
 };
 
@@ -4835,7 +4854,24 @@ BUSTER_GLOBAL_LOCAL void c_ast_start_statement(CAstBuilder* builder, bool allow_
 {
     CToken token = c_ast_peek(builder, 0);
     u32 position = builder->position;
-    if (token.kind == C_TOKEN_IDENTIFIER)
+    if (token.kind == C_TOKEN_IDENTIFIER && c_ast_is_windows_x64(builder) &&
+        c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SEH_TRY) &&
+        c_ast_is_punctuator(c_ast_peek(builder, 1), C_PUNCTUATOR_LEFT_BRACE))
+    {
+        if (builder->seh_active)
+        {
+            c_ast_fail(builder, position, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                       S8("Windows SEH: nested Windows x64 `__try` statements are unsupported"));
+        }
+        else
+        {
+            builder->seh_active = true;
+            CAstFrame* frame = c_ast_push(builder, C_AST_FRAME_SEH_TRY, C_AST_SEH_TRY_OPEN, 0, builder->node_count);
+            frame->a = position;
+            c_ast_advance(builder);
+        }
+    }
+    else if (token.kind == C_TOKEN_IDENTIFIER)
     {
         u32 info = c_ast_info(builder, token);
         if (c_ast_is_name_info(info))
@@ -5677,6 +5713,121 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_simple_statement(CAstBuilder* builder, CAstF
     }
 }
 
+// One bounded Windows x64 `__try { ... } __except (filter) { ... }` statement.
+// The node children are the two compound bodies around the filter expression.
+BUSTER_GLOBAL_LOCAL void c_ast_step_seh_try(CAstBuilder* builder, CAstFrame* frame)
+{
+    bool running = true;
+    while (running && !builder->failed)
+    {
+        switch (frame->state)
+        {
+        case C_AST_SEH_TRY_OPEN:
+        {
+            if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_LEFT_BRACE))
+            {
+                frame->state = C_AST_SEH_TRY_AFTER_BODY;
+                c_ast_push_block(builder, 0);
+                running = false;
+            }
+            else
+            {
+                c_ast_fail(builder, builder->position, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                           S8("Windows SEH: Windows x64 `__try` requires a compound statement body"));
+            }
+            break;
+        }
+        case C_AST_SEH_TRY_AFTER_BODY:
+        {
+            CToken token = c_ast_peek(builder, 0);
+            if (c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SEH_FINALLY))
+            {
+                c_ast_fail(builder, builder->position, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                           S8("Windows SEH: Windows x64 `__finally` handlers are unsupported; use `__except`"));
+            }
+            else if (c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SEH_EXCEPT))
+            {
+                c_ast_advance(builder);
+                if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    c_ast_advance(builder);
+                    frame->state = C_AST_SEH_TRY_AFTER_FILTER;
+                    c_ast_push_expr(builder, C_AST_PREC_COMMA, 0);
+                    running = false;
+                }
+                else
+                {
+                    c_ast_fail(builder, builder->position, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                               S8("Windows SEH: Windows x64 `__except` requires a parenthesized filter expression"));
+                }
+            }
+            else
+            {
+                c_ast_fail(builder, builder->position, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                           S8("Windows SEH: Windows x64 `__try` requires exactly one `__except` handler; `__finally` is unsupported"));
+            }
+            break;
+        }
+        case C_AST_SEH_TRY_AFTER_FILTER:
+        {
+            if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            {
+                c_ast_advance(builder);
+                frame->state = C_AST_SEH_TRY_HANDLER_OPEN;
+            }
+            else
+            {
+                c_ast_fail(builder, builder->position, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                           S8("Windows SEH: Windows x64 `__except` filter is missing its closing parenthesis"));
+            }
+            break;
+        }
+        case C_AST_SEH_TRY_HANDLER_OPEN:
+        {
+            if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_LEFT_BRACE))
+            {
+                frame->state = C_AST_SEH_TRY_AFTER_HANDLER;
+                c_ast_push_block(builder, 0);
+                running = false;
+            }
+            else
+            {
+                c_ast_fail(builder, builder->position, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                           S8("Windows SEH: Windows x64 `__except` handler must be a compound statement"));
+            }
+            break;
+        }
+        case C_AST_SEH_TRY_AFTER_HANDLER:
+        {
+            CToken token = c_ast_peek(builder, 0);
+            if (c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SEH_FINALLY))
+            {
+                c_ast_fail(builder, builder->position, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                           S8("Windows SEH: combining Windows x64 `__except` and `__finally` handlers is unsupported"));
+            }
+            else if (c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SEH_EXCEPT))
+            {
+                c_ast_fail(builder, builder->position, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                           S8("Windows SEH: multiple Windows x64 `__except` handlers are unsupported"));
+            }
+            else
+            {
+                c_ast_append(builder, C_AST_SEH_TRY_EXCEPT, frame->begin, frame->a, 0);
+                builder->seh_active = false;
+                c_ast_pop(builder);
+                running = false;
+            }
+            break;
+        }
+        default:
+        {
+            BUSTER_TODO();
+        }
+        }
+    }
+    return;
+}
+
 // ---- translation unit and dispatch ----------------------------------------
 
 // The external declarations, up to the end-of-file token.
@@ -5848,6 +5999,9 @@ BUSTER_GLOBAL_LOCAL void c_ast_run(CAstBuilder* builder)
             break;
         case C_AST_FRAME_SIMPLE_STATEMENT:
             c_ast_step_simple_statement(builder, frame);
+            break;
+        case C_AST_FRAME_SEH_TRY:
+            c_ast_step_seh_try(builder, frame);
             break;
         case C_AST_FRAME_COUNT:
         default:

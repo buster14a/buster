@@ -1,17 +1,115 @@
-name: Temporary Clang Win64 SEH ABI baseline
+name: RAD Debugger session development
+
+# Temporary hosted development checkpoint for #2279; removed before integration.
+# The routine RAD compatibility workflow remains main-only.
 on:
   push:
     branches: [codex/2279-debugger-qualification]
 permissions:
   contents: read
 concurrency:
-  group: raddebugger-seh-baseline-${{ github.run_id }}
+  group: raddebugger-development-${{ github.run_id }}
   cancel-in-progress: false
 jobs:
-  windows-seh-clang-x64-baseline:
-    name: Clang x64 SEH ABI baseline (diagnostic only)
+  linux-x86-64:
+    # Windows-only repair checkpoints skip the unchanged Linux platform.
+    if: "!startsWith(github.event.head_commit.message, 'test: Windows-only ')"
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: ubuntu-26.04
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Record actual Buster checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: EpicGames/raddebugger
+          ref: f6b4a38134652886239b91f940cd7a67fedf689d
+          path: external/raddebugger
+          persist-credentials: false
+      - name: Record actual RAD Debugger checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: external/raddebugger
+          source-repository: EpicGames/raddebugger
+      - name: Install upstream platform libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libfreetype6-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev libgl1-mesa-dev libegl1-mesa-dev xvfb xauth libgl1-mesa-dri
+      - name: Verify generated intrinsic metadata
+        run: python3 tools/generate_c_vendor_builtins.py --check
+      - name: Hosted bootstrap
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/raddebugger-driver"
+      - name: Retain generated source-size acknowledgement for review
+        run: |
+          "$RUNNER_TEMP/raddebugger-driver" source_size --write-baseline
+          cat docs/source-size-baseline.txt
+      - name: Build and check the independent session controller
+        run: |
+          clang -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror tools/raddebugger_session_test.c -lX11 -o "$RUNNER_TEMP/raddebugger-session-controller"
+          "$RUNNER_TEMP/raddebugger-session-controller" --self-test
+      - name: Configure compiler
+        run: |
+          "$RUNNER_TEMP/raddebugger-driver" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF -DBUSTER_BENCH_ALLOCATIONS=ON
+      - name: Build trusted compiler
+        id: compiler
+        run: |
+          "$RUNNER_TEMP/raddebugger-driver" build --config Release -t ide
+      - name: Compiler tests
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/raddebugger-driver" build --config Release -t test_all 2>&1 | tee build/raddebugger-tests.log
+      - name: Candidate self-host fixed point
+        if: always() && steps.compiler.outcome == 'success'
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/raddebugger-driver" test_self_host --config Release 2>&1 | tee build/raddebugger-self-host.log
+      - name: Pristine input negative controls
+        if: always() && steps.compiler.outcome == 'success'
+        run: |
+          "$RUNNER_TEMP/raddebugger-driver" test_raddebugger --self-test
+      - name: Qualify pristine RAD Debugger builds and independent runtime controls
+        if: always() && steps.compiler.outcome == 'success'
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/raddebugger-driver" test_raddebugger --config Release "$GITHUB_WORKSPACE/external/raddebugger" 2>&1 | tee build/raddebugger-harness.log
+      - name: Retain machine specifications
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: build/raddebugger-machine-specifications
+      - name: Retain exact-source diagnostics including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: raddebugger-session-development-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/raddebugger-*
+            docs/source-size-baseline.txt
+          if-no-files-found: warn
+          retention-days: 14
+  # Job fragment for a temporary qualification workflow or the existing CI jobs map.
+  # Keep the established RAD Debugger compatibility workflow's main-only trigger unchanged.
+  raddebugger-windows-x64:
+    name: RAD Debugger Windows x86-64
     runs-on: windows-2025
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -19,7 +117,7 @@ jobs:
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           requested-runner: windows-2025
-      - name: Check out exact Buster source
+      - name: Check out Buster
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
@@ -30,21 +128,33 @@ jobs:
           mode: source
           source-directory: .
           source-repository: ${{ github.repository }}
-      - name: Install pinned Clang and LLVM inspection tools
+      - name: Check out pinned RAD Debugger
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: EpicGames/raddebugger
+          ref: f6b4a38134652886239b91f940cd7a67fedf689d
+          path: external/raddebugger
+          lfs: true
+          persist-credentials: false
+      - name: Record actual RAD Debugger checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: external/raddebugger
+          source-repository: EpicGames/raddebugger
+      - name: Install pinned LLVM
         shell: bash
         env:
-          BUSTER_CI_LLVM_VERSION: 23.1.3
           BUSTER_CI_PYTHON: python
           GH_TOKEN: ${{ github.token }}
           LLVM_TARGET: x86_64-windows
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/raddebugger-seh-clang-baseline"
+          mkdir -p "$RUNNER_TEMP/raddebugger-windows-job"
           python tools/ci_llvm.py --target "$LLVM_TARGET" --work-directory "$RUNNER_TEMP/llvm" \
             --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV" \
-            2>&1 | tee "$RUNNER_TEMP/raddebugger-seh-clang-baseline/llvm-install.log"
-      - name: Compile and inspect both Clang SEH variants before runtime
-        id: compile
+            2>&1 | tee "$RUNNER_TEMP/raddebugger-windows-job/llvm.log"
+      - name: Bootstrap Buster and qualify RAD Debugger
         shell: pwsh
         env:
           VS_ARCH: amd64
@@ -52,118 +162,199 @@ jobs:
           CLANG_ARCH: x86_64
         run: |
           $ErrorActionPreference = 'Stop'
-          $Logs = Join-Path $env:RUNNER_TEMP 'raddebugger-seh-clang-baseline'
+          $Logs = Join-Path $env:RUNNER_TEMP 'raddebugger-windows-job'
           New-Item -ItemType Directory -Force -Path $Logs | Out-Null
-          $Sources = @(
-            (Join-Path $env:GITHUB_WORKSPACE 'tools\raddebugger_seh_clang_baseline.c')
-          )
-          foreach ($Source in $Sources) { Copy-Item $Source $Logs }
-
-          & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT -LlvmBin $env:BUSTER_CI_LLVM_BIN -GithubEnv $env:GITHUB_ENV -Require cl, clang, llvm-readobj, llvm-objdump -ClangArch $env:CLANG_ARCH
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & clang --version 2>&1 | Tee-Object -FilePath (Join-Path $Logs 'clang-version.log')
+          & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT -LlvmBin $env:BUSTER_CI_LLVM_BIN -Require cl, clang, llvm-rc, llvm-ml, llvm-lib, llvm-readobj -ClangArch $env:CLANG_ARCH
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $Common = @('-target','x86_64-pc-windows-msvc','-std=gnu11','-fms-extensions','-fverbose-asm','-g','-gcodeview','-O2','-Wall','-Wextra','-Werror','-D_CRT_SECURE_NO_WARNINGS')
-          foreach ($Variant in @('default','async')) {
-            $Flags = @($Common)
-            if ($Variant -eq 'async') { $Flags += '-fasync-exceptions' }
-            foreach ($Source in $Sources) {
-              $Stem = [System.IO.Path]::GetFileNameWithoutExtension($Source)
-              $Assembly = Join-Path $Logs "$Variant-$Stem.s"
-              $Object = Join-Path $Logs "$Variant-$Stem.obj"
-              & clang @Flags -S $Source -o $Assembly 2>&1 | Tee-Object -FilePath (Join-Path $Logs "$Variant-$Stem-assembly-build.log")
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-              & clang @Flags -c $Source -o $Object 2>&1 | Tee-Object -FilePath (Join-Path $Logs "$Variant-$Stem-object-build.log")
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            }
-          }
+          # generate recreates build/, so keep the native driver and setup logs in RUNNER_TEMP.
+          $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
+          $Bootstrap = 'clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o "' + $Driver + '" 2>&1'
+          cmd /d /s /c $Bootstrap | Tee-Object -FilePath (Join-Path $Logs 'bootstrap.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          foreach ($Variant in @('default','async')) {
-            foreach ($Source in $Sources) {
-              $Stem = [System.IO.Path]::GetFileNameWithoutExtension($Source)
-              $Object = Join-Path $Logs "$Variant-$Stem.obj"
-              $ReadPath = Join-Path $Logs "$Variant-$Stem.readobj.txt"
-              & llvm-readobj --unwind --symbols --relocations $Object 2>&1 | Tee-Object -FilePath $ReadPath
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-              $Assembly = Join-Path $Logs "$Variant-$Stem.s"
-              Select-String -Path $Assembly -Pattern '\.seh_proc|\.seh_handler|\.seh_handlerdata|CatchAll|LabelStart|LabelEnd|\.long\s+1' -Context 1,1 |
-                Out-String -Width 240 | Tee-Object -FilePath (Join-Path $Logs "$Variant-$Stem-scope-boundaries.txt")
-              & llvm-objdump -d $Object 2>&1 | Tee-Object -FilePath (Join-Path $Logs "$Variant-$Stem-disassembly-postcall-pcs.txt")
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-              & llvm-objdump -s -j .xdata $Object 2>&1 | Tee-Object -FilePath (Join-Path $Logs "$Variant-$Stem-xdata-scope-bytes.txt")
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            }
-          }
+          # Compile and self-test the trusted controller before the slow generate/build steps.
+          $Controller = Join-Path $env:RUNNER_TEMP 'raddebugger-session-test.exe'
+          $ControllerSource = Join-Path $env:GITHUB_WORKSPACE 'tools\raddebugger_session_test.c'
+          $ControllerBuild = 'clang -target x86_64-pc-windows-msvc -fuse-ld=lld -std=c11 -Wall -Wextra -Werror -D_CRT_SECURE_NO_WARNINGS "' + $ControllerSource + '" -lws2_32 -liphlpapi -luser32 -o "' + $Controller + '" 2>&1'
+          cmd /d /s /c $ControllerBuild | Tee-Object -FilePath (Join-Path $Logs 'controller-build.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $ControllerSelfTest = '"' + $Controller + '" --self-test 2>&1'
+          cmd /d /s /c $ControllerSelfTest | Tee-Object -FilePath (Join-Path $Logs 'controller-self-test.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $BaseReadObj = Join-Path $Logs 'default-raddebugger_seh_clang_baseline.readobj.txt'
-          $ReadObj = Get-Content -Raw $BaseReadObj
-          $FlagBlocks = [regex]::Matches($ReadObj, '(?is)Flags\s*(?:\[([^\]]{0,400})\]|:\s*([^\r\n]{0,160}))')
-          $HasBothFlags = $false
-          foreach ($FlagMatch in $FlagBlocks) {
-            $FlagText = $FlagMatch.Groups[1].Value + $FlagMatch.Groups[2].Value
-            if ($FlagText -match '(?i)\(0x0?3\)' -or
-                ($FlagText -match '(?i)(ExceptionHandler|EHANDLER)' -and $FlagText -match '(?i)(TerminateHandler|UHANDLER)')) {
-              $HasBothFlags = $true
-            }
-          }
-          if (-not $HasBothFlags) { throw 'Default x64 unwind output did not show both exception and termination handler flags in one flags record.' }
-          if ($ReadObj -notmatch '(?im)ADDR32NB.*__C_specific_handler|__C_specific_handler.*ADDR32NB') {
-            throw 'Default object lacks the x64 personality relocation evidence.'
-          }
-          $AsmPath = Join-Path $Logs 'default-raddebugger_seh_clang_baseline.s'
-          $AssemblyText = Get-Content -Raw $AsmPath
-          if ($AssemblyText -notmatch '(?s)\.seh_handlerdata.*?\.long\s+(?:1|0x1)\b[^\r\n]*CatchAll') {
-            throw 'Default assembly lacks a catch-all scope table record with literal filter value 1.'
-          }
+          $Generate = '"' + $Driver + '" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF -DBUSTER_BENCH_ALLOCATIONS=ON 2>&1'
+          cmd /d /s /c $Generate | Tee-Object -FilePath (Join-Path $Logs 'generate.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          foreach ($Variant in @('default','async')) {
-            $Objects = @()
-            foreach ($Source in $Sources) {
-              $Stem = [System.IO.Path]::GetFileNameWithoutExtension($Source)
-              $Objects += Join-Path $Logs "$Variant-$Stem.obj"
+          $Build = '"' + $Driver + '" build --config Release -t ide 2>&1'
+          cmd /d /s /c $Build | Tee-Object -FilePath (Join-Path $Logs 'build-ide.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $CompilerTests = '"' + $Driver + '" build --config Release -t test_all 2>&1'
+          cmd /d /s /c $CompilerTests | Tee-Object -FilePath (Join-Path $Logs 'compiler-tests.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $SelfTest = '"' + $Driver + '" test_raddebugger --self-test 2>&1'
+          cmd /d /s /c $SelfTest | Tee-Object -FilePath (Join-Path $Logs 'self-test.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # First-party SEH correctness controls use external LLD/CRT, never raw JIT.
+          $SehSource = Join-Path $env:GITHUB_WORKSPACE 'tools\raddebugger_seh_runtime_control.c'
+          $Compiler = Join-Path $env:GITHUB_WORKSPACE 'build\Release\ide.exe'
+          Copy-Item $SehSource (Join-Path $Logs 'seh-runtime.c')
+          $Configurations = @(@{ Name='seh-clang-async'; Reference=$true })
+          foreach ($Allocator in @('fast','quality')) {
+            foreach ($Form in @('ssa','stack','ast')) {
+              $Configurations += @{ Name="seh-$Allocator-$Form"; Reference=$false; Allocator=$Allocator; Form=$Form }
             }
-            $Exe = Join-Path $Logs "$Variant-baseline.exe"
-            & clang -target x86_64-pc-windows-msvc -fuse-ld=lld $Objects '-Wl,/DEBUG' -o $Exe 2>&1 |
-              Tee-Object -FilePath (Join-Path $Logs "$Variant-link.log")
+          }
+          foreach ($Configuration in $Configurations) {
+            $Stem = $Configuration.Name
+            $Object = Join-Path $Logs "$Stem.obj"
+            $Exe = Join-Path $Logs "$Stem.exe"
+            if ($Configuration.Reference) {
+              & clang -target x86_64-pc-windows-msvc -std=gnu11 -fms-extensions -fasync-exceptions -g -gcodeview -O2 -Wall -Wextra -Werror -c $SehSource -o $Object 2>&1 |
+                Tee-Object -FilePath (Join-Path $Logs "$Stem-compile.log")
+            } else {
+              $Allocator = $Configuration.Allocator
+              $Form = $Configuration.Form
+              $Args = @('cc','-nostdinc','-target','x86_64-pc-windows-msvc','-std=gnu11','-g','-O2',
+                        "-fregister-allocator=$Allocator",'-fverify-codegen','-c',$SehSource,'-o',$Object)
+              if ($Form -eq 'ssa') { $Args += '-ffrontend-ssa' }
+              if ($Form -eq 'stack') { $Args += '-fno-frontend-ssa' }
+              if ($Form -eq 'ast') { $Args += '-fc-ast-pilot=implicit' }
+              & $Compiler @Args 2>&1 | Tee-Object -FilePath (Join-Path $Logs "$Stem-compile.log")
+            }
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            if (-not (Test-Path (Join-Path $Logs "$Variant-baseline.pdb"))) {
-              throw "Clang did not produce the $Variant debug PDB."
+            & llvm-readobj --unwind --symbols --relocations $Object 2>&1 |
+              Tee-Object -FilePath (Join-Path $Logs "$Stem-readobj.log")
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & llvm-objdump -d $Object 2>&1 | Tee-Object -FilePath (Join-Path $Logs "$Stem-disassembly.log")
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & clang -target x86_64-pc-windows-msvc -fuse-ld=lld $Object '-Wl,/DEBUG' -o $Exe 2>&1 |
+              Tee-Object -FilePath (Join-Path $Logs "$Stem-link.log")
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if (-not (Test-Path (Join-Path $Logs "$Stem.pdb"))) { throw "$Stem PDB missing." }
+            $Stdout = Join-Path $Logs "$Stem-runtime.log"
+            $Stderr = Join-Path $Logs "$Stem-runtime.stderr"
+            $Child = Start-Process -FilePath $Exe -ArgumentList 'async' -PassThru -NoNewWindow -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr
+            if (-not $Child.WaitForExit(30000)) {
+              $Child.Kill($true)
+              if (-not $Child.WaitForExit(3000)) { throw "$Stem child cleanup failed." }
+              throw "$Stem runtime timed out."
+            }
+            if ($null -eq $Child.ExitCode -or $Child.ExitCode -ne 0) { throw "$Stem exited $($Child.ExitCode)." }
+            $RuntimeText = Get-Content -Raw $Stdout
+            $RuntimeText | Write-Output
+            if ((Get-Item $Stderr).Length -ne 0 -or
+                [regex]::Matches($RuntimeText, '(?m)^RADDBG_SEH_CHECK .* PASS\r?$').Count -ne 14 -or
+                $RuntimeText -notmatch '(?m)^RADDBG_SEH_RESULT checks=14 failures=0\r?$') {
+              throw "$Stem did not pass all 14 SEH controls with empty stderr."
             }
           }
-      - name: Run default Clang callback and unwind controls (no async fault-load claim)
-        if: ${{ always() && steps.compile.outcome == 'success' }}
-        shell: pwsh
-        run: |
-          $Logs = Join-Path $env:RUNNER_TEMP 'raddebugger-seh-clang-baseline'
-          $Exe = Join-Path $Logs 'default-baseline.exe'
-          & $Exe default 2>&1 | Tee-Object -FilePath (Join-Path $Logs 'default-runtime.log')
+
+          $Source = Join-Path $env:GITHUB_WORKSPACE 'external\raddebugger'
+          $Qualification = '"' + $Driver + '" test_raddebugger --config Release --debugger "' + $Source + '" 2>&1'
+          cmd /d /s /c $Qualification | Tee-Object -FilePath (Join-Path $Logs 'qualification.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ((Get-Content -Raw (Join-Path $Logs 'default-runtime.log')) -notmatch 'RADDBG_SEH_RESULT checks=10 failures=0') {
-            throw 'Default Clang callback controls did not pass all 10 expected checks.'
-          }
-      - name: Run explicit Clang async-exceptions fault-load control
-        if: ${{ always() && steps.compile.outcome == 'success' }}
-        shell: pwsh
-        run: |
-          $Logs = Join-Path $env:RUNNER_TEMP 'raddebugger-seh-clang-baseline'
-          $Exe = Join-Path $Logs 'async-baseline.exe'
-          & $Exe async 2>&1 | Tee-Object -FilePath (Join-Path $Logs 'async-runtime.log')
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ((Get-Content -Raw (Join-Path $Logs 'async-runtime.log')) -notmatch 'RADDBG_SEH_RESULT checks=12 failures=0') {
-            throw 'Explicit async-exceptions Clang controls did not pass all 12 expected checks.'
-          }
       - name: Retain machine specifications
         if: always()
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           mode: retain
-          retention-directory: ${{ runner.temp }}/raddebugger-seh-clang-baseline
-      - name: Retain baseline sources and diagnostics
-        if: always()
+          retention-directory: ${{ runner.temp }}/raddebugger-windows-job
+      - name: Retain Windows qualification evidence
+        if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: raddebugger-seh-clang-baseline-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/raddebugger-seh-clang-baseline
+          name: raddebugger-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/raddebugger-windows-*
+            ${{ runner.temp }}/raddebugger-windows-job
           if-no-files-found: warn
           retention-days: 14
+
+
+  windows-compiler-candidate:
+    name: Windows compiler candidate fixed point
+    if: "!startsWith(github.event.head_commit.message, 'test: Windows-only ')"
+    runs-on: windows-2025
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: windows-2025
+      - name: Check out Buster
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record actual Buster checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - name: Install pinned LLVM
+        shell: bash
+        env:
+          BUSTER_CI_PYTHON: python
+          GH_TOKEN: ${{ github.token }}
+          LLVM_TARGET: x86_64-windows
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/raddebugger-windows-candidate"
+          python tools/ci_llvm.py --target "$LLVM_TARGET" --work-directory "$RUNNER_TEMP/llvm" \
+            --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV" \
+            2>&1 | tee "$RUNNER_TEMP/raddebugger-windows-candidate/llvm.log"
+      - name: Preserve the candidate native self-host fixed point
+        shell: pwsh
+        env:
+          VS_ARCH: amd64
+          VS_COMPONENT: Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+          CLANG_ARCH: x86_64
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Logs = Join-Path $env:RUNNER_TEMP 'raddebugger-windows-candidate'
+          New-Item -ItemType Directory -Force -Path $Logs | Out-Null
+          & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT -LlvmBin $env:BUSTER_CI_LLVM_BIN -Require cl, clang, llvm-rc, llvm-ml, llvm-lib, llvm-readobj -ClangArch $env:CLANG_ARCH
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # generate recreates build/, so keep the native driver and setup logs in RUNNER_TEMP.
+          $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
+          $Bootstrap = 'clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o "' + $Driver + '" 2>&1'
+          cmd /d /s /c $Bootstrap | Tee-Object -FilePath (Join-Path $Logs 'bootstrap.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $Generate = '"' + $Driver + '" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF -DBUSTER_BENCH_ALLOCATIONS=ON 2>&1'
+          cmd /d /s /c $Generate | Tee-Object -FilePath (Join-Path $Logs 'generate.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $Build = '"' + $Driver + '" build --config Release -t ide 2>&1'
+          cmd /d /s /c $Build | Tee-Object -FilePath (Join-Path $Logs 'build-ide.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $FixedPoint = '"' + $Driver + '" test_self_host --config Release 2>&1'
+          cmd /d /s /c $FixedPoint | Tee-Object -FilePath (Join-Path $Logs 'self-host.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain machine specifications
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/raddebugger-windows-candidate
+      - name: Retain candidate Windows compiler evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: raddebugger-windows-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/self-host
+            ${{ runner.temp }}/raddebugger-windows-candidate
+          if-no-files-found: warn
+          retention-days: 14
+

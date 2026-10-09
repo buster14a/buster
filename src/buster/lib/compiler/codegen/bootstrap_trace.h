@@ -1,11 +1,11 @@
 #pragma once
 #include <buster/lib/compiler/codegen/machine.h>
 
-// Opt-in bootstrap evidence. Version 1 uses little-endian u64 scalars and
+// Opt-in bootstrap evidence. Version 2 uses little-endian u64 scalars and
 // length-prefixed byte strings, never pointers, padding or arena capacities.
 // A checked, buffered writer bounds memory independently of translation size.
 #define BOOTSTRAP_TRACE_BUFFER_SIZE (64u * 1024u)
-#define BOOTSTRAP_TRACE_END 0x31444e4552545342ull
+#define BOOTSTRAP_TRACE_END 0x32444e4552545342ull
 
 typedef struct BootstrapTrace BootstrapTrace;
 struct BootstrapTrace

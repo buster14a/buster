@@ -865,6 +865,11 @@ typedef enum CSymbolWellKnown
     C_SYMBOL_WELL_KNOWN_CONST,
     C_SYMBOL_WELL_KNOWN_ATOMIC,
     C_SYMBOL_WELL_KNOWN_VA_OPT,
+    // Contextual Windows x64 SEH words. They stay identifiers everywhere
+    // except the statement-start grammar that opts into native outlining.
+    C_SYMBOL_WELL_KNOWN_SEH_TRY,
+    C_SYMBOL_WELL_KNOWN_SEH_EXCEPT,
+    C_SYMBOL_WELL_KNOWN_SEH_FINALLY,
     C_SYMBOL_WELL_KNOWN_COUNT,
 } CSymbolWellKnown;
 

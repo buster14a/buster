@@ -3537,6 +3537,7 @@ String8 ebpf_error_code_name(EbpfErrorCode code)
     case EBPF_ERROR_NONE: return S8("none");
     case EBPF_ERROR_INVALID_ARGUMENT: return S8("invalid argument");
     case EBPF_ERROR_IR_VALIDATION: return S8("IR validation");
+    case EBPF_ERROR_UNSUPPORTED_EXCEPTION_ROOT: break;
     case EBPF_ERROR_UNSUPPORTED_TYPE: return S8("unsupported type");
     case EBPF_ERROR_UNSUPPORTED_AGGREGATE: return S8("unsupported aggregate");
     case EBPF_ERROR_UNSUPPORTED_INSTRUCTION: return S8("unsupported instruction");
@@ -3555,7 +3556,7 @@ String8 ebpf_error_code_name(EbpfErrorCode code)
     case EBPF_ERROR_ENCODING: return S8("object encoding");
     case EBPF_ERROR_COUNT: return S8("invalid error code");
     }
-    return S8("invalid error code");
+    return code == EBPF_ERROR_UNSUPPORTED_EXCEPTION_ROOT ? S8("unsupported exception root") : S8("invalid error code");
 }
 
 bool ebpf_artifact_is_valid(EbpfArtifact artifact)
@@ -3613,6 +3614,13 @@ EbpfArtifact ebpf_emit_with_options(Arena* arena, IrProgram* program, IrModule* 
             context.error.function = validation.function;
             context.error.block = validation.block;
             context.error.instruction = validation.instruction;
+            break;
+        }
+        else if (ir_module_has_exception_root(modules + module_index))
+        {
+            context.error.code = EBPF_ERROR_UNSUPPORTED_EXCEPTION_ROOT;
+            context.error.message = S8("eBPF does not support canonical exception roots");
+            context.error.diagnostic = context.error.message;
             break;
         }
     }

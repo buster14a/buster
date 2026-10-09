@@ -256,7 +256,8 @@
     X(DESIGNATION, LIST, 0, 1)             /* designators (>= 1), then the value (last); token: first designator token */                   \
     X(DESIGNATOR_MEMBER, LEAF, 0, 0)       /* `.name`; data: symbol; token: the name */                                                     \
     X(DESIGNATOR_INDEX, FIXED, 1, 1)       /* `[index]`; token: `[` */                                                                      \
-    X(DESIGNATOR_RANGE, FIXED, 2, 2)       /* GNU `[lo ... hi]`; token: `[` */
+    X(DESIGNATOR_RANGE, FIXED, 2, 2)       /* GNU `[lo ... hi]`; token: `[` */ \
+    X(SEH_TRY_EXCEPT, FIXED, 3, 3)         /* Windows x64 `__try`: try-body, filter expression, handler; token: `__try` */
 
 typedef enum CAstKind
 {

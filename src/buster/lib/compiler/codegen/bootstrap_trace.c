@@ -69,7 +69,7 @@ BootstrapTrace bootstrap_trace_open(Arena* arena, String8 path, String8 kind)
     if (!result.failed)
     {
         result.buffer = arena_allocate(arena, u8, BOOTSTRAP_TRACE_BUFFER_SIZE);
-        bootstrap_trace_string(&result, S8("BUSTER bootstrap trace v1"));
+        bootstrap_trace_string(&result, S8("BUSTER bootstrap trace v2"));
         bootstrap_trace_string(&result, kind);
     }
     return result;
@@ -146,6 +146,7 @@ BUSTER_GLOBAL_LOCAL void bootstrap_trace_ir_function(BootstrapTrace* trace, IrFu
     bootstrap_trace_u64(trace, (u64)function->canonical_type.value);
     bootstrap_trace_u64(trace, (u64)function->id.value);
     bootstrap_trace_u64(trace, (u64)function->entry.value);
+    bootstrap_trace_u64(trace, (u64)function->exception_entry_plus_one);
     bootstrap_trace_u64(trace, (u64)function->state);
     bootstrap_trace_u64(trace, (u64)function->block_count);
     for (u32 i = 0; i < function->block_count; i += 1)
@@ -486,6 +487,7 @@ void bootstrap_trace_machine(BootstrapTrace* trace, IrFunction* function, Machin
         bootstrap_trace_u64(trace, (u64)validation.instruction);
         bootstrap_trace_u64(trace, (u64)validation.operand);
         bootstrap_trace_u64(trace, (u64)validation.mutable_virtual_register_count);
+        bootstrap_trace_u64(trace, (u64)machine->exception_entry_plus_one);
         // A verifier rejection can mean the tables themselves are absent or
         // inconsistent. Preserve the error, but never dereference rejected
         // storage merely to produce diagnostics about it.

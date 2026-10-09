@@ -4402,15 +4402,23 @@ static bool wasm64_validate_inputs(Wasm64Context* context)
     {
         IrModule* module = context->modules + module_index;
         IrValidationResult validation = ir_prepare_canonical_module(context->program, module, context->options.assume_validated);
-        if (validation.error != IR_VALIDATION_NONE)
+        if (validation.error != IR_VALIDATION_NONE || ir_module_has_exception_root(module))
         {
-            IrFunction* function = validation.function.value < module->function_count ? module->functions + validation.function.value : 0;
-            IrBlock* block = function && validation.block.value < function->block_count ? function->blocks + validation.block.value : 0;
-            IrInstruction* instruction = function && validation.instruction.value < function->instruction_count
-                                             ? function->instructions + validation.instruction.value
-                                             : 0;
-            wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("canonical IR validation failed before WebAssembly emission"), function,
-                        block, instruction, IR_SYMBOL_ID_INVALID);
+            if (validation.error != IR_VALIDATION_NONE)
+            {
+                IrFunction* function = validation.function.value < module->function_count ? module->functions + validation.function.value : 0;
+                IrBlock* block = function && validation.block.value < function->block_count ? function->blocks + validation.block.value : 0;
+                IrInstruction* instruction = function && validation.instruction.value < function->instruction_count
+                                                 ? function->instructions + validation.instruction.value
+                                                 : 0;
+                wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("canonical IR validation failed before WebAssembly emission"), function,
+                            block, instruction, IR_SYMBOL_ID_INVALID);
+            }
+            else
+            {
+                wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_EXCEPTION_ROOT,
+                            wasm64_s8("WebAssembly does not support canonical exception roots"), 0, 0, 0, IR_SYMBOL_ID_INVALID);
+            }
             return false;
         }
     }
@@ -4525,6 +4533,7 @@ String8 wasm64_error_code_name(Wasm64ErrorCode code)
     case WASM64_ERROR_NONE: return wasm64_s8("none");
     case WASM64_ERROR_INVALID_ARGUMENT: return wasm64_s8("invalid_argument");
     case WASM64_ERROR_IR_VALIDATION: return wasm64_s8("ir_validation");
+    case WASM64_ERROR_UNSUPPORTED_EXCEPTION_ROOT: break;
     case WASM64_ERROR_UNSUPPORTED_TYPE: return wasm64_s8("unsupported_type");
     case WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI: return wasm64_s8("unsupported_aggregate_abi");
     case WASM64_ERROR_VARIADIC: return wasm64_s8("variadic");
@@ -4540,5 +4549,5 @@ String8 wasm64_error_code_name(Wasm64ErrorCode code)
     case WASM64_ERROR_UNSUPPORTED_LINKAGE: return wasm64_s8("unsupported_linkage");
     case WASM64_ERROR_COUNT: break;
     }
-    return wasm64_s8("unknown");
+    return code == WASM64_ERROR_UNSUPPORTED_EXCEPTION_ROOT ? wasm64_s8("unsupported_exception_root") : wasm64_s8("unknown");
 }

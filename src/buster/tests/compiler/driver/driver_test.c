@@ -46,6 +46,8 @@
 // through serialized ELF allocation flags and object-reader identities.
 // compiler_driver_test_initial_exec_tls checks foreign MOV GOTTPOFF sites and
 // fixed/PIE execution, including malformed-site diagnostics and retained output.
+// compiler_driver_test_windows_seh covers bounded Windows x64 SEH lowering,
+// named refusals, and real Windows runtime dispatch through the CRT.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
@@ -27649,6 +27651,900 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_arena_reservation_f
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_windows_seh_runtime_source(Arena* arena)
+{
+    // Embedded first-party input avoids a new retirement-support fixture identity.
+    // Each independent S8 is below the ISO C 4095-byte literal ceiling.
+    String8 parts[] = {
+        S8(
+            "// First-party Windows x64 SEH runtime regression for #2279/#3276.\n"
+            "// Real CRT/LLD linking exercises protected loads and callback unwinding.\n"
+            "// Call-PC boundaries are checked separately by native/object controls.\n"
+            "typedef void (*callback_fn)(void *);\n"
+            "typedef void (*safe_fn)(callback_fn, callback_fn, void *);\n"
+            "typedef int (*outer_fn)(safe_fn, callback_fn, callback_fn, void *);\n"
+            "typedef int (*bad_arg_fn)(safe_fn, callback_fn, callback_fn, void * volatile *);\n"
+            "\n"
+            "__declspec(dllimport) void __stdcall RaiseException(unsigned long, unsigned long, unsigned long, unsigned long long const *);\n"
+            "int __cdecl printf(char const *, ...);\n"
+            "void run_outer_controls(int);\n"
+            "void run_local_controls(void);\n"
+            "void run_argument_controls(void);\n"
+            "\n"
+            "#define RAD_SEH_NOINLINE __declspec(noinline)\n"
+            "\n"
+            "volatile int call_count, fail_count, value_seen, after_raise, fail_after;\n"
+            "volatile int nested_before, nested_after, leaf_after, outer_after, arg_after;\n"
+            "volatile int argument_count, argument_after;\n"
+            "int seh_checks, seh_errors;\n"
+            "\n"
+            "void seh_check(char const *kind, char const *test, int ok)\n"
+            "{\n"
+            "    ++seh_checks;\n"
+            "    printf(\"RADDBG_SEH_CHECK %s %s %s\\n\", kind, test, ok ? \"PASS\" : \"FAIL\");\n"
+            "    if (!ok)\n"
+            "    {\n"
+            "        ++seh_errors;\n"
+            "    }\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "void seh_reset(void)\n"
+            "{\n"
+            "    call_count = fail_count = value_seen = 0;\n"
+            "    after_raise = fail_after = 0;\n"
+            "    nested_before = nested_after = leaf_after = 0;\n"
+            "    outer_after = arg_after = 0;\n"
+            "    argument_count = argument_after = 0;\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "RAD_SEH_NOINLINE void normal_callback(void *p)\n"
+            "{\n"
+            "    ++call_count;\n"
+            "    ++*(int *)p;\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "RAD_SEH_NOINLINE void mutate_then_raise(void *p)\n"
+            "{\n"
+            "    *(int *)p = 41;\n"
+            "    RaiseException(0xe0424242ul, 0, 0, 0);\n"
+            "    after_raise = 1;\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "RAD_SEH_NOINLINE void leaf_callback(void *p)\n"
+            "{\n"
+            "    *(int *)p = 53;\n"
+            "    RaiseException(0xe0424243ul, 0, 0, 0);\n"
+            "    leaf_after = 1;\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "RAD_SEH_NOINLINE void nested_callback(void *p)\n"
+            "{\n"
+            "    nested_before = 1;\n"
+            "    leaf_callback(p);\n"
+            "    nested_after = 1;\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "RAD_SEH_NOINLINE void capture_callback(void *p)\n"
+            "{\n"
+            "    ++fail_count;\n"
+            "    value_seen = *(int *)p;\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "RAD_SEH_NOINLINE void original_safe_call(callback_fn f, callback_fn h, void *p)\n"
+            "{\n"
+            "    __try\n"
+            "    {\n"
+            "        f(p);\n"
+            "    }\n"
+            "    __except(1)\n"
+            "    {\n"
+            "        if (h)\n"
+            "        {\n"
+            "            h(p);\n"
+            "        }\n"
+            "    }\n"),
+        S8(
+            "    return;\n"
+            "}\n"
+            "\n"
+            "static RAD_SEH_NOINLINE _Bool catch_as_bool(callback_fn f, void *p)\n"
+            "{\n"
+            "    _Bool result = 0;\n"
+            "    __try\n"
+            "    {\n"
+            "        f(p);\n"
+            "    }\n"
+            "    __except(1)\n"
+            "    {\n"
+            "        result = 1;\n"
+            "    }\n"
+            "    return result;\n"
+            "}\n"
+            "\n"
+            "RAD_SEH_NOINLINE void outlined_safe_call(callback_fn f, callback_fn h, void *p)\n"
+            "{\n"
+            "    if (catch_as_bool(f, p) && h)\n"
+            "    {\n"
+            "        h(p);\n"
+            "    }\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "static void run_callback_cases(char const *kind, safe_fn s)\n"
+            "{\n"
+            "    int value = 7;\n"
+            "\n"
+            "    seh_reset();\n"
+            "    s(normal_callback, capture_callback, &value);\n"
+            "    seh_check(kind, \"normal\", value == 8 && call_count == 1 &&\n"
+            "              fail_count == 0);\n"
+            "\n"
+            "    value = 7;\n"
+            "    seh_reset();\n"
+            "    s(mutate_then_raise, capture_callback, &value);\n"
+            "    seh_check(kind, \"mutation-visible\", value == 41 && value_seen == 41 &&\n"
+            "              fail_count == 1 && after_raise == 0);\n"
+            "\n"
+            "    value = 7;\n"
+            "    seh_reset();\n"
+            "    s(nested_callback, capture_callback, &value);\n"
+            "    seh_check(kind, \"nested-unwind\", value == 53 && nested_before == 1 &&\n"
+            "              nested_after == 0 && leaf_after == 0 && value_seen == 53);\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "void run_core_controls(void)\n"
+            "{\n"
+            "    run_callback_cases(\"original\", original_safe_call);\n"
+            "    run_callback_cases(\"outlined\", outlined_safe_call);\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "int main(int argc, char **argv)\n"
+            "{\n"
+            "    int test_bad_arg = argc > 1 && argv[1][0] == 'a';\n"
+            "\n"
+            "    run_core_controls();\n"
+            "    run_outer_controls(test_bad_arg);\n"
+            "    run_local_controls();\n"
+            "    run_argument_controls();\n"
+            "    printf(\"RADDBG_SEH_RESULT checks=%d failures=%d\\n\", seh_checks, seh_errors);\n"
+            "    return seh_errors ? 1 : 0;\n"
+            "}\n"
+            "\n"
+            "extern volatile int fail_count, after_raise, fail_after, outer_after, arg_after, call_count;\n"
+            "extern void seh_check(char const *, char const *, int);\n"
+            "extern void seh_reset(void);\n"
+            "extern void original_safe_call(callback_fn, callback_fn, void *);\n"
+            "extern void outlined_safe_call(callback_fn, callback_fn, void *);\n"
+            "extern void normal_callback(void *);\n"
+            "extern void capture_callback(void *);\n"
+            "\n"
+            "static RAD_SEH_NOINLINE void raise_callback(void *p)\n"
+            "{\n"
+            "    (void)p;\n"
+            "    RaiseException(0xe0424244ul, 0, 0, 0);\n"
+            "    after_raise = 1;\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "static RAD_SEH_NOINLINE void raise_failure(void *p)\n"
+            "{\n"
+            "    (void)p;\n"
+            "    ++fail_count;\n"
+            "    RaiseException(0xe0424245ul, 0, 0, 0);\n"
+            "    fail_after = 1;\n"
+            "    return;\n"
+            "}\n"
+            "\n"),
+        S8(
+            "static RAD_SEH_NOINLINE int outer_guard(safe_fn s, callback_fn f, callback_fn h, void *p)\n"
+            "{\n"
+            "    int result = 0;\n"
+            "    __try\n"
+            "    {\n"
+            "        s(f, h, p);\n"
+            "    }\n"
+            "    __except(1)\n"
+            "    {\n"
+            "        result = 1;\n"
+            "    }\n"
+            "    if (!result)\n"
+            "    {\n"
+            "        outer_after = 1;\n"
+            "    }\n"
+            "    return result;\n"
+            "}\n"
+            "\n"
+            "static RAD_SEH_NOINLINE int bad_argument_guard(safe_fn s, callback_fn f, callback_fn h, void * volatile *bad)\n"
+            "{\n"
+            "    int result = 0;\n"
+            "    __try\n"
+            "    {\n"
+            "        s(f, h, *bad);\n"
+            "    }\n"
+            "    __except(1)\n"
+            "    {\n"
+            "        result = 1;\n"
+            "    }\n"
+            "    if (!result)\n"
+            "    {\n"
+            "        arg_after = 1;\n"
+            "    }\n"
+            "    return result;\n"
+            "}\n"
+            "\n"
+            "static void run_outer_cases(char const *kind, safe_fn s, int test_bad_arg)\n"
+            "{\n"
+            "    int value = 7;\n"
+            "    int caught = 0;\n"
+            "    void * volatile *bad = (void * volatile *)(unsigned long long)1;\n"
+            "\n"
+            "    seh_reset();\n"
+            "    caught = outer_guard(s, raise_callback, raise_failure, &value);\n"
+            "    seh_check(kind, \"failure-to-outer\", caught == 1 && fail_count == 1 &&\n"
+            "              after_raise == 0 && fail_after == 0 && outer_after == 0);\n"
+            "\n"
+            "    if (test_bad_arg)\n"
+            "    {\n"
+            "        seh_reset();\n"
+            "        caught = bad_argument_guard(s, normal_callback, capture_callback, bad);\n"
+            "        seh_check(kind, \"bad-argument\", caught == 1 && call_count == 0 &&\n"
+            "                  fail_count == 0 && arg_after == 0);\n"
+            "    }\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "void run_outer_controls(int test_bad_arg)\n"
+            "{\n"
+            "    run_outer_cases(\"original\", original_safe_call, test_bad_arg);\n"
+            "    run_outer_cases(\"outlined\", outlined_safe_call, test_bad_arg);\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "extern void seh_check(char const *, char const *, int);\n"
+            "extern void seh_reset(void);\n"
+            "\n"
+            "static volatile int local_after_raise;\n"
+            "\n"
+            "static RAD_SEH_NOINLINE void mutate_local(int *value)\n"
+            "{\n"
+            "    *value = 41;\n"
+            "    RaiseException(0xe0424247ul, 0, 0, 0);\n"
+            "    local_after_raise = 1;\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "static RAD_SEH_NOINLINE int local_type_probe(void)\n"
+            "{\n"
+            "    typedef struct THREADNAME_INFO\n"
+            "    {\n"
+            "        unsigned long dwType;\n"
+            "        char const *szName;\n"
+            "        unsigned long dwThreadID;\n"
+            "        unsigned long dwFlags;\n"
+            "    } THREADNAME_INFO;\n"
+            "    THREADNAME_INFO info = {0};\n"
+            "    int caught = 0;\n"
+            "    __try\n"
+            "    {\n"
+            "        RaiseException(0xe0424246ul, 0, sizeof(info) / sizeof(unsigned long long),\n"
+            "                       (unsigned long long const *)&info);\n"
+            "    }\n"
+            "    __except(1)\n"
+            "    {\n"
+            "        caught = 1;\n"
+            "    }\n"),
+        S8(
+            "    return caught && sizeof(info) == 3 * sizeof(unsigned long long);\n"
+            "}\n"
+            "\n"
+            "static RAD_SEH_NOINLINE int capture_automatic_local(void)\n"
+            "{\n"
+            "    int local = 7;\n"
+            "    int observed = 0;\n"
+            "    local_after_raise = 0;\n"
+            "    __try\n"
+            "    {\n"
+            "        mutate_local(&local);\n"
+            "    }\n"
+            "    __except(1)\n"
+            "    {\n"
+            "        observed = local;\n"
+            "    }\n"
+            "    return observed == 41 && local_after_raise == 0;\n"
+            "}\n"
+            "\n"
+            "void run_local_controls(void)\n"
+            "{\n"
+            "    int type_ok;\n"
+            "    int local_ok;\n"
+            "\n"
+            "    seh_reset();\n"
+            "    type_ok = local_type_probe();\n"
+            "    seh_check(\"local-type\", \"sizeof-address\", type_ok);\n"
+            "\n"
+            "    seh_reset();\n"
+            "    local_ok = capture_automatic_local();\n"
+            "    seh_check(\"local-capture\", \"automatic-local\", local_ok);\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "// The nested call must execute inside the helper. Hoisting it into the\n"
+            "// caller would leave this exception outside the designated protected scope.\n"
+            "static RAD_SEH_NOINLINE int raising_argument(int *value)\n"
+            "{\n"
+            "    ++argument_count;\n"
+            "    *value = 67;\n"
+            "    RaiseException(0xe0424248ul, 0, 0, 0);\n"
+            "    argument_after = 1;\n"
+            "    return 9;\n"
+            "}\n"
+            "\n"
+            "static RAD_SEH_NOINLINE void record_integer_argument(int value)\n"
+            "{\n"
+            "    ++call_count;\n"
+            "    value_seen = value;\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "static RAD_SEH_NOINLINE void raise_integer_argument(int value)\n"
+            "{\n"
+            "    ++call_count;\n"
+            "    value_seen = value;\n"
+            "    RaiseException(0xe0424249ul, 0, 0, 0);\n"
+            "    after_raise = 1;\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "static RAD_SEH_NOINLINE int nested_argument_guard(void)\n"
+            "{\n"
+            "    int value = 7;\n"
+            "    int observed = 0;\n"
+            "    int caught = 0;\n"
+            "    __try\n"
+            "    {\n"
+            "        record_integer_argument(raising_argument(&value));\n"
+            "    }\n"
+            "    __except(1)\n"
+            "    {\n"
+            "        observed = value;\n"
+            "        caught = 1;\n"
+            "    }\n"
+            "    return caught == 1 && value == 67 && observed == 67 && call_count == 0 &&\n"
+            "           argument_count == 1 && argument_after == 0;\n"
+            "}\n"
+            "\n"
+            "static RAD_SEH_NOINLINE int side_effect_argument_guard(void)\n"
+            "{\n"
+            "    int value = 7;\n"
+            "    int observed = 0;\n"
+            "    int caught = 0;\n"
+            "    __try\n"
+            "    {\n"
+            "        raise_integer_argument(++value);\n"
+            "    }\n"
+            "    __except(1)\n"
+            "    {\n"
+            "        observed = value;\n"
+            "        caught = 1;\n"
+            "    }\n"
+            "    return caught == 1 && value == 8 && observed == 8 && value_seen == 8 &&\n"
+            "           call_count == 1 && after_raise == 0;\n"
+            "}\n"
+            "\n"
+            "void run_argument_controls(void)\n"
+            "{\n"
+            "    int nested_ok;\n"
+            "    int side_effect_ok;\n"
+            "\n"
+            "    seh_reset();\n"
+            "    nested_ok = nested_argument_guard();\n"),
+        S8(
+            "    seh_check(\"argument\", \"nested-raise\", nested_ok);\n"
+            "\n"
+            "    seh_reset();\n"
+            "    side_effect_ok = side_effect_argument_guard();\n"
+            "    seh_check(\"argument\", \"side-effect\", side_effect_ok);\n"
+            "    return;\n"
+            "}\n"),
+    };
+    String8 source = string_format(arena, S8("{S8}{S8}{S8}{S8}{S8}"),
+                                  parts[0], parts[1], parts[2], parts[3], parts[4]);
+    return source;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_windows_seh(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa"), S8("-fc-ast-pilot=implicit")};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 windows_x64 = S8("x86_64-windows");
+    String8 positive_source = S8(
+        "typedef void (*seh_callback)(void *);\n"
+        "int windows_seh_single_call(seh_callback callback)\n"
+        "{\n"
+        "    typedef struct { unsigned long value; } Local;\n"
+        "    Local local = {(unsigned long)sizeof(Local)};\n"
+        "    Local *address = &local;\n"
+        "    int observed = 0;\n"
+        "    __try { callback(address); }\n"
+        "    __except (1) { observed = (int)address->value; }\n"
+        "    return observed != (int)sizeof(Local);\n"
+        "}\n");
+    String8 sentinel = S8("previous output survives rejected Windows SEH input");
+
+    // Every host compiles the bounded handler shape to a Windows x64 object
+    // through each front-end representation and both native allocators.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-windows-seh-positive-source"), S8(".c"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(positive_source))))
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    String8 name = string_format(arena, S8("buster-windows-seh-positive-{u32}-{u32}"), allocator, frontend);
+                    String8 object_path = buster_test_temporary_path(arena, name, S8(".obj"));
+                    String8 command[] = {
+                        S8("-target"), windows_x64, S8("-nostdinc"), S8("-std=gnu17"), S8("-O2"), S8("-g0"),
+                        allocators[allocator], frontends[frontend], S8("-fverify-codegen"), S8("-c"),
+                        S8("-o"), object_path, input,
+                    };
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                        arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                    String8 description = string_format(arena, S8("Windows SEH positive {S8} {S8}: {S8}"),
+                                                       allocators[allocator], frontends[frontend], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+                    {
+                        BUSTER_TEST(arguments, compiled.codegen_statistics.function_count != 0 &&
+                                               compiled.codegen_statistics.fallback_function_count == 0);
+                        BUSTER_TEST(arguments, compiled.object.error == OBJECT_ERROR_NONE && compiled.object.sections &&
+                                               compiled.object.section_count > OBJECT_SECTION_WINDOWS_XDATA);
+                        if (compiled.object.sections && compiled.object.section_count > OBJECT_SECTION_WINDOWS_XDATA)
+                        {
+                            ByteSlice xdata = compiled.object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+                            BUSTER_TEST(arguments, xdata.pointer && xdata.length >= 32);
+                            u32 xdata_relocation_count = 0;
+                            u32 coordinate_count = 0;
+                            bool has_personality = false;
+                            for (u32 relocation_index = 0; relocation_index < compiled.object.relocation_count; relocation_index += 1)
+                            {
+                                ObjectRelocation* relocation = compiled.object.relocations + relocation_index;
+                                if (relocation->section == OBJECT_SECTION_WINDOWS_XDATA)
+                                {
+                                    xdata_relocation_count += 1;
+                                    BUSTER_TEST(arguments, relocation->kind == OBJECT_RELOCATION_COFF_ADDR32NB);
+                                    if (relocation->symbol < compiled.object.symbol_count)
+                                    {
+                                        ObjectSymbol* target = compiled.object.symbols + relocation->symbol;
+                                        has_personality |= string_equal(target->name, S8("__C_specific_handler"));
+                                        coordinate_count += target->section == OBJECT_SECTION_TEXT;
+                                    }
+                                }
+                            }
+                            BUSTER_TEST(arguments, xdata_relocation_count == 4 && coordinate_count == 3 && has_personality);
+                        }
+                        ObjectSymbol* function = compiler_driver_test_symbol_by_name(&compiled.object, S8("windows_seh_single_call"));
+                        BUSTER_TEST(arguments, function && function->kind == OBJECT_SYMBOL_FUNCTION &&
+                                               function->section == OBJECT_SECTION_TEXT && function->size != 0);
+                        ByteSlice bytes = file_read(arena, object_path, (FileReadOptions){0});
+                        BUSTER_TEST(arguments, bytes.pointer && bytes.length != 0);
+                    }
+                    os_file_delete(object_path);
+                }
+            }
+        }
+        os_file_delete(input);
+        scratch_end(temporary);
+    }
+
+    struct WindowsSehNegativeCase { String8 name; String8 source; };
+    struct WindowsSehNegativeCase negative_cases[] = {
+        {S8("noncall"), S8(
+            "void seh_noncall(int *value)\n"
+            "{ __try { *value += 1; } __except (1) { *value = 0; } return; }\n")},
+        {S8("multistatement"), S8(
+            "void seh_multistatement(void (*callback)(void *), void *context)\n"
+            "{ __try { callback(context); callback(context); } __except (1) { } return; }\n")},
+        {S8("nested"), S8(
+            "void seh_nested(void (*callback)(void *), void *context)\n"
+            "{ __try { __try { callback(context); } __except (1) { } } __except (1) { } return; }\n")},
+        {S8("finally"), S8(
+            "void seh_finally(void (*callback)(void *), void *context)\n"
+            "{ __try { callback(context); } __finally { } return; }\n")},
+        {S8("filter"), S8(
+            "void seh_filter(void (*callback)(void *), void *context)\n"
+            "{ __try { callback(context); } __except (2) { } return; }\n")},
+        {S8("filter-comma"), S8(
+            "void seh_filter_comma(void (*callback)(void *), void *context)\n"
+            "{ __try { callback(context); } __except ((0, 1)) { } return; }\n")},
+        {S8("filter-call"), S8(
+            "int filter(void);\n"
+            "void seh_filter_call(void (*callback)(void *), void *context)\n"
+            "{ __try { callback(context); } __except (filter()) { } return; }\n")},
+        {S8("filter-selector"), S8(
+            "void seh_filter_selector(void (*callback)(void *), void *context, int selector)\n"
+            "{ __try { callback(context); } __except (selector) { } return; }\n")},
+        {S8("branching-argument"), S8(
+            "void seh_branching_argument(int choose, void (*callback)(void *), void *left, void *right)\n"
+            "{ __try { callback(choose ? left : right); } __except (1) { } return; }\n")},
+        {S8("vla"), S8(
+            "void seh_vla(int count, void (*callback)(void *))\n"
+            "{ int values[count]; __try { callback(values); } __except (1) { } return; }\n")},
+        {S8("transfer"), S8(
+            "void seh_transfer(void (*callback)(void *), void *context)\n"
+            "{ __try { callback(context); goto done; } __except (1) { } done: return; }\n")},
+    };
+    String8 seh_diagnostic_prefix = S8("Windows SEH:");
+
+    // Refusals must be named and must preserve any existing output file.
+    for (u32 negative = 0; negative < BUSTER_ARRAY_LENGTH(negative_cases); negative += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 name = string_format(arena, S8("buster-windows-seh-negative-{S8}-{u32}"),
+                                         negative_cases[negative].name, frontend);
+            String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+            String8 output = buster_test_temporary_path(arena, name, S8(".obj"));
+            bool files_ready = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(negative_cases[negative].source)) &&
+                               file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel));
+            if (BUSTER_REQUIRE(arguments, files_ready))
+            {
+                String8 command[] = {
+                    S8("-target"), windows_x64, S8("-nostdinc"), S8("-std=gnu17"), frontends[frontend],
+                    S8("-c"), S8("-o"), output, input,
+                };
+                CompilerDriverResult rejected = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                String8 description = string_format(arena, S8("Windows SEH refusal {S8} {S8}: {S8}"),
+                                                    negative_cases[negative].name, frontends[frontend], rejected.diagnostic);
+                BUSTER_TEST_RAW(arguments, rejected.error != COMPILER_DRIVER_ERROR_NONE, description);
+                BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, seh_diagnostic_prefix) != BUSTER_STRING_NO_MATCH);
+                BUSTER_TEST(arguments, !rejected.has_object);
+                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, output, (FileReadOptions){0})), sentinel);
+            }
+            os_file_delete(output);
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+
+    // These spellings remain ordinary identifiers outside the statement grammar.
+    String8 cross_targets[] = {S8("x86_64-linux"), S8("aarch64-windows")};
+    String8 identifier_targets[] = {S8("x86_64-linux"), S8("aarch64-windows"), windows_x64};
+    String8 identifier_source = S8(
+        "int __try(void) { return 1; }\n"
+        "int __except(int value) { return value; }\n"
+        "int __finally(void) { return 3; }\n"
+        "int seh_identifier_control(void) { __try(); return __try() + __except(2) + __finally() != 6; }\n");
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-windows-seh-identifiers"), S8(".c"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(identifier_source))))
+        {
+            for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(identifier_targets); target += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    String8 name = string_format(arena, S8("buster-windows-seh-identifiers-{u32}-{u32}"), target, frontend);
+                    String8 output = buster_test_temporary_path(arena, name, S8(".obj"));
+                    String8 command[] = {
+                        S8("-target"), identifier_targets[target], S8("-nostdinc"), S8("-std=gnu17"), S8("-O2"), S8("-g0"),
+                        frontends[frontend], S8("-fverify-codegen"), S8("-c"), S8("-o"), output, input,
+                    };
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                        arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                    String8 description = string_format(arena, S8("Windows SEH ordinary identifier control {S8} {S8}: {S8}"),
+                                                        identifier_targets[target], frontends[frontend], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+                    {
+                        String8 ordinary_names[] = {S8("__try"), S8("__except"), S8("__finally"), S8("seh_identifier_control")};
+                        BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == BUSTER_ARRAY_LENGTH(ordinary_names) &&
+                                               compiled.codegen_statistics.fallback_function_count == 0);
+                        for (u32 symbol_index = 0; symbol_index < BUSTER_ARRAY_LENGTH(ordinary_names); symbol_index += 1)
+                        {
+                            ObjectSymbol* symbol = compiler_driver_test_symbol_by_name(&compiled.object, ordinary_names[symbol_index]);
+                            BUSTER_TEST(arguments, symbol && symbol->kind == OBJECT_SYMBOL_FUNCTION && symbol->global);
+                        }
+                    }
+                    os_file_delete(output);
+                }
+            }
+        }
+        os_file_delete(input);
+        scratch_end(temporary);
+    }
+
+    struct WindowsSehOffTargetCase { String8 name; String8 source; };
+    struct WindowsSehOffTargetCase off_target_cases[] = {
+        {S8("except"), S8(
+            "void seh_offtarget_except(void (*callback)(void *), void *context)\n"
+            "{ __try { callback(context); } __except (1) { } return; }\n")},
+        {S8("finally"), S8(
+            "void seh_offtarget_finally(void (*callback)(void *), void *context)\n"
+            "{ __try { callback(context); } __finally { } return; }\n")},
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(cross_targets); target += 1)
+    {
+        for (u32 unsupported = 0; unsupported < BUSTER_ARRAY_LENGTH(off_target_cases); unsupported += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                String8 name = string_format(arena, S8("buster-windows-seh-offtarget-{S8}-{u32}-{u32}"),
+                                             off_target_cases[unsupported].name, target, frontend);
+                String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+                String8 output = buster_test_temporary_path(arena, name, S8(".obj"));
+                bool files_ready = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(off_target_cases[unsupported].source)) &&
+                                   file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel));
+                if (BUSTER_REQUIRE(arguments, files_ready))
+                {
+                    String8 command[] = {
+                        S8("-target"), cross_targets[target], S8("-nostdinc"), S8("-std=gnu17"), frontends[frontend],
+                        S8("-c"), S8("-o"), output, input,
+                    };
+                    CompilerDriverResult rejected = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 description = string_format(arena, S8("Windows SEH off-target refusal {S8} {S8} {S8}: {S8}"),
+                                                        off_target_cases[unsupported].name, cross_targets[target],
+                                                        frontends[frontend], rejected.diagnostic);
+                    BUSTER_TEST_RAW(arguments, rejected.error != COMPILER_DRIVER_ERROR_NONE, description);
+                    BUSTER_TEST(arguments, !rejected.has_object);
+                    BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, output, (FileReadOptions){0})), sentinel);
+                }
+                os_file_delete(output);
+                os_file_delete(input);
+                scratch_end(temporary);
+            }
+        }
+    }
+
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64
+    // First prove the same first-party fixture with Clang's explicit
+    // asynchronous-exception mode; this reference exercises its faulting loads.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 clang = executable_resolve_in_path(arena, S8("clang"));
+        String8 clang_arg1 = {0};
+#if defined(BUSTER_HOST_C_COMPILER) && defined(BUSTER_HOST_C_COMPILER_ID)
+        bool configured_clang = string_first_sequence(S8(BUSTER_HOST_C_COMPILER_ID), S8("Clang")) <
+                                S8(BUSTER_HOST_C_COMPILER_ID).length;
+        if (configured_clang && S8(BUSTER_HOST_C_COMPILER).length)
+        {
+            clang = S8(BUSTER_HOST_C_COMPILER);
+#if defined(BUSTER_HOST_C_COMPILER_ARG1)
+            clang_arg1 = S8(BUSTER_HOST_C_COMPILER_ARG1);
+#endif
+        }
+#endif
+        String8 runtime_contents = compiler_driver_test_windows_seh_runtime_source(arena);
+        String8 runtime_source = buster_test_temporary_path(arena, S8("buster-windows-seh-runtime-input"), S8(".c"));
+        bool runtime_source_written = runtime_contents.length == 9233 &&
+                                      file_write(runtime_source, BUSTER_SLICE_TO_BYTE_SLICE(runtime_contents));
+        String8 runtime_target = S8("x86_64-pc-windows-msvc");
+        String8 baseline_base = buster_test_temporary_path(arena, S8("buster-windows-seh-clang-reference"), S8(""));
+        String8 baseline_executable = string_format_z(arena, S8("{S8}.exe"), baseline_base);
+        String8 baseline_pdb = string_format_z(arena, S8("{S8}.pdb"), baseline_base);
+        String8 baseline_pdb_argument = string_format_z(arena, S8("-Wl,/pdb:{S8}"), baseline_pdb);
+        String8 baseline_command[20];
+        u32 baseline_command_count = 0;
+        baseline_command[baseline_command_count++] = clang;
+        if (clang_arg1.length) baseline_command[baseline_command_count++] = clang_arg1;
+        baseline_command[baseline_command_count++] = S8("-target");
+        baseline_command[baseline_command_count++] = runtime_target;
+        baseline_command[baseline_command_count++] = S8("-nostdinc");
+        baseline_command[baseline_command_count++] = S8("-std=gnu17");
+        baseline_command[baseline_command_count++] = S8("-O2");
+        baseline_command[baseline_command_count++] = S8("-g");
+        baseline_command[baseline_command_count++] = S8("-fms-extensions");
+        baseline_command[baseline_command_count++] = S8("-fasync-exceptions");
+        baseline_command[baseline_command_count++] = S8("-fuse-ld=lld");
+        baseline_command[baseline_command_count++] = S8("-Wl,/debug");
+        baseline_command[baseline_command_count++] = baseline_pdb_argument;
+        baseline_command[baseline_command_count++] = runtime_source;
+        baseline_command[baseline_command_count++] = S8("-o");
+        baseline_command[baseline_command_count++] = baseline_executable;
+        ProcessSpawnOptions external_capture = {
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .use_process_environment = true, .search_path = true, .new_process_group = true,
+        };
+        String8 run_outputs[7] = {0};
+        bool run_ready[7] = {0};
+        BUSTER_TEST(arguments, clang.length != 0);
+        BUSTER_TEST(arguments, runtime_source_written);
+        if (clang.length && runtime_source_written)
+        {
+            ProcessSpawnResult baseline_link_spawn = os_process_spawn(
+                (SliceString8){.pointer = baseline_command, .length = baseline_command_count},
+                (SliceString8){0}, (SliceString8){0}, external_capture);
+            BUSTER_TEST(arguments, baseline_link_spawn.handle != 0);
+            if (baseline_link_spawn.handle)
+            {
+                ProcessWaitResult baseline_link_wait = os_process_wait_deadline(arena, baseline_link_spawn, 60000000);
+                bool baseline_linked = !baseline_link_wait.timed_out && baseline_link_wait.result == PROCESS_RESULT_SUCCESS;
+                BUSTER_TEST_RAW(arguments, baseline_linked,
+                                BYTE_SLICE_TO_STRING(8, baseline_link_wait.streams[STANDARD_STREAM_ERROR]));
+                ByteSlice pdb_bytes = baseline_linked ? file_read(arena, baseline_pdb, (FileReadOptions){0}) : (ByteSlice){0};
+                BUSTER_TEST(arguments, pdb_bytes.pointer && pdb_bytes.length != 0);
+                if (baseline_linked)
+                {
+                    String8 child_command[] = {baseline_executable, S8("asyncarg")};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_command),
+                                                                (SliceString8){0}, (SliceString8){0}, external_capture);
+                    BUSTER_TEST(arguments, child.handle != 0);
+                    if (child.handle)
+                    {
+                        ProcessWaitResult waited = os_process_wait_deadline(arena, child, 30000000);
+                        String8 stderr_text = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
+                        BUSTER_TEST(arguments, !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS);
+                        BUSTER_TEST(arguments, stderr_text.length == 0);
+                        run_outputs[0] = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_OUTPUT]);
+                        run_ready[0] = !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS && stderr_text.length == 0;
+                    }
+                }
+            }
+
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    u32 iteration = allocator * BUSTER_ARRAY_LENGTH(frontends) + frontend;
+                    String8 name = string_format(arena, S8("buster-windows-seh-buster-{u32}-{u32}"), allocator, frontend);
+                    String8 object_path = buster_test_temporary_path(arena, name, S8(".obj"));
+                    String8 executable_base = buster_test_temporary_path(arena, name, S8(""));
+                    String8 executable = string_format_z(arena, S8("{S8}.exe"), executable_base);
+                    String8 pdb = string_format_z(arena, S8("{S8}.pdb"), executable_base);
+                    String8 pdb_argument = string_format_z(arena, S8("-Wl,/pdb:{S8}"), pdb);
+                    String8 command[] = {
+                        S8("-target"), windows_x64, S8("-nostdinc"), S8("-std=gnu17"), S8("-O2"), S8("-g"),
+                        allocators[allocator], frontends[frontend], S8("-fverify-codegen"), S8("-c"),
+                        S8("-o"), object_path, runtime_source,
+                    };
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                        arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                    String8 description = string_format(arena, S8("Windows SEH runtime compile {S8} {S8}: {S8}"),
+                                                       allocators[allocator], frontends[frontend], compiled.diagnostic);
+                    bool compiled_ok = compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object;
+                    BUSTER_TEST_RAW(arguments, compiled_ok, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 37 &&
+                                               compiled.codegen_statistics.fallback_function_count == 0, description);
+                    ByteSlice object_bytes = compiled_ok ? file_read(arena, object_path, (FileReadOptions){0}) : (ByteSlice){0};
+                    BUSTER_TEST(arguments, object_bytes.pointer && object_bytes.length != 0);
+                    if (compiled_ok)
+                    {
+                        String8 link_command[20];
+                        u32 link_command_count = 0;
+                        link_command[link_command_count++] = clang;
+                        if (clang_arg1.length) link_command[link_command_count++] = clang_arg1;
+                        link_command[link_command_count++] = S8("-target");
+                        link_command[link_command_count++] = runtime_target;
+                        link_command[link_command_count++] = S8("-g");
+                        link_command[link_command_count++] = S8("-fuse-ld=lld");
+                        link_command[link_command_count++] = S8("-Wl,/debug");
+                        link_command[link_command_count++] = pdb_argument;
+                        link_command[link_command_count++] = object_path;
+                        link_command[link_command_count++] = S8("-o");
+                        link_command[link_command_count++] = executable;
+                        ProcessSpawnResult link_spawn = os_process_spawn(
+                            (SliceString8){.pointer = link_command, .length = link_command_count},
+                            (SliceString8){0}, (SliceString8){0}, external_capture);
+                        BUSTER_TEST(arguments, link_spawn.handle != 0);
+                        if (link_spawn.handle)
+                        {
+                            ProcessWaitResult link_wait = os_process_wait_deadline(arena, link_spawn, 60000000);
+                            bool linked = !link_wait.timed_out && link_wait.result == PROCESS_RESULT_SUCCESS;
+                            BUSTER_TEST_RAW(arguments, linked, BYTE_SLICE_TO_STRING(8, link_wait.streams[STANDARD_STREAM_ERROR]));
+                            ByteSlice pdb_bytes = linked ? file_read(arena, pdb, (FileReadOptions){0}) : (ByteSlice){0};
+                            BUSTER_TEST(arguments, pdb_bytes.pointer && pdb_bytes.length != 0);
+                            if (linked)
+                            {
+                                String8 child_command[] = {executable, S8("asyncarg")};
+                                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_command),
+                                                                            (SliceString8){0}, (SliceString8){0}, external_capture);
+                                BUSTER_TEST(arguments, child.handle != 0);
+                                if (child.handle)
+                                {
+                                    ProcessWaitResult waited = os_process_wait_deadline(arena, child, 30000000);
+                                    String8 stderr_text = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
+                                    BUSTER_TEST(arguments, !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS);
+                                    BUSTER_TEST(arguments, stderr_text.length == 0);
+                                    run_outputs[iteration + 1] = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_OUTPUT]);
+                                    run_ready[iteration + 1] = !waited.timed_out &&
+                                        waited.result == PROCESS_RESULT_SUCCESS && stderr_text.length == 0;
+                                }
+                            }
+                        }
+                    }
+                    os_file_delete(pdb);
+                    os_file_delete(executable);
+                    os_file_delete(object_path);
+                }
+            }
+        }
+
+        String8 check_prefix = S8("RADDBG_SEH_CHECK ");
+        String8 pass_suffix = S8(" PASS");
+        String8 summary = S8("RADDBG_SEH_RESULT checks=14 failures=0");
+        bool reference_output_valid = false;
+        for (u32 run = 0; run < BUSTER_ARRAY_LENGTH(run_outputs); run += 1)
+        {
+            String8 output = run_outputs[run];
+            u32 line_count = 0;
+            u32 check_count = 0;
+            u32 pass_count = 0;
+            u32 summary_count = 0;
+            bool output_shape_valid = output.pointer && output.length && output.pointer[output.length - 1] == '\n';
+            for (u64 cursor = 0; cursor < output.length;)
+            {
+                u64 end = cursor;
+                while (end < output.length && output.pointer[end] != '\n') end += 1;
+                String8 line = {.pointer = output.pointer + cursor, .length = end - cursor};
+                if (line.length && line.pointer[line.length - 1] == '\r') line.length -= 1;
+                line_count += 1;
+                if (line.length >= check_prefix.length &&
+                    memcmp(line.pointer, check_prefix.pointer, check_prefix.length) == 0)
+                {
+                    check_count += 1;
+                    if (line.length >= pass_suffix.length &&
+                        memcmp(line.pointer + line.length - pass_suffix.length, pass_suffix.pointer, pass_suffix.length) == 0)
+                    {
+                        pass_count += 1;
+                    }
+                    else
+                    {
+                        output_shape_valid = false;
+                    }
+                }
+                else if (string_equal(line, summary))
+                {
+                    summary_count += 1;
+                }
+                else
+                {
+                    output_shape_valid = false;
+                }
+                cursor = end < output.length ? end + 1 : output.length;
+            }
+            output_shape_valid = output_shape_valid && line_count == 15 && check_count == 14 &&
+                                 pass_count == 14 && summary_count == 1;
+            BUSTER_TEST(arguments, run_ready[run] && output_shape_valid);
+            if (run == 0) reference_output_valid = run_ready[run] && output_shape_valid;
+            else if (reference_output_valid) BUSTER_STRING_TEST(arguments, output, run_outputs[0]);
+        }
+        os_file_delete(baseline_pdb);
+        os_file_delete(baseline_executable);
+        os_file_delete(runtime_source);
+        scratch_end(temporary);
+    }
+#endif
+
+    return result;
+}
+
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -27800,6 +28696,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_aligned_calls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_large_frame);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_arm64_unwind);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_seh);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_dwarf5_objects);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_options);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_codeview_limit);

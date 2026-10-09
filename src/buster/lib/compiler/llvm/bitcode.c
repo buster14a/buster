@@ -6653,6 +6653,18 @@ LlvmBitcodeArtifact llvm_bitcode_emit_with_options(Arena* arena, IrProgram* prog
                 context.error.opcode = IR_OPCODE_COUNT;
                 break;
             }
+            else if (ir_module_has_exception_root(modules + module_index))
+            {
+                context.error.code = LLVM_BITCODE_ERROR_UNSUPPORTED_EXCEPTION_ROOT;
+                context.error.message = llvm_bc_s8("LLVM bitcode does not support canonical exception roots");
+                context.error.diagnostic = context.error.message;
+                context.error.function = IR_FUNCTION_ID_INVALID;
+                context.error.block = IR_BLOCK_ID_INVALID;
+                context.error.instruction = IR_INSTRUCTION_ID_INVALID;
+                context.error.symbol = IR_SYMBOL_ID_INVALID;
+                context.error.opcode = IR_OPCODE_COUNT;
+                break;
+            }
         }
     }
     if (!llvm_bc_failed(&context) &&
@@ -6720,6 +6732,8 @@ String8 llvm_bitcode_error_code_name(LlvmBitcodeErrorCode code)
         return llvm_bc_s8("invalid_argument");
     case LLVM_BITCODE_ERROR_IR_VALIDATION:
         return llvm_bc_s8("ir_validation");
+    case LLVM_BITCODE_ERROR_UNSUPPORTED_EXCEPTION_ROOT:
+        break;
     case LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE:
         return llvm_bc_s8("unsupported_type");
     case LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION:
@@ -6737,5 +6751,5 @@ String8 llvm_bitcode_error_code_name(LlvmBitcodeErrorCode code)
     case LLVM_BITCODE_ERROR_COUNT:
         return llvm_bc_s8("count");
     }
-    return llvm_bc_s8("unknown");
+    return code == LLVM_BITCODE_ERROR_UNSUPPORTED_EXCEPTION_ROOT ? llvm_bc_s8("unsupported_exception_root") : llvm_bc_s8("unknown");
 }

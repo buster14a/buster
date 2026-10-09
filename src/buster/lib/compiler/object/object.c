@@ -11197,10 +11197,39 @@ struct ObjectWindowsUnwindResult
     ByteSlice xdata;
     u32* xdata_offsets;
     u32 function_count;
+    u32 exception_count;
     bool valid;
     bool aarch64;
     u8 reserved[2];
 };
+
+enum
+{
+    OBJECT_WINDOWS_UNWIND_VERSION = 1,
+    OBJECT_WINDOWS_X64_UNWIND_EHANDLER = 1u << 3,
+    OBJECT_WINDOWS_X64_UNWIND_UHANDLER = 2u << 3,
+    // LLVM llvmorg-23.1.3 WinException.cpp:237 registers the C personality
+    // with emitWinEHHandler(..., true, true), including catch-only scopes.
+    OBJECT_WINDOWS_X64_UNWIND_HANDLER_FLAGS = OBJECT_WINDOWS_X64_UNWIND_EHANDLER | OBJECT_WINDOWS_X64_UNWIND_UHANDLER,
+    // Tail after DWORD-aligned unwind codes: handler RVA, count, one 16-byte
+    // scope row [inclusive Begin, exclusive End, catch-all 1, Target].
+    OBJECT_WINDOWS_X64_EXCEPTION_TAIL_SIZE = 24,
+    OBJECT_WINDOWS_X64_EXCEPTION_COUNT_OFFSET = 4,
+    OBJECT_WINDOWS_X64_EXCEPTION_BEGIN_OFFSET = 8,
+    OBJECT_WINDOWS_X64_EXCEPTION_END_OFFSET = 12,
+    OBJECT_WINDOWS_X64_EXCEPTION_FILTER_OFFSET = 16,
+    OBJECT_WINDOWS_X64_EXCEPTION_TARGET_OFFSET = 20,
+};
+
+BUSTER_GLOBAL_LOCAL bool object_codegen_exception_scope_valid(CodegenFunctionDescriptor const* function)
+{
+    bool result = function->exception_entry_offset
+                      ? function->exception_scope_begin >= function->prolog_size &&
+                            function->exception_scope_begin < function->exception_entry_offset &&
+                            function->exception_entry_offset < function->code_size
+                      : function->exception_scope_begin == 0;
+    return result;
+}
 
 // A frame register describes RSP at its establishment instruction, not at
 // the end of the prologue. Both current x64 producers establish it before
@@ -11222,7 +11251,8 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsX64UnwindLayout object_windows_x64_unwind_layou
 {
     ObjectWindowsX64UnwindLayout result = {
         .frame_action = UINT32_MAX,
-        .valid = function->prolog_size <= UINT8_MAX && (!function->unwind_action_count || function->unwind_actions),
+        .valid = function->prolog_size <= UINT8_MAX && (!function->unwind_action_count || function->unwind_actions) &&
+                 object_codegen_exception_scope_valid(function),
     };
     bool allocation_after_frame = false;
     u64 displaced_frame_offset = 0;
@@ -11285,7 +11315,9 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_x64_unwind_build(Ar
         for (u32 function_index = 0; valid && function_index < function_count; function_index += 1)
         {
             ObjectWindowsX64UnwindLayout layout = object_windows_x64_unwind_layout(functions + function_index);
-            u64 record_size = align_forward(4 + (u64)layout.slot_count * 2, 4);
+            bool exception = functions[function_index].exception_entry_offset != 0;
+            u64 record_size = align_forward(4 + (u64)layout.slot_count * 2, 4) + (exception ? OBJECT_WINDOWS_X64_EXCEPTION_TAIL_SIZE : 0u);
+            result.exception_count += exception;
             valid = layout.valid && xdata_size <= UINT32_MAX && record_size <= UINT32_MAX - xdata_size;
             if (valid)
             {
@@ -11317,7 +11349,8 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_x64_unwind_build(Ar
             CodegenFunctionDescriptor* function = functions + function_index;
             ObjectWindowsX64UnwindLayout layout = object_windows_x64_unwind_layout(function);
             u8* record = result.xdata.pointer + result.xdata_offsets[function_index];
-            record[0] = 1;
+            record[0] = (u8)(OBJECT_WINDOWS_UNWIND_VERSION |
+                             (function->exception_entry_offset ? OBJECT_WINDOWS_X64_UNWIND_HANDLER_FLAGS : 0u));
             record[1] = (u8)function->prolog_size;
             record[2] = (u8)layout.slot_count;
             if (layout.encode_frame)
@@ -11380,6 +11413,19 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_x64_unwind_build(Ar
                 }
             }
             valid = cursor == 4 + layout.slot_count * 2;
+            if (valid && function->exception_entry_offset)
+            {
+                // DWORD-aligned UNWIND_INFO tail: handler RVA, scope count,
+                // then inclusive Begin / exclusive End / catch-all 1 / Target.
+                u32 tail = (u32)align_forward(cursor, 4);
+                u32 scope_count = 1;
+                u32 catch_all = 1;
+                memcpy(record + tail + OBJECT_WINDOWS_X64_EXCEPTION_COUNT_OFFSET, &scope_count, sizeof(scope_count));
+                memcpy(record + tail + OBJECT_WINDOWS_X64_EXCEPTION_BEGIN_OFFSET, &function->exception_scope_begin, sizeof(u32));
+                memcpy(record + tail + OBJECT_WINDOWS_X64_EXCEPTION_END_OFFSET, &function->exception_entry_offset, sizeof(u32));
+                memcpy(record + tail + OBJECT_WINDOWS_X64_EXCEPTION_FILTER_OFFSET, &catch_all, sizeof(catch_all));
+                memcpy(record + tail + OBJECT_WINDOWS_X64_EXCEPTION_TARGET_OFFSET, &function->exception_entry_offset, sizeof(u32));
+            }
         }
     }
     result.valid = valid;
@@ -11760,6 +11806,28 @@ BUSTER_GLOBAL_LOCAL bool object_append_windows_unwind(Arena* arena, ObjectFile* 
                 .section = OBJECT_SECTION_WINDOWS_XDATA,
                 .kind = OBJECT_SYMBOL_DATA,
             };
+            u32 personality_symbol = UINT32_MAX;
+            for (u32 candidate = 0; built.exception_count && candidate < object->symbol_count; candidate += 1)
+            {
+                if (string_equal(object->symbols[candidate].name, S8("__C_specific_handler")))
+                {
+                    personality_symbol = candidate;
+                    break;
+                }
+            }
+            if (built.exception_count && personality_symbol == UINT32_MAX)
+            {
+                personality_symbol = object->symbol_count++;
+                object->symbols[personality_symbol] = (ObjectSymbol){
+                    .name = S8("__C_specific_handler"),
+                    .section = OBJECT_SECTION_UNDEFINED,
+                    .kind = OBJECT_SYMBOL_FUNCTION,
+                    .global = true,
+                };
+            }
+            bool personality_valid = !built.exception_count ||
+                                     (object->symbols[personality_symbol].kind == OBJECT_SYMBOL_FUNCTION &&
+                                      object->symbols[personality_symbol].global);
             for (u32 function_index = 0; function_index < built.function_count; function_index += 1)
             {
                 u64 offset = (u64)function_index * (built.aarch64 ? 8 : 12);
@@ -11786,15 +11854,46 @@ BUSTER_GLOBAL_LOCAL bool object_append_windows_unwind(Arena* arena, ObjectFile* 
                     .symbol = xdata_symbol,
                     .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
                 };
+                u32 record_offset = built.xdata_offsets[function_index];
+                u8* record = built.xdata.pointer + record_offset;
+                if (!built.aarch64 && (record[0] & OBJECT_WINDOWS_X64_UNWIND_HANDLER_FLAGS) == OBJECT_WINDOWS_X64_UNWIND_HANDLER_FLAGS)
+                {
+                    u32 tail = (u32)align_forward(4u + (u32)record[2] * 2u, 4);
+                    object->relocations[object->relocation_count++] = (ObjectRelocation){
+                        .offset = (u64)record_offset + tail,
+                        .section = OBJECT_SECTION_WINDOWS_XDATA,
+                        .symbol = personality_symbol,
+                        .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
+                    };
+                    u32 fields[3] = {OBJECT_WINDOWS_X64_EXCEPTION_BEGIN_OFFSET, OBJECT_WINDOWS_X64_EXCEPTION_END_OFFSET,
+                                     OBJECT_WINDOWS_X64_EXCEPTION_TARGET_OFFSET};
+                    for (u32 field = 0; field < BUSTER_ARRAY_LENGTH(fields); field += 1)
+                    {
+                        u32 coordinate = 0;
+                        memcpy(&coordinate, record + tail + fields[field], sizeof(coordinate));
+                        memset(record + tail + fields[field], 0, sizeof(coordinate));
+                        object->relocations[object->relocation_count++] = (ObjectRelocation){
+                            .addend = (s64)coordinate,
+                            .offset = (u64)record_offset + tail + fields[field],
+                            .section = OBJECT_SECTION_WINDOWS_XDATA,
+                            .symbol = function_index,
+                            .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
+                        };
+                    }
+                }
             }
+            result = personality_valid;
         }
-        result = true;
+        else
+        {
+            result = true;
+        }
     }
 
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool object_codegen_functions_valid(CodegenModule* module)
+BUSTER_GLOBAL_LOCAL bool object_codegen_functions_valid(CodegenModule* module, Target target)
 {
     if (module->function_count != module->entry_count || module->assembly_function_count > module->function_count ||
         (module->function_count && (!module->functions || !module->entries)))
@@ -11809,7 +11908,10 @@ BUSTER_GLOBAL_LOCAL bool object_codegen_functions_valid(CodegenModule* module)
         if (function->symbol.value != entry->symbol.value || function->code_offset != entry->offset || function->code_offset < previous_end ||
             function->code_offset > module->code.length ||
             function->code_size > module->code.length - function->code_offset || function->prolog_size > function->code_size ||
-            (function->unwind_action_count && !function->unwind_actions) || (function->epilog_count && !function->epilog_offsets))
+            (function->unwind_action_count && !function->unwind_actions) || (function->epilog_count && !function->epilog_offsets) ||
+            (function->exception_entry_offset &&
+             (target.cpu_arch != CPU_ARCH_X86_64 || target.os != OPERATING_SYSTEM_WINDOWS)) ||
+            !object_codegen_exception_scope_valid(function))
         {
             return false;
         }
@@ -12343,7 +12445,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     ObjectFile result = {
         .target = target,
     };
-    if (!arena || !program || !module || module->error != CODEGEN_ERROR_NONE || module->data_relocation_count || !object_codegen_functions_valid(module) ||
+    if (!arena || !program || !module || module->error != CODEGEN_ERROR_NONE || module->data_relocation_count || !object_codegen_functions_valid(module, target) ||
         (target.cpu_arch != CPU_ARCH_X86_64 && target.cpu_arch != CPU_ARCH_AARCH64))
     {
         result.error = OBJECT_ERROR_INVALID_INPUT;
@@ -12710,7 +12812,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         }
     }
     u32 metadata_relocation_count = (dwarf.valid ? dwarf.relocation_count : 0) + (codeview.valid ? codeview.relocation_count : 0) + cfi.relocation_count +
-                                    windows_unwind.function_count * (windows_unwind.aarch64 ? 2u : 3u);
+                                    windows_unwind.function_count * (windows_unwind.aarch64 ? 2u : 3u) + windows_unwind.exception_count * 4u;
     bool apple_thread_local = false;
     if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
     {
@@ -12776,6 +12878,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     result.symbols = arena_allocate(arena, ObjectSymbol,
                                     module->entry_count + module->global_count + alias_count + module->relocation_count + (apple_thread_local ? 1 : 0) +
                                         (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0) + (windows_unwind.function_count ? 1 : 0) +
+                                        (windows_unwind.exception_count ? 1 : 0) +
                                         (cfi.valid && object_format_for_target(target) == OBJECT_FORMAT_ELF64 ? 1 : 0) + named.count);
     for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
     {
@@ -15641,6 +15744,13 @@ ByteSlice* object_artifact_slices(Arena* arena, ObjectArtifact artifact, u32* sl
 }
 
 #if BUSTER_INCLUDE_TESTS
+ByteSlice object_test_windows_x64_unwind(Arena* arena, CodegenFunctionDescriptor* functions, u32 count)
+{
+    ObjectWindowsUnwindResult built = object_windows_x64_unwind_build(arena, functions, count);
+    ByteSlice result = built.valid ? built.xdata : (ByteSlice){0};
+    return result;
+}
+
 ObjectError object_test_elf64_plan(Arena* arena, ObjectFile* object, u64* size)
 {
     ObjectWriteStatistics statistics = {0};
@@ -15733,6 +15843,24 @@ ObjectExecutable object_link_executable(ObjectFile* object)
             image_size += section_spans[section];
         }
         if (text_section == UINT32_MAX) result.error = OBJECT_ERROR_INVALID_INPUT;
+        if (result.error != OBJECT_ERROR_NONE)
+        {
+            break;
+        }
+        // Handler/scope image RVAs require Windows runtime registration.
+        // Refuse the typed xdata relocations before reserving executable memory;
+        // ordinary pdata RVAs and unwind-only xdata remain admitted.
+        for (u32 index = 0; object->target.os == OPERATING_SYSTEM_WINDOWS && index < object->relocation_count; index += 1)
+        {
+            ObjectRelocation const* relocation = object->relocations + index;
+            if (relocation->section < object->section_count &&
+                object->sections[relocation->section].kind == OBJECT_SECTION_WINDOWS_XDATA &&
+                relocation->kind == OBJECT_RELOCATION_COFF_ADDR32NB)
+            {
+                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                break;
+            }
+        }
         if (result.error != OBJECT_ERROR_NONE)
         {
             break;

@@ -7923,9 +7923,16 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
 {
     MachineSelectResult result = {
         .failed_opcode = IR_OPCODE_COUNT,
+        .failure_detail = function && function->exception_entry_plus_one
+                              ? (target.os != OPERATING_SYSTEM_WINDOWS
+                                     ? S8("catch-all exception helpers require Windows x64 native code generation")
+                                     : S8("unsupported finite Windows x64 catch-all helper shape")) : (String8){0},
     };
     if (!arena || !program || !function || target.cpu_arch != CPU_ARCH_X86_64 || function->state != IR_FUNCTION_LOWERED || !function->block_count ||
-        function->entry.value >= function->block_count)
+        function->entry.value >= function->block_count ||
+        (function->exception_entry_plus_one &&
+         (target.os != OPERATING_SYSTEM_WINDOWS || function->block_count != 2u ||
+          function->exception_entry_plus_one > function->block_count)))
     {
         return result;
     }
@@ -9645,6 +9652,12 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     if (!machine_builder_canonical_edges(&selector.builder, function, selector.value_virtual_registers, selector.value_pairs))
     {
         return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
+    }
+    if (function->exception_entry_plus_one)
+    {
+        u32 canonical_exception = function->exception_entry_plus_one - 1u;
+        selector.builder.exception_entry_plus_one =
+            (selector.block_entries ? selector.block_entries[canonical_exception] : canonical_exception) + 1u;
     }
     result.function = machine_function_builder_finish(arena, &selector.builder);
     result.function.target = windows_abi ? &machine_x86_64_windows_description : &machine_x86_64_description;
@@ -16138,7 +16151,7 @@ MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* fu
                                                u64 caller_capacity)
 {
     MachineEncodeResult result = {0};
-    if (!placement->valid)
+    if (!placement->valid || !machine_exception_entry_valid(function))
     {
         return result;
     }
@@ -16247,6 +16260,12 @@ MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* fu
     }
     result.block_offsets = arena_allocate(arena, u32, function->block_count);
     result.row_offsets = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
+    if (function->exception_entry_plus_one)
+    {
+        result.call_return_offsets = arena_allocate(arena, u32, function->instruction_count);
+        memset(result.call_return_offsets, 0, sizeof(u32) * function->instruction_count);
+        result.epilog_offsets = arena_allocate(arena, u32, function->block_count);
+    }
     // Prologue: the frame base is RBP, matching the canonical path, and
     // the placement's callee-saved registers push right after it in fixed
     // RBX, R14, R15 order so the unwind actions can name exact offsets.
@@ -16550,6 +16569,17 @@ MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* fu
                         {
                             machine_x64_emit_fixed_vzeroupper(&encoder);
                         }
+                        if (result.epilog_offsets)
+                        {
+                            if (result.epilog_count < function->block_count)
+                            {
+                                result.epilog_offsets[result.epilog_count++] = encoder.count;
+                            }
+                            else
+                            {
+                                encoder.overflow = true;
+                            }
+                        }
                         // Windows fixed-stack unwind records use RSP alone.
                         // Its epilogue grammar requires ADD RSP, constant (not
                         // MOV RSP, RBP), followed only by the saved-register pops.
@@ -16626,6 +16656,10 @@ MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* fu
                         }
                         u32 call_start = encoder.count;
                         machine_x64_emit_fixed_relative(&encoder, MACHINE_X64_FIXED_TEMPLATE_CALL_REL32, S8("CALL"));
+                        if (result.call_return_offsets)
+                        {
+                            result.call_return_offsets[instruction_index] = encoder.count;
+                        }
                         MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
                         *site = (MachineCallSite){
                             .code_offset = call_start + 1,
@@ -16646,6 +16680,10 @@ MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* fu
                         machine_x64_emit_fixed_register(&encoder,
                                                         machine_x64_fixed_template_family_row(MACHINE_X64_FIXED_TEMPLATE_CALL_REGISTER, target_register),
                                                         S8("CALL"), target_register, 64);
+                        if (result.call_return_offsets)
+                        {
+                            result.call_return_offsets[instruction_index] = encoder.count;
+                        }
                     }
                     break; case MACHINE_X64_LEA_BLOCK:
                     {

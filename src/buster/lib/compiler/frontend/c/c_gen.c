@@ -49,6 +49,9 @@
 // would recurse runs on an explicit machine owned by CIntegerIrBuilder:
 // - CIrVlaValue retains evaluated VLA extents and expression category until
 //   pointer consumers finish; c_ir_vla_* owns its sparse per-function table.
+// - c_ir_seh_emit_helper_call outlines the bounded Windows x64 protected
+//   call with a fresh semantic-only builder; c_ir_seh_lower_statement puts
+//   its ordinary handler and continuation in the caller's task list.
 // - CIrLowerMachine is the frame stack for statements and expressions.
 //   Each CIrLowerFrameKind pairs a *_step function (advance the frame one
 //   CIrLowerFrameStage) with a *_frame_push adapter, both dispatched by
@@ -3215,6 +3218,9 @@ struct CIntegerIrBuilder
 {
     CIrDirectSsa* direct_ssa;
     bool direct_ssa_enabled;
+    // Objects referenced by a protected call stay memory-backed in the caller
+    // so the outlined helper can capture their addresses without reading them.
+    u8* seh_captured_entities;
     // c_ir_ssa_finish may not assume that a declaration's initializer
     // dominates the reads in its scope: set by
     // CIRLowerOptions.disable_declaration_shortcut, or when the jump targets
@@ -4193,6 +4199,39 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder,
     u32 scanned = c_ir_matching_delimiter(builder->preprocess, open, end, opening, closing);
     IR_CONSTRUCTION_RECORD(C_DELIMITER_FALLBACK_TOKENS, (scanned == UINT32_MAX ? end : scanned + 1) - open);
     return scanned;
+}
+
+BUSTER_C_INTERNAL u32 c_ir_seh_statement_end(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    u32 result = UINT32_MAX;
+    CPreprocessResult preprocess = builder->preprocess;
+    if (builder->target.os == OPERATING_SYSTEM_WINDOWS && builder->target.cpu_arch == CPU_ARCH_X86_64 && start < end &&
+        preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+        c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[start], C_SYMBOL_WELL_KNOWN_SEH_TRY) && start + 1 < end &&
+        c_token_is_punctuator(&preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACE))
+    {
+        u32 try_close = c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+        u32 marker = try_close < end ? try_close + 1 : UINT32_MAX;
+        u32 handler_start = UINT32_MAX;
+        if (marker < end && c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[marker], C_SYMBOL_WELL_KNOWN_SEH_EXCEPT) &&
+            marker + 1 < end && c_token_is_punctuator(&preprocess.tokens[marker + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 filter_close = c_ir_matching_delimiter_cached(builder, marker + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                              C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            handler_start = filter_close < end ? filter_close + 1 : UINT32_MAX;
+        }
+        else if (marker < end && c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[marker], C_SYMBOL_WELL_KNOWN_SEH_FINALLY))
+        {
+            handler_start = marker + 1;
+        }
+        if (handler_start < end && c_token_is_punctuator(&preprocess.tokens[handler_start], C_PUNCTUATOR_LEFT_BRACE))
+        {
+            u32 handler_close = c_ir_matching_delimiter_cached(builder, handler_start, end, C_PUNCTUATOR_LEFT_BRACE,
+                                                                C_PUNCTUATOR_RIGHT_BRACE);
+            result = handler_close < end ? handler_close + 1 : UINT32_MAX;
+        }
+    }
+    return result;
 }
 
 // Records, for each label of a body in token order, the innermost GNU
@@ -6077,7 +6116,8 @@ BUSTER_C_INTERNAL bool c_ir_ssa_local_eligible(CIntegerIrBuilder* builder, CEnti
     {
         CEntity* entity = builder->parse.entities + id.value;
         eligible = (entity->kind == C_ENTITY_LOCAL || entity->kind == C_ENTITY_PARAMETER) &&
-                   !entity->is_static_storage && !entity->is_thread_local && !entity->has_cleanup;
+                   !entity->is_static_storage && !entity->is_thread_local && !entity->has_cleanup &&
+                   !(builder->seh_captured_entities && builder->seh_captured_entities[id.value]);
     }
     return eligible;
 }
@@ -22139,6 +22179,12 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
     {
         u32 index = frame->as.prepare_control.index++;
         CToken token = builder->preprocess.tokens[index];
+        u32 seh_after = c_ir_seh_statement_end(builder, index, frame->as.prepare_control.end);
+        if (seh_after != UINT32_MAX)
+        {
+            frame->as.prepare_control.index = seh_after;
+            continue;
+        }
         // The sizeof owner decides whether a VLA expression must run. When it
         // does, it lowers the operand in a child expression frame, which runs
         // its own preparation pass. This scan must not hoist control groups
@@ -23141,6 +23187,12 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             // The assumption's operand is type-checked by the parser but is
             // never evaluated, including calls nested inside the operand.
             index = builder->prepared_calls[active_calls[active_call_count - 1]].close_index;
+            continue;
+        }
+        u32 seh_after = c_ir_seh_statement_end(builder, index, end);
+        if (seh_after != UINT32_MAX)
+        {
+            index = seh_after - 1;
             continue;
         }
         CToken token = builder->preprocess.tokens[index];
@@ -41377,6 +41429,14 @@ BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builde
             continue;
         }
         CToken token = preprocess.tokens[cursor];
+        u32 seh_after = c_ir_seh_statement_end(builder, cursor, end);
+        if (seh_after != UINT32_MAX)
+        {
+            span.end = seh_after;
+            span.valid = true;
+            measured = true;
+            continue;
+        }
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
         {
             u32 close = c_ir_matching_delimiter_cached(builder, cursor, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
@@ -44780,6 +44840,706 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_finish_vla_declaration(CIntegerIrBuilder*
      C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) |    \
      C_SYMBOL_WELL_KNOWN_BIT(STATIC_ASSERT) | C_IR_ASM_KEYWORD_SET)
 
+
+BUSTER_C_INTERNAL bool c_ir_seh_capture_discovery(CIntegerIrBuilder* builder, CDeclaration declaration)
+{
+    bool success = true;
+    u32 body_end = declaration.body_start + declaration.body_token_count;
+    if (builder->target.os == OPERATING_SYSTEM_WINDOWS && builder->target.cpu_arch == CPU_ARCH_X86_64 &&
+        declaration.body_token_count && builder->parse.entity_count)
+    {
+        u64 capture_bytes = builder->parse.entity_count;
+        bool reserved = capture_bytes <= UINT32_MAX &&
+                        c_ir_lower_scratch_reservation(builder, sizeof(u8), capture_bytes, BUSTER_ALIGN_OF(u8));
+        if (!reserved)
+        {
+            builder->failure_message = S8("Windows SEH: capture discovery capacity exceeded");
+            builder->failure_token_index = declaration.body_start;
+            success = false;
+        }
+        else
+        {
+            builder->seh_captured_entities = arena_allocate(builder->scratch_arena, u8, capture_bytes);
+            if (!builder->seh_captured_entities)
+            {
+                builder->failure_message = S8("Windows SEH: capture discovery capacity exceeded");
+                builder->failure_token_index = declaration.body_start;
+                success = false;
+            }
+            else
+            {
+                memset(builder->seh_captured_entities, 0, capture_bytes);
+                for (u32 index = declaration.body_start; index < body_end && success; index += 1)
+                {
+                    CToken token = builder->preprocess.tokens[index];
+                    if (token.kind != C_TOKEN_IDENTIFIER ||
+                        !c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SEH_TRY))
+                    {
+                        continue;
+                    }
+                    u32 after = c_ir_seh_statement_end(builder, index, body_end);
+                    u32 try_close = index + 1 < body_end
+                                        ? c_ir_matching_delimiter_cached(builder, index + 1, body_end, C_PUNCTUATOR_LEFT_BRACE,
+                                                                         C_PUNCTUATOR_RIGHT_BRACE)
+                                        : UINT32_MAX;
+                    if (after == UINT32_MAX || try_close == UINT32_MAX)
+                    {
+                        continue;
+                    }
+                    for (u32 capture_token = index + 2; capture_token < try_close; capture_token += 1)
+                    {
+                        CToken name = builder->preprocess.tokens[capture_token];
+                        if (name.kind != C_TOKEN_IDENTIFIER)
+                        {
+                            continue;
+                        }
+                        CEntityId entity_id = c_ir_identifier_entity(builder, capture_token);
+                        if (entity_id.value >= builder->parse.entity_count)
+                        {
+                            continue;
+                        }
+                        CEntity* entity = builder->parse.entities + entity_id.value;
+                        bool automatic_object = (entity->kind == C_ENTITY_LOCAL || entity->kind == C_ENTITY_PARAMETER) &&
+                                                !entity->is_static_storage && !entity->is_thread_local && !entity->is_extern;
+                        if (automatic_object)
+                        {
+                            builder->seh_captured_entities[entity_id.value] = 1;
+                        }
+                    }
+                    index = after - 1;
+                }
+            }
+        }
+    }
+    return success;
+}
+
+typedef struct CIrSehCapture CIrSehCapture;
+struct CIrSehCapture
+{
+    CEntityId entity;
+    IrTypeId object_type;
+    IrTypeId pointer_type;
+    IrValueId outer_place;
+    u32 token_index;
+};
+
+BUSTER_C_INTERNAL void c_ir_seh_refuse(CIntegerIrBuilder* builder, u32 token_index, String8 reason)
+{
+    builder->failure_message = reason.length >= 12 && !memcmp(reason.pointer, "Windows SEH:", 12)
+                                   ? reason : string_format(builder->arena, S8("Windows SEH: {S8}"), reason);
+    builder->failure_token_index = token_index;
+    return;
+}
+
+typedef struct CIrSehStatement CIrSehStatement;
+struct CIrSehStatement
+{
+    u32 expression_start;
+    u32 expression_end;
+    u32 handler_start;
+    u32 handler_end;
+    u32 after;
+};
+
+// Constant folding alone admits comma expressions. Filters additionally use
+// this conservative ICE syntax boundary before any runtime row is emitted.
+BUSTER_C_INTERNAL bool c_ir_seh_filter_syntax(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool valid = start < end;
+    for (u32 index = start; valid && index < end; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        valid = !c_ir_assignment_operator(token) &&
+                !c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA) &&
+                !c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) &&
+                !c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS) &&
+                !c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) &&
+                !c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) &&
+                token.kind != C_TOKEN_STRING_LITERAL;
+        if (valid && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                       C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            valid = close < end;
+            IrTypeId cast_type = valid ? c_ir_group_type_name(builder, index, close) : IR_TYPE_ID_INVALID;
+            if (cast_type.value != IR_ID_UNDERLYING_INVALID)
+            {
+                valid = c_ir_constant_type_is_integer(ir_type_from_id(&builder->program->types, cast_type));
+            }
+        }
+        if (valid && token.kind == C_TOKEN_PREPROCESSING_NUMBER)
+        {
+            String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
+            bool hexadecimal = spelling.length >= 2 && spelling.pointer[0] == '0' &&
+                               (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X');
+            for (u64 byte = 0; valid && byte < spelling.length; byte += 1)
+            {
+                u8 value = spelling.pointer[byte];
+                valid = value != '.' && value != 'p' && value != 'P' && value != 'i' && value != 'j' &&
+                        (hexadecimal || (value != 'e' && value != 'E'));
+            }
+        }
+        if (valid && token.kind == C_TOKEN_IDENTIFIER)
+        {
+            bool unevaluated = c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SIZEOF) ||
+                               string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("_Alignof")) ||
+                               string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("alignof"));
+            if (unevaluated && index + 1 < end &&
+                c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                           C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                valid = close < end;
+                index = valid ? close : index;
+            }
+            else
+            {
+                CEntityId entity_id = c_ir_identifier_entity(builder, index);
+                CEntity* entity = entity_id.value < builder->parse.entity_count ? builder->parse.entities + entity_id.value : 0;
+                bool integer_constant = entity && (entity->kind == C_ENTITY_ENUMERATOR ||
+                                                   (entity->is_constexpr && entity->has_constant_value));
+                bool type_name = entity && entity->kind == C_ENTITY_TYPEDEF;
+                bool type_keyword = !entity && c_parse_type_start_token(&builder->parse, builder->preprocess, C_SCOPE_ID_INVALID, token);
+                String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
+                bool boolean = c_preprocess_dialect_is_c23(builder->preprocess.dialect) &&
+                               (string_equal(spelling, S8("true")) || string_equal(spelling, S8("false")));
+                valid = integer_constant || type_name || type_keyword || boolean;
+                if (valid && index + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    valid = type_name || type_keyword;
+                }
+            }
+        }
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_ir_seh_statement_shape(CIntegerIrBuilder* builder, u32 start, u32 end, CIrSehStatement* statement)
+{
+    bool valid = start + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACE);
+    u32 try_close = valid ? c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) : UINT32_MAX;
+    u32 marker = try_close < end ? try_close + 1 : UINT32_MAX;
+    u32 filter_close = UINT32_MAX;
+    u32 handler_open = UINT32_MAX;
+    u32 handler_close = UINT32_MAX;
+    if (valid)
+    {
+        valid = marker < end && c_token_is_well_known(builder->preprocess.spelling_base, builder->preprocess.tokens[marker], C_SYMBOL_WELL_KNOWN_SEH_EXCEPT) &&
+                marker + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[marker + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        if (!valid)
+        {
+            c_ir_seh_refuse(builder, start, S8("expected __except with a constant filter; __finally is unsupported"));
+        }
+    }
+    if (valid)
+    {
+        filter_close = c_ir_matching_delimiter_cached(builder, marker + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        handler_open = filter_close < end ? filter_close + 1 : UINT32_MAX;
+        valid = handler_open < end && c_token_is_punctuator(&builder->preprocess.tokens[handler_open], C_PUNCTUATOR_LEFT_BRACE);
+        handler_close = valid ? c_ir_matching_delimiter_cached(builder, handler_open, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) : UINT32_MAX;
+        valid &= handler_close < end;
+    }
+    if (valid)
+    {
+        CIrConstantValue filter = {0};
+        valid = c_ir_seh_filter_syntax(builder, marker + 2, filter_close) &&
+                c_ir_constant_evaluate(builder, marker + 2, filter_close, &filter) &&
+                filter.kind == C_IR_CONSTANT_INTEGER && filter.integer == 1 && !filter.integer_high;
+        if (!valid)
+        {
+            c_ir_seh_refuse(builder, marker, S8("the __except filter must be an integer constant expression equal to 1"));
+        }
+    }
+    u32 expression_start = start + 2;
+    u32 expression_end = try_close < end && try_close > expression_start ? try_close - 1 : UINT32_MAX;
+    if (valid)
+    {
+        valid = expression_start + 2 < try_close &&
+                builder->preprocess.tokens[expression_start].kind == C_TOKEN_IDENTIFIER &&
+                !c_token_in_well_known_set(builder->preprocess.spelling_base, builder->preprocess.tokens[expression_start],
+                                           C_IR_STATEMENT_KEYWORD_SET | C_IR_DECLARATION_INTRODUCER_SET) &&
+                c_token_is_punctuator(&builder->preprocess.tokens[expression_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                c_token_is_punctuator(&builder->preprocess.tokens[expression_end], C_PUNCTUATOR_SEMICOLON) &&
+                c_ir_matching_delimiter_cached(builder, expression_start + 1, try_close, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                C_PUNCTUATOR_RIGHT_PARENTHESIS) == expression_end - 1;
+        if (!valid)
+        {
+            c_ir_seh_refuse(builder, start, S8("the protected body must contain exactly one call expression statement"));
+        }
+    }
+    for (u32 index = expression_start; valid && index < expression_end; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        bool body_control = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) ||
+                            c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) ||
+                            c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON) ||
+                            c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION) ||
+                            c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) ||
+                            c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE);
+        bool marker_token = token.kind == C_TOKEN_IDENTIFIER && index + 1 < expression_end &&
+                            c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SEH_TRY) &&
+                            c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACE);
+        if (body_control || marker_token)
+        {
+            c_ir_seh_refuse(builder, index, S8("nested protected regions, transfers and arguments requiring control flow are unsupported"));
+            valid = false;
+        }
+    }
+    for (u32 index = handler_open < end ? handler_open + 1 : end; valid && index < handler_close; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        if (token.kind == C_TOKEN_IDENTIFIER && index + 1 < handler_close &&
+            c_token_is_well_known(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SEH_TRY) &&
+            c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACE))
+        {
+            c_ir_seh_refuse(builder, index, S8("nested protected regions are unsupported"));
+            valid = false;
+        }
+    }
+    if (valid)
+    {
+        *statement = (CIrSehStatement){
+            .expression_start = expression_start, .expression_end = expression_end,
+            .handler_start = handler_open + 1, .handler_end = handler_close, .after = handler_close + 1,
+        };
+    }
+    else if (!builder->failure_message.length)
+    {
+        c_ir_seh_refuse(builder, start, S8("malformed protected call statement"));
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_ir_query_scratch_reservation(u64 reserved_size, u64* position, u32 capacity);
+BUSTER_C_INTERNAL bool c_ir_scratch_reservation_size(u64 required_size, u64 current_size, u64* size_out);
+BUSTER_C_INTERNAL bool c_ir_function_scratch_tail_reservation(u64* position, u64 body_capacity, u64 lowering_capacity, bool direct_ssa);
+
+typedef struct CIrSehWorkspace CIrSehWorkspace;
+struct CIrSehWorkspace
+{
+    u32 tokens;
+    u32 rows;
+    u32 local_slots;
+    u32 query_capacity;
+    u32 query_buckets;
+    u64 reserved_size;
+};
+
+BUSTER_C_INTERNAL bool c_ir_seh_workspace_plan(CIntegerIrBuilder* builder, CIrSehStatement statement, CIrSehWorkspace* plan)
+{
+    u64 tokens = (u64)statement.expression_end - statement.expression_start;
+    u64 rows = tokens * 20 + 64;
+    u64 slots = C_IR_LOCAL_SLOT_MINIMUM;
+    while (slots < (tokens + 1) * C_IR_LOCAL_SLOT_LOAD_DIVISOR && slots <= UINT32_MAX / 2)
+    {
+        slots *= 2;
+    }
+    u64 queries = builder->queries ? builder->queries->frame_capacity : tokens + 16;
+    u64 buckets = 16;
+    while (buckets < queries && buckets <= UINT32_MAX / 2)
+    {
+        buckets *= 2;
+    }
+    u64 position = arena_minimum_position;
+#define C_IR_SEH_RESERVE(type, count) c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, sizeof(type), (count), BUSTER_ALIGN_OF(type))
+    bool valid = tokens && tokens < UINT32_MAX && rows <= UINT32_MAX && slots <= UINT32_MAX &&
+                 slots >= (tokens + 1) * C_IR_LOCAL_SLOT_LOAD_DIVISOR && queries && queries <= UINT32_MAX &&
+                 buckets >= queries && buckets <= UINT32_MAX &&
+                 (!builder->queries || (!builder->queries->frame_count && !builder->queries->has_request && !builder->queries->sizeof_frame_used)) &&
+                 C_IR_SEH_RESERVE(CIrSehCapture, tokens) &&
+                 c_ir_query_scratch_reservation(ARENA_MAX_RESERVATION, &position, (u32)queries) &&
+                 C_IR_SEH_RESERVE(u32, buckets) &&
+                 C_IR_SEH_RESERVE(CIrLowerFrame, rows) &&
+                 C_IR_SEH_RESERVE(CIntegerIrLocal, tokens + 1) &&
+                 C_IR_SEH_RESERVE(u32, tokens + 1) && C_IR_SEH_RESERVE(u32, tokens + 1) && C_IR_SEH_RESERVE(u32, slots) &&
+                 C_IR_SEH_RESERVE(CIrPreparedCall, tokens) &&
+                 C_IR_SEH_RESERVE(u32, tokens) && C_IR_SEH_RESERVE(u32, tokens) && C_IR_SEH_RESERVE(u32, tokens) &&
+                 C_IR_SEH_RESERVE(u32, tokens) && C_IR_SEH_RESERVE(u32, tokens) && C_IR_SEH_RESERVE(u32, tokens) &&
+                 C_IR_SEH_RESERVE(CIrPreparedControlExpression, tokens) &&
+                 C_IR_SEH_RESERVE(u32, tokens) && C_IR_SEH_RESERVE(u32, tokens) && C_IR_SEH_RESERVE(u32, tokens) &&
+                 C_IR_SEH_RESERVE(u8, tokens) && C_IR_SEH_RESERVE(CIrGroupFactsEntry, tokens + 1) &&
+                 c_ir_function_scratch_tail_reservation(&position, tokens, rows, false);
+#undef C_IR_SEH_RESERVE
+    u64 reserved_size = 0;
+    valid = valid && c_ir_scratch_reservation_size(position, BUSTER_MB(64), &reserved_size);
+    if (valid)
+    {
+        *plan = (CIrSehWorkspace){
+            .tokens = (u32)tokens, .rows = (u32)rows, .local_slots = (u32)slots,
+            .query_capacity = (u32)queries, .query_buckets = (u32)buckets, .reserved_size = reserved_size,
+        };
+    }
+    return valid;
+}
+
+// A semantic-only initializer makes the reset of every per-function mutable
+// field explicit: omitted fields are empty, never borrowed from the caller.
+BUSTER_C_INTERNAL void c_ir_seh_builder_initialize(CIntegerIrBuilder* caller, CIntegerIrBuilder* helper, IrFunction* function,
+                                                   Arena* workspace, CIrSehStatement statement, CIrSehWorkspace plan, CIrQueryMachine* queries)
+{
+    *queries = (CIrQueryMachine){
+        .frame_capacity = plan.query_capacity, .completed_capacity = plan.query_capacity,
+        .value_capacity = plan.query_capacity, .operator_capacity = plan.query_capacity,
+        .sizeof_frame_capacity = plan.query_capacity, .chain_mask = plan.query_buckets - 1,
+    };
+    queries->frames = arena_allocate(workspace, CIrQueryFrame, plan.query_capacity);
+    queries->completed = arena_allocate(workspace, CIrQueryFrame, plan.query_capacity);
+    queries->values = arena_allocate(workspace, CIrConstantValue, plan.query_capacity);
+    queries->operators = arena_allocate(workspace, CIrConstantOperator, plan.query_capacity);
+    queries->resumes = arena_allocate(workspace, CIrQueryResume, plan.query_capacity);
+    queries->sizeof_frames = arena_allocate(workspace, CIrSizeofFrame, plan.query_capacity);
+    queries->chain_heads = arena_allocate_zeroed(workspace, u32, plan.query_buckets);
+    queries->chain_next = arena_allocate(workspace, u32, plan.query_capacity);
+    queries->chain_bucket = arena_allocate(workspace, u32, plan.query_capacity);
+    *helper = (CIntegerIrBuilder){
+        .arena = caller->arena, .scratch_arena = workspace, .temporary_arena = caller->temporary_arena,
+        .program = caller->program, .module = caller->module, .function = function,
+        .function_name_symbol_plus_one = caller->function_name_symbol_plus_one,
+        .preprocess = caller->preprocess, .parse = caller->parse,
+        .token_entities_plus_one = caller->token_entities_plus_one, .constant_entity_index = caller->constant_entity_index,
+        .declaration_functions = caller->declaration_functions, .entity_symbols = caller->entity_symbols,
+        .function_names = caller->function_names, .pointer_types = caller->pointer_types, .wide_float_cache = caller->wide_float_cache,
+        .slot_cache = caller->slot_cache, .field_symbols = caller->field_symbols,
+        .over_aligned_array_name = caller->over_aligned_array_name,
+        .oversized_array_bound_token_plus_one = caller->oversized_array_bound_token_plus_one,
+        .signatures = caller->signatures, .c_type_ir_map = caller->c_type_ir_map,
+        .scalar_types = caller->scalar_types, .type_context = caller->type_context, .literal_limits = caller->literal_limits,
+        .s32_type = caller->s32_type, .size_type = caller->size_type, .ptrdiff_type = caller->ptrdiff_type,
+        .char_type = caller->char_type, .bool_type = caller->bool_type, .nullptr_type = caller->nullptr_type,
+        .void_type = caller->void_type, .f16_type = caller->f16_type, .f32_type = caller->f32_type,
+        .f64_type = caller->f64_type, .long_double_type = caller->long_double_type,
+        .return_type = caller->bool_type, .returns_zero_at_end = true, .target = caller->target, .source = caller->source,
+        .declaration_index = caller->declaration_index,
+        .scope_finger = C_SCOPE_ID_INVALID, .scope_finger_root = C_SCOPE_ID_INVALID,
+        .location_cursor = {.memo_offset = UINT32_MAX}, .current_block = IR_BLOCK_ID_INVALID,
+        .last_instruction = IR_INSTRUCTION_ID_INVALID, .previous_instruction = IR_INSTRUCTION_ID_INVALID,
+        .failure_token_index = UINT32_MAX, .local_capacity = plan.tokens + 1, .local_entity_slot_mask = plan.local_slots - 1,
+        .body_token_start = statement.expression_start, .body_token_count = plan.tokens, .prepared_call_capacity = plan.tokens,
+        .prepared_control_expression_capacity = plan.tokens,
+        .prepared_control_token_start = statement.expression_start, .prepared_control_token_count = plan.tokens,
+        .stream_matching_delimiters_plus_one = caller->stream_matching_delimiters_plus_one,
+        .group_facts_exact = true, .queries = queries, .lower_machine = {.frame_capacity = plan.rows},
+    };
+    helper->lower_machine.frames = arena_allocate(workspace, CIrLowerFrame, plan.rows);
+    helper->locals = arena_allocate(workspace, CIntegerIrLocal, plan.tokens + 1);
+    helper->local_entities = arena_allocate(workspace, u32, plan.tokens + 1);
+    helper->local_symbols = arena_allocate(workspace, u32, plan.tokens + 1);
+    helper->local_entity_slots = arena_allocate(workspace, u32, plan.local_slots);
+    helper->prepared_calls = arena_allocate(workspace, CIrPreparedCall, plan.tokens);
+    helper->prepared_call_indices = arena_allocate(workspace, u32, plan.tokens);
+    helper->prepared_call_token_heads = arena_allocate(workspace, u32, plan.tokens);
+    helper->prepared_call_token_next = arena_allocate(workspace, u32, plan.tokens);
+    helper->group_type_names = arena_allocate_zeroed(workspace, u32, plan.tokens);
+    helper->matching_delimiters_plus_one = helper->stream_matching_delimiters_plus_one ? 0 : arena_allocate_zeroed(workspace, u32, plan.tokens);
+    helper->statement_ends_plus_one = arena_allocate_zeroed(workspace, u32, plan.tokens);
+    helper->prepared_control_expressions = arena_allocate(workspace, CIrPreparedControlExpression, plan.tokens);
+    helper->prepared_control_open_slots = arena_allocate_zeroed(workspace, u32, plan.tokens);
+    helper->prepared_control_emitted_marks = arena_allocate_zeroed(workspace, u32, plan.tokens);
+    helper->prepared_control_lowering_stack = arena_allocate(workspace, u32, plan.tokens);
+    helper->group_facts = arena_allocate(workspace, u8, plan.tokens);
+    helper->group_facts_stack = arena_allocate(workspace, CIrGroupFactsEntry, plan.tokens + 1);
+    memset(helper->local_entity_slots, 0xff, sizeof(u32) * plan.local_slots);
+    memset(helper->prepared_call_indices, 0xff, sizeof(u32) * plan.tokens);
+    memset(helper->prepared_call_token_heads, 0xff, sizeof(u32) * plan.tokens);
+    if (!helper->stream_matching_delimiters_plus_one)
+    {
+        helper->group_facts_exact = c_ir_build_delimiter_index(helper);
+    }
+    return;
+}
+
+// This dispatch is statically bounded: the protected expression has no
+// statement-expression body or nested protected marker. Arguments and nested
+// calls run through the ordinary expression machine inside this helper.
+BUSTER_C_INTERNAL IrValueId c_ir_seh_emit_helper_call(CIntegerIrBuilder* caller, u32 token_index, CIrSehStatement statement)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    CIrSehWorkspace plan = {0};
+    u32 maximum_captures = statement.expression_end - statement.expression_start;
+    bool valid = c_ir_seh_workspace_plan(caller, statement, &plan);
+    Arena* workspace = valid ? c_frontend_arena_create((ArenaCreation){.reserved_size = plan.reserved_size, .flags = {.no_pool = true}},
+                                                       C_FRONTEND_RESERVATION_LOWERING) : 0;
+    valid &= workspace != 0;
+    CIrSehCapture* captures = valid ? arena_allocate(workspace, CIrSehCapture, maximum_captures) : 0;
+    u32 capture_count = 0;
+    for (u32 index = statement.expression_start; valid && index < statement.expression_end; index += 1)
+    {
+        CToken token = caller->preprocess.tokens[index];
+        if (token.kind != C_TOKEN_IDENTIFIER)
+        {
+            continue;
+        }
+        String8 spelling = c_token_spelling(caller->preprocess.spelling_base, token);
+        if (string_equal(spelling, S8("__func__")) || string_equal(spelling, S8("__FUNCTION__")) ||
+            string_equal(spelling, S8("__PRETTY_FUNCTION__")))
+        {
+            CIrConstantValue name_object = c_ir_function_name_object(caller, token);
+            valid = name_object.kind == C_IR_CONSTANT_LVALUE;
+            if (!valid)
+            {
+                c_ir_seh_refuse(caller, index, S8("could not preserve the source function's name object"));
+            }
+        }
+        CEntityId entity_id = c_ir_identifier_entity(caller, index);
+        CEntity* entity = entity_id.value < caller->parse.entity_count ? caller->parse.entities + entity_id.value : 0;
+        bool automatic_object = entity && (entity->kind == C_ENTITY_LOCAL || entity->kind == C_ENTITY_PARAMETER) &&
+                                !entity->is_static_storage && !entity->is_thread_local && !entity->is_extern;
+        if (!valid || !automatic_object)
+        {
+            continue;
+        }
+        bool captured = false;
+        for (u32 previous = 0; previous < capture_count && !captured; previous += 1)
+        {
+            captured = captures[previous].entity.value == entity_id.value;
+        }
+        if (captured)
+        {
+            continue;
+        }
+        CIntegerIrLocal* local = c_ir_find_local_by_entity(caller, entity_id);
+        valid = local && !local->direct_ssa && local->place.value < caller->function->value_count &&
+                !local->is_variable_length_array && !local->is_vla_parameter && !entity->has_cleanup && !entity->is_register &&
+                capture_count + 1 < UINT16_MAX;
+        if (valid)
+        {
+            IrValue* place = caller->function->values + local->place.value;
+            CIrVlaValue shape = c_ir_vla_value(caller, local->place);
+            valid = place->category == IR_VALUE_PLACE && !shape.counts && local->type.value < caller->program->types.count;
+        }
+        if (!valid)
+        {
+            c_ir_seh_refuse(caller, index, S8("captures require addressable automatic objects without register, cleanup or variable-length state"));
+        }
+        else
+        {
+            IrTypeId pointer_type = c_ir_add_pointer_type(caller->program, caller->pointer_types, local->type);
+            valid = pointer_type.value != IR_ID_UNDERLYING_INVALID;
+            if (valid)
+            {
+                captures[capture_count++] = (CIrSehCapture){
+                    .entity = entity_id, .object_type = local->type, .pointer_type = pointer_type,
+                    .outer_place = local->place, .token_index = index,
+                };
+            }
+        }
+    }
+    IrTypeId* parameter_types = valid ? arena_allocate(caller->arena, IrTypeId, capture_count ? capture_count : 1) : 0;
+    for (u32 index = 0; valid && index < capture_count; index += 1)
+    {
+        parameter_types[index] = captures[index].pointer_type;
+    }
+    IrFunctionId caller_id = caller->function->id;
+    IrFunctionId helper_id = IR_FUNCTION_ID_INVALID;
+    CIrQueryMachine queries = {0};
+    CIntegerIrBuilder helper = {0};
+    if (valid)
+    {
+        // The module plan counts contextual markers. Do not grow the module
+        // under declaration_functions or a live caller builder.
+        valid = caller->module->function_count < caller->module->function_capacity;
+        IrTypeId helper_type = valid ? ir_program_add_type(caller->program, (IrType){
+            .name = S8("Windows SEH protected call"), .element_type = IR_TYPE_ID_INVALID, .return_type = caller->bool_type,
+            .layout = {.size = caller->program->data_layout.pointer.size,
+                       .alignment = caller->program->data_layout.pointer.alignment, .resolved = true},
+            .kind = IR_TYPE_FUNCTION, .parameter_types = parameter_types, .parameter_count = capture_count,
+            .calling_convention = IR_CALLING_CONVENTION_C,
+        }) : IR_TYPE_ID_INVALID;
+        valid = valid && helper_type.value != IR_ID_UNDERLYING_INVALID;
+        if (valid)
+        {
+            String8 link_name = string_format(caller->arena, S8(".L.seh.{u32}.{u32}"), caller_id.value, token_index);
+            IrSourceRange source = c_ir_token_source_range(caller, caller->preprocess.tokens[token_index]);
+            IrSymbolId symbol = ir_program_add_symbol(caller->program, (IrSymbol){
+                .name = link_name, .link_name = link_name, .source = source, .type = helper_type,
+                .kind = IR_SYMBOL_FUNCTION, .linkage = IR_LINKAGE_INTERNAL, .is_definition = true,
+            });
+            valid = symbol.value != IR_ID_UNDERLYING_INVALID;
+            if (valid)
+            {
+                IrFunction* function = ir_module_add_function(caller->arena, caller->module, (IrFunction){
+                    // __func__ and its type-only consumers describe the source function.
+                    .name = caller->function->name, .symbol = symbol, .source = source, .canonical_type = helper_type,
+                    .entry = IR_BLOCK_ID_INVALID, .state = IR_FUNCTION_REJECTED,
+                });
+                valid = function != 0;
+                if (valid)
+                {
+                    helper_id = function->id;
+                    caller->function = caller->module->functions + caller_id.value;
+                    function = caller->module->functions + helper_id.value;
+                    function->block_capacity = 2;
+                    function->blocks = arena_allocate(caller->arena, IrBlock, 2);
+                    function->instruction_capacity = plan.rows;
+                    function->instructions = arena_allocate(caller->arena, IrInstruction, plan.rows);
+                    function->instruction_canonical_sources = arena_allocate(caller->arena, IrSourceRange, plan.rows);
+                    function->value_capacity = plan.rows;
+                    function->values = arena_allocate(caller->arena, IrValue, plan.rows);
+                    c_ir_seh_builder_initialize(caller, &helper, function, workspace, statement, plan, &queries);
+                    IrBlockId entry = c_ir_block_create(&helper);
+                    valid = entry.value != IR_ID_UNDERLYING_INVALID && c_ir_switch_block(&helper, entry) && helper.group_facts_exact;
+                    function->entry = entry;
+                }
+            }
+        }
+    }
+    for (u32 index = 0; valid && index < capture_count; index += 1)
+    {
+        CIrSehCapture capture = captures[index];
+        CIntegerIrLocal* original = c_ir_find_local_by_entity(caller, capture.entity);
+        IrSourceRange source = c_ir_token_source_range(caller, caller->preprocess.tokens[capture.token_index]);
+        IrValueId pointer = c_ir_add_result(&helper, capture.pointer_type);
+        valid = original && pointer.value != IR_ID_UNDERLYING_INVALID;
+        if (valid)
+        {
+            helper.function->values[pointer.value].points_to_read_only = caller->function->values[capture.outer_place.value].is_read_only;
+            IrInstruction argument = c_ir_instruction_initialize(IR_OPCODE_ARGUMENT, capture.pointer_type);
+            argument.immediates = arena_allocate(caller->arena, u64, 1);
+            argument.immediates[0] = index;
+            argument.immediate_count = 1;
+            argument.result = pointer;
+            valid = c_ir_append_instruction(&helper, argument, source).value != IR_ID_UNDERLYING_INVALID;
+        }
+        IrValueId place = valid ? c_ir_emit_dereference_place(&helper, pointer, source) : IR_VALUE_ID_INVALID;
+        valid = valid && place.value != IR_ID_UNDERLYING_INVALID;
+        if (valid)
+        {
+            IrValue* rebound = helper.function->values + place.value;
+            IrValue* original_place = caller->function->values + capture.outer_place.value;
+            rebound->alignment = original_place->alignment;
+            rebound->is_read_only = original_place->is_read_only;
+            rebound->is_volatile = original_place->is_volatile;
+            rebound->points_to_read_only = original_place->points_to_read_only;
+            helper.local_entities[helper.local_count] = capture.entity.value;
+            helper.local_symbols[helper.local_count] = caller->parse.entities[capture.entity.value].symbol;
+            helper.locals[helper.local_count] = (CIntegerIrLocal){
+                .name = original->name, .source = original->source, .place = place, .id = IR_LOCAL_ID_INVALID,
+                .type = original->type, .c_type = original->c_type, .entity = original->entity,
+                .is_parameter = original->is_parameter, .direct_ssa = false,
+            };
+            c_ir_local_entity_record(&helper, capture.entity.value, helper.local_count);
+            helper.local_count += 1;
+        }
+    }
+    if (valid)
+    {
+        CIrLowerFrameResult expression = c_ir_lower_dispatch(&helper, (CIrLowerFrame){
+            .kind = C_IR_LOWER_FRAME_EXPRESSION,
+            .as.expression = {.start = statement.expression_start, .end = statement.expression_end},
+        });
+        valid = expression.success && !helper.lower_machine.failed && !helper.failure_message.length &&
+                helper.function->block_count == 1 && !helper.function->blocks[helper.current_block.value].terminated;
+        for (u32 index = 0; valid && index < helper.function->instruction_count; index += 1)
+        {
+            IrInstruction* row = helper.function->instructions + index;
+            valid = !ir_call_returns_twice(caller->program, row) &&
+                    row->opcode != IR_OPCODE_STACK_ALLOCATE && row->opcode != IR_OPCODE_STACK_SAVE &&
+                    row->opcode != IR_OPCODE_STACK_RESTORE && row->opcode != IR_OPCODE_INLINE_ASSEMBLY;
+            if (!valid)
+            {
+                helper.failure_message = S8("returns-twice calls, dynamic stack state and inline assembly are unsupported");
+            }
+        }
+        valid = valid && c_ir_check_error_attribute_calls(&helper) && c_ir_atomic_aggregate_accesses_lowerable(&helper);
+        if (valid)
+        {
+            IrSourceRange source = c_ir_token_source_range(caller, caller->preprocess.tokens[token_index]);
+            IrValueId normal_result = c_ir_emit_integer_value_at(&helper, 0, false, source, caller->bool_type);
+            valid = normal_result.value != IR_ID_UNDERLYING_INVALID && c_ir_terminate(&helper, IR_OPCODE_RETURN, &normal_result, 1, 0, 0, source);
+            if (valid)
+            {
+                IrBlockId exception = c_ir_block_create(&helper);
+                valid = exception.value != IR_ID_UNDERLYING_INVALID && c_ir_switch_block(&helper, exception);
+                if (valid)
+                {
+                    helper.function->exception_entry_plus_one = exception.value + 1;
+                    IrValueId exception_result = c_ir_emit_integer_value_at(&helper, 1, false, source, caller->bool_type);
+                    valid = exception_result.value != IR_ID_UNDERLYING_INVALID &&
+                            c_ir_terminate(&helper, IR_OPCODE_RETURN, &exception_result, 1, 0, 0, source) &&
+                            helper.function->block_count == 2 && c_ir_finish_construction(&helper);
+                }
+            }
+        }
+        if (!valid)
+        {
+            c_ir_seh_refuse(caller, helper.failure_token_index < caller->preprocess.token_count ? helper.failure_token_index : token_index,
+                            helper.failure_message.length ? helper.failure_message : S8("the protected call must lower to one straight-line block"));
+        }
+    }
+    if (valid)
+    {
+        IrFunction* function = caller->module->functions + helper_id.value;
+        function->state = IR_FUNCTION_LOWERED;
+        caller->module->lowered_function_count += 1;
+        caller->program->lowered_function_count += 1;
+        IrValueId* arguments = arena_allocate(caller->arena, IrValueId, capture_count ? capture_count : 1);
+        for (u32 index = 0; valid && index < capture_count; index += 1)
+        {
+            CIrSehCapture capture = captures[index];
+            IrSourceRange source = c_ir_token_source_range(caller, caller->preprocess.tokens[capture.token_index]);
+            arguments[index] = c_ir_emit_address_of_place(caller, capture.outer_place, capture.object_type, source);
+            valid = arguments[index].value != IR_ID_UNDERLYING_INVALID;
+        }
+        if (valid)
+        {
+            CIrSignature signature = {
+                .parameter_types = parameter_types, .return_type = caller->bool_type, .parameter_count = capture_count,
+                .valid = true, .body_supported = true, .returns_zero_at_end = true,
+            };
+            result = c_ir_emit_call_target(caller, caller->preprocess.tokens[token_index], function, signature, arguments, capture_count);
+            valid = result.value != IR_ID_UNDERLYING_INVALID;
+        }
+    }
+    if (!valid)
+    {
+        c_ir_seh_refuse(caller, caller->failure_token_index < caller->preprocess.token_count ? caller->failure_token_index : token_index,
+                        caller->failure_message.length ? caller->failure_message : S8("could not reserve or construct the protected call helper"));
+        result = IR_VALUE_ID_INVALID;
+    }
+    if (workspace)
+    {
+        arena_destroy(workspace, 1);
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_ir_seh_lower_statement(CIntegerIrBuilder* builder, CIrLowerBodyState* state, CIrBodyTask task,
+                                                u32 token_index, u32* task_count, CIrBodyTask* tasks)
+{
+    CIrSehStatement statement = {0};
+    bool valid = c_ir_seh_statement_shape(builder, token_index, task.end, &statement);
+    IrValueId result = valid ? c_ir_seh_emit_helper_call(builder, token_index, statement) : IR_VALUE_ID_INVALID;
+    valid = valid && result.value != IR_ID_UNDERLYING_INVALID && (u64)*task_count + 2 <= state->task_capacity;
+    if (valid)
+    {
+        IrBlockId handler = c_ir_block_create(builder);
+        IrBlockId merge = c_ir_block_create(builder);
+        IrBlockId targets[] = {handler, merge};
+        IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[token_index]);
+        valid = handler.value != IR_ID_UNDERLYING_INVALID && merge.value != IR_ID_UNDERLYING_INVALID &&
+                c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &result, 1, targets, 2, source);
+        if (valid)
+        {
+            tasks[(*task_count)++] = (CIrBodyTask){
+                .start = statement.after, .end = task.end, .block = merge, .continuation = task.continuation,
+                .break_block = task.break_block, .continue_block = task.continue_block,
+            };
+            c_ir_body_task_inherit_scope(&tasks[*task_count - 1], task);
+            tasks[(*task_count)++] = (CIrBodyTask){
+                .start = statement.handler_start, .end = statement.handler_end, .block = handler, .continuation = merge,
+                .break_block = task.break_block, .continue_block = task.continue_block, .restore_before_continuation = true,
+            };
+            c_ir_body_task_inherit_control(&tasks[*task_count - 1], task);
+        }
+    }
+    if (!valid && !builder->failure_message.length)
+    {
+        c_ir_seh_refuse(builder, token_index, S8("could not construct the handler continuation"));
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
 {
     if (!state->initialized && !c_ir_lower_body_initialize(builder, state))
@@ -45140,7 +45900,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             }
         }
     }
-    while (task_count || state->has_current_task)
+    bool seh_statement_lowered = true;
+    while ((task_count || state->has_current_task) && seh_statement_lowered)
     {
         CIrBodyTask task = {0};
         u32 index = 0;
@@ -45265,6 +46026,15 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 break;
             }
             CToken first = builder->preprocess.tokens[index];
+            if (builder->target.os == OPERATING_SYSTEM_WINDOWS && builder->target.cpu_arch == CPU_ARCH_X86_64 &&
+                first.kind == C_TOKEN_IDENTIFIER &&
+                c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_SEH_TRY) &&
+                index + 1 < task.end && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACE))
+            {
+                seh_statement_lowered = c_ir_seh_lower_statement(builder, state, task, index, &task_count, tasks);
+                split = true;
+                break;
+            }
             if (c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_BRACE))
             {
                 u32 close = c_ir_matching_delimiter_cached(builder, index, task.end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
@@ -46952,7 +47722,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             }
         }
     }
-    return true;
+    return seh_statement_lowered;
 }
 
 BUSTER_C_INTERNAL void c_ir_lower_body_step(CIntegerIrBuilder* builder)
@@ -57842,6 +58612,7 @@ bool c_ir_lower_capacity_plan(CPreprocessResult preprocess, CAnalysisResult pars
     u32 token_capacity = valid ? (u32)preprocess.token_count : 0;
     u32 identifier_token_count = 0;
     u32 string_literal_count = 0;
+    u32 seh_try_count = 0;
     u64 type_capacity = 0;
     u64 symbol_capacity = 0;
     u64 function_capacity = 0;
@@ -57850,13 +58621,16 @@ bool c_ir_lower_capacity_plan(CPreprocessResult preprocess, CAnalysisResult pars
     {
         for (u32 token_index = 0; token_index < token_capacity; token_index += 1)
         {
-            CTokenKind kind = preprocess.tokens[token_index].kind;
+            CToken token = preprocess.tokens[token_index];
+            CTokenKind kind = token.kind;
             identifier_token_count += kind == C_TOKEN_IDENTIFIER;
             string_literal_count += kind == C_TOKEN_STRING_LITERAL;
+            seh_try_count += kind == C_TOKEN_IDENTIFIER &&
+                             c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SEH_TRY);
         }
-        type_capacity = (u64)parse.type_count * 2 + parse.declaration_count + string_literal_count + C_TYPE_COUNT + 4;
+        type_capacity = (u64)parse.type_count * 2 + parse.declaration_count + string_literal_count + seh_try_count + C_TYPE_COUNT + 4;
         symbol_capacity = (u64)parse.entity_count + parse.declaration_count + identifier_token_count + string_literal_count + 1;
-        function_capacity = parse.declaration_count;
+        function_capacity = (u64)parse.declaration_count + seh_try_count;
         for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
         {
             function_capacity += parse.entities[entity_index].kind == C_ENTITY_LOCAL && parse.entities[entity_index].has_cleanup;
@@ -60471,9 +61245,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         }
         bool direct_ssa_enabled = !options.disable_direct_ssa && local_capacity < UINT16_MAX;
         u32 declaration_start = array_parameter ? BUSTER_MIN(declaration.token_start, declaration.body_start) : declaration.body_start;
+        bool body_has_seh = false;
         for (u32 token_index = declaration_start; token_index < body_end; token_index += 1)
         {
             CToken token = preprocess.tokens[token_index];
+            if (target.os == OPERATING_SYSTEM_WINDOWS && target.cpu_arch == CPU_ARCH_X86_64 && token.kind == C_TOKEN_IDENTIFIER)
+            {
+                body_has_seh |= c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SEH_TRY);
+            }
             bool open_parenthesis = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS);
             prepared_call_capacity += open_parenthesis;
             prepared_control_expression_capacity += open_parenthesis || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET);
@@ -60542,7 +61321,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u8), body_array_capacity, BUSTER_ALIGN_OF(u8)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrGroupFactsEntry), prepared_control_expression_capacity + 1,
                                           BUSTER_ALIGN_OF(CIrGroupFactsEntry)) &&
-            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32));
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32)) &&
+            (!body_has_seh || c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u8), parse.entity_count ? parse.entity_count : 1,
+                                                              BUSTER_ALIGN_OF(u8)));
         if (scratch_fits && lowering_capacity <= UINT32_MAX && local_capacity <= UINT32_MAX && local_slot_capacity <= UINT32_MAX &&
             prepared_call_capacity <= UINT32_MAX && prepared_control_expression_capacity <= UINT32_MAX && lower_frame_capacity <= UINT32_MAX &&
             !function_reservation_limit)
@@ -60749,6 +61530,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         builder.group_facts_exact = delimiters_valid;
         CIrSignature signature = signatures[declaration_index];
         bool parameters_lowered = true;
+        if (body_has_seh && !c_ir_seh_capture_discovery(&builder, declaration))
+        {
+            parameters_lowered = false;
+        }
         for (u32 parameter_index = 0; parameter_index < signature.parameter_count; parameter_index += 1)
         {
             CParameter parameter = signature.parameters[parameter_index];

@@ -386,6 +386,10 @@ SpirvArtifact spirv_emit(Arena* arena, IrProgram* program, IrModule* module)
             emitter.artifact.function = validation.function;
             spirv_fail(&emitter, S8("canonical IR validation failed before SPIR-V emission"), validation.instruction);
         }
+        else if (ir_module_has_exception_root(module))
+        {
+            spirv_fail(&emitter, S8("SPIR-V does not support canonical exception roots"), IR_INSTRUCTION_ID_INVALID);
+        }
         else if (module->function_count != 1 || module->functions[0].state != IR_FUNCTION_LOWERED || module->rejected_function_count || module->global_count ||
                  module->assembly_count || module->alias_count || module->initializer_count || program->data_layout.pointer.bit_width != 32)
         {

@@ -142,6 +142,12 @@ struct CodegenFunctionDescriptor
     u32 prolog_size;
     u32 unwind_action_count;
     u32 epilog_count;
+    // Zero entry means ordinary code. A Windows x64 catch-all helper owns
+    // [exception_scope_begin, exception_entry_offset), with both coordinates
+    // relative to this function's first code byte. The exception entry is a
+    // separate terminal block, never a source line or guessed return address.
+    u32 exception_scope_begin;
+    u32 exception_entry_offset;
 };
 
 typedef enum CodegenDataRelocationKind
