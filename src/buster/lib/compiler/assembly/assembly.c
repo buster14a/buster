@@ -552,9 +552,10 @@ struct AssemblyInstruction
     bool aarch64_control_private_long;
     u8 aarch64_control_private_expression;
     u8 aarch64_control_reserved;
-    // `:lo12:sym` / `sym@PAGEOFF` was replaced by #0 before parsing; emission
-    // attaches the symbol's low-12 relocation to the encoded word (#2933).
+    // `:lo12:sym` / `sym@PAGEOFF` and numeric `:lo12:value` use the same
+    // checked emitter; numeric values are encoded as scaled immediates.
     bool aarch64_lo12;
+    bool aarch64_lo12_numeric;
     AssemblyExpression aarch64_lo12_expression;
     BusterAarch64SystemInstruction aarch64_system_instruction;
     u16 aarch64_system_register_encoding;
@@ -589,6 +590,7 @@ struct AssemblyBuilder
     bool private_inline_labels;
     bool unit_control_relocations;
     bool inline_assembly;
+    bool collect_form_observations;
     // Set by assembly_instruction_parse for the statement it last parsed.
     TargetCpuFeature statement_feature;
     // Set by assembly_instruction_parse when `movabs` named the accumulator
@@ -12113,12 +12115,12 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_statement(AssemblyBuilder* b
     }
 }
 
-// Symbolic page addressing in a standalone unit (#2933). `adrp x0, sym` names
+// Page addressing in a standalone unit (#2933, #3127). `adrp x0, sym` names
 // its symbol directly, and the low 12 bits are `:lo12:sym` on ELF and COFF or
 // `sym@PAGEOFF` (with `sym@PAGE` on ADRP) on Mach-O. The modifier is replaced
-// by #0 so the ordinary encoders see a plain immediate; emission then retains
-// a relocation on the word. Anything else carrying a modifier is refused here
-// with a message naming the combination.
+// by #0 so the ordinary encoders see a plain immediate; the checked emitter
+// then retains a symbolic relocation or patches a numeric scaled immediate. Other
+// modifier/instruction combinations are refused here with a specific message.
 typedef enum AssemblyAarch64ModifierResult
 {
     ASSEMBLY_AARCH64_MODIFIER_ABSENT,
@@ -12203,9 +12205,10 @@ BUSTER_GLOBAL_LOCAL String8 assembly_aarch64_modifier_strip(AssemblyBuilder* bui
 
 BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewrite(AssemblyBuilder* builder, String8 statement, u32 line,
                                                                                      u32 column, String8* rewritten,
-                                                                                     AssemblyExpression* expression, bool* relocated)
+                                                                                     AssemblyExpression* expression, bool* relocated, bool* numeric)
 {
     AssemblyAarch64ModifierResult result = ASSEMBLY_AARCH64_MODIFIER_ABSENT;
+    *numeric = false;
     statement = assembly_trim(statement);
     u64 mnemonic_end = 0;
     while (mnemonic_end < statement.length && !assembly_space(statement.pointer[mnemonic_end]))
@@ -12303,14 +12306,30 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
         }
         if (!message.length && !strip_valid)
         {
-            message = S8("a relocation modifier must be followed by a symbol expression");
+            message = S8("a page modifier must be followed by a constant or symbol expression");
         }
         if (!message.length && symbol_text.length)
         {
-            *expression = (AssemblyExpression){0};
-            if (!assembly_expression_parse(builder, symbol_text, expression) || !expression->has_symbol || expression->has_unsigned_addend)
+            AssemblyExpression parsed = {0};
+            bool parsed_expression = assembly_expression_parse(builder, symbol_text, &parsed);
+            if (!parsed_expression)
+            {
+                message = S8("a page modifier requires an absolute constant or a symbol with an optional signed addend");
+            }
+            else if (parsed.has_symbol && parsed.has_unsigned_addend)
             {
                 message = S8("a relocation modifier requires a symbol with an optional signed addend");
+            }
+            else if (!parsed.has_symbol && has_at)
+            {
+                // Numeric Mach-O @PAGEOFF semantics have not been verified.
+                // Keep the existing symbol-only format contract.
+                message = S8("a Mach-O page modifier requires a symbol expression");
+            }
+            else
+            {
+                *expression = parsed;
+                *numeric = !parsed.has_symbol;
             }
         }
         if (message.length)
@@ -12326,7 +12345,7 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
                 text = string_format(builder->arena, S8("{S8}, {S8}"), text, index == modified ? replacement : tokens[index]);
             }
             *rewritten = string_format(builder->arena, S8("{S8} {S8}"), mnemonic, text);
-            *relocated = !adrp;
+            *relocated = !adrp && !*numeric;
             result = ASSEMBLY_AARCH64_MODIFIER_REWRITTEN;
         }
     }
@@ -12338,18 +12357,20 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
 {
     AssemblyExpression expression = {0};
     bool relocated = false;
+    bool numeric = false;
     AssemblyAarch64ModifierResult modifier = ASSEMBLY_AARCH64_MODIFIER_ABSENT;
     if (target.cpu_arch == CPU_ARCH_AARCH64 && builder->unit_control_relocations)
     {
-        modifier = assembly_aarch64_modifier_rewrite(builder, statement, line, column, &statement, &expression, &relocated);
+        modifier = assembly_aarch64_modifier_rewrite(builder, statement, line, column, &statement, &expression, &relocated, &numeric);
     }
     if (modifier != ASSEMBLY_AARCH64_MODIFIER_REFUSED)
     {
         u32 instruction_count = builder->instruction_count;
         assembly_instruction_parse_statement(builder, statement, line, column, offset, target, syntax);
-        if (relocated && builder->instruction_count == instruction_count + 1)
+        if ((relocated || numeric) && builder->instruction_count == instruction_count + 1)
         {
             builder->instructions[instruction_count].aarch64_lo12 = true;
+            builder->instructions[instruction_count].aarch64_lo12_numeric = numeric;
             builder->instructions[instruction_count].aarch64_lo12_expression = expression;
         }
     }
@@ -12942,6 +12963,32 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
         memset(builder->result.bytes.pointer + output + emitted.byte_count + 3u, 0, sizeof(u32));
     }
     builder->output_count += instruction->size;
+    if (builder->collect_form_observations)
+    {
+        AssemblyEncodeResult* result = &builder->result;
+        if (result->form_observation_count == 0)
+        {
+            BusterX86MetadataForm selected_form = {0};
+            result->selected_form_id = instruction->metadata_form_id;
+            result->selected_form_offset = builder->output_count - instruction->size;
+            result->selected_form_size = emitted.byte_count;
+            if (buster_x86_metadata_form(instruction->metadata_form_id, &selected_form) &&
+                selected_form.id == instruction->metadata_form_id)
+            {
+                result->selected_form_stable_hash = selected_form.stable_hash;
+                result->selected_form_identity_valid = true;
+            }
+        }
+        result->form_observation_count += 1;
+        if (result->form_observation_count != 1)
+        {
+            result->selected_form_id = UINT32_MAX;
+            result->selected_form_stable_hash = 0;
+            result->selected_form_offset = 0;
+            result->selected_form_size = 0;
+            result->selected_form_identity_valid = false;
+        }
+    }
     return true;
 }
 
@@ -13442,6 +13489,27 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                                 S8("a low-12 modifier applies only to an unshifted ADD immediate or an unsigned-offset load or store"));
             emission_failed = true;
         }
+        else if (instruction->aarch64_lo12_numeric)
+        {
+            bool unsigned_value = instruction->aarch64_lo12_expression.has_unsigned_addend;
+            s64 signed_value = instruction->aarch64_lo12_expression.addend;
+            u64 value = unsigned_value ? instruction->aarch64_lo12_expression.unsigned_addend : (u64)signed_value;
+            u32 scale = add ? 0 : simd_quad ? 4 : size_log2;
+            u64 alignment_mask = (UINT64_C(1) << scale) - 1;
+            u64 maximum = UINT64_C(0xfff) << scale;
+            if ((!unsigned_value && signed_value < 0) || value > maximum || (value & alignment_mask))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
+                                    S8("a numeric low-12 immediate must be nonnegative, aligned, and fit its 12-bit scaled field"));
+                emission_failed = true;
+            }
+            else
+            {
+                u32 immediate = (u32)(value >> scale);
+                word = (word & ~(UINT32_C(0xfff) << 10)) | (immediate << 10);
+                memcpy(builder->result.bytes.pointer + instruction->offset, &word, sizeof(word));
+            }
+        }
         else if (!assembly_relocation_append(builder, instruction->offset, instruction->aarch64_lo12_expression, kind, 0))
         {
             assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
@@ -13457,7 +13525,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
 
 AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncodeOptions options)
 {
-    AssemblyEncodeResult empty = {0};
+    AssemblyEncodeResult empty = {.selected_form_id = options.collect_form_observations ? UINT32_MAX : 0};
     if (!arena || (source.length && !source.pointer))
     {
         return empty;
@@ -13479,9 +13547,11 @@ AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncod
     AssemblyBuilder builder = {
         .arena = arena,
         .target = options.target,
+        .result = {.selected_form_id = options.collect_form_observations ? UINT32_MAX : 0},
         .private_inline_labels = options.private_inline_labels,
         .unit_control_relocations = options.unit_control_relocations,
         .inline_assembly = options.inline_assembly,
+        .collect_form_observations = options.collect_form_observations,
         // A small set of source aliases (currently WAIT-prefixed x87 FINIT
         // and FCLEX) expands into multiple metadata instructions.
         .instruction_capacity = line_count * 2,

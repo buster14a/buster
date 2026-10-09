@@ -161,15 +161,23 @@ today's pipeline:
   item of a `COMPOUND_STATEMENT`;
 - implicit `int` at file scope, when an identifier opens the declaration.
 
-Known gaps, both rejected with a diagnostic and both pinned by the
-[corpus differential](#corpus-differential); no corpus input uses either form:
+The tree accepts two attribute placements that need node slots of their own:
 
-- a later declarator in a list that carries both a leading and a trailing
-  attribute list (`int a, __attribute__((x)) b __attribute__((y));`), because
-  `INIT_DECLARATOR` has one attribute-list slot;
-- an attribute list that opens a parenthesized declarator which is not a
-  pointer (`int (__attribute__((x)) p);`, accepted by clang, gcc and
-  `c_parse_ast`), because only `DECLARATOR_POINTER` has a slot for it.
+- A later declarator in a list may carry an attribute list before and after
+  it (`int a, __attribute__((x)) b __attribute__((y));`). `INIT_DECLARATOR`
+  and `MEMBER_DECLARATOR` each have a presence bit (bit 3) for the list
+  written before the declarator, which is their first child; the trailing
+  list keeps its own bit and follows the declarator.
+- An attribute list may open a parenthesized declarator that is not a pointer
+  (`int (__attribute__((x)) p);`, `int (__attribute__((x)) f)(void);`,
+  `int (__attribute__((x)) a)[3];`, and the abstract forms in parameters and
+  type names). The group's declarator is wrapped in a `DECLARATOR_ATTRIBUTED`
+  with two children: the `ATTRIBUTE_LIST`, then everything inside the
+  parentheses. When a `*` follows the list the attributes belong to that
+  pointer and stay on `DECLARATOR_POINTER`, as before. The wrapper derives
+  nothing, so it does not change which node is the first derivation above a
+  name. A list with no declarator after it (`int (__attribute__((x)));`) is a
+  syntax error.
 
 ## Driver pilot hook
 
@@ -217,8 +225,10 @@ continuation and token-range tiling) must equal the `CParserDeclaration`
 records `c_parse_ast` produces. Inputs on which the two passes legitimately
 differ are pinned on both sides in `c_ast_corpus_known`, so a fix to either
 pass fails its entry until the input moves to the agreement table
-`c_ast_corpus_constructs`. Only the tree's two known gaps above remain pinned,
-as rejected. The four declaration-split misreads the differential found
+`c_ast_corpus_constructs`. No input is pinned today: the table's last two
+entries, the attribute placements under [Syntax boundary](#syntax-boundary),
+moved to the agreement table when the tree began to accept them. The four
+declaration-split misreads the differential found
 ([#3142](https://github.com/buster14a/buster/issues/3142)) were fixed by
 [#3156](https://github.com/buster14a/buster/pull/3156) and are agreement
 constructs now: a file-scope plain `asm("...")`, attribute lists before or
