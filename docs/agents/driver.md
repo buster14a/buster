@@ -1223,7 +1223,7 @@ receiving a dynamic executable (GitHub #2851).
 is linked, and a link refuses the first one named as
 `unsupported option: -nostdlib (...)`. Buster implements none of their link
 semantics (a link without the C runtime start-up files or default libraries), so
-they are never silently ignored where they would matter (GitHub #1418).
+they are never silently ignored where they would matter (GitHub #1418; rejected spellings are listed in [compatibility.md](../compatibility.md)).
 
 `link_native_image_elf64_x86_64_position_independent` writes both kinds as an
 ET_DYN at base zero. Its orientation comment is the contract; in short:

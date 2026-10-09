@@ -33594,6 +33594,32 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_vector_avx2.has_object && c_vector_avx2.codegen_statistics.function_count != 0 &&
                                c_vector_avx2.codegen_statistics.code_bytes != 0);
     BUSTER_TEST(arguments, arena_destroy(c_vector_target_arena, 1));
+    // -mavx2 is -mattr=+avx2 end to end: the same level plus the aliases writes
+    // the same object bytes as the -mattr spelling. (This fixture's code is
+    // the same with and without AVX2, so the comparison is against -mattr.)
+    {
+        String8 alias_paths[2] = {
+            buster_test_temporary_path(arguments->arena, S8("buster-c-vector-alias"), S8(".o")),
+            buster_test_temporary_path(arguments->arena, S8("buster-c-vector-attr"), S8(".o")),
+        };
+        String8 alias_command[] = {S8("-fregister-allocator=fast"), S8("-c"), S8("--target=x86_64-linux"), S8("-march=x86-64-v2"),
+                                   S8("-mavx"), S8("-mavx2"), S8("-o"), alias_paths[0], S8("tests/basic_c_vector.c")};
+        String8 attr_command[] = {S8("-fregister-allocator=fast"), S8("-c"), S8("--target=x86_64-linux"), S8("-march=x86-64-v2"),
+                                  S8("-mattr=+avx,+avx2"), S8("-o"), alias_paths[1], S8("tests/basic_c_vector.c")};
+        SliceString8 alias_commands[2] = {(SliceString8)BUSTER_ARRAY_TO_SLICE(alias_command), (SliceString8)BUSTER_ARRAY_TO_SLICE(attr_command)};
+        ByteSlice alias_images[2] = {0};
+        for (u32 index = 0; index < 2; index += 1)
+        {
+            Arena* alias_arena = arena_create((ArenaCreation){0});
+            CompilerDriverResult alias_result = compiler_driver_execute_invocation(alias_arena, compiler_driver_parse_arguments(alias_arena, alias_commands[index]));
+            BUSTER_TEST_RAW(arguments, alias_result.error == COMPILER_DRIVER_ERROR_NONE, alias_result.diagnostic);
+            alias_images[index] = file_read(arguments->arena, alias_paths[index], (FileReadOptions){0});
+            BUSTER_TEST(arguments, alias_images[index].length != 0);
+            BUSTER_TEST(arguments, arena_destroy(alias_arena, 1));
+        }
+        BUSTER_TEST(arguments, alias_images[0].length == alias_images[1].length &&
+                                   memory_compare(alias_images[0].pointer, alias_images[1].pointer, alias_images[0].length));
+    }
     String8 c_vector_avx512_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vector-avx512"), S8(".o"));
     String8 c_vector_avx512_command_line[] = {
         S8("-fregister-allocator=fast"),
