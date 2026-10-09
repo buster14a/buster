@@ -9854,15 +9854,29 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_normalized_parameter_origin(Unit
                     u32 argument_value = IR_ID_UNDERLYING_INVALID;
                     u32 pointer_argument = IR_ID_UNDERLYING_INVALID;
                     u32 canonical_consumer = IR_ID_UNDERLYING_INVALID;
+                    u32 canonical_store = UINT32_MAX;
+                    u32 seed_place = IR_ID_UNDERLYING_INVALID;
+                    u32 expected_size = source_index < 2 ? 1u : source_index < 4 ? 2u : 4u;
+                    IrType* seed_type = 0;
                     IrLocalId seed_local = {.value = IR_ID_UNDERLYING_INVALID};
+                    String8 case_name = string_format(temporary.arena, S8("normalized parameter cpu={u32} case={u32}"),
+                                                       (u32)target.cpu_arch, source_index);
                     for (u32 local_index = 0; local_index < function->debug_local_count; local_index += 1)
                     {
                         IrDebugLocal* local = function->debug_locals + local_index;
-                        if (string_equal(local->name, S8("seed")) && local->is_parameter) seed_local = local->id;
+                        if (string_equal(local->name, S8("seed")) && local->is_parameter)
+                        {
+                            seed_local = local->id;
+                            seed_type = ir_type_from_id(&program->types, local->type);
+                        }
                     }
                     for (u32 ir_row = 0; ir_row < function->instruction_count; ir_row += 1)
                     {
                         IrInstruction* instruction = function->instructions + ir_row;
+                        if (instruction->opcode == IR_OPCODE_LOCAL && instruction->canonical_local.value == seed_local.value)
+                        {
+                            seed_place = instruction->result.value;
+                        }
                         if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->immediate_count &&
                             instruction->immediates[0] == 0)
                         {
@@ -9877,6 +9891,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_normalized_parameter_origin(Unit
                     for (u32 ir_row = 0; ir_row < function->instruction_count; ir_row += 1)
                     {
                         IrInstruction* instruction = function->instructions + ir_row;
+                        if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count == 2 &&
+                            instruction->operands[0].value == seed_place && instruction->operands[1].value == argument_value)
+                        {
+                            BUSTER_TEST_RAW(arguments, canonical_store == UINT32_MAX, case_name);
+                            canonical_store = ir_row;
+                        }
                         for (u32 operand = 0; operand < instruction->operand_count; operand += 1)
                         {
                             if (instruction->operands[operand].value == argument_value &&
@@ -9887,9 +9907,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_normalized_parameter_origin(Unit
                             }
                         }
                     }
-                    BUSTER_TEST(arguments, argument_value != IR_ID_UNDERLYING_INVALID &&
-                                           canonical_consumer != IR_ID_UNDERLYING_INVALID &&
-                                           seed_local.value != IR_ID_UNDERLYING_INVALID);
+                    BUSTER_TEST_RAW(arguments, argument_value != IR_ID_UNDERLYING_INVALID, case_name);
+                    BUSTER_TEST_RAW(arguments, seed_local.value != IR_ID_UNDERLYING_INVALID, case_name);
+                    BUSTER_TEST_RAW(arguments, seed_type && seed_type->kind == IR_TYPE_INTEGER && seed_type->layout.resolved &&
+                                              seed_type->layout.size == expected_size && seed_type->bit_width == expected_size * 8u &&
+                                              seed_type->is_signed == ((source_index & 1u) == 0), case_name);
+                    // Canonical promotion intentionally retains sub-int cells:
+                    // their LOAD performs truncation/extension. The ABI argument
+                    // first feeds a result-less STORE, then arithmetic reads
+                    // that named cell. Both 32-bit cases use the argument directly.
+                    if (source_index < 4)
+                    {
+                        BUSTER_TEST_RAW(arguments, seed_place != IR_ID_UNDERLYING_INVALID, case_name);
+                        BUSTER_TEST_RAW(arguments, canonical_store < function->instruction_count, case_name);
+                        BUSTER_TEST_RAW(arguments, canonical_consumer == IR_ID_UNDERLYING_INVALID, case_name);
+                    }
+                    else
+                    {
+                        BUSTER_TEST_RAW(arguments, canonical_consumer != IR_ID_UNDERLYING_INVALID, case_name);
+                    }
                     MachineSelectionModule* selection_module = machine_select_module_prepare(temporary.arena, program, target);
                     MachineSelectResult selected = machine_select_validated_canonical_function(
                         temporary.arena, program, function, target, false, true, selection_module);
@@ -9960,6 +9996,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_normalized_parameter_origin(Unit
                                 }
                             }
                             bool normalized_consumer = false;
+                            MachineRef stored_carrier = MACHINE_REF_NONE_VALUE;
+                            u32 stored_carrier_count = 0;
                             for (u32 machine_row = 0; machine_row < machine->instruction_count; machine_row += 1)
                             {
                                 MachineInstruction* instruction = machine->instructions + machine_row;
@@ -9980,9 +10018,36 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_normalized_parameter_origin(Unit
                                                             (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE);
                                     }
                                 }
-                                normalized_consumer |= uses_owner && defines_consumer && machine_row > definition_row;
+                                if (source_index < 4)
+                                {
+                                    u32 canonical_row = UINT32_MAX;
+                                    for (u32 mark_index = 0; mark_index < machine->line_mark_count; mark_index += 1)
+                                    {
+                                        MachineLineMark* mark = machine->line_marks + mark_index;
+                                        if (mark->row <= machine_row) canonical_row = mark->instruction;
+                                    }
+                                    bool stores_owner = instruction->opcode == (architecture ? MACHINE_A64_STORE_FRAME64 : MACHINE_X64_STORE_FRAME64) &&
+                                                        instruction->operands[1] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, owner) &&
+                                                        machine_ref_kind(instruction->operands[0]) == MACHINE_REF_STACK_SLOT &&
+                                                        canonical_row == canonical_store && machine_row > definition_row;
+                                    if (stores_owner)
+                                    {
+                                        stored_carrier = instruction->operands[0];
+                                        stored_carrier_count += 1;
+                                    }
+                                    normalized_consumer |= stores_owner;
+                                }
+                                else
+                                {
+                                    normalized_consumer |= uses_owner && defines_consumer && machine_row > definition_row;
+                                }
                             }
-                            BUSTER_TEST(arguments, normalized_consumer);
+                            BUSTER_TEST_RAW(arguments, normalized_consumer, case_name);
+                            if (source_index < 4)
+                            {
+                                BUSTER_TEST_RAW(arguments, stored_carrier_count == 1, case_name);
+                                BUSTER_TEST_RAW(arguments, machine_ref_payload(stored_carrier) < machine->stack_slot_count, case_name);
+                            }
                             u32 matching_debug_values = 0;
                             for (u32 debug_index = 0; debug_index < machine->debug_value_count; debug_index += 1)
                             {
@@ -9990,10 +10055,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_normalized_parameter_origin(Unit
                                 if (debug_value->local.value == seed_local.value)
                                 {
                                     matching_debug_values += 1;
-                                    BUSTER_TEST(arguments, debug_value->kind == MACHINE_DEBUG_VALUE_REFERENCE &&
-                                                           debug_value->piece_count == 1 &&
-                                                           debug_value->pieces[0] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, owner) &&
-                                                           debug_value->value_size == (source_index < 2 ? 1 : source_index < 4 ? 2 : 4));
+                                    MachineRef expected_carrier = source_index < 4 ? stored_carrier :
+                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, owner);
+                                    BUSTER_TEST_RAW(arguments, debug_value->kind == MACHINE_DEBUG_VALUE_REFERENCE, case_name);
+                                    BUSTER_TEST_RAW(arguments, debug_value->piece_count == 1, case_name);
+                                    BUSTER_TEST_RAW(arguments, debug_value->pieces[0] == expected_carrier, case_name);
+                                    BUSTER_TEST_RAW(arguments, debug_value->value_size == expected_size &&
+                                                              debug_value->piece_sizes[0] == expected_size, case_name);
                                 }
                             }
                             BUSTER_TEST(arguments, matching_debug_values != 0);
@@ -10076,7 +10144,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_origin_transfer_guards(UnitTestA
         }
         MachineFunction finished = machine_function_builder_finish(temporary.arena, &builder);
         BUSTER_TEST(arguments, finished.virtual_register_count == BUSTER_ARRAY_LENGTH(expected) &&
-                               memory_compare(finished.virtual_registers, expected, sizeof(expected)) == 0);
+                               memory_compare(finished.virtual_registers, expected, sizeof(expected)));
         scratch_end(temporary);
     }
     return result;

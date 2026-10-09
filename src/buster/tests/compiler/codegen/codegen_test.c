@@ -3029,10 +3029,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_reused_home_bounda
             s32 second_frame = shared ? first_frame : x64 ? 48 : -48;
             // These are explicit row-point expectations, independently applied
             // to both recorders. Fresh stores publish from the following row.
-            // Shared-frame validity ends at a block entry or final own event
-            // + 1. Certified registers survive until a physical clobber:
-            // v1 remains in register 0 at row 7, then v0 overwrites it at row 8.
-            // v0's final definition retains register 0 through the final NOP.
+            // Shared-frame validity ends at the block entry or an actual
+            // competing store. v1's final read at row 6 does not erase its
+            // frame bytes; v0 overwrites that shared home after row 8.
+            // An own DEFINE also retires the old spill. Whole-row sampling
+            // refuses row 8, even though its AFTER spill recertifies v0 for
+            // row 9. That fresh spill selects FRAME in both home layouts.
             DebugLocationSeed shared_expected[] = {
                 {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 100, .end = 110,
                  .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
@@ -3041,23 +3043,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_reused_home_bounda
                 {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 140, .end = 190,
                  .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
                 {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 190, .end = 200,
-                 .location = {.kind = DEBUG_LOCATION_REGISTER, .reg = x64 ? DEBUG_REGISTER_X86_RAX : DEBUG_REGISTER_AARCH64_X0}},
+                 .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = first_frame}},
                 {.function_symbol = {.value = 7}, .local = {.value = 1}, .start = 100, .end = 150,
                  .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
-                {.function_symbol = {.value = 7}, .local = {.value = 1}, .start = 150, .end = 170,
+                {.function_symbol = {.value = 7}, .local = {.value = 1}, .start = 150, .end = 180,
                  .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = second_frame}},
-                {.function_symbol = {.value = 7}, .local = {.value = 1}, .start = 170, .end = 180,
-                 .location = {.kind = DEBUG_LOCATION_REGISTER, .reg = x64 ? DEBUG_REGISTER_X86_RAX : DEBUG_REGISTER_AARCH64_X0}},
                 {.function_symbol = {.value = 7}, .local = {.value = 1}, .start = 180, .end = 200,
                  .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
             };
             // Distinct offsets are the negative control: no other virtual
-            // register can overwrite either home, so existing cross-block
-            // frame availability and the final fresh store remain intact.
+            // register can overwrite either home. Cross-block availability
+            // stays intact, while v0's own row-8 definition invalidates its
+            // old frame image until the following row's recertified store.
             DebugLocationSeed unique_expected[] = {
                 {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 100, .end = 110,
                  .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
-                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 110, .end = 200,
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 110, .end = 180,
+                 .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = first_frame}},
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 180, .end = 190,
+                 .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 190, .end = 200,
                  .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = first_frame}},
                 {.function_symbol = {.value = 7}, .local = {.value = 1}, .start = 100, .end = 150,
                  .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
