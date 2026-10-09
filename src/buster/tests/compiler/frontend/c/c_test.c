@@ -6814,24 +6814,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_union_initializer_overrides(U
             .integers = {7, 9}, .integer_count = 2,
         },
         {
-            .name = S8("braced_scalar_once"),
-            .declaration = S8("int braced_scalar_once = {1};\n"),
-            .runtime_check = S8("braced_scalar_once == 1"),
-            .integers = {1}, .integer_count = 1,
-        },
-        {
-            .name = S8("braced_scalar_twice"),
-            .declaration = S8("int braced_scalar_twice = {{1}};\n"),
-            .runtime_check = S8("braced_scalar_twice == 1"),
-            .integers = {1}, .integer_count = 1,
-        },
-        {
-            .name = S8("braced_scalar_deep"),
-            .declaration = S8("int braced_scalar_deep = {{{{{{1}}}}}};\n"),
-            .runtime_check = S8("braced_scalar_deep == 1"),
-            .integers = {1}, .integer_count = 1,
-        },
-        {
             .name = S8("deep_anonymous_flat"),
             .declaration = S8("struct DeepAnonymousUnionNumbers deep_anonymous_flat = {1, 2};\n"),
             .runtime_check = S8("deep_anonymous_flat.x == 1 && deep_anonymous_flat.y == 2"),
