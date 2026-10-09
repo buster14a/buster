@@ -39486,30 +39486,37 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
 
 BUSTER_C_INTERNAL bool c_ir_expression_task_push(CIntegerIrBuilder* builder, CIrLowerFrame* frame, CIrLowerFrame task, u32 token_index)
 {
+    bool pushed = false;
+    bool reservation_fits = true;
     if (!frame->as.expression.tasks)
     {
         frame->as.expression.task_capacity = frame->as.expression.end - frame->as.expression.start + 1;
         u64 tasks_position = builder->temporary_arena->position;
-        if (!c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &tasks_position, sizeof(CIrLowerFrame),
-                                              frame->as.expression.task_capacity, BUSTER_ALIGN_OF(CIrLowerFrame)))
+        reservation_fits = c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &tasks_position, sizeof(CIrLowerFrame),
+                                                           frame->as.expression.task_capacity, BUSTER_ALIGN_OF(CIrLowerFrame));
+        if (!reservation_fits)
         {
             frame->as.expression.task_capacity = 0;
             builder->failure_message = S8("C expression lowering scratch reservation exceeded");
             builder->failure_token_index = token_index;
-            return false;
         }
-        frame->as.expression.tasks = arena_allocate(builder->temporary_arena, CIrLowerFrame, frame->as.expression.task_capacity);
+        else
+        {
+            frame->as.expression.tasks = arena_allocate(builder->temporary_arena, CIrLowerFrame, frame->as.expression.task_capacity);
+        }
     }
-    if (frame->as.expression.task_count >= frame->as.expression.task_capacity)
+    if (reservation_fits && frame->as.expression.task_count < frame->as.expression.task_capacity)
+    {
+        frame->as.expression.tasks[frame->as.expression.task_count++] = task;
+        pushed = true;
+    }
+    else if (reservation_fits)
     {
         builder->failure_message = S8("C expression nesting exceeds the lowering frame capacity");
         builder->failure_token_index = token_index;
-        return false;
     }
-    frame->as.expression.tasks[frame->as.expression.task_count++] = task;
-    return true;
+    return pushed;
 }
-
 // Assignment expressions form a place only after calls in that operand have
 // completed. Preserve the existing parenthesized-place recovery path.
 BUSTER_C_INTERNAL bool c_ir_assignment_expression_place_frame_push(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
