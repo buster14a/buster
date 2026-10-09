@@ -121,8 +121,10 @@
     X(TAG_NAME, LEAF, 0, 0)                /* data: symbol; token: the tag */                                                               \
     X(MEMBER_LIST, LIST, 0, 0)             /* MEMBER_DECLARATION, STATIC_ASSERT, EMPTY_DECLARATION or PRAGMA items; token: `{` */        \
     X(MEMBER_DECLARATION, LIST, 1, 0)      /* DECL_SPECIFIERS, MEMBER_DECLARATOR*; token: first token */                                    \
-    X(MEMBER_DECLARATOR, PRESENCE, 0, 0)   /* bits 0 declarator, 1 bit-field width, 2 attributes (identify by kind: a list written before \
-                                              the declarator, `int a, __attribute__((x)) b;`, precedes it); token: name, else `:` */        \
+    X(MEMBER_DECLARATOR, PRESENCE, 0, 0)   /* bits 0 declarator, 1 bit-field width, 2 trailing ATTRIBUTE_LIST, 3 leading ATTRIBUTE_LIST     \
+                                              (written before the declarator or the `:`, `int a, __attribute__((x)) b;`; first when set).   \
+                                              Then the declarator, and the width and the trailing list in the order written (identify those \
+                                              two by kind); token: name, else `:` */                                                        \
     X(ENUMERATOR_LIST, LIST, 0, 0)         /* ENUMERATOR*; token: `{` */                                                                    \
     X(ENUMERATOR, PRESENCE, 0, 0)          /* bits 0 attributes, 1 value; token: the name */                                                \
     X(TYPEOF, FIXED, 1, 1)                 /* TYPE_NAME or expression; token: keyword */                                                    \
@@ -131,12 +133,16 @@
     X(ALIGNAS, FIXED, 1, 1)                /* TYPE_NAME or expression; token: keyword */                                                    \
     X(BITINT, FIXED, 1, 1)                 /* `_BitInt ( width )`; token: keyword */                                                        \
     /* ---- declarators ---- */                                                                                                             \
-    X(INIT_DECLARATOR, PRESENCE, 1, 0)     /* declarator, then bits 0 ASM_LABEL, 1 ATTRIBUTE_LIST (identify those two by kind; a list \
-                                              written before the declarator, `int a, __attribute__((x)) b;`, precedes it),                  \
-                                              2 initializer (last); token: declarator's name token, else its first token */                \
+    X(INIT_DECLARATOR, PRESENCE, 1, 0)     /* bit 3 leading ATTRIBUTE_LIST (written before the declarator, `int a, __attribute__((x)) b;`;  \
+                                              first when set), the declarator, then bits 0 ASM_LABEL and 1 trailing ATTRIBUTE_LIST in the   \
+                                              order written (identify those two by kind), 2 initializer (last); a declarator can carry      \
+                                              both lists; token: declarator's name token, else its first token */                           \
     X(ASM_LABEL, FIXED, 1, 1)              /* STRING; token: keyword */                                                                     \
     X(DECLARATOR_NAME, LEAF, 0, 0)         /* data: symbol; token: the name */                                                              \
     X(DECLARATOR_POINTER, PRESENCE, 0, 0)  /* bits 0 ATTRIBUTE_LIST, 1 inner declarator; flags C_AST_QUALIFIER_*; token: `*` */            \
+    X(DECLARATOR_ATTRIBUTED, FIXED, 2, 2)  /* ATTRIBUTE_LIST, inner declarator: attributes opening a parenthesized group whose first item   \
+                                              is not `*`, `int (__attribute__((x)) p);` (a pointer keeps its list in DECLARATOR_POINTER);   \
+                                              the list applies to everything inside the parentheses; token: the list's first token */       \
     X(DECLARATOR_ARRAY, PRESENCE, 0, 0)    /* bits 0 inner declarator, 1 size; flags C_AST_QUALIFIER_*, C_AST_ARRAY_*; token: `[` */       \
     X(DECLARATOR_FUNCTION, PRESENCE, 1, 0) /* bit 0 inner declarator, then the parameter or identifier list (last); token: `(` */          \
     X(PARAMETER_LIST, LIST, 0, 0)          /* PARAMETER*; `()` has none; token: `(` */                                                      \

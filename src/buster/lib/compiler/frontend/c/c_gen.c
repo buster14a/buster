@@ -13439,6 +13439,38 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_apply(CPunctuator op, CIrExt80Value left,
     return result;
 }
 
+BUSTER_C_INTERNAL CIrExt80Value c_ir_ext80_value_type_only(CIrExt80Value value)
+{
+    CIrExt80Value result;
+    if (value.rank == C_IR_EXT80_RANK_INTEGER)
+    {
+        u32 width = value.integer_width ? value.integer_width : 32;
+        result = c_ir_ext80_integer_close(false, 0, width, value.unsigned_width != 0);
+    }
+    else
+    {
+        result = c_ir_ext80_value_zero(false, value.rank);
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL CIrExt80Value c_ir_ext80_value_common_arithmetic_type(CIrExt80Value left, CIrExt80Value right)
+{
+    u8 rank = left.rank > right.rank ? left.rank : right.rank;
+    CIrExt80Value result = c_ir_ext80_value_zero(false, rank);
+    if (rank == C_IR_EXT80_RANK_INTEGER)
+    {
+        u32 left_width = left.integer_width ? left.integer_width : 32;
+        u32 right_width = right.integer_width ? right.integer_width : 32;
+        u32 width = left_width > right_width ? left_width : right_width;
+        bool is_unsigned = left_width == right_width ? (left.unsigned_width || right.unsigned_width)
+                           : left_width > right_width ? left.unsigned_width != 0
+                                                      : right.unsigned_width != 0;
+        result = c_ir_ext80_integer_close(false, 0, width, is_unsigned);
+    }
+    return result;
+}
+
 // Unary signs act in the operand's promoted integer domain until a real
 // conversion occurs. Integer values are exact here and need no rational core.
 BUSTER_C_INTERNAL bool c_ir_ext80_fold_unary(bool negative, CIrExt80Value* value)
@@ -13826,6 +13858,9 @@ struct CIrExt80Fold
     // Set when the frame or value stack would overflow its token-count size,
     // so the caller can say so instead of naming a token.
     bool capacity_exceeded;
+    // Type-only evaluation keeps common conditional-arm types when an
+    // unselected constant expression has no value (for example `1 / 0`).
+    bool type_only;
 };
 
 // Entries each stack keeps on the host stack before it asks the arena.
@@ -13890,11 +13925,35 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_reduce(CIrExt80Fold* fold)
     bool applied = true;
     if (frame.kind == C_IR_EXT80_FRAME_PLUS || frame.kind == C_IR_EXT80_FRAME_NEGATE)
     {
-        applied = c_ir_ext80_fold_unary(frame.kind == C_IR_EXT80_FRAME_NEGATE, &fold->values[fold->value_count - 1]);
+        CIrExt80Value* value = &fold->values[fold->value_count - 1];
+        applied = c_ir_ext80_fold_unary(frame.kind == C_IR_EXT80_FRAME_NEGATE, value);
+        if (!applied && fold->type_only)
+        {
+            *value = c_ir_ext80_value_type_only(*value);
+            applied = true;
+        }
     }
     else if (frame.kind == C_IR_EXT80_FRAME_CAST)
     {
-        applied = c_ir_ext80_fold_cast(frame.cast, &fold->values[fold->value_count - 1]);
+        CIrExt80Value* value = &fold->values[fold->value_count - 1];
+        applied = c_ir_ext80_fold_cast(frame.cast, value);
+        if (!applied && fold->type_only)
+        {
+            if (frame.cast.integer)
+            {
+                *value = c_ir_ext80_integer_close(false, 0, frame.cast.width, frame.cast.is_unsigned);
+                if (frame.cast.width < 32)
+                {
+                    value->unsigned_width = 0;
+                    value->integer_width = 32;
+                }
+            }
+            else
+            {
+                *value = c_ir_ext80_value_zero(false, frame.cast.rank);
+            }
+            applied = true;
+        }
     }
     else
     {
@@ -13904,7 +13963,13 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_reduce(CIrExt80Fold* fold)
                                                                    : C_PUNCTUATOR_SLASH;
         CIrExt80Value right = fold->values[fold->value_count - 1];
         fold->value_count -= 1;
-        applied = c_ir_ext80_fold_apply(op, fold->values[fold->value_count - 1], right, &fold->values[fold->value_count - 1]);
+        CIrExt80Value* left = &fold->values[fold->value_count - 1];
+        applied = c_ir_ext80_fold_apply(op, *left, right, left);
+        if (!applied && fold->type_only)
+        {
+            *left = c_ir_ext80_value_common_arithmetic_type(*left, right);
+            applied = true;
+        }
     }
     if (!applied)
     {
@@ -14165,7 +14230,433 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_expression(CIrExt80Fold* fold, CIrExt80Va
     {
         *value_out = fold->values[0];
     }
+    fold->frames = NULL;
+    fold->values = NULL;
+    fold->capacity = 0;
+    fold->frame_count = 0;
+    fold->value_count = 0;
     return ok;
+}
+
+typedef struct CIrExt80ConditionalFrame CIrExt80ConditionalFrame;
+struct CIrExt80ConditionalFrame
+{
+    u32 start;
+    u32 end;
+    u32 question;
+    u32 colon;
+    u8 stage;
+    bool omitted;
+    bool selected_is_true;
+    bool type_only;
+    CIrExt80Value condition;
+    CIrExt80Value selected_value;
+    CIrExt80Value other_value;
+};
+
+typedef struct CIrExt80ConditionalIndex CIrExt80ConditionalIndex;
+struct CIrExt80ConditionalIndex
+{
+    u32 base;
+    u32 token_count;
+    u32* delimiter_closes_plus_one;
+    u32* conditional_colons_plus_one;
+    u32* depths;
+    u32* next_questions_at_depth;
+    u32* delimiter_stack;
+    u32* question_heads;
+};
+
+// Pair every delimiter and conditional once for this initializer. The
+// evaluator's subranges can then find enclosing parentheses and the next
+// question at their own nesting level without rescanning suffixes.
+BUSTER_C_INTERNAL bool c_ir_ext80_conditional_index_build(CIrExt80Fold* fold, CPreprocessResult preprocess, u32 start, u32 end,
+                                                            CIrExt80ConditionalIndex* index)
+{
+    u32 token_count = index->token_count;
+    u32 depth = 0;
+    u32 delimiter_count = 0;
+    bool valid = token_count != 0;
+    if (valid)
+    {
+        memset(index->delimiter_closes_plus_one, 0, token_count * sizeof(*index->delimiter_closes_plus_one));
+        memset(index->conditional_colons_plus_one, 0, token_count * sizeof(*index->conditional_colons_plus_one));
+        memset(index->depths, 0, token_count * sizeof(*index->depths));
+        for (u32 offset = 0; offset < token_count; offset += 1)
+        {
+            index->next_questions_at_depth[offset] = UINT32_MAX;
+        }
+        for (u32 current_depth = 0; current_depth <= token_count; current_depth += 1)
+        {
+            index->question_heads[current_depth] = UINT32_MAX;
+        }
+    }
+    for (u32 token_index = start; valid && token_index < end; token_index += 1)
+    {
+        u32 offset = token_index - start;
+        CToken token = preprocess.tokens[token_index];
+        CPunctuator punctuator = (CPunctuator)token.punctuator;
+        index->depths[offset] = depth;
+        bool opening = punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || punctuator == C_PUNCTUATOR_LEFT_BRACKET ||
+                       punctuator == C_PUNCTUATOR_LEFT_BRACE;
+        bool closing = punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS || punctuator == C_PUNCTUATOR_RIGHT_BRACKET ||
+                       punctuator == C_PUNCTUATOR_RIGHT_BRACE;
+        if (opening)
+        {
+            valid = delimiter_count < token_count && depth < token_count;
+            if (valid)
+            {
+                index->delimiter_stack[delimiter_count++] = token_index;
+                depth += 1;
+            }
+        }
+        else if (closing)
+        {
+            valid = delimiter_count != 0 && depth != 0;
+            if (valid)
+            {
+                u32 open_index = index->delimiter_stack[--delimiter_count];
+                CPunctuator open = (CPunctuator)preprocess.tokens[open_index].punctuator;
+                bool pair_matches = (open == C_PUNCTUATOR_LEFT_PARENTHESIS && punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                                    (open == C_PUNCTUATOR_LEFT_BRACKET && punctuator == C_PUNCTUATOR_RIGHT_BRACKET) ||
+                                    (open == C_PUNCTUATOR_LEFT_BRACE && punctuator == C_PUNCTUATOR_RIGHT_BRACE);
+                valid = pair_matches;
+                if (valid)
+                {
+                    index->delimiter_closes_plus_one[open_index - start] = token_index + 1;
+                    depth -= 1;
+                }
+            }
+        }
+        else if (punctuator == C_PUNCTUATOR_QUESTION)
+        {
+            valid = depth <= token_count;
+            if (valid)
+            {
+                index->next_questions_at_depth[offset] = index->question_heads[depth];
+                index->question_heads[depth] = token_index;
+            }
+        }
+        else if (punctuator == C_PUNCTUATOR_COLON && depth <= token_count)
+        {
+            u32 question = index->question_heads[depth];
+            if (question != UINT32_MAX)
+            {
+                index->conditional_colons_plus_one[question - start] = token_index + 1;
+                index->question_heads[depth] = index->next_questions_at_depth[question - start];
+            }
+        }
+    }
+    valid = valid && delimiter_count == 0 && depth == 0;
+    // The question-link array is no longer needed after pairing. Reuse it to
+    // answer each subrange's next question at the depth of its first token.
+    if (valid)
+    {
+        for (u32 current_depth = 0; current_depth <= token_count; current_depth += 1)
+        {
+            index->question_heads[current_depth] = UINT32_MAX;
+        }
+        for (u32 token_index = end; token_index > start;)
+        {
+            token_index -= 1;
+            u32 offset = token_index - start;
+            u32 current_depth = index->depths[offset];
+            if (preprocess.tokens[token_index].punctuator == C_PUNCTUATOR_QUESTION)
+            {
+                index->question_heads[current_depth] = token_index;
+            }
+            index->next_questions_at_depth[offset] = index->question_heads[current_depth];
+        }
+    }
+    if (!valid && (!index->delimiter_closes_plus_one || !index->conditional_colons_plus_one || !index->depths ||
+                   !index->next_questions_at_depth || !index->delimiter_stack || !index->question_heads))
+    {
+        fold->capacity_exceeded = true;
+    }
+    return valid;
+}
+
+// Find a conditional that is the whole expression. Its delimiter and
+// question-colon boundaries come from the single initializer index above.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_root_conditional(CIrExt80ConditionalIndex const* index, CPreprocessResult preprocess, u32 start,
+                                                         u32 end, u32* expression_start, u32* question_out, u32* colon_out,
+                                                         u32* expression_end)
+{
+    while (start < end && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[start],
+                                                     C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+    {
+        start += 1;
+    }
+    bool trimming = true;
+    while (trimming && start < end)
+    {
+        trimming = false;
+        u32 offset = start - index->base;
+        if (c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+            index->delimiter_closes_plus_one[offset] == end)
+        {
+            start += 1;
+            end -= 1;
+            while (start < end && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[start],
+                                                             C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
+            {
+                start += 1;
+            }
+            trimming = true;
+        }
+    }
+    bool found = false;
+    if (start < end)
+    {
+        u32 question = index->next_questions_at_depth[start - index->base];
+        if (question != UINT32_MAX && question < end)
+        {
+            u32 colon_plus_one = index->conditional_colons_plus_one[question - index->base];
+            if (colon_plus_one && colon_plus_one - 1 < end)
+            {
+                u32 colon = colon_plus_one - 1;
+                bool omitted = question + 1 == colon;
+                if (question != start && (!omitted || c_preprocess_dialect_is_gnu(preprocess.dialect)) && colon + 1 < end)
+                {
+                    *expression_start = start;
+                    *question_out = question;
+                    *colon_out = colon;
+                    *expression_end = end;
+                    found = true;
+                }
+            }
+        }
+    }
+    return found;
+}
+
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_conditional_convert(CIrExt80Value left_type, CIrExt80Value right_type, CIrExt80Value selected,
+                                                            CIrExt80Value* result_out)
+{
+    CIrExt80Value common = c_ir_ext80_value_common_arithmetic_type(left_type, right_type);
+    bool converted = true;
+    if (common.rank != C_IR_EXT80_RANK_INTEGER)
+    {
+        converted = c_ir_ext80_value_convert(&selected, common.rank);
+    }
+    else
+    {
+        bool negative = false;
+        u64 magnitude = 0;
+        bool exact = true;
+        c_ir_ext80_integer_open(selected, &negative, &magnitude);
+        selected = c_ir_ext80_integer_wrap(negative, magnitude, common.integer_width, common.unsigned_width != 0, &exact);
+        BUSTER_UNUSED(exact);
+    }
+    if (converted)
+    {
+        *result_out = selected;
+    }
+    return converted;
+}
+
+// Evaluate conditional subranges with an explicit token-bounded work stack.
+// The unselected arm supplies only its arithmetic type; type-only folding
+// keeps an invalid value such as integer division by zero from changing the
+// selected branch's constant value.
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_constant_range(CIrExt80Fold* fold, u32 start, u32 end, CIrExt80Value* value_out)
+{
+    CIrExt80ConditionalFrame inline_frames[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    CIrExt80Value inline_values[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    u32 inline_closes[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    u32 inline_colons[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    u32 inline_depths[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    u32 inline_next_questions[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    u32 inline_delimiter_stack[C_IR_EXT80_FOLD_INLINE_CAPACITY];
+    u32 inline_question_heads[C_IR_EXT80_FOLD_INLINE_CAPACITY + 1];
+    u32 token_count = end >= start ? end - start : UINT32_MAX;
+    u32 capacity = token_count < UINT32_MAX ? token_count + 1 : 0;
+    bool has_conditional = false;
+    for (u32 token_index = start; token_index < end && !has_conditional; token_index += 1)
+    {
+        has_conditional = c_token_is_punctuator(&fold->preprocess.tokens[token_index], C_PUNCTUATOR_QUESTION);
+    }
+    bool valid = token_count != 0 && capacity != 0;
+    if (valid && !has_conditional)
+    {
+        CIrExt80Value value = {0};
+        fold->cursor = start;
+        fold->limit = end;
+        fold->blame = start;
+        valid = c_ir_ext80_fold_expression(fold, &value) && fold->cursor == end;
+        if (valid)
+        {
+            *value_out = value;
+        }
+    }
+    else if (valid)
+    {
+        CIrExt80ConditionalIndex index = {.base = start, .token_count = token_count};
+        CIrExt80ConditionalFrame* frames = inline_frames;
+        CIrExt80Value* values = inline_values;
+        if (capacity <= C_IR_EXT80_FOLD_INLINE_CAPACITY)
+        {
+            index.delimiter_closes_plus_one = inline_closes;
+            index.conditional_colons_plus_one = inline_colons;
+            index.depths = inline_depths;
+            index.next_questions_at_depth = inline_next_questions;
+            index.delimiter_stack = inline_delimiter_stack;
+            index.question_heads = inline_question_heads;
+        }
+        else
+        {
+            index.delimiter_closes_plus_one = arena_allocate(fold->arena, u32, token_count);
+            index.conditional_colons_plus_one = arena_allocate(fold->arena, u32, token_count);
+            index.depths = arena_allocate(fold->arena, u32, token_count);
+            index.next_questions_at_depth = arena_allocate(fold->arena, u32, token_count);
+            index.delimiter_stack = arena_allocate(fold->arena, u32, token_count);
+            index.question_heads = arena_allocate(fold->arena, u32, capacity);
+            frames = arena_allocate(fold->arena, CIrExt80ConditionalFrame, capacity);
+            values = arena_allocate(fold->arena, CIrExt80Value, capacity);
+        }
+        valid = index.delimiter_closes_plus_one && index.conditional_colons_plus_one && index.depths && index.next_questions_at_depth &&
+                index.delimiter_stack && index.question_heads && frames && values;
+        if (valid)
+        {
+            valid = c_ir_ext80_conditional_index_build(fold, fold->preprocess, start, end, &index);
+        }
+        else
+        {
+            fold->capacity_exceeded = true;
+        }
+        u32 frame_count = 0;
+        u32 value_count = 0;
+        if (valid)
+        {
+            frames[frame_count++] = (CIrExt80ConditionalFrame){.start = start, .end = end};
+        }
+        while (valid && frame_count)
+        {
+            CIrExt80ConditionalFrame* frame = frames + frame_count - 1;
+            if (frame->stage == 0)
+            {
+                u32 expression_start = 0;
+                u32 question = 0;
+                u32 colon = 0;
+                u32 expression_end = 0;
+                if (!c_ir_ext80_fold_root_conditional(&index, fold->preprocess, frame->start, frame->end, &expression_start, &question,
+                                                       &colon, &expression_end))
+                {
+                    CIrExt80Value value = {0};
+                    bool saved_type_only = fold->type_only;
+                    fold->cursor = frame->start;
+                    fold->limit = frame->end;
+                    fold->blame = frame->start;
+                    fold->type_only = frame->type_only;
+                    valid = c_ir_ext80_fold_expression(fold, &value) && fold->cursor == frame->end && value_count < capacity;
+                    fold->type_only = saved_type_only;
+                    if (valid)
+                    {
+                        values[value_count++] = value;
+                        frame_count -= 1;
+                    }
+                }
+                else
+                {
+                    frame->start = expression_start;
+                    frame->end = expression_end;
+                    frame->question = question;
+                    frame->colon = colon;
+                    frame->omitted = colon == question + 1;
+                    frame->stage = 1;
+                    BUSTER_CHECK(frame_count < capacity);
+                    frames[frame_count++] = (CIrExt80ConditionalFrame){.start = expression_start, .end = question,
+                                                                        .type_only = frame->type_only};
+                }
+            }
+            else if (frame->stage == 1)
+            {
+                valid = value_count != 0;
+                if (valid)
+                {
+                    frame->condition = values[--value_count];
+                    frame->selected_is_true = !c_ir_ext80_value_is_zero(frame->condition);
+                    if (frame->omitted && frame->selected_is_true)
+                    {
+                        frame->selected_value = frame->condition;
+                        frame->stage = 3;
+                        BUSTER_CHECK(frame_count < capacity);
+                        frames[frame_count++] = (CIrExt80ConditionalFrame){.start = frame->colon + 1, .end = frame->end, .type_only = true};
+                    }
+                    else
+                    {
+                        frame->stage = 2;
+                        u32 selected_start = frame->omitted || !frame->selected_is_true ? frame->colon + 1 : frame->question + 1;
+                        u32 selected_end = frame->omitted || !frame->selected_is_true ? frame->end : frame->colon;
+                        BUSTER_CHECK(frame_count < capacity);
+                        frames[frame_count++] = (CIrExt80ConditionalFrame){.start = selected_start, .end = selected_end,
+                                                                            .type_only = frame->type_only};
+                    }
+                }
+            }
+            else if (frame->stage == 2)
+            {
+                valid = value_count != 0;
+                if (valid)
+                {
+                    frame->selected_value = values[--value_count];
+                    if (frame->omitted)
+                    {
+                        frame->other_value = frame->condition;
+                        frame->stage = 4;
+                    }
+                    else
+                    {
+                        frame->stage = 3;
+                        u32 other_start = frame->selected_is_true ? frame->colon + 1 : frame->question + 1;
+                        u32 other_end = frame->selected_is_true ? frame->end : frame->colon;
+                        BUSTER_CHECK(frame_count < capacity);
+                        frames[frame_count++] = (CIrExt80ConditionalFrame){.start = other_start, .end = other_end, .type_only = true};
+                    }
+                }
+            }
+            else if (frame->stage == 3)
+            {
+                valid = value_count != 0;
+                if (valid)
+                {
+                    frame->other_value = values[--value_count];
+                    frame->stage = 4;
+                }
+            }
+            else
+            {
+                CIrExt80Value true_type = frame->selected_is_true ? frame->selected_value : frame->other_value;
+                CIrExt80Value false_type = frame->selected_is_true ? frame->other_value : frame->selected_value;
+                CIrExt80Value converted = frame->type_only ? c_ir_ext80_value_common_arithmetic_type(true_type, false_type) : (CIrExt80Value){0};
+                valid = frame->type_only || c_ir_ext80_fold_conditional_convert(true_type, false_type, frame->selected_value, &converted);
+                valid = valid && value_count < capacity;
+                if (valid)
+                {
+                    values[value_count++] = converted;
+                    frame_count -= 1;
+                }
+                else
+                {
+                    fold->blame = frame->question;
+                }
+            }
+        }
+        valid = valid && value_count == 1;
+        if (valid)
+        {
+            *value_out = values[0];
+        }
+    }
+    if (valid)
+    {
+        fold->cursor = end;
+    }
+    else if (!token_count || !capacity)
+    {
+        fold->capacity_exceeded = true;
+    }
+    return valid;
 }
 
 // The entry point both static x87 writers use: the scalar global and one
@@ -14176,7 +14667,7 @@ BUSTER_C_SHARED bool c_semantic_ext80_fold_initializer(Arena* arena, CPreprocess
 {
     CIrExt80Fold fold = {.preprocess = preprocess, .arena = arena, .cursor = start, .limit = end, .blame = start};
     CIrExt80Value value = {0};
-    bool folded = start < end && c_ir_ext80_fold_expression(&fold, &value);
+    bool folded = start < end && c_ir_ext80_fold_constant_range(&fold, start, end, &value);
     bool valid = folded && fold.cursor == end;
     if (!valid)
     {
@@ -17382,6 +17873,13 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
                 // rather than a parenthesized single identifier.  Preserve
                 // the cast type so the base value can be converted before
                 // the outer dereference is formed below.
+                if (dereference_count && close < end && builder->preprocess.tokens[close].kind != C_TOKEN_IDENTIFIER)
+                {
+                    // A computed cast operand, such as `*(int *)(bytes + i)`,
+                    // supplies its pointer value through the expression child.
+                    // The continuation dereferences that value exactly once.
+                    goto c_ir_place_expression_base;
+                }
                 if (close >= end || builder->preprocess.tokens[close].kind != C_TOKEN_IDENTIFIER)
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -59906,6 +60404,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     // declaration is external instead.
     bool* entity_external_definition = arena_allocate(arena, bool, parse.entity_count);
     memset(entity_external_definition, 0, sizeof(*entity_external_definition) * parse.entity_count);
+    // C17 6.2.2p5 and 6.7.4p7: linkage belongs to the identifier. A function
+    // declared `static` anywhere at file scope keeps internal linkage for
+    // every other declaration of it, so `static int f(void); inline int
+    // f(void) { ... }` defines an ordinary internal function, not an inline
+    // definition. A `static` declaration after a non-static one is rejected
+    // by the declaration checks before lowering.
+    bool* entity_internal = arena_allocate(arena, bool, parse.entity_count);
+    memset(entity_internal, 0, sizeof(*entity_internal) * parse.entity_count);
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
@@ -59918,6 +60424,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                           C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU) | C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU_ALT));
         if (specifiers & C_SYMBOL_WELL_KNOWN_BIT(STATIC))
         {
+            entity_internal[declaration.entity.value] = true;
             continue;
         }
         bool inline_specified = (specifiers & (C_SYMBOL_WELL_KNOWN_BIT(INLINE) | C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU) |
@@ -59939,7 +60446,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         {
             entity_function_declarations[declaration.entity.value] = declaration_index;
         }
-        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
+        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0 ||
+                        (declaration.entity.value < parse.entity_count && entity_internal[declaration.entity.value]);
         bool inline_definition = declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
         bool referenced_outside_body = declaration.entity.value < parse.entity_count && function_referenced_outside[declaration.entity.value];
         // A `constructor` or `destructor` is reachable by definition: the
@@ -60055,7 +60563,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             };
             continue;
         }
-        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
+        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0 ||
+                        (declaration.entity.value < parse.entity_count && entity_internal[declaration.entity.value]);
         u32 entity_definition_index = declaration.entity.value < parse.entity_count
                                           ? entity_function_declarations[declaration.entity.value] : UINT32_MAX;
         bool microsoft_definition = target.os == OPERATING_SYSTEM_WINDOWS && entity_definition_index < parse.declaration_count &&
@@ -60257,7 +60766,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
-        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
+        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0 ||
+                        (declaration.entity.value < parse.entity_count && entity_internal[declaration.entity.value]);
         bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
         bool emitted = declaration_functions[declaration_index] && declaration.is_definition && !declaration.is_gnu_inline_only &&
             (!(internal || inline_definition) || function_needed[declaration_index]);
@@ -60288,7 +60798,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         {
             continue;
         }
-        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
+        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0 ||
+                        (declaration.entity.value < parse.entity_count && entity_internal[declaration.entity.value]);
         u32 entity_definition_index = declaration.entity.value < parse.entity_count
                                           ? entity_function_declarations[declaration.entity.value] : UINT32_MAX;
         bool microsoft_definition = target.os == OPERATING_SYSTEM_WINDOWS && entity_definition_index < parse.declaration_count &&

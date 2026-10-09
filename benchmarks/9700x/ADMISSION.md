@@ -21,14 +21,27 @@ its existing post-merge main comparison remains asynchronous and report-only.
 Neither that comparison nor RAD Debugger compatibility is a pre-merge required
 check in the main ruleset or the merge-admission workflow inventory.
 
-The only PR exception is an affirmative owner request: a workload/data change,
-`compiler-compare.request`, or `scaling.request`. The trusted authorizer verifies
+The only PR exception is an affirmative owner request for an experiment or an
+explicit task/issue requirement for applicable performance evidence: a
+workload/data change, `compiler-compare.request`, or `scaling.request` carries
+that request through the existing gate. Routine bug fixes, CI repairs, conflict
+resolution and branch refreshes do not by themselves authorize such a change.
+Record the request/acceptance reference in the handoff; an already authorized
+request needs no second unrelated manual approval. See the
+[request decisions and examples](../../docs/agents/benchmarking.md#request-decisions-and-examples).
+The trusted authorizer verifies
 both the complete PR file inventory and a fresh request-file change at the
 exact head relative to **every parent**. Compiler/scaling markers also need a
 new request line present in every parent diff: merging old marker histories
 alone is not a renewed experiment. An unrelated update, generic invocation
 or merge that merely inherits a request from main cannot replay it. To request
-a new candidate comparison, change the request file in the new head commit.
+a deliberately requested new candidate comparison, add a fresh request line
+in the new head commit. A changed head alone is not a renewed request.
+Before requesting again, read the exact-head check and its matching run/attempt
+and receipt. Reuse complete published evidence only for its original source,
+binary, baseline, workload, profile and configuration identities; stale prose
+saying "queued" is not a rerun reason. Different inputs or a new head need new
+evidence for a performance claim, within the applicable experiment or hold.
 The authorizer log records the head and request paths; the host gate requires
 that same request head and run attempt. The workload/configuration and hardware
 remain bound by the existing receipts and harness.
@@ -40,8 +53,12 @@ head, the request path must differ from both parents, so resolving main into
 a branch without a new request does not consume the host.
 
 Every performance claim still needs actual relevant Zen 5 evidence (#2761).
-A skipped PR benchmark leaves performance validation incomplete. Moving routine
-measurements after merge does not waive requested acceptance measurements.
+A skipped PR benchmark leaves performance validation incomplete. Report normal
+correctness/policy CI, validation of the performance claim, and task acceptance
+separately. Moving routine measurements after merge does not waive requested
+acceptance measurements or release another issue's pre-merge hold. A source-path
+classifier proves machine-verifiable routing/provenance, not human intent;
+the agent guidance governs whether a request should be created.
 
 ## Gate
 

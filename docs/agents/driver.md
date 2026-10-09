@@ -626,6 +626,27 @@ GNU's `F3 0F 7E` form on the equal-length XMM-register tie; machine queries
 retain their existing `66 0F D6` form, and memory/GPR/MMX transfers keep their
 existing encodings.
 
+The x86-64 metadata completion command is `ide x86_64_completion_census
+[--output=<path>]`. Its schema-4 manifest records every generated form row,
+the structural result, Intel and AT&T outcomes separately, source reasons,
+byte/relocation counts and per-row diagnostics. It also retains escaped
+synthesized source text, complete direct and public-assembler byte sequences,
+all relocation values and symbols, and the selected x86 metadata form observed
+after successful checked emission. Each dialect's source witness is captured
+from the ordinary public assembler path; failed source rows retain their
+source and diagnostics, with no selected form invented. When run by hosted CI,
+the artifact is bound to the tested checkout through the workflow run and
+checkout SHA. `source_partition_complete` means every emitted metadata row
+has an outcome for each dialect; `source_complete` means every such row is
+source-capable in both dialects. The default command exit checks structural,
+record, diagnostic, witness and metadata-audit completeness while retaining
+known source gaps in the report. `--require-source-complete` adds the strict
+per-dialect requirement and needs `--output` so the report is still written
+when it fails. The retained witnesses establish what the admitted public
+source and encoder paths did for this snapshot; they do not supply an
+independent architectural oracle for every form. The broader #2931 issue
+remains open for unrelated encoding defects and further proof.
+
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
 suffixes (so `.init_array.00101` keeps its priority), exact `.init`/`.fini`,
@@ -976,7 +997,11 @@ vocabulary. An index can request a definition in a section the full reader
 cannot retain; selecting that member still reaches the existing admission or
 unresolved-symbol diagnostic. That unsupported-definition limitation remains
 at the full-reader boundary rather than silently publishing a descriptor as a
-linked object.
+linked object. An unindexed ELF member counts every global with a non-zero section
+index, reserved `SHN_ABS`, `SHN_COMMON` and `SHN_XINDEX` included, as a definition,
+exactly as a ranlib index does. The member is selected in archive order and the full
+reader refuses it with member and symbol attribution; the link does not report an
+unattributed unresolved symbol or fall through to a later member.
 
 `compiler_driver_archive_test_lazy` exercises all three object formats, 32/64-bit
 GNU and BSD indexes, BSD extended names, unindexed input, transitive dependencies,
@@ -1460,3 +1485,4 @@ SOURCE input metrics. Include resolution, preprocessing, semantics, canonical
 IR validation, backends and publication run fresh. See
 [bounded raw source reuse](../source-lex-reuse.md), including ownership and
 qualified-host performance acceptance, which remains pending.
+
