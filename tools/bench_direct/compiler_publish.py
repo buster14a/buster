@@ -2771,14 +2771,18 @@ def utility_leg_records(authority: dict, files: dict[str, bytes], host: dict, te
                 type(observed.get(key)) is not type(value) or observed.get(key) != value for key, value in expected.items()) or \
                 type(observed.get("wall_us")) is not int or not 0 < observed["wall_us"] <= inv_wall or cleanup > observed["wall_us"]:
             raise ValueError("utility final inventory raw producer/ledger observation differs")
-        leg_phases = phases[8 + index * 5:13 + index * 5]
+        leg_phases = [item for item in phases if item["phase"].startswith(leg + "-")]
+        if [item["phase"] for item in leg_phases] != [leg + "-" + name for name in
+                ("reset-checkout", "reset-tracked-source", "reset-build-cache", "trusted-bootstrap", "ordinary-compare")]:
+            raise ValueError("utility leg phase recipe is incomplete")
         if sum(sampling_integer(item["wall_us"], True) for item in leg_phases) + inv_wall > wall:
             raise ValueError("utility leg clock omits reset/bootstrap/compare/final inventory work")
         manifest_inventory(inventory_raw, {"root": plan["source_root"], "base": plan["baseline_revision"],
                                            "base_tree": plan["baseline_tree"]})
         row["observed_wall_us"] = wall
     duration = sampling_integer(terminal["duration_us"], True)
-    if sum_wall + sum(sampling_integer(row["wall_us"], True) for row in phases[:8]) > duration or \
+    if sum_wall + sum(sampling_integer(row["wall_us"], True) for row in phases
+                       if not row["phase"].startswith(("legacy-", "snapshot-"))) > duration or \
             sampling_integer(legs[-1]["finish_us"], True) - sampling_integer(legs[0]["start_us"], True) > duration:
         raise ValueError("utility native controller clock omits measured legs or pre-leg work")
     return legs
