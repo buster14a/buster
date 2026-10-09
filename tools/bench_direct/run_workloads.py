@@ -36,14 +36,17 @@ other activity on the host is reported (load average) but not excluded.
 A SIGINT, SIGTERM or SIGHUP (a cancelled or timed-out job) takes the path of a
 failing stage: the completed runs stay in the report, the interrupted stage is
 named, the workloads that did not start are listed as NOT RUN, and the exit
-status is 128 plus the signal number. The handlers exist only while `main`
-runs. The workload and compiler process groups are killed and reaped on every
+status is 128 plus the signal number. An exception that is not a signal takes
+the same path. The handlers exist only while `main` runs. The workload and compiler process groups are killed and reaped on every
 exit path, so nothing started here outlives the runner. A signal that arrives
-while a report piece is being written is held until the write is complete. Each
-planned workload, stage and finished run is also appended to
-`<work>/progress.log` (bounded by PROGRESS_LOG_LIMIT, fsynced per line) and
-echoed to stderr, so SIGKILL, which cannot be handled, still leaves the
-completed samples on disk and in the job log (#2902).
+while a report piece is being written is held until the write is complete. A
+standard output that cannot be written (a closed terminal, a closed pipe) is
+reported as a failure and dropped; the step summary and the exit status are
+still completed. Each planned workload, stage and finished run is also appended
+to `<work>/progress.log` (bounded by PROGRESS_LOG_LIMIT; fsynced at the start of
+every stage and at the end, never between the timed runs) and echoed to stderr,
+so SIGKILL, which cannot be handled, still leaves the completed samples in the
+job log and, written to the kernel, in the file (#2902).
 
 The observed CPU model, read from the kernel and never from a runner label,
 heads the report (#2761). On any host other than the approved Zen 5 host
@@ -51,7 +54,7 @@ nothing is compiled or run and the run fails, so a workload can only be
 reported as measured on the Ryzen 7 9700X.
 
 Map: changed_workloads, source_problem, SignalGuard, Progress, compile_bounded, run_once, run_sample,
-render, Reporter, measure_workload, run_plan, main.
+render, Reporter, measure_workload, measure_source, load_average, run_plan, main.
 """
 
 from __future__ import annotations
@@ -180,8 +183,10 @@ SIGNALS = SignalGuard()
 class Progress:
     """Append-only write-ahead log of what the run is about to do and has done.
 
-    Every line is written and fsynced before the next operation, and echoed to
-    stderr. The file is created in the work directory when the first stage
+    Every line is written before the next operation and echoed to stderr. Stage
+    starts and the closing lines are also fsynced; the per-run lines are not, so
+    no disk flush overlaps the next timed run. A killed process loses nothing
+    that was written, only a power failure can. The file is created in the work directory when the first stage
     starts, so a run refused before any work leaves no directory behind; lines
     noted earlier are written first. A failure to write the file is remembered
     in `error` and stops the file only; the measurement is not affected by it.
@@ -205,10 +210,10 @@ class Progress:
         except OSError as error:
             self.error = f"cannot write {PROGRESS_NAME}: {error}"
         for data in self.backlog:
-            self.append(data)
+            self.append(data, True)
         self.backlog = []
 
-    def append(self, data: bytes) -> None:
+    def append(self, data: bytes, sync: bool) -> None:
         if self.descriptor >= 0:
             try:
                 if self.full:
@@ -221,16 +226,17 @@ class Progress:
                     if os.write(self.descriptor, data) != len(data):
                         raise OSError("short write")
                     self.size += len(data)
-                    os.fsync(self.descriptor)
+                    if sync:
+                        os.fsync(self.descriptor)
             except OSError as error:
                 self.error = f"cannot write {PROGRESS_NAME}: {error}"
                 self.close()
 
-    def note(self, text: str) -> None:
+    def note(self, text: str, sync: bool = True) -> None:
         line = f"{time.monotonic() - self.started:9.3f}s {' '.join(text.split())}"
         data = line.encode("utf-8", "replace")[:PROGRESS_LINE_LIMIT - 1].decode("utf-8", "ignore").encode("utf-8") + b"\n"
         if self.opened:
-            self.append(data)
+            self.append(data, sync)
         else:
             self.backlog.append(data)
         try:
@@ -529,6 +535,18 @@ def render(name: str, source_sha: str, program_sha: str, rows: list[dict], data_
     return lines, passed
 
 
+def silence_stdout() -> None:
+    """Point standard output at /dev/null once it failed, so its unwritten buffer cannot fail the exit."""
+    try:
+        descriptor = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(descriptor, sys.stdout.fileno())
+        finally:
+            os.close(descriptor)
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
 class Reporter:
     """Writes each finished piece of the report at once, so a later failure keeps it."""
 
@@ -536,15 +554,24 @@ class Reporter:
         self.summary = summary
         self.failures = failures
         self.summary_failed: list[str] = []
+        self.stdout_failed: list[str] = []
+        self.pieces = 0
 
     def publish(self, chunk: list[str]) -> None:
         text = "\n".join(chunk) + "\n"
         # A stop signal waits until the piece is complete in both places, so it
         # is never torn. The summary is appended with one O_APPEND write loop,
         # not replaced: $GITHUB_STEP_SUMMARY already holds earlier steps' text.
+        # An unwritable standard output (SIGHUP after the terminal closed, a
+        # closed pipe) is recorded and dropped; the summary is still appended.
         with SIGNALS.held():
-            sys.stdout.write(text)
-            sys.stdout.flush()
+            if not self.stdout_failed:
+                try:
+                    sys.stdout.write(text)
+                    sys.stdout.flush()
+                except (OSError, ValueError) as error:
+                    self.stdout_failed.append(f"cannot write standard output: {error}")
+                    silence_stdout()
             if self.summary and not self.summary_failed:
                 try:
                     descriptor = os.open(self.summary, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o666)
@@ -557,26 +584,38 @@ class Reporter:
                         os.close(descriptor)
                 except OSError as error:
                     self.summary_failed.append(f"cannot write --summary: {error}")
+            # Counted inside the held section: a stop raised when it ends found the piece written.
+            self.pieces += 1
 
 
 def measure_workload(name: str, arguments: argparse.Namespace, compiler: str, reporter: Reporter,
                      progress: Progress) -> bool:
     """Compile and time one workload; returns True when it stopped on an error or a signal.
 
-    Either leaves the rest of the plan unrun and reported as NOT RUN.
+    Either leaves the rest of the plan unrun and reported as NOT RUN. A source or
+    input that is refused up front fails this workload alone.
     """
-    failures = reporter.failures
     stopped = False
     problem = source_problem(arguments.candidate, name)
     if problem:
-        failures.append(f"{name}: {problem}")
+        reporter.failures.append(f"{name}: {problem}")
         progress.note(f"SKIP {name}: {problem}")
-        return False
+    else:
+        stopped = measure_source(name, arguments, compiler, reporter, progress)
+    return stopped
+
+
+def measure_source(name: str, arguments: argparse.Namespace, compiler: str, reporter: Reporter,
+                   progress: Progress) -> bool:
+    """Compile and time a workload whose files passed `source_problem`; True when it stopped."""
+    failures = reporter.failures
+    stopped = False
     rows: list[dict] = []
     stage = "preparing the run directory"
     scratch = arguments.work / Path(name).stem
     source = arguments.candidate / name
     program = scratch / "program"
+    pieces = reporter.pieces
     try:
         progress.stage(name, stage)
         scratch.mkdir(parents=True)
@@ -611,7 +650,8 @@ def measure_workload(name: str, arguments: argparse.Namespace, compiler: str, re
             for index in range(WARMUPS + SAMPLES):
                 rows.append(run_sample(program, scratch, arguments.cpu, index, data_bytes))
                 progress.note(f"RUN {name} {index + 1} of {WARMUPS + SAMPLES}: exit {rows[-1]['exit']}, "
-                              f"timed out {int(rows[-1]['timed_out'])}, wall {rows[-1]['wall_ns'] / 1e6:.3f} ms")
+                              f"timed out {int(rows[-1]['timed_out'])}, wall {rows[-1]['wall_ns'] / 1e6:.3f} ms",
+                              sync=False)
                 # Outside the timed interval; this also keeps the executable in the page cache.
                 current = file_sha(program)
                 if current != program_sha:
@@ -623,7 +663,8 @@ def measure_workload(name: str, arguments: argparse.Namespace, compiler: str, re
                 for row in rows:
                     row.setdefault("invalid", f"source sha256 changed from {source_sha} to {source_now} after compilation")
             section, passed = render(name, source_sha, program_sha, rows, data_sha)
-            reporter.publish(section)
+            # The verdict is recorded before the section is written, so a stop that
+            # ends the write cannot lose it.
             progress.note(f"DONE {name}: {'valid' if passed else 'INVALID'}, {len(rows)} runs")
             if not passed:
                 failures.append(f"{name}: a run exited nonzero, was signalled, timed out or invalidated its input")
@@ -631,8 +672,10 @@ def measure_workload(name: str, arguments: argparse.Namespace, compiler: str, re
                 if row.get("invalid"):
                     failures.append(f"{name}: {row['invalid']}")
                     break
-    except (OSError, subprocess.SubprocessError, KeyboardInterrupt) as error:
-        # Keep what finished, name the stage, and never turn it into success.
+            reporter.publish(section)
+    except (Exception, KeyboardInterrupt) as error:
+        # Keep what finished, name the stage, and never turn it into success. This
+        # includes an unexpected exception: the closing report must still be written.
         stopped = True
         kind = ("interrupted" if isinstance(error, KeyboardInterrupt)
                 else "timed out" if isinstance(error, subprocess.TimeoutExpired) else "failed")
@@ -640,16 +683,31 @@ def measure_workload(name: str, arguments: argparse.Namespace, compiler: str, re
             detail = f"{error} received"
         else:
             detail = f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
-        failures.append(f"{name}: {stage} {kind} ({detail}); {len(rows)} of {WARMUPS + SAMPLES} "
-                        "runs completed, the remaining work was NOT RUN")
-        progress.note(f"INCOMPLETE {name}: {stage} {kind} ({detail}), {len(rows)} runs completed")
-        completed = [f"Completed runs (exit/timed out/wall ms): " + ", ".join(
-            f"{row['exit']}/{int(row['timed_out'])}/{row['wall_ns'] / 1e6:.3f}" for row in rows), ""]
-        reporter.publish([f"### `{name}`", "",
-                          f"**INCOMPLETE:** {stage} {kind}: `{detail}`. {len(rows)} of {WARMUPS + SAMPLES} runs "
-                          "completed; the rest was NOT RUN and no summary is given.", ""]
-                         + (completed if rows else []))
+        if reporter.pieces != pieces:
+            # A stop raised as the last write ended: the section is already complete.
+            failures.append(f"{name}: {kind} ({detail}) after its section was written; "
+                            "the remaining work was NOT RUN")
+            progress.note(f"INCOMPLETE {name}: {kind} ({detail}) after its section was written")
+        else:
+            failures.append(f"{name}: {stage} {kind} ({detail}); {len(rows)} of {WARMUPS + SAMPLES} "
+                            "runs completed, the remaining work was NOT RUN")
+            progress.note(f"INCOMPLETE {name}: {stage} {kind} ({detail}), {len(rows)} runs completed")
+            completed = ["Completed runs (exit/timed out/wall ms): " + ", ".join(
+                f"{row['exit']}/{int(row['timed_out'])}/{row['wall_ns'] / 1e6:.3f}" for row in rows), ""]
+            reporter.publish([f"### `{name}`", "",
+                              f"**INCOMPLETE:** {stage} {kind}: `{detail}`. {len(rows)} of {WARMUPS + SAMPLES} runs "
+                              "completed; the rest was NOT RUN and no summary is given.", ""]
+                             + (completed if rows else []))
     return stopped
+
+
+def load_average() -> str:
+    """The kernel's load average line, or `unavailable`."""
+    try:
+        text = Path("/proc/loadavg").read_text(encoding="ascii").strip()
+    except OSError:
+        text = "unavailable"
+    return text
 
 
 def run_plan(arguments: argparse.Namespace, compiler: str | None, cpu_model: str, failures: list[str],
@@ -668,7 +726,7 @@ def run_plan(arguments: argparse.Namespace, compiler: str | None, cpu_model: str
     plan = [] if failures else workloads
     try:
         reporter.publish(lines)
-        load_before = Path("/proc/loadavg").read_text(encoding="ascii").strip()
+        load_before = load_average()
         if plan:
             progress.note(f"PLAN {len(plan)} workloads, {WARMUPS} warmups and {SAMPLES} samples each: "
                           + ", ".join(plan))
@@ -679,21 +737,20 @@ def run_plan(arguments: argparse.Namespace, compiler: str | None, cpu_model: str
                 break
         # From here on only the closing report is written; later signals are recorded, not raised.
         SIGNALS.stopping = True
-    except KeyboardInterrupt as error:
-        # A stop that arrived between workloads, outside their own handling.
+    except (Exception, KeyboardInterrupt) as error:
+        # A stop or an error outside a workload's own handling; still close the report.
         SIGNALS.stopping = True
-        failures.append(f"{error} received between workloads, outside their own handling; "
+        detail = f"{error} received" if isinstance(error, StopRequested) else f"{type(error).__name__}: {error}"
+        failures.append(f"{detail} between workloads, outside their own handling; "
                         "every workload listed as NOT RUN did not finish")
-        progress.note(f"INTERRUPTED outside a workload: {error}")
+        progress.note(f"INTERRUPTED outside a workload: {detail}")
     if position < len(plan):
         failures.append("NOT RUN: " + ", ".join(plan[position:]))
         progress.note("NOT RUN " + ", ".join(plan[position:]))
-    try:
-        load_after = Path("/proc/loadavg").read_text(encoding="ascii").strip()
-    except OSError:
-        load_after = "unavailable"
+    load_after = load_average()
     lines = [f"Compiler: `{compiler}`. Flags: `{' '.join(COMPILE_FLAGS)}`.", "",
              f"Load average before: `{load_before}`; after: `{load_after}`.", ""]
+    failures.extend(reporter.stdout_failed)
     failures.extend(reporter.summary_failed)
     if progress.error:
         failures.append(progress.error)

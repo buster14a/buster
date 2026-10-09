@@ -84,9 +84,11 @@ report, written one piece at a time as each workload finishes, so an earlier
 workload's section survives a later failure. The job log's standard error also
 carries `progress:` lines, and the runner's work directory
 (`$RUNNER_TEMP/direct-bench`) holds `progress.log` with the same lines. Each
-line is written and `fsync`ed before the next operation: the plan, the start of
-every stage of every workload, and every finished run with its exit state and
-wall time. The file is created when the first stage starts, truncated at the
+line is written before the next operation: the plan, the start of every stage
+of every workload, and every finished run with its exit state and wall time.
+Stage starts and the closing lines are `fsync`ed; the per-run lines are not, so
+no disk flush overlaps the next timed run (a killed runner loses nothing it
+wrote, only a power failure can). The file is created when the first stage starts, truncated at the
 start of each run, capped at 64 KiB (it ends with a marker line when the cap is
 hit, after which only standard error continues), and each line is cut at 300
 bytes. If it cannot be written the run still measures, then fails with
@@ -110,7 +112,8 @@ that workload alone, with its reason, before it is compiled.
 
 ### A workload that did not finish
 
-A workload that fails or is interrupted gets an **INCOMPLETE** section naming
+A workload that fails, including with an unexpected exception, or is
+interrupted gets an **INCOMPLETE** section naming
 the stage it was in, the kind (`failed`, `timed out` or `interrupted`), the
 exception and how many of the 11 planned runs completed. Completed runs are
 listed as exit/timed out/wall milliseconds; no latency summary is given, and
@@ -145,7 +148,12 @@ failing stage: the section of the workload in progress is published as
 INCOMPLETE with the stage and the runs that completed, the workloads that had
 not started are listed as `NOT RUN`, and the closing lines are written before
 the runner exits with 130, 143 or 129. A report piece that is being written
-when the signal arrives is finished first. The compiler or workload process
+when the signal arrives is finished first; if that was a workload's last
+section, no INCOMPLETE section is added for it, only a `**FAILED:**` line. If
+standard output cannot be written (the terminal that sent SIGHUP is gone, or
+the log reader exited), that is reported as `**FAILED:** cannot write standard
+output` and the rest of the report goes to the step summary and `progress.log`
+alone, with the same exit status. The compiler or workload process
 group that was running is killed and reaped on every exit path, so nothing
 started by the runner outlives it. A signal that was ignored when the runner
 started stays ignored, and any signal after the first stop is only recorded,

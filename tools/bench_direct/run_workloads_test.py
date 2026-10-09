@@ -447,6 +447,94 @@ class DirectWorkloadTest(unittest.TestCase):
         time.sleep(0.05)
         self.assertEqual(guard.received, signal.SIGTERM)
 
+    def test_unreadable_stdout_still_completes_summary_and_status(self) -> None:
+        # A closed terminal (SIGHUP) or a vanished log reader makes standard output fail.
+        head, pids = self.hanging_head()
+        for number in (signal.SIGHUP, signal.SIGTERM):
+            with self.subTest(signal=number.name):
+                pids.unlink(missing_ok=True)
+                shutil.rmtree(self.root / "work", ignore_errors=True)
+                (self.root / "summary.md").unlink(missing_ok=True)
+                process = self.start_harness(head)
+                running = self.wait_for_lines(pids, 4)[-1]
+                process.stdout.close()
+                process.send_signal(number)
+                self.assertEqual(process.wait(timeout=60), 128 + number, process.stderr.read())
+                self.assertFalse(alive(running), "the signalled workload outlived the runner")
+                summary = (self.root / "summary.md").read_text(encoding="utf-8")
+                self.assertIn(f"**INCOMPLETE:** measurement interrupted: `{number.name} received`. "
+                              "3 of 11 runs completed", summary)
+                self.assertIn("NOT RUN: benchmarks/9700x/bb_ok.c", summary)
+                self.assertIn("**FAILED:** cannot write standard output", summary)
+                log = (self.root / "work" / "progress.log").read_text(encoding="utf-8")
+                self.assertTrue(log.rstrip().endswith(f"END exit status {128 + number}"), log)
+
+    def test_unwritable_stdout_in_process_is_a_reported_failure(self) -> None:
+        import run_workloads
+
+        class Broken(io.StringIO):
+            def write(self, text):
+                raise BrokenPipeError(32, "Broken pipe")
+
+        status, _ = self.run_in_process(self.commit({"benchmarks/9700x/aa_ok.c": PASSING}),
+                                        patch.object(sys, "stdout", Broken()))
+        self.assertEqual(status, 1)
+        summary = (self.root / "summary.md").read_text(encoding="utf-8")
+        self.assertEqual(summary.count("| sample "), 9)
+        self.assertEqual(summary.count("**FAILED:** cannot write standard output"), 1)
+
+    def test_stop_while_publishing_a_finished_section_adds_no_second_section(self) -> None:
+        import run_workloads
+
+        class Interrupting(io.StringIO):
+            def write(self, text):
+                if "Validity:" in text:
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    time.sleep(0.05)
+                return super().write(text)
+
+        seen = Interrupting()
+        head = self.commit({"benchmarks/9700x/aa_ok.c": PASSING, "benchmarks/9700x/bb_ok.c": PASSING})
+        status, _ = self.run_in_process(head, patch.object(sys, "stdout", seen))
+        out = seen.getvalue()
+        self.assertEqual(status, 128 + signal.SIGTERM)
+        self.assertEqual(out.count("### `benchmarks/9700x/aa_ok.c`"), 1)
+        self.assertNotIn("**INCOMPLETE:**", out)
+        self.assertIn("after its section was written", out)
+        self.assertIn("NOT RUN: benchmarks/9700x/bb_ok.c", out)
+        self.assertEqual((self.root / "summary.md").read_text(encoding="utf-8"), out)
+
+    def test_unexpected_exception_in_a_stage_is_a_terminal_report(self) -> None:
+        import run_workloads
+        real = run_workloads.run_sample
+
+        def failing(program, scratch, cpu, index, data):
+            if index == 1:
+                raise RuntimeError("boom")
+            return real(program, scratch, cpu, index, data)
+
+        head = self.commit({"benchmarks/9700x/aa_ok.c": PASSING, "benchmarks/9700x/bb_ok.c": PASSING})
+        status, out = self.run_in_process(head, patch.object(run_workloads, "run_sample", failing))
+        self.assertEqual(status, 1)
+        self.assertIn("**INCOMPLETE:** measurement failed: `RuntimeError: boom`. 1 of 11 runs completed", out)
+        self.assertIn("NOT RUN: benchmarks/9700x/bb_ok.c", out)
+        log = (self.root / "work" / "progress.log").read_text(encoding="utf-8")
+        self.assertTrue(log.rstrip().endswith("END exit status 1"), log)
+
+    def test_run_lines_are_not_fsynced_between_timed_runs(self) -> None:
+        import run_workloads
+        progress = run_workloads.Progress(self.root / "sync dir")
+        self.addCleanup(progress.close)
+        with patch.object(sys, "stderr", io.StringIO()), patch.object(os, "fsync") as sync:
+            progress.stage("benchmarks/9700x/aa_ok.c", "measurement")
+            started = sync.call_count
+            for index in range(11):
+                progress.note(f"RUN {index}", sync=False)
+            self.assertEqual(sync.call_count, started)
+            progress.stage("benchmarks/9700x/aa_ok.c", "reporting")
+            self.assertEqual(sync.call_count, started + 1)
+        self.assertEqual((self.root / "sync dir" / run_workloads.PROGRESS_NAME).read_text(encoding="utf-8").count("RUN "), 11)
+
     def test_progress_log_is_bounded(self) -> None:
         import run_workloads
         progress = run_workloads.Progress(self.root / "log dir")
