@@ -214,13 +214,17 @@ declaration shapes the corpus holds few of, and on Linux the frontend's own
 `c_ast_validate`. The top-level declaration records the tree implies (one per
 declarator; kind, definition, `typedef`, declarator name token, body start,
 continuation and token-range tiling) must equal the `CParserDeclaration`
-records `c_parse_ast` produces. The differences that exist are pinned on both
-sides in `c_ast_corpus_known`:
-
-- `c_parse_ast` classifies a file-scope plain `asm("...")` as a function named
-  `asm`, and `int __attribute__((x)) (*p)(void);` as a function named `x`.
-- It takes `__attribute__` as the name in `int (__attribute__((x)) *p);` and
-  classifies a C23 opaque `enum E : T;` as an object.
+records `c_parse_ast` produces. Inputs on which the two passes legitimately
+differ are pinned on both sides in `c_ast_corpus_known`, so a fix to either
+pass fails its entry until the input moves to the agreement table
+`c_ast_corpus_constructs`. Only the tree's two known gaps above remain pinned,
+as rejected. The four declaration-split misreads the differential found
+([#3142](https://github.com/buster14a/buster/issues/3142)) were fixed by
+[#3156](https://github.com/buster14a/buster/pull/3156) and are agreement
+constructs now: a file-scope plain `asm("...")`, attribute lists before or
+opening a parenthesized pointer declarator, and a C23 opaque `enum E : T;`.
+The tree also rejects syntax errors that today's `-fsyntax-only` accepts
+([#3143](https://github.com/buster14a/buster/issues/3143)).
 
 The compiler sources are preprocessed against the host's C library, so the
 differential also covers glibc's headers. It caught `__float128`, which glibc
@@ -228,12 +232,6 @@ differential also covers glibc's headers. It caught `__float128`, which glibc
 preprocessor reports. `__float128` is now a builtin type word.
 `_Float128`, `_Float64x` and `_Float128x` stay identifiers that a header may
 typedef.
-
-These are defects of the current declaration split
-([#3142](https://github.com/buster14a/buster/issues/3142)). The tree also
-rejects syntax errors that today's `-fsyntax-only` accepts
-([#3143](https://github.com/buster14a/buster/issues/3143)).
-- The tree's two known gaps above are pinned as rejected.
 
 ## Consumer and retirement map
 

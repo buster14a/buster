@@ -1825,6 +1825,11 @@ BUSTER_GLOBAL_LOCAL CAstCorpusConstruct const c_ast_corpus_constructs[] = {
     {S8_INITIALIZER("__attribute__((x)) int (*pfx)(void) __attribute__((y)) = 0; typedef int T5 __attribute__((aligned(4))); enum E5 { A5 __attribute__((deprecated)) = 1 } e5; int x6 __asm__(\"x\") __attribute__((unused));"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("int c, __attribute__((x)) d, e __attribute__((y));"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("_Static_assert(1, \"a\"); int s1; _Static_assert(1, \"b\"); int s2;"), C_PREPROCESS_DIALECT_GNU17},
+    // #3142: plain file-scope `asm`, attributes opening a parenthesized
+    // pointer declarator or preceding one, and a C23 opaque enum.
+    {S8_INITIALIZER("asm(\"nop\"); int after;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int __attribute__((unused)) (*pfa)(void); int (__attribute__((unused)) *pb);"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("enum G : long;"), C_PREPROCESS_DIALECT_C23},
 };
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_constructs_run(UnitTestArguments* arguments, CAstCorpusTally* tally)
@@ -1869,34 +1874,6 @@ struct CAstCorpusKnown
 };
 
 BUSTER_GLOBAL_LOCAL CAstCorpusKnown const c_ast_corpus_known[] = {
-    // c_parse_ast_run's scan: plain `asm` is not a declaration keyword, so
-    // `asm (` at the start of a declaration is an ordinary function name before
-    // a parameter list, and the FUNCTION test precedes the ASSEMBLY test. The
-    // semantic pass then reports "unknown type name 'asm'". `__asm__` and
-    // `__asm` are keywords and classify as ASSEMBLY (the corpus has six).
-    {S8_INITIALIZER("asm(\"nop\"); int after;"), S8_INITIALIZER("file-scope `asm (...)` is classified FUNCTION named `asm` (c_parse_ast_run)"), S8_INITIALIZER(""), S8_INITIALIZER("kind"),
-     C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_OLD_WRONG, C_PARSER_DECLARATION_FUNCTION, C_PARSER_DECLARATION_ASSEMBLY},
-    // c_parse_ast_run's first top-level `(` is the attribute's outer
-    // parenthesis, and c_parse_parenthesized_function_name reads
-    // `((unused)) (` as a redundantly parenthesized function name `unused`
-    // followed by a parameter list. `ide cc -fsyntax-only` then fails with "a
-    // function cannot return a function"; clang and gcc accept the line.
-    {S8_INITIALIZER("int __attribute__((unused)) (*pfa)(void);"),
-     S8_INITIALIZER("`__attribute__((x)) (*p)(...)` is read as a function named `x` (c_parse_parenthesized_function_name)"), S8_INITIALIZER(""), S8_INITIALIZER("kind"),
-     C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_OLD_WRONG, C_PARSER_DECLARATION_FUNCTION, C_PARSER_DECLARATION_OBJECT},
-    // c_parse_parenthesized_declarator_name skips attributes only after a `*`,
-    // so an attribute list opening the group makes `__attribute__` itself the
-    // declared name. Later uses of `pb` are then "undeclared identifier" in
-    // `ide cc -fsyntax-only`; clang and gcc accept the program. (GCC's manual
-    // spells this form `void (__attribute__((noreturn)) ****f) (void);`.)
-    {S8_INITIALIZER("int (__attribute__((unused)) *pb);"),
-     S8_INITIALIZER("attributes opening a parenthesized pointer declarator make `__attribute__` the declared name (c_parse_parenthesized_declarator_name)"),
-     S8_INITIALIZER(""), S8_INITIALIZER("name_token"), C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_OLD_WRONG, C_PARSER_DECLARATION_OBJECT, C_PARSER_DECLARATION_OBJECT},
-    // c_parse_type_only_declaration skips from a `:` to the opening brace, so
-    // an opaque `enum E : T;`, which has none, is not type-only and falls to the
-    // name heuristic: OBJECT named `G`.
-    {S8_INITIALIZER("enum G : long;"), S8_INITIALIZER("a C23 opaque enum declaration is classified OBJECT (c_parse_type_only_declaration)"), S8_INITIALIZER(""), S8_INITIALIZER("kind"),
-     C_PREPROCESS_DIALECT_C23, C_AST_CORPUS_KNOWN_OLD_WRONG, C_PARSER_DECLARATION_OBJECT, C_PARSER_DECLARATION_TYPE},
     // INIT_DECLARATOR has no slot for an attribute list inside a parenthesized
     // declarator whose first item is not a pointer: the pointer form
     // (`(__attribute__((x)) *p)`) keeps its list on DECLARATOR_POINTER.
