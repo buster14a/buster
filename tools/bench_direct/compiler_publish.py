@@ -2205,7 +2205,147 @@ def preparation_publish(environment: dict) -> int:
     return 0 if success and row.get("status") == "completed" and row.get("conclusion") == "success" else 1
 
 
+UTILITY_CHECK_NAME = "9700X compiler closure utility research"
+UTILITY_HOST_JOB = "Compiler closure utility"
+
+
+def physical_clock_data(environment: dict) -> int:
+    """Read public platform start facts; native code owns admission and deadline clamping."""
+    import time
+    from pathlib import Path
+    import authorize as direct_authorize
+    kind = environment.get("BQ_PHYSICAL_CLOCK_KIND")
+    jobs = {"sampling": ("sampling", SAMPLING_HOST_JOB), "preparation": ("preparation", PREPARATION_HOST_JOB),
+            "utility": ("utility", UTILITY_HOST_JOB)}
+    repository, run_id, attempt = environment.get("GITHUB_REPOSITORY", ""), environment.get("GITHUB_RUN_ID", ""), environment.get("GITHUB_RUN_ATTEMPT", "")
+    revision, runner = environment.get("GITHUB_SHA", ""), environment.get("RUNNER_NAME", "")
+    request_id, head = environment.get("BQ_REQUEST_RUN_ID", ""), environment.get("BQ_HEAD_COMMIT", "")
+    if kind not in jobs or repository != "buster14a/buster" or not DECIMAL.fullmatch(run_id) or attempt != "1" or \
+            not SHA.fullmatch(revision) or environment.get("GITHUB_JOB") != jobs[kind][0] or \
+            not runner or any(ord(char) < 32 or ord(char) > 126 for char in runner) or \
+            not DECIMAL.fullmatch(request_id) or not SHA.fullmatch(head):
+        raise ValueError("physical clock lacks exact platform/request/runner inputs")
+    started_wall, started_mono = time.time_ns() // 1000, time.monotonic_ns()
+    # Deliberately tokenless even if an inherited environment has a credential.
+    api = Api(repository, "")
+    execution = api.request(f"/actions/runs/{run_id}")
+    if not isinstance(execution, dict) or type(execution.get("id")) is not int or str(execution["id"]) != run_id or \
+            type(execution.get("run_attempt")) is not int or execution["run_attempt"] != 1 or \
+            execution.get("path") != BENCH_WORKFLOW or execution.get("event") != "workflow_run" or \
+            execution.get("head_branch") != "main" or execution.get("head_sha") != revision or \
+            direct_authorize.full_name(execution.get("repository")) != repository or \
+            direct_authorize.full_name(execution.get("head_repository")) != repository or \
+            direct_authorize.identity(execution.get("actor")) != direct_authorize.MAINTAINER or \
+            direct_authorize.identity(execution.get("triggering_actor")) != direct_authorize.MAINTAINER or \
+            execution.get("display_title") != f"9700X request {request_id}.1 head {head}":
+        raise ValueError("physical clock current workflow provenance differs")
+    rows = api.pages(f"/actions/runs/{run_id}/attempts/1/jobs", "jobs")
+    matches = [row for row in rows if isinstance(row, dict) and row.get("name") == jobs[kind][1]]
+    if len(matches) != 1:
+        raise ValueError("physical clock platform job is absent or ambiguous")
+    job = matches[0]
+    if type(job.get("id")) is not int or job["id"] <= 0 or str(job.get("run_id")) != run_id or \
+            type(job.get("run_attempt")) is not int or job["run_attempt"] != 1 or job.get("head_sha") != revision or \
+            job.get("status") != "in_progress" or job.get("conclusion") is not None or \
+            type(job.get("runner_id")) is not int or job["runner_id"] <= 0 or job.get("runner_name") != runner or \
+            not isinstance(job.get("labels"), list) or not job["labels"] or any(
+                not isinstance(value, str) or not value for value in job["labels"]) or \
+            not {"self-hosted", "Linux", "X64", "buster-zen5", "ryzen-9700x"}.issubset(set(job["labels"])):
+        raise ValueError("physical clock actual active runner/platform attempt is unavailable")
+    stamp = job.get("started_at")
+    if not isinstance(stamp, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", stamp):
+        raise ValueError("physical clock platform start timestamp is unavailable")
+    job_start = round(datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp() * 1000000)
+    finished_wall, elapsed = time.time_ns() // 1000, (time.monotonic_ns() - started_mono) // 1000
+    if not 0 < job_start <= started_wall <= finished_wall or not 0 <= elapsed <= 120 * 1000000 or \
+            abs((finished_wall - started_wall) - elapsed) > 1000000 or finished_wall - job_start > 5400 * 1000000:
+        raise ValueError("physical clock observation is stale, inconsistent or outside its reservation")
+    record = {"schema": "buster-compiler-physical-job-clock-v1", "kind": kind, "repository": repository,
+              "run_id": run_id, "run_attempt": "1", "policy_trusted_revision": revision,
+              "job_id": str(job["id"]), "job_name": jobs[kind][1], "runner_id": str(job["runner_id"]), "runner_name": runner,
+              "started_at": stamp, "started_unix_us": str(job_start), "start_lower_unix_us": str(job_start - 1000000),
+              "observer_started_unix_us": str(started_wall), "observer_finished_unix_us": str(finished_wall),
+              "observer_monotonic_elapsed_us": str(elapsed), "timestamp_precision_us": "1000000",
+              "observation_scope": "public-platform-job-start"}
+    raw = "".join(key + "\t" + value + "\n" for key, value in record.items()).encode("ascii")
+    root = Path(environment.get("RUNNER_TEMP", ""))
+    output, env_file = root / "compiler-physical-job-clock.tsv", environment.get("GITHUB_ENV", "")
+    if not root.is_absolute() or not root.is_dir() or not env_file or len(raw) > 16384:
+        raise ValueError("physical clock evidence/environment destination is unavailable")
+    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(raw)
+    encoded = base64.b64encode(raw).decode("ascii")
+    with open(env_file, "a", encoding="ascii") as stream:
+        stream.write("BQ_PHYSICAL_JOB_DATA=" + encoded + "\n")
+        stream.write("BQ_PHYSICAL_JOB_DATA_FILE=" + str(output) + "\n")
+    print(f"COMPILER_PHYSICAL_CLOCK kind={kind} job={job['id']} first_attempt=1")
+    return 0
+
+
+def utility_export_manifest(raw: bytes, members: dict[str, bytes]) -> dict:
+    """Bind every retained data member to the native exact export inventory."""
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= 8 << 20 or not raw.endswith(b"\n"):
+        raise ValueError("utility export manifest is missing, truncated or oversized")
+    rows = raw.decode("ascii").splitlines()
+    if not rows or rows[0] != "BUSTER_COMPILER_CLOSURE_UTILITY_EXPORT_V1" or len(rows) > 131073:
+        raise ValueError("utility export manifest schema/population differs")
+    seen, regular, directories = {}, set(), set()
+    for row in rows[1:]:
+        fields = row.split("\t")
+        if len(fields) != 5:
+            raise ValueError("utility export manifest row is malformed")
+        kind, name, digest, size, mode = fields
+        if kind not in ("F", "D") or not name or any(part in ("", ".", "..") for part in name.split("/")) or \
+                name.startswith("/") or not re.fullmatch(r"[A-Za-z0-9_.+/-]+", name) or name in seen:
+            raise ValueError("utility export manifest path/kind is unsafe or duplicated")
+        size, mode = sampling_integer(size), sampling_integer(mode)
+        if mode > 0o7777:
+            raise ValueError("utility export manifest mode is malformed")
+        if kind == "D":
+            if digest != "-" or size != 0 or name in members:
+                raise ValueError("utility export directory contains an invented file identity")
+            directories.add(name)
+        else:
+            data = members.get(name)
+            if not re.fullmatch(r"[a-f0-9]{64}", digest) or mode & 0o111 or \
+                    not isinstance(data, bytes) or len(data) != size or hashlib.sha256(data).hexdigest() != digest:
+                raise ValueError("utility export manifest differs from retained regular data")
+            regular.add(name)
+        seen[name] = {"kind": kind, "sha256": digest if kind == "F" else None, "bytes": size, "mode": mode}
+    if not regular or regular != set(members) or any(
+            "/".join(name.split("/")[:index]) not in directories
+            for name in regular for index in range(1, len(name.split("/")))):
+        raise ValueError("utility export manifest does not cover exactly the retained data and parent directories")
+    return seen
+
+
+def utility_net_observation(legacy_us: int, snapshot_us: int, physical_upper_us: int) -> dict:
+    """Assess the once-only trace with every outside-leg physical microsecond charged to snapshot."""
+    if any(type(value) is not int or not 0 < value <= (1 << 64) - 1
+           for value in (legacy_us, snapshot_us, physical_upper_us)) or \
+            physical_upper_us > 5400 * 1000000 or physical_upper_us < legacy_us + snapshot_us:
+        raise ValueError("utility complete leg/whole-job clocks are unavailable or inconsistent")
+    residual = physical_upper_us - legacy_us - snapshot_us
+    charged_snapshot = snapshot_us + residual
+    return {"legacy_leg_us": legacy_us, "snapshot_leg_us": snapshot_us,
+            "physical_job_wall_upper_us": physical_upper_us, "physical_residual_us": residual,
+            "residual_charged_to_legacy_us": 0, "residual_charged_to_snapshot_us": residual,
+            "snapshot_charged_us": charged_snapshot,
+            "observed_net_saving_us": legacy_us - charged_snapshot,
+            "criterion": "snapshot-plus-residual-less-than-legacy",
+            "charge_policy": "all-physical-residual-to-snapshot",
+            "criterion_met": charged_snapshot < legacy_us,
+            "assessment_scope": "once-only-controlled-trace",
+            "general_workload_savings_assessed": False,
+            "hosted_api_publication_us": None}
 def main() -> int:
+    if sys.argv[1:] == ["physical-clock"]:
+        try:
+            return physical_clock_data(dict(os.environ))
+        except (OSError, ValueError, urllib.error.URLError, TimeoutError) as error:
+            print(f"COMPILER_PHYSICAL_CLOCK_REFUSED {error}", file=sys.stderr)
+            return 1
     if sys.argv[1:] in (["sampling-queue"], ["sampling-publish"]):
         try:
             return (sampling_queue if sys.argv[1] == "sampling-queue" else sampling_publish)(dict(os.environ))
