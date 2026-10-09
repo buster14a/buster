@@ -969,7 +969,13 @@ def sampling_json(files: dict[str, bytes], name: str, object_only: bool = True) 
         return result
     def nonfinite(unused):
         raise ValueError("non-finite sampling JSON number")
-    value = json.loads(raw.decode("utf-8"), object_pairs_hook=unique, parse_constant=nonfinite)
+    def finite(value):
+        import math
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError("non-finite sampling JSON number")
+        return result
+    value = json.loads(raw.decode("utf-8"), object_pairs_hook=unique, parse_constant=nonfinite, parse_float=finite)
     if object_only and not isinstance(value, dict):
         raise ValueError("sampling JSON is not an object: " + name)
     return value
@@ -1423,7 +1429,7 @@ def sampling_observed_costs(api: Api, authority: dict, files: dict[str, bytes]) 
             if wall > 0 and queue >= 0:
                 observed.update(physical_job_wall_us=wall, physical_job_wall_upper_us=wall + 2000000,
                                 queue_delay_seconds=queue)
-    except (ValueError, KeyError, TypeError, OSError, urllib.error.URLError, TimeoutError):
+    except (ValueError, KeyError, TypeError, AttributeError, OverflowError, OSError, urllib.error.URLError, TimeoutError):
         pass
     return observed
 
