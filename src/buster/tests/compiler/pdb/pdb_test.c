@@ -140,7 +140,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_forward_type_hashes(UnitTestArgument
                 BUSTER_TEST(arguments, valid);
                 if (valid)
                 {
-                    BUSTER_TEST(arguments, count >= 5 && pdb_read_u32(hashes, 4) == 161053);
+                    // Frozen CRC-v8 bucket of the self pointer with size eight.
+                    BUSTER_TEST(arguments, count >= 5 && pdb_read_u32(hashes, 4) == 99742);
+                    BUSTER_TEST(arguments, count >= 2 &&
+                        ((pdb_read_u32(tpi, offsets[1] + 8) >> 13) & 0x3f) == 8);
                     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(expected_names); target += 1)
                     {
                         String8 expected = expected_names[target];

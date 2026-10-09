@@ -161,6 +161,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_recursive_aggregates(UnitTestAr
             {
                 // The self pointer names the original canonical aggregate ID.
                 BUSTER_TEST(arguments, codeview_test_u16(record + 2) == 0x1002 && codeview_test_u32(record + 4) == 0x1000);
+                BUSTER_TEST(arguments, (codeview_test_u32(record + 8) & 0x1f) == 0x0c &&
+                    ((codeview_test_u32(record + 8) >> 13) & 0x3f) == 8);
             }
             else
             {
@@ -201,6 +203,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_recursive_aggregates(UnitTestAr
         }
         BUSTER_TEST(arguments, lists == 5);
     }
+    u64 unsupported_pointer_sizes[] = {0, 64, UINT64_MAX};
+    for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(unsupported_pointer_sizes); size_index += 1)
+    {
+        types[1].size = unsupported_pointer_sizes[size_index];
+        CodeviewResult refused_pointer = codeview_build(arguments->arena, (CodeviewInput){
+            .model = &model, .file_paths = &path, .file_count = 1, .machine = CODEVIEW_MACHINE_X64});
+        BUSTER_TEST(arguments, !refused_pointer.valid && !refused_pointer.symbols.length && !refused_pointer.types.length);
+    }
+    types[1].size = 8;
     String8 reserved[] = {S8_INITIALIZER("__unnamed"), S8_INITIALIZER("<unnamed-tag>"),
                           S8_INITIALIZER("scope::__unnamed"), S8_INITIALIZER("scope::<unnamed-tag>")};
     for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(reserved); name_index += 1)

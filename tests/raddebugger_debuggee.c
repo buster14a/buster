@@ -32,8 +32,12 @@ struct DebuggeeRecord
     int samples[3];
 };
 
-static DEBUGGEE_NOINLINE int debuggee_inner(int seed, DebuggeeRecord record)
+static DEBUGGEE_NOINLINE int debuggee_inner(int seed, const DebuggeeRecord *input_record)
 {
+    // The Win64 by-value aggregate uses CodeView S_DEFRANGE_REGISTER_REL_INDIR,
+    // which pinned RAD does not parse. Keep the aggregate/array/bitfield oracle
+    // on this normal local copy; by-value parameter evaluation is out of scope.
+    DebuggeeRecord record = *input_record;
     volatile int inner_value = seed + record.samples[1];
     volatile int inner_total = inner_value + record.samples[0] + record.samples[2] + // RAD_BPT_INNER
                                (int)record.flags + (int)record.code + record.tag;
@@ -45,7 +49,7 @@ static DEBUGGEE_NOINLINE int debuggee_outer(int seed)
     int values[3] = {2, 3, 5};
     DebuggeeRecord record = {17, 5, 257, {7, 11, 13}};
     volatile int outer_value = seed + values[1];
-    volatile int outer_result = debuggee_inner(outer_value, record); // RAD_BPT_OUTER: inspect array and aggregate.
+    volatile int outer_result = debuggee_inner(outer_value, &record); // RAD_BPT_OUTER: inspect array and aggregate.
     volatile int final_result = outer_result + values[0] + values[1] + values[2] + seed;
     return final_result;
 }

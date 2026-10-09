@@ -847,9 +847,16 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(ByteWriter* types, DebugModel
         if (type->kind == DEBUG_TYPE_POINTER)
         {
             byte_writer_emit_u32_le(types, codeview_model_type_index(model, type->element_type));
-            // PointerKind 0x0c is the 64-bit near pointer used by both
-            // supported native CodeView targets.
-            byte_writer_emit_u32_le(types, 0x0c);
+            // PointerKind 0x0c is the near pointer used by both native
+            // targets; its six-bit size field preserves the model's bytes.
+            if (type->size && type->size <= 0x3f)
+            {
+                byte_writer_emit_u32_le(types, 0x0c | (u32)type->size << 13);
+            }
+            else
+            {
+                types->overflow = true;
+            }
         }
         else if (type->kind == DEBUG_TYPE_ARRAY || type->kind == DEBUG_TYPE_VECTOR)
         {
