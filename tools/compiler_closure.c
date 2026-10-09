@@ -481,7 +481,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operati
         }
     }
     {
-        String8 receipt = string_format(arena, S8("{\"schema\":\"" BUSTER_COMPILER_CLOSURE_SCHEMA "\",\"policy\":\"snapshot-v1\","
+        String8 receipt = string_format(arena, S8("{{\"schema\":\"" BUSTER_COMPILER_CLOSURE_SCHEMA "\",\"policy\":\"snapshot-v1\","
             "\"state\":\"{S8}\",\"operation\":\"{S8}\",\"base\":\"{S8}\",\"base_tree\":\"{S8}\",\"root_sha256\":\"{S8}\","
             "\"manifest_sha256\":\"{S8}\",\"duration_us\":{u64},\"harness_preparation_us\":{u64}\n}\n"),
             success ? S8("complete") : S8("failed"), operation, base, tree, production_profile_sha256_text(arena, root), digest,

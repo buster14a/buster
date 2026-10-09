@@ -1336,6 +1336,7 @@ class FrozenClosureTest(unittest.TestCase):
         for path in ("CMakeCache.txt", "Release/ide", "throughput-tools/throughput"):
             row("build", path)
         row("bootstrap", "posix/driver")
+        row("bootstrap", "posix/driver.complete")
         bindings = []
         for key in ("CMAKE_C_COMPILER", "CMAKE_LINKER", "CMAKE_MAKE_PROGRAM", "clang", "cmake", "ninja", "tcc"):
             row("tool", key)

@@ -1697,7 +1697,8 @@ def validate_closure(receipt: dict, bundle: object) -> list[str]:
         return []  # historical and default legacy-rebuild receipts
     if not isinstance(closure, dict) or closure.get("policy") != "snapshot-v1" or closure.get("fallback") is not None:
         return ["frozen baseline closure policy/fallback is unsupported"]
-    identity, binaries = receipt.get("identity", {}), receipt.get("binaries", {})
+    identity = receipt.get("identity") if isinstance(receipt.get("identity"), dict) else {}
+    binaries = receipt.get("binaries") if isinstance(receipt.get("binaries"), dict) else {}
     raw = bundle if isinstance(bundle, dict) else {}
     reasons: list[str] = []
     manifests: list[bytes] = []
@@ -1726,7 +1727,8 @@ def validate_closure(receipt: dict, bundle: object) -> list[str]:
                     not lines[1].startswith("root\t/"):
                 raise ValueError("manifest source/tree/root header mismatch")
             root_hash = hashlib.sha256(lines[1][5:].encode()).hexdigest()
-            if any(closure.get(operation, {}).get("root_sha256") != root_hash for operation in ("snapshot", "restore")):
+            if any(not isinstance(closure.get(operation), dict) or closure[operation].get("root_sha256") != root_hash
+                   for operation in ("snapshot", "restore")):
                 raise ValueError("manifest matched root identity mismatch")
             rows: dict[tuple[str, str], list[str]] = {}
             total = 0
@@ -1744,7 +1746,8 @@ def validate_closure(receipt: dict, bundle: object) -> list[str]:
                     raise ValueError("manifest record is malformed or unsafe")
                 key = fields[0], fields[7]
                 if key in rows or (fields[1] == "F" and not SHA256.fullmatch(fields[6])) or \
-                        (fields[1] == "D" and fields[6] != "-"):
+                        (fields[1] == "D" and (fields[6] != "-" or any(int(value) for value in fields[3:6]))) or \
+                        int(fields[2]) > 4095 or int(fields[4]) >= 1_000_000_000:
                     raise ValueError("manifest record duplicate or invalid hash")
                 rows[key] = fields
                 total += int(fields[5])
@@ -1752,9 +1755,10 @@ def validate_closure(receipt: dict, bundle: object) -> list[str]:
                 raise ValueError("manifest file/byte inventory mismatch")
             required = (("source", "build.c"), ("source", "build.sh"), ("source", "tools/bootstrap_driver.sh"),
                         ("build", "CMakeCache.txt"), ("build", "Release/ide"), ("build", "throughput-tools/throughput"))
-            if any(key not in rows for key in required) or not any(key[0] == "bootstrap" for key in rows):
+            if any(key not in rows for key in required) or not any(key[0] == "bootstrap" and key[1].endswith(".complete") for key in rows):
                 raise ValueError("manifest baseline source/generated/build-driver/harness closure is incomplete")
-            if rows["build", "Release/ide"][6] != binaries.get("baseline", {}).get("sha256"):
+            baseline = binaries.get("baseline") if isinstance(binaries.get("baseline"), dict) else {}
+            if rows["build", "Release/ide"][6] != baseline.get("sha256"):
                 raise ValueError("manifest baseline compiler binary mismatch")
             for key in ("CMAKE_C_COMPILER", "CMAKE_LINKER", "CMAKE_MAKE_PROGRAM", "clang", "cmake", "ninja", "tcc", "resource"):
                 if not bindings.get(key, "").startswith("/") or (key != "resource" and ("tool", key) not in rows):

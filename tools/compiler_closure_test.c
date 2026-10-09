@@ -10,6 +10,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena)
     String8 report = path_join(arena, directory, S8("native.json"));
     make_directory_recursive(arena, path_join(arena, root, S8("src/generated")));
     make_directory_recursive(arena, path_join(arena, root, S8("build/generated")));
+        make_directory_recursive(arena, path_join(arena, root, S8("build/throughput-tools")));
     make_directory_recursive(arena, path_join(arena, root, S8("build/Release")));
     make_directory_recursive(arena, path_join(arena, root, S8("build/throughput-tools")));
     make_directory_recursive(arena, path_join(arena, root, S8(".cache/bootstrap-driver")));
@@ -62,6 +63,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena)
         passed = production_profile_write(header, S8("candidate generated source\n")) &&
             production_profile_write(generated, S8("candidate build generated input\n")) &&
             production_profile_write(bootstrap, S8("candidate driver\n")) &&
+            production_profile_write(harness, S8("#!/bin/sh\nprintf 'candidate corpus consumer\\n'\n")) &&
             production_profile_write(path_join(arena, root, S8("src/generated/candidate-only.h")), S8("candidate only\n")) &&
             compiler_closure_transfer(arena, S8("restore"), root, snapshot, base, base_tree, report, digest) &&
             compiler_closure_transfer(arena, S8("verify"), root, snapshot, base, base_tree, report, digest);
