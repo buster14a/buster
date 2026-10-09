@@ -356,7 +356,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_host_receipt(Arena*
 #define BUSTER_UTILITY_EXPORT_DEPTH 8ull
 
 typedef struct CompilerClosureUtilityExportTotals CompilerClosureUtilityExportTotals;
-struct CompilerClosureUtilityExportTotals { u64 files, bytes, deadline; };
+struct CompilerClosureUtilityExportTotals { u64 files, bytes, deadline; bool diagnostic; };
 typedef struct CompilerClosureUtilityExportDirectory CompilerClosureUtilityExportDirectory;
 struct CompilerClosureUtilityExportDirectory { String8 source, destination, relative; u64 depth; };
 
@@ -462,9 +462,11 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_copy(Arena* arena, 
     u64 queued = 1;
     queue[0] = (CompilerClosureUtilityExportDirectory){source, destination, relative, 0};
     bool valid = os_now_microseconds() < totals->deadline;
+    String8 last_member = relative;
     for (u64 at = 0; valid && at < queued; at += 1)
     {
         CompilerClosureUtilityExportDirectory current = queue[at];
+        last_member = current.relative;
         String8 terminated = string_duplicate_arena(arena, current.source, true);
         struct stat status = {0};
         valid = current.depth <= BUSTER_UTILITY_EXPORT_DEPTH && lstat((char*)terminated.pointer, &status) == 0 &&
@@ -482,6 +484,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_copy(Arena* arena, 
             String8 name = entries[i].name;
             String8 input = path_join(arena, current.source, name), output = path_join(arena, current.destination, name);
             String8 member = path_join(arena, current.relative, name);
+            last_member = member;
             String8 named = string_duplicate_arena(arena, input, true);
             struct stat info = {0};
             valid = compiler_sampling_controller_path_safe(name) && member.length <= 1024 &&
@@ -521,6 +524,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_copy(Arena* arena, 
             valid = valid && os_now_microseconds() < totals->deadline;
         }
     }
+    if (!valid && totals->diagnostic)
+        string_print(S8("COMPILER_CLOSURE_UTILITY_DIAGNOSTIC_EXPORT_FAILED source={S8} member={S8} "
+            "copied_files={u64} copied_bytes={u64} within_deadline={u64} physical_qualification=false\n"),
+            source, last_member, totals->files, totals->bytes, (u64)(os_now_microseconds() < totals->deadline));
     return valid;
 }
 
@@ -546,6 +553,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_export(Arena* arena
             compiler_closure_utility_controller_copy(arena, sources[i], path_join(arena, target, components[i]),
                 components[i], totals, &lines);
         result = result && copied;
+        if (resolved.diagnostic)
+            string_print(S8("COMPILER_CLOSURE_UTILITY_DIAGNOSTIC_EXPORT_COMPONENT leg={S8} component={S8} copied={u64}\n"),
+                leg, components[i], (u64)copied);
     }
     String8 names[] = {S8("inventory.json"), S8("inventory.manifest.tsv")};
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
@@ -567,6 +577,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_export(Arena* arena
             totals->files += 1; totals->bytes += content.length;
         }
         result = result && copied;
+        if (resolved.diagnostic)
+            string_print(S8("COMPILER_CLOSURE_UTILITY_DIAGNOSTIC_EXPORT_COMPONENT leg={S8} component={S8} copied={u64}\n"),
+                leg, names[i], (u64)copied);
         scratch_end(data);
     }
     String8 manifest = string_join_arena(arena, string8_list_to_slice(arena, lines), false);
@@ -710,6 +723,20 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_phase(CompilerSampl
     bool intact = compiler_closure_utility_controller_tools(controller->arena, resolved, false);
     controller->success = controller->success && result && intact && !unknown &&
         compiler_closure_admitting() && !compiler_sampling_controller_cancelled();
+    if (resolved->diagnostic)
+    {
+        string_print(S8("COMPILER_CLOSURE_UTILITY_DIAGNOSTIC_PHASE stage={u64} phase={S8} ready={u64} "
+            "child_complete={u64} tools_intact={u64} cleanup_unknown={u64} success={u64}\n"),
+            controller->stage, name, (u64)ready, (u64)result, (u64)intact, (u64)unknown, (u64)controller->success);
+        if (ready && !controller->success)
+        {
+            String8 path = path_join(controller->arena, controller->evidence,
+                string_format(controller->arena, S8("controller-{u64}-{S8}.stderr.log"), controller->stage, name));
+            String8 error = compiler_sampling_controller_read(controller->arena, path, 8192);
+            string_print(S8("COMPILER_CLOSURE_UTILITY_DIAGNOSTIC_PHASE_STDERR bytes={u64} phase={S8}\n{S8}\n"),
+                error.length, name, error);
+        }
+    }
     return controller->success;
 }
 
@@ -800,6 +827,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_inventory(CompilerS
         compiler_closure_cleanup_signalled-signalled, compiler_closure_cleanup_reaped-reaped,
         result && published ? S8("complete") : S8("failed")));
     controller->success = controller->success && result && published && os_now_microseconds() < controller->deadline;
+    if (resolved->diagnostic)
+        string_print(S8("COMPILER_CLOSURE_UTILITY_DIAGNOSTIC_INVENTORY leg={S8} ready={u64} "
+            "manifest_bytes={u64} owner_unknown={u64} validated={u64} published={u64} success={u64}\n"),
+            leg, (u64)ready, manifest.length, (u64)unknown, (u64)result, (u64)published, (u64)controller->success);
     return controller->success;
 }
 
@@ -843,6 +874,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_leg(CompilerSamplin
             !compiler_sampling_controller_cancelled();
         u64 finished = os_now_microseconds();
         controller->success = controller->success && finished <= controller->deadline;
+        if (resolved->diagnostic)
+            string_print(S8("COMPILER_CLOSURE_UTILITY_DIAGNOSTIC_LEG leg={S8} exported={u64} tools_intact={u64} "
+                "success={u64} wall_us={u64} copied_files={u64} copied_bytes={u64}\n"),
+                leg, (u64)exported, (u64)intact, (u64)controller->success, finished-started, totals->files, totals->bytes);
         string8_list_push(arena, legs, string_format(arena,
             S8("{S8}\t{S8}\t{u64}\t{u64}\t{u64}\tbootstrap-through-export-hashfinalization\t{S8}\t{S8}\t{S8}\t{S8}\t{S8}\n"),
             leg, snapshot ? S8("snapshot-v1") : S8("legacy-rebuild"), started, finished, finished-started,
@@ -910,7 +945,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_worker_cla
             string_equal(first, resolved.admitted.plan.baseline_revision) && string_equal(second, resolved.admitted.plan.pull_head);
         bool tools_before = controller.success && compiler_closure_utility_controller_tools(arena, &resolved, false);
         controller.success = controller.success && tools_before;
-        CompilerClosureUtilityExportTotals totals = {.deadline = controller.deadline};
+        CompilerClosureUtilityExportTotals totals = {.deadline = controller.deadline, .diagnostic = resolved.diagnostic};
         bool legacy = compiler_closure_utility_controller_leg(&controller, &resolved, S8("legacy"), false, &totals, &legs, &inventory);
         bool snapshot = legacy && compiler_closure_utility_controller_leg(&controller, &resolved, S8("snapshot"), true, &totals, &legs, &inventory);
         bool tools_after = compiler_closure_utility_controller_tools(arena, &resolved, false);
@@ -951,6 +986,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_worker_cla
             file_write(path_join(arena, resolved.claim, S8("utility-overrun.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(failure));
         }
         result = controller.success && recorded && within_after_publication ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+        if (resolved.diagnostic)
+            string_print(S8("COMPILER_CLOSURE_UTILITY_DIAGNOSTIC_WORKER legacy_complete={u64} snapshot_complete={u64} "
+                "tools_after={u64} terminal_recorded={u64} within_deadline={u64} success={u64} phases={u64}\n"),
+                (u64)legacy, (u64)snapshot, (u64)tools_after, (u64)recorded,
+                (u64)within_after_publication, (u64)(result==PROCESS_RESULT_SUCCESS), controller.stage);
     }
     else string_print(S8("error: utility worker execution claim consumed; attempt cannot retry\n"));
 #else
@@ -1083,6 +1123,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_owned(Aren
     }
     result = complete && within && recorded && publication_recorded && within_after_publication ?
         PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    if (resolved.diagnostic)
+        string_print(S8("COMPILER_CLOSURE_UTILITY_DIAGNOSTIC_OWNER claimed={u64} contained={u64} "
+            "launch_attempted={u64} wait_observed={u64} wait_result={u64} platform_status={u64} "
+            "manager_proven={u64} quiet={u64} inner_unknown={u64} cleanup={u64} restored={u64} "
+            "within={u64} recorded={u64} publication_recorded={u64} success={u64}\n"),
+            (u64)claimed, (u64)contained, (u64)launch_attempted, (u64)wait_observed,
+            (u64)wait.result, (u64)wait.platform_status, (u64)manager_proven, (u64)quiet,
+            (u64)inner_unknown, (u64)cleanup, (u64)restored, (u64)within, (u64)recorded,
+            (u64)publication_recorded, (u64)(result==PROCESS_RESULT_SUCCESS));
 #else
     BUSTER_UNUSED(arena); BUSTER_UNUSED(resolved); BUSTER_UNUSED(arguments); BUSTER_UNUSED(started);
 #endif
