@@ -1,0 +1,389 @@
+{
+  "artifact": {
+    "archive_member_inventory_sha256": "f76d6f9865a6994df66130da67251156b3d7a585c5b6b0e0a4c12ba48d9fd401",
+    "compile_database_bytes": 1057099,
+    "compile_database_sha256": "6fdb5dc392e947c0f14e341a2880caf329a9bc0b1f433c3d6d36762604dd86c0",
+    "request_bytes": 8472,
+    "request_selector": "profile: clang-analyze-full-v1",
+    "request_selector_occurrences": 2,
+    "request_sha256": "b58621ff49de247bc426489ef9e374bed47af3e50c72b5b3632d1e3feee29354",
+    "zip_bytes": 6985721,
+    "zip_member_count": 802,
+    "zip_sha256": "95086bb50bc6465b2fafd37345d5c443a5d764679043165876cf1069f8a73d23"
+  },
+  "campaign_identity": {
+    "base": "521b791421a962a085a0a9685357b6ea5ca790ef",
+    "base_tree": "c1c0fbe0448824c69698e3b54294781543f196d7",
+    "head": "7c75f6277c723125c09152a21cffc217c14db5c5",
+    "head_tree": "6f711a0b96409a3c97b343d2614eadf4488d1a5d",
+    "identity_exact_match": true,
+    "pull": "3167",
+    "repository": "buster14a/buster",
+    "request_run_id": "37894323184",
+    "run_attempt": "1",
+    "run_id": "37894338138"
+  },
+  "evidence_bundle": {
+    "archive": "3130-evidence-bundle.tar.xz",
+    "archive_bytes": 7150628,
+    "archive_file_members": 47,
+    "archive_sha256": "2a9696a3cfb31ed25cc86be649b7b40b6ef283ca531fe88d952dc8bae0461ff0",
+    "manifest_payload_files": 42,
+    "manifest_payload_total_bytes": 17393790
+  },
+  "failed_row": {
+    "checker": "core.NullPointerArithm",
+    "diagnostic": "Addition of a null pointer (via field 'types') and a probably nonzero integer value (via field 'value') may result in undefined behavior",
+    "index": 97,
+    "location": "270:31",
+    "log_bytes": 24137,
+    "log_sha256": "a851af2db8048a5d557053fc3053e75c4ae03d71fd4cd5d85f31bf6f429a8523",
+    "module": "ir",
+    "observed_path_note": "The nested ir_type_from_id path returns without writing table->types; the warning is emitted at 270:31.",
+    "path": "src/buster/lib/compiler/ir/ir.c",
+    "source_root_cause_proven": false
+  },
+  "integrated_local_source": {
+    "local_commit": "4a5e2e5aa55624eec920244eb0e8ada86aa7d073",
+    "merge_commit": "60b601c6b2754bb88d71fa3211b374252a6dcc9a",
+    "merge_parents": [
+      "7c75f6277c723125c09152a21cffc217c14db5c5",
+      "8ea54465a2309f95bcb160143ce4804e05a8dbc8"
+    ],
+    "note": "Local integrated source includes the frozen db062 VA correction. This is not the source revision of the failed H campaign.",
+    "tree": "5ad874305f3665e14c1fa61b1c5417091ed4425c"
+  },
+  "interpretation": {
+    "performance_ratios_allowed": false,
+    "reason": "Every matched analysis arm and aggregate failed on the same TU; elapsed observations are retained without a performance verdict.",
+    "status": "failed_and_comparison_invalid"
+  },
+  "phase_measurements": [
+    {
+      "exit_status": 0,
+      "peak_rss_bytes": 23568384,
+      "phase": "prepare-baseline",
+      "role": "baseline",
+      "state": "complete",
+      "system_cpu_us": 3311,
+      "user_cpu_us": 59601,
+      "wall_us": 64630
+    },
+    {
+      "exit_status": 0,
+      "peak_rss_bytes": 70492160,
+      "phase": "prepare-candidate",
+      "role": "candidate",
+      "state": "complete",
+      "system_cpu_us": 251031,
+      "user_cpu_us": 4829173,
+      "wall_us": 5450932
+    },
+    {
+      "exit_status": 256,
+      "peak_rss_bytes": 447451136,
+      "phase": "analysis-baseline-0",
+      "role": "baseline",
+      "state": "failed",
+      "system_cpu_us": 6360115,
+      "user_cpu_us": 602229251,
+      "wall_us": 307886125
+    },
+    {
+      "exit_status": 256,
+      "peak_rss_bytes": 23490560,
+      "phase": "aggregate-baseline-0",
+      "role": "baseline",
+      "state": "failed",
+      "system_cpu_us": 0,
+      "user_cpu_us": 63388,
+      "wall_us": 64776
+    },
+    {
+      "exit_status": 256,
+      "peak_rss_bytes": 451751936,
+      "phase": "analysis-candidate-0",
+      "role": "candidate",
+      "state": "failed",
+      "system_cpu_us": 6739129,
+      "user_cpu_us": 640307119,
+      "wall_us": 329063331
+    },
+    {
+      "exit_status": 256,
+      "peak_rss_bytes": 70266880,
+      "phase": "aggregate-candidate-0",
+      "role": "candidate",
+      "state": "failed",
+      "system_cpu_us": 236167,
+      "user_cpu_us": 4841286,
+      "wall_us": 5592715
+    },
+    {
+      "exit_status": 256,
+      "peak_rss_bytes": 447381504,
+      "phase": "analysis-candidate-1",
+      "role": "candidate",
+      "state": "failed",
+      "system_cpu_us": 6746643,
+      "user_cpu_us": 640205062,
+      "wall_us": 328386690
+    },
+    {
+      "exit_status": 256,
+      "peak_rss_bytes": 70250496,
+      "phase": "aggregate-candidate-1",
+      "role": "candidate",
+      "state": "failed",
+      "system_cpu_us": 205888,
+      "user_cpu_us": 4874419,
+      "wall_us": 5425078
+    },
+    {
+      "exit_status": 256,
+      "peak_rss_bytes": 447483904,
+      "phase": "analysis-baseline-1",
+      "role": "baseline",
+      "state": "failed",
+      "system_cpu_us": 6516940,
+      "user_cpu_us": 601901886,
+      "wall_us": 307537365
+    },
+    {
+      "exit_status": 256,
+      "peak_rss_bytes": 23425024,
+      "phase": "aggregate-baseline-1",
+      "role": "baseline",
+      "state": "failed",
+      "system_cpu_us": 0,
+      "user_cpu_us": 63537,
+      "wall_us": 64954
+    }
+  ],
+  "phase_totals": {
+    "all_native_phase_process_wall_us": 1289536596,
+    "independent_aggregate_process_wall_us": 11147523,
+    "matched_full_analysis_process_wall_us": 1272873511,
+    "preflight_process_wall_us": 5515562,
+    "wait4_peak_largest_individual_rss_bytes": 451751936,
+    "wait4_system_cpu_us": 27059224,
+    "wait4_user_cpu_us": 2499374722,
+    "whole_tree_sampler_complete": true
+  },
+  "release_job": {
+    "candidate_head": "7c75f6277c723125c09152a21cffc217c14db5c5",
+    "candidate_head_tree": "6f711a0b96409a3c97b343d2614eadf4488d1a5d",
+    "checkout_commit": "646d7e6a5daba7ae056cec1647b39a3080086ad2",
+    "merge_parents": [
+      "7c75f6277c723125c09152a21cffc217c14db5c5",
+      "521b791421a962a085a0a9685357b6ea5ca790ef"
+    ],
+    "merge_tree": "6f711a0b96409a3c97b343d2614eadf4488d1a5d",
+    "native_self_test": {
+      "checks": 141,
+      "expected_rejections": 53,
+      "failures": 0,
+      "log_timestamp_utc": "2026-10-09T06:58:27.1917041Z",
+      "status": "pass"
+    },
+    "scope_limit": "This Release job is identity-bound to the H source tree through a merge commit, not a literal H checkout. It supplies the listed Release-local tests and analyzer aggregate; it is not the separate complete 182-row 9700X full analyzer campaign and does not prove upload of its fixture."
+  },
+  "runs": [
+    {
+      "cost_observations": {
+        "observation_status": "partial",
+        "validation_reason": "baseline-0 in-run aggregate failures does not match its analyzer plan",
+        "validation_status": "failed"
+      },
+      "name": "baseline-0",
+      "observed_coverage": {
+        "failed_rows_observed": 1,
+        "observed_rows": 182,
+        "passing_rows_observed": 181,
+        "planned_rows": 182,
+        "terminal_shards": 8,
+        "unrecorded_rows": 0
+      },
+      "plan": {
+        "alias_rows": 0,
+        "manifest_sha256": "fc76c436cdd8a9cb76c648947b938418504ec11f55ab5b475e11b8d837eebc47",
+        "schema": "PLAN_V1",
+        "selected_rows": 182,
+        "unique_executions": 182
+      },
+      "process_tree": {
+        "peak_live_processes": 5,
+        "reason": "none",
+        "sampled_peak_tree_rss_bytes": 875667456,
+        "samples": 12242,
+        "status": "complete"
+      },
+      "reported_run_elapsed_us": 307883532,
+      "reported_run_status": "fail",
+      "role": "baseline",
+      "status": "failed"
+    },
+    {
+      "cost_observations": {
+        "observation_status": "partial",
+        "validation_reason": "candidate-0 in-run aggregate failures does not match its analyzer plan",
+        "validation_status": "failed"
+      },
+      "name": "candidate-0",
+      "observed_coverage": {
+        "failed_rows_observed": 1,
+        "observed_rows": 182,
+        "passing_rows_observed": 181,
+        "planned_rows": 182,
+        "terminal_shards": 8,
+        "unrecorded_rows": 0
+      },
+      "plan": {
+        "alias_rows": 47,
+        "manifest_sha256": "51da503d569739a4ddaeb3c8e0060eb6596342949ea32d0ea5d251c4e0565d95",
+        "schema": "PLAN_V2",
+        "selected_rows": 182,
+        "unique_executions": 135
+      },
+      "process_tree": {
+        "peak_live_processes": 8,
+        "reason": "none",
+        "sampled_peak_tree_rss_bytes": 900042752,
+        "samples": 12869,
+        "status": "complete"
+      },
+      "reported_run_elapsed_us": 329060789,
+      "reported_run_status": "fail",
+      "role": "candidate",
+      "status": "failed"
+    },
+    {
+      "cost_observations": {
+        "observation_status": "partial",
+        "validation_reason": "candidate-1 in-run aggregate failures does not match its analyzer plan",
+        "validation_status": "failed"
+      },
+      "name": "candidate-1",
+      "observed_coverage": {
+        "failed_rows_observed": 1,
+        "observed_rows": 182,
+        "passing_rows_observed": 181,
+        "planned_rows": 182,
+        "terminal_shards": 8,
+        "unrecorded_rows": 0
+      },
+      "plan": {
+        "alias_rows": 47,
+        "manifest_sha256": "aa799c76db34b953ea0a5070ee0b88844c14b17fd76321210278d97f865d469c",
+        "schema": "PLAN_V2",
+        "selected_rows": 182,
+        "unique_executions": 135
+      },
+      "process_tree": {
+        "peak_live_processes": 8,
+        "reason": "none",
+        "sampled_peak_tree_rss_bytes": 901545984,
+        "samples": 12849,
+        "status": "complete"
+      },
+      "reported_run_elapsed_us": 328384247,
+      "reported_run_status": "fail",
+      "role": "candidate",
+      "status": "failed"
+    },
+    {
+      "cost_observations": {
+        "observation_status": "partial",
+        "validation_reason": "baseline-1 in-run aggregate failures does not match its analyzer plan",
+        "validation_status": "failed"
+      },
+      "name": "baseline-1",
+      "observed_coverage": {
+        "failed_rows_observed": 1,
+        "observed_rows": 182,
+        "passing_rows_observed": 181,
+        "planned_rows": 182,
+        "terminal_shards": 8,
+        "unrecorded_rows": 0
+      },
+      "plan": {
+        "alias_rows": 0,
+        "manifest_sha256": "28db1c72513fc09e80f5cd33ce6045502f55200f232985a96df6b5b46b8144e2",
+        "schema": "PLAN_V1",
+        "selected_rows": 182,
+        "unique_executions": 182
+      },
+      "process_tree": {
+        "peak_live_processes": 5,
+        "reason": "none",
+        "sampled_peak_tree_rss_bytes": 884977664,
+        "samples": 12228,
+        "status": "complete"
+      },
+      "reported_run_elapsed_us": 307534961,
+      "reported_run_status": "fail",
+      "role": "baseline",
+      "status": "failed"
+    }
+  ],
+  "sampler_scope": {
+    "completeness": "all four ANALYZE_RUN records reported complete",
+    "note": "Sampling completeness does not qualify an analyzer comparison that failed correctness gates.",
+    "scope": "sampled process-tree RSS lower bound",
+    "status": "complete"
+  },
+  "schema": "issue3130-second-full-attempt-observations-v1",
+  "source_size": {
+    "baseline_refreshed": false,
+    "build_c_git_blob": "937d7c9e7a58752e82078b8cecfb0069f66d045a",
+    "build_growth_acknowledged_by": "7a75db7c21ce7623c27d4f6ea2826ccc83c8bc8f",
+    "build_growth_bytes": 256070,
+    "command": "build/issue3170-clang21-driver-20261009 source_size --rev HEAD --base 8ea54465a2309f95bcb160143ce4804e05a8dbc8",
+    "driver_provenance": "source-size-driver-provenance-c183.txt",
+    "driver_provenance_sha256": "d92ad13ce7b8d18dbe81afb840c5942315babf38d5684ea7efd879c1b8d861aa",
+    "driver_sha256": "d89904948069caaa1ed9b8aa427f386c9ac4310596b4b768ae81be0ead7d65c1",
+    "driver_source_commit": "c1831b7abf89d63cea5c1b285761a840d1738369",
+    "driver_source_tree": "f295f3d4ed5e8ea981d87c9e2c61995d6c2906f5",
+    "native_compiler": "Ubuntu clang 21.1.8",
+    "production_growth_bytes": 4992,
+    "production_limit_bytes": 32768,
+    "result_log": "source-size-local-4a5e-vs-8ea.log",
+    "result_log_sha256": "84fdfbc13342cd166ac6c61203fbf12e9d9f9618c342b6abebfc2ee0b4b083b9",
+    "scope_note": "Source-size entrypoint inputs build.c and tools/source_size.c match the existing driver source bytes; this is a source inventory report, not a full build validation.",
+    "source_size_c_git_blob": "9e17418af2d91b1c91177ddb9d2edffe34e3663e",
+    "status": "pass"
+  },
+  "va_correction_evidence": {
+    "parent": "9553bfba1951648b768888d11aef1013d829ae2c",
+    "patch_summary": "3 files, 67 insertions (root supplied commit summary).",
+    "source_binding_note": "These captures are preserved as recorded; they include precommit/dirty executions, console-only outputs, and an unavailable Clang 21 core.NullPointerArithm checker.",
+    "source_commit": "db062b683d1a1e8f87f8e165c8e6776ebcff06e3",
+    "test_and_build_scope": {
+      "compiler": "Ubuntu clang 21.1.8",
+      "compiler_scope_limit": "No Clang 23 or canonical TCC result is included for this local VA correction.",
+      "configure": "exit 0; output console-only",
+      "final_source_syntax": "exit 0, 42.405 seconds, empty captured log. It ran on precommit 9553 plus dirty changes whose source bytes were later committed as db062; not a clean-checkout db062 execution.",
+      "initial_build": "exit 1; diagnostic retained in initial-build-failure-capture.json: test-only IrOpcode to u8 conversion under -Werror; cast applied, corrected build exit 0 but console-only output.",
+      "runtime_ir_tests": "502136 passed, 0 failed, module duration 293678495 ns; output console-only and run preceded final test-only typedef/in-bounds result-slot refinement. The production guard did not change.",
+      "supported_clang21_analyzer": "core.NullDereference,core.NonNullParamChecker; exit 0, empty log, run on precommit 9553 plus dirty source state.",
+      "unavailable_clang21_checker": "core.NullPointerArithm was rejected as an unavailable analyzer checker before analysis; exit 1; exact 221-byte diagnostic is retained, SHA-256 23f79bb0dcdde085937e4ed0c1e2d0f3653d2e61e36f76d9a2dcce785734b82c."
+    },
+    "tree": "06d9565f0c81793a4071c3bb6f1e60c5c2246465"
+  },
+  "workload": {
+    "arm_order": [
+      "baseline-0",
+      "candidate-0",
+      "candidate-1",
+      "baseline-1"
+    ],
+    "configuration": "Release",
+    "driver_clang_path": "/usr/bin/clang-23",
+    "host": "AMD Ryzen 7 9700X 8-Core Processor (benchpress)",
+    "installed_clang": "23.1.1",
+    "jobs": 2,
+    "selected_rows": 182,
+    "shards": 8,
+    "timeout_seconds": 600
+  }
+}

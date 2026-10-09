@@ -5814,7 +5814,7 @@ BUSTER_C_INTERNAL CIntegerIrLocal* c_ir_find_local_by_entity(CIntegerIrBuilder* 
     }
     else
     {
-        for (u32 index = builder->local_count; index != 0 && !result; index -= 1)
+        for (u32 index = builder->local_count; builder->local_entities && builder->locals && index != 0 && !result; index -= 1)
         {
             if (builder->local_entities[index - 1] == entity.value)
             {
@@ -6808,7 +6808,7 @@ BUSTER_C_INTERNAL void c_ir_ssa_classify_debug(CIntegerIrBuilder* builder, u8* m
                             ? ssa->events[initializer].value.value
                             : UINT32_MAX;
             IrInstructionId definition = value < function->value_count ? function->values[value].definition : IR_INSTRUCTION_ID_INVALID;
-            IrInstruction* row = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
+            IrInstruction* row = function->instructions && definition.value < function->instruction_count ? function->instructions + definition.value : 0;
             bool fresh = row && row->result.value == value && row->opcode != IR_OPCODE_LOAD && row->opcode != IR_OPCODE_ARGUMENT &&
                          row->opcode != IR_OPCODE_LOCAL && row->canonical_local.value == IR_ID_UNDERLYING_INVALID;
             if (fresh)
@@ -37729,7 +37729,7 @@ BUSTER_C_INTERNAL void c_ir_lower_typedef_step(CIntegerIrBuilder* builder)
     {
         u32 index = state->index++;
         CEntityId entity = c_ir_identifier_entity(builder, index);
-        CEntity* value = entity.value < builder->parse.entity_count ? builder->parse.entities + entity.value : 0;
+        CEntity* value = builder->parse.entities && entity.value < builder->parse.entity_count ? builder->parse.entities + entity.value : 0;
         if (value && value->kind == C_ENTITY_TYPEDEF && value->declaration_token_plus_one == index + 1 &&
             value->type.value < builder->parse.type_count &&
             builder->c_type_ir_map[value->type.value].value == IR_ID_UNDERLYING_INVALID)

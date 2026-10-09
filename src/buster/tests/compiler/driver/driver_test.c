@@ -56,6 +56,7 @@
 #include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
+#include <buster/lib/compiler/wasm/wasm_internal.h>
 #include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 #include <buster/tests/compiler/driver/driver_test.h>
@@ -2406,9 +2407,14 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_object_debug_u3
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_dwarf_location_list(ByteSlice debug_loc, u32 location_offset,
-                                                                                      u64 function_start, u64 function_end)
+                                                                                      u64 function_start, u64 function_end,
+                                                                                      u64* first_begin)
 {
     bool result = false;
+    if (first_begin)
+    {
+        *first_begin = UINT64_MAX;
+    }
     u64 offset = location_offset;
     while (!result && offset <= debug_loc.length && debug_loc.length - offset >= 16)
     {
@@ -2429,6 +2435,10 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_dwarf_location_
             break;
         }
         result = begin < end && begin >= function_start && end <= function_end;
+        if (result && first_begin)
+        {
+            *first_begin = begin;
+        }
         offset += expression_length;
     }
     return result;
@@ -2440,9 +2450,13 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_dwarf_location_
 // value DIE's DW_AT_location list, not an unrelated location range.
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_debug_local_location(ObjectFile* object, String8 function_name,
                                                                                        String8 local_name, u64 function_start,
-                                                                                       u64 function_end)
+                                                                                       u64 function_end, u64* first_begin)
 {
     bool result = false;
+    if (first_begin)
+    {
+        *first_begin = UINT64_MAX;
+    }
     ByteSlice info = object ? object->sections[OBJECT_SECTION_DEBUG_INFO].data : (ByteSlice){0};
     ByteSlice strings = object ? object->sections[OBJECT_SECTION_DEBUG_STR].data : (ByteSlice){0};
     ByteSlice locations = object ? object->sections[OBJECT_SECTION_DEBUG_LOC].data : (ByteSlice){0};
@@ -2502,7 +2516,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_debug_local_loc
             }
             if (string_equal(compiler_driver_test_dwarf_string(strings, child_name_offset), local_name))
             {
-                result = compiler_driver_test_dwarf_location_list(locations, location_offset, function_start, function_end);
+                result = compiler_driver_test_dwarf_location_list(locations, location_offset, function_start, function_end, first_begin);
             }
         }
     }
@@ -7575,7 +7589,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_global_relocations
         for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
         {
             ObjectRelocation relocation = object->relocations[relocation_index];
-            ObjectSymbol const* symbol = relocation.symbol < object->symbol_count ? object->symbols + relocation.symbol : 0;
+            ObjectSymbol const* symbol = object->symbols && relocation.symbol < object->symbol_count ? object->symbols + relocation.symbol : 0;
             bool data = symbol && symbol->kind == OBJECT_SYMBOL_DATA &&
                         (symbol->section == OBJECT_SECTION_DATA || symbol->section == OBJECT_SECTION_READ_ONLY_DATA ||
                          symbol->section == OBJECT_SECTION_ZERO);
@@ -7648,6 +7662,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_scalar_local_locat
                         "    int i;\n"
                         "    for (i = 0; i < n; i += 1) { total += i; }\n"
                         "    return total;\n"
+                        "}\n"
+                        "int deferred(int v, int choose)\n"
+                        "{\n"
+                        "    int late;\n"
+                        "    sink = 0;\n"
+                        "    late = v + 1;\n"
+                        "    if (choose) late = late + 2;\n"
+                        "    else late = late + 3;\n"
+                        "    sink = late;\n"
+                        "    late = late + 4;\n"
+                        "    sink = late;\n"
+                        "    return sink;\n"
+                        "}\n"
+                        "int branch_only(int choose)\n"
+                        "{\n"
+                        "    int later;\n"
+                        "    if (choose) later = 41;\n"
+                        "    else later = 42;\n"
+                        "    sink = later;\n"
+                        "    return sink;\n"
                         "}\n");
     String8 path = buster_test_temporary_path(temporary.arena, S8("buster-debug-scalar-locals"), S8(".c"));
     BUSTER_TEST(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source)));
@@ -7661,6 +7695,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_scalar_local_locat
         {S8_INITIALIZER("copies"), {S8_INITIALIZER("v"), S8_INITIALIZER("a"), S8_INITIALIZER("b"), S8_INITIALIZER("c"), S8_INITIALIZER("d"), S8_INITIALIZER("w")}},
         {S8_INITIALIZER("reassigned"), {S8_INITIALIZER("v"), S8_INITIALIZER("once"), S8_INITIALIZER("twice")}},
         {S8_INITIALIZER("looped"), {S8_INITIALIZER("n"), S8_INITIALIZER("total"), S8_INITIALIZER("i")}},
+        {S8_INITIALIZER("deferred"), {S8_INITIALIZER("v"), S8_INITIALIZER("choose"), S8_INITIALIZER("late")}},
+        {S8_INITIALIZER("branch_only"), {S8_INITIALIZER("later")}},
     };
     String8 const allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 const frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
@@ -7669,7 +7705,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_scalar_local_locat
         for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
         {
             String8 output = buster_test_temporary_path(temporary.arena, S8("buster-debug-scalar-locals"), S8(".o"));
-            String8 command[] = {S8("-c"), S8("-g"), S8("-fpinned-debug-locals"), S8("-target"), S8("x86_64-unknown-linux-gnu"), allocators[allocator], frontends[frontend],
+            String8 command[] = {S8("-c"), S8("-g"), S8("-O0"), S8("-target"), S8("x86_64-unknown-linux-gnu"), allocators[allocator], frontends[frontend],
                                  S8("-o"), output, path};
             CompilerDriverResult built = compiler_driver_execute_invocation(temporary.arena,
                 compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
@@ -7684,12 +7720,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_scalar_local_locat
                 {
                     String8 description = string_format(temporary.arena, S8("{S8} {S8}.{S8}"), label, test_case->function,
                                                         test_case->locals[local]);
+                    if (string_equal(test_case->function, S8("branch_only")))
+                    {
+                        // The first complete stores are path-local, so this
+                        // bounded seed policy deliberately leaves the value
+                        // unavailable instead of exposing its entry stack bytes.
+                        BUSTER_TEST_RAW(arguments, !compiler_driver_test_debug_local_location(&built.object, test_case->function,
+                            test_case->locals[local], symbol->value, symbol->value + symbol->size, 0), description);
+                        continue;
+                    }
                     BUSTER_TEST_RAW(arguments, compiler_driver_test_debug_local_location(&built.object, test_case->function,
                                                                                          test_case->locals[local], symbol->value,
-                                                                                         symbol->value + symbol->size), description);
+                                                                                         symbol->value + symbol->size, 0), description);
+                    if (string_equal(test_case->function, S8("deferred")) && string_equal(test_case->locals[local], S8("late")))
+                    {
+                        u64 first_begin = UINT64_MAX;
+                        bool has_location = compiler_driver_test_debug_local_location(&built.object, test_case->function,
+                                                                                      test_case->locals[local], symbol->value,
+                                                                                      symbol->value + symbol->size, &first_begin);
+                        BUSTER_TEST_RAW(arguments, has_location && first_begin > symbol->value, description);
+                    }
                 }
             }
         }
+    }
+    String8 opt_out_output = buster_test_temporary_path(temporary.arena, S8("buster-debug-scalar-locals-opt-out"), S8(".o"));
+    String8 opt_out_command[] = {S8("-c"), S8("-g"), S8("-O0"), S8("-fno-pinned-debug-locals"),
+                                 S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-fregister-allocator=fast"), S8("-ffrontend-ssa"),
+                                 S8("-o"), opt_out_output, path};
+    CompilerDriverResult opt_out = compiler_driver_execute_invocation(temporary.arena,
+        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(opt_out_command)));
+    BUSTER_TEST(arguments, opt_out.error == COMPILER_DRIVER_ERROR_NONE && opt_out.has_object);
+    String8 debug_zero_output = buster_test_temporary_path(temporary.arena, S8("buster-debug-scalar-locals-g0"), S8(".o"));
+    String8 debug_zero_command[] = {S8("-c"), S8("-g0"), S8("-O0"), S8("-target"), S8("x86_64-unknown-linux-gnu"),
+                                    S8("-fregister-allocator=fast"), S8("-ffrontend-ssa"), S8("-o"), debug_zero_output, path};
+    CompilerDriverResult debug_zero = compiler_driver_execute_invocation(temporary.arena,
+        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(debug_zero_command)));
+    BUSTER_TEST(arguments, debug_zero.error == COMPILER_DRIVER_ERROR_NONE && debug_zero.has_object);
+    if (opt_out.has_object && debug_zero.has_object)
+    {
+        ByteSlice opt_out_text = opt_out.object.sections[OBJECT_SECTION_TEXT].data;
+        ByteSlice debug_zero_text = debug_zero.object.sections[OBJECT_SECTION_TEXT].data;
+        BUSTER_TEST(arguments, opt_out_text.length == debug_zero_text.length && opt_out_text.length != 0);
+        if (opt_out_text.length == debug_zero_text.length)
+        {
+            BUSTER_TEST(arguments, memcmp(opt_out_text.pointer, debug_zero_text.pointer, opt_out_text.length) == 0);
+        }
+        BUSTER_TEST(arguments, opt_out.object.sections[OBJECT_SECTION_DEBUG_LINE].data.length != 0);
+        BUSTER_TEST(arguments, debug_zero.object.sections[OBJECT_SECTION_DEBUG_LINE].data.length == 0);
+    }
+    if (opt_out.has_object)
+    {
+        String8 default_output = buster_test_temporary_path(temporary.arena, S8("buster-debug-scalar-locals-default"), S8(".o"));
+        ByteSlice default_text = {0};
+        String8 default_command[] = {S8("-c"), S8("-g"), S8("-O0"), S8("-target"), S8("x86_64-unknown-linux-gnu"),
+                                     S8("-fregister-allocator=fast"), S8("-ffrontend-ssa"), S8("-o"), default_output, path};
+        CompilerDriverResult default_build = compiler_driver_execute_invocation(temporary.arena,
+            compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(default_command)));
+        BUSTER_TEST(arguments, default_build.error == COMPILER_DRIVER_ERROR_NONE && default_build.has_object);
+        if (default_build.has_object)
+        {
+            default_text = default_build.object.sections[OBJECT_SECTION_TEXT].data;
+        }
+        ByteSlice unpinned_text = opt_out.object.sections[OBJECT_SECTION_TEXT].data;
+        bool default_code_changed = default_text.length != unpinned_text.length ||
+                                    (default_text.length && memcmp(default_text.pointer, unpinned_text.pointer, default_text.length) != 0);
+        BUSTER_TEST(arguments, default_text.length != 0 && default_code_changed);
     }
     scratch_end(temporary);
     return result;
@@ -12627,7 +12723,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_f128(Un
                     }
                     BUSTER_TEST(arguments, found);
                     bool local_location = symbol && compiler_driver_test_debug_local_location(&compiled.object, test_case->symbol, S8("value"),
-                                                                                                symbol->value, symbol->value + symbol->size);
+                                                                                                symbol->value, symbol->value + symbol->size, 0);
                     BUSTER_TEST(arguments, local_location);
                     if (found)
                     {
@@ -16950,6 +17046,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_policy(UnitTes
     BUSTER_TEST(arguments, !compiler_driver_test_wasm_node_environment_failure(true, PROCESS_RESULT_FAILED, loader));
     BUSTER_TEST(arguments, !compiler_driver_test_wasm_node_environment_failure(false, PROCESS_RESULT_FAILED, S8("RuntimeError: unreachable\n")));
     BUSTER_TEST(arguments, !compiler_driver_test_wasm_node_environment_failure(false, PROCESS_RESULT_FAILED, (String8){0}));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_string_equal(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_TEST(arguments, wasm64_test_string_equal());
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_string_slice(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_TEST(arguments, wasm64_test_string_slice());
     return result;
 }
 
@@ -28724,6 +28834,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x64_i128_float);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_node_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_integers);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_string_equal);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_string_slice);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_string_records);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_signature_interning);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_export_names);
@@ -32149,8 +32261,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(arm64_unwind_temporary);
     }
-    // Recording line rows must not change the code that is generated for
-    // them: the machine code has to be identical with and without -g.
+    // The default -g pins mutable scalar locals, so its code can differ from
+    // -g0. Explicitly disabling pinning retains the prior code-generation
+    // policy and must keep the same text as -g0.
     {
         TemporalArena debug_parity_temporary = scratch_begin(&arguments->arena, 1);
         String8 debug_parity_targets[] = {
@@ -32173,11 +32286,18 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 String8 stripped_object_path =
                     buster_test_temporary_path(debug_parity_temporary.arena, S8("buster-c-debug-parity"),
                                                string_format(debug_parity_temporary.arena, S8("-{u32}-{u32}-g0.o"), target_index, source_index));
+                String8 unpinned_object_path =
+                    buster_test_temporary_path(debug_parity_temporary.arena, S8("buster-c-debug-parity"),
+                                               string_format(debug_parity_temporary.arena, S8("-{u32}-{u32}-g-unpinned.o"), target_index, source_index));
                 String8 debug_command_line[] = {
                     S8("-c"), S8("-g"), S8("-target"), debug_parity_targets[target_index], S8("-o"), debug_object_path, source,
                 };
                 String8 stripped_command_line[] = {
                     S8("-c"), S8("-g0"), S8("-target"), debug_parity_targets[target_index], S8("-o"), stripped_object_path, source,
+                };
+                String8 unpinned_command_line[] = {
+                    S8("-c"), S8("-g"), S8("-fno-pinned-debug-locals"), S8("-target"), debug_parity_targets[target_index],
+                    S8("-o"), unpinned_object_path, source,
                 };
                 CompilerDriverResult with_debug = compiler_driver_execute_invocation(
                     debug_parity_temporary.arena,
@@ -32185,20 +32305,26 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 CompilerDriverResult without_debug = compiler_driver_execute_invocation(
                     debug_parity_temporary.arena,
                     compiler_driver_parse_arguments(debug_parity_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(stripped_command_line)));
+                CompilerDriverResult unpinned = compiler_driver_execute_invocation(
+                    debug_parity_temporary.arena,
+                    compiler_driver_parse_arguments(debug_parity_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unpinned_command_line)));
                 BUSTER_TEST(arguments, with_debug.error == COMPILER_DRIVER_ERROR_NONE && with_debug.has_object);
                 BUSTER_TEST(arguments, without_debug.error == COMPILER_DRIVER_ERROR_NONE && without_debug.has_object);
-                if (with_debug.has_object && without_debug.has_object)
+                BUSTER_TEST(arguments, unpinned.error == COMPILER_DRIVER_ERROR_NONE && unpinned.has_object);
+                if (with_debug.has_object && without_debug.has_object && unpinned.has_object)
                 {
                     ByteSlice debug_text = with_debug.object.sections[OBJECT_SECTION_TEXT].data;
                     ByteSlice stripped_text = without_debug.object.sections[OBJECT_SECTION_TEXT].data;
+                    ByteSlice unpinned_text = unpinned.object.sections[OBJECT_SECTION_TEXT].data;
                     BUSTER_TEST(arguments, debug_text.length != 0);
-                    BUSTER_TEST(arguments, debug_text.length == stripped_text.length);
-                    if (debug_text.length == stripped_text.length)
+                    BUSTER_TEST(arguments, stripped_text.length != 0 && unpinned_text.length == stripped_text.length);
+                    if (unpinned_text.length == stripped_text.length)
                     {
-                        BUSTER_TEST(arguments, memcmp(debug_text.pointer, stripped_text.pointer, debug_text.length) == 0);
+                        BUSTER_TEST(arguments, memcmp(unpinned_text.pointer, stripped_text.pointer, stripped_text.length) == 0);
                     }
                     BUSTER_TEST(arguments, with_debug.object.sections[OBJECT_SECTION_DEBUG_LINE].data.length != 0);
                     BUSTER_TEST(arguments, without_debug.object.sections[OBJECT_SECTION_DEBUG_LINE].data.length == 0);
+                    BUSTER_TEST(arguments, unpinned.object.sections[OBJECT_SECTION_DEBUG_LINE].data.length != 0);
                 }
             }
         }

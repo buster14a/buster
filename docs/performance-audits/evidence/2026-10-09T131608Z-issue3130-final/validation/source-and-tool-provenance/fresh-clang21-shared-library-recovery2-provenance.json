@@ -1,0 +1,21 @@
+{
+  "captured_at": "2026-10-09T13:00:54.195675+00:00",
+  "scope": "New local tool recovery after observed large shared-library truncation; no project correctness or old capture reconstruction claim",
+  "prior_prefix_libLLVM_observed": {
+    "bytes": 128638976,
+    "sha256": "e0d7893c4ee93fb0e205f1e55b6d494b35746a7a2a3fc555bb7ac3c253dbb3ae",
+    "clang_startup_exit": 135
+  },
+  "signed_exact_deb_member_libLLVM": {
+    "bytes": 138493144,
+    "sha256": "fd419f2d3eddfbdece987a7757da8f66794ab933dde48fa685c2ad1c9478225e"
+  },
+  "fresh_prefix": "/workspace/scratch/550ea6746c17/local-clang21-recovery2/fresh-prefix-20261009T1300",
+  "fresh_libLLVM_bytes": 138493144,
+  "fresh_libLLVM_sha256": "fd419f2d3eddfbdece987a7757da8f66794ab933dde48fa685c2ad1c9478225e",
+  "clang_binary_sha256": "2451bd5e44d0fe575e3088eb29725b4b0820e5c335a3fdb889ae036f55b57f56",
+  "clang_startup_exit": 0,
+  "clang_version": "Ubuntu clang version 21.1.8 (++20251221032922+2078da43e25a-1~exp1~20251221153059.70)\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /workspace/scratch/550ea6746c17/local-clang21-recovery2/fresh-prefix-20261009T1300/usr/lib/llvm-21/bin\n",
+  "cause_scope": "External file truncation observed; no repository source change identified. Original and fresh libLLVM do not share a destination.",
+  "project_tests_run_by_root": false
+}
