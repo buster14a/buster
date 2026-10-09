@@ -1025,17 +1025,21 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_owned(Aren
     u64 publication_started = os_now_microseconds();
     u64 native_wall=publication_started-started;
     u64 clock_elapsed=resolved.diagnostic ? 0 : resolved.job_clock.entry_elapsed_us;
-    u64 wall=resolved.diagnostic ? native_wall : clock_elapsed+publication_started-resolved.job_clock.entry_monotonic_us;
+    u64 resolution_wall=!resolved.diagnostic && resolved.job_clock.entry_monotonic_us>=started ?
+        resolved.job_clock.entry_monotonic_us-started : 0;
+    bool entry_bound=resolved.diagnostic || (resolved.job_clock.entry_monotonic_us>=started && clock_elapsed>=resolution_wall);
+    u64 preentry=resolved.diagnostic ? 0 : entry_bound ? clock_elapsed-resolution_wall : 0;
+    u64 wall=native_wall+preentry;
     String8 wall_scope=resolved.diagnostic ? S8("native-diagnostic-entry-through-child-cleanup-before-terminal-publication") :
         S8("public-platform-job-start-lower-through-child-cleanup-before-terminal-publication");
-    bool within = compiler_closure_utility_controller_budget(resolved, started, 5400000000ull) != 0;
+    bool within = entry_bound && compiler_closure_utility_controller_budget(resolved, started, 5400000000ull) != 0;
     String8 owner = string_format(arena,
         S8("schema\tbuster-compiler-closure-utility-owner-v1\nphase\tutility\npacket\t0\nplan_sha256\t{S8}\n"
            "physical_packet_wall_us\t{u64}\nnative_entry_wall_us\t{u64}\njob_elapsed_at_native_entry_us\t{u64}\n"
            "physical_job_clock_sha256\t{S8}\nwall_scope\t{S8}\n"
            "process_state\t{S8}\ntimed_out\t{u64}\ncleanup_failed\t{u64}\n"
            "within_reservation\t{S8}\ncancelled\t{u64}\nqualification_state\tunvalidated\ndefault_activated\tfalse\n"),
-        resolved.admitted.freeze_sha256, wall, native_wall, clock_elapsed,
+        resolved.admitted.freeze_sha256, wall, native_wall, preentry,
         resolved.diagnostic ? S8("unavailable") : stage_object_sha256_bytes(arena,(u8*)resolved.job_clock.record.pointer,resolved.job_clock.record.length),
         wall_scope, complete ? S8("complete") : S8("failed"),
         (u64)wait.timed_out, (u64)!cleanup, within ? S8("true") : S8("false"), (u64)cancelled);
@@ -1044,7 +1048,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_owned(Aren
         file_write(path_join(arena, resolved.options.evidence, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(owner)) &&
         file_write(path_join(arena, resolved.claim, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(owner));
     u64 observed_at=os_now_microseconds();
-    u64 observed_wall=resolved.diagnostic ? observed_at-started : clock_elapsed+observed_at-resolved.job_clock.entry_monotonic_us;
+    u64 observed_wall=observed_at-started+preentry;
     String8 publication = string_format(arena,
         S8("schema\tbuster-compiler-closure-utility-owner-publication-v1\nowner_sha256\t{S8}\n"
            "scope\t{S8}\ninitial_scope_us\t{u64}\npublication_us\t{u64}\n"
@@ -1058,7 +1062,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_owned(Aren
     // No successful return may exclude either receipt's publication from the
     // actual hard clock guard. The last observation receipt cannot self-time;
     // its tail remains explicitly unavailable, never an invented zero.
-    bool within_after_publication = compiler_closure_utility_controller_budget(resolved, started, 5400000000ull) != 0;
+    bool within_after_publication = entry_bound && compiler_closure_utility_controller_budget(resolved, started, 5400000000ull) != 0;
     if (claimed && !within_after_publication)
     {
         String8 failed = string_format(arena,
