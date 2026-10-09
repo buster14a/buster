@@ -4668,11 +4668,11 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
 #endif
 #if BUSTER_LINUX
         String8 link_chain_root = path_join(arena, root, S8("bounded-link-chain"));
-        bool link_chain_ready = ready && clang_analyze_new_directory(arena, link_chain_root);
+        bool link_chain_ready = ready && stream_written && clang_analyze_new_directory(arena, link_chain_root);
         for (u64 i = 0; link_chain_ready && i <= BUSTER_ANALYZE_MAX_COMPILER_LINKS; i += 1)
         {
             String8 link_path = path_join(arena, link_chain_root, string_format(arena, S8("link-{u64}"), i));
-            String8 target = i == BUSTER_ANALYZE_MAX_COMPILER_LINKS ? clang : string_format(arena, S8("link-{u64}"), i + 1);
+            String8 target = i == BUSTER_ANALYZE_MAX_COMPILER_LINKS ? stream_probe_path : string_format(arena, S8("link-{u64}"), i + 1);
             String8 link_path_z = string_duplicate_arena(arena, link_path, true);
             String8 target_z = string_duplicate_arena(arena, target, true);
             link_chain_ready = symlink(target_z.pointer, link_path_z.pointer) == 0;
