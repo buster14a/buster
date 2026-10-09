@@ -482,6 +482,10 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_locals(Arena* arena, DebugModel* mo
         {
             added = debug_scope_add(arena, model, parent, DEBUG_SCOPE_LEXICAL, (DebugSourceLocation){0}, function->code_offset,
                                     function->code_offset + function->code_size, scope_variable_counts[scope_index + 1]);
+            if (added != DEBUG_SCOPE_INVALID)
+            {
+                model->scopes[added].no_code = true;
+            }
         }
         // When only the model's capacity ran out the locals go to the
         // function scope instead; a block's locals are never dropped.

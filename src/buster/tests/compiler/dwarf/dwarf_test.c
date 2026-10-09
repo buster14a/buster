@@ -801,8 +801,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_scope_without_ranges(UnitTestArgum
     };
     DebugScope scopes[] = {
         {.kind = DEBUG_SCOPE_FUNCTION, .parent = DEBUG_SCOPE_INVALID, .start = 0x30, .end = 0x50},
-        {.kind = DEBUG_SCOPE_LEXICAL, .parent = 0, .start = 0x30, .end = 0x50},
-        {.kind = DEBUG_SCOPE_LEXICAL, .parent = 0, .start = 0x30, .end = 0x50},
+        {.kind = DEBUG_SCOPE_LEXICAL, .parent = 0, .start = 0x30, .end = 0x50, .no_code = true},
+        {.kind = DEBUG_SCOPE_LEXICAL, .parent = 0, .start = 0x30, .end = 0x50, .no_code = true},
     };
     DebugFunction function = {.name = S8("run_function"), .type = 1, .scope = 0, .code_offset = 0x30, .code_size = 0x20};
     DebugModel model = {.types = types, .type_count = 2, .functions = &function, .function_count = 1,
