@@ -15,5 +15,6 @@ struct Wasm64CheckedArithmeticProbe
 };
 
 BUSTER_F_DECL Wasm64CheckedArithmeticProbe wasm64_test_checked_arithmetic(void);
+BUSTER_F_DECL bool wasm64_test_string_equal(void);
 BUSTER_F_DECL bool wasm64_test_string_slice(void);
 #endif

@@ -248,7 +248,7 @@ static String8 wasm64_s8(char8 const* pointer)
 
 static bool wasm64_string_equal(String8 a, String8 b)
 {
-    return a.length == b.length && (!a.length || memory_compare(a.pointer, b.pointer, a.length));
+    return a.length == b.length && (!a.length || (a.pointer && b.pointer && memory_compare(a.pointer, b.pointer, a.length)));
 }
 
 static bool wasm64_string_has_hash(String8 value, u64* hash_index)
@@ -285,6 +285,14 @@ static String8 wasm64_string_slice(String8 value, u64 start, u64 end)
 }
 
 #if BUSTER_INCLUDE_TESTS
+bool wasm64_test_string_equal(void)
+{
+    String8 null_name = {.length = sizeof("_start") - 1};
+    return !wasm64_string_equal(null_name, S8("_start")) && !wasm64_string_equal(S8("_start"), null_name) &&
+           wasm64_string_equal((String8){0}, (String8){0}) && wasm64_string_equal(S8("_start"), S8("_start")) &&
+           !wasm64_string_equal(S8("_start"), S8("main"));
+}
+
 bool wasm64_test_string_slice(void)
 {
     char8 bytes[] = "abcdef";

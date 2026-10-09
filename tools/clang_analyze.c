@@ -4728,13 +4728,21 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
 #if BUSTER_LINUX
         String8 link_chain_root = path_join(arena, root, S8("bounded-link-chain"));
         bool link_chain_ready = ready && stream_written && clang_analyze_new_directory(arena, link_chain_root);
+        char8* created_link_paths[BUSTER_ANALYZE_MAX_COMPILER_LINKS + 1] = {0};
+        u64 created_link_count = 0;
         for (u64 i = 0; link_chain_ready && i <= BUSTER_ANALYZE_MAX_COMPILER_LINKS; i += 1)
         {
             String8 link_path = path_join(arena, link_chain_root, string_format(arena, S8("link-{u64}"), i));
             String8 target = i == BUSTER_ANALYZE_MAX_COMPILER_LINKS ? stream_probe_path : string_format(arena, S8("link-{u64}"), i + 1);
             String8 link_path_z = string_duplicate_arena(arena, link_path, true);
             String8 target_z = string_duplicate_arena(arena, target, true);
-            link_chain_ready = symlink(target_z.pointer, link_path_z.pointer) == 0;
+            bool link_created = symlink(target_z.pointer, link_path_z.pointer) == 0;
+            if (link_created)
+            {
+                created_link_paths[created_link_count] = link_path_z.pointer;
+                created_link_count += 1;
+            }
+            link_chain_ready = link_created;
         }
         String8 link64 = path_join(arena, link_chain_root, S8("link-1"));
         String8 link65 = path_join(arena, link_chain_root, S8("link-0"));
@@ -4748,6 +4756,13 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
                                link64_walk.link_count == BUSTER_ANALYZE_MAX_COMPILER_LINKS;
         bool link65_rejected = link_chain_ready && !clang_analyze_compiler_path_walk(arena, &link65_walk, link65);
         clang_analyze_test_check(link64_accepted && link65_rejected, S8("compiler-symlink-walk-has-bounded-64-link-limit"), &state);
+        bool link_chain_cleanup = link_chain_ready && created_link_count == BUSTER_ANALYZE_MAX_COMPILER_LINKS + 1;
+        for (u64 i = 0; i < created_link_count; i += 1)
+        {
+            bool link_removed = unlink(created_link_paths[i]) == 0;
+            link_chain_cleanup = link_chain_cleanup && link_removed;
+        }
+        clang_analyze_test_check(link_chain_cleanup, S8("compiler-symlink-walk-fixture-links-cleaned"), &state);
 #endif
         String8 compile[] = {clang, S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char"), S8("tools/clang_analyze_fixture.c"), S8("-o"), fixture};
         ProcessSpawnResult spawn = {0};
