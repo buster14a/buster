@@ -5688,119 +5688,7 @@ BUSTER_C_SHARED CTypeId c_semantic_vendor_builtin_type(CParseResult* result, Tar
     return type;
 }
 
-// The kind a preprocessing-number token types as, or C_TYPE_INVALID when its
-// spelling is not a valid literal. The one rule behind
-// c_parse_expression_leaf_without_cast, the literal fast path and the tree
-// typer (c_ast_types.c): none of them appends a type row to ask it, so the
-// tree typer can read the immutable scalar row for the answer. The leaf runs
-// once per literal query, so it takes the rule inlined; the tree typer calls
-// c_parse_number_literal_kind.
-BUSTER_GLOBAL_LOCAL BUSTER_INLINE CTypeKind c_parse_number_literal_kind_inline(CPreprocessResult const* preprocess, CParseResult const* result,
-                                                                               u32 token_index)
-{
-    CTypeKind kind = C_TYPE_INT;
-    // An integer literal's kind was typed once by the syntax pass for this
-    // data model; only a floating spelling, or a token the facts do not
-    // cover, reads its spelling here.
-    CNumberFact fact = c_number_fact(result->number_facts, preprocess->tokens, token_index);
-    bool floating = (fact.flags & C_NUMBER_FACT_FLOATING) != 0;
-    bool typed = !floating && c_number_fact_kind(result->number_facts, fact, preprocess->target, &kind);
-    String8 first_spelling = typed ? (String8){0} : c_token_spelling(preprocess->spelling_base, preprocess->tokens[token_index]);
-    if (!fact.present)
-    {
-        bool hexadecimal = first_spelling.length >= 2 && first_spelling.pointer[0] == '0' && (first_spelling.pointer[1] == 'x' || first_spelling.pointer[1] == 'X');
-        for (u64 index = 0; index < first_spelling.length; index += 1)
-        {
-            u8 byte = first_spelling.pointer[index];
-            floating |= byte == '.' || byte == 'p' || byte == 'P' || (!hexadecimal && (byte == 'e' || byte == 'E'));
-        }
-    }
-    if (floating)
-    {
-        // The whole run of trailing suffix letters, not just the last
-        // one: GNU's imaginary `i`/`j` may sit on either side of the
-        // width suffix, and musl spells `_Complex_I` as `1.0fi` where
-        // glibc spells it `1.0iF`.
-        bool single = false;
-        bool extended = false;
-        bool imaginary = false;
-        // C23's `f16`/`F16` is the one floating suffix that is not a run
-        // of letters, so it is recognized before the letter scan below --
-        // which would otherwise stop at its `6` and read the spelling as
-        // an unsuffixed double. An imaginary `i`/`j` may still follow it.
-        u64 suffix_end = first_spelling.length;
-        while (suffix_end && (first_spelling.pointer[suffix_end - 1] == 'i' || first_spelling.pointer[suffix_end - 1] == 'I' ||
-                              first_spelling.pointer[suffix_end - 1] == 'j' || first_spelling.pointer[suffix_end - 1] == 'J'))
-        {
-            imaginary = true;
-            suffix_end -= 1;
-        }
-        bool half = suffix_end >= 3 && (first_spelling.pointer[suffix_end - 3] == 'f' || first_spelling.pointer[suffix_end - 3] == 'F') &&
-                    first_spelling.pointer[suffix_end - 2] == '1' && first_spelling.pointer[suffix_end - 1] == '6';
-        for (u64 scan = half ? suffix_end - 3 : suffix_end; scan; scan -= 1)
-        {
-            u8 letter = first_spelling.pointer[scan - 1];
-            if (letter == 'f' || letter == 'F')
-            {
-                single = true;
-            }
-            else if (letter == 'l' || letter == 'L')
-            {
-                extended = true;
-            }
-            else if (letter == 'i' || letter == 'I' || letter == 'j' || letter == 'J')
-            {
-                imaginary = true;
-            }
-            else
-            {
-                break;
-            }
-        }
-        kind = half ? C_TYPE_FLOAT16 : single ? C_TYPE_FLOAT : extended ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
-        if (imaginary)
-        {
-            kind = c_type_kind_complex_of(kind);
-        }
-    }
-    else if (!typed)
-    {
-        u64 integer = 0;
-        kind = c_conditional_number(first_spelling, &integer)
-                   ? c_semantic_integer_literal_kind(preprocess->target, 0, first_spelling, integer)
-                   : C_TYPE_INVALID;
-    }
-    return kind;
-}
-
-BUSTER_C_SHARED CTypeKind c_parse_number_literal_kind(CPreprocessResult const* preprocess, CParseResult const* result, u32 token_index)
-{
-    return c_parse_number_literal_kind_inline(preprocess, result, token_index);
-}
-
-// The kind a character-literal token types as: int, or the wide and Unicode
-// prefix's element kind.
-BUSTER_C_SHARED CTypeKind c_parse_character_literal_kind(CPreprocessResult const* preprocess, u32 token_index)
-{
-    String8 spelling = c_token_spelling(preprocess->spelling_base, preprocess->tokens[token_index]);
-    CTypeKind kind = C_TYPE_INT;
-    if (spelling.length && spelling.pointer[0] == 'L')
-    {
-        kind = target_uses_16_bit_wchar(preprocess->target) ? C_TYPE_UNSIGNED_SHORT :
-               target_uses_unsigned_wchar(preprocess->target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
-    }
-    else if (spelling.length && spelling.pointer[0] == 'u')
-    {
-        kind = spelling.length > 1 && spelling.pointer[1] == '8' ? C_TYPE_UNSIGNED_CHAR : C_TYPE_UNSIGNED_SHORT;
-    }
-    else if (spelling.length && spelling.pointer[0] == 'U')
-    {
-        kind = C_TYPE_UNSIGNED_INT;
-    }
-    return kind;
-}
-
-BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPreprocessResult preprocess,
+BUSTER_C_SHARED CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPreprocessResult preprocess,
                                                                  CParseResult* result, CScopeId scope, u32 start, u32 end)
 {
     if (start >= end)
@@ -5810,12 +5698,98 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
     CToken first = preprocess.tokens[start];
     if (first.kind == C_TOKEN_PREPROCESSING_NUMBER)
     {
-        CTypeKind kind = c_parse_number_literal_kind_inline(&preprocess, result, start);
+        CTypeKind kind = C_TYPE_INT;
+        // An integer literal's kind was typed once by the syntax pass for this
+        // data model; only a floating spelling, or a token the facts do not
+        // cover, reads its spelling here.
+        CNumberFact fact = c_number_fact(result->number_facts, preprocess.tokens, start);
+        bool floating = (fact.flags & C_NUMBER_FACT_FLOATING) != 0;
+        bool typed = !floating && c_number_fact_kind(result->number_facts, fact, preprocess.target, &kind);
+        String8 first_spelling = typed ? (String8){0} : c_token_spelling(preprocess.spelling_base, first);
+        if (!fact.present)
+        {
+            bool hexadecimal = first_spelling.length >= 2 && first_spelling.pointer[0] == '0' && (first_spelling.pointer[1] == 'x' || first_spelling.pointer[1] == 'X');
+            for (u64 index = 0; index < first_spelling.length; index += 1)
+            {
+                u8 byte = first_spelling.pointer[index];
+                floating |= byte == '.' || byte == 'p' || byte == 'P' || (!hexadecimal && (byte == 'e' || byte == 'E'));
+            }
+        }
+        if (floating)
+        {
+            // The whole run of trailing suffix letters, not just the last
+            // one: GNU's imaginary `i`/`j` may sit on either side of the
+            // width suffix, and musl spells `_Complex_I` as `1.0fi` where
+            // glibc spells it `1.0iF`.
+            bool single = false;
+            bool extended = false;
+            bool imaginary = false;
+            // C23's `f16`/`F16` is the one floating suffix that is not a run
+            // of letters, so it is recognized before the letter scan below --
+            // which would otherwise stop at its `6` and read the spelling as
+            // an unsuffixed double. An imaginary `i`/`j` may still follow it.
+            u64 suffix_end = first_spelling.length;
+            while (suffix_end && (first_spelling.pointer[suffix_end - 1] == 'i' || first_spelling.pointer[suffix_end - 1] == 'I' ||
+                                  first_spelling.pointer[suffix_end - 1] == 'j' || first_spelling.pointer[suffix_end - 1] == 'J'))
+            {
+                imaginary = true;
+                suffix_end -= 1;
+            }
+            bool half = suffix_end >= 3 && (first_spelling.pointer[suffix_end - 3] == 'f' || first_spelling.pointer[suffix_end - 3] == 'F') &&
+                        first_spelling.pointer[suffix_end - 2] == '1' && first_spelling.pointer[suffix_end - 1] == '6';
+            for (u64 scan = half ? suffix_end - 3 : suffix_end; scan; scan -= 1)
+            {
+                u8 letter = first_spelling.pointer[scan - 1];
+                if (letter == 'f' || letter == 'F')
+                {
+                    single = true;
+                }
+                else if (letter == 'l' || letter == 'L')
+                {
+                    extended = true;
+                }
+                else if (letter == 'i' || letter == 'I' || letter == 'j' || letter == 'J')
+                {
+                    imaginary = true;
+                }
+                else
+                {
+                    break;
+                }
+            }
+            kind = half ? C_TYPE_FLOAT16 : single ? C_TYPE_FLOAT : extended ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
+            if (imaginary)
+            {
+                kind = c_type_kind_complex_of(kind);
+            }
+        }
+        else if (!typed)
+        {
+            u64 integer = 0;
+            kind = c_conditional_number(first_spelling, &integer)
+                       ? c_semantic_integer_literal_kind(preprocess.target, 0, first_spelling, integer)
+                       : C_TYPE_INVALID;
+        }
         return end == start + 1 && kind != C_TYPE_INVALID ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID;
     }
     if (first.kind == C_TOKEN_CHARACTER_LITERAL && end == start + 1)
     {
-        return c_parse_expression_scalar_type(result, c_parse_character_literal_kind(&preprocess, start));
+        String8 spelling = c_token_spelling(preprocess.spelling_base, first);
+        CTypeKind kind = C_TYPE_INT;
+        if (spelling.length && spelling.pointer[0] == 'L')
+        {
+            kind = target_uses_16_bit_wchar(preprocess.target) ? C_TYPE_UNSIGNED_SHORT :
+                   target_uses_unsigned_wchar(preprocess.target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+        }
+        else if (spelling.length && spelling.pointer[0] == 'u')
+        {
+            kind = spelling.length > 1 && spelling.pointer[1] == '8' ? C_TYPE_UNSIGNED_CHAR : C_TYPE_UNSIGNED_SHORT;
+        }
+        else if (spelling.length && spelling.pointer[0] == 'U')
+        {
+            kind = C_TYPE_UNSIGNED_INT;
+        }
+        return c_parse_expression_scalar_type(result, kind);
     }
     if (first.kind == C_TOKEN_STRING_LITERAL)
     {
@@ -33344,7 +33318,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
     }
     // The function-definition index of the syntax tree, when there is one,
     // lives with the other tables built once outside the per-body checkpoints.
-    c_ast_types_bodies_prepare(machine);
+    c_ast_types_bodies_prepare(machine, result);
     for (u32 declaration_index = 0; declaration_index < result->declaration_count; declaration_index += 1)
     {
         CDeclaration* declaration = result->declarations + declaration_index;

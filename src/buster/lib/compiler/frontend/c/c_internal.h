@@ -1485,7 +1485,7 @@ struct CAstTypeAnswer
     bool nonplace_projection;
 };
 
-BUSTER_C_EXTERN void c_ast_types_bodies_prepare(CTypeParseMachine* machine);
+BUSTER_C_EXTERN void c_ast_types_bodies_prepare(CTypeParseMachine* machine, CParseResult const* result);
 BUSTER_C_EXTERN void c_ast_types_body_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
                                             CDeclaration const* declaration);
 BUSTER_C_EXTERN void c_ast_types_body_end(CTypeParseMachine* machine);
@@ -1495,10 +1495,11 @@ BUSTER_C_EXTERN CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
 // constraint would.
 BUSTER_C_EXTERN void c_ast_types_publish(CTypeParseMachine* machine, CParseResult* result, CAstTypeAnswer answer, u32 end);
 
-// c_parse.c queries the typer reads: the shared literal rules, the member
-// search, the integer-kind predicate and the two machine-state guards.
-BUSTER_C_EXTERN CTypeKind c_parse_number_literal_kind(CPreprocessResult const* preprocess, CParseResult const* result, u32 token_index);
-BUSTER_C_EXTERN CTypeKind c_parse_character_literal_kind(CPreprocessResult const* preprocess, u32 token_index);
+// c_parse.c queries the typer reads: the literal leaf, the member search, the
+// integer-kind predicate, the scalar rows and the two machine-state guards.
+// The machine's literal leaf: a lone number or character literal's scalar row.
+BUSTER_C_EXTERN CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, u32 start,
+                                                             u32 end);
 BUSTER_C_EXTERN CTypeId c_parse_member_type(Arena* arena, CParseResult* result, CTypeId type, u32 symbol, String8 name, u32* bit_width_out,
                                             CTypeId* aggregate_out, u32* member_out);
 BUSTER_C_EXTERN bool c_parse_expression_integer_kind(CTypeKind kind);

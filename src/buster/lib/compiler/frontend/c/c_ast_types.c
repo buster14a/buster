@@ -59,9 +59,10 @@
 //   IDENTIFIER   bound through identifier_use_by_token_plus_one to an object,
 //                function, parameter, local or enumerator: the entity's type,
 //                as c_parse_direct_expression_base answers the single token.
-//   NUMBER,      the literal rules c_parse_expression_leaf_without_cast uses
-//   CHARACTER    (c_parse_number_literal_kind, c_parse_character_literal_kind)
-//                read from the immutable scalar rows.
+//   NUMBER,      c_parse_expression_leaf_without_cast itself, the leaf the
+//   CHARACTER    machine's literal path calls; it returns an immutable scalar
+//                row and appends none while every scalar row is published
+//                (c_ast_types_scalars_published).
 //   MEMBER,      a struct or union member through c_parse_member_type (which
 //   MEMBER_ARROW also searches anonymous members), as c_parse_direct_expression_postfix
 //                does; declined when the aggregate is qualified, because the
@@ -120,6 +121,9 @@ struct CAstTypeBodyIndex
     u32* braces;
     u32* nodes;
     u32 count;
+    // Every scalar row is published (c_ast_types_scalars_published), so the
+    // literal leaf cannot append one.
+    bool scalars_published;
 };
 
 // One typed function body. Arrays are indexed by node - begin.
@@ -145,6 +149,7 @@ struct CAstTypeBody
     u32 token_start;
     u32 token_end;
     u32 token_total;
+    bool scalars_published;
     CAstTypeStatistics local_statistics;
 };
 
@@ -173,7 +178,23 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_top_level_definition(CAst const* ast, u32 c
     return ast->kinds[child] == C_AST_FUNCTION_DEFINITION && child >= 1 && ast->kinds[child - 1] == C_AST_COMPOUND_STATEMENT;
 }
 
-BUSTER_C_SHARED void c_ast_types_bodies_prepare(CTypeParseMachine* machine)
+// Whether c_parse_validate_lowering_constraints has published the immutable
+// row of every scalar kind a literal can have. While it has, the literal leaf
+// returns that row and appends none.
+BUSTER_GLOBAL_LOCAL bool c_ast_types_scalars_published(CParseResult const* result)
+{
+    bool published = result->expression_scalar_types != 0;
+    for (u32 kind = C_TYPE_VOID; kind <= C_TYPE_NULLPTR && published; kind += 1)
+    {
+        CTypeId row = result->expression_scalar_types[kind];
+        CType const* type = row.value < result->type_count ? result->types + row.value : 0;
+        published = kind == C_TYPE_VA_LIST ||
+                    (type && type->kind == (CTypeKind)kind && !type->is_const && !type->is_volatile && !type->is_restrict && !type->is_atomic);
+    }
+    return published;
+}
+
+BUSTER_C_SHARED void c_ast_types_bodies_prepare(CTypeParseMachine* machine, CParseResult const* result)
 {
     CAst const* ast = machine->syntax_tree;
     machine->ast_bodies = 0;
@@ -192,6 +213,7 @@ BUSTER_C_SHARED void c_ast_types_bodies_prepare(CTypeParseMachine* machine)
         index->braces = arena_allocate(machine->scratch_arena, u32, count + 1);
         index->nodes = arena_allocate(machine->scratch_arena, u32, count + 1);
         index->count = count;
+        index->scalars_published = c_ast_types_scalars_published(result);
         u32 slot = count;
         cursor = ast->root;
         while (slot && cursor > floor && ast->extents[cursor - 1] && ast->extents[cursor - 1] <= cursor)
@@ -433,35 +455,21 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_identifier(CAstTypeBody* body, u32 node, u3
     }
 }
 
-// The immutable scalar row for `kind`, or the invalid id when there is none or
-// it is not the plain unqualified row c_parse_expression_scalar_type would
-// return without appending.
-BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_scalar_row(CParseResult const* result, CTypeKind kind)
-{
-    CTypeId row = C_TYPE_ID_INVALID;
-    if (kind != C_TYPE_INVALID && kind < C_TYPE_COUNT && result->expression_scalar_types)
-    {
-        CTypeId candidate = result->expression_scalar_types[kind];
-        if (candidate.value < result->type_count)
-        {
-            CType const* type = result->types + candidate.value;
-            if (type->kind == kind && !type->is_const && !type->is_volatile && !type->is_restrict && !type->is_atomic)
-            {
-                row = candidate;
-            }
-        }
-    }
-    return row;
-}
-
-BUSTER_GLOBAL_LOCAL void c_ast_types_literal(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node, u32 relative, bool number)
+// A number or character literal, typed by the leaf the machine's literal path
+// uses (c_parse_expression_leaf_without_cast), so the rule exists once. With
+// every scalar row published the leaf only reads the row it returns.
+BUSTER_GLOBAL_LOCAL void c_ast_types_literal(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess, u32 node, u32 relative,
+                                             CTokenKind token_kind)
 {
     u32 token = body->ast->tokens[node];
-    CTypeKind kind = number ? c_parse_number_literal_kind(preprocess, body->result, token) : c_parse_character_literal_kind(preprocess, token);
-    CTypeId row = c_ast_types_scalar_row(body->result, kind);
-    if (row.value != C_ID_UNDERLYING_INVALID)
+    if (body->scalars_published && token < body->token_total && body->tokens[token].kind == token_kind)
     {
-        c_ast_types_accept(body, relative, row, 0);
+        CTypeId type = c_parse_expression_leaf_without_cast(machine->scratch_arena, *preprocess, body->result, (CScopeId){.value = C_ID_UNDERLYING_INVALID},
+                                                            token, token + 1);
+        if (type.value < body->result->type_count)
+        {
+            c_ast_types_accept(body, relative, type, 0);
+        }
     }
 }
 
@@ -609,12 +617,12 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_node(CAstTypeBody* body, CTypeParseMac
     break;
     case C_AST_NUMBER:
     {
-        c_ast_types_literal(body, preprocess, node, relative, true);
+        c_ast_types_literal(body, machine, preprocess, node, relative, C_TOKEN_PREPROCESSING_NUMBER);
     }
     break;
     case C_AST_CHARACTER:
     {
-        c_ast_types_literal(body, preprocess, node, relative, false);
+        c_ast_types_literal(body, machine, preprocess, node, relative, C_TOKEN_CHARACTER_LITERAL);
     }
     break;
     case C_AST_MEMBER:
@@ -721,6 +729,7 @@ BUSTER_C_SHARED void c_ast_types_body_begin(CTypeParseMachine* machine, CParseRe
             .token_start = token_start,
             .token_end = (u32)token_end,
             .token_total = (u32)preprocess->token_count,
+            .scalars_published = bodies->scalars_published,
         };
         body->statistics = machine->ast_type_statistics ? machine->ast_type_statistics : &body->local_statistics;
         memset(body->start_head, 0, sizeof(*body->start_head) * declaration->body_token_count);
@@ -1060,7 +1069,7 @@ CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult prepro
                 c_parse_expression_scalar_type(result, (CTypeKind)kind);
             }
         }
-        c_ast_types_bodies_prepare(&machine);
+        c_ast_types_bodies_prepare(&machine, result);
         c_ast_types_body_begin(&machine, result, &preprocess, declaration);
         probe.status = C_TEST_AST_TYPE_PROBE_UNTYPED;
         if (machine.ast_types)
