@@ -657,51 +657,57 @@ SAMPLING_HOST_JOB = "Sampling qualification packet"
 
 def sampling_archive(payload: bytes) -> dict[str, bytes]:
     """Bound both the ZIP directory and inflated files before consuming data."""
-    if not isinstance(payload, bytes) or not 0 < len(payload) <= ARTIFACT_LIMIT:
-        raise ValueError("sampling archive is missing or oversized")
-    # Reject ZIP64/multipart archives and huge directories before ZipFile
-    # allocates a ZipInfo for every advertised member.
-    end = payload.rfind(b"PK\x05\x06", max(0, len(payload) - 65557))
-    if end < 0 or end + 22 > len(payload):
-        raise ValueError("sampling archive has no bounded ZIP directory")
-    import struct
-    signature, disk, directory_disk, disk_count, count, size, offset, comment = struct.unpack_from("<4s4H2LH", payload, end)
-    if signature != b"PK\x05\x06" or disk or directory_disk or disk_count != count or \
-            not 0 < count <= 2048 or size == 0xffffffff or offset == 0xffffffff or \
-            offset + size != end or end + 22 + comment != len(payload):
-        raise ValueError("sampling ZIP directory is multipart, oversized or malformed")
-    result = {}
-    aliases = set()
-    expanded = 0
-    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        entries = archive.infolist()
-        if len(entries) != count:
-            raise ValueError("sampling ZIP entry count differs from directory")
-        for entry in entries:
-            name = entry.filename
-            alias = member_identity(name)
-            components = name.rstrip("/").split("/")
-            if not name or len(name) > 512 or "\\" in name or name.startswith("/") or \
-                    any(part in ("", ".", "..") for part in components) or \
-                    any(ord(byte) < 32 or ord(byte) > 126 for byte in name) or alias in aliases:
-                raise ValueError("sampling ZIP has an unsafe or duplicate member")
-            aliases.add(alias)
-            kind = stat.S_IFMT(entry.external_attr >> 16)
-            if entry.flag_bits & 1 or entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) or \
-                    kind not in ((0, stat.S_IFDIR) if entry.is_dir() else (0, stat.S_IFREG)):
-                raise ValueError("sampling ZIP has an encrypted or nonregular member")
-            if entry.is_dir():
-                if entry.file_size:
-                    raise ValueError("sampling ZIP directory carries file data")
-                continue
-            expanded += entry.file_size
-            if not 0 <= entry.file_size <= ANALYZER_MEMBER_LIMIT or expanded > ARTIFACT_LIMIT:
-                raise ValueError("sampling ZIP exceeds its inflated member or total bound")
-            data = archive.read(entry)
-            if len(data) != entry.file_size:
-                raise ValueError("sampling ZIP member length differs from directory")
-            result[name] = data
-    return result
+    import zlib
+    try:
+        if not isinstance(payload, bytes) or not 0 < len(payload) <= ARTIFACT_LIMIT:
+            raise ValueError("sampling archive is missing or oversized")
+        # Reject ZIP64/multipart archives and huge directories before ZipFile
+        # allocates a ZipInfo for every advertised member.
+        end = payload.rfind(b"PK\x05\x06", max(0, len(payload) - 65557))
+        if end < 0 or end + 22 > len(payload):
+            raise ValueError("sampling archive has no bounded ZIP directory")
+        import struct
+        signature, disk, directory_disk, disk_count, count, size, offset, comment = struct.unpack_from("<4s4H2LH", payload, end)
+        if signature != b"PK\x05\x06" or disk or directory_disk or disk_count != count or \
+                not 0 < count <= 2048 or size == 0xffffffff or offset == 0xffffffff or \
+                offset + size != end or end + 22 + comment != len(payload):
+            raise ValueError("sampling ZIP directory is multipart, oversized or malformed")
+        result = {}
+        aliases = set()
+        expanded = 0
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            entries = archive.infolist()
+            if len(entries) != count:
+                raise ValueError("sampling ZIP entry count differs from directory")
+            for entry in entries:
+                name = entry.filename
+                alias = member_identity(name)
+                components = name.rstrip("/").split("/")
+                if not name or len(name) > 512 or "\\" in name or name.startswith("/") or \
+                        any(part in ("", ".", "..") for part in components) or \
+                        any(ord(byte) < 32 or ord(byte) > 126 for byte in name) or alias in aliases:
+                    raise ValueError("sampling ZIP has an unsafe or duplicate member")
+                aliases.add(alias)
+                kind = stat.S_IFMT(entry.external_attr >> 16)
+                if entry.flag_bits & 1 or entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) or \
+                        kind not in ((0, stat.S_IFDIR) if entry.is_dir() else (0, stat.S_IFREG)):
+                    raise ValueError("sampling ZIP has an encrypted or nonregular member")
+                if entry.is_dir():
+                    if entry.file_size:
+                        raise ValueError("sampling ZIP directory carries file data")
+                    continue
+                expanded += entry.file_size
+                if not 0 <= entry.file_size <= ANALYZER_MEMBER_LIMIT or expanded > ARTIFACT_LIMIT:
+                    raise ValueError("sampling ZIP exceeds its inflated member or total bound")
+                data = archive.read(entry)
+                if len(data) != entry.file_size:
+                    raise ValueError("sampling ZIP member length differs from directory")
+                result[name] = data
+        return result
+
+
+    except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError) as error:
+        raise ValueError("sampling archive compression or directory data is corrupt") from error
 
 
 def sampling_tsv(data: bytes, table: bool = False) -> object:
@@ -1123,6 +1129,7 @@ def sampling_phase_proofs(files: dict[str, bytes], context: dict, prepared: dict
     if len(phases) != len(wanted):
         raise ValueError("sampling controller phase ledger is missing or changed")
     proofs = {"owner-supervision.tsv"}
+    proof_bounds = {"owner-supervision.tsv": owner_wall}
     phase_wall = 0
     for index, (row, name) in enumerate(zip(phases, wanted), 1):
         if set(row) != columns or row.get("stage") != str(index) or row.get("phase") != name or row.get("state") != "complete" or \
@@ -1131,6 +1138,7 @@ def sampling_phase_proofs(files: dict[str, bytes], context: dict, prepared: dict
         phase_wall += sampling_integer(row["wall_us"], True)
         stem = f"controller-{index}-{name}"
         proofs.add(stem + "-supervision.tsv")
+        proof_bounds[stem + "-supervision.tsv"] = sampling_integer(row["wall_us"], True)
         for stream in ("stdout", "stderr"):
             raw = files.get(stem + "." + stream + ".log")
             if not isinstance(raw, bytes) or len(raw) > 1024 * 1024:
@@ -1153,8 +1161,13 @@ def sampling_phase_proofs(files: dict[str, bytes], context: dict, prepared: dict
                 if raw != prepared["bundle"]["manifest"] or issues:
                     raise ValueError("sampling per-phase native closure changed: " + "; ".join(issues[:3]))
                 proofs.add(stem + "-supervision.tsv")
+                proof_bounds[stem + "-supervision.tsv"] = packet_wall
+        raw_attempts = sampling_tsv(files.get("attempts.tsv"), True)
+        if len(raw_attempts) != len(context["schedule"]["slots"]):
+            raise ValueError("sampling measured process ledger is missing")
         for index in range(len(context["schedule"]["slots"])):
             proofs.add(f"trial-{index}-supervision.tsv")
+            proof_bounds[f"trial-{index}-supervision.tsv"] = sampling_integer(raw_attempts[index].get("wall_us"), True)
             for stream in ("stdout", "stderr"):
                 raw = files.get(f"trial-{index}.{stream}.log")
                 if not isinstance(raw, bytes) or len(raw) > 1024 * 1024:
@@ -1163,7 +1176,9 @@ def sampling_phase_proofs(files: dict[str, bytes], context: dict, prepared: dict
     if observed != proofs:
         raise ValueError("sampling complete native supervision proof set is missing or undeclared")
     for name in proofs:
-        sampling_supervision(files[name])
+        proof = sampling_supervision(files[name])
+        if sampling_integer(proof["wall_us"], True) > proof_bounds[name]:
+            raise ValueError("sampling supervision wall exceeds its recorded phase or owner duration")
     return owner, terminal
 
 
@@ -1187,6 +1202,11 @@ def sampling_acquisition(authority: dict, files: dict[str, bytes], context: dict
 
 def sampling_source_hashes(api: Api, authority: dict, context: dict, acquired: dict) -> None:
     import base64
+    from pathlib import Path
+    from sampling_qualification_receipt import _lab
+    actual_lab = Path(_lab.__file__).read_bytes()
+    if not 0 < len(actual_lab) <= 1024 * 1024 or hashlib.sha256(actual_lab).hexdigest() != acquired["lab_sha256"]:
+        raise ValueError("sampling statistical replay module differs from the acquired trusted lab source")
     revision = context["record"]["trusted_revision"]
     for path, key in (("tools/uarch_lab.py", "lab_sha256"),
                       ("docs/compiler-main-sampling-qualification-v1.json", "protocol_sha256")):
@@ -1339,6 +1359,7 @@ def sampling_validate(api: Api, authority: dict, files: dict[str, bytes]) -> dic
     job = sampling_host_job(api, authority)
     occupancy = sampling_job_accounting(job, sampling_integer(owner["physical_packet_wall_us"], True),
                                         context["schedule"]["reservation_seconds"])
+    occupancy["native_owner_wall_us"] = sampling_integer(owner["physical_packet_wall_us"], True)
     occupancy["native_packet_wall_us"] = sampling_integer(terminal["physical_packet_wall_us"], True)
     if context["phase"] == "acquire":
         acquired = sampling_acquisition(authority, files, context, prepared)
@@ -1399,7 +1420,7 @@ def sampling_validate(api: Api, authority: dict, files: dict[str, bytes]) -> dic
                   platform_runner={key: job.get(key) for key in ("id", "runner_id", "runner_name", "runner_group_id", "runner_group_name", "labels")},
                   acquisition_campaign=context["sha256"], acquisition_revision=context["revision"],
                   prepared_sha256=prepared["sha256"],
-                  acquisition_preparation_costs=sampling_json(files, "prepared/prepared-cost.json") if "prepared/prepared-cost.json" in files else None,
+                  acquisition_preparation_costs=sampling_json(files, "prepared/preparation-cost.json"),
                   acquired_binaries={role: {"sha256": prepared["record"][role + "_sha256"],
                                            "size_bytes": prepared["record"][role + "_bytes"]}
                                      for role in ("baseline", "candidate", "candidate2")})
