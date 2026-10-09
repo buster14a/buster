@@ -113,6 +113,17 @@ def population(utility_policy=None, *, main_policy=None, main_profile="compiler-
 
 
 class DataContract(unittest.TestCase):
+    def test_main_context_refuses_nonmain_before_file_or_child_observation(self):
+        for mode in (None, "pull", "utility"):
+            with self.subTest(mode=mode), mock.patch.object(compare, "sha256") as digest, \
+                    mock.patch.object(compare.subprocess, "Popen") as spawn, mock.patch.object(Path, "resolve") as resolve:
+                with self.assertRaisesRegex(ValueError, "requires main mode"):
+                    compare.NativePhaseContext(Path("/driver"), Path("/work"), Path("/evidence"), {"mode": mode},
+                                               main_owned=True)
+                resolve.assert_not_called()
+                digest.assert_not_called()
+                spawn.assert_not_called()
+
     def test_supported_main_named_recipes_require_trusted_authority_and_complete_population(self):
         from compiler_receipt import validate_closure, MAIN_PROFILES
         for policy in ("legacy-rebuild", "snapshot-v1"):

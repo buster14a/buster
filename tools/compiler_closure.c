@@ -797,7 +797,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_driver_path(Arena* arena)
         compiler_closure_owned_bootstrap(arena, driver, &trusted, &marker, &producer) &&
         compiler_closure_hash(arena, driver, &digest, &status) && status.st_size > 0 &&
         (status.st_mode & 0111) && string_equal(digest, producer.artifact_sha256);
-    if (valid) { string_print(string_format(arena, S8("{S8}\n"), driver)); }
+    if (valid) { string_print(S8("{S8}\n"), driver); }
     else { string_print(S8("error: current native driver has no valid immutable bootstrap identity\n")); }
     return valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }

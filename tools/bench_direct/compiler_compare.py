@@ -160,6 +160,8 @@ class NativePhaseContext:
             raise ValueError("native ownership route flags must be boolean")
         if utility and main_owned:
             raise ValueError("native ownership routes are mutually exclusive")
+        if main_owned and receipt.get("mode") != "main":
+            raise ValueError("supported native ownership requires main mode")
         self.utility, self.main_owned = utility, main_owned
         owned_preflight = owned_preflight or utility or main_owned
         self.owned_preflight = owned_preflight

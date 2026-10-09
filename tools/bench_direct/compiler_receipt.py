@@ -2040,7 +2040,7 @@ def validate_closure(receipt: dict, bundle: object, expected_policy: str | None 
                      require_owned_preflight: bool = False, expected_profile: str | None = None) -> list[str]:
     """Replay native producer/consumer identities as bounded data, including the frozen baseline executable."""
     if type(require_owned_phases) is not bool or type(require_owned_preflight) is not bool or \
-            expected_phase_schema not in (None, "buster-compiler-snapshot-phases-v1", "buster-compiler-utility-phases-v1",\
+            expected_phase_schema not in (None, "buster-compiler-snapshot-phases-v1", "buster-compiler-utility-phases-v1",
                                           "buster-compiler-main-owned-phases-v1"):
         return ["native ownership requirements do not match a supported trusted route"]
     if expected_phase_schema == "buster-compiler-main-owned-phases-v1" and \
