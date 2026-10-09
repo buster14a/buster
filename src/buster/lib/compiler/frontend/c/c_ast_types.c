@@ -95,6 +95,7 @@
 //   CAstTypeBodyIndex, CAstTypeBody              function index, per-body arrays
 //   c_ast_types_bodies_prepare, c_ast_types_find_definition
 //   c_ast_types_body_begin, c_ast_types_body_end the per-body entry points
+//   c_ast_types_body_node, c_ast_types_body_scratch_bytes  the tree-typed body and its scratch size
 //   c_ast_types_span, c_ast_types_expand         span rules
 //   c_ast_types_type_body, c_ast_types_type_node the eager pass and its rules
 //   c_ast_types_locate, c_ast_types_answer       query lookup and the decision
@@ -691,10 +692,13 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_body(CAstTypeBody* body, CTypeParseMac
     WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_NODES, visited);
 }
 
-BUSTER_C_SHARED void c_ast_types_body_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
-                                            CDeclaration const* declaration)
+// The COMPOUND_STATEMENT node whose tree types a declaration's body, or
+// C_AST_TYPE_NONE when the body is not typed from the tree. Shared by
+// c_ast_types_body_begin and c_ast_types_body_scratch_bytes so the size that
+// is checked is the size that is allocated.
+BUSTER_GLOBAL_LOCAL u32 c_ast_types_body_node(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
+                                              CDeclaration const* declaration)
 {
-    machine->ast_types = 0;
     CAstTypeBodyIndex const* bodies = machine->ast_bodies;
     u32 token_start = declaration->body_start;
     u64 token_end = (u64)declaration->body_start + declaration->body_token_count;
@@ -706,11 +710,40 @@ BUSTER_C_SHARED void c_ast_types_body_begin(CTypeParseMachine* machine, CParseRe
         eligible = result->position_index->built && result->position_index->matching_delimiters_plus_one;
     }
     u32 definition = eligible ? c_ast_types_find_definition(bodies, token_start - 1) : C_AST_TYPE_NONE;
-    CAst const* ast = machine->syntax_tree;
-    if (definition != C_AST_TYPE_NONE && ast->kinds[definition - 1] == C_AST_COMPOUND_STATEMENT &&
+    u32 node = C_AST_TYPE_NONE;
+    if (definition != C_AST_TYPE_NONE && machine->syntax_tree->kinds[definition - 1] == C_AST_COMPOUND_STATEMENT &&
         result->position_index->matching_delimiters_plus_one[token_start - 1] - 1 == token_end)
     {
-        u32 node = definition - 1;
+        node = definition - 1;
+    }
+    return node;
+}
+
+BUSTER_C_SHARED u64 c_ast_types_body_scratch_bytes(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
+                                                   CDeclaration const* declaration)
+{
+    u64 bytes = 0;
+    u32 node = c_ast_types_body_node(machine, result, preprocess, declaration);
+    if (node != C_AST_TYPE_NONE)
+    {
+        u64 count = machine->syntax_tree->extents[node];
+        bytes = (u64)sizeof(CAstTypeBody) + count * (sizeof(CTypeId) + 3 * sizeof(u32) + sizeof(u8)) +
+                (u64)declaration->body_token_count * sizeof(u32);
+    }
+    return bytes;
+}
+
+BUSTER_C_SHARED void c_ast_types_body_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
+                                            CDeclaration const* declaration)
+{
+    machine->ast_types = 0;
+    CAstTypeBodyIndex const* bodies = machine->ast_bodies;
+    u32 token_start = declaration->body_start;
+    u64 token_end = (u64)declaration->body_start + declaration->body_token_count;
+    CAst const* ast = machine->syntax_tree;
+    u32 node = c_ast_types_body_node(machine, result, preprocess, declaration);
+    if (node != C_AST_TYPE_NONE)
+    {
         u32 count = ast->extents[node];
         CAstTypeBody* body = arena_allocate(machine->scratch_arena, CAstTypeBody, 1);
         *body = (CAstTypeBody){

@@ -112,6 +112,50 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_reservation_failures(UnitTest
     return result;
 }
 
+// A body whose per-token validation arrays cannot fit the scratch arena is
+// diagnosed and rejected, not allowed to overrun it (#1256). The seam caps the
+// scratch the validation may claim so a small body reaches the same check a
+// multi-million-token body reaches on the real arena.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_validation_scratch_exhaustion(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 parts[66];
+    parts[0] = S8("static int id(int x){return x;} int main(void){int x=0;");
+    for (u32 index = 1; index <= 64; index += 1)
+    {
+        parts[index] = S8("x += 1;");
+    }
+    parts[65] = S8("return id(x);}");
+    String8 source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+    for (u32 limited = 0; limited < 2; limited += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessOptions options = {.source_path = S8("body-scratch.c"), .target = target_native,
+                                      .data_layout = target_data_layout(target_native)};
+        c_test_body_validation_scratch_limit(limited ? BUSTER_KB(2) : 0);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, options);
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, options.source_path, preprocess, syntax, target_native, (CIRLowerOptions){0});
+        c_test_body_validation_scratch_limit(0);
+        if (limited)
+        {
+            BUSTER_TEST(arguments, !lowered.program && !lowered.canonical_ir_certified && lowered.diagnostic_count == 1);
+            if (BUSTER_REQUIRE(arguments, lowered.diagnostics && lowered.diagnostic_count != 0))
+            {
+                BUSTER_TEST(arguments, string_first_sequence(lowered.diagnostics[0].message, S8("in function 'main'")) != BUSTER_STRING_NO_MATCH);
+                BUSTER_TEST(arguments, string_first_sequence(lowered.diagnostics[0].message, S8("too large for semantic validation")) != BUSTER_STRING_NO_MATCH);
+            }
+        }
+        else
+        {
+            BUSTER_TEST(arguments, !preprocess.error_count && !lowered.diagnostic_count && lowered.canonical_ir_certified && lowered.program);
+        }
+        c_preprocess_release(&preprocess);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_lower_capacity_plan(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -58812,6 +58856,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_frontend_lex_differential);
     C_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
     C_TEST_FIXTURE(arguments, c_test_frontend_reservation_failures);
+    C_TEST_FIXTURE(arguments, c_test_body_validation_scratch_exhaustion);
     C_TEST_FIXTURE(arguments, c_test_frontend_scratch_and_hardening);
     C_TEST_FIXTURE(arguments, c_test_frontend_semantic_basics);
     C_TEST_FIXTURE(arguments, c_test_frontend_source_metrics);

@@ -121,6 +121,7 @@
 //   c_switch_prefix_overlaps,                    switch label overlap: radix sort plus
 //   c_switch_first_overlapping_label              sweep, shared with c_gen.c lowering
 //   c_parse_validate_one_switch                  per-switch label and range validation
+//   c_parse_body_validation_scratch_fits         per-body scratch bound checked before validation
 //   c_parse_validate_lowering_constraints        source validation before canonical IR
 //   c_parse_ast, c_analyze_semantics, c_parse     model-building stage entry points
 //   c_analyze_semantics_only                     complete validation without canonical IR
@@ -34112,6 +34113,50 @@ BUSTER_C_INTERNAL void c_parse_validate_array_bound_values(CTypeParseMachine* ma
     }
 }
 
+// Per-body validation claims arrays sized by the body's token count before any
+// family runs. A body whose arrays cannot fit the scratch arena is diagnosed
+// instead of overrunning it (#1256). Only allocations that every such body
+// makes are counted, each at its real element size: the loop below, the
+// tree-typed body arrays of c_ast_types_body_begin, and the largest per-token
+// array pair a family claims while those are live (the control-statement
+// ranges and suffix flags). The check therefore rejects a body only when its
+// own arrays alone exceed the arena; every allocation pays up to its alignment
+// in padding.
+#define C_PARSE_BODY_VALIDATION_ALLOCATION_COUNT 16
+#define C_PARSE_BODY_VALIDATION_ALIGNMENT_PADDING 16
+#define C_PARSE_BODY_SCOPE_BUILD_PENDING_BYTES (64 * 3 * sizeof(u32))
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_parse_body_validation_scratch_cap;
+
+void c_test_body_validation_scratch_limit(u64 bytes)
+{
+    c_parse_body_validation_scratch_cap = bytes;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL bool c_parse_body_validation_scratch_fits(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
+                                                              CDeclaration const* declaration)
+{
+    Arena* scratch = machine->scratch_arena;
+    u64 available = scratch->position <= scratch->reserved_size ? scratch->reserved_size - scratch->position : 0;
+#if BUSTER_INCLUDE_TESTS
+    if (c_parse_body_validation_scratch_cap)
+    {
+        available = BUSTER_MIN(available, c_parse_body_validation_scratch_cap);
+    }
+#endif
+    u64 tokens = declaration->body_token_count;
+    u64 per_token = sizeof(CParseExpressionQuery) + 2 * sizeof(u8) + sizeof(CParseControlRange) + sizeof(u8);
+    bool scoped = result->position_index && result->scope_children_offsets && declaration->scope.value < result->scope_count;
+    u64 needed = tokens * per_token + C_PARSE_BODY_VALIDATION_ALLOCATION_COUNT * C_PARSE_BODY_VALIDATION_ALIGNMENT_PADDING;
+    if (scoped)
+    {
+        needed += tokens * sizeof(u32) + C_PARSE_BODY_SCOPE_BUILD_PENDING_BYTES;
+    }
+    needed += c_ast_types_body_scratch_bytes(machine, result, preprocess, declaration);
+    return needed <= available;
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                                CPreprocessResult preprocess)
 {
@@ -34257,6 +34302,12 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         if (declaration->kind == C_DECLARATION_FUNCTION && declaration->is_definition) c_parse_validate_signature(machine, result, preprocess, declaration);
         if (declaration->kind != C_DECLARATION_FUNCTION || !declaration->is_definition || !declaration->body_token_count)
         {
+            continue;
+        }
+        if (!c_parse_body_validation_scratch_fits(machine, result, &preprocess, declaration))
+        {
+            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                               string_format(arena, S8("in function '{S8}': C function body is too large for semantic validation"), declaration->name));
             continue;
         }
         CParseLoweringConstraintDiagnostic diagnostic = {

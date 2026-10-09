@@ -1505,6 +1505,10 @@ struct CAstTypeAnswer
 BUSTER_C_EXTERN void c_ast_types_bodies_prepare(CTypeParseMachine* machine, CParseResult const* result);
 BUSTER_C_EXTERN void c_ast_types_body_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
                                             CDeclaration const* declaration);
+// The scratch bytes c_ast_types_body_begin will allocate for this body, zero
+// when the body is not typed from the tree.
+BUSTER_C_EXTERN u64 c_ast_types_body_scratch_bytes(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
+                                                   CDeclaration const* declaration);
 BUSTER_C_EXTERN void c_ast_types_body_end(CTypeParseMachine* machine);
 BUSTER_C_EXTERN CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                   u32 start, u32 end);

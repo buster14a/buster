@@ -20,6 +20,11 @@ BUSTER_F_DECL CTypeId c_test_aggregate_lookup_add(CParseResult* result, CType ty
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKind kind, String8 tag, CScopeId scope);
 BUSTER_F_DECL void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpoint);
 
+// Caps the scratch bytes per-body semantic validation may claim on the calling
+// thread, so a small fixture reaches the "body too large" diagnostic. Zero
+// restores the arena's real remaining capacity.
+BUSTER_F_DECL void c_test_body_validation_scratch_limit(u64 bytes);
+
 // The tree expression typer (c_ast_types.c). c_test_ast_type_probe answers one
 // range of an analyzed function body on a private machine. `status` is a
 // C_TEST_AST_TYPE_PROBE_* value: the function has no body, the body was not
