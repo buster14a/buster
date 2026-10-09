@@ -92,12 +92,44 @@ streaming preprocessor instead of a complete token array; see
 ## Preprocessor fusion
 
 The builder runs after `c_preprocess` has finished, over the complete final
-token array. Fusion interleaves the two stages: the preprocessor hands over
-final-stream tokens in batches as it produces them, and the builder consumes
-each batch while it is still in cache. The tree still refers to the
-preprocessing result's tokens by index, so the array stays. **Status:** an
-experiment under the [measurement plan](#measurement-plan); it ships only if
-its budgets pass.
+token array. Fusion would interleave the two stages: the preprocessor hands
+over final-stream tokens in batches as it produces them, and the builder
+consumes each batch while it is still in cache. The tree would still refer to
+the preprocessing result's tokens by index, so the array stays either way.
+**Status: measured, not shipped** (audit
+[`2026-10-09T222755Z`](../../performance-audits/2026-10-09T222755Z.md)).
+
+The measured mechanism stays in the history of
+[#3102](https://github.com/buster14a/buster/issues/3102)'s fusion branch at
+`2eeb846e`, then reverted:
+- **The preprocessor.** Its main loop became resumable: begin, run text lines
+  until the output reaches a target, then finish. A record holds the state that
+  outlives one line.
+- **The builder.** Its cursor borrowed the output stream in place, since the
+  stream's base never moves. Its refill ran the preprocessor for 2,048 tokens
+  past the row it needed. The builder's dispatch loop was the one loop that
+  advanced both stages.
+- **Correctness.** The tree, its diagnostics and the preprocessing result were
+  identical to the array path.
+- **Measurement.** Fusion was free in instructions, and in cache simulation it
+  removed the builder's last-level misses on the token array. On the host,
+  preprocessing plus the parse phase did not get faster, and peak RSS grew,
+  so it fails the ship budget below.
+
+A later attempt has to handle what this one met:
+- **The final-stream passes.** After the main loop, `c_preprocess` respells
+  identifiers (C23 underscore aliases and UCN names), rewrites GNU obsolete
+  designators and renames GNU `__label__` labels. Any of them can change rows
+  the builder has already read; the pilot rebuilt from the array when one did.
+- **Keywords.** A keyword the symbol table has not interned when the build
+  begins needs its table entry before the first row that carries it.
+- **The symbol table.** The builder must not intern into the preprocessor's
+  table mid-stream, or every later id shifts.
+- **Memory.** Both phase arenas are alive at once: about 12 MiB more peak RSS
+  and 31 GiB more reserved address space, which Valgrind's cap cannot hold
+  ([#3305](https://github.com/buster14a/buster/issues/3305)).
+- **`__STDC_HOSTED__`.** Its replacement token lives on the stage driver's
+  setup stack. That is safe only while setup and the line loop share one frame.
 
 ## Names that change the parse
 
@@ -516,5 +548,22 @@ The base is the main revision the candidate branches from. The budgets:
 If the last budget fails, the audit records the negative result and fusion
 does not ship. A hosted pass would still leave Zen 5 acceptance (#2761)
 incomplete.
+
+Fusion's hosted census is
+[`2026-10-09T222755Z`](../../performance-audits/2026-10-09T222755Z.md), taken
+the same way and diagnostic only:
+- **Passing budgets.** Correctness and object identity pass, and so do the
+  three instruction budgets: the default path is +0.028%, the array pilot
+  +0.013%, and fusion's own cost −0.0005%. Fusion's arm could not run under
+  Valgrind with 31 GiB phase reservations, so its instruction and cache rows
+  come from a build that reserves 8 GiB.
+- **Cache simulation.** Fusion removes 712,939 last-level data read misses
+  (6.2%). 548 K of them are the builder's own reads of the token array, and the
+  rest are later reads of rows still in cache. It adds 712 K
+  instruction-cache misses.
+- **The ship budget fails.** Preprocessing plus the parse phase was 35.5 ms
+  (5.2%) slower, with 4 of 15 pairs favouring fusion, and a repeat agreed. The
+  A/A control itself exceeded its ±0.5% bound.
+- **Decision.** Fusion does not ship. The token array and the array build stay.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
