@@ -538,6 +538,89 @@ class AnalyzerReceiptTest(unittest.TestCase):
             f"phases=10 status={helper_status}\n").encode()
         return files, identity, alias_pairs
 
+    @classmethod
+    def failed_raw_profile(cls) -> tuple[dict[str, bytes], dict, list[tuple[int, int]]]:
+        """Build failed trials with seven baseline diagnostics and no candidate terminal results."""
+        files, identity, aliases = cls.full_raw_profile()
+        for label in ("baseline-0", "baseline-1"):
+            result_path = f"profile/{label}/shard-0/result.txt"
+            result = compiler_receipt.analyzer_parse_result(files[result_path], 1)
+            data = bytearray(b"BUSTER_CLANG_ANALYZE_RESULT_V1\n")
+            data.extend(result["fingerprint"].encode("ascii") + b"\n")
+            cls.record_number(data, result["shard"])
+            cls.record_number(data, result["selected_rows"])
+            cls.record_number(data, result["elapsed_us"])
+            cls.record_number(data, result["peak_child_rss_bytes"])
+            failed_indices = {row["index"] for row in result["rows"][:7]}
+            for row in result["rows"]:
+                cls.record_number(data, row["index"])
+                status = row["status"]
+                if row["index"] in failed_indices:
+                    status = 1
+                    log_path = f"profile/{label}/shard-0/unit-{row['index']}.log"
+                    log = b"warning: synthetic NullPointerArithm diagnostic\n"
+                    files[log_path] = log
+                    row["log_sha256"] = hashlib.sha256(log).hexdigest()
+                cls.record_number(data, status)
+                cls.record_number(data, row["duration_us"])
+                data.extend(row["log_sha256"].encode("ascii") + b"\n")
+            files[result_path] = bytes(data)
+
+            aggregate = ("ANALYZE_AGGREGATE eligible=182 checked=182 excluded_config_or_language=0 "
+                         "failures=7 shards=8 peak_child_rss_bytes=1024 status=fail")
+            files[f"profile/aggregate-{label}.stdout.log"] = (aggregate + "\n").encode()
+            analysis_lines = []
+            for line in files[f"profile/analysis-{label}.stdout.log"].decode().splitlines():
+                if line.startswith("ANALYZE_SHARD shard=0 "):
+                    line = line.replace("status=pass", "status=fail")
+                if line.startswith("ANALYZE_AGGREGATE "):
+                    line = aggregate
+                if line.startswith("ANALYZE_RUN "):
+                    line = line.replace("status=pass", "status=fail")
+                analysis_lines.append(line)
+            files[f"profile/analysis-{label}.stdout.log"] = ("\n".join(analysis_lines) + "\n").encode()
+
+        for label in ("candidate-0", "candidate-1"):
+            for shard in range(8):
+                files.pop(f"profile/{label}/shard-{shard}/result.txt", None)
+                for name in tuple(files):
+                    if name.startswith(f"profile/{label}/shard-{shard}/unit-"):
+                        files.pop(name)
+            aggregate = ("ANALYZE_AGGREGATE selected_rows=182 checked=0 unique_executions=0 aliased_rows=0 "
+                        "excluded_config_or_language=0 failures=0 shards=8 peak_child_rss_bytes=0 status=fail")
+            files[f"profile/aggregate-{label}.stdout.log"] = (
+                files[f"profile/aggregate-{label}.stdout.log"].decode().splitlines()[0] + "\n" + aggregate + "\n").encode()
+            analysis_lines = []
+            for line in files[f"profile/analysis-{label}.stdout.log"].decode().splitlines():
+                if line.startswith("ANALYZE_PLAN mode=worker ") or line.startswith("ANALYZE_SHARD "):
+                    continue
+                if line.startswith("ANALYZE_PLAN mode=run "):
+                    analysis_lines.append(line)
+                    analysis_lines.extend(f"error: worker shard manifest is malformed or inconsistent shard={shard}"
+                                          for shard in range(8))
+                    continue
+                if line.startswith("ANALYZE_AGGREGATE "):
+                    line = aggregate
+                if line.startswith("ANALYZE_RUN "):
+                    line = line.replace("status=pass", "status=fail")
+                analysis_lines.append(line)
+            files[f"profile/analysis-{label}.stdout.log"] = ("\n".join(analysis_lines) + "\n").encode()
+
+        phase_lines = files["profile/profile.tsv"].decode().splitlines()
+        phase_header = phase_lines[0].split("\t")
+        state_index = phase_header.index("state")
+        exit_index = phase_header.index("exit_status")
+        for index in range(1, len(phase_lines)):
+            fields = phase_lines[index].split("\t")
+            if fields[0].startswith(("analysis-", "aggregate-")):
+                fields[state_index] = "failed"
+                fields[exit_index] = "256"
+                phase_lines[index] = "\t".join(fields)
+        files["profile/profile.tsv"] = ("\n".join(phase_lines) + "\n").encode()
+        files["profile/helper.log"] = (
+            b"exit=1\nANALYZE_BENCHMARK_PROFILE name=clang-analyze-full-v1 elapsed_us=10000 phases=10 status=fail\n")
+        return files, identity, aliases
+
     def test_plan_identity_binds_candidate_context_and_explicit_dependency_inventories(self) -> None:
         prepared = compiler_receipt.analyzer_parse_plan(self.plan("profile/prepare-candidate"))
         repeated = compiler_receipt.analyzer_parse_plan(self.plan("profile/candidate-0"))
@@ -570,10 +653,14 @@ class AnalyzerReceiptTest(unittest.TestCase):
         summary, summary_problems = compiler_receipt.analyzer_profile_summary(files, identity)
         self.assertEqual(summary_problems, [])
         self.assertEqual(summary["status"], "complete")
+        self.assertFalse(summary["comparison_invalid"])
         self.assertEqual(summary["inventory"]["selected_rows"], 182)
         self.assertEqual(summary["inventory"]["candidate_unique_executions"], 135)
         self.assertEqual(summary["inventory"]["candidate_alias_rows"], 47)
         self.assertEqual(len(summary["per_tu"]), 182)
+        self.assertEqual(sum(row["candidate_planned_execution"] for row in summary["per_tu"]), 135)
+        self.assertEqual(sum(row["candidate_executed"] is True for row in summary["per_tu"]), 135)
+        self.assertTrue(all(row["candidate_executed"] is not None for row in summary["per_tu"]))
         self.assertEqual([run["name"] for run in summary["runs"]], list(compiler_receipt.ANALYZER_RUNS))
         for run in summary["runs"]:
             costs = run["internal_costs"]
@@ -663,6 +750,191 @@ class AnalyzerReceiptTest(unittest.TestCase):
                 errors = compiler_receipt.validate_analyzer_bundle(receipt, summary, {"files": changed_files})
                 self.assertTrue(errors, description)
                 self.assertTrue(any(expected_reason in error for error in errors), (description, errors[:8]))
+
+    def test_failed_profile_retains_observations_and_remains_unqualifiable(self) -> None:
+        files, identity, _ = self.failed_raw_profile()
+        profile_summary, summary_problems = compiler_receipt.analyzer_profile_summary(files, identity)
+        self.assertTrue(summary_problems)
+        self.assertEqual(profile_summary["status"], "failed")
+        self.assertTrue(profile_summary["comparison_invalid"])
+        self.assertEqual(len(profile_summary["measurements"]), 10)
+        self.assertEqual(len(profile_summary["runs"]), 4)
+        self.assertEqual(profile_summary["sampler"]["status"], "complete")
+        self.assertEqual(len(profile_summary["sampler"]["runs"]), 4)
+        self.assertEqual(len(profile_summary["per_tu"]), 182)
+        runs = {row["name"]: row for row in profile_summary["runs"]}
+        self.assertEqual(runs["baseline-0"]["status"], "failed")
+        self.assertEqual(runs["baseline-0"]["result_coverage"], {
+            "planned_rows": 182, "terminal_shards": 8, "observed_rows": 182,
+            "passing_rows_observed": 175, "failed_rows_observed": 7, "unrecorded_rows": 0})
+        self.assertEqual(runs["candidate-0"]["status"], "failed")
+        self.assertEqual(runs["candidate-0"]["result_coverage"], {
+            "planned_rows": 182, "terminal_shards": 0, "observed_rows": 0,
+            "passing_rows_observed": 0, "failed_rows_observed": 0, "unrecorded_rows": 182})
+        self.assertEqual(runs["candidate-0"]["executed_tus"], None)
+        self.assertEqual(runs["candidate-0"]["whole_tree_sampler_status"], "complete")
+        row_zero = next(row for row in profile_summary["per_tu"] if row["index"] == 0)
+        self.assertEqual(row_zero["run_evidence"]["baseline-0"]["state"], "failed")
+        self.assertEqual(row_zero["run_evidence"]["baseline-0"]["status"], 1)
+        self.assertEqual(row_zero["run_evidence"]["candidate-0"]["state"], "missing")
+        self.assertIsNone(row_zero["candidate_executed"])
+        self.assertIsNone(row_zero["baseline_median_elapsed_us"])
+        self.assertIsNone(row_zero["candidate_median_elapsed_us"])
+
+        profile_receipt = analyzer_receipt()
+        profile_receipt["identity"] = identity
+        profile_receipt["analyzer"] = profile_summary
+        profile_receipt["analyzer_request_sha256"] = profile_summary["request"]["sha256"]
+        profile_receipt["analyzer_clang_provenance"] = profile_summary["clang"]
+        profile_receipt["analyzer_driver_checkouts"] = profile_summary["driver_checkouts"]
+        profile_receipt["analyzer_driver_provenance"] = profile_summary["driver_provenance"]
+        raw_bundle = {"summary": profile_summary, "files": files}
+        self.assertTrue(compiler_receipt.validate_analyzer_bundle(profile_receipt, profile_summary, raw_bundle))
+        decision = compiler_publish.decide(identity, True, "success", profile_receipt, profile_summary, "",
+                                           {"analyzer": raw_bundle})
+        self.assertEqual(decision[0], "failure", decision)
+        report = compiler_receipt.render_analyzer(profile_receipt, profile_summary, decision[0], decision[2])
+        self.assertIn("**Comparison status: invalid.**", report)
+        self.assertIn("Failed translation-unit result rows:", report)
+        self.assertIn("`src/unit-000.c`", report)
+        self.assertIn("0 / 182", report)
+        self.assertIn("complete", report)
+        self.assertIn("Observed aggregate counters (diagnostic only", report)
+        self.assertIn("fail / failed / identity matched / plan-bound-failed", report)
+        self.assertIn("| 182 | 182 | N/A (PLAN_V1) | N/A (PLAN_V1) | 7 | 1024 |", report)
+        self.assertIn("| 182 | 0 | 0 | 0 | 0 | 0 |", report)
+        self.assertNotIn("Wall time B/A", report)
+
+    def test_failed_cost_records_preserve_individual_plan_bound_observations(self) -> None:
+        files, identity, _ = self.failed_raw_profile()
+        summary, problems = compiler_receipt.analyzer_profile_summary(files, identity)
+        self.assertTrue(problems)
+        runs = {row["name"]: row for row in summary["runs"]}
+        baseline_costs = runs["baseline-0"]["internal_costs"]
+        self.assertEqual(baseline_costs["validation_status"], "failed")
+        self.assertEqual(baseline_costs["record_sets"]["shards"], "complete")
+        failed_shard = next(row for row in baseline_costs["shards"] if row["status"] == "fail")
+        self.assertEqual(failed_shard["validation_status"], "plan-bound")
+        self.assertEqual(failed_shard["observed_numeric"]["elapsed_us"], 100)
+        self.assertEqual(failed_shard["observed_numeric"]["peak_child_rss_bytes"], 1024)
+        baseline_aggregate = baseline_costs["analysis_aggregate_records"][0]
+        self.assertEqual(baseline_aggregate["observed_numeric"]["eligible"], 182)
+        self.assertEqual(baseline_aggregate["observed_numeric"]["checked"], 182)
+        self.assertEqual(baseline_aggregate["observed_numeric"]["failures"], 7)
+        self.assertGreater(baseline_aggregate["observed_numeric"]["peak_child_rss_bytes"], 0)
+        self.assertEqual(baseline_aggregate["plan_identity_status"], "matched")
+        self.assertEqual(baseline_aggregate["result_state"], "failed")
+        self.assertEqual(baseline_aggregate["validation_status"], "plan-bound-failed")
+        self.assertTrue(baseline_aggregate["plan_checks"]["eligible"]["matches"])
+        self.assertFalse(baseline_aggregate["plan_checks"]["failures"]["matches"])
+
+        candidate_costs = runs["candidate-0"]["internal_costs"]
+        self.assertEqual(candidate_costs["validation_status"], "failed")
+        self.assertEqual(candidate_costs["record_sets"]["worker_plan"], "missing")
+        self.assertEqual(candidate_costs["run_plan"]["planning_us"], 300)
+        self.assertEqual(candidate_costs["aggregate_plan"]["context_proof_us"], 80)
+        self.assertEqual(candidate_costs["worker_plan_records"], [])
+        self.assertTrue(candidate_costs["raw_record_sets"]["analysis_plan"]["records"])
+        self.assertTrue(candidate_costs["raw_record_sets"]["aggregate_plan"]["records"])
+        candidate_aggregate = candidate_costs["independent_aggregate_records"][0]
+        self.assertEqual(candidate_aggregate["observed_numeric"], {
+            "selected_rows": 182, "checked": 0, "unique_executions": 0, "aliased_rows": 0,
+            "excluded_config_or_language": 0, "failures": 0, "shards": 8,
+            "peak_child_rss_bytes": 0})
+        self.assertEqual(candidate_aggregate["plan_identity_status"], "mismatch")
+        self.assertEqual(candidate_aggregate["count_match_status"], "mismatch")
+        self.assertEqual(candidate_aggregate["result_state"], "failed")
+        self.assertTrue(all(row["baseline_median_elapsed_us"] is None and
+                            row["candidate_median_elapsed_us"] is None for row in summary["per_tu"]))
+
+        report = compiler_receipt.render_analyzer(analyzer_receipt(), summary, "failure", problems)
+        self.assertIn("fail / plan-bound", report)
+        self.assertIn("missing worker PLAN", report)
+        self.assertIn("0.000 s (plan-bound)", report)
+        self.assertIn("NA (missing record)", report)
+
+    def test_malformed_and_plan_mismatched_aggregate_counters_stay_unqualified(self) -> None:
+        files, identity, _ = self.failed_raw_profile()
+        for path in ("profile/analysis-candidate-0.stdout.log", "profile/aggregate-candidate-0.stdout.log"):
+            files[path] = files[path].replace(b"checked=0", b"checked=bad", 1)
+        summary, problems = compiler_receipt.analyzer_profile_summary(files, identity)
+        self.assertTrue(problems)
+        self.assertEqual(summary["status"], "failed")
+        self.assertTrue(summary["comparison_invalid"])
+        runs = {row["name"]: row for row in summary["runs"]}
+        malformed = runs["candidate-0"]["internal_costs"]["analysis_aggregate_records"][0]
+        self.assertEqual(malformed["field_checks"]["checked"]["state"], "invalid")
+        self.assertNotIn("checked", malformed["observed_numeric"])
+        self.assertEqual(malformed["result_state"], "incomplete")
+        malformed_receipt = analyzer_receipt()
+        malformed_receipt["identity"] = identity
+        self.assertTrue(compiler_receipt.validate_analyzer_bundle(
+            malformed_receipt, summary, {"files": files}))
+
+        files, identity, _ = self.full_raw_profile()
+        aggregate_path = "profile/aggregate-candidate-0.stdout.log"
+        aggregate_lines = files[aggregate_path].decode().splitlines()
+        files[aggregate_path] = ("\n".join(
+            line.replace("selected_rows=182", "selected_rows=181", 1)
+            if line.startswith("ANALYZE_AGGREGATE ") else line for line in aggregate_lines) + "\n").encode()
+        summary, problems = compiler_receipt.analyzer_profile_summary(files, identity)
+        self.assertTrue(problems)
+        self.assertEqual(summary["status"], "failed")
+        self.assertTrue(summary["comparison_invalid"])
+        runs = {row["name"]: row for row in summary["runs"]}
+        mismatch = runs["candidate-0"]["internal_costs"]["independent_aggregate_records"][0]
+        self.assertEqual(mismatch["observed_numeric"]["selected_rows"], 181)
+        self.assertFalse(mismatch["plan_checks"]["selected_rows"]["matches"])
+        self.assertEqual(mismatch["plan_identity_status"], "mismatch")
+        self.assertEqual(mismatch["result_state"], "failed")
+        mismatch_receipt = analyzer_receipt()
+        mismatch_receipt["identity"] = identity
+        self.assertTrue(compiler_receipt.validate_analyzer_bundle(
+            mismatch_receipt, summary, {"files": files}))
+
+    def test_malformed_run_records_results_and_manifests_stay_fail_closed(self) -> None:
+        expected = dict(EXPECTED, mode="pull", ref="refs/pull/7/head")
+        files, identity, _ = self.full_raw_profile()
+        run_path = "profile/analysis-baseline-0.stdout.log"
+        run_record = next(line for line in files[run_path].decode().splitlines()
+                          if line.startswith("ANALYZE_RUN "))
+        files[run_path] += (run_record + "\n").encode()
+        files["profile/candidate-0/shard-0/result.txt"] = b"BUSTER_CLANG_ANALYZE_RESULT_V2\ntruncated\n"
+        phase_lines = files["profile/profile.tsv"].decode().splitlines()
+        files["profile/profile.tsv"] = ("\n".join(
+            line for line in phase_lines if not line.startswith("analysis-candidate-1\t")) + "\n").encode()
+        profile_summary, problems = compiler_receipt.analyzer_profile_summary(files, identity)
+        self.assertTrue(problems)
+        self.assertTrue(profile_summary["comparison_invalid"])
+        self.assertEqual(profile_summary["status"], "failed")
+        self.assertEqual(len(profile_summary["runs"]), 4)
+        runs = {row["name"]: row for row in profile_summary["runs"]}
+        self.assertEqual(runs["baseline-0"]["driver_record_status"], "duplicate")
+        self.assertEqual(len(runs["baseline-0"]["driver_record"]), 2)
+        self.assertEqual(runs["candidate-0"]["result_coverage"]["terminal_shards"], 7)
+        self.assertGreater(runs["candidate-0"]["result_coverage"]["unrecorded_rows"], 0)
+        self.assertIsNone(runs["candidate-1"]["analysis_process_wall_us"])
+        self.assertIsNone(profile_summary["totals"]["matched_full_analysis_process_wall_us"])
+        report = compiler_receipt.render_analyzer(analyzer_receipt(), profile_summary, "failure", [])
+        self.assertIn("NA s", report)
+        self.assertIn("**Comparison status: invalid.**", report)
+
+        malformed = dict(files)
+        malformed["profile/candidate-1/manifest.txt"] = b"BUSTER_CLANG_ANALYZE_PLAN_V2\ntruncated\n"
+        malformed_summary, malformed_problems = compiler_receipt.analyzer_profile_summary(malformed, identity)
+        self.assertTrue(malformed_problems)
+        self.assertTrue(malformed_summary["comparison_invalid"])
+        receipt_for_malformed = analyzer_receipt()
+        receipt_for_malformed["identity"] = identity
+        receipt_for_malformed["analyzer"] = malformed_summary
+        receipt_for_malformed["analyzer_request_sha256"] = malformed_summary["request"]["sha256"]
+        receipt_for_malformed["analyzer_clang_provenance"] = malformed_summary["clang"]
+        receipt_for_malformed["analyzer_driver_checkouts"] = malformed_summary["driver_checkouts"]
+        receipt_for_malformed["analyzer_driver_provenance"] = malformed_summary["driver_provenance"]
+        malformed_bundle = {"summary": malformed_summary, "files": malformed}
+        decision = compiler_publish.decide(expected, True, "success", receipt_for_malformed, malformed_summary, "",
+                                           {"analyzer": malformed_bundle})
+        self.assertEqual(decision[0], "failure", decision)
 
     def test_candidate_full_arm_plan_and_shard_cost_records_are_bound(self) -> None:
         files, _, _ = self.full_raw_profile()

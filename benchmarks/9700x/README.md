@@ -140,6 +140,14 @@ counters; those fields are explicitly unavailable, not zero. Outer analysis and
 aggregate wait4 CPU and largest individual RSS are reported separately from the
 sampled process-tree RSS lower bound.
 
+Failed or incomplete arms retain their raw phase and sampler records, every
+present terminal shard/result record, and partial per-TU and individually
+plan-bound cost/counter observations with explicit failed, partial, malformed,
+unbound or missing states. Acceptance still requires complete passing arms,
+plan-matched full coverage, matching independent aggregates, and complete
+process-tree sampling with positive samples, live-process counts and sampled
+RSS. Invalid comparisons produce no timing ratios or per-TU median summaries.
+
 This profile is report-only and has no speedup or regression verdict. Its
 native campaign is capped at 75 minutes inside the existing 90-minute
 `compare-pull` job; setup and report export remain inside that same job budget.
