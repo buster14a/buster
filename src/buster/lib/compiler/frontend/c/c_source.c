@@ -5012,6 +5012,7 @@ BUSTER_C_SHARED String8 const c_declaration_keyword_spellings[] = {
     S8_INITIALIZER("__complex"),     S8_INITIALIZER("__complex__"), S8_INITIALIZER("__builtin_va_list"),
     S8_INITIALIZER("_Float16"),
     S8_INITIALIZER("__bf16"),
+    S8_INITIALIZER("__fp16"),
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(c_declaration_keyword_spellings) < C_DECLARATION_KEYWORD_SLOT_COUNT / 2);
@@ -5024,7 +5025,7 @@ BUSTER_C_INTERNAL String8 const c_symbol_classified_extras[] = {
     S8_INITIALIZER("true"),          S8_INITIALIZER("false"),  S8_INITIALIZER("nullptr"),
     S8_INITIALIZER("alignof"),       S8_INITIALIZER("constexpr"), S8_INITIALIZER("typeof_unqual"),
     S8_INITIALIZER("typeof"),        S8_INITIALIZER("vector_size"), S8_INITIALIZER("__vector_size"),
-    S8_INITIALIZER("__vector_size__"), S8_INITIALIZER("__fp16"),
+    S8_INITIALIZER("__vector_size__"),
 };
 
 // The spellings behind CSymbolWellKnown: entry N is interned N-th and
