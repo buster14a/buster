@@ -558,7 +558,7 @@ run_case() {
         "$timeout_bin" --preserve-status --signal=TERM --kill-after=3s "$runner_timeout" \
             python3 - "$timeout_bin" "$repo_root/ios/lifecycle_capture_bridge.sh" \
             "$state/interrupted-run" "$state/registration" "$state/processes" \
-            "$state/interruption-result" 15 15 -- \
+            "$state/interruption-result" 3 14 -- \
             /bin/bash "$launcher" "${arguments[@]}" <<'PY' >"$state/output" 2>&1 &
 import os
 import select
