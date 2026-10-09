@@ -26,9 +26,10 @@ struct CompilerClosureUtilityControllerResolved
     CompilerClosureUtilityControllerTransport transport;
     CompilerClosureUtilityAdmission admitted;
     CompilerSamplingControllerHost host;
+    CompilerExperimentJobClock job_clock;
     String8 workspace, driver, lab, python, protocol, comparator, receipt_adapter, owned_phase;
     String8 claim, claim_record, pull, bootstrap_marker_sha256;
-    bool valid;
+    bool diagnostic, valid;
 };
 
 BUSTER_GLOBAL_LOCAL CompilerClosureUtilityControllerOptions compiler_closure_utility_controller_parse(SliceString8 arguments)
@@ -121,13 +122,14 @@ BUSTER_GLOBAL_LOCAL String8 compiler_closure_utility_controller_claim_record(Are
            "source_root\t{S8}\noutput_root\t{S8}\nevidence\t{S8}\ndriver\t{S8}\n"
            "request_sha256\t{S8}\nplan_transport_sha256\t{S8}\nallowlist_sha256\t{S8}\nfacts_sha256\t{S8}\nhistory_sha256\t{S8}\n"
            "pull\t{S8}\npull_head\t{S8}\nbootstrap_marker_sha256\t{S8}\n"
-           "reservation_seconds\t5400\nworker_seconds\t5280\ntail_seconds\t120\nstate\tclaimed\n"),
+           "physical_job_clock_sha256\t{S8}\nreservation_seconds\t5400\nworker_seconds\t5280\ntail_seconds\t120\nstate\tclaimed\n"),
         admitted.freeze_revision, admitted.freeze_sha256,
         compiler_sampling_controller_fact(facts, S8("request_run_id")),
         compiler_sampling_controller_fact(facts, S8("executor_run_id")),
         compiler_sampling_controller_fact(facts, S8("request_head")), admitted.policy_trusted_revision, admitted.trusted_revision,
         admitted.plan.source_root, admitted.plan.output_root, resolved.options.evidence, resolved.driver,
-        hashes[0], hashes[1], hashes[2], hashes[3], hashes[4], resolved.pull, admitted.plan.pull_head, resolved.bootstrap_marker_sha256);
+        hashes[0], hashes[1], hashes[2], hashes[3], hashes[4], resolved.pull, admitted.plan.pull_head, resolved.bootstrap_marker_sha256,
+        stage_object_sha256_bytes(arena, (u8*)resolved.job_clock.record.pointer, resolved.job_clock.record.length));
     return result;
 }
 
@@ -241,6 +243,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_resolve(Arena* aren
         compiler_closure_utility_controller_paths(arena, options, resolved.admitted.plan, &resolved);
     resolved.host = compiler_sampling_controller_observed_host(arena);
     valid = valid && resolved.host.valid && compiler_experiment_cleanup_guard(arena) &&
+        compiler_experiment_job_clock_resolve(arena, S8("utility"), resolved.admitted.policy_trusted_revision, &resolved.job_clock) &&
+        compiler_experiment_job_clock_remaining_us(resolved.job_clock, 5400000000ull, 5280000000ull) &&
         compiler_closure_utility_controller_tools(arena, &resolved, true);
     resolved.claim_record = valid ? compiler_closure_utility_controller_claim_record(arena, resolved) : (String8){0};
     if (valid && options.owned_worker)
@@ -278,6 +282,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_claim(Arena* arena,
         OsDirectoryCreateResult evidence = result ? os_make_directory_exclusive(resolved.options.evidence) : (OsDirectoryCreateResult){0};
         result = result && evidence.created && !evidence.error.v &&
             file_write(path_join(arena, resolved.options.evidence, S8("claim.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(resolved.claim_record));
+        if (result && !resolved.diagnostic) result = file_write(path_join(arena, resolved.options.evidence, S8("physical-job-clock.tsv")),
+            BUSTER_SLICE_TO_BYTE_SLICE(resolved.job_clock.record));
         String8 names[] = {S8("request.txt"), S8("plan.tsv"), S8("allowlist.tsv"), S8("facts.tsv"), S8("history.tsv")};
         for (u64 i = 0; result && i < BUSTER_ARRAY_LENGTH(names); i += 1)
             result = file_write(path_join(arena, resolved.options.evidence, names[i]), BUSTER_SLICE_TO_BYTE_SLICE(resolved.transport.bytes[i]));
@@ -322,7 +328,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_host_receipt(Arena*
         resolved.driver, admitted.plan.native_driver_sha256, resolved.bootstrap_marker_sha256,
         resolved.comparator, admitted.plan.comparator_sha256, resolved.receipt_adapter, admitted.plan.receipt_sha256,
         resolved.owned_phase, admitted.plan.owned_phase_sha256);
-    return resolved.host.valid && file_write(path_join(arena, resolved.options.evidence, S8("host.json")), BUSTER_SLICE_TO_BYTE_SLICE(text));
+    return (resolved.host.valid || resolved.diagnostic) && file_write(path_join(arena, resolved.options.evidence, S8("host.json")), BUSTER_SLICE_TO_BYTE_SLICE(text));
 }
 
 // The shared metadata reader reserves its declared limit. Full raw evidence
@@ -377,7 +383,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_member(String8 rela
             String8 allowed[] = {S8("lab.json"), S8("commands.log"), S8("perf-probe.csv"), S8("probe.ccmetrics"),
                 S8("metrics-probe.log"), S8("warmup.ccmetrics"), S8("probe.c"), S8("wrapper.csv"), S8("wrapper-rss.log"),
                 S8("source.metrics"), S8("source-run.log"), S8("plain-run.log"), S8("env/env.json"),
-                S8("env/lscpu.txt"), S8("env/metricgroups.txt")};
+                S8("env/lscpu.txt"), S8("env/metricgroups.txt"), S8("env/cpuinfo.txt"), S8("stdout.log"), S8("stderr.log")};
             result = compiler_closure_utility_controller_named(name, (SliceString8)BUSTER_ARRAY_TO_SLICE(allowed)) ||
                 (string_starts_with_sequence(name, S8("warmup-")) && string_ends_with_sequence(name, S8(".log")));
             *skip = string_equal(name, S8("out.exe")) || string_equal(name, S8("reference.exe"));
@@ -404,7 +410,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_member(String8 rela
         else
         {
             String8 allowed[] = {S8("summary.json"), S8("metadata.json"), S8("samples.csv"), S8("telemetry.csv"), S8("jobs.tsv"),
-                S8("commands.jsonl"), S8("capabilities.jsonl"), S8("complete.txt"), S8("summary.txt"), S8("report.txt"),
+                S8("commands.jsonl"), S8("capabilities.jsonl"), S8("complete.txt"), S8("summary.txt"), S8("summary.md"), S8("report.txt"),
                 S8("cpuinfo.txt"), S8("kernel.txt"), S8("affinity-and-host-status.txt"), S8("perf_event_paranoid.txt"),
                 S8("cpu-quota.txt"), S8("cpuset.txt"), S8("smt.txt"), S8("governor.txt"), S8("frequency-driver.txt"), S8("host.txt")};
             result = compiler_closure_utility_controller_named(member, (SliceString8)BUSTER_ARRAY_TO_SLICE(allowed));
@@ -479,8 +485,13 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_copy(Arena* arena, 
                     (u64)info.st_size <= BUSTER_UTILITY_EXPORT_BYTES - totals->bytes;
                 TemporalArena data = scratch_begin(&arena, 1);
                 String8 content = valid ? compiler_preparation_controller_read_data(data.arena, input) : (String8){0};
+                struct stat after = {0};
                 valid = valid && content.pointer && content.length == (u64)info.st_size &&
-                    file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(content));
+                    lstat((char*)named.pointer, &after) == 0 && S_ISREG(after.st_mode) && !(after.st_mode & 0111) &&
+                    info.st_dev == after.st_dev && info.st_ino == after.st_ino && info.st_mode == after.st_mode &&
+                    info.st_size == after.st_size && info.st_mtim.tv_sec == after.st_mtim.tv_sec &&
+                    info.st_mtim.tv_nsec == after.st_mtim.tv_nsec && info.st_ctim.tv_sec == after.st_ctim.tv_sec &&
+                    info.st_ctim.tv_nsec == after.st_ctim.tv_nsec && file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(content));
                 if (valid)
                 {
                     String8 digest = stage_object_sha256_bytes(arena, (u8*)content.pointer, content.length);
@@ -559,6 +570,16 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_export(Arena* arena
 
 
 #endif
+
+BUSTER_GLOBAL_LOCAL u64 compiler_closure_utility_controller_budget(CompilerClosureUtilityControllerResolved resolved,
+    u64 started, u64 worker_budget)
+{
+    if (!resolved.diagnostic) return compiler_experiment_job_clock_remaining_us(resolved.job_clock, 5400000000ull, worker_budget);
+    // Private hosted mode cannot possess a platform occupancy receipt. It has a
+    // fixed native diagnostic deadline and publishes complete-job cost unavailable.
+    u64 spent=os_now_microseconds()-started;
+    return spent<worker_budget ? worker_budget-spent : 0;
+}
 
 #if BUSTER_LINUX && !BUSTER_ANDROID
 BUSTER_GLOBAL_LOCAL void compiler_closure_utility_controller_cancel(int signal)
@@ -804,19 +825,19 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_leg(CompilerSamplin
 }
 #endif
 
-BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_worker(Arena* arena,
-    CompilerClosureUtilityControllerResolved resolved)
+BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_worker_claimed(Arena* arena,
+    CompilerClosureUtilityControllerResolved resolved, bool claimed)
 {
     ProcessResult result = PROCESS_RESULT_FAILED;
 #if BUSTER_LINUX && !BUSTER_ANDROID
     // A duplicate or concurrent loser returns before ALL later evidence writes.
-    bool claimed = compiler_closure_utility_controller_claim_worker(arena, resolved);
     if (claimed)
     {
         CompilerSamplingController controller = {.arena = arena, .evidence = resolved.options.evidence,
             .started = os_now_microseconds(), .success = resolved.valid};
         controller.plan.source_root = resolved.admitted.plan.source_root;
-        controller.deadline = controller.started + BUSTER_CLOSURE_UTILITY_WORKER_SECONDS * 1000000ull;
+        controller.deadline = controller.started + compiler_closure_utility_controller_budget(resolved, controller.started,
+            BUSTER_CLOSURE_UTILITY_WORKER_SECONDS * 1000000ull);
         string8_list_push(arena, &controller.phases, S8("stage\tphase\twall_us\texit_status\ttimed_out\tcleanup_failed\tcancelled\tstate\n"));
         String8List legs = {0}, inventory = {0};
         string8_list_push(arena, &legs, S8("BUSTER_COMPILER_CLOSURE_UTILITY_LEGS_V1\n"
@@ -838,6 +859,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_worker(Are
         String8 trusted_clean[] = {S8("-C"), resolved.options.trusted_root, S8("diff"), S8("--quiet"), S8("--exit-code"), S8("HEAD"), S8("--")};
         compiler_closure_utility_controller_phase(&controller, &resolved, S8("trusted-harness-clean"),
             compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(trusted_clean)), 120000000ull);
+        if (!resolved.diagnostic)
+        {
         String8 clone[] = {S8("clone"), S8("--no-checkout"), S8("--no-tags"), S8("https://github.com/buster14a/buster.git"), resolved.admitted.plan.source_root};
         compiler_closure_utility_controller_phase(&controller, &resolved, S8("clone-utility-source"),
             compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(clone)), 120000000ull);
@@ -845,13 +868,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_worker(Are
             resolved.admitted.plan.baseline_revision, resolved.admitted.plan.candidate_revision, resolved.admitted.plan.pull_head};
         compiler_closure_utility_controller_phase(&controller, &resolved, S8("fetch-utility-pins"),
             compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fetch)), 120000000ull);
+        }
         String8 base_tree = compiler_closure_utility_controller_revision(&controller, &resolved,
             string_format(arena, S8("{S8}^{{tree}"), resolved.admitted.plan.baseline_revision), S8("baseline-tree"));
         String8 head_tree = compiler_closure_utility_controller_revision(&controller, &resolved,
             string_format(arena, S8("{S8}^{{tree}"), resolved.admitted.plan.candidate_revision), S8("candidate-tree"));
         String8 first = compiler_closure_utility_controller_revision(&controller, &resolved,
             string_format(arena, S8("{S8}^1"), resolved.admitted.plan.candidate_revision), S8("candidate-first-parent"));
-        String8 second = compiler_closure_utility_controller_revision(&controller, &resolved,
+        String8 second = resolved.diagnostic ? resolved.admitted.plan.pull_head : compiler_closure_utility_controller_revision(&controller, &resolved,
             string_format(arena, S8("{S8}^2"), resolved.admitted.plan.candidate_revision), S8("candidate-second-parent"));
         controller.success = controller.success && string_equal(base_tree, resolved.admitted.plan.baseline_tree) &&
             string_equal(head_tree, resolved.admitted.plan.candidate_tree) &&
@@ -907,6 +931,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_worker(Are
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_worker(Arena* arena,
+    CompilerClosureUtilityControllerResolved resolved)
+{
+    return compiler_closure_utility_controller_worker_claimed(arena, resolved,
+        compiler_closure_utility_controller_claim_worker(arena, resolved));
+}
+
 BUSTER_GLOBAL_LOCAL SliceString8 compiler_closure_utility_controller_owner_arguments(Arena* arena,
     String8 driver, SliceString8 arguments)
 {
@@ -914,7 +945,8 @@ BUSTER_GLOBAL_LOCAL SliceString8 compiler_closure_utility_controller_owner_argum
     os_argument_builder_append(&builder, driver);
     os_argument_builder_append(&builder, S8("compiler_profile_qualification"));
     for (u64 i = 0; i < arguments.length; i += 1) os_argument_builder_append(&builder, arguments.pointer[i]);
-    os_argument_builder_append(&builder, S8("--owned-utility-worker"));
+    os_argument_builder_append(&builder, arguments.length && string_equal(arguments.pointer[0], S8("--self-test-utility-export")) ?
+        S8("--owned-utility-fixture-worker") : S8("--owned-utility-worker"));
     return os_argument_builder_flush(&builder);
 }
 
@@ -935,8 +967,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_owned(Aren
     SliceString8 command = compiler_closure_utility_controller_owner_arguments(arena, resolved.driver, arguments);
     u64 owner_limit = BUSTER_CLOSURE_UTILITY_WORKER_SECONDS * 1000000ull;
     u64 before_spawn = os_now_microseconds() - started;
+    u64 remaining = compiler_closure_utility_controller_budget(resolved, started, owner_limit);
     if (deferred && !compiler_sampling_controller_cancelled() && compiler_closure_admitting() &&
-        compiler_experiment_cleanup_guard(arena) && before_spawn < owner_limit)
+        compiler_experiment_cleanup_guard(arena) && before_spawn < owner_limit && remaining)
     {
         spawn = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
             (ProcessSpawnOptions){.use_process_environment = 1, .new_process_group = 1, .observe_resources = 1});
@@ -945,11 +978,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_owned(Aren
             spawn.process_group_control = &control;
             u64 spent = os_now_microseconds() - started;
             u64 limit = BUSTER_CLOSURE_UTILITY_WORKER_SECONDS * 1000000ull;
-            wait = os_process_wait_deadline(arena, spawn, spent < limit ? limit - spent : 1);
+            u64 remaining_before_wait = compiler_closure_utility_controller_budget(resolved, started, limit);
+            wait = os_process_wait_deadline(arena, spawn, remaining_before_wait ? remaining_before_wait : 1);
+            BUSTER_UNUSED(spent);
         }
     }
     bool released = !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
-    bool quiet = contained && released && compiler_experiment_supervisor_end(arena, &supervisor);
+    bool quiet = contained && released && compiler_experiment_supervisor_end_known(arena, &supervisor, released);
     bool inner_unknown = compiler_closure_utility_controller_unknown(arena, resolved);
     bool cleanup = quiet && !wait.process_tree_cleanup_failed && !inner_unknown;
     if (claimed && !cleanup) compiler_closure_utility_controller_latch(arena, resolved,
@@ -961,7 +996,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_owned(Aren
     complete = complete && restored;
     u64 publication_started = os_now_microseconds();
     u64 wall = publication_started - started;
-    bool within = wall <= BUSTER_CLOSURE_UTILITY_PHYSICAL_SECONDS * 1000000ull;
+    bool within = compiler_closure_utility_controller_budget(resolved, started, 5400000000ull) != 0;
     String8 owner = string_format(arena,
         S8("schema\tbuster-compiler-closure-utility-owner-v1\nphase\tutility\npacket\t0\nplan_sha256\t{S8}\n"
            "physical_packet_wall_us\t{u64}\nwall_scope\tentry-through-child-cleanup-before-terminal-publication\n"
@@ -979,14 +1014,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_owned(Aren
            "scope\tentry-through-owner-publication\ninitial_scope_us\t{u64}\npublication_us\t{u64}\n"
            "observed_wall_us\t{u64}\nobservation_publication_us\tunavailable\nwithin_reservation\t{S8}\n"),
         stage_object_sha256_bytes(arena, (u8*)owner.pointer, owner.length), wall, observed_wall - wall, observed_wall,
-        observed_wall <= BUSTER_CLOSURE_UTILITY_PHYSICAL_SECONDS * 1000000ull ? S8("true") : S8("false"));
+        compiler_closure_utility_controller_budget(resolved, started, 5400000000ull) ?  S8("true") : S8("false"));
     bool publication_recorded = recorded &&
         file_write(path_join(arena, resolved.options.evidence, S8("owner-publication.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(publication)) &&
         file_write(path_join(arena, resolved.claim, S8("owner-publication.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(publication));
     // No successful return may exclude either receipt's publication from the
     // actual hard clock guard. The last observation receipt cannot self-time;
     // its tail remains explicitly unavailable, never an invented zero.
-    bool within_after_publication = os_now_microseconds() - started <= BUSTER_CLOSURE_UTILITY_PHYSICAL_SECONDS * 1000000ull;
+    bool within_after_publication = compiler_closure_utility_controller_budget(resolved, started, 5400000000ull) != 0;
     if (claimed && !within_after_publication)
     {
         String8 failed = string_format(arena,
@@ -1010,9 +1045,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_owned(Aren
 
 
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_self_test(Arena* arena);
+BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_fixture_execute(Arena* arena, SliceString8 arguments);
 
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_main(Arena* arena, SliceString8 arguments)
 {
+    if (arguments.length && string_equal(arguments.pointer[0], S8("--self-test-utility-export")))
+        return compiler_closure_utility_fixture_execute(arena, arguments);
     u64 started = os_now_microseconds();
     CompilerClosureUtilityControllerOptions options = compiler_closure_utility_controller_parse(arguments);
     if (options.self_test) return compiler_closure_utility_controller_self_test(arena);
@@ -1027,4 +1065,5 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_main(Arena* arena, Sl
 }
 
 #include "compiler_closure_utility_test.c"
+#include "compiler_closure_utility_fixture.c"
 #endif

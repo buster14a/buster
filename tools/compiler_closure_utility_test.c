@@ -82,9 +82,12 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_fixture_signals(Arena* arena, 
 {
     CompilerExperimentSupervisor owner = {0};
     bool began = compiler_experiment_supervisor_begin(arena, &owner);
-    pid_t child = began ? fork() : -1;
+    int report[2] = {-1, -1};
+    bool piped = began && pipe2(report, O_CLOEXEC) == 0;
+    pid_t child = piped ? fork() : -1;
     if (!child)
     {
+        close(report[0]);
         struct sigaction prior_term = {0}, prior_int = {0}, after_term = {0}, after_int = {0};
         bool observed = sigaction(SIGTERM, 0, &prior_term) == 0 && sigaction(SIGINT, 0, &prior_int) == 0;
         CompilerSamplingSignalScope scope = {0};
@@ -97,11 +100,19 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_fixture_signals(Arena* arena, 
         bool restored = deferred && compiler_closure_utility_controller_signals_end(&scope) &&
             sigaction(SIGTERM, 0, &after_term) == 0 && sigaction(SIGINT, 0, &after_int) == 0 &&
             prior_term.sa_handler == after_term.sa_handler && prior_int.sa_handler == after_int.sa_handler;
-        _exit(tested && flags && restored ? 0 : 9);
+        u8 success = tested && flags && restored ? 1 : 0;
+        bool reported = write(report[1], &success, 1) == 1;
+        close(report[1]);
+        _exit(success && reported ? 0 : 9);
     }
+    if (report[1] >= 0) { close(report[1]); report[1] = -1; }
+    struct pollfd event = {.fd=report[0],.events=POLLIN};
+    u8 success = 0;
+    bool reported = child > 1 && poll(&event, 1, 15000) > 0 && read(report[0], &success, 1) == 1 && success == 1;
+    if (report[0] >= 0) close(report[0]);
     bool reaped = child > 1 && compiler_experiment_supervisor_fixture_reap(child, os_now_microseconds()+15000000ull);
     bool quiet = began && compiler_experiment_supervisor_end(arena, &owner) && !owner.signalled && !owner.reaped;
-    return reaped && quiet;
+    return reported && reaped && quiet;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_fixture_raw(Arena* arena, String8 directory)
