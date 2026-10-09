@@ -124,6 +124,49 @@ struct BusterX86CompletionCensusRecord
     u16 reserved1;
 };
 
+// Optional raw evidence for the checked direct metadata emitter. The fixed
+// arrays preserve the emitter's complete output without multiplying stack
+// storage across the census rows.
+enum
+{
+    BUSTER_X86_COMPLETION_CENSUS_DIRECT_BYTE_CAPACITY = 32,
+};
+
+typedef struct BusterX86CompletionCensusDirectWitness BusterX86CompletionCensusDirectWitness;
+struct BusterX86CompletionCensusDirectWitness
+{
+    u32 form_id;
+    u64 stable_hash;
+    u16 status;
+    bool bytes_complete;
+    bool relocations_complete;
+    u8 reserved[2];
+    u32 byte_count;
+    u32 relocation_count;
+    u32 captured_byte_count;
+    u32 captured_relocation_count;
+    u8 bytes[BUSTER_X86_COMPLETION_CENSUS_DIRECT_BYTE_CAPACITY];
+    BusterX86MetadataRelocation relocations[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY];
+};
+
+// Optional source witnesses borrow all generated/encoded storage from the
+// query arena. The observation is captured from assembly_encode's successful
+// checked metadata emitter, never from a second metadata selection.
+typedef struct BusterX86CompletionCensusSourceWitness BusterX86CompletionCensusSourceWitness;
+struct BusterX86CompletionCensusSourceWitness
+{
+    u32 form_id;
+    u64 stable_hash;
+    u8 dialect;
+    u8 classification;
+    u8 reason;
+    bool source_generated;
+    bool assembly_attempted;
+    u8 reserved[3];
+    String8 source;
+    AssemblyEncodeResult encoded;
+};
+
 typedef struct BusterX86CompletionCensusQuery BusterX86CompletionCensusQuery;
 struct BusterX86CompletionCensusQuery
 {
@@ -144,6 +187,12 @@ struct BusterX86CompletionCensusQuery
     // fields in the result are zero by contract.
     bool structural_only;
     u8 reserved[5];
+    // Optional bounded witness arrays. A null pointer and zero capacity leaves
+    // evidence capture disabled and does not affect census classifications.
+    BusterX86CompletionCensusDirectWitness* direct_witnesses;
+    u32 direct_witness_capacity;
+    BusterX86CompletionCensusSourceWitness* source_witnesses;
+    u32 source_witness_capacity;
 };
 
 typedef struct BusterX86CompletionCensusResult BusterX86CompletionCensusResult;
@@ -208,6 +257,21 @@ struct BusterX86CompletionCensusResult
     u32 diagnostic_dropped_count;
     bool diagnostics_complete;
     u8 reserved0[3];
+    // Witness completeness is independent of structural/source partitions.
+    // Capture must be explicitly requested with a non-null array or non-zero
+    // capacity; undersized or absent requested arrays are reported as drops.
+    bool direct_witnesses_requested;
+    bool direct_witnesses_complete;
+    u16 reserved2;
+    u32 direct_witness_expected_count;
+    u32 direct_witness_count;
+    u32 direct_witness_dropped_count;
+    bool source_witnesses_requested;
+    bool source_witnesses_complete;
+    u16 reserved3;
+    u32 source_witness_expected_count;
+    u32 source_witness_count;
+    u32 source_witness_dropped_count;
 };
 
 // Scans the immutable generated snapshot in form order.  No global report or
