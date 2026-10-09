@@ -80,12 +80,13 @@ def fixture(phase: str = "confirm", packet: int = 0) -> tuple:
     rows, series = [], {}
     for index, slot in enumerate(plan["slots"]):
         rows.append({"trial": str(index), "profile": slot[0], "family": family, "ordinal": str(slot[1]),
-                     "pairs": str(slot[2]), "wall_us": "100000", "user_cpu_us": "0", "system_cpu_us": "0",
+                     "pairs": str(slot[2]), "wall_us": str(round((slot[2] or 8) * (4.0 if family == "aa" else 4.042) * 1000000) + 1000000), "user_cpu_us": "0", "system_cpu_us": "0",
                      "peak_rss_bytes": "0", "cpu_status": "3", "memory_status": "3",
                      "exit_status": "0", "timed_out": "0", "cleanup_failed": "0", "capture_failed": "0",
                      "closure_before": CLOSURE, "closure_after": CLOSURE, "state": "process-complete-unvalidated"})
         series[index] = bundle(slot[0], slot[2], binaries, workload, 1.0 if family == "aa" else 1.021)
-    terminal = {"physical_packet_wall_us": "1000000", "prep_us": "10000",
+    occupancy = sum(int(row["wall_us"]) for row in rows) + 20000
+    terminal = {"physical_packet_wall_us": str(occupancy), "prep_us": "10000",
                 "captured_input_files_unchanged": "true", "within_reservation": "true", "process_state": "complete",
                 "qualification_state": "unvalidated", "queue_delay": "unavailable"}
     history = []
@@ -96,6 +97,7 @@ def fixture(phase: str = "confirm", packet: int = 0) -> tuple:
                             "run_attempt": "1", "state": "complete",
                             "reservation_seconds": receipt.schedule(history_phase, index)["reservation_seconds"],
                             "physical_packet_wall_us": 1000000})
+    history[-1]["physical_packet_wall_us"] = occupancy
     trusted = {"authenticated": True,
                "request": {"repository": "buster14a/buster", "actor": "davidgmbb", "owner": "davidgmbb",
                            "selector": receipt.REQUEST_SELECTORS[phase], "request_run_id": "998",
@@ -103,7 +105,7 @@ def fixture(phase: str = "confirm", packet: int = 0) -> tuple:
                            "campaign": DIGEST},
                "executor": {"repository": "buster14a/buster", "request_run_id": "998", "run_id": history[-1]["run_id"],
                             "run_attempt": "1", "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor",
-                            "physical_packet_wall_us": 1000000, "queue_delay_seconds": None},
+                            "physical_packet_wall_us": occupancy, "queue_delay_seconds": None},
                "identity": copy.deepcopy(identity), "binaries": binaries, "workload_config": workload,
                "attempts": history}
     return identity, rows, terminal, series, trusted
