@@ -93,6 +93,30 @@ that list. `c_test_duplicate_parameter_names` checks syntax-only/lowering
 parity, both frontend forms and symbol/spelling lookup, and inspects the outer
 parameter names of nested block-local prototypes.
 
+File-scope object and function, block-scope and enumerator (file and block scope)
+redefinitions, and conflicting declarations (including the static/non-static
+linkage pair), name the entity and print the line and column of the earlier
+declaration, in the `(previous declaration at L:C)` form parameters use:
+`redefinition of 'x' (previous declaration at 1:5)`,
+`redefinition of enumerator 'RED' (previous declaration at 1:10)`. The site is the
+entity's first declaration (a prototype before the first definition, not the
+definition) mapped through the preprocessor source map, so `#line` and macro
+expansion sites read as the diagnostic's own do. When the earlier site is in
+another file than the diagnostic (an included header, or a `#line` that renamed
+the file) it is prefixed with that file's path (`previous declaration at
+header.h:1:5`). The diagnostic always sits at the later of the two declarations:
+file-scope enumerators are published after every object and function, so an
+enumerator declared first is compared by final token order with the entity found
+and, when that entity follows it, the error is `redefinition of 'A'` at the entity
+naming the enumerator as the previous site. The text is formatted only when the
+diagnostic is emitted. `c_test_redefinition_names_previous_site` checks the
+spellings and both orders; `compiler_driver_test_record_diagnostic_equivalence`
+pins them for syntax-only and object output, including a header-first case.
+Residue: the previous site is not yet the first definition, `duplicate member`
+and tag redefinitions carry no site, and a header included twice (or a macro
+expanded twice) maps both declarations to one source position, so the previous
+site equals the diagnostic's own (#1432).
+
 Windows target predefines in `c_source.c` normalize `__inline` and `__forceinline`
 to the function specifier `inline`, without injecting a storage class. UCRT-style
 `static __inline` and `extern __inline` declarations retain their source storage;

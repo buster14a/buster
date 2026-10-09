@@ -7,6 +7,7 @@ request: PR #3164 issue #3038 fresh throughput-corpus-v2 exact-head comparison a
 # request: issue #2680 PR #3031 current-main throughput-corpus-v2 fresh qualification
 request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
 # request: issue #2680 PR #3031 throughput-corpus-v2 qualification against main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
+request: issue #2522 unwrap parenthesized logical chains; current main 8ea54465a2309f95bcb160143ce4804e05a8dbc8
 # request: issue #2680 PR #3031 throughput-corpus-v2 qualification against main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
 request: issue #1243 unindexed archive reserved symbol definitions; current main 51918eee3a8ef2e1baf8bac5cf1fd1a6b30b7129
 # request: PR #3031 main 88a8da42a0ede1a778101969880c72291c7bc480 current-main exact-candidate throughput-corpus-v2 qualification after #3025 integration
@@ -18,6 +19,7 @@ request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compile
 # request: PR #3026 fresh qualification after preserving current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
 request: issue #1570 string literal sizeof array bounds; current main 51918eee3a8ef2e1baf8bac5cf1fd1a6b30b7129
 request: PR #3026 normal merge of main 88a8da42a0ede1a778101969880c72291c7bc480; inherited #3025 ELF reserved-symbol diagnostics, preserved feature scope, fresh exact-head qualification
+request: issue #3015 Mach-O weak_definition directive in assembly; current main 4fd4eb5ce18c27dc7e7ee75dd1ef3d88b6bf3832
 #
 # Add or change any line of this file in an owner pull request (a draft is
 # enough) to compare that pull request's compiler with its merge base on the
@@ -47,6 +49,7 @@ request: PR #3145 issue #3132 fresh exact-head throughput-corpus-v2 comparison a
 request: PR #3145 renew exact-head throughput-corpus-v2 comparison after preserving parent #3135 request history 35cda7f0f7bc4fc5f9602e1f443b4a3c35ab50ef
 request: PR #3145 issue #3132 fresh exact-head throughput-corpus-v2 comparison after signed LDTRSB immediate repair 6567d766d728637da13561fadf281512af1b896f
 # request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
+request: issue #1432 name entity and previous site in redefinition diagnostics; current main 8ea54465a2309f95bcb160143ce4804e05a8dbc8
 # request: issue #1311 TU reservation resource diagnostic classification
 request: PR #3158 issue #1259 x87 long double static conditional initializer folding; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
 request: PR #3158 issue #1259 docfinalcodefrozen exact-head f46b67ff2f10b4227d42deed93602ad81cad5328 x87 long double static conditional initializer folding; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; compiler sources unchanged from 99ea42c8
@@ -60,6 +63,7 @@ request: issue #2516 refuse directory response files without opening; current ma
 # request: issue #2626 current-main fused-validator qualification; baseline 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
 request: issue #2626 current-main fused-validator qualification; baseline 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
 request: PR #2628 issue #2626 current-main fused-validator qualification; baseline 88a8da42a0ede1a778101969880c72291c7bc480
+request: issue #1281 x86-64 ELF reassemblable listings; current main d91fd185e0bcd4066ecf0faecfd06c146f476d02
 request: PR #3135 fresh exact-head throughput-corpus-v2 comparison after verified conflict-free request-history repair
 request: PR #3135 issue #3128 BFC alias exact-head throughput-corpus-v2 compiler comparison after PR-manager source review
 request: PR #3135 renewed exact-head throughput-corpus-v2 comparison after preserving main request history
@@ -112,6 +116,7 @@ request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualificat
 request: PR #3108 issue #3102 implicit postorder syntax-tree pilot (opt-in -fc-ast-pilot; default compile path unchanged); merge of current main 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3108 issue #3102 implicit postorder syntax-tree pilot, renewed after the cancelled 1abba791 attempt (opt-in -fc-ast-pilot; default compile path unchanged); main 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3156 issue #3142 C declaration classification for top-level asm, GNU attributes and opaque C23 enums; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
+request: issue #1574 driver honours -Werror warning groups; current main 1d5413c87accaf6bbd1bc7e2783d1b71778600f1
 request: PR #3154 issue #1488 nested outer-union initializer identity; fresh exact-head compiler comparison
 request: PR #3154 issue #1488 per-concrete-union state repair; source 44784b1cac0227b9393face5949eb0f44a9cad65; current main f9cb3d01f0d714e7dfe42d0baaceaa097786130d; fresh exact-head compiler comparison
 request: PR #3154 issue #1488 compile and nested-braced union state repairs; source 97b012d117018b18e0ca8fcf40619b1862c8005a; current main 098faa88609b835dba055576207a8f0391e4d6c1; fresh exact-head compiler comparison
