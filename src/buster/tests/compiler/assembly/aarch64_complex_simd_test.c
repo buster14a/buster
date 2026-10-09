@@ -515,9 +515,9 @@ UnitTestResult aarch64_complex_simd_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, fmla_lane_shape_conflict_rejected);
 
     /* ROTATE is a distinct typed VM value, even though its operand
-     * transform ultimately encodes a numeric table entry. Start from a
-     * canonical FCMLA row, request a nonzero quarter-turn, then decode and
-     * compare the complete typed operand vector. */
+     * transform ultimately encodes a numeric table entry. Row 35's audit
+     * representative is selector-reserved (0x2f001000), so seed from its
+     * legal S-element encoding and retain an explicit rejection check. */
     BusterA64ComplexSIMDRowInfo fcmla_lane_row = {0};
     BusterAarch64CanonicalFormInfo fcmla_lane_canonical = {0};
     u32 fcmla_lane_canonical_index = UINT32_MAX;
@@ -525,10 +525,15 @@ UnitTestResult aarch64_complex_simd_tests(UnitTestArguments* arguments)
         fcmla_lane_row.semantic_form_id == 283 && fcmla_lane_row.operand_count == 8 &&
         a64_complex_simd_audit_canonical_form(fcmla_lane_row.source_digest, &fcmla_lane_canonical_index,
                                                &fcmla_lane_canonical);
+    u32 const fcmla_lane_seed_word = UINT32_C(0x2f401000);
     BusterA64ComplexSIMDResult fcmla_lane_decoded = {0};
     bool fcmla_lane_decoded_ok = fcmla_lane_row_ok &&
-        buster_a64_complex_simd_decode_row(target, 35, fcmla_lane_canonical.representative_word,
+        buster_a64_complex_simd_decode_row(target, 35, fcmla_lane_seed_word,
                                            &fcmla_lane_decoded) == BUSTER_A64_COMPLEX_SIMD_STATUS_OK;
+    BusterA64ComplexSIMDResult fcmla_reserved_selector = {0};
+    bool fcmla_reserved_selector_rejected = fcmla_lane_row_ok &&
+        buster_a64_complex_simd_decode_row(target, 35, UINT32_C(0x2f001000),
+                                           &fcmla_reserved_selector) == BUSTER_A64_COMPLEX_SIMD_STATUS_RESERVED;
     BusterA64ComplexSIMDInstruction fcmla_lane_instruction = {.row_index = 35, .operand_count = 8};
     for (u32 operand_index = 0; fcmla_lane_decoded_ok && operand_index < fcmla_lane_decoded.operand_count; operand_index += 1)
     {
@@ -560,6 +565,7 @@ UnitTestResult aarch64_complex_simd_tests(UnitTestArguments* arguments)
             expected.payload == actual.payload && expected.mask == actual.mask && text_equal;
     }
     BUSTER_TEST(arguments, fcmla_lane_row_ok && fcmla_lane_decoded_ok &&
+        fcmla_reserved_selector_rejected &&
         fcmla_lane_encode_status == BUSTER_A64_COMPLEX_SIMD_STATUS_OK &&
         fcmla_lane_decode_status == BUSTER_A64_COMPLEX_SIMD_STATUS_OK &&
         fcmla_lane_typed_operands_equal &&

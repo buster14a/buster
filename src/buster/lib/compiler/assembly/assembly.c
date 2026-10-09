@@ -12510,11 +12510,11 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ComplexSIMDLaneParseResult assembly_aarch64_c
                         source_count, &candidate_word, &candidate_feature, candidate_trace);
                     if (candidate_trace)
                     {
-                        fprintf(stderr, "lane-source form=%u row=%u ok=%u stage=%u group=%u semantic=%u kind=%u flags=%llu value_kind=%u value=%llu encode=%u\n",
+                        fprintf(stderr, "lane-source form=%u row=%u ok=%u stage=%u group=%u semantic=%u kind=%u flags=%llu value_kind=%u value=%llu encode=%u word=%08x\n",
                                 form.id, row.row_index, candidate_ok, candidate_trace->stage, candidate_trace->group,
                                 candidate_trace->semantic_index, candidate_trace->operand_kind,
                                 (unsigned long long)candidate_trace->operand_flags, candidate_trace->value.kind,
-                                (unsigned long long)candidate_trace->value.payload, candidate_trace->encode_status);
+                                (unsigned long long)candidate_trace->value.payload, candidate_trace->encode_status, candidate_word);
                     }
                     if (candidate_ok)
                     {
