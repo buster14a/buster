@@ -867,6 +867,89 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_conditional_sizeof_mem
     return result;
 }
 
+// A member `_Alignas` that measures the previous record of a chain folds from
+// the solve's own layouts instead of a nested typed query per level (#3269).
+// The chains run past the old 256-level refusal and the depth that overflowed
+// the stack before it. Each line names the previous record: a plain `sizeof`,
+// an `_Alignof` over arrays of varying length, and a mix of a typedef, a
+// qualified tag, pointers and the `+`/`*` arithmetic the fold accepts. The
+// final assertion holds the answer Clang gives for the same source.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignas_typed_query_chain(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 depth = 1500;
+    String8 bases[] = {S8("struct S0 { double d; };\n"), S8("struct S0 { _Alignas(16) char c; };\n"), S8("struct S0 { _Alignas(16) char c; };\n")};
+    String8 assertions[] = {S8("_Static_assert(sizeof(struct S1499) == 8 && _Alignof(struct S1499) == 8, \"chain\");\n"),
+                            S8("_Static_assert(sizeof(struct S1499) == 16 && _Alignof(struct S1499) == 16, \"chain\");\n"),
+                            S8("_Static_assert(sizeof(struct S1499) == 16 && _Alignof(struct S1499) == 16, \"chain\");\n")};
+    for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(bases); variant += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u64 source_capacity = bases[variant].length + (u64)depth * 160 + assertions[variant].length;
+        char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+        u64 source_length = 0;
+        c_test_append_source(source_bytes, source_capacity, &source_length, bases[variant]);
+        for (u32 index = 1; index < depth; index += 1)
+        {
+            String8 current = string_format(temporary.arena, S8("{u32}"), index);
+            String8 previous = string_format(temporary.arena, S8("{u32}"), index - 1);
+            String8 pieces[16] = {0};
+            u32 piece_count = 0;
+            switch (variant)
+            {
+            case 0:
+                pieces[piece_count++] = S8("struct S");
+                pieces[piece_count++] = current;
+                pieces[piece_count++] = S8(" { _Alignas(sizeof(struct S");
+                pieces[piece_count++] = previous;
+                pieces[piece_count++] = S8(")) char c; };\n");
+                break;
+            case 1:
+                pieces[piece_count++] = S8("struct S");
+                pieces[piece_count++] = current;
+                pieces[piece_count++] = S8(" { _Alignas(_Alignof(struct S");
+                pieces[piece_count++] = previous;
+                pieces[piece_count++] = S8(")) char c[");
+                pieces[piece_count++] = string_format(temporary.arena, S8("{u32}"), index % 5 + 1);
+                pieces[piece_count++] = S8("]; };\n");
+                break;
+            default:
+                pieces[piece_count++] = S8("typedef struct S");
+                pieces[piece_count++] = previous;
+                pieces[piece_count++] = S8(" T");
+                pieces[piece_count++] = previous;
+                pieces[piece_count++] = S8("; struct S");
+                pieces[piece_count++] = current;
+                pieces[piece_count++] = S8(" { _Alignas(sizeof(T");
+                pieces[piece_count++] = previous;
+                pieces[piece_count++] = S8(") * 0 + _Alignof(const struct S");
+                pieces[piece_count++] = previous;
+                pieces[piece_count++] = S8(") * (1)) char a[");
+                pieces[piece_count++] = string_format(temporary.arena, S8("{u32}"), index % 3 + 1);
+                pieces[piece_count++] = S8("]; T");
+                pieces[piece_count++] = previous;
+                pieces[piece_count++] = S8(" *previous; };\n");
+                break;
+            }
+            for (u32 piece = 0; piece < piece_count; piece += 1)
+            {
+                c_test_append_source(source_bytes, source_capacity, &source_length, pieces[piece]);
+            }
+        }
+        c_test_append_source(source_bytes, source_capacity, &source_length, assertions[variant]);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, (String8){.pointer = source_bytes, .length = source_length},
+                                                     S8("alignas-typed-query-chain.c"), target_native, &preprocess, &parse);
+        BUSTER_TEST(arguments, source_length < source_capacity);
+        BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0,
+                        lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("alignas typed query chain"));
+        BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // A 300-label switch whose labels are a permutation of 0..299, so no label is
 // adjacent to its neighbor in value. With `duplicate_position` below the label
 // count, that label repeats the value at position 40: the overlap is injected
@@ -10195,6 +10278,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
         {S8("char d[(unsigned long long)5]; _Static_assert(sizeof(d) == 5, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("char d[(_Bool)5 + 1]; _Static_assert(sizeof(d) == 2, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("enum { X = 300 }; char d[(char)X + (signed char)200 + 100]; _Static_assert(sizeof(d) == 88, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        // A request that measures a record folds from the solve's own layouts
+        // (#3269); one that reaches its own record waits on it and still ends
+        // in the diagnostic, and a folded value obeys the power-of-two rule.
+        {S8("struct A { _Alignas(sizeof(struct A)) char c; };"), S8("invalid object alignment"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct A { _Alignas(sizeof(struct A) * 2 + 1) char c; };"), S8("invalid object alignment"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct B; struct A { _Alignas(sizeof(struct B)) char c; }; struct B { _Alignas(_Alignof(struct A)) char c; };"), S8("invalid object alignment"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct S0 { char c[3]; }; struct S1 { _Alignas(sizeof(struct S0)) char c; };"), S8("not a power of two"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct A { _Alignas(sizeof(struct A *)) char c; struct A *next; }; typedef struct A TA; struct B { _Alignas(sizeof(const TA) + 0 * sizeof(int)) char c; }; struct C { _Alignas(sizeof(struct B) * 2) char c; }; _Static_assert(sizeof(struct B) == 16 && _Alignof(struct C) == 32, \"fold\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("void g(void) { struct X { char c[3]; }; { struct X { char c[64]; }; struct Y { _Alignas(sizeof(struct X)) char c; }; _Static_assert(_Alignof(struct Y) == 64, \"inner\"); } struct Z { _Alignas(sizeof(struct X) + 1) char c; }; _Static_assert(_Alignof(struct Z) == 4, \"outer\"); }"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("typedef int A16 __attribute__((aligned(16))); struct V { _Alignas(_Alignof(const A16) + 0) char c; }; _Static_assert(_Alignof(struct V) == 16, \"v\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         // Only a type that reaches itself is refused, however deep a chain of
         // distinct types runs.
         {S8("struct S0 { double d; }; struct S1 { _Alignas(sizeof(struct S0)) char c; }; struct S2 { _Alignas(sizeof(struct S1)) char c; }; struct S3 { _Alignas(sizeof(struct S2)) char c; }; struct S4 { _Alignas(sizeof(struct S3)) char c; }; struct S5 { _Alignas(sizeof(struct S4)) char c; }; struct S6 { _Alignas(sizeof(struct S5)) char c; }; struct S7 { _Alignas(sizeof(struct S6)) char c; }; _Static_assert(sizeof(struct S7) == 8, \"chain\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
@@ -58759,6 +58852,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_controlled_body_extents_linear);
     C_TEST_FIXTURE(arguments, c_test_controlling_expression_scope);
     C_TEST_FIXTURE(arguments, c_test_array_object_size_limits);
+    C_TEST_FIXTURE(arguments, c_test_alignas_typed_query_chain);
     C_TEST_FIXTURE(arguments, c_test_declaration_constraints);
     C_TEST_FIXTURE(arguments, c_test_declaration_regressions);
     C_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
