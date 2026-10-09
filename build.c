@@ -40507,6 +40507,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             build_add(arena, build_directory, string8_list_to_slice(arena, build_targets), string8_list_to_slice(arena, native_arguments), options);
         }
         break;
+        case BUILD_COMMAND_COMPILER_CLOSURE:
         case BUILD_COMMAND_PRODUCTION_PROFILE:
         case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
         {
