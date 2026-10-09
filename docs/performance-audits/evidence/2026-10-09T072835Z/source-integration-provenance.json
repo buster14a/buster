@@ -1,0 +1,39 @@
+{
+  "canonical_server_equivalent": {
+    "correction_commit": "fcc9203a63f4290141f354a2031a213c19047fb7",
+    "identity_note": "Root supplied and verified these server-generated canonical objects; this audit worktree is still on its local equivalent commits.",
+    "merge_commit": "739aaa043181e97710c64f20c1e60fd5b16b348b",
+    "tree": "157d0df347e5da46065a8cdc25842ac09d68d8e9",
+    "tree_after_correction": "5ad874305f3665e14c1fa61b1c5417091ed4425c"
+  },
+  "local_correction_parent": "60b601c6b2754bb88d71fa3211b374252a6dcc9a",
+  "local_merge_commit": "60b601c6b2754bb88d71fa3211b374252a6dcc9a",
+  "local_merge_parents": [
+    "7c75f6277c723125c09152a21cffc217c14db5c5",
+    "8ea54465a2309f95bcb160143ce4804e05a8dbc8"
+  ],
+  "local_merge_tree": "157d0df347e5da46065a8cdc25842ac09d68d8e9",
+  "local_source_commit": "4a5e2e5aa55624eec920244eb0e8ada86aa7d073",
+  "local_source_tree": "5ad874305f3665e14c1fa61b1c5417091ed4425c",
+  "request_file": {
+    "fresh_selector_added": false,
+    "profile_selector": "clang-analyze-full-v1",
+    "selector_count": 2
+  },
+  "schema": "issue3130-integrated-source-provenance-v1",
+  "selected_h_commit": "7c75f6277c723125c09152a21cffc217c14db5c5",
+  "selected_h_tree": "6f711a0b96409a3c97b343d2614eadf4488d1a5d",
+  "selected_m_commit": "8ea54465a2309f95bcb160143ce4804e05a8dbc8",
+  "selected_m_tree": "0fa2ddebf8c23c4cb1697e3bd46e67fa93782a7b",
+  "va_correction": {
+    "integrated_effect": "The three-file frozen patch was applied atop the H+M merge; M array-validation changes remain present in ir.c.",
+    "patch_files": [
+      "src/buster/lib/compiler/ir/ir.c",
+      "src/buster/lib/compiler/ir/ir_internal.h",
+      "src/buster/tests/compiler/ir/ir_test.c"
+    ],
+    "source_commit": "db062b683d1a1e8f87f8e165c8e6776ebcff06e3",
+    "source_parent": "9553bfba1951648b768888d11aef1013d829ae2c",
+    "source_tree": "06d9565f0c81793a4071c3bb6f1e60c5c2246465"
+  }
+}
