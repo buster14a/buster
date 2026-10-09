@@ -2,6 +2,7 @@ request: PR #3135 fresh exact-head throughput-corpus-v2 comparison after verifie
 request: PR #3135 issue #3128 BFC alias exact-head throughput-corpus-v2 compiler comparison after PR-manager source review
 request: PR #3135 renewed exact-head throughput-corpus-v2 comparison after preserving main request history
 # Compiler comparison request for the Ryzen 7 9700X (#2769).
+request: PR #3145 issue #3132 fresh exact-head throughput-corpus-v2 comparison after CASP odd-pair parity fix 204693e8edf3ed5341c8e1d3a6360489240c97ba
 request: PR #3145 renew exact-head throughput-corpus-v2 comparison after preserving parent #3135 request history 35cda7f0f7bc4fc5f9602e1f443b4a3c35ab50ef
 request: PR #3145 issue #3132 fresh exact-head throughput-corpus-v2 comparison after signed LDTRSB immediate repair 6567d766d728637da13561fadf281512af1b896f
 # request: issue #2680 x86 source MOVQ XMM register form choice
