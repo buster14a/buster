@@ -57,7 +57,7 @@ from compiler_github import ARTIFACT_LIMIT, RECONCILE_DEPTH
 from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE_PROFILE, INLINE_ACCEPTANCE_REQUEST_LINE,
                               INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUEST_LINE,
                               ANALYZER_REQUEST_LINES,
-                              ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, RECEIPT_SCHEMA, SCALING_PROFILE,
+                              ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, MAIN40_PROFILE, MAIN_PROFILES, named_main_profile, RECEIPT_SCHEMA, SCALING_PROFILE,
                               SCALING_REQUEST, SHA, THROUGHPUT_PROFILE, classify, classify_scaling,
                               classify_throughput, classify_throughput_exit, dumps, host_problem, inline_acceptance_requested,
                               render, scaling_digest, throughput_digest, validate_inline_acceptance,
@@ -154,12 +154,14 @@ class OwnedPhaseFailed(RuntimeError):
 
 class NativePhaseContext:
     """Minimal direct bridge to the trusted native owner; process-tree policy stays in C."""
-    def __init__(self, driver: Path, work: Path, evidence: Path, receipt: dict, *, utility: bool = False, owned_preflight: bool = False):
-        from compiler_owned_phase import POPULATION_SCHEMA, UTILITY_POPULATION_SCHEMA
-        if type(utility) is not bool or type(owned_preflight) is not bool:
+    def __init__(self, driver: Path, work: Path, evidence: Path, receipt: dict, *, utility: bool = False, owned_preflight: bool = False, main_owned: bool = False):
+        from compiler_owned_phase import POPULATION_SCHEMA, UTILITY_POPULATION_SCHEMA, MAIN_POPULATION_SCHEMA
+        if type(utility) is not bool or type(owned_preflight) is not bool or type(main_owned) is not bool:
             raise ValueError("native ownership route flags must be boolean")
-        self.utility = utility
-        owned_preflight = owned_preflight or utility
+        if utility and main_owned:
+            raise ValueError("native ownership routes are mutually exclusive")
+        self.utility, self.main_owned = utility, main_owned
+        owned_preflight = owned_preflight or utility or main_owned
         self.owned_preflight = owned_preflight
         self.driver = driver.resolve(strict=True)
         if not driver.is_absolute() or driver != self.driver or not self.driver.is_relative_to(TRUSTED_ROOT) or \
@@ -177,7 +179,7 @@ class NativePhaseContext:
         self.directory = evidence / "owned-phases"
         self.directory.mkdir()
         self.stopped = False
-        self.receipt["phase_ownership"] = {"schema": UTILITY_POPULATION_SCHEMA if utility else POPULATION_SCHEMA, "state": "pending",
+        self.receipt["phase_ownership"] = {"schema": MAIN_POPULATION_SCHEMA if main_owned else UTILITY_POPULATION_SCHEMA if utility else POPULATION_SCHEMA, "state": "pending",
                                           "trusted_root": str(TRUSTED_ROOT), "directory": str(self.directory.resolve()),
                                           "trusted_revision": receipt["identity"]["trusted_revision"] if owned_preflight else git(TRUSTED_ROOT, "rev-parse", "HEAD"),
                                           "trusted_tree": None if owned_preflight else git(TRUSTED_ROOT, "rev-parse", "HEAD^{tree}"),
@@ -255,7 +257,7 @@ class NativePhaseContext:
             bins = population.get("binaries_root")
             work = population.get("work_root")
             identity = self.receipt.get("identity", {})
-            legacy_utility = getattr(self, "utility", False) and self.receipt.get("preparation_policy") == "legacy-rebuild"
+            legacy_utility = (getattr(self, "utility", False) or getattr(self, "main_owned", False)) and self.receipt.get("preparation_policy") == "legacy-rebuild"
             prefix = ["./build.sh", "bench_throughput"] if legacy_utility else [str(candidate) + "/build/throughput-tools/throughput"]
             expected = [*prefix, "run",
                 "--baseline", str(bins) + "/ide-base", "--candidate", str(bins) + "/ide-cand",
@@ -1205,12 +1207,22 @@ def parse(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--closure-driver", type=Path, help="canonical immutable trusted native driver; required by snapshot-v1")
     parser.add_argument("--utility-owned-phases", action="store_true",
                         help="explicit main-only Utility research: individually supervise every child in either preparation leg")
+    parser.add_argument("--main-owned-phases", action="store_true",
+                        help="supported automatic-main native ownership; requires an authenticated dormant policy")
+    parser.add_argument("--main-profile", choices=sorted(MAIN_PROFILES),
+                        help="fixed named main recipe; requires --main-owned-phases")
     parser.add_argument("--mode", choices=sorted(MODES), required=True)
     for name in IDENTITY_KEYS[1:]:
         parser.add_argument("--" + name.replace("_", "-"), required=True)
     arguments = parser.parse_args(argv)
     if arguments.utility_owned_phases and (arguments.mode != "main" or arguments.closure_driver is None):
         parser.error("--utility-owned-phases requires main mode and the trusted --closure-driver")
+    if arguments.main_owned_phases and (arguments.utility_owned_phases or arguments.mode != "main" or arguments.closure_driver is None):
+        parser.error("--main-owned-phases requires main mode and trusted driver, exclusively from Utility")
+    if arguments.main_profile is not None and not arguments.main_owned_phases:
+        parser.error("--main-profile requires --main-owned-phases")
+    if arguments.main_owned_phases and arguments.main_profile is None:
+        arguments.main_profile = PROFILE["name"]
     return arguments
 
 
@@ -1291,6 +1303,7 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                                  arguments.analyzer_request_line)
         return
     reasons = receipt["reasons"]
+    selected_profile = named_main_profile(arguments.main_profile) if getattr(arguments, "main_owned_phases", False) else PROFILE
     request_problem = getattr(arguments, "analyzer_profile_request_problem", "")
     if request_problem and request_problem not in reasons:
         reasons.append(request_problem)
@@ -1373,11 +1386,14 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         lab = work / "lab"
         mark(receipt, evidence, "lab")
         measured = time.monotonic()
-        status = run([sys.executable, "-B", str(arguments.lab.resolve()), "compare",
-                      "--baseline", str(bins / "ide-base"), "--candidate", str(bins / "ide-cand"),
-                      "--repo-root", str(candidate), "--cpu", str(PROFILE["cpu"]), "--output", str(lab),
-                      "--target-minutes", str(PROFILE["target_minutes"]), "--warmups", str(PROFILE["warmups"])],
-                     candidate, evidence / "lab.log", LAB_TIMEOUT_SECONDS)
+        lab_command = [sys.executable, "-B", str(arguments.lab.resolve()), "compare",
+                       "--baseline", str(bins / "ide-base"), "--candidate", str(bins / "ide-cand"),
+                       "--repo-root", str(candidate), "--cpu", str(selected_profile["cpu"]), "--output", str(lab),
+                       "--target-minutes", str(selected_profile["target_minutes"]), "--warmups", str(selected_profile["warmups"])]
+        if selected_profile is MAIN40_PROFILE:
+            lab_command += ["--pairs", "40", "--seed", "20261003", "--min-effect", "0.5"]
+        status = run(lab_command, candidate, evidence / "lab.log",
+                     300 if selected_profile is MAIN40_PROFILE else LAB_TIMEOUT_SECONDS)
         receipt["timings"]["measurement_seconds"] = round(time.monotonic() - measured, 3)
         receipt["lab"]["exit"] = status
         mark(receipt, evidence, "lab-evidence")
@@ -1437,15 +1453,18 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         except (OSError, ValueError):
             pass
         if snapshot_closure or OWNED_PHASE_CONTEXT is not None:
-            from compiler_owned_phase import UTILITY_POPULATION_SCHEMA
+            from compiler_owned_phase import UTILITY_POPULATION_SCHEMA, MAIN_POPULATION_SCHEMA
             reasons.extend(validate_closure(receipt, raw_closure,
                 expected_policy="snapshot-v1" if snapshot_closure else "legacy-rebuild", require_owned_phases=True,
-                expected_phase_schema=UTILITY_POPULATION_SCHEMA if getattr(arguments, "utility_owned_phases", False) else None,
-                require_owned_preflight=getattr(OWNED_PHASE_CONTEXT, "owned_preflight", False)))
+                expected_phase_schema=MAIN_POPULATION_SCHEMA if getattr(arguments, "main_owned_phases", False) else
+                                      UTILITY_POPULATION_SCHEMA if getattr(arguments, "utility_owned_phases", False) else None,
+                require_owned_preflight=getattr(OWNED_PHASE_CONTEXT, "owned_preflight", False),
+                expected_profile=selected_profile["name"] if getattr(arguments, "main_owned_phases", False) else None))
         for role, name in (("baseline", "ide-base"), ("candidate", "ide-cand")):
             if sha256(bins / name) != receipt["binaries"][role]["sha256"]:
                 reasons.append(f"{role} binary changed during measurement")
-        reasons.extend(classify(summary, receipt["binaries"]))
+        reasons.extend(classify(summary, receipt["binaries"],
+                                expected_profile=selected_profile["name"] if getattr(arguments, "main_owned_phases", False) else None))
         if isinstance(summary, dict):
             receipt["lab"].update(schema=summary.get("schema"), verdict=summary.get("verdict"),
                                   complete_pairs=(summary.get("plan") or {}).get("complete_pairs"))
@@ -1483,9 +1502,11 @@ def main(argv: list[str] | None = None) -> int:
     arguments.analyzer_profile_request_problem = analyzer_request_problem
     identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}
     utility = getattr(arguments, "utility_owned_phases", False)
-    early_owned = utility or (arguments.mode == "main" and arguments.closure_policy == "snapshot-v1")
+    main_owned = getattr(arguments, "main_owned_phases", False)
+    selected_profile = named_main_profile(arguments.main_profile) if main_owned else PROFILE
+    early_owned = utility or main_owned or (arguments.mode == "main" and arguments.closure_policy == "snapshot-v1")
     receipt = {"schema": RECEIPT_SCHEMA, "mode": arguments.mode, "state": "failed", "reasons": [], "identity": identity,
-               "profile": ANALYZER_PROFILE_BY_LINE[analyzer_request_line] if analyzer_requested else PROFILE,
+               "profile": ANALYZER_PROFILE_BY_LINE[analyzer_request_line] if analyzer_requested else selected_profile,
                "throughput_profile": THROUGHPUT_PROFILE if not analyzer_requested else None,
                "host": {"hostname": socket.gethostname(), "cpu_model": "" if early_owned else cpu_model()},
                "toolchain": {} if early_owned else toolchain(), "binaries": {}, "lab": {},
@@ -1502,7 +1523,7 @@ def main(argv: list[str] | None = None) -> int:
     if early_owned:
         receipt["preparation_policy"] = arguments.closure_policy
         try:
-            OWNED_PHASE_CONTEXT = NativePhaseContext(arguments.closure_driver, work, evidence, receipt, utility=utility, owned_preflight=True)
+            OWNED_PHASE_CONTEXT = NativePhaseContext(arguments.closure_driver, work, evidence, receipt, utility=utility, owned_preflight=True, main_owned=main_owned)
             receipt["phase_ownership"].update(candidate_root=str(candidate), binaries_root=str(bins.resolve()),
                                                lab_path=str(arguments.lab.resolve()))
             receipt["host"]["cpu_model"] = cpu_model()

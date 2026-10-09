@@ -133,3 +133,39 @@ The disabled Utility route passes `--utility-owned-phases --closure-driver PATH`
 Utility receipts use `buster-compiler-utility-phases-v1`, require `owned_preflight: true`, and retain all ordinal records, commands, logs and bootstrap proofs for both legs. The trusted publisher explicitly requires that schema and ownership in both legs; an absent legacy closure cannot bypass this requirement. The exact legacy recipe has 11 core commands and the snapshot recipe has 12. Only the ordered original read-only Git/version metadata probes may precede those commands. Missing optional tcc, perf or taskset executables are recorded as NA without a child attempt. Missing configured clang, CMake, Ninja or Git tools stop preflight; required compiler and bootstrap identities remain mandatory. Owned preflight defaults unspecified capture working directories to the canonical trusted checkout, so invoking the trusted script from another directory preserves the same recipe. Both leg clocks include this supervision and its proof publication; no diagnostic timing qualifies host savings.
 
 Normal main snapshot execution also starts owned preflight before metadata and identity children, retaining its existing snapshot population schema. Its future trusted activation caller must pass `require_owned_preflight=True` alongside the expected snapshot policy and ownership requirement, preventing removal of those proofs from downgrading the new contract. Historical receipt interpretation defaults to false. Historical legacy execution and all pull preflight ordering remain unchanged. The default preparation policy remains legacy until the separately admitted comparability and whole-job utility controls pass.
+
+## Supported automatic-main route (dormant)
+
+The main-only `--main-owned-phases` option requires a canonical, identity-validated
+`--closure-driver` and is exclusive with `--utility-owned-phases`. The native
+`compiler_closure driver-path` command reports only its current executable after
+checking that executable's exact bootstrap marker, artifact and dependencies.
+A trusted caller bootstraps this driver before candidate work and observes its
+identity; a candidate path or cache glob cannot select it.
+
+The new `buster-compiler-main-owned-phases-v1` schema owns every preflight child
+and each of the eleven legacy or twelve snapshot core children. Its reader
+requires the trusted caller to supply `expected_policy`, `expected_profile`,
+`require_owned_phases=True` and `require_owned_preflight=True`. Missing or stripped
+phase/profile fields cannot select a historical contract. Both policies retain
+the full twelve-cell, two-round throughput corpus, and a clean, fully validated
+counted regression remains complete report-only evidence. Exit 125, cancellation,
+timeout and unproven cleanup stop before any later child.
+
+`--main-profile compiler-compare-v1` retains the original ten-minute lab recipe.
+`--main-profile compiler-main-40pairs-v1` selects exactly forty pairs with
+`--target-minutes 10 --warmups 1 --pairs 40 --seed 20261003 --min-effect 0.5`
+and CPU 2; its lab deadline is 300 seconds. The pinned lab retains fresh copies,
+ABBA order, 95% confidence and 2000 bootstrap resamples. The fixed named profile
+adds no arbitrary count, target, inference or workload selectors. The raw reader
+must independently replay the exact config, plan, forty complete paired runs and
+unchanged statistics. Historical PROFILE, pull and explicit Utility replay remain
+stable. New Utility physical legs use the supported MAIN-owned long route, so
+both treatments measure the same supervision contract and include its cost.
+
+Eligibility, feature activation and rollback are authenticated trusted-policy
+choices that bind policy revision P to a reviewed frozen measurement revision H.
+These options alone grant no physical authority. The rollout remains disabled
+until the predeclared preparation, comparability, sampling and complete whole-job
+utility evidence is reviewed. Rollback retains the supported owned legacy long
+route at H. Historical unwrapped job costs cannot establish its utility.

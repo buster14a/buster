@@ -72,6 +72,9 @@ def emit(argv: list[str], *, corpus: bool) -> int:
     else:
         parser.add_argument("--repo-root", type=Path, required=True)
         parser.add_argument("--target-minutes", type=int, required=True)
+        parser.add_argument("--pairs", type=int)
+        parser.add_argument("--seed", type=int)
+        parser.add_argument("--min-effect", type=float)
     arguments = parser.parse_args(argv)
     a, b = digest(arguments.baseline), digest(arguments.candidate)
     if arguments.cpu != receipt_contract.PROFILE["cpu"]:
@@ -113,6 +116,14 @@ def emit(argv: list[str], *, corpus: bool) -> int:
         documents["summary"]["baseline"]["sha256"] = a
         documents["summary"]["candidate"]["sha256"] = b
         documents["summary"]["diagnostic_fixture"] = copy.deepcopy(DIAGNOSTIC)
+        if any(value is not None for value in (arguments.pairs, arguments.seed, arguments.min_effect)):
+            if (arguments.pairs, arguments.seed, arguments.min_effect) != (40, 20261003, 0.5):
+                raise ValueError("diagnostic caller changed the named forty-pair recipe")
+            documents["summary"]["plan"].update(pairs=40, complete_pairs=40, seed=20261003, confidence=0.95,
+                bootstrap_resamples=2000, fresh_copy=True, order="ABBA", reason="--pairs 40")
+            for role in ("baseline", "candidate"):
+                documents["summary"][role]["runs"] = 40
+            documents["summary"]["verdict"].update(n=40, min_effect_percent=0.5)
     arguments.output.mkdir(parents=True, exist_ok=False)
     for name, document in documents.items():
         write(arguments.output / (name + ".json"), document)
@@ -317,6 +328,80 @@ class ActualOrdinaryMeasure(unittest.TestCase):
         self.context = context
         compare.OWNED_PHASE_CONTEXT = context
         return arguments, current, context, summaries
+
+    def supported_main(self, policy, profile):
+        identity = self.identity("main")
+        arguments = ["--candidate", str(self.candidate), "--lab", str(Path(__file__).resolve()),
+            "--work", str(self.work), "--evidence", str(self.evidence),
+            "--summary", str(self.directory / "supported-main-summary.md"),
+            "--closure-policy", policy, "--main-owned-phases", "--main-profile", profile,
+            "--closure-driver", str(NATIVE_DRIVER)]
+        for key, value in identity.items():
+            arguments.extend(["--" + key.replace("_", "-"), value])
+        def diagnostic_host(current):
+            current["diagnostic_fixture"] = copy.deepcopy(DIAGNOSTIC)
+            return ""
+        prior_cwd = os.getcwd()
+        try:
+            os.chdir(self.directory)
+            with mock.patch.object(compare, "host_problem", side_effect=diagnostic_host):
+                status = compare.main(arguments)
+        finally:
+            os.chdir(prior_cwd)
+        self.current = json.loads((self.evidence / "receipt.json").read_bytes())
+        self.assertEqual(status, 0, self.current["reasons"])
+        self.assertEqual(self.current["state"], "measured")
+        self.assertEqual(self.current["profile"], receipt_contract.named_main_profile(profile))
+        ownership = self.current["phase_ownership"]
+        self.assertEqual(ownership["schema"], owned.MAIN_POPULATION_SCHEMA)
+        self.assertIs(ownership["owned_preflight"], True)
+        core = [row for row in ownership["phases"] if row["kind"] == "run"]
+        self.assertEqual(len(core), 11 if policy == "legacy-rebuild" else 12)
+        expected = dict(expected_policy=policy, expected_profile=profile,
+            expected_phase_schema=owned.MAIN_POPULATION_SCHEMA, require_owned_phases=True, require_owned_preflight=True,
+            expected_phase_driver_sha256=digest(NATIVE_DRIVER), expected_trusted_revision=self.trusted_revision)
+        bundle = raw_bundle(self.current, self.evidence)
+        self.assertEqual(receipt_contract.validate_closure(self.current, bundle, **expected), [])
+        summary = json.loads((self.evidence / "lab/summary.json").read_bytes())
+        self.assertEqual(receipt_contract.classify(summary, self.current["binaries"], expected_profile=profile), [])
+        self.assertEqual(summary["verdict"]["outcome"], "slower")
+        self.assertEqual(self.current["throughput"]["exit"], 1)
+        lab = next(row for row in core if row["phase"] == "lab")
+        if profile == "compiler-main-40pairs-v1":
+            self.assertEqual(lab["timeout"], 300)
+            self.assertEqual(lab["argv"][-6:], ["--pairs", "40", "--seed", "20261003", "--min-effect", "0.5"])
+        else:
+            self.assertEqual(lab["timeout"], compare.LAB_TIMEOUT_SECONDS)
+            self.assertNotIn("--pairs", lab["argv"])
+        stripped = copy.deepcopy(bundle)
+        stripped["owned_phases"].pop(next(iter(stripped["owned_phases"])))
+        self.assertTrue(receipt_contract.validate_closure(self.current, stripped, **expected))
+        self.assertIsNone(compare.OWNED_PHASE_CONTEXT)
+        print("COMPILER_MAIN_OWNED_DIAGNOSTIC policy=" + policy + " profile=" + profile +
+              " core=" + str(len(core)) + " strict_replay=1 regression_report_only=1 qualification=unqualified")
+
+    def test_supported_main_owned_long_legacy_producer_then_reader(self):
+        self.supported_main("legacy-rebuild", "compiler-compare-v1")
+
+    def test_supported_main_owned_forty_legacy_producer_then_reader(self):
+        self.supported_main("legacy-rebuild", "compiler-main-40pairs-v1")
+
+    def test_supported_main_owned_forty_snapshot_producer_then_reader(self):
+        self.supported_main("snapshot-v1", "compiler-main-40pairs-v1")
+
+    def test_canonical_driver_path_reports_only_identity_validated_current_bootstrap(self):
+        result = subprocess.run([str(NATIVE_DRIVER), "compiler_closure", "driver-path"],
+            cwd=self.directory, capture_output=True, text=True, timeout=30, start_new_session=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(NATIVE_DRIVER))
+        import shutil
+        impostor = self.directory / "copied-driver"
+        shutil.copyfile(NATIVE_DRIVER, impostor)
+        impostor.chmod(0o755)
+        refused = subprocess.run([str(impostor), "compiler_closure", "driver-path"],
+            cwd=self.directory, capture_output=True, text=True, timeout=30, start_new_session=True)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertNotEqual(refused.stdout.strip(), str(impostor))
 
     def test_normal_main_snapshot_initializes_owned_preflight_before_all_children(self):
         identity = self.identity("main")
