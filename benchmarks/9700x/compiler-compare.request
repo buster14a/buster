@@ -1,3 +1,4 @@
+request: PR #3136 renewed exact-head throughput-corpus-v2 comparison after request-history repair
 request: PR #3136 issue #2931 MOVDIRI width exact-head throughput-corpus-v2 compiler comparison after PR-manager source review
 # Compiler comparison request for the Ryzen 7 9700X (#2769).
 # request: issue #2680 x86 source MOVQ XMM register form choice
