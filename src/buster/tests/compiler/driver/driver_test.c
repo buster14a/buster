@@ -1094,6 +1094,309 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_diagnostic_streams(UnitT
     return result;
 }
 
+// #1574: -Werror, -Werror=<group>, -Wno-error[=<group>] and -Wno-<group>
+// over the warnings the driver publishes. GCC and Clang agree on every row
+// except the ones marked as Clang-only (everything) or slice-3b placeholders
+// (malformed or unknown names, which both refuse and this driver still accepts
+// until #1574 diagnoses them).
+typedef struct CompilerDriverWarningPolicyCase CompilerDriverWarningPolicyCase;
+struct CompilerDriverWarningPolicyCase
+{
+    u32 source;
+    String8 options[3];
+    // Expected: the invocation fails, or the warning text is still published.
+    bool promoted;
+    bool shown;
+    String8 tag;
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_warning_policy(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    // Parsing: the last spelling that names a group or the global flag wins,
+    // an explicit per-group promotion outranks the global flag in either
+    // order, and names no warning here has change nothing.
+    {
+        String8 line[] = {S8("-Werror"), S8("-Wno-error=cpp"), S8("-Wno-gnu-designator"), S8("-Werror=extra-tokens"),
+                          S8("-Werror=no-such-group"), S8("-Wall"), S8("-c"), S8("source.c")};
+        CompilerDriverInvocation parsed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(line));
+        BUSTER_TEST(arguments, parsed.error == COMPILER_DRIVER_ERROR_NONE && parsed.warning_policy.werror && !parsed.suppress_warnings);
+        BUSTER_TEST(arguments, parsed.warning_policy.promotion[COMPILER_DRIVER_WARNING_GROUP_CPP] == COMPILER_DRIVER_WARNING_PROMOTION_WARNING);
+        BUSTER_TEST(arguments, parsed.warning_policy.disabled[COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR]);
+        BUSTER_TEST(arguments, parsed.warning_policy.promotion[COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS] == COMPILER_DRIVER_WARNING_PROMOTION_ERROR);
+        String8 reset_line[] = {S8("-Werror"), S8("-Wno-error"), S8("-Wno-cpp"), S8("-Wcpp"), S8("-Wno-#warnings"), S8("-Werror=#warnings"), S8("-c"), S8("source.c")};
+        CompilerDriverInvocation reset = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(reset_line));
+        BUSTER_TEST(arguments, reset.error == COMPILER_DRIVER_ERROR_NONE && !reset.warning_policy.werror);
+        BUSTER_TEST(arguments, !reset.warning_policy.disabled[COMPILER_DRIVER_WARNING_GROUP_CPP]);
+        BUSTER_TEST(arguments, reset.warning_policy.promotion[COMPILER_DRIVER_WARNING_GROUP_CPP] == COMPILER_DRIVER_WARNING_PROMOTION_ERROR);
+        // A parent name acts on each member group.
+        String8 parent_line[] = {S8("-Wno-everything"), S8("-Werror=gnu"), S8("-Wno-error=cpp"), S8("-Weverything"), S8("-Werror=everything"), S8("-c"), S8("source.c")};
+        CompilerDriverInvocation parent = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parent_line));
+        BUSTER_TEST(arguments, parent.error == COMPILER_DRIVER_ERROR_NONE && !parent.warning_policy.werror && parent.warning_policy.everything_off);
+        // -Wno-everything disabled every group, -Werror=gnu re-enabled its member,
+        // and the sticky -Weverything and the nameless -Werror=everything changed nothing.
+        BUSTER_TEST(arguments, parent.warning_policy.disabled[COMPILER_DRIVER_WARNING_GROUP_CPP]);
+        BUSTER_TEST(arguments, parent.warning_policy.disabled[COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS]);
+        BUSTER_TEST(arguments, !parent.warning_policy.disabled[COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR]);
+        BUSTER_TEST(arguments, parent.warning_policy.promotion[COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR] == COMPILER_DRIVER_WARNING_PROMOTION_ERROR);
+        BUSTER_TEST(arguments, parent.warning_policy.promotion[COMPILER_DRIVER_WARNING_GROUP_CPP] == COMPILER_DRIVER_WARNING_PROMOTION_WARNING);
+        BUSTER_TEST(arguments, parent.warning_policy.promotion[COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS] == COMPILER_DRIVER_WARNING_PROMOTION_DEFAULT);
+    }
+    String8 sources[] = {
+        S8("#warning policy-warning\nint main(void) { return 0; }\n"),
+        S8("#ifdef POLICY_UNDEFINED\n#endif policy-extra\nint main(void) { return 0; }\n"),
+        S8("struct policy_record { int a; };\nstruct policy_record policy_value = { a: 1 };\nint main(void) { return 0; }\n"),
+    };
+    String8 markers[] = {S8("policy-warning"), S8("extra tokens at end of '#endif' directive"), S8("GNU obsolete field designator")};
+    // The temporary path is a function of its stem, so each file needs its own.
+    String8 stems[] = {S8("warning-policy-cpp"), S8("warning-policy-extra"), S8("warning-policy-designator")};
+    String8 source_paths[3];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        source_paths[index] = buster_test_temporary_path(arena, stems[index], S8(".c"));
+        BUSTER_TEST(arguments, file_write(source_paths[index], BUSTER_SLICE_TO_BYTE_SLICE(sources[index])));
+    }
+    String8 object_path = buster_test_temporary_path(arena, S8("warning-policy"), S8(".o"));
+    String8 none = {0};
+    String8 cpp_tag = S8("policy-warning [-Werror=cpp]");
+    String8 extra_tag = S8("[-Werror=extra-tokens]");
+    String8 designator_tag = S8("[-Werror=gnu-designator]");
+    // sources: 0 is #warning (cpp), 1 extra tokens after #endif, 2 the GNU designator.
+    CompilerDriverWarningPolicyCase cases[] = {
+        {0, {none, none, none}, false, true, none},
+        {0, {S8("-Wall"), S8("-Wextra"), none}, false, true, none},
+        {0, {S8("-Werror"), none, none}, true, false, cpp_tag},
+        {0, {S8("-Wall"), S8("-Werror"), none}, true, false, cpp_tag},
+        {0, {S8("-Werror=cpp"), none, none}, true, false, cpp_tag},
+        {0, {S8("-Werror=#warnings"), none, none}, true, false, cpp_tag},
+        {0, {S8("-Wno-cpp"), none, none}, false, false, none},
+        {0, {S8("-Wno-#warnings"), none, none}, false, false, none},
+        {0, {S8("-Wno-error=cpp"), none, none}, false, true, none},
+        {0, {S8("-Wno-error=#warnings"), S8("-Werror"), none}, false, true, none},
+        {0, {S8("-Werror"), S8("-Wno-error=cpp"), none}, false, true, none},
+        {0, {S8("-Wno-error=cpp"), S8("-Werror"), none}, false, true, none},
+        {0, {S8("-Werror"), S8("-Wno-error"), none}, false, true, none},
+        {0, {S8("-Wno-error"), S8("-Werror"), none}, true, false, cpp_tag},
+        {0, {S8("-Werror=cpp"), S8("-Wno-error"), none}, true, false, cpp_tag},
+        {0, {S8("-Wno-error"), S8("-Werror=cpp"), none}, true, false, cpp_tag},
+        {0, {S8("-Werror=cpp"), S8("-Wno-error=cpp"), none}, false, true, none},
+        {0, {S8("-Wno-error=cpp"), S8("-Werror=cpp"), none}, true, false, cpp_tag},
+        // A disabled warning is not promoted; the last option on the group wins.
+        {0, {S8("-Wno-cpp"), S8("-Werror"), none}, false, false, none},
+        {0, {S8("-Werror"), S8("-Wno-cpp"), none}, false, false, none},
+        {0, {S8("-Werror=cpp"), S8("-Wno-cpp"), none}, false, false, none},
+        {0, {S8("-Wno-cpp"), S8("-Werror=cpp"), none}, true, false, cpp_tag},
+        {0, {S8("-Wno-cpp"), S8("-Wcpp"), S8("-Werror")}, true, false, cpp_tag},
+        {0, {S8("-Wno-cpp"), S8("-Wno-error=cpp"), S8("-Werror")}, false, false, none},
+        // -w outranks the rest in either order.
+        {0, {S8("-w"), S8("-Werror"), none}, false, false, none},
+        {0, {S8("-Werror"), S8("-w"), none}, false, false, none},
+        {0, {S8("-Werror=cpp"), S8("-w"), none}, false, false, none},
+        // Another group changes nothing. The rows after it are slice-3b placeholders: an
+        // unknown or malformed name leaves the policy alone here, but both compilers refuse it.
+        {0, {S8("-Werror=extra-tokens"), none, none}, false, true, none},
+        {0, {S8("-Werror=no-such-group"), none, none}, false, true, none},
+        {0, {S8("-Wno-no-such-group"), S8("-Werror=cpp"), none}, true, false, cpp_tag},
+        {0, {S8("-Werror="), none, none}, false, true, none},
+        {0, {S8("-Wno-"), none, none}, false, true, none},
+        {1, {none, none, none}, false, true, none},
+        {1, {S8("-Werror"), none, none}, true, false, extra_tag},
+        {1, {S8("-Werror=extra-tokens"), none, none}, true, false, extra_tag},
+        {1, {S8("-Werror=endif-labels"), none, none}, true, false, extra_tag},
+        {1, {S8("-Werror=cpp"), none, none}, false, true, none},
+        {1, {S8("-Werror"), S8("-Wno-extra-tokens"), none}, false, false, none},
+        {1, {S8("-Werror"), S8("-Wno-endif-labels"), none}, false, false, none},
+        {1, {S8("-Werror"), S8("-Wno-error=extra-tokens"), none}, false, true, none},
+        {2, {none, none, none}, false, true, none},
+        {2, {S8("-Werror"), none, none}, true, false, designator_tag},
+        {2, {S8("-Werror=gnu-designator"), none, none}, true, false, designator_tag},
+        {2, {S8("-Werror"), S8("-Wno-gnu-designator"), none}, false, false, none},
+        {2, {S8("-Werror=cpp"), none, none}, false, true, none},
+        // Parent groups act on their members: everything covers every group,
+        // gnu covers the designator and no other warning here.
+        {0, {S8("-Wno-everything"), S8("-Werror"), none}, false, false, none},
+        {0, {S8("-Werror"), S8("-Wno-everything"), none}, false, false, none},
+        // -Wno-everything is sticky (Clang): -Weverything re-enables nothing, a named group does.
+        {0, {S8("-Wno-everything"), S8("-Weverything"), S8("-Werror")}, false, false, none},
+        {0, {S8("-Wno-everything"), S8("-Weverything"), S8("-Werror=cpp")}, true, false, cpp_tag},
+        {0, {S8("-Weverything"), S8("-Wno-everything"), S8("-Werror")}, false, false, none},
+        {0, {S8("-Wno-everything"), S8("-Werror=cpp"), none}, true, false, cpp_tag},
+        // -Werror=everything and -Wno-error=everything name nothing (Clang ignores them).
+        {0, {S8("-Werror=everything"), none, none}, false, true, none},
+        {0, {S8("-Werror=everything"), S8("-Wno-error=cpp"), none}, false, true, none},
+        {0, {S8("-Wno-error=everything"), S8("-Werror"), none}, true, false, cpp_tag},
+        {0, {S8("-Werror=everything"), S8("-Wno-everything"), none}, false, false, none},
+        {0, {S8("-Werror=gnu"), none, none}, false, true, none},
+        {0, {S8("-Wno-gnu"), S8("-Werror"), none}, true, false, cpp_tag},
+        {1, {S8("-Werror=everything"), none, none}, false, true, none},
+        {1, {S8("-Wno-everything"), S8("-Werror"), none}, false, false, none},
+        {1, {S8("-Werror=gnu"), S8("-Wno-gnu"), none}, false, true, none},
+        {2, {S8("-Wno-everything"), S8("-Werror"), none}, false, false, none},
+        {2, {S8("-Werror=everything"), none, none}, false, true, none},
+        {2, {S8("-Wno-gnu"), S8("-Werror"), none}, false, false, none},
+        {2, {S8("-Wno-error=gnu"), S8("-Werror"), none}, false, true, none},
+        {2, {S8("-Werror=gnu"), none, none}, true, false, designator_tag},
+        {2, {S8("-Werror=gnu-designator"), S8("-Wno-gnu"), none}, false, false, none},
+        {2, {S8("-Wno-gnu"), S8("-Wgnu"), S8("-Werror")}, true, false, designator_tag},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        CompilerDriverWarningPolicyCase const* row = &cases[index];
+        TemporalArena attempt = arena_begin_temporal(arena);
+        String8 command[10];
+        u32 count = 0;
+        command[count++] = S8("-std=c11");
+        command[count++] = S8("-c");
+        for (u32 option = 0; option < BUSTER_ARRAY_LENGTH(row->options); option += 1)
+        {
+            if (row->options[option].length) command[count++] = row->options[option];
+        }
+        command[count++] = S8("-o");
+        command[count++] = object_path;
+        command[count++] = source_paths[row->source];
+        (void)os_file_delete(object_path);
+        CompilerDriverResult run = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena,
+            (SliceString8){.pointer = command, .length = count}));
+        ByteSlice object = file_read(arena, object_path, (FileReadOptions){0});
+        String8 run_text = string_format(arena, S8("diagnostic='{S8}' warning='{S8}' error={u32}"), run.diagnostic, run.warning, (u32)run.error);
+        String8 label = string_format(arena, S8("policy case {u32} source {u32}: {S8}"), index, row->source, run_text);
+        bool marker = string_first_sequence(run.warning, markers[row->source]) != BUSTER_STRING_NO_MATCH;
+        if (row->promoted)
+        {
+            BUSTER_TEST_RAW(arguments, run.error == COMPILER_DRIVER_ERROR_TOKENIZE, run.diagnostic);
+            BUSTER_TEST_RAW(arguments, object.length == 0 && run.tokenizer_error_count == 1 && run.tokenizer_warning_count == 0, label);
+            // The promoted warning is an error record and text naming its option, and no longer a warning.
+            BUSTER_TEST_RAW(arguments, string_first_sequence(run.diagnostic, row->tag) != BUSTER_STRING_NO_MATCH, label);
+            BUSTER_TEST_RAW(arguments, !marker && string_first_sequence(run.warning, S8("warning:")) == BUSTER_STRING_NO_MATCH, label);
+            BUSTER_TEST_RAW(arguments, run.diagnostic_count == 1 && run.diagnostics[0].severity == COMPILER_DIAGNOSTIC_ERROR, label);
+            BUSTER_TEST_RAW(arguments, run.diagnostic_count && string_first_sequence(run.diagnostics[0].message, row->tag) != BUSTER_STRING_NO_MATCH, label);
+        }
+        else
+        {
+            BUSTER_TEST_RAW(arguments, run.error == COMPILER_DRIVER_ERROR_NONE, run.diagnostic);
+            BUSTER_TEST_RAW(arguments, object.length != 0, label);
+            BUSTER_TEST_RAW(arguments, marker == row->shown, label);
+            BUSTER_TEST_RAW(arguments, row->shown ? run.tokenizer_warning_count == 1 && run.diagnostic_count == 1 &&
+                                                run.diagnostics[0].severity == COMPILER_DIAGNOSTIC_WARNING
+                                              : run.warning.length == 0 && run.diagnostic_count == 0, label);
+        }
+        scratch_end(attempt);
+    }
+
+    // Every action and the multi-input batch honour the same policy: a
+    // promoted warning fails the invocation and leaves no output artifact.
+    String8 second_path = buster_test_temporary_path(arena, S8("warning-policy-second"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(second_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("#warning policy-second\nint policy_helper(void) { return 1; }\n"))));
+    String8 output_path = buster_test_temporary_path(arena, S8("warning-policy"), S8(".out"));
+    String8 actions[][4] = {
+        {S8("-c"), none, none, none},
+        {S8("-S"), none, none, none},
+        {S8("-E"), none, none, none},
+        {S8("-fsyntax-only"), none, none, none},
+        {none, none, none, none},
+        {none, second_path, none, none},
+        {none, second_path, S8("-fcompile-jobs=1"), none},
+        {none, second_path, S8("-fcompile-jobs=2"), none},
+    };
+    for (u32 action = 0; action < BUSTER_ARRAY_LENGTH(actions); action += 1)
+    {
+        for (u32 promoted = 0; promoted < 2; promoted += 1)
+        {
+            TemporalArena attempt = arena_begin_temporal(arena);
+            String8 command[12];
+            u32 count = 0;
+            command[count++] = S8("-target");
+            command[count++] = S8("x86_64-unknown-linux");
+            command[count++] = S8("-nostdinc");
+            if (actions[action][0].length) command[count++] = actions[action][0];
+            command[count++] = S8("-Werror");
+            if (!promoted) command[count++] = S8("-Wno-error=cpp");
+            if (actions[action][2].length) command[count++] = actions[action][2];
+            command[count++] = S8("-o");
+            command[count++] = output_path;
+            command[count++] = source_paths[0];
+            if (actions[action][1].length) command[count++] = actions[action][1];
+            (void)os_file_delete(output_path);
+            CompilerDriverResult run = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena,
+                (SliceString8){.pointer = command, .length = count}));
+            ByteSlice output = file_read(arena, output_path, (FileReadOptions){0});
+            bool writes = !string_equal(actions[action][0], S8("-fsyntax-only"));
+            if (promoted)
+            {
+                BUSTER_TEST_RAW(arguments, run.error == COMPILER_DRIVER_ERROR_TOKENIZE, run.diagnostic);
+                BUSTER_TEST(arguments, output.length == 0);
+                BUSTER_TEST(arguments, string_first_sequence(run.diagnostic, cpp_tag) != BUSTER_STRING_NO_MATCH);
+                BUSTER_TEST(arguments, run.diagnostic_count >= 1 && run.diagnostics[0].severity == COMPILER_DIAGNOSTIC_ERROR);
+            }
+            else
+            {
+                BUSTER_TEST_RAW(arguments, run.error == COMPILER_DRIVER_ERROR_NONE, run.diagnostic);
+                BUSTER_TEST(arguments, (output.length != 0) == writes);
+                BUSTER_TEST(arguments, run.diagnostic_count == (actions[action][1].length ? 2u : 1u));
+                BUSTER_TEST(arguments, string_first_sequence(run.warning, S8("warning: policy-warning")) != BUSTER_STRING_NO_MATCH);
+            }
+            scratch_end(attempt);
+        }
+    }
+
+    // A header served from the source cache to a later unit publishes its
+    // warnings again, so the policy reaches the replay as well.
+    String8 header_path = buster_test_temporary_path(arena, S8("warning-policy-header"), S8(".h"));
+    String8 cached_first = buster_test_temporary_path(arena, S8("warning-policy-cached-first"), S8(".c"));
+    String8 cached_second = buster_test_temporary_path(arena, S8("warning-policy-cached-second"), S8(".c"));
+    // Include the header by its file name: it sits next to both sources, and
+    // the temporary path is relative on Windows (build/...), where a quoted
+    // include of the whole path would resolve against the source's directory.
+    String8 header_name = header_path;
+    for (u64 index = 0; index < header_path.length; index += 1)
+    {
+        if (header_path.pointer[index] == '/' || header_path.pointer[index] == '\\')
+        {
+            header_name = string_slice(header_path, index + 1, header_path.length);
+        }
+    }
+    String8 include_line = string_format(arena, S8("#include \"{S8}\"\nint policy_cached(void) {{ return 0; }}\n"), header_name);
+    BUSTER_TEST(arguments, file_write(header_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("#ifdef POLICY_UNDEFINED\n#endif policy-cached\n"))));
+    BUSTER_TEST(arguments, file_write(cached_first, BUSTER_SLICE_TO_BYTE_SLICE(include_line)));
+    BUSTER_TEST(arguments, file_write(cached_second, BUSTER_SLICE_TO_BYTE_SLICE(include_line)));
+    for (u32 promoted = 0; promoted < 2; promoted += 1)
+    {
+        TemporalArena attempt = arena_begin_temporal(arena);
+        String8 command[] = {S8("-fsyntax-only"), S8("-fsource-cache"), S8("-fkeep-going"), S8("-fcompile-jobs=1"),
+                             promoted ? S8("-Werror=extra-tokens") : S8("-Wno-error"), cached_first, cached_second};
+        CompilerDriverResult run = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena,
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        if (BUSTER_REQUIRE(arguments, run.input_result_count == 2))
+        {
+            BUSTER_TEST(arguments, run.source_cache.hits != 0);
+            BUSTER_TEST(arguments, run.diagnostic_count == 2);
+            for (u32 index = 0; index < 2; index += 1)
+            {
+                BUSTER_TEST(arguments, promoted ? run.inputs[index].status == COMPILER_DRIVER_INPUT_STATUS_REJECTED && run.inputs[index].error_count == 1
+                                                : run.inputs[index].status == COMPILER_DRIVER_INPUT_STATUS_OK && run.inputs[index].warning_count == 1);
+            }
+        }
+        BUSTER_TEST(arguments, (run.error != COMPILER_DRIVER_ERROR_NONE) == (promoted != 0));
+        scratch_end(attempt);
+    }
+
+    (void)os_file_delete(object_path);
+    (void)os_file_delete(output_path);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(source_paths); index += 1) (void)os_file_delete(source_paths[index]);
+    (void)os_file_delete(second_path);
+    (void)os_file_delete(header_path);
+    (void)os_file_delete(cached_first);
+    (void)os_file_delete(cached_second);
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // -E output must keep the effective #pragma pack state, so compiling the .i
 // lays records out as compiling the source does (#1342). The header pops back
 // to natural alignment and then leaves pack(2) open into the main file.
@@ -27207,6 +27510,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_reservation_failure);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_diagnostic_streams);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_warning_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_gcc_spellings);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_pack_state);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_arguments);

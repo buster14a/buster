@@ -294,9 +294,8 @@ anything past the fourth component. Both used to be dropped silently, which
 left baseline code generation and no hint that the request was ignored.
 `-fno-strict-overflow` is accepted as `-fwrapv` (signed overflow already wraps;
 there is no `-fno-wrapv`, so `-fstrict-overflow` stays unsupported). `-w` is
-accepted and publishes no warning text or records; the only warnings the driver
-emits are the preprocessor's (`#warning`), gated in
-`compiler_driver_publish_c_diagnostics`. `--version`, `-dumpversion` and
+accepted and publishes no warning text or records and outranks every other
+warning option. `--version`, `-dumpversion` and
 `-dumpmachine` need no input and exit 0 (`compiler_driver_query_text`):
 `-dumpversion` prints `18.0.0`, the `__clang_major__`/`__clang_minor__`/
 `__clang_patchlevel__` triple (`__clang_version__` is `18.0.0 (buster)`);
@@ -1297,6 +1296,64 @@ preprocessor macro/include operations and dependency requests. Direct `-D`,
 `-U`, and `-I` remain available; dependency generation (`-M`, `-MM`, `-MD`,
 `-MMD`, `-MF`, `-MT`, `-MP`) is refused in every spelling. A failed request
 preserves any existing artifact instead of reporting a successful stale build.
+
+## Warning options
+
+The warnings the driver publishes today are the preprocessor's (`#warning`,
+extra tokens after a directive such as `#endif junk`) and the GNU obsolete
+`member: value` designator in a strict ISO dialect. Each belongs to a group
+(`CompilerDriverWarningGroup`, mapped from the diagnostic kind by
+`compiler_driver_warning_group_of_kind`), and `compiler_driver_publish_c_diagnostics`
+applies one `CompilerDriverWarningPolicy` to them for every input, serial or
+batched, including those whose source was replayed from the source cache.
+
+| Group | Spellings | Warning |
+|---|---|---|
+| `cpp` | `-Wcpp` (GCC), `-W#warnings` (Clang) | `#warning` |
+| `extra-tokens` | `-Wextra-tokens` (Clang), `-Wendif-labels` (GCC, which names only `#else`/`#endif` there) | tokens after a directive |
+| `gnu-designator` | `-Wgnu-designator` (Clang; GCC files it under `-Wpedantic`) | `member:` designator |
+
+Options apply left to right, as in GCC and Clang, and the last one that names
+a group or the global flag wins:
+
+- `-w` suppresses every warning, so nothing is promoted either, whatever the
+  order.
+- `-Wno-<group>` drops that group; `-W<group>` and `-Werror=<group>` enable it
+  again.
+- A parent name acts on each of its members: `gnu` covers `gnu-designator`
+  and `everything` (Clang) covers every group, so `-Wno-everything`,
+  `-Wno-gnu` and `-Werror=gnu` behave as if each member were named, in the
+  same left-to-right order. As in Clang, `everything` is only a `-W`/`-Wno-`
+  name: `-Werror=everything` and `-Wno-error=everything` name nothing and are
+  ignored, and `-Wno-everything` is sticky, so a later `-Weverything`
+  re-enables nothing while a named group (`-Wcpp`, `-Werror=cpp`) still does.
+- `-Werror` makes every enabled warning an error, including one with no group;
+  `-Wno-error` undoes it.
+- `-Werror=<group>` promotes one group and `-Wno-error=<group>` exempts one.
+  An explicit per-group choice outranks the global `-Werror`/`-Wno-error` in
+  either order (`-Wno-error=cpp -Werror` leaves `#warning` a warning).
+
+A promoted warning is published with error severity and the option that
+promoted it (`... [-Werror=cpp]`, `[-Werror=extra-tokens]` or
+`[-Werror=gnu-designator]`; a warning without a group gets `[-Werror]`). The unit
+fails with the tokenizer error, so `-c`, `-S`, `-E`, `-fsyntax-only`, a link
+and a batch of several inputs all return failure and write no output; the
+failed-unit rules above decide which later results are discarded. Its record
+in `CompilerDriverResult.diagnostics` and the per-input `error_count` are those
+of an error, and `tokenizer_warning_count` no longer counts it. The count
+still includes a warning that `-w` or `-Wno-<group>` dropped, as it did for `-w`
+before this policy existed; only the promoted ones are subtracted.
+
+Every other `-W...` spelling is still accepted and ignored: `-Wall`, `-Wextra`,
+and names that are neither a group nor a parent of one (`-Werror=unused-variable`,
+`-Werror=` and `-Wno-` neither enable nor promote anything). Diagnosing unknown or unimplemented names is a
+separate decision (#1574). The parser and lowering still have no warning
+channel, so signed-overflow in constant expressions is not yet a warning that
+`-Werror` can promote.
+
+Under a bare `-Werror` the GNU obsolete designator fails the build, as it does
+in Clang (where `-Wgnu-designator` is on by default); GCC accepts the same
+source silently.
 
 ## Source debug information
 
