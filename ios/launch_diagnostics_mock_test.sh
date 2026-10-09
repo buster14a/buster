@@ -38,7 +38,6 @@ test_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-ios-monitor.XXXXXX")
 runner=
 MOCK_ACTIVE_ACK_STATE=
 MOCK_CLEANUP_INCOMPLETE=0
-MOCK_INTERRUPT_GATE_OPEN=0
 mock_report_owner_state() {
     local state=$1 role token directory done_state received_state lifetime_state trace_line trace_count
     if [[ ! -f $state/processes ]]; then
@@ -297,11 +296,6 @@ cleanup() {
     local status=$? runner_status=0
     trap - EXIT INT TERM
     mock_release_all
-    if [[ $MOCK_INTERRUPT_GATE_OPEN == 1 ]]; then
-        printf 'abort\n' >&7 2>/dev/null || true
-        exec 7>&-
-        MOCK_INTERRUPT_GATE_OPEN=0
-    fi
     if [[ -n $runner ]]; then
         # This job is owned by the verified GNU timeout helper; wait never signals it.
         wait "$runner" || runner_status=$?
@@ -536,7 +530,7 @@ run_case() {
     local label=$1 outcome=$2 expected=$3 interrupt=$4 bundles=$5
     local diagnostic_mode=${6:-success}
     local state="$test_root/$label" status=0 role token registration runner_timeout probe status_log output_log expected_probe expected_progress owner_deadline owner_wait_status
-    local registration_timeout gate_result signal_result delay_result bridge_result delay_ns
+    local producer_result signal_result bridge_result producer_token
     local producer_count reader_count diagnostic_count expected_diagnostic_count=0
     mkdir -p "$state/Debug/ide.app" "$state/Release/ide.app" "$state/control"
     mkfifo "$state/acknowledgments"
@@ -556,57 +550,128 @@ run_case() {
     fi
     runner_timeout=15s
     if [[ $interrupt == 1 ]]; then
-        # This outer harness cap covers bounded mock setup; the test-only
-        # producer-registration handshake starts the two-second TERM window.
-        # The launcher's three-second result deadline remains unchanged.
-        runner_timeout=20s
-        mkfifo "$state/registration" "$state/interruption-gate"
-        exec 5<> "$state/registration"
-        exec 7<> "$state/interruption-gate"
-        MOCK_INTERRUPT_GATE_OPEN=1
+        # The fixed outer cap starts before bridge setup. The controller gets
+        # one bounded producer-registration window and TERM follows ownership
+        # proof immediately; launcher deadlines remain 3s/1s.
+        mkfifo "$state/registration"
         export FAKE_REGISTRATION_FIFO="$state/registration"
         "$timeout_bin" --preserve-status --signal=TERM --kill-after=3s "$runner_timeout" \
-            python3 "$repo_root/ios/launch_diagnostics_mock_interrupt.py" \
-            "$timeout_bin" "$repo_root/ios/lifecycle_capture_bridge.sh" "$state/interrupted-run" \
-            "$state/interruption-gate" 10 "$state/interruption-result" -- \
-            /bin/bash "$launcher" "${arguments[@]}" >"$state/output" 2>&1 &
+            python3 - "$timeout_bin" "$repo_root/ios/lifecycle_capture_bridge.sh" \
+            "$state/interrupted-run" "$state/registration" "$state/processes" \
+            "$state/interruption-result" 15 15 -- \
+            /bin/bash "$launcher" "${arguments[@]}" <<'PY' >"$state/output" 2>&1 &
+import os
+import select
+import signal
+import stat
+import subprocess
+import sys
+import time
+
+def wait_bridge(bridge):
+    try:
+        return bridge.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        if bridge.poll() is None:
+            try:
+                bridge.send_signal(signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        return bridge.wait(timeout=1)
+
+def replay_capture(prefix):
+    path = prefix + ".log"
+    if os.path.isfile(path) and not os.path.islink(path):
+        with open(path, "rb") as capture:
+            sys.stdout.buffer.write(capture.read())
+            sys.stdout.buffer.flush()
+
+def main():
+    separator = sys.argv.index("--", 1)
+    options, command = sys.argv[1:separator], sys.argv[separator + 1:]
+    if len(options) != 8 or not command:
+        raise ValueError("interruption controller received incorrect arguments")
+    timeout_bin, bridge_script, prefix, fifo, registry, result, command_seconds, capture_seconds = options
+    if not stat.S_ISFIFO(os.lstat(fifo).st_mode):
+        raise ValueError("producer registration endpoint is not a FIFO")
+    fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    bridge = None
+    try:
+        bridge = subprocess.Popen([
+            "/bin/bash", bridge_script, timeout_bin, prefix,
+            command_seconds, capture_seconds, "--", *command,
+        ])
+        deadline = time.monotonic() + 10
+        pending = bytearray()
+        token = None
+        while time.monotonic() < deadline and token is None:
+            if bridge.poll() is not None:
+                raise RuntimeError("lifecycle bridge exited before producer registration")
+            remaining = deadline - time.monotonic()
+            ready, _, _ = select.select([fd], [], [], min(0.05, remaining))
+            if not ready:
+                continue
+            chunk = os.read(fd, 256)
+            if not chunk:
+                time.sleep(min(0.05, remaining))
+                continue
+            pending.extend(chunk)
+            if len(pending) > 1024:
+                raise ValueError("producer registration data exceeded its bound")
+            while b"\n" in pending:
+                raw, _, rest = pending.partition(b"\n")
+                pending = bytearray(rest)
+                fields = raw.decode("ascii").split(" ")
+                if len(fields) != 2:
+                    raise ValueError("producer registration row is malformed")
+                role, candidate = fields
+                if not candidate.startswith("owner.") or "/" in candidate:
+                    raise ValueError("producer registration token is invalid")
+                if role in ("reader", "diagnostic"):
+                    continue
+                if role != "producer":
+                    raise ValueError("unexpected mock owner role: " + role)
+                if not stat.S_ISREG(os.lstat(registry).st_mode):
+                    raise ValueError("mock process registry is not a regular file")
+                with open(registry, "r", encoding="ascii") as rows:
+                    if rows.read().splitlines().count("producer " + candidate) != 1:
+                        raise ValueError("producer notification has no exact owner row")
+                token = candidate
+                break
+        if token is None:
+            raise TimeoutError("producer registration handshake expired")
+        if bridge.poll() is not None:
+            raise RuntimeError("lifecycle bridge exited before TERM")
+        # Popen owns the direct bridge child; its private CANCEL frame reaches the
+        # existing lifecycle_capture.py owner. No PID or process group is signaled.
+        bridge.send_signal(signal.SIGTERM)
+        status = wait_bridge(bridge)
+        if status != 143:
+            raise RuntimeError("lifecycle bridge returned %d after producer registration" % status)
+        with open(result, "x", encoding="ascii", newline="\n") as marker:
+            marker.write("producer=%s signal=TERM bridge_status=%d\n" % (token, status))
+        return status
+    finally:
+        os.close(fd)
+        if bridge is not None and bridge.poll() is None:
+            try:
+                bridge.send_signal(signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            wait_bridge(bridge)
+        replay_capture(prefix)
+
+try:
+    sys.exit(main())
+except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+    print("mock interruption controller failed: %s" % error, file=sys.stderr)
+    sys.exit(1)
+PY
     else
         "$timeout_bin" --preserve-status --signal=TERM --kill-after=3s "$runner_timeout" \
             /bin/bash "$launcher" "${arguments[@]}" >"$state/output" 2>&1 &
     fi
     runner=$!
-    if [[ $interrupt == 1 ]]; then
-        registration_timeout=10
-        while :; do
-            registration=
-            if ! IFS= read -r -t "$registration_timeout" -u 5 registration; then
-                echo "launcher did not register its producer before the bounded interrupt gate" >&2
-                exit 1
-            fi
-            IFS=' ' read -r role token <<<"$registration"
-            [[ $token == owner.* && $token != */* ]]
-            [[ $role == reader ]] && continue
-            [[ $role == producer ]] || {
-                echo "unexpected iOS mock registration role=$role" >&2
-                exit 1
-            }
-            if [[ ! -f $state/processes ]] || ! grep -Fxq "producer $token" "$state/processes"; then
-                echo "producer notification arrived without its registered owner row" >&2
-                mock_report_owner_state "$state"
-                exit 1
-            fi
-            break
-        done
-        # The helper starts its two-second TERM interval only after this exact
-        # producer/token row is present; status 143 still requires owned cleanup.
-        if ! printf 'interrupt\n' >&7; then
-            echo "could not open the post-registration interruption gate" >&2
-            exit 1
-        fi
-        exec 5>&-
-        exec 7>&-
-        MOCK_INTERRUPT_GATE_OPEN=0
-    fi
     wait "$runner" || status=$?
     runner=
     if [[ $status -ne $expected ]]; then
@@ -617,17 +682,17 @@ run_case() {
     if [[ $interrupt == 1 ]]; then
         if [[ ! -f $state/interruption-result ]] || [[ $(wc -l <"$state/interruption-result") -ne 1 ]]; then
             cat "$state/output" >&2
-            echo "$label did not record the post-registration interruption result" >&2
+            echo "$label did not record the producer-registered interruption result" >&2
             exit 1
         fi
-        read -r gate_result signal_result delay_result bridge_result <"$state/interruption-result"
-        delay_ns=${delay_result#delay_ns=}
-        if [[ $gate_result != gate=interrupt || $signal_result != signal=TERM \
-            || ! $delay_ns =~ ^[0-9]+$ || $delay_ns -lt 2000000000 \
-            || $bridge_result != bridge_status=143 ]]; then
+        read -r producer_result signal_result bridge_result <"$state/interruption-result"
+        producer_token=${producer_result#producer=}
+        if [[ $producer_token != owner.* || $producer_token == */* \
+            || $signal_result != signal=TERM || $bridge_result != bridge_status=143 \
+            || ! -f $state/processes ]] || ! grep -Fxq "producer $producer_token" "$state/processes"; then
             cat "$state/output" >&2
             cat "$state/interruption-result" >&2
-            echo "$label did not interrupt the owned launcher two seconds after producer registration" >&2
+            echo "$label did not TERM the owned lifecycle bridge after producer registration" >&2
             exit 1
         fi
     fi

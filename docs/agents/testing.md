@@ -403,9 +403,14 @@
   version, event, status and elapsed seconds; they never contain console-line
   contents. Owners use Bash's timed builtin read, and the fake tee copies the
   line-oriented console fixture without a reader child.
-  The interruption case uses the verified GNU timeout helper's
-  two-second TERM bound, shorter than the launcher's three-second launch
-  deadline, and requires producer registration before accepting status 143.
+  The interrupted mock case keeps the verified GNU timeout helper's original
+  15-second outer cap. Its controller allows one bounded 10-second producer
+  registration window, verifies the exact owner row, then immediately sends
+  TERM through the owned lifecycle-capture bridge handle. The bridge forwards
+  cancellation over its private owner protocol; no recorded PID or process
+  group is signaled. The launcher's three-second launch deadline and one-second
+  monitor-command deadline are unchanged, and status 143 still requires the
+  registered producer's normal owner cleanup evidence.
   Cleanup shares a three-second lifetime EOF deadline and retains private
   control state if any owner remains live. A legacy stale-ID control verifies
   cleanup never treats recorded PID/PGID values as signal authority.
