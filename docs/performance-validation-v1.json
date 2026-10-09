@@ -30,10 +30,23 @@
       }
     },
     {
-      "id": "build:clang_analyze",
+      "id": "build:clang_analyze_benchmark",
       "kind": "build-command",
       "validation": "performance",
       "measures": "complete split-source Release Clang analyzer inventory from one candidate compile database, matched baseline/candidate/candidate/baseline full runs, with separately timed preflights and independent aggregate verification",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "clang-analyze-full-v1",
+        "request": "exact profile: clang-analyze-full-v1 line in benchmarks/9700x/compiler-compare.request"
+      }
+    },
+    {
+      "id": "tool:clang_analyze_benchmark.c",
+      "kind": "tool",
+      "validation": "performance",
+      "measures": "native helper for the matched full-inventory Clang analyzer profile, including preflights, baseline/candidate/candidate/baseline analysis and independent aggregate verification",
       "zen5": {
         "route": "pull-compare",
         "status": "covered",
