@@ -1,4 +1,9 @@
 # Compiler comparison request for the Ryzen 7 9700X (#2769).
+request: PR #3158 issue #1259 x87 long double static conditional initializer folding; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
+request: PR #3158 issue #1259 docfinalcodefrozen exact-head f46b67ff2f10b4227d42deed93602ad81cad5328 x87 long double static conditional initializer folding; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; compiler sources unchanged from 99ea42c8
+request: PR #3158 issue #1259 final-source-fix exact-head marker; prior head 59c5b9d0982a0c918368fefca3f6e0bc455e54b2; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; compiler source fix removes an unused initialization in c_gen.c; request a fresh 9700X measurement for the final PR head
+request: PR #3158 issue #1259 final stack-lifetime cleanup; prior head 56a3f5e0e4a56216659eb662b81ccec068e3f482; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; clear stack-backed conditional-fold buffers before return; request fresh 9700X measurement for the final head
+request: PR #3158 issue #1259 source-repair candidate e64035130100a6bcddbd2b0d0e1b5edfff1c7327; current main f2188669c5174f71879e9b682eded8f7004d8988; request a fresh 9700X measurement for the final exact PR head
 # request: issue #2680 x86 source MOVQ XMM register form choice
 # request: issue #2680 PR #3031 current-main throughput-corpus-v2 fresh qualification
 request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
