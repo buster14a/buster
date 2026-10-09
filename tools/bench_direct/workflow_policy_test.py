@@ -432,14 +432,24 @@ on:
   workflow_run:
     workflows: [9700X direct workload benchmark, 9700X compiler benchmark request]
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Completed benchmark executor or failed main request run ID
+        required: true
+        type: string
+      run_attempt:
+        description: Exact completed run attempt
+        required: true
+        type: string
 permissions: {}
 concurrency:
-  group: buster-9700x-terminal-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  group: buster-9700x-terminal-${{ github.event.workflow_run.id || inputs.run_id }}-${{ github.event.workflow_run.run_attempt || inputs.run_attempt }}
   cancel-in-progress: false
 jobs:
   reconcile:
     name: Reconcile the exact completed benchmark attempt
-    if: ${{ github.repository == 'buster14a/buster' && github.event.workflow_run.head_repository.full_name == github.repository && (github.event.workflow_run.path == '.github/workflows/9700x-direct-bench.yml' || (github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion != 'success')) }}
+    if: ${{ github.repository == 'buster14a/buster' && ((github.event_name == 'workflow_run' && github.event.workflow_run.head_repository.full_name == github.repository && (github.event.workflow_run.path == '.github/workflows/9700x-direct-bench.yml' || (github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion != 'success'))) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == 'davidgmbb' && github.actor_id == '39247043' && github.triggering_actor == 'davidgmbb')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     concurrency:
@@ -465,14 +475,17 @@ jobs:
       - name: Reconcile terminal checks and record separate Actions costs
         env:
           GH_TOKEN: ${{ github.token }}
-          LC_RUN_ID: ${{ github.event.workflow_run.id }}
-          LC_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
-        run: '"$RUNNER_TEMP/9700x-lifecycle" recover "$LC_RUN_ID" "$LC_ATTEMPT" > "$RUNNER_TEMP/9700x-lifecycle.jsonl"'
+          LC_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+          LC_ATTEMPT: ${{ github.event.workflow_run.run_attempt || inputs.run_attempt }}
+        shell: bash
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/9700x-lifecycle" recover "$LC_RUN_ID" "$LC_ATTEMPT" | tee "$RUNNER_TEMP/9700x-lifecycle.jsonl"
       - name: Retain bounded lifecycle observations
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: 9700x-lifecycle-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          name: 9700x-lifecycle-${{ github.event.workflow_run.id || inputs.run_id }}-${{ github.event.workflow_run.run_attempt || inputs.run_attempt }}
           path: ${{ runner.temp }}/9700x-lifecycle.jsonl
           if-no-files-found: warn
           retention-days: 90"""
@@ -495,10 +508,7 @@ def main() -> int:
     texts.update({path: path.read_text(encoding="utf-8")
                   for path in (*actions.rglob("*.yml"), *actions.rglob("*.yaml"))})
     check_runner_routes(errors, texts)
-    lifecycle = texts.get(LIFECYCLE, "")
-    active_lifecycle = "\n".join(line for line in lifecycle.splitlines() if line.strip() and not line.lstrip().startswith("#"))
-    if active_lifecycle != LIFECYCLE_EXPECTED:
-        errors.append("terminal lifecycle recovery must match the exact reviewed completion-only hosted workflow")
+    check_lifecycle(errors, texts.get(LIFECYCLE, ""))
     check_postmerge_diagnostics(errors)
     check_premerge_checks(errors)
     check_direct_workflow(errors)
@@ -506,6 +516,14 @@ def main() -> int:
     check_preparation_path(errors)
     check_compiler_path(errors)
     return report(errors)
+
+
+def check_lifecycle(errors: list[str], workflow: str) -> None:
+    """Only exact completion callbacks or owner/main hosted attempt replay."""
+    active = "\n".join(line for line in workflow.splitlines()
+                       if line.strip() and not line.lstrip().startswith("#"))
+    if active != LIFECYCLE_EXPECTED:
+        errors.append("terminal lifecycle recovery must match the exact reviewed completion/replay hosted workflow")
 
 
 def trigger_block(workflow: str) -> tuple[str, ...]:
