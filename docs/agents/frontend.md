@@ -528,6 +528,10 @@ admits the wrapper type layouts, and validates equal-lane
 parameters and results receive a named semantic refusal; reached casts,
 bitcasts and vector conversions receive a named lowering refusal. No half
 arithmetic, promotion, F16C lowering or ABI support is implied.
+The parser classifies `__fp16` as a type word, so using it as a direct named-call argument
+expression (including through a member named `__builtin_bit_cast`) is rejected
+as a type name used where an expression argument is required. A real
+non-member `__builtin_bit_cast` destination remains a type operand.
 Static assertions and semantic type/layout checks outside function bodies
 can inspect the storage-half type without lowering a half value. Function-body
 expressions that require a storage-half value or IR type, including `sizeof`

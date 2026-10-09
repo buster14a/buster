@@ -17054,12 +17054,126 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_codeview_symbol_diagnostic(Arena* a
     return ran && command_passed;
 }
 
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_bootstrap_trace_diagnostic(Arena* arena, String8 ide, String8 clang,
+                                                                 String8 output_directory, String8 resource_include,
+                                                                 String8 debugger_directory, bool* stopped)
+{
+    make_directory_recursive(arena, debugger_directory);
+    String8 repository_directory = os_path_absolute(arena, S8("."), true);
+    String8 source = path_join(arena, repository_directory, S8("tests/raddebugger_debuggee.c"));
+    String8 trace_dump_source = path_join(arena, repository_directory, S8("tools/raddebugger_trace_dump.c"));
+    String8 trace_prefix = path_join(arena, debugger_directory, S8("windows-debuggee-buster-bootstrap"));
+    String8 trace_object = path_join(arena, debugger_directory, S8("windows-debuggee-buster-bootstrap.obj"));
+    String8 trace_compile_prefix = path_join(arena, debugger_directory, S8("windows-debuggee-buster-bootstrap-compile"));
+    String8 trace_flag = string_format(arena, S8("-fbootstrap-trace={S8}"), trace_prefix);
+    String8 trace_tokens = string_format(arena, S8("{S8}.tokens"), trace_prefix);
+    String8 trace_ir = string_format(arena, S8("{S8}.ir"), trace_prefix);
+    String8 trace_mir = string_format(arena, S8("{S8}.mir"), trace_prefix);
+    String8 trace_dump_binary = path_join(arena, debugger_directory, S8("raddebugger-trace-dump.exe"));
+    String8 trace_dump_compile_prefix = path_join(arena, debugger_directory, S8("raddebugger-trace-dump-compile"));
+    String8 trace_dump_prefix = path_join(arena, debugger_directory, S8("windows-debuggee-buster-mir-dump"));
+    String8 system_includes = os_get_environment_variable(S8("INCLUDE"));
+    String8 cc = S8("cc");
+    String8 target_flag = S8("-target");
+    String8 target = S8("x86_64-pc-windows-msvc");
+    String8 allocator = S8("-fregister-allocator=fast");
+    String8 cpu = S8("-mcpu=baseline");
+    String8 attributes = S8("-mattr=+cx16,+sse2");
+    String8 debug_flag = S8("-g");
+    String8 optimize_flag = S8("-O0");
+    String8 output_flag = S8("-o");
+    bool fixture_source_ready = source.length && path_exists(arena, source);
+    bool trace_compile_ran = false;
+    bool trace_compile_passed = false;
+    bool decoder_source_ready = trace_dump_source.length && path_exists(arena, trace_dump_source);
+    bool decoder_compile_ran = false;
+    bool decoder_compile_passed = false;
+    bool decoder_ran = false;
+    bool decoder_passed = false;
+    if (fixture_source_ready && !*stopped)
+    {
+        OsArgumentBuilder builder = os_argument_builder_start(arena);
+        os_argument_builder_append(&builder, ide);
+        os_argument_builder_append(&builder, cc);
+        os_argument_builder_append(&builder, target_flag);
+        os_argument_builder_append(&builder, target);
+        os_argument_builder_append(&builder, allocator);
+        os_argument_builder_append(&builder, cpu);
+        os_argument_builder_append(&builder, attributes);
+        os_argument_builder_append(&builder, debug_flag);
+        os_argument_builder_append(&builder, optimize_flag);
+        os_argument_builder_append(&builder, trace_flag);
+        raddebugger_windows_append_system_includes(&builder, system_includes, resource_include);
+        os_argument_builder_append(&builder, S8("-c"));
+        os_argument_builder_append(&builder, source);
+        os_argument_builder_append(&builder, output_flag);
+        os_argument_builder_append(&builder, trace_object);
+        RaddebuggerCommandResult compile = raddebugger_command(arena, os_argument_builder_flush(&builder), output_directory,
+                                                               trace_compile_prefix, RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+        trace_compile_ran = true;
+        trace_compile_passed = raddebugger_command_ok(compile) && path_exists(arena, trace_object);
+    }
+    if (decoder_source_ready && !*stopped)
+    {
+        String8 dump_target_flags[] = {S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-fuse-ld=lld"),
+                                       S8("-std=c11"), S8("-Wall"), S8("-Wextra"), S8("-Werror")};
+        OsArgumentBuilder builder = os_argument_builder_start(arena);
+        os_argument_builder_append(&builder, clang);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(dump_target_flags); index += 1)
+        {
+            os_argument_builder_append(&builder, dump_target_flags[index]);
+        }
+        os_argument_builder_append(&builder, trace_dump_source);
+        os_argument_builder_append(&builder, output_flag);
+        os_argument_builder_append(&builder, trace_dump_binary);
+        RaddebuggerCommandResult compile = raddebugger_command(arena, os_argument_builder_flush(&builder), output_directory,
+                                                               trace_dump_compile_prefix, RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+        decoder_compile_ran = true;
+        decoder_compile_passed = raddebugger_command_ok(compile) && path_exists(arena, trace_dump_binary);
+    }
+    bool trace_tokens_ready = path_exists(arena, trace_tokens);
+    bool trace_ir_ready = path_exists(arena, trace_ir);
+    bool trace_mir_ready = path_exists(arena, trace_mir);
+    if (trace_compile_passed && decoder_compile_passed && trace_mir_ready && !*stopped)
+    {
+        String8 arguments[] = {trace_dump_binary, trace_mir};
+        RaddebuggerCommandResult dump = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), output_directory,
+                                                            trace_dump_prefix, RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+        decoder_ran = true;
+        decoder_passed = raddebugger_command_ok(dump);
+        u64 shown_bytes = BUSTER_MIN(dump.output.length, 65536u);
+        bool truncated = dump.output.length > shown_bytes;
+        String8 excerpt = string_slice(dump.output, 0, shown_bytes);
+        string_print(S8("RADDEBUGGER_BOOTSTRAP_TRACE_DECODER status={S8} output_bytes={u64} shown_bytes={u64} console_truncated={u32} capture_truncated={u32} stdout={S8}.stdout stderr={S8}.stderr acceptance=unchanged\n{S8}\n"),
+                     decoder_passed ? S8("command-ok") : S8("command-failed"), dump.output.length, shown_bytes, (u32)truncated,
+                     (u32)dump.wait.output_truncated, trace_dump_prefix, trace_dump_prefix, excerpt);
+    }
+    String8 trace_status = !trace_compile_ran ? (*stopped ? S8("not-run-stopped") : S8("fixture-source-not-found")) :
+                          (trace_compile_passed ? S8("pass") : S8("diagnostic-failure"));
+    String8 decoder_status = !decoder_compile_ran ? (*stopped ? S8("not-run-stopped") : S8("decoder-source-not-found")) :
+                             (decoder_compile_passed ? S8("pass") : S8("diagnostic-failure"));
+    String8 dump_status = !decoder_ran ? (*stopped ? S8("not-run-stopped") :
+                                          (trace_compile_passed && decoder_compile_passed && trace_mir_ready
+                                               ? S8("not-run")
+                                               : S8("trace-or-decoder-not-ready"))) :
+                          (decoder_passed ? S8("captured") : S8("diagnostic-failure"));
+    string_print(S8("RADDEBUGGER_BOOTSTRAP_TRACE compiler=buster compile={S8} decoder_build={S8} dump={S8} tokens={S8} ir={S8} mir={S8} tokens_path={S8} ir_path={S8} mir_path={S8} compile_logs={S8} decoder_build_logs={S8} dump_logs={S8} acceptance=unchanged\n"),
+                 trace_status, decoder_status, dump_status, trace_tokens_ready ? S8("present") : S8("missing"),
+                 trace_ir_ready ? S8("present") : S8("missing"), trace_mir_ready ? S8("present") : S8("missing"),
+                 trace_tokens, trace_ir, trace_mir, trace_compile_prefix, trace_dump_compile_prefix, trace_dump_prefix);
+    bool result = trace_compile_passed && decoder_compile_passed && decoder_ran && decoder_passed;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debuggee_diagnostics(Arena* arena, String8 ide, String8 clang, String8 llvm_readobj,
                                                                   String8 source_directory, String8 output_directory,
                                                                   String8 resource_include, String8 debuggee_object,
                                                                   String8 clang_debuggee_object, String8 debuggee_binary, bool* stopped)
 {
     String8 debugger_directory = path_join(arena, output_directory, S8("debugger"));
+    bool bootstrap_trace_diagnostic = raddebugger_windows_bootstrap_trace_diagnostic(
+        arena, ide, clang, output_directory, resource_include, debugger_directory, stopped);
+    BUSTER_UNUSED(bootstrap_trace_diagnostic);
     bool codeview_passed = false;
     bool no_debug_passed = false;
     bool clang_trace_passed = false;

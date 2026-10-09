@@ -23305,6 +23305,136 @@ BUSTER_C_INTERNAL bool c_parse_controlling_expression_defines_tag(CTokenShape co
 // declaration's initializer is reached from c_parse_local_declarations rather
 // than from the function-body walk -- which hands that whole declaration
 // statement over and resumes past its semicolon.
+BUSTER_C_INTERNAL bool c_parse_storage_half_value_call_argument(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                                          u32 token_index)
+{
+    bool candidate = result && token_index < preprocess.token_count &&
+                     preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER &&
+                     string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), S8("__fp16"));
+    u32 open = C_ID_UNDERLYING_INVALID;
+    if (candidate && token_index && c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        open = token_index - 1;
+    }
+    else if (candidate && token_index && c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_COMMA))
+    {
+        u32 round_depth = 0;
+        u32 square_depth = 0;
+        u32 brace_depth = 0;
+        u32 cursor = token_index;
+        while (cursor && open == C_ID_UNDERLYING_INVALID)
+        {
+            cursor -= 1;
+            CToken previous = preprocess.tokens[cursor];
+            if (c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            {
+                round_depth += 1;
+            }
+            else if (c_token_is_punctuator(&previous, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                if (round_depth)
+                {
+                    round_depth -= 1;
+                }
+                else if (!square_depth && !brace_depth)
+                {
+                    open = cursor;
+                }
+            }
+            else if (c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_BRACKET))
+            {
+                square_depth += 1;
+            }
+            else if (c_token_is_punctuator(&previous, C_PUNCTUATOR_LEFT_BRACKET) && square_depth)
+            {
+                square_depth -= 1;
+            }
+            else if (c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_BRACE))
+            {
+                brace_depth += 1;
+            }
+            else if (c_token_is_punctuator(&previous, C_PUNCTUATOR_LEFT_BRACE) && brace_depth)
+            {
+                brace_depth -= 1;
+            }
+        }
+    }
+    bool argument_boundary = candidate && token_index + 1 < preprocess.token_count &&
+        (c_token_is_punctuator(&preprocess.tokens[token_index + 1], C_PUNCTUATOR_COMMA) ||
+         c_token_is_punctuator(&preprocess.tokens[token_index + 1], C_PUNCTUATOR_RIGHT_PARENTHESIS));
+    bool call = argument_boundary && open != C_ID_UNDERLYING_INVALID && open > 0 && open < token_index &&
+                preprocess.tokens[open - 1].kind == C_TOKEN_IDENTIFIER;
+    u32 callee_index = call ? open - 1 : C_ID_UNDERLYING_INVALID;
+    String8 callee = call ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[callee_index]) : (String8){0};
+    bool member = call && callee_index && (c_token_is_punctuator(&preprocess.tokens[callee_index - 1], C_PUNCTUATOR_DOT) ||
+                                           c_token_is_punctuator(&preprocess.tokens[callee_index - 1], C_PUNCTUATOR_ARROW));
+    u32 round_depth = 0;
+    u32 square_depth = 0;
+    u32 brace_depth = 0;
+    u32 top_level_commas = 0;
+    u32 last_top_level_comma_plus_one = C_ID_UNDERLYING_INVALID;
+    for (u32 cursor = call ? open + 1 : 0; call && cursor < token_index; cursor += 1)
+    {
+        CToken current = preprocess.tokens[cursor];
+        if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            round_depth += 1;
+        }
+        else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) && round_depth)
+        {
+            round_depth -= 1;
+        }
+        else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            square_depth += 1;
+        }
+        else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET) && square_depth)
+        {
+            square_depth -= 1;
+        }
+        else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            brace_depth += 1;
+        }
+        else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACE) && brace_depth)
+        {
+            brace_depth -= 1;
+        }
+        else if (!round_depth && !square_depth && !brace_depth &&
+                 c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
+        {
+            top_level_commas += 1;
+            last_top_level_comma_plus_one = cursor + 1;
+        }
+    }
+    bool top_level_argument_start = call && !round_depth && !square_depth && !brace_depth &&
+                                    (token_index == open + 1 || last_top_level_comma_plus_one == token_index);
+    u32 argument_index = top_level_commas;
+    bool real_bit_cast_type_slot = call && !member && top_level_argument_start && argument_index == 0 &&
+                                   string_equal(callee, S8("__builtin_bit_cast"));
+    bool builtin_type_argument = call && !member && top_level_argument_start &&
+        ((string_equal(callee, S8("__builtin_types_compatible_p")) && argument_index < 2) ||
+         (string_equal(callee, S8("__builtin_offsetof")) && argument_index == 0) ||
+         (string_equal(callee, S8("__builtin_va_arg")) && argument_index == 1));
+    bool type_query = string_equal(callee, S8("sizeof")) || string_equal(callee, S8("_Alignof")) ||
+                      string_equal(callee, S8("alignof")) || string_equal(callee, S8("__alignof")) ||
+                      string_equal(callee, S8("__alignof__")) || string_equal(callee, S8("typeof")) ||
+                      string_equal(callee, S8("__typeof")) || string_equal(callee, S8("__typeof__")) || string_equal(callee, S8("typeof_unqual"));
+    bool statement_cast = string_equal(callee, S8("return")) || string_equal(callee, S8("case")) ||
+                          string_equal(callee, S8("else")) || string_equal(callee, S8("do")) ||
+                          string_equal(callee, S8("if")) || string_equal(callee, S8("while")) ||
+                          string_equal(callee, S8("for")) || string_equal(callee, S8("switch"));
+    CEntityId callee_entity = call ? c_parse_lookup_entity_token(result, preprocess.spelling_base, scope,
+                                                                   &preprocess.tokens[callee_index]) : C_ENTITY_ID_INVALID;
+    bool declaration_name = callee_entity.value < result->entity_count &&
+                            result->entities[callee_entity.value].declaration_token_plus_one == callee_index + 1;
+    bool declarator = call && callee_index > 0 &&
+                       c_parse_type_start_token(result, preprocess, scope, preprocess.tokens[callee_index - 1]);
+    bool result_value = call && !real_bit_cast_type_slot && !builtin_type_argument && !type_query &&
+                        !statement_cast && !declaration_name && !declarator;
+    return result_value;
+}
+
 BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
                                                        CPreprocessResult preprocess, u32 declaration_index, CScopeId scope, u32 body_start,
                                                        u32 body_token_count)
@@ -23812,8 +23942,18 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                                     c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 1],
                                                               C_PARSE_AGGREGATE_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(GOTO));
             bool asm_goto_label = asm_goto_label_start != UINT32_MAX && index >= asm_goto_label_start && index < asm_goto_label_end;
+            bool declaration_keyword = c_parse_declaration_keyword_at(result, preprocess, index);
+            bool storage_half_type_word = declaration_keyword &&
+                string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("__fp16"));
+            if (storage_half_type_word &&
+                c_parse_storage_half_value_call_argument(result, preprocess, scope_stack[scope_count - 1], index))
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[index]),
+                                   C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                   S8("type name '__fp16' used where an expression argument is required"));
+            }
             if (!(declaration_type_identifier_bound && index == declaration_type_start) && !member && !previous_keyword && !label && !asm_goto_label &&
-                !c_parse_declaration_keyword_at(result, preprocess, index) &&
+                !declaration_keyword &&
                 !(index > body_start &&
                   c_parse_label_address_prefix_with_typedef(result, &preprocess, scope_stack[scope_count - 1], body_start, index - 1)) &&
                 !(asm_operand_range_start != UINT32_MAX &&
