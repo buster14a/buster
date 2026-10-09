@@ -311,7 +311,11 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_supported(IrProgram* program, IrFunction*
         IrInstructionId row = block->first_instruction;
         for (u32 visits = 0; row.value < caller->instruction_count && visits <= caller->instruction_count; visits += 1)
         {
-            if (row.value == call_id.value) found = true;
+            if (row.value == call_id.value)
+            {
+                found = true;
+                break;
+            }
             row = caller->instructions[row.value].next;
         }
         valid = found;

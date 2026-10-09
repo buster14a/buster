@@ -930,8 +930,11 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                                                 ir_inline_storage_multiply(caller->debug_local_count, 3u));
                             caller_work = ir_inline_storage_add(caller_work, caller_phi_units);
                             caller_work = ir_inline_storage_add(caller_work, function_projected_units);
-                            u64 projected_edges = ir_inline_storage_add(caller_edge_units, function_projected_units);
-                            projected_edges = ir_inline_storage_add(projected_edges, callee_payload_units);
+                            // Predecessor rebuilding walks targets, not all cloned payload rows.
+                            u64 projected_edges = ir_inline_storage_add(caller_edge_units, function_projected_edges);
+                            projected_edges = ir_inline_storage_add(projected_edges, callee_target_units);
+                            projected_edges = ir_inline_storage_add(projected_edges,
+                                                                   ir_inline_storage_add(callee_return_units, 1u));
                             caller_work = ir_inline_storage_add(caller_work,
                                                                 ir_inline_storage_multiply(projected_edges, 5u));
                             caller_work = ir_inline_storage_add(caller_work,
