@@ -2016,19 +2016,30 @@ def campaign_positive_int(value: object) -> int:
     return value
 
 
-def campaign_original_identity(phase: str, packet: int, authority: dict, artifact: dict) -> tuple:
-    """Join original native-reviewed source and verified immutable artifact identity."""
+def campaign_native_scope(phase: str, packet: int, authority: dict) -> tuple:
+    """Bind the original reviewed slot before API reads or invalid-data retention."""
     from sampling_qualification_receipt import schedule
     sampling = phase in ("acquire", "pilot", "confirm")
     planned = schedule(phase, packet) if sampling else {}
     if type(packet) is not int or (sampling and not planned) or (not sampling and (phase not in ("preparation", "utility") or packet != 0)):
         raise ValueError("campaign phase or packet is not declared")
-    if authority.get("historical_review") is not True:
-        raise ValueError("campaign cannot compact unreviewed original evidence")
-    if not campaign_reviewed(authority, "sampling" if sampling else phase):
+    prefix = "sampling" if sampling else phase
+    if not campaign_reviewed(authority, prefix):
         raise ValueError("campaign lacks its distinct historical native review")
     admitted = authority["admitted"]
-    prefix = "sampling" if sampling else phase
+    expected = {prefix + "_phase": "qualify" if phase == "preparation" else phase,
+                prefix + "_packet": str(packet), prefix + "_family": planned["family"] if sampling else phase}
+    if any(admitted.get(key) != value for key, value in expected.items()):
+        raise ValueError("campaign original native review belongs to another planned slot")
+    execution = authority.get("executor")
+    if not isinstance(execution, dict) or admitted.get(prefix + "_policy_revision") != execution.get("head_sha"):
+        raise ValueError("campaign original native review has another policy revision")
+    return sampling, planned, admitted, prefix
+
+
+def campaign_original_identity(phase: str, packet: int, authority: dict, artifact: dict) -> tuple:
+    """Join original native-reviewed source and verified immutable artifact identity."""
+    sampling, planned, admitted, prefix = campaign_native_scope(phase, packet, authority)
     revision_key = "sampling_freeze_revision" if sampling else prefix + "_plan_revision"
     hash_key = "sampling_freeze_sha256" if sampling else prefix + "_plan_sha256"
     measurement = admitted[prefix + "_trusted_revision"]
@@ -2040,7 +2051,7 @@ def campaign_original_identity(phase: str, packet: int, authority: dict, artifac
                 authority[key]["run_attempt"] != 1 or type(authority[key].get("id")) is not int or
                 str(authority[key]["id"]) != authority["request_id" if key == "request" else "run_id"]
                 for key in ("request", "executor")) or \
-            (sampling and admitted.get("sampling_policy_revision") != policy):
+            admitted.get(prefix + "_policy_revision") != policy:
         raise ValueError("campaign original API policy, source or attempt identity is invalid")
     if type(artifact.get("id")) is not int or artifact["id"] <= 0 or \
             not isinstance(artifact.get("verified_zip_sha256"), str) or not re.fullmatch(r"[a-f0-9]{64}", artifact["verified_zip_sha256"]) or \
@@ -2062,6 +2073,8 @@ def campaign_complete_fact(phase: str, packet: int, authority: dict, artifact: d
         raise ValueError("campaign cannot compact incomplete raw evidence")
     if result.get("phase") != ("qualify" if phase == "preparation" else phase) or result.get("packet") != packet:
         raise ValueError("campaign raw replay belongs to another planned packet")
+    if phase in ("preparation", "utility") and result.get("campaign_criteria") != campaign_criteria_fragment(phase, result):
+        raise ValueError("campaign compact prerequisite criteria contradict retained raw validation")
     account = result["accounting"]
     job_wall = campaign_positive_int(account["physical_job_wall_upper_us"])
     native_wall = campaign_positive_int(account["native_owner_wall_us"])
@@ -2107,14 +2120,38 @@ def campaign_complete_fact(phase: str, packet: int, authority: dict, artifact: d
 
 
 
+def campaign_api_wall(job: object) -> int:
+    """Retain conservative API timestamp occupancy even for failed or over-budget jobs."""
+    if not isinstance(job, dict) or type(job.get("id")) is not int or job["id"] <= 0 or \
+            type(job.get("run_id")) is not int or job["run_id"] <= 0 or \
+            type(job.get("run_attempt")) is not int or job["run_attempt"] != 1 or job.get("status") != "completed":
+        raise ValueError("campaign original terminal API job is unavailable")
+    stamps = []
+    for key in ("created_at", "started_at", "completed_at"):
+        value = job.get(key)
+        if not isinstance(value, str):
+            raise ValueError("campaign API timestamp is unavailable")
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.utcoffset() is None:
+            raise ValueError("campaign API timestamp has no timezone")
+        stamps.append(parsed)
+    created, started, completed = stamps
+    delta = completed - started
+    wall = delta.days * 86400000000 + delta.seconds * 1000000 + delta.microseconds
+    if wall <= 0 or started < created:
+        raise ValueError("campaign original API job clock is unordered")
+    return campaign_positive_int(wall + 2000000)
+
+
 def campaign_invalid_row(phase: str, packet: int, authority: dict, artifact: dict, job: dict | None) -> dict:
     """Compact an invalid replay with only independently observed API wall, if available."""
     sampling, planned, admitted, measurement, policy, revision_key, hash_key = campaign_original_identity(phase, packet, authority, artifact)
     job_wall = "-"
     try:
-        account = sampling_job_accounting(job, 1, planned["reservation_seconds"] if sampling else 5400,
-                                          job_name=SAMPLING_HOST_JOB if sampling else PREPARATION_HOST_JOB if phase == "preparation" else UTILITY_HOST_JOB)
-        job_wall = str(campaign_positive_int(account["physical_job_wall_upper_us"]))
+        if not isinstance(job, dict) or str(job.get("run_id")) != authority["run_id"] or \
+                job.get("name") != (SAMPLING_HOST_JOB if sampling else PREPARATION_HOST_JOB if phase == "preparation" else UTILITY_HOST_JOB):
+            raise ValueError("campaign API job belongs to another original scope")
+        job_wall = str(campaign_api_wall(job))
     except ValueError:
         pass
     row = campaign_not_run(phase, packet, planned["family"] if sampling else phase)
@@ -2148,22 +2185,31 @@ def campaign_invalid_fact(api: Api, phase: str, packet: int, authority: dict, ar
     return row, replay
 
 
-def campaign_criteria_fragment(phase: str, result: dict, files: dict[str, bytes]) -> dict:
-    """Retain the already validated prerequisite intervals and clocks as compact data."""
+def campaign_aa_corpus_counts(files: dict[str, bytes]) -> dict:
+    counts = {}
+    for label in ("legacy/immutable-aa", "snapshot/immutable-aa", "snapshot/cross-build-aa"):
+        corpus = sampling_json(files, "qualification/" + label + "-throughput/summary.json")
+        count = corpus.get("confirmed_regressions")
+        if type(count) is not int or not 0 <= count <= 12:
+            raise ValueError("campaign prerequisite A/A corpus regression count is unavailable")
+        counts[label] = count
+    return counts
+
+
+def campaign_criteria_fragment(phase: str, result: dict) -> dict:
+    """Recompact retained validated intervals, exact A/A counts and clocks without inference."""
     criterion = {}
     if phase == "preparation":
-        regressions = 0
-        for label, stem in (("legacy/immutable-aa", "legacy_immutable_aa"), ("snapshot/immutable-aa", "snapshot_immutable_aa"),
-                            ("snapshot/cross-build-aa", "snapshot_cross_build_aa")):
+        counts = result.get("campaign_aa_corpus_regressions")
+        labels = ("legacy/immutable-aa", "snapshot/immutable-aa", "snapshot/cross-build-aa")
+        if not isinstance(counts, dict) or set(counts) != set(labels) or any(
+                type(counts[label]) is not int or not 0 <= counts[label] <= 12 for label in labels):
+            raise ValueError("campaign retained original A/A corpus counts are unavailable")
+        for label, stem in zip(labels, ("legacy_immutable_aa", "snapshot_immutable_aa", "snapshot_cross_build_aa")):
             item = result["series"][label]
             low, high, unused_halfwidth = campaign_ppm(item["ci_low"], item["ci_high"])
             criterion[stem + "_low_ppm"], criterion[stem + "_high_ppm"] = str(low), str(high)
-            corpus = sampling_json(files, "qualification/" + label + "-throughput/summary.json")
-            count = corpus.get("confirmed_regressions")
-            if type(count) is not int or not 0 <= count <= 12:
-                raise ValueError("campaign prerequisite A/A corpus regression count is unavailable")
-            regressions += count
-        criterion["aa_corpus_regressions"] = str(regressions)
+        criterion["aa_corpus_regressions"] = str(sum(counts.values()))
     elif phase == "utility":
         net = result["utility_observation"]
         criterion.update(utility_legacy_wall_us=str(campaign_positive_int(net["legacy_leg_us"])),
@@ -2183,6 +2229,7 @@ def campaign_ingest_packet(api: Api, phase: str, packet: int, authority: dict, a
     if not isinstance(authority, dict) or authority.get("repository") != "buster14a/buster" or \
             not campaign_reviewed(authority, "sampling" if phase in ("acquire", "pilot", "confirm") else phase):
         raise ValueError("campaign ingestion lacks original independently reviewed authority")
+    campaign_native_scope(phase, packet, authority)
     if phase in ("acquire", "pilot", "confirm"):
         reader, validator = sampling_read_artifact, sampling_validate
     elif phase == "preparation":
@@ -2199,7 +2246,10 @@ def campaign_ingest_packet(api: Api, phase: str, packet: int, authority: dict, a
         if result.get("packet_state") not in ("complete-valid-research", "complete-negative-research") or \
                 result.get("problems") != [] or result.get("qualification_state") != "unqualified":
             raise ValueError("campaign original raw validation is incomplete")
-        result = dict(result, campaign_criteria=campaign_criteria_fragment(phase, result, files))
+        result = dict(result)
+        if phase == "preparation":
+            result["campaign_aa_corpus_regressions"] = campaign_aa_corpus_counts(files)
+        result["campaign_criteria"] = campaign_criteria_fragment(phase, result)
         row, replay = campaign_complete_fact(phase, packet, authority, artifact, result)
     except ValueError as error:
         row, replay = campaign_invalid_fact(api, phase, packet, authority, artifact, error, result)
@@ -2292,7 +2342,7 @@ def campaign_assemble_facts(ingested: list[dict | None]) -> dict:
         criterion = {"schema": "buster-compiler-main-profile-criteria-v1", "measurement_revision": measurement,
                      "preparation_plan_sha256": prep_row["freeze_sha256"], "preparation_raw_replay_sha256": prep_row["raw_replay_sha256"],
                      "utility_plan_sha256": utility_row["freeze_sha256"], "utility_raw_replay_sha256": utility_row["raw_replay_sha256"],
-                     **preparation["campaign_criteria"], **utility["campaign_criteria"]}
+                     **campaign_criteria_fragment("preparation", preparation), **campaign_criteria_fragment("utility", utility)}
         if set(criterion) != set(CAMPAIGN_CRITERIA_FIELDS):
             raise ValueError("campaign retained prerequisite criteria are incomplete")
         criteria = b"".join((key + "\t" + criterion[key] + "\n").encode("ascii") for key in CAMPAIGN_CRITERIA_FIELDS)

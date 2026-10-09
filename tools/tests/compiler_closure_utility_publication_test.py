@@ -1607,9 +1607,14 @@ class CampaignFactsDataTests(unittest.TestCase):
         admitted = {prefix + "_trusted_revision": REVISION, prefix + "_historical_valid": "true",
                     ("sampling_freeze_revision" if prefix == "sampling" else prefix + "_plan_revision"): "c" * 40,
                     ("sampling_freeze_sha256" if prefix == "sampling" else prefix + "_plan_sha256"): "d" * 64}
-        admitted.update({prefix + "_historical_execution_authority": "false", prefix + "_historical_qualification": "unqualified"})
+        admitted.update({prefix + "_historical_execution_authority": "false", prefix + "_historical_qualification": "unqualified",
+                         prefix + "_phase": "qualify" if phase == "preparation" else phase,
+                         prefix + "_packet": str(packet), prefix + "_family": schedule(phase, packet)["family"] if prefix == "sampling" else phase,
+                         prefix + "_policy_revision": "e" * 40})
         if prefix == "sampling":
-            admitted.update(sampling_policy_revision="e" * 40, sampling_campaign_parent="f" * 64)
+            plan = schedule(phase, packet)
+            admitted.update(sampling_policy_revision="e" * 40, sampling_campaign_parent="f" * 64,
+                            sampling_phase=phase, sampling_packet=str(packet), sampling_family=plan["family"])
         request, executor = {"id": index + 100, "run_attempt": 1}, {"id": index + 200, "run_attempt": 1, "head_sha": "e" * 40}
         authority = {"historical_review": True, "repository": REPOSITORY, "admitted": admitted,
                      "request_id": str(request["id"]), "run_id": str(executor["id"]), "request": request,
@@ -1634,6 +1639,10 @@ class CampaignFactsDataTests(unittest.TestCase):
         artifact = {"id": index + 300, "verified_zip_sha256": "1" * 64, "verified_zip_bytes": index + 1000,
                     "verified_member_manifest_sha256": hashlib.sha256(b"retained manifest\n").hexdigest(),
                     "verified_member_manifest": b"retained manifest\n"}
+        if phase == "preparation":
+            result["campaign_aa_corpus_regressions"] = {label: 0 for label in result["series"]}
+        if phase in ("preparation", "utility"):
+            result["campaign_criteria"] = publisher.campaign_criteria_fragment(phase, result)
         return authority, result, artifact
 
     def test_ppm_never_rounds_a_borderline_interval_into_acceptance(self):
@@ -1748,6 +1757,15 @@ class CampaignFactsDataTests(unittest.TestCase):
             altered[10]["raw_replay"] += b" "
             with self.assertRaises(ValueError):
                 publisher.campaign_assemble_facts(altered)
+            for index, key in ((44, "legacy_immutable_aa_low_ppm"), (45, "utility_job_wall_us")):
+                altered = copy.deepcopy(ingested)
+                record = json.loads(altered[index]["raw_replay"])
+                record["validation"]["campaign_criteria"][key] = "0"
+                changed_replay = publisher.campaign_json(record)
+                altered[index]["raw_replay"] = changed_replay
+                altered[index]["fact"]["raw_replay_sha256"] = hashlib.sha256(changed_replay).hexdigest()
+                with self.subTest(index=index, key=key), self.assertRaises(ValueError):
+                    publisher.campaign_assemble_facts(altered)
             retained = list(ingested)
             retained[20] = invalid
             assembled = publisher.campaign_assemble_facts(retained)
@@ -1769,11 +1787,14 @@ class CampaignFactsDataTests(unittest.TestCase):
 
     def test_invalid_raw_keeps_verified_zip_and_unknown_native_wall(self):
         authority, result, artifact = self.authority_and_result("confirm", 0, 4)
-        with patch.object(publisher, "sampling_host_job", return_value={}), \
-                patch.object(publisher, "sampling_job_accounting", return_value={"physical_job_wall_upper_us": 120000000}):
+        actual_job = {"id": 600, "run_id": int(authority["run_id"]), "run_attempt": 1,
+                      "name": publisher.SAMPLING_HOST_JOB, "status": "completed", "conclusion": "failure",
+                      "created_at": "2026-10-01T00:00:00Z", "started_at": "2026-10-01T00:00:01Z",
+                      "completed_at": "2026-10-01T00:02:00Z"}
+        with patch.object(publisher, "sampling_host_job", return_value=actual_job):
             row, replay = publisher.campaign_invalid_fact(object(), "confirm", 0, authority, artifact, ValueError("bad raw pair"))
         self.assertEqual(row["state"], "invalid")
-        self.assertEqual(row["job_wall_us"], "120000000")
+        self.assertEqual(row["job_wall_us"], "121000000")
         self.assertEqual(row["native_wall_us"], "-")
         self.assertEqual(row["artifact_id"], str(artifact["id"]))
         self.assertEqual(row["slots"], "-")
@@ -1781,6 +1802,38 @@ class CampaignFactsDataTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             publisher.campaign_invalid_fact(object(), "confirm", 0, dict(authority, historical_review=False),
                                             artifact, ValueError("bad raw pair"))
+
+    def test_invalid_cost_retains_failed_and_over_budget_api_wall(self):
+        authority, unused_result, artifact = self.authority_and_result("confirm", 0, 4)
+        observed = {"id": 600, "run_id": int(authority["run_id"]), "run_attempt": 1,
+                    "name": publisher.SAMPLING_HOST_JOB, "status": "completed", "conclusion": "failure",
+                    "created_at": "2026-10-01T00:00:00Z", "started_at": "2026-10-01T00:00:01Z",
+                    "completed_at": "2026-10-01T01:00:01Z"}
+        row = publisher.campaign_invalid_row("confirm", 0, authority, artifact, observed)
+        self.assertEqual(row["job_wall_us"], "3602000000")
+        self.assertEqual(row["native_wall_us"], "-")
+        self.assertEqual(row["state"], "invalid")
+        with self.assertRaises(ValueError):
+            publisher.campaign_api_wall(dict(observed, run_attempt=True))
+        with self.assertRaises(ValueError):
+            publisher.campaign_api_wall(dict(observed, completed_at="2026-09-30T00:00:01Z"))
+
+    def test_original_scope_mismatch_refuses_before_zip_or_invalid_retention(self):
+        authority, unused_result, unused_artifact = self.authority_and_result("pilot", 1, 2)
+        with patch.object(publisher, "sampling_read_artifact", side_effect=AssertionError("scope rebound to ZIP")):
+            with self.assertRaises(ValueError):
+                publisher.campaign_ingest_packet(object(), "pilot", 2, authority)
+        for phase in ("preparation", "utility"):
+            original, unused_result, unused_artifact = self.authority_and_result(phase, 0, 44)
+            prefix = phase
+            for key, value in ((prefix + "_phase", "pilot"), (prefix + "_packet", "1"),
+                               (prefix + "_family", "aa"), (prefix + "_policy_revision", "0" * 40)):
+                changed = copy.deepcopy(original)
+                changed["admitted"][key] = value
+                with self.subTest(phase=phase, key=key), \
+                        patch.object(publisher, phase + "_read_artifact", side_effect=AssertionError("scope rebound to ZIP")), \
+                        self.assertRaises(ValueError):
+                    publisher.campaign_ingest_packet(object(), phase, 0, changed)
 
     def test_prerequisite_review_flags_are_distinct_and_cannot_be_live_admission(self):
         for phase in ("preparation", "utility"):
