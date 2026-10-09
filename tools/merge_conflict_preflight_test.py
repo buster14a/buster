@@ -261,6 +261,12 @@ class MergeConflictPreflightTest(unittest.TestCase):
         self.assertEqual(report["overlap"]["retirement_policy_schema_or_trust_paths"], [trust])
         self.assertTrue(report["merge"]["path_details"][0]["retirement_trust_path"])
 
+    def test_current_native_declaration_is_reserved_as_policy(self) -> None:
+        flags = PREFLIGHT._path_flags("docs/current-native-object-census-v1.json")
+        self.assertTrue(flags["retirement_policy_or_schema"])
+        self.assertTrue(flags["retirement_policy_schema_or_trust_path"])
+        self.assertFalse(flags["generated_or_integration_owned_retirement_artifact"])
+
     def test_retirement_path_sets_match_the_trusted_integration_classifier(self) -> None:
         if not INTEGRATION_PATH.exists():
             self.skipTest("standalone fixture checkout omits native_retirement_integration.py")
