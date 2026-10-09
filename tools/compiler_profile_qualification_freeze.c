@@ -167,7 +167,7 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingFreeze compiler_sampling_freeze_parse(String
         !string_equal(result.ab2_candidate_sha256, result.baseline_sha256) &&
         !string_equal(result.ab1_candidate_sha256, result.ab2_candidate_sha256) &&
         (pilot ? string_equal(result.candidate_pairs, S8("0")) && string_equal(result.selected_candidate, S8("exploratory")) :
-            string_equal(result.candidate_pairs, S8("40")) && string_equal(result.selected_candidate, S8("buster-main-sampling-p40")));
+            string_equal(result.candidate_pairs, S8("40")) && string_equal(result.selected_candidate, S8("compiler-main-40pairs-candidate-v1")));
     String8 calibration[] = {result.calibration_ab1_low_percent, result.calibration_ab1_high_percent,
         result.calibration_ab2_low_percent, result.calibration_ab2_high_percent};
     for (u64 i = 0; valid && i < BUSTER_ARRAY_LENGTH(calibration); i += 1)
@@ -262,7 +262,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_self_test(Arena* arena)
     fixture.phase = S8("confirm");
     fixture.campaign_parent = a;
     fixture.candidate_pairs = S8("40");
-    fixture.selected_candidate = S8("buster-main-sampling-p40");
+    fixture.selected_candidate = S8("compiler-main-40pairs-candidate-v1");
     fixture.calibration_ab1_low_percent = S8("2.000001");
     fixture.calibration_ab1_high_percent = S8("2.5");
     fixture.calibration_ab2_low_percent = S8("2.1");
