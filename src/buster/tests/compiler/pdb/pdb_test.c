@@ -71,7 +71,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice pdb_test_stream_bytes(Arena* arena, ByteSlice imag
     return (ByteSlice){.pointer = bytes, .length = size};
 }
 
-// Independent debugger-style forward lookup: locate a complete scoped tag in
+// Raw-format forward lookup regression: locate a complete scoped tag in
 // the name bucket carried by the TPI hash stream, then inspect its field list.
 BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_forward_type_hashes(UnitTestArguments* arguments)
 {
@@ -100,9 +100,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_forward_type_hashes(UnitTestArgument
             .machine = architecture ? CODEVIEW_MACHINE_ARM64 : CODEVIEW_MACHINE_X64});
         PdbSection section = {.name = S8(".text"), .virtual_address = 0x1000, .virtual_size = 8,
                               .raw_offset = 0x400, .raw_size = 0x200, .characteristics = 0x60000020};
+        PdbModule module = {.name = S8("recursive.obj"), .codeview_symbols = codeview.symbols,
+                            .codeview_types = codeview.types, .code_section = 1, .code_size = 8};
         PdbResult built = pdb_build(arguments->arena, (PdbInput){
-            .module_name = S8("recursive.obj"), .codeview_symbols = codeview.symbols, .codeview_types = codeview.types,
-            .sections = &section, .section_count = 1, .age = 1, .code_section = 1, .code_size = 8,
+            .modules = &module, .module_count = 1, .sections = &section, .section_count = 1, .age = 1,
             .machine = architecture ? 0xaa64 : 0x8664});
         if (BUSTER_REQUIRE(arguments, codeview.valid && built.valid))
         {
@@ -1182,7 +1183,7 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
             u64 directory_base = (u64)directory_block * PDB_TEST_BLOCK_SIZE;
             BUSTER_TEST(arguments, directory_size >= 4);
             u32 stream_count = pdb_read_u32(built.bytes, directory_base);
-            if (BUSTER_REQUIRE(arguments, stream_count == PDB_TEST_STREAM_COUNT))
+            if (BUSTER_REQUIRE(arguments, stream_count == PDB_TEST_STREAM_COUNT + 1))
             {
                 u64 block_cursor = directory_base + 4 + (u64)stream_count * 4;
                 u32 info_block = 0;
