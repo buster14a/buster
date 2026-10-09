@@ -89,7 +89,8 @@
 //   c_parse_parameter_list_names_validate        one namespace per parameter list
 //   c_parse_validate_constexpr_declaration,       constexpr, type
 //   c_parse_types_compatible,                     compatibility
-//   c_parse_definition_parameter_count_*          pre-C23 definition counts
+//   c_parse_definition_parameter_count_*,         pre-C23 definition counts
+//   c_parse_prototype_parameter_count_record
 //   c_parse_type_identity_prepare                 retained C identity answers
 //   c_parse_validate_cleanup_attribute            __attribute__((cleanup))
 //   c_parse_name_symbol .. c_parse_lookup_*       symbol interning, scopes,
@@ -19312,8 +19313,12 @@ BUSTER_C_INTERNAL u32 c_parse_definition_parameter_count_plus_one(CParseResult* 
 }
 
 // `declaration_count_plus_one` is the new declaration's own answer from
-// c_parse_definition_parameter_count_plus_one. Two unprototyped declarations
-// never conflict here; two definitions are a redefinition.
+// c_parse_definition_parameter_count_plus_one. The entity keeps its first
+// declaration's type, so when that is unprototyped the prototype count the
+// entity has seen (`prototype_parameter_count_plus_one`) stands in for it: a
+// new unprototyped definition is held to it, and a new prototype is held to
+// both it and a recorded definition. Two unprototyped declarations never
+// conflict here; two definitions are a redefinition.
 BUSTER_C_INTERNAL bool c_parse_definition_parameter_count_conflicts(CParseResult* result, CEntity* candidate, CTypeId type,
                                                                       u32 declaration_count_plus_one)
 {
@@ -19326,15 +19331,35 @@ BUSTER_C_INTERNAL bool c_parse_definition_parameter_count_conflicts(CParseResult
         {
             if (declaration_count_plus_one)
             {
-                conflicts = !prior.is_unprototyped && prior.parameter_count + 1 != declaration_count_plus_one;
+                u32 known = prior.is_unprototyped ? candidate->prototype_parameter_count_plus_one : prior.parameter_count + 1;
+                conflicts = known && known != declaration_count_plus_one;
             }
-            else if (candidate->definition_parameter_count_plus_one)
+            else if (!added.is_unprototyped)
             {
-                conflicts = !added.is_unprototyped && added.parameter_count + 1 != candidate->definition_parameter_count_plus_one;
+                u32 added_plus_one = added.parameter_count + 1;
+                conflicts = (candidate->definition_parameter_count_plus_one && candidate->definition_parameter_count_plus_one != added_plus_one) ||
+                            (candidate->prototype_parameter_count_plus_one && candidate->prototype_parameter_count_plus_one != added_plus_one);
             }
         }
     }
     return conflicts;
+}
+
+// Called once a declaration has joined `entity`: the first prototype that
+// follows an unprototyped first declaration is the one later declarations
+// are held to, because the entity's type stays unprototyped.
+BUSTER_C_INTERNAL void c_parse_prototype_parameter_count_record(CParseResult* result, CEntity* entity, CTypeId type)
+{
+    if (entity->kind == C_ENTITY_FUNCTION && !entity->prototype_parameter_count_plus_one && entity->type.value < result->type_count &&
+        type.value < result->type_count)
+    {
+        CType prior = result->types[entity->type.value];
+        CType added = result->types[type.value];
+        if (prior.kind == C_TYPE_FUNCTION && prior.is_unprototyped && added.kind == C_TYPE_FUNCTION && !added.is_unprototyped)
+        {
+            entity->prototype_parameter_count_plus_one = added.parameter_count + 1;
+        }
+    }
 }
 
 BUSTER_C_INTERNAL CSourceLocation c_parse_cleanup_attribute_location(CPreprocessResult preprocess, CCleanupAttributeInfo attribute)
@@ -33814,6 +33839,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                 existing->definition_is_gnu_inline_only = declaration->is_gnu_inline_only;
                 existing->definition_parameter_count_plus_one = definition_parameter_count_plus_one;
             }
+            c_parse_prototype_parameter_count_record(&result, existing, declaration->type);
             // The composite of `char pad[]` and `char pad[5]` is the complete
             // array (C11 6.2.7p3): a redeclaration that completes an entity
             // first declared with an unbounded array adopts its type â later
