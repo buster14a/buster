@@ -116,9 +116,9 @@ class PrerequisiteApi(OriginalApi):
             "status": "completed", "conclusion": "success",
             "output": {"title": "Valid unqualified utility packet" if utility else "Valid unqualified preparation packet"},
         }
-        self.records[self.check_path()] = {"check_runs": [check]}
+        self.records[self.check_path()] = {"total_count": 1, "check_runs": [check]}
         host_name = "Compiler closure utility" if utility else "Compiler preparation qualification"
-        self.records[f"/actions/runs/{self.executor}/attempts/1/jobs?per_page=100"] = {"jobs": [{
+        self.records[f"/actions/runs/{self.executor}/attempts/1/jobs?per_page=100"] = {"total_count": 1, "jobs": [{
             "id": 90000, "run_id": self.executor, "run_attempt": 1, "head_sha": ACQUISITION_POLICY,
             "name": host_name, "status": "completed", "conclusion": "success",
             "started_at": "2026-10-09T00:01:02Z", "completed_at": "2026-10-09T00:01:03Z",
@@ -163,7 +163,7 @@ class HistoricalPrerequisiteApiTest(unittest.TestCase):
         self.assertEqual(facts["pull_state"], self.active_api.pull()["state"])
         self.assertEqual(proof["pull_current_head"], self.active_api.pull()["head"]["sha"])
         self.assertEqual(facts["fresh_parent_0"], records["request"].rstrip("\n"))
-        self.assertEqual(records["history"], "\t".join(authorize.SAMPLING_HISTORY_HEADER) + "\n")
+        self.assertTrue(records["history"].startswith("\t".join(authorize.SAMPLING_HISTORY_HEADER) + "\n"))
         self.native_records.append(copy.deepcopy(records))
         # Observe the fixed real subprocess bridge, never replace its outcome.
         return NATIVE_REVIEW(records, utility=utility)
@@ -276,8 +276,11 @@ class HistoricalPrerequisiteApiTest(unittest.TestCase):
                 before = copy.deepcopy(current)
                 with mock.patch.object(subprocess, "run", wraps=REAL_RUN) as process:
                     bound = authorize.bind_historical_original_transport(current, files, api.prefix)
-                self.assertEqual(process.call_count, 1)
-                command = process.call_args.args[0]
+                self.assertEqual(process.call_count, 2)
+                first = process.call_args_list[0].args[0]
+                self.assertEqual(first[1:3], ["compiler_profile_qualification", "--validate-historical-" + api.prefix])
+                self.assertEqual(len(first), 10)
+                command = process.call_args_list[1].args[0]
                 self.assertEqual(command[1:3], ["compiler_profile_qualification", "--validate-historical-original-facts"])
                 self.assertEqual(len(command), 6)
                 expected = {"historical_original_facts_valid": "true",
@@ -294,6 +297,188 @@ class HistoricalPrerequisiteApiTest(unittest.TestCase):
                     self.assertEqual(files[name], current["raw"][name])
                 self.assertEqual(original["admitted"][api.prefix + "_policy_revision"],
                                  current["admitted"][api.prefix + "_policy_revision"])
+
+
+    def test_original_and_latest_attempt_types_cannot_be_relabelled(self):
+        for utility in (False, True):
+            for run in (10000, 20000):
+                for endpoint in ("", "/attempts/1"):
+                    for attempt in (2, "1", True, None):
+                        with self.subTest(utility=utility, run=run, endpoint=endpoint, attempt=attempt):
+                            api = PrerequisiteApi(utility=utility)
+                            api.records[f"/actions/runs/{run}{endpoint}"]["run_attempt"] = attempt
+                            self.rejects_before_native(api)
+            api = PrerequisiteApi(utility=utility)
+            execution, request = api.originals()
+            execution["head_sha"] = HARNESS
+            self.rejects_before_native(api, (execution, request))
+            execution, request = api.originals()
+            request["head_sha"] = ADVANCED_HEAD
+            self.rejects_before_native(api, (execution, request))
+
+    def test_actual_api_owner_membership_ancestry_and_compare_head_are_required(self):
+        for utility in (False, True):
+            mutations = {
+                "foreign_request_actor": lambda a: a.records[f"/actions/runs/{a.current}/attempts/1"]
+                    ["actor"].update(id=OWNER["id"] + 1),
+                "foreign_executor_trigger": lambda a: a.records[f"/actions/runs/{a.executor}/attempts/1"]
+                    ["triggering_actor"].update(login="foreign"),
+                "foreign_request_repo": lambda a: a.records[f"/actions/runs/{a.current}/attempts/1"]
+                    ["head_repository"].update(full_name="foreign/buster"),
+                "foreign_pull_author": lambda a: a.pull()["user"].update(id=OWNER["id"] + 1),
+                "foreign_pull_repo": lambda a: a.pull()["head"]["repo"].update(full_name="foreign/buster"),
+                "invalid_observed_state": lambda a: a.pull().update(state="merged"),
+                "duplicate_association": lambda a: a.records[f"/commits/{ACQUISITION_HEAD}/pulls?per_page=100"]
+                    .append(copy.deepcopy(a.pull())),
+                "foreign_association": lambda a: a.pull().update(number=43),
+                "source_commit_relabel": lambda a: a.records[f"/commits/{ACQUISITION_HEAD}"].update(sha=ADVANCED_HEAD),
+                "foreign_compare_head": lambda a: a.records[f"/compare/{FIRST_PARENT}...{ACQUISITION_HEAD}"]
+                    ["commits"][0].update(sha=ADVANCED_HEAD),
+                "incomplete_compare": lambda a: a.records[f"/compare/{FIRST_PARENT}...{ACQUISITION_HEAD}"]
+                    .update(total_commits=2),
+                "unprotected_policy": lambda a: a.records.update({f"/compare/{ACQUISITION_POLICY}...main": {"status": "behind"}}),
+                "foreign_plan_lineage": lambda a: a.records.update({f"/compare/{ACQUISITION_REVISION}...{ACQUISITION_POLICY}":
+                                                                   {"status": "diverged"}}),
+                "foreign_harness_lineage": lambda a: a.records.update({f"/compare/{HARNESS}...{ACQUISITION_POLICY}":
+                                                                      {"status": "behind"}}),
+            }
+            for name, change in mutations.items():
+                with self.subTest(utility=utility, mutation=name):
+                    api = PrerequisiteApi(utility=utility)
+                    change(api)
+                    # Some semantic failures are deliberately delegated to the
+                    # real native validator; neither path may emit authority.
+                    with self.assertRaises(ValueError):
+                        self.review(api, [])
+
+    def test_executor_inventory_and_supplied_prefix_must_be_complete_and_unique(self):
+        for utility in (False, True):
+            for mutation in ("empty", "duplicate", "count", "foreign_title", "foreign_id"):
+                with self.subTest(utility=utility, mutation=mutation):
+                    api = PrerequisiteApi(utility=utility)
+                    if mutation == "empty":
+                        api.executor_inventory = []
+                    elif mutation == "duplicate":
+                        api.executor_inventory.append(copy.deepcopy(api.executor_inventory[0]))
+                    elif mutation == "count":
+                        api.executor_inventory_total = 2
+                    elif mutation == "foreign_title":
+                        api.executor_inventory[0]["display_title"] = f"9700X request {api.current}.1 head {ADVANCED_HEAD}"
+                    else:
+                        api.executor_inventory[0]["id"] += 1
+                    self.rejects_before_native(api)
+            api = PrerequisiteApi(utility=utility)
+            execution, request = api.originals()
+            with mock.patch.object(authorize, "prerequisite_review_native") as bridge:
+                with self.assertRaises(ValueError):
+                    authorize.review_prerequisite_authority(api, REPOSITORY, execution, request,
+                                                           [["fabricated prior attempt"]], utility=utility)
+                bridge.assert_not_called()
+
+    def test_exact_positive_and_complete_negative_check_pairing_is_native_checked(self):
+        for utility in (False, True):
+            for negative in (False, True):
+                for mutation in ("app", "head", "external", "duplicate", "title", "conclusion", "executor"):
+                    with self.subTest(utility=utility, negative=negative, mutation=mutation):
+                        api = PrerequisiteApi(utility=utility, negative=negative)
+                        check = api.check()
+                        if mutation == "app":
+                            check["app"]["id"] = 1
+                        elif mutation == "head":
+                            check["head_sha"] = ADVANCED_HEAD
+                        elif mutation == "external":
+                            check["external_id"] += ":foreign"
+                        elif mutation == "duplicate":
+                            api.records[api.check_path()]["check_runs"].append(copy.deepcopy(check))
+                        elif mutation == "title":
+                            check["output"]["title"] = ("Valid unqualified preparation packet" if utility else
+                                                        "Valid unqualified utility packet")
+                        elif mutation == "conclusion":
+                            check["conclusion"] = "success" if negative else "failure"
+                        else:
+                            for endpoint in ("", "/attempts/1"):
+                                api.records[f"/actions/runs/{api.executor}{endpoint}"]["conclusion"] = (
+                                    "success" if negative else "failure")
+                            api.executor_inventory[0]["conclusion"] = "success" if negative else "failure"
+                        with self.assertRaises(ValueError):
+                            self.review(api, [])
+
+    def test_current_raw_and_record_map_drift_is_rejected_before_either_native_call(self):
+        for utility in (False, True):
+            api, _, files, current = self.original_and_current(utility)
+            changes = {
+                "extra_record": lambda a: a["historical_records"].update(extra=b"unreviewed\n"),
+                "record_mismatch": lambda a: a["historical_records"].update(plan=b"foreign\n"),
+                "raw_mismatch": lambda a: a["raw"].update(plan=a["raw"]["plan.tsv"]),
+                "missing_record": lambda a: a["historical_records"].pop("history"),
+                "facts_object": lambda a: a["facts"].update(pull_state="open"),
+                "request_freshness": lambda a: a["raw"].update({"request.txt": b"inherited selector\n"}),
+                "api_bytes": lambda a: a["historical_records"].update(api=b"foreign\n"),
+                "api_digest": lambda a: a["admitted"].update({api.prefix + "_historical_api_sha256": "0" * 64}),
+                "execution_boundary": lambda a: a["admitted"].update({api.prefix + "_historical_execution_authority": "true"}),
+                "admission_boundary": lambda a: a["admitted"].update({api.prefix + "_admitted": "true"}),
+                "review_type": lambda a: a.update(historical_review=1),
+            }
+            for name, change in changes.items():
+                with self.subTest(utility=utility, mutation=name):
+                    changed = copy.deepcopy(current)
+                    change(changed)
+                    with mock.patch.object(subprocess, "run", wraps=REAL_RUN) as process:
+                        with self.assertRaises(ValueError):
+                            authorize.bind_historical_original_transport(changed, files, api.prefix)
+                        process.assert_not_called()
+
+    def test_original_nonfacts_records_cannot_drift_from_current_committed_records(self):
+        for utility in (False, True):
+            api, _, files, current = self.original_and_current(utility)
+            for name in ("allowlist.tsv", "request.txt", "history.tsv", "plan.tsv"):
+                with self.subTest(utility=utility, member=name):
+                    changed = copy.deepcopy(files)
+                    changed[name] += b"foreign\tvalue\n"
+                    with mock.patch.object(subprocess, "run", wraps=REAL_RUN) as process:
+                        with self.assertRaises(ValueError):
+                            authorize.bind_historical_original_transport(current, changed, api.prefix)
+                        process.assert_not_called()
+
+    def test_retained_original_facts_are_native_bound_without_rewriting_observations(self):
+        for utility in (False, True):
+            api, _, files, current = self.original_and_current(utility)
+            edits = {"pull_state": "closed", "trusted_revision": HARNESS, "request_head": ADVANCED_HEAD,
+                     "owner_id": str(OWNER["id"] + 1), "actor_login": "foreign",
+                     "executor_run_attempt": "2", "fresh_parent_0": "inherited selector"}
+            for field, value in edits.items():
+                with self.subTest(utility=utility, field=field):
+                    changed = copy.deepcopy(files)
+                    facts = authorize.sampling_review_record(changed["facts.tsv"].decode())
+                    facts[field] = value
+                    changed["facts.tsv"] = tsv(facts).encode()
+                    before = copy.deepcopy(current)
+                    with mock.patch.object(subprocess, "run", wraps=REAL_RUN) as process:
+                        with self.assertRaises(ValueError):
+                            authorize.bind_historical_original_transport(current, changed, api.prefix)
+                    self.assertEqual(process.call_count, 2)
+                    self.assertEqual(process.call_args_list[0].args[0][2], "--validate-historical-" + api.prefix)
+                    self.assertEqual(process.call_args_list[1].args[0][2], "--validate-historical-original-facts")
+                    self.assertEqual(current, before)
+
+    def test_coherently_reencoded_api_proof_is_revalidated_by_real_current_native_bridge(self):
+        for utility in (False, True):
+            api, _, files, current = self.original_and_current(utility)
+            for field, value in (("executor_actor_id", str(OWNER["id"] + 1)),
+                                 ("request_latest_attempt", "2"), ("policy_revision", HARNESS),
+                                 ("request_head", ADVANCED_HEAD), ("first_parent", SECOND_PARENT),
+                                 ("check_external_id", "foreign"), ("pull_state", "open")):
+                with self.subTest(utility=utility, field=field):
+                    changed = copy.deepcopy(current)
+                    changed["native_api_proof"][field] = value
+                    changed["historical_records"]["api"] = tsv(changed["native_api_proof"]).encode()
+                    changed["admitted"][api.prefix + "_historical_api_sha256"] = hashlib.sha256(
+                        changed["historical_records"]["api"]).hexdigest()
+                    with mock.patch.object(subprocess, "run", wraps=REAL_RUN) as process:
+                        with self.assertRaises(ValueError):
+                            authorize.bind_historical_original_transport(changed, files, api.prefix)
+                    self.assertEqual(process.call_count, 1)
+                    self.assertEqual(process.call_args.args[0][2], "--validate-historical-" + api.prefix)
 
 
 if __name__ == "__main__":
