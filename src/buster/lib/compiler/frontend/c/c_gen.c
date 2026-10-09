@@ -45568,29 +45568,39 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             // one test also answers the duplicate-label question the non-range
             // path used to answer on its own -- and it names the offending
             // label instead of failing the whole body as unsupported.
-            for (u32 current_index = 0; current_index < state->switch_case_count; current_index += 1)
+            u32 overlapping_case = UINT32_MAX;
             {
-                CIrSwitchCase* current = switch_cases + current_index;
-                if (current->is_default)
+                u64 overlap_mark = builder->scratch_arena->position;
+                u32 label_capacity = state->switch_case_count ? state->switch_case_count : 1;
+                u64* label_lows = arena_allocate(builder->scratch_arena, u64, label_capacity);
+                u64* label_highs = arena_allocate(builder->scratch_arena, u64, label_capacity);
+                u32* label_cases = arena_allocate(builder->scratch_arena, u32, label_capacity);
+                u32 overlap_label_count = 0;
+                for (u32 overlap_scan = 0; overlap_scan < state->switch_case_count; overlap_scan += 1)
                 {
-                    continue;
-                }
-                for (u32 previous_index = 0; previous_index < current_index; previous_index += 1)
-                {
-                    CIrSwitchCase* previous = switch_cases + previous_index;
-                    if (previous->is_default)
+                    if (!switch_cases[overlap_scan].is_default)
                     {
-                        continue;
-                    }
-                    bool overlaps = c_ir_switch_integer_less_equal(switched_type, current->value, previous->high_value) &&
-                                    c_ir_switch_integer_less_equal(switched_type, previous->value, current->high_value);
-                    if (overlaps)
-                    {
-                        builder->failure_message = S8("case label overlaps another case label");
-                        builder->failure_token_index = current->label_start;
-                        return false;
+                        label_lows[overlap_label_count] = switch_cases[overlap_scan].value;
+                        label_highs[overlap_label_count] = switch_cases[overlap_scan].high_value;
+                        label_cases[overlap_label_count] = overlap_scan;
+                        overlap_label_count += 1;
                     }
                 }
+                // Values are masked to the switch type, so for a signed type
+                // flipping its sign bit orders them as signed values.
+                u64 order_flip = switched_type->is_signed ? (c_ir_integer_type_mask(switched_type) >> 1) + 1 : 0;
+                u32 overlapping_label = c_switch_first_overlapping_label(builder->scratch_arena, label_lows, label_highs, order_flip, overlap_label_count);
+                if (overlapping_label != UINT32_MAX)
+                {
+                    overlapping_case = label_cases[overlapping_label];
+                }
+                arena_set_position(builder->scratch_arena, overlap_mark);
+            }
+            if (overlapping_case != UINT32_MAX)
+            {
+                builder->failure_message = S8("case label overlaps another case label");
+                builder->failure_token_index = switch_cases[overlapping_case].label_start;
+                return false;
             }
             IrBlockId default_block = merge;
             for (u32 case_index = 0; case_index < state->switch_case_count; case_index += 1)
