@@ -3712,7 +3712,7 @@ BUSTER_GLOBAL_LOCAL bool object_test_elf_shape_readback(Arena* arena, ObjectFile
             bool zero_fill = source->kind == OBJECT_SECTION_ZERO || source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
             bool tls = source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA || source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
             u32 type = zero_fill ? 8 : source->kind == OBJECT_SECTION_UNWIND && object->target.cpu_arch == CPU_ARCH_X86_64 ? 0x70000001
-                                      : source->kind == OBJECT_SECTION_INIT_ARRAY ? (string_starts_with_sequence(source->name, S8(".preinit_array")) ? 16 : 14)
+                                      : source->kind == OBJECT_SECTION_INIT_ARRAY ? (string_equal(source->name, S8(".preinit_array")) ? 16 : 14)
                                       : source->kind == OBJECT_SECTION_FINI_ARRAY ? 15 : 1;
             u64 flags = source->kind == OBJECT_SECTION_TEXT ? 6 : tls ? 0x403
                         : source->kind == OBJECT_SECTION_DATA || zero_fill || source->kind == OBJECT_SECTION_INIT_ARRAY ||
@@ -5266,6 +5266,64 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, initializer_read.initializer_priorities[1][entry] == written_terminator_priorities[entry]);
             }
         }
+        // Issue 1243: an ELF `.preinit_array` entry's IR_INITIALIZER_PRIORITY_PREINIT
+        // sorts ahead of a `constructor(0)`, is its own `.preinit_array`
+        // section and survives a round trip; COFF and Mach-O have no such
+        // array, so the sentinel must reach neither writer as a name or as a
+        // number, and comes back as the earliest priority that format has.
+        ObjectSection preinit_sections[OBJECT_SECTION_COUNT];
+        memcpy(preinit_sections, initializer_sections, sizeof(preinit_sections));
+        u8 preinit_entries[4 * OBJECT_INITIALIZER_ENTRY_SIZE] = {0};
+        preinit_sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(preinit_entries);
+        preinit_sections[OBJECT_SECTION_FINI_ARRAY].data = (ByteSlice){0};
+        u32 preinit_priorities[] = {IR_INITIALIZER_PRIORITY_PREINIT, 0, 101, IR_INITIALIZER_PRIORITY_NONE};
+        ObjectRelocation preinit_relocations[] = {
+            {.section = OBJECT_SECTION_INIT_ARRAY, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = OBJECT_INITIALIZER_ENTRY_SIZE, .section = OBJECT_SECTION_INIT_ARRAY, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = 2 * OBJECT_INITIALIZER_ENTRY_SIZE, .section = OBJECT_SECTION_INIT_ARRAY, .symbol = 2, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = 3 * OBJECT_INITIALIZER_ENTRY_SIZE, .section = OBJECT_SECTION_INIT_ARRAY, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        };
+        ObjectFile preinit_object = initializer_object;
+        preinit_object.sections = preinit_sections;
+        preinit_object.relocations = preinit_relocations;
+        preinit_object.relocation_count = BUSTER_ARRAY_LENGTH(preinit_relocations);
+        preinit_object.initializer_priorities[0] = preinit_priorities;
+        preinit_object.initializer_priorities[1] = 0;
+        ObjectArtifact preinit_elf = object_write(arguments->arena, &preinit_object, OBJECT_FORMAT_ELF64);
+        BUSTER_TEST(arguments, preinit_elf.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, object_bytes_contain(preinit_elf.bytes, S8(".preinit_array")));
+        BUSTER_TEST(arguments, !object_bytes_contain(preinit_elf.bytes, S8(".init_array.65535")));
+        BUSTER_TEST(arguments, !object_bytes_contain(preinit_elf.bytes, S8(".init_array.4294967295")));
+        BUSTER_TEST(arguments, object_bytes_contain(preinit_elf.bytes, S8(".init_array.00000")));
+        BUSTER_TEST(arguments, object_bytes_contain(preinit_elf.bytes, S8(".init_array.00101")));
+        ObjectFile preinit_roundtrip = object_read(arguments->arena, preinit_elf.bytes, preinit_object.target);
+        bool preinit_read_valid = preinit_roundtrip.error == OBJECT_ERROR_NONE && preinit_roundtrip.initializer_priorities[0] &&
+                                  preinit_roundtrip.section_count > OBJECT_SECTION_INIT_ARRAY &&
+                                  preinit_roundtrip.sections[OBJECT_SECTION_INIT_ARRAY].data.length == sizeof(preinit_entries);
+        if (BUSTER_REQUIRE(arguments, preinit_read_valid))
+        {
+            for (u64 entry = 0; entry < BUSTER_ARRAY_LENGTH(preinit_priorities); entry += 1)
+            {
+                BUSTER_TEST(arguments, preinit_roundtrip.initializer_priorities[0][entry] == preinit_priorities[entry]);
+            }
+        }
+        // COFF has the zero-priority group as the earliest; Mach-O states none.
+        ObjectArtifact preinit_coff = object_write(arguments->arena, &preinit_object, OBJECT_FORMAT_COFF);
+        BUSTER_TEST(arguments, preinit_coff.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, !object_bytes_contain(preinit_coff.bytes, S8(".preinit_array")));
+        BUSTER_TEST(arguments, object_bytes_contain(preinit_coff.bytes, S8(".CRT$XCA00000")));
+        ObjectFile preinit_coff_read = object_read(arguments->arena, preinit_coff.bytes, (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS});
+        if (BUSTER_REQUIRE(arguments, preinit_coff_read.error == OBJECT_ERROR_NONE && preinit_coff_read.initializer_priorities[0]))
+        {
+            u32 expected_coff[] = {0, 0, 101, IR_INITIALIZER_PRIORITY_NONE};
+            for (u64 entry = 0; entry < BUSTER_ARRAY_LENGTH(expected_coff); entry += 1)
+            {
+                BUSTER_TEST(arguments, preinit_coff_read.initializer_priorities[0][entry] == expected_coff[entry]);
+            }
+        }
+        ObjectArtifact preinit_mach = object_write(arguments->arena, &preinit_object, OBJECT_FORMAT_MACH_O64);
+        BUSTER_TEST(arguments, preinit_mach.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, !object_bytes_contain(preinit_mach.bytes, S8(".preinit_array")));
     }
     bool elf_relocation_valid = elf_roundtrip.relocations && elf_roundtrip.relocation_count && elf_roundtrip.symbols &&
                                 elf_roundtrip.relocations[0].symbol < elf_roundtrip.symbol_count;

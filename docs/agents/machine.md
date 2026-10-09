@@ -364,6 +364,18 @@ fixture as well as compiling both architectures.
   last use and an edge whose terminator is at or after it skip the store when
   that use lies below the floor. A parameter-edge source whose copy found no
   register still stores, because that copy reloads its home.
+- The shared prepass also computes block live-out for every escaping,
+  non-rematerializable value (`machine_fast_value_liveness`, one bitset row
+  per block over a dense index of those values, solved by the same worklist
+  as frame-object closure). An edge-copy source starts live out of its
+  edge's source block. A boundary write-back, or an eviction past the
+  value's last textual use, skips the store when the value is not live out
+  of the block whose exit it conforms (`machine_fast_dead_out`). The decision
+  is per block, not per edge: one store at a conditional's terminator serves
+  both successors. Contract construction still carries a dirty value that is
+  dead in the join, because dropping it would force the store onto the
+  predecessor's other path. Functions with one block, or past
+  `MACHINE_FAST_LIVENESS_WORD_LIMIT` words per plane, keep the textual rules.
 - FAST/QUALITY also drop the write-back of a strict SSA (immutable, unpinned)
   value at a backward edge whose terminator has that single target, when the
   value is defined in the header or in a block past the header's entry bypass.
@@ -1059,6 +1071,28 @@ remain source-declared. `machine_test_x64_inline_timestamps` checks exact
 instruction bytes, output registers, clobbers and rejected operand forms
 across native targets, frontend forms and allocator modes. Runtime availability
 and ordering of timestamp reads remain the caller's responsibility.
+
+The same vocabulary admits the unsuffixed and `w`/`l` port instructions
+(`in`, `inw`, `inl`, `out`, `outw`, `outl`, beside `inb`/`outb`), the
+floating-point environment instructions (`fnclex`, `fwait`, `fninit`, `fnstenv`,
+`fldenv`, `ldmxcsr`, `stmxcsr`) and `int`. The shared assembler folds a
+constant `int $3` onto the one-byte breakpoint (`CC`) as GNU as does, while any
+other constant keeps `CD ib` and a symbolic operand keeps its relocation.
+A multi-letter GNU constraint is a set of alternatives whose order is
+irrelevant (`c_semantic_asm_register_alternative`, shared with the
+`c_parse.c` semantic mirror). A set holding `r` or `g` selects the general
+register; otherwise exactly one fixed register letter (`a`, `b`, `c`, `d`, `S`,
+`D`) selects that register, so `am`/`ma` are RAX and `dN`/`Nd` are RDX. The
+other letters (`m`, `o`, `V`, and for inputs the immediate letters) are
+alternatives that are never selected. Sets with no register member, two fixed
+registers or an unknown letter stay refused; a lone `i` or `n` reports
+`unsupported asm input constraint`. This is not an alternative rescue: a set
+that selects a fixed register still conflicts with another operand or clobber
+pinned to the same register.
+`assembly_test_x64_breakpoint_and_fp_environment`,
+`machine_test_x64_inline_port_environment` and
+`c_test_inline_assembly_constraint_unions` hold the byte oracles (GNU as 2.47)
+and the neighbouring refusals; only unprivileged MXCSR/x87 round trips execute.
 
 ## Wide integer conversion rounding
 

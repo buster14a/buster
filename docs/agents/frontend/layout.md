@@ -589,6 +589,57 @@ An unresolved object type becomes an ordinary agenda dependency; the reader
 does not start another layout solve or add a whole-table pass. A runtime VLA
 therefore remains nonconstant.
 
+A bound that contains a cast, such as `char d[(char)300]` (44 bytes) or
+`char d[(int)3.9]` (3), needs the conversion the untyped evaluator lacks. While
+the bound's tokens are rewritten, a cast to an integer type narrower than 64
+bits (a builtin spelling or a typedef of one) wraps its operand in the rewritten
+tokens: `((operand) & mask)` for an unsigned type, and
+`((((operand) & mask) ^ sign) - sign)` for a signed one, with the closing
+tokens placed after `c_parse_layout_cast_operand_end`. The bound then stays on
+the untyped fast path and costs no more than a bound without a cast. Only a cast
+to another type (floating, `_Bool`, enumeration, pointer) or an operand the
+evaluator cannot read (a floating constant) reaches `c_parse_layout_typed_array_bound`,
+which runs the protected typed query. That query rebuilds the model its tokens
+name, so it is the slow path; do not route integer casts to it.
+
+A member `_Alignas(_Alignof(T))` whose type name the declaration machine parses
+into a row past the solve's table (builtin, pointer and array spellings) is
+answered by `c_parse_layout_alignment_specifiers` itself: a builtin or pointer
+from the target layout, an array from its element, and a table element waits for
+its own layout like any other table type, which is also what keeps
+`_Alignas(_Alignof(struct A[1]))` inside `struct A` a diagnostic. A request that
+is an expression (`_Alignof(short) * 4`) goes to the typed query. Typed queries from
+a member `_Alignas` expression nest (the query's private solve asks again for
+the alignments of the types it names, as before this change) under three
+limits: a request from a type whose own query is in flight is refused
+(`c_parse_layout_typed_query_types`, a thread-local stack, like the member-query
+depth), the nest is at most `C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY` deep,
+and one outermost query runs at most `C_PARSE_LAYOUT_TYPED_QUERY_BUDGET` nested
+queries. A valid answer is memoized for the rest of its outermost query, and a
+range refused by the depth or budget is remembered until the next
+`c_analyze_semantics_core` so an over-deep chain fails once per type instead of
+once per level. This is a cap on call nesting, not an explicit worklist; the
+call nesting of the `_Alignas` route is inherited from #2829 and is not removed
+here. An array bound does not nest: it asks the typed query only from the
+outermost solve (`c_parse_layout_typed_array_bound`), and a bound inside a
+query stays unresolved. Most cast bounds never ask. The rewrite wraps an
+integer cast with a mask and sign flip, and treats a cast to `float`, `double`
+or `long double` as the identity when the bound only adds and multiplies
+non-negative integers and its value stays below 2^24. An unsigned cast of 32 or
+more bits that is not the whole bound is exact on the same condition with the
+result below 2^32 (modular and ordinary arithmetic agree there); any other
+operator (`-`, `/`, shifts, comparisons), a floating literal, a cast to another
+type, or a larger result goes to the typed query. The known gaps are tracked on
+#1258: a member `_Alignas(_Alignof(int (*)[3]))` or `sizeof` of a parenthesized
+abstract declarator is not folded, `(enum E)X` in a bound goes to the typed
+query, `(float)3` is accepted where GCC refuses it, a typed bound that names a
+type whose own bound needs the typed query stays unresolved, and an
+unparenthesized `sizeof` operand other than a single name in a bound
+(`sizeof -1`, `sizeof *p`) is unresolved with or without a cast (the bound
+reader never read it; the regression rows pin the diagnostic).
+`c_test_declaration_constraints` covers these beside the negative-bound and
+false-assertion refusals (#1258).
+
 Object alignment consumes the same declaration runs as standalone `_Alignof`,
 including literal requests, type-naming requests and completed redeclarations.
 The legacy layout reader still cannot evaluate identifier-bearing alignment
