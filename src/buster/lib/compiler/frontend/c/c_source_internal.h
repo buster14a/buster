@@ -33,6 +33,41 @@ struct CSourceAllocationPlan
     u64 checkpoint_capacity;
 };
 
+// A preprocessing run that can stop between text lines and resume (GitHub
+// #3102, preprocessor fusion). c_preprocess is begin, one
+// c_preprocess_run_lines to the end and finish; the fused syntax-tree pilot
+// (c_ast_build_fused) asks for output a batch at a time instead. The run state
+// is private to c_source.c and lives in the run's phase arena.
+typedef struct CPreprocessRun CPreprocessRun;
+
+typedef struct CPreprocessRunView CPreprocessRunView;
+struct CPreprocessRunView
+{
+    // The output stream. Its base never moves while lines land, and the main
+    // loop never writes a row below `produced` again; only the final-stream
+    // passes in c_preprocess_run_finish can, and they report it.
+    CToken const* tokens;
+    char8 const* spelling_base;
+    // The run's symbol table, still growing: ids already handed out are final.
+    CSymbolTable* symbols;
+    u64 produced;
+    // No line is left; the run's next call must be c_preprocess_run_finish.
+    bool lines_done;
+};
+
+// Opens a run, or returns null when none can start (an oversized source, a
+// failed reservation or no arena); *early then holds the result to publish.
+BUSTER_F_DECL CPreprocessRun* c_preprocess_run_begin(Arena* arena, String8 source, CPreprocessOptions options, CPreprocessResult* early);
+// Runs text lines until at least `output_target` tokens are committed or the
+// lines run out. One line can commit many tokens, so `produced` may pass the
+// target. Never called again after a view reports lines_done.
+BUSTER_F_DECL CPreprocessRunView c_preprocess_run_lines(CPreprocessRun* run, u64 output_target);
+// Appends the end-of-file token, runs the final-stream passes, seals the
+// result and releases the run. When `rewritten_tokens` is not null it receives
+// the number of rows those passes respelled or inserted: C23 and UCN
+// identifier respellings, GNU obsolete designators and `__label__` renames.
+BUSTER_F_DECL CPreprocessResult c_preprocess_run_finish(CPreprocessRun* run, u64* rewritten_tokens);
+
 typedef struct CIncludeFileIdentity CIncludeFileIdentity;
 struct CIncludeFileIdentity
 {
