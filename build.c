@@ -104,6 +104,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_NONE,
     BUILD_COMMAND_BENCH_THROUGHPUT,
     BUILD_COMMAND_BENCH_THROUGHPUT_CI,
+    BUILD_COMMAND_COMPILER_CLOSURE,
     BUILD_COMMAND_PRODUCTION_PROFILE,
     BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST,
     BUILD_COMMAND_GENERATE,
@@ -25380,6 +25381,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
     {
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
         case BUILD_COMMAND_TEST_UNITS_PARTITIONED:
+        case BUILD_COMMAND_COMPILER_CLOSURE:
         case BUILD_COMMAND_PRODUCTION_PROFILE:
         case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
         case BUILD_COMMAND_CLANG_ANALYZE:
@@ -39335,6 +39337,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 }
 
 #include "tools/production_profile.c"
+#include "tools/compiler_closure.c"
 #include "tools/source_size.c"
 #include "tools/ci_no_code.c"
 #include "tools/ci_unit_tests.c"
@@ -39355,6 +39358,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_NONE] = S8_INITIALIZER("none"),
         [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
         [BUILD_COMMAND_BENCH_THROUGHPUT_CI] = S8_INITIALIZER("bench_throughput_ci"),
+        [BUILD_COMMAND_COMPILER_CLOSURE] = S8_INITIALIZER("compiler_closure"),
         [BUILD_COMMAND_PRODUCTION_PROFILE] = S8_INITIALIZER("production_profile"),
         [BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST] = S8_INITIALIZER("production_profile_self_test"),
         [BUILD_COMMAND_GENERATE] = S8_INITIALIZER("generate"),
@@ -39497,6 +39501,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         {
             case BUILD_COMMAND_MATRIX_PHASE_RUN: result = matrix_phase_run(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UNITS_PARTITIONED: result = ci_unit_tests_main(arena, owned_arguments, arguments.pointer[0]); break;
+            case BUILD_COMMAND_COMPILER_CLOSURE: result = compiler_closure_main(arena, owned_arguments); break;
             case BUILD_COMMAND_PRODUCTION_PROFILE: result = production_profile_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST: result = production_profile_self_test(arena); break;
             case BUILD_COMMAND_CLANG_ANALYZE: result = clang_analyze_main(arena, owned_arguments); break;
