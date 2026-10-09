@@ -255,7 +255,7 @@ def validate_packet(identity: object, attempts: object, terminal: object, series
                           "request_head": request.get("request_head")}
     if not isinstance(identity, dict) or identity != frozen or any(frozen.get(key) != value for key, value in expected_constants.items()):
         problems.append("packet identity contradicts authenticated frozen identities or predeclared schedule")
-    for key in ("base", "base_tree", "baseline_revision", "candidate_revision"):
+    for key in ("base", "base_tree", "baseline_revision", "candidate_revision", "trusted_revision"):
         if not HEX40.fullmatch(str(frozen.get(key, ""))):
             problems.append(f"frozen {key} source identity is missing or malformed")
     for key in ("baseline_sha256", "candidate_sha256", "lab_sha256", "protocol_sha256", "python_sha256",
