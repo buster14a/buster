@@ -125,6 +125,10 @@ request: PR #3154 issue #1488 bound per-clear union-state preservation; source 2
 request: PR #3155 issue #3143 malformed syntax diagnostics; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3155 issue #3143 fresh syntax-only candidate preserving semicolon recovery; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3155 issue #3143 return-scoped syntax-only diagnostics; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
+request: issue #1297 idle member-offset committed-layout replay and reached-set scratch; validated production c1b2481103fc22ee20a7a2e48de6f600eb3fb1df; fresh compiler-compare-v1 and throughput-corpus-v2 qualification
+request: PR #3141 issue #1297 member-owner replay preserving aligned aggregate views; validated production 9a377bdcf6b20f48826747f67ee896395b719aaa; renewed exact-head compiler-compare-v1 and throughput-corpus-v2 qualification
+request: PR #3141 issue #1297 preserved-parent integration of main fcf5790c4aa3452396113b99eaeecb9f7c496b91 including #3121 inferred-bound finalization and shared scaling fixtures; fresh exact-head compiler-compare-v1 and throughput-corpus-v2 qualification
+request: PR #3141 issue #1297 conflict-preserving source repair atop frozen main 8ea54465a2309f95bcb160143ce4804e05a8dbc8; fresh exact-head compiler-compare-v1 and throughput-corpus-v2 qualification; prior candidate results do not carry forward
 request: issue #2717 candidate default -g complete-entry-store scalar pinning; compare exact PR head and throughput-corpus-v2
 request: PR #3157 issue #2717 final default -g scalar location candidate after dense-scan review; compare exact head
 # request: PR #3157 issue #2717 remove analyzer dead store; compare the final exact PR head

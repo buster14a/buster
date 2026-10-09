@@ -42,6 +42,32 @@ def corpus_members() -> dict:
             "throughput/metadata.json": json.dumps(documents["metadata"])}
 
 
+class ArtifactDownloadBoundsTest(unittest.TestCase):
+    def download(self, payload, **limits):
+        redirected = urllib.error.HTTPError("https://api.github.com/archive", 302, "redirect",
+                                            {"Location": "https://storage.invalid/archive"}, None)
+        opener = mock.Mock()
+        opener.open.side_effect = redirected
+        response = io.BytesIO(payload)
+        with mock.patch.object(compiler_github.urllib.request, "build_opener", return_value=opener), \
+                mock.patch.object(compiler_github.urllib.request, "urlopen", return_value=response) as storage:
+            result = compiler_github.Api(REPO, "test-token").download("https://api.github.com/archive", **limits)
+            self.assertNotIn("Authorization", storage.call_args.args[0].headers)
+        return result
+
+    def test_bounded_preparation_download_reuses_tokenless_redirect(self):
+        self.assertEqual(self.download(b"1234", max_bytes=4), b"1234")
+        with self.assertRaises(OSError):
+            self.download(b"12345", max_bytes=4)
+
+    def test_invalid_new_bound_is_rejected_before_request(self):
+        with mock.patch.object(compiler_github.urllib.request, "build_opener") as request:
+            for limit in (True, 0, -1, (2 << 30) + 1, "4"):
+                with self.subTest(limit=limit), self.assertRaises(ValueError):
+                    compiler_github.Api(REPO, "test-token").download("https://api.github.com/archive", max_bytes=limit)
+            request.assert_not_called()
+
+
 class FakeGitHub(compiler_github.Api):
     def __init__(self):
         super().__init__(REPO, "token")
