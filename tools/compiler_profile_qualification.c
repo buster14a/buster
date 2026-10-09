@@ -6,6 +6,7 @@
 #include "compiler_profile_qualification_ledger.c"
 #include "compiler_profile_qualification_freeze.c"
 #include "compiler_profile_qualification_admission.c"
+#include "compiler_preparation_qualification_admission.c"
 #include "compiler_experiment_supervisor.c"
 
 #define BUSTER_SAMPLING_PACKET_LIMIT_US (60ull * 60ull * 1000000ull)
@@ -226,6 +227,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_self_test(Arena* arena)
         !compiler_sampling_path_overlap(S8("/tmp/output"), S8("/tmp/output-other"));
     good = good && compiler_experiment_supervisor_self_test(arena);
     good = good && compiler_sampling_freeze_self_test(arena) && compiler_sampling_admission_self_test(arena);
+    good = good && compiler_preparation_admission_self_test(arena);
     good = good && compiler_sampling_schedule_self_test(arena) == PROCESS_RESULT_SUCCESS;
     good = good && compiler_sampling_controller_self_test(arena);
     if (!good) result = PROCESS_RESULT_FAILED;
@@ -712,11 +714,53 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
 
 #include "compiler_profile_qualification_controller.c"
 
+
+BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_preparation_admit(Arena* arena, SliceString8 arguments)
+{
+    ProcessResult result = PROCESS_RESULT_FAILED;
+    CompilerPreparationAdmission admitted = {0};
+    bool cleanup_present = false, workspace_present = false;
+    String8 observed_cleanup = compiler_sampling_controller_environment(S8("RUNNER_TEMP"), &cleanup_present);
+    String8 observed_workspace = compiler_sampling_controller_environment(S8("GITHUB_WORKSPACE"), &workspace_present);
+    bool valid = arguments.length == 9 && cleanup_present && workspace_present;
+    String8 data[5] = {0};
+    u64 limits[] = {16384, 512, 16384, BUSTER_SAMPLING_ADMISSION_HISTORY_MAX_BYTES, BUSTER_SAMPLING_FREEZE_MAX_BYTES};
+    for (u64 i = 0; valid && i < BUSTER_ARRAY_LENGTH(data); i += 1)
+    {
+        data[i] = compiler_sampling_controller_read(arena, arguments.pointer[i + 1], limits[i]);
+        valid = data[i].length != 0;
+    }
+    String8 cleanup = valid ? os_path_absolute(arena, observed_cleanup, true) : (String8){0};
+    String8 workspace = valid ? os_path_absolute(arena, observed_workspace, true) : (String8){0};
+    valid = valid && cleanup.length && workspace.length &&
+        string_equal(cleanup, os_path_absolute(arena, arguments.pointer[6], true)) &&
+        string_equal(workspace, os_path_absolute(arena, arguments.pointer[7], true));
+    if (valid) admitted = compiler_preparation_admission_validate(arena, data[0], data[1], data[2], data[3], data[4], cleanup, workspace);
+    if (admitted.valid)
+    {
+        CompilerPreparationPlan plan = admitted.plan;
+        String8 outputs = string_format(arena,
+            S8("preparation_admitted=true\npreparation_phase=qualify\npreparation_packet=0\npreparation_reservation_seconds={u64}\n"
+               "preparation_worker_seconds={u64}\npreparation_timeout_minutes={u64}\npreparation_plan_revision={S8}\npreparation_plan_sha256={S8}\n"
+               "preparation_protocol_sha256={S8}\npreparation_base={S8}\npreparation_base_tree={S8}\n"
+               "preparation_candidate_revision={S8}\npreparation_candidate_tree={S8}\npreparation_trusted_revision={S8}\n"),
+            admitted.reservation_seconds, admitted.worker_seconds, admitted.timeout_minutes, admitted.freeze_revision, admitted.freeze_sha256,
+            admitted.protocol_sha256, plan.baseline_revision, plan.baseline_tree, plan.candidate_revision, plan.candidate_tree, admitted.trusted_revision);
+        if (file_write(arguments.pointer[8], BUSTER_SLICE_TO_BYTE_SLICE(outputs))) result = PROCESS_RESULT_SUCCESS;
+    }
+    if (result != PROCESS_RESULT_SUCCESS) string_print(S8("error: distinct preparation qualification admission is disabled or invalid\n"));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* arena, SliceString8 arguments)
 {
     CompilerSamplingOptions options = compiler_sampling_parse(arguments);
     ProcessResult result = PROCESS_RESULT_FAILED;
-    if (options.valid && options.self_test)
+    if (arguments.length && string_equal(arguments.pointer[0], S8("--admit-preparation")))
+    {
+        result = compiler_sampling_preparation_admit(arena, arguments);
+    }
+    else if (options.valid && options.self_test)
     {
         result = compiler_sampling_self_test(arena);
     }
