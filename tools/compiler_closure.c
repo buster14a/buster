@@ -222,6 +222,17 @@ BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult compiler_closure_capture(Aren
         .length = result.wait.streams[STANDARD_STREAM_OUTPUT].length};
     result.error = (String8){.pointer = (char8*)result.wait.streams[STANDARD_STREAM_ERROR].pointer,
         .length = result.wait.streams[STANDARD_STREAM_ERROR].length};
+    if (!result.success)
+    {
+        string_print(S8("COMPILER_CLOSURE_PROBE failed command={S8} result={u64} status={u64} timed_out={u64} "
+            "capture_failed={u64} tree_failed={u64} retained={u64} lost={u64} cleanup={u64} signalled={u64} reaped={u64} "
+            "cancelled={u64} error={S8}\n"),
+            arguments.length ? arguments.pointer[0] : S8("-"), (u64)result.wait.result, (u64)result.wait.platform_status,
+            (u64)result.wait.timed_out, (u64)result.wait.capture_failed, (u64)result.wait.process_tree_cleanup_failed,
+            (u64)result.wait.process_group_reservation_retained, (u64)result.wait.process_group_ownership_lost,
+            phase.cleanup_proven ? 1ull : 0ull, phase.signalled, phase.reaped,
+            process_control_atomic_load(&compiler_closure_cancel_signal), result.error);
+    }
     return result;
 }
 
