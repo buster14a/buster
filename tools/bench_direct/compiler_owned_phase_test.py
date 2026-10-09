@@ -256,7 +256,7 @@ class ActualNativeOwner(unittest.TestCase):
 
     def test_signal_crashed_probe_cannot_be_an_expected_failure(self):
         with self.assertRaises(compare.OwnedPhaseFailed):
-            compare.captured_run(["/bin/sh", "-c", "kill -SEGV $"], cwd=self.work,
+            compare.captured_run(["/bin/sh", "-c", "kill -SEGV $$"], cwd=self.work,
                                  capture_output=True, check=False, timeout=5)
         native, _ = self.raw()
         self.assertTrue(native["cleanup_proven"])
