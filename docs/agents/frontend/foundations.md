@@ -1739,12 +1739,19 @@ the definition; a definition with attributes between its keyword and its body
 diagnostic in a block initializer, because the expression parser sizes such a
 type name wrongly and an unrecognized body would bind to an outer name of the
 same spelling. A C23 `for` declaration publishes the
-same way; the pre-C23 `for` declaration (C17 6.8.5p3, #2392), C23 `auto` and
-`constexpr` initializers keep their previous behavior pending a maintainer
-decision. That behavior is silent for a name an outer scope also declares: the
-body's enumerator binds to the outer one (`for (int i = sizeof(struct { enum
-{ A = 3 } e; char c[A]; }); ...)` under `-std=gnu17` sizes `c` with the outer
-`A`), so #2392 must record it as a miscompile witness, not a refusal.
+same way. The pre-C23 `for` declaration (C17 6.8.5p3, DR277), C23 `auto` and
+C23 `constexpr` initializers do not publish a definition at its own point, and
+binding its names to an outer enumerator of the same spelling would miscompile
+(`for (int i = sizeof(struct { enum { A = 3 } e; char c[A]; }); ...)` under
+`-std=gnu17` would size `c` with the outer `A`). `c_parse_range_defines_enumerator`
+finds an enum definition in such an initializer, outside a statement expression,
+and `c_parse_local_declarations` refuses it with an unsupported-semantics
+diagnostic (the `for` case with the C17 6.8.5p3 wording, which GCC and Clang
+also reject; GCC 13 rejects the `auto` and `constexpr` cases as well, Clang 18
+accepts `auto`). Publishing them like other initializers, the alternative
+policy, is tracked by #3252: until then a C23 program that defines an enum in
+an `auto` or `constexpr` initializer is refused, even where it names no
+outer enumerator.
 `c_test_initializer_enum_scope` checks acceptance/refusal, unique publication
 and both canonical frontend forms on the same three layouts, plus GNU17 and C23
 cases through `c_test_enum_scope_case`.
@@ -1766,10 +1773,21 @@ list (`int (*p)(int [sizeof(enum { R = 2 })])`) is in that prototype's scope
 (C17 6.2.1p4): the walk marks its members `is_prototype_scope`, a `(` that
 follows a `(*...)` declarator group, a parenthesised declarator name (`typedef int (F)(...)`) or a declarator name at the top of the declaration (`typedef int F(int a[...])`, with nothing open and before any initializer; attribute and operator groups such as `__attribute__((...))`, `sizeof`, `__alignof__` and `__builtin_*` never open one) opening the list, and neither publication
 nor pending lookup sees them, so they neither clash with nor reach the file.
-File-scope enumerators are still published together after the declarations, so a
-use before the definition is accepted, as for any file-scope enumerator
-(`int y = R; unsigned long x = sizeof(enum { R = 2 });`), and a clash with a later
-declaration is reported at the enumerator. Remaining under #1615: an enum defined as a later argument of a call-like group (`__builtin_types_compatible_p(int, enum { R = 2 })`) is not walked, only one that follows a `(`; prototype-scope
+File-scope enumerators are still published together after the declarations, but an
+enumerator's scope begins at its own definition (C17 6.2.1p7), so
+`c_parse_diagnose_early_expression_enum_uses` then rereads the file-scope
+declarations that are not function definitions (a body's own binding already
+refuses) and diagnoses each identifier that resolves to an expression-defined
+enumerator defined at a later token as `use of undeclared identifier`
+(`int y = R; unsigned long x = sizeof(enum { R = 2 });` is refused, as GCC and
+Clang refuse it; a later use is accepted). A token counts as a use by what
+precedes it: a member selection, a declarator after a type word or `*`, a
+closing bracket and a list separator outside parentheses, brackets and
+initializers do not, so a record member or a local named like the enumerator is
+not a use. The scan is a heuristic over tokens, not a binding pass. A clash with a later
+declaration is reported at the enumerator. Classification of prototype lists keeps
+its open-parenthesis state in arena-allocated bit arrays sized by the range's
+token count, so nesting depth has no limit. Remaining under #1615: an enum defined as a later argument of a call-like group (`__builtin_types_compatible_p(int, enum { R = 2 })`) is not walked, only one that follows a `(`; prototype-scope
 names in a function definition's parameter bounds, which are also visible in its
 body (`int f(int a[sizeof(enum { R = 2 })]) { return R; }` is refused, and so is
 `int f(int a[sizeof(struct { enum { A = 3 } e; char c[A]; })])`), a prototype

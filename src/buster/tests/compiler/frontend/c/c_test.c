@@ -9037,6 +9037,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_expression_enum_scope(UnitT
         // Qualified and fixed-underlying-type names publish too.
         S8("unsigned long x=sizeof(const enum{R=2});int y=R;int main(void){return y-2;}"),
         S8("unsigned long x=sizeof(const enum E{R=2});enum E e=R;int main(void){return (int)e-2;}"),
+        // A member or a local of the same spelling is not a use of the
+        // enumerator, and a use after the definition still binds it.
+        S8("struct S{int a,R;};unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
+        S8("int f(void){int R=5;return R;}unsigned long x=sizeof(enum{R=2});int main(void){return f()-5+R-2;}"),
     };
     String8 rejected[] = {
         S8("enum{R=9};unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
@@ -9049,11 +9053,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_expression_enum_scope(UnitT
         S8("unsigned long x=sizeof(enum{R=2});typedef int R;int main(void){return 0;}"),
         // A prototype-scope name does not leak to the file.
         S8("int (*p)(int [sizeof(enum{R=2})]);int main(void){return R;}"),
+        // The scope of an enumerator begins after its definition (C17
+        // 6.2.1p7): GCC and Clang diagnose each of these as undeclared.
+        S8("int y=R;unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
+        S8("unsigned long x=R+sizeof(enum{R=2});int main(void){return 0;}"),
+        S8("int a[R];int b[sizeof(enum{R=2})];int main(void){return 0;}"),
+        S8("_Static_assert(R==2,\"early\");unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
     };
     CDiagnosticKind rejected_kinds[] = {
         C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION,
         C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION,
-        C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+        C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+        C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
     };
     Target targets[] = {target_native, target_native, target_native};
     targets[0].cpu_arch = CPU_ARCH_X86_64;
@@ -9092,6 +9103,44 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_expression_enum_scope(UnitT
     c_test_enum_scope_case(arguments, &result, (String8){.pointer = stress_buffer, .length = stress_length}, C_PREPROCESS_DIALECT_C17, target_native, false, true,
                            C_DIAGNOSTIC_REDEFINITION);
     scratch_end(stress_scratch);
+    // A function body's earlier use is refused when the body lowers, not at
+    // parse: the file-scope scan leaves bodies to their own binding.
+    {
+        TemporalArena body_scratch = scratch_begin(0, 0);
+        String8 body_source = S8("int f(void){return R;}unsigned long x=sizeof(enum{R=2});int main(void){return 0;}");
+        CPreprocessResult body_tokens = c_preprocess(body_scratch.arena, body_source, (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_C17,
+        });
+        CParseResult body_parse = c_parse(body_scratch.arena, body_tokens);
+        CIRLowerResult body_lowered = c_lower_to_ir_with_options(body_scratch.arena, S8("early-body-use.c"), body_tokens, body_parse, target_native,
+                                                                 (CIRLowerOptions){0});
+        BUSTER_TEST_RAW(arguments, body_parse.diagnostic_count != 0 || (body_lowered.diagnostic_count != 0 && body_lowered.program == 0), body_source);
+        scratch_end(body_scratch);
+    }
+    // Prototype-scope classification has no nesting limit: a definition 100
+    // parentheses deep inside a parameter list is still that prototype's.
+    TemporalArena deep_scratch = scratch_begin(0, 0);
+    u32 deep_levels = 100;
+    for (u32 variant = 0; variant < 2; variant += 1)
+    {
+        u64 deep_capacity = BUSTER_KB(4);
+        char8* deep_buffer = arena_allocate(deep_scratch.arena, char8, deep_capacity);
+        u64 deep_length = 0;
+        c_test_append_source(deep_buffer, deep_capacity, &deep_length, variant ? S8("int (*p)(int [") : S8("enum{R=1};int (*p)(int ["));
+        for (u32 level = 0; level < deep_levels; level += 1)
+        {
+            c_test_append_source(deep_buffer, deep_capacity, &deep_length, S8("("));
+        }
+        c_test_append_source(deep_buffer, deep_capacity, &deep_length, S8("sizeof(enum{R=2})"));
+        for (u32 level = 0; level < deep_levels; level += 1)
+        {
+            c_test_append_source(deep_buffer, deep_capacity, &deep_length, S8(")"));
+        }
+        c_test_append_source(deep_buffer, deep_capacity, &deep_length, variant ? S8("]);int main(void){return R;}\n") : S8("]);int main(void){return R-1;}\n"));
+        c_test_enum_scope_case(arguments, &result, (String8){.pointer = deep_buffer, .length = deep_length}, C_PREPROCESS_DIALECT_C17, target_native, false,
+                               variant == 0, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER);
+    }
+    scratch_end(deep_scratch);
     return result;
 }
 
@@ -9348,6 +9397,31 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_scope(UnitTestArgumen
             }
             c_test_enum_scope_case(arguments, &result, S8("int main(void){for(int i=(int)sizeof(enum{K=4});i<1;i++);return K;}"), C_PREPROCESS_DIALECT_C23,
                                    targets[target_index], form != 0, false, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER);
+            // A definition these paths cannot publish at its own point is
+            // refused, never bound to an outer enumerator of the same name
+            // (#3252): GCC and Clang reject the pre-C23 for case, GCC the C23
+            // auto and constexpr ones; they are refused until published.
+            String8 refused_sources[] = {
+                S8("enum{A=100};int main(void){for(int i=(int)sizeof(struct{enum{A=3}e;char c[A];});i<0;i++);return 0;}"),
+                S8("int main(void){for(int i=(int)sizeof(enum{K=4});i<0;i++);return 0;}"),
+            };
+            for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(refused_sources); fixture += 1)
+            {
+                c_test_enum_scope_case(arguments, &result, refused_sources[fixture], C_PREPROCESS_DIALECT_GNU17, targets[target_index], form != 0, false,
+                                       C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                c_test_enum_scope_case(arguments, &result, refused_sources[fixture], C_PREPROCESS_DIALECT_C17, targets[target_index], form != 0, false,
+                                       C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+            }
+            String8 c23_refused[] = {
+                S8("enum{A=100};int main(void){auto n=sizeof(struct{enum{A=3}e;char c[A];});return (int)n;}"),
+                S8("enum{A=100};int main(void){constexpr int n=sizeof(struct{enum{A=3}e;char c[A];});return n;}"),
+                S8("int main(void){constexpr int n=sizeof(enum{K=4});return n;}"),
+            };
+            for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(c23_refused); fixture += 1)
+            {
+                c_test_enum_scope_case(arguments, &result, c23_refused[fixture], C_PREPROCESS_DIALECT_C23, targets[target_index], form != 0, false,
+                                       C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+            }
         }
     }
     return result;

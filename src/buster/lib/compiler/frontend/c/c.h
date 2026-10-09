@@ -1131,7 +1131,11 @@ struct CEnumMember
     // lives in that prototype's scope (C17 6.2.1p4) and is never published
     // at file scope nor found by pending lookup from outside it.
     bool is_prototype_scope;
-    u8 reserved[5];
+    // Defined by an enum type name inside a file-scope declaration's
+    // initializer, bound or static assertion. Its scope begins at its own
+    // definition (C17 6.2.1p7), so an earlier file-scope use is diagnosed.
+    bool is_expression_defined;
+    u8 reserved[4];
 };
 BUSTER_CT_CHECK(sizeof(CEnumMember) == 96);
 
