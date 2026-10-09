@@ -26985,12 +26985,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 
-    // A later optimization level restores FAST after an explicit QUALITY selection.
+    // Optimization levels preserve an explicit QUALITY selection.
     String8 register_allocator_reenabled_command_line[] = {S8("-fregister-allocator=quality"), S8("-O1"), S8("source.c")};
     CompilerDriverInvocation register_allocator_reenabled = compiler_driver_parse_arguments(
         arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(register_allocator_reenabled_command_line));
     BUSTER_TEST(arguments, register_allocator_reenabled.error == COMPILER_DRIVER_ERROR_NONE);
-    BUSTER_TEST(arguments, register_allocator_reenabled.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST);
+    BUSTER_TEST(arguments, register_allocator_reenabled.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY);
 
     String8 register_allocator_quality_command_line[] = {S8("-O3"), S8("-fregister-allocator=quality"), S8("source.c")};
     CompilerDriverInvocation register_allocator_quality = compiler_driver_parse_arguments(
@@ -40426,7 +40426,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
 #endif
-        // QUALITY after -O2 remains explicit; a later -O2 restores FAST.
+        // QUALITY remains explicit across -O2; a later allocator flag selects FAST.
         {
             String8 sticky_quality_path = buster_test_temporary_path(asm_unit_arena, S8("buster-c-allocator-sticky-quality"), S8(".o"));
             String8 sticky_fast_path = buster_test_temporary_path(asm_unit_arena, S8("buster-c-allocator-sticky-fast"), S8(".o"));
@@ -40435,7 +40435,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 S8("tests/basic_c_explicit_allocator_sticks.c"),
             };
             String8 fast_command[] = {
-                S8("-fregister-allocator=quality"), S8("-O2"), S8("-fverify-codegen"), S8("-c"), S8("-o"), sticky_fast_path,
+                S8("-fregister-allocator=quality"), S8("-O2"), S8("-fregister-allocator=fast"), S8("-fverify-codegen"), S8("-c"), S8("-o"), sticky_fast_path,
                 S8("tests/basic_c_explicit_allocator_sticks.c"),
             };
             CompilerDriverInvocation quality_invocation = compiler_driver_parse_arguments(asm_unit_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(quality_command));
