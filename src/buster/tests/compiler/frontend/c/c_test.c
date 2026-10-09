@@ -16909,11 +16909,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_runtime(UnitTestArguments* argumen
         }
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
         String8 references[] = {S8("gcc"), S8("clang")};
-        // Clang 18.1.3 and 20.1.2 do not match an identifier pasted from a UCN to its
-        // UTF-8 spelling and report the pasted `πtail` as undeclared (#2490). Clang 22.1.8
-        // and 23.1.1 accept it; 21 is untested and treated as affected. The version test lives only in this external-compiler prefix: Buster
-        // reports __clang_major__ as 18, so the shared source cannot test it. Buster
-        // still compiles the pasted form above. This prefix is not given to Buster.
+        // Clang 18.1.3 and 20.1.2 do not match an identifier pasted from a UCN to
+        // its UTF-8 spelling and report the pasted `πtail` as undeclared (#2490).
+        // Clang 22.1.8 and 23.1.1 accept it; 21 is untested and treated as
+        // affected. The version test lives only in this external-compiler prefix:
+        // Buster reports __clang_major__ as 18, so the shared source cannot test
+        // it. Buster still compiles the pasted form above. This prefix is not
+        // given to Buster. Like its neighbours, this test leaves its temporary
+        // files in place.
         String8 reference_prefixes[] = {
             S8(""),
             S8("#if !defined(__clang__)\n#error expected a Clang reference\n#endif\n"
