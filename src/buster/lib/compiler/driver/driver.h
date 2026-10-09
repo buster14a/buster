@@ -113,6 +113,19 @@ typedef enum CompilerDriverCDialect
     COMPILER_DRIVER_C_DIALECT_COUNT,
 } CompilerDriverCDialect;
 
+// -fc-ast-pilot[=layout] (GitHub #3102): build the implicit postorder C syntax
+// tree of each C input after preprocessing and before c_parse_ast, inside the
+// parse phase. The tree feeds no later stage yet; a unit the tree builder
+// rejects fails with the parse error class. OFF is the default.
+typedef enum CompilerDriverCAstPilot
+{
+    COMPILER_DRIVER_C_AST_PILOT_OFF,
+    COMPILER_DRIVER_C_AST_PILOT_IMPLICIT,
+    COMPILER_DRIVER_C_AST_PILOT_HYBRID,
+    COMPILER_DRIVER_C_AST_PILOT_EXPLICIT,
+    COMPILER_DRIVER_C_AST_PILOT_COUNT,
+} CompilerDriverCAstPilot;
+
 typedef enum CompilerDriverLinkOperationKind
 {
     COMPILER_DRIVER_LINK_OPERATION_FILE,
@@ -225,6 +238,7 @@ struct CompilerDriverInvocation
     CompilerDriverLanguage language;
     CompilerDriverAction action;
     CompilerDriverCDialect c_dialect;
+    CompilerDriverCAstPilot c_ast_pilot;
     CompilerDriverError error;
     AssemblySyntax assembly_syntax;
     bool emit_llvm_bitcode;
@@ -411,6 +425,32 @@ struct CompilerDriverFallbackRecord
     u32 column;
 };
 
+// What the -fc-ast-pilot hook measured, summed over the inputs that built a
+// tree. `units` is zero when the hook did not run. The walk, scan and
+// children rows are diagnostic passes over the finished tree and are timed
+// only under -v: one full c_ast_walk (`walk_steps` events), one linear pass
+// over the kinds column counting CALL nodes (`scan_calls`), and
+// c_ast_children over every node into a scratch buffer (`child_entries` is
+// the sum of the child counts it returned).
+typedef struct CompilerDriverCAstPilotResult CompilerDriverCAstPilotResult;
+struct CompilerDriverCAstPilotResult
+{
+    u64 units;
+    u64 nodes;
+    u64 tokens;
+    u64 build_nanoseconds;
+    u64 retained_bytes;
+    u64 transient_high_water;
+    u64 sealed_copy_bytes;
+    u64 finalize_child_entries;
+    u64 walk_nanoseconds;
+    u64 walk_steps;
+    u64 scan_nanoseconds;
+    u64 scan_calls;
+    u64 children_nanoseconds;
+    u64 child_entries;
+};
+
 typedef struct CompilerDriverResult CompilerDriverResult;
 struct CompilerDriverResult
 {
@@ -418,6 +458,7 @@ struct CompilerDriverResult
     IrFastStatistics fast;
     CIRDirectSsaStatistics direct_ssa;
     CTypeLayoutStatistics type_layout;
+    CompilerDriverCAstPilotResult c_ast;
     String8 diagnostic;
     String8 warning;
     // Published in input/stage order, owned by the result arena. Empty on a
@@ -488,6 +529,9 @@ BUSTER_F_DECL void compiler_prewarm(void);
 // this before creating its first gang; ordinary serial compilation does not.
 BUSTER_F_DECL void compiler_parallel_prewarm(void);
 BUSTER_F_DECL CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments);
+// The layout spelling of -fc-ast-pilot=<layout> ("implicit", "hybrid",
+// "explicit"); "off" for COMPILER_DRIVER_C_AST_PILOT_OFF.
+BUSTER_F_DECL String8 compiler_driver_c_ast_pilot_name(CompilerDriverCAstPilot pilot);
 // The output of a parsed --version/-dumpversion/-dumpmachine query. The version
 // is the one the C frontend presents in __clang_major__/__clang_minor__/
 // __clang_patchlevel__; the machine is the invocation's effective target.

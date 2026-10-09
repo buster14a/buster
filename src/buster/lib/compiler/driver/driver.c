@@ -12,8 +12,9 @@
 // link_validate_linker_arguments owns their supported semantic subset.
 // compiler_driver_execute_invocation then runs the
 // selected pipeline: compiler_driver_execute_c_single carries a C input
-// through preprocess, parse, lowering, codegen, and object/executable
-// output (with -emit-llvm, WebAssembly, eBPF, and direct Vulkan compute
+// through preprocess, parse (the opt-in -fc-ast-pilot syntax-tree build,
+// compiler_driver_c_ast_pilot_run, runs ahead of c_parse_ast), lowering,
+// codegen, and object/executable output (with -emit-llvm, WebAssembly, eBPF, and direct Vulkan compute
 // SPIR-V as alternate canonical emissions), the
 // compiler_driver_preprocess_text serializer keeps -E line structure while
 // guarding every apparent adjacency with the C lexical-boundary rules, the
@@ -71,6 +72,7 @@
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 
 #include <buster/lib/compiler/frontend/c/c.h>
+#include <buster/lib/compiler/frontend/c/c_ast.h>
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/codegen/bootstrap_trace.h>
@@ -2035,6 +2037,33 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.disable_direct_ssa = string_equal(argument, S8("-fno-frontend-ssa"));
             continue;
         }
+        if (string_equal(argument, S8("-fc-ast-pilot")))
+        {
+            invocation.c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_IMPLICIT;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("-fc-ast-pilot="));
+        if (value.length)
+        {
+            if (string_equal(value, S8("implicit")))
+            {
+                invocation.c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_IMPLICIT;
+            }
+            else if (string_equal(value, S8("hybrid")))
+            {
+                invocation.c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_HYBRID;
+            }
+            else if (string_equal(value, S8("explicit")))
+            {
+                invocation.c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_EXPLICIT;
+            }
+            else
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("unsupported -fc-ast-pilot layout: {S8}"), value);
+                break;
+            }
+            continue;
+        }
         if (string_equal(argument, S8("-fno-canonical-local-promotion")) || string_equal(argument, S8("-fcanonical-local-promotion")))
         {
             invocation.disable_local_promotion = string_equal(argument, S8("-fno-canonical-local-promotion"));
@@ -3948,6 +3977,116 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_phase_begin(CompilerDriverUnitMetrics* 
     }
 }
 
+String8 compiler_driver_c_ast_pilot_name(CompilerDriverCAstPilot pilot)
+{
+    String8 name;
+    switch (pilot)
+    {
+    case COMPILER_DRIVER_C_AST_PILOT_IMPLICIT:
+        name = S8("implicit");
+        break;
+    case COMPILER_DRIVER_C_AST_PILOT_HYBRID:
+        name = S8("hybrid");
+        break;
+    case COMPILER_DRIVER_C_AST_PILOT_EXPLICIT:
+        name = S8("explicit");
+        break;
+    case COMPILER_DRIVER_C_AST_PILOT_OFF:
+    case COMPILER_DRIVER_C_AST_PILOT_COUNT:
+    default:
+        name = S8("off");
+        break;
+    }
+    return name;
+}
+
+BUSTER_GLOBAL_LOCAL CAstLayout compiler_driver_c_ast_pilot_layout(CompilerDriverCAstPilot pilot)
+{
+    CAstLayout layout;
+    switch (pilot)
+    {
+    case COMPILER_DRIVER_C_AST_PILOT_HYBRID:
+        layout = C_AST_LAYOUT_HYBRID;
+        break;
+    case COMPILER_DRIVER_C_AST_PILOT_EXPLICIT:
+        layout = C_AST_LAYOUT_EXPLICIT;
+        break;
+    case COMPILER_DRIVER_C_AST_PILOT_OFF:
+    case COMPILER_DRIVER_C_AST_PILOT_IMPLICIT:
+    case COMPILER_DRIVER_C_AST_PILOT_COUNT:
+    default:
+        layout = C_AST_LAYOUT_IMPLICIT;
+        break;
+    }
+    return layout;
+}
+
+// The -fc-ast-pilot hook (GitHub #3102): builds the syntax tree of one
+// preprocessed unit in the caller's arena, which keeps it until the unit's
+// arena is released; nothing reads it afterwards. The driver has no phase
+// arena to lend (c_preprocess is not given one either), so the builder makes
+// and retires a private one. A tree that is not complete fails the unit with
+// the parse error class and its diagnostics, published like c_parse_ast's.
+// Under -v three diagnostic passes over a finished tree are timed with the
+// same clock as the build: one c_ast_walk over the root, one linear pass over
+// the kinds column counting CALL nodes, and c_ast_children over every node
+// into a scratch buffer. Each pass feeds a counter that the -v line prints, so
+// none can be optimized away.
+BUSTER_GLOBAL_LOCAL CAstResult compiler_driver_c_ast_pilot_run(Arena* arena, CompilerDriverInvocation const* invocation, CPreprocessResult preprocess,
+                                                               CompilerDriverCAstPilotResult* pilot)
+{
+    TimeDataType start = timestamp_take();
+    CAstResult built = c_ast_build(arena, preprocess, (CAstOptions){.layout = compiler_driver_c_ast_pilot_layout(invocation->c_ast_pilot)});
+    u64 build_nanoseconds = timestamp_ns_between(start, timestamp_take());
+    if (built.complete)
+    {
+        pilot->units += 1;
+        pilot->nodes += built.ast.node_count;
+        pilot->tokens += preprocess.token_count;
+        pilot->build_nanoseconds += build_nanoseconds;
+        pilot->retained_bytes += built.statistics.retained_bytes;
+        pilot->transient_high_water += built.statistics.transient_high_water;
+        pilot->sealed_copy_bytes += built.statistics.sealed_copy_bytes;
+        pilot->finalize_child_entries += built.statistics.finalize_child_entries;
+        if (invocation->verbose)
+        {
+            TemporalArena temporary = arena_begin_temporal(arena);
+            start = timestamp_take();
+            CAstWalk walk = c_ast_walk_begin(temporary.arena, &built.ast, built.ast.root);
+            u32 node = 0;
+            while (c_ast_walk_next(&walk, &node) != C_AST_WALK_DONE)
+            {
+            }
+            pilot->walk_nanoseconds += timestamp_ns_between(start, timestamp_take());
+            pilot->walk_steps += walk.steps;
+            scratch_end(temporary);
+
+            start = timestamp_take();
+            u64 calls = 0;
+            for (u32 index = 0; index < built.ast.node_count; index += 1)
+            {
+                calls += built.ast.kinds[index] == C_AST_CALL;
+            }
+            pilot->scan_nanoseconds += timestamp_ns_between(start, timestamp_take());
+            pilot->scan_calls += calls;
+
+            u32 roots[256] = {0};
+            u32 volatile sink = 0;
+            u64 entries = 0;
+            start = timestamp_take();
+            for (u32 index = 0; index < built.ast.node_count; index += 1)
+            {
+                entries += c_ast_children(&built.ast, index, roots, BUSTER_ARRAY_LENGTH(roots));
+                sink = roots[0];
+            }
+            pilot->children_nanoseconds += timestamp_ns_between(start, timestamp_take());
+            pilot->child_entries += entries;
+            BUSTER_UNUSED(sink);
+        }
+    }
+    return built;
+}
+
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_llvm_target_triple(Target target)
 {
     if (target.cpu_arch == CPU_ARCH_WASM32)
@@ -5005,6 +5144,18 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     WORK_LEDGER_PHASE(PARSE);
     compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_PARSE);
+    if (invocation.c_ast_pilot != COMPILER_DRIVER_C_AST_PILOT_OFF)
+    {
+        CAstResult tree = compiler_driver_c_ast_pilot_run(arena, &invocation, preprocess, &result.c_ast);
+        if (!tree.complete)
+        {
+            result.parser_diagnostic_count = tree.diagnostic_count;
+            result.error = COMPILER_DRIVER_ERROR_PARSE;
+            result.diagnostic = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, tree.diagnostics, tree.diagnostic_count,
+                                                                      invocation.input_paths[0], (String8){0});
+            goto end;
+        }
+    }
     CParserResult syntax = c_parse_ast(arena, preprocess);
     result.parser_diagnostic_count = syntax.diagnostic_count;
     if (syntax.diagnostic_count)
@@ -6731,6 +6882,20 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.type_layout.agenda_notifications += unit.type_layout.agenda_notifications;
         result.type_layout.agenda_pushes += unit.type_layout.agenda_pushes;
         result.type_layout.agenda_fallbacks += unit.type_layout.agenda_fallbacks;
+        result.c_ast.units += unit.c_ast.units;
+        result.c_ast.nodes += unit.c_ast.nodes;
+        result.c_ast.tokens += unit.c_ast.tokens;
+        result.c_ast.build_nanoseconds += unit.c_ast.build_nanoseconds;
+        result.c_ast.retained_bytes += unit.c_ast.retained_bytes;
+        result.c_ast.transient_high_water += unit.c_ast.transient_high_water;
+        result.c_ast.sealed_copy_bytes += unit.c_ast.sealed_copy_bytes;
+        result.c_ast.finalize_child_entries += unit.c_ast.finalize_child_entries;
+        result.c_ast.walk_nanoseconds += unit.c_ast.walk_nanoseconds;
+        result.c_ast.walk_steps += unit.c_ast.walk_steps;
+        result.c_ast.scan_nanoseconds += unit.c_ast.scan_nanoseconds;
+        result.c_ast.scan_calls += unit.c_ast.scan_calls;
+        result.c_ast.children_nanoseconds += unit.c_ast.children_nanoseconds;
+        result.c_ast.child_entries += unit.c_ast.child_entries;
         result.local_promotion.candidate_locals += unit.local_promotion.candidate_locals;
         result.local_promotion.promoted_locals += unit.local_promotion.promoted_locals;
         result.local_promotion.removed_loads += unit.local_promotion.removed_loads;
