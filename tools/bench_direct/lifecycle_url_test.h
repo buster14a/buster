@@ -1,5 +1,5 @@
 // Synthetic canonical GitHub Actions check URLs for native recovery (#3209).
-// Included by lifecycle_test.h; lc_case_21 through lc_case_28 feed lc_self_test.
+// Included by lifecycle_test.h; canonical URL scenarios feed lc_self_test.
 // Exact check/request/executor/protocol boundaries are exercised without network.
 #ifndef BUSTER_9700X_LIFECYCLE_URL_TEST_H
 #define BUSTER_9700X_LIFECYCLE_URL_TEST_H
