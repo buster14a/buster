@@ -1612,6 +1612,15 @@ BUSTER_GLOBAL_LOCAL u32* object_assembly_initializer_priorities(ObjectFile* obje
     return result;
 }
 
+// STV_HIDDEN is stated with `.hidden` on the ELF targets whose text is GNU
+// assembler syntax; a text that dropped it would assemble back to a symbol the
+// source had hidden exported.
+BUSTER_GLOBAL_LOCAL bool object_assembly_states_hidden(Target target, ObjectSymbol* symbol)
+{
+    return symbol->hidden && (symbol->global || symbol->weak || symbol->section == OBJECT_SECTION_UNDEFINED) &&
+           object_format_for_target(target) == OBJECT_FORMAT_ELF64 && object_assembly_is_gnu_type_target(target);
+}
+
 BUSTER_GLOBAL_LOCAL void object_assembly_emit_labels(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target, u32 section, u64 offset)
 {
     u32 end = buffer->index.sections[section].symbol_end;
@@ -1622,6 +1631,12 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_labels(ObjectAssemblyBuffer* buffe
         if (object_assembly_is_aarch64_text_anchor(object, target, section, symbol))
         {
             continue;
+        }
+        if (object_assembly_states_hidden(target, symbol))
+        {
+            object_assembly_append_string(buffer, S8("\t.hidden "));
+            object_assembly_append_assembly_symbol(buffer, target, symbol->name);
+            object_assembly_append_string(buffer, S8("\n"));
         }
         if (symbol->weak && object_assembly_is_x86_64_elf(target))
         {
@@ -4391,8 +4406,8 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
         for (u32 symbol_index = 0; symbol_index < object->symbol_count && valid; symbol_index += 1)
         {
             u64 length = object->symbols[symbol_index].name.length;
-            valid = capacity <= UINT64_MAX - 128 && length <= (UINT64_MAX - capacity - 128) / 2;
-            if (valid) capacity += length * 2 + 128;
+            valid = capacity <= UINT64_MAX - 192 && length <= (UINT64_MAX - capacity - 192) / 3;
+            if (valid) capacity += length * 3 + 192;
         }
         valid = valid && object->relocation_count <= (UINT64_MAX - capacity) / 256;
         if (valid) capacity += (u64)object->relocation_count * 256;
@@ -4423,6 +4438,12 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
                     object_assembly_append_string(&buffer, symbol->weak && object_assembly_is_x86_64_elf(object->target) ? S8("\t.weak ") : S8("\t.extern "));
                     object_assembly_append_assembly_symbol(&buffer, object->target, symbol->name);
                     object_assembly_append_string(&buffer, S8("\n"));
+                    if (object_assembly_states_hidden(object->target, symbol))
+                    {
+                        object_assembly_append_string(&buffer, S8("\t.hidden "));
+                        object_assembly_append_assembly_symbol(&buffer, object->target, symbol->name);
+                        object_assembly_append_string(&buffer, S8("\n"));
+                    }
                 }
             }
             for (u32 section_index = 0; section_index < object->section_count && !buffer.error; section_index += 1)

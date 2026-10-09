@@ -11367,7 +11367,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_symbol_visibility(UnitTestArguments* a
         "#pragma GCC visibility push(hidden)\n"
         "int first_default_pragma_hidden(void) { return 1; }\n"
         "#pragma GCC visibility pop\n"
-        "int plain(void) { return local_static() + pragma_reference() + ext_hidden + ext_plain; }\n");
+        "int plain(void) { return local_static() + pragma_reference() + ext_hidden + ext_plain; }\n"
+        // An attribute after the closing brace of a tag body belongs to the type,
+        // as GCC and Clang read it, so the variables it declares stay default; one
+        // after the declarator is the variable's.
+        "struct TagA { int a; } __attribute__((visibility(\"hidden\"))) tag_a;\n"
+        "struct TagC { int a; } __attribute__((visibility(\"hidden\"))) tag_c1, tag_c2;\n"
+        "enum TagE { TAG_E } __attribute__((visibility(\"hidden\"))) tag_e;\n"
+        "union TagU { int a; } __attribute__((visibility(\"hidden\"))) tag_u;\n"
+        "struct TagF { int a; } tag_f __attribute__((visibility(\"hidden\")));\n"
+        "struct TagS { int a; } const __attribute__((visibility(\"hidden\"))) tag_s = {1};\n"
+        // The argument is any string literal spelling: concatenated or u8-prefixed.
+        "__attribute__((visibility(\"hid\" \"den\"))) int concatenated = 1;\n"
+        "__attribute__((visibility(u8\"hidden\"))) int prefixed = 1;\n"
+        // Block-scope extern object declarations state a visibility too, by
+        // attribute before or after the declarator or by the active pragma.
+        "int block_user(void)\n"
+        "{\n"
+        "    extern int bx_after __attribute__((visibility(\"hidden\")));\n"
+        "    __attribute__((visibility(\"hidden\"))) extern int bx_before;\n"
+        "    extern int bx_plain;\n"
+        "    extern int bx_list_a __attribute__((visibility(\"hidden\"))), bx_list_b;\n"
+        "    return bx_after + bx_before + bx_plain + bx_list_a + bx_list_b;\n"
+        "}\n"
+        "#pragma GCC visibility push(hidden)\n"
+        "int block_pragma(void) { extern int bx_pragma; return bx_pragma; }\n"
+        "#pragma GCC visibility pop\n");
     struct { String8 name; s32 plain; s32 hidden_option; s32 default_option; } expectations[] = {
         {S8("hv"), 1, 1, 1},
         {S8("hf"), 1, 1, 1},
@@ -11398,6 +11423,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_symbol_visibility(UnitTestArguments* a
         {S8("first_attribute_default"), 0, 0, 0},
         {S8("first_default_pragma_hidden"), 0, 0, 0},
         {S8("plain"), 0, 1, 0},
+        {S8("tag_a"), 0, 1, 0},
+        {S8("tag_c1"), 0, 1, 0},
+        {S8("tag_c2"), 0, 1, 0},
+        {S8("tag_e"), 0, 1, 0},
+        {S8("tag_u"), 0, 1, 0},
+        {S8("tag_f"), 1, 1, 1},
+        {S8("tag_s"), 1, 1, 1},
+        {S8("concatenated"), 1, 1, 1},
+        {S8("prefixed"), 1, 1, 1},
+        {S8("block_user"), 0, 1, 0},
+        {S8("bx_after"), 1, 1, 1},
+        {S8("bx_before"), 1, 1, 1},
+        {S8("bx_plain"), 0, 0, 0},
+        {S8("bx_list_a"), 1, 1, 1},
+        {S8("bx_list_b"), 0, 0, 0},
+        {S8("block_pragma"), 1, 1, 1},
+        {S8("bx_pragma"), 1, 1, 1},
     };
     u8 options[] = {C_SYMBOL_VISIBILITY_UNSPECIFIED, C_SYMBOL_VISIBILITY_HIDDEN, C_SYMBOL_VISIBILITY_DEFAULT, C_SYMBOL_VISIBILITY_INTERNAL};
     for (u32 option = 0; option < BUSTER_ARRAY_LENGTH(options); option += 1)
@@ -11430,6 +11472,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_symbol_visibility(UnitTestArguments* a
         {S8("__attribute__((visibility(\"bogus\"))) int bf(void) { return 3; }\n"), 0, 0, 1},
         {S8("__attribute__((visibility(hidden))) int bf(void) { return 3; }\n"), 0, 0, 1},
         {S8("__attribute__((visibility())) int bf(void) { return 3; }\n"), 0, 0, 1},
+        {S8("__attribute__((visibility(\"hid\" 1))) int bf(void) { return 3; }\n"), 0, 0, 1},
+        {S8("int pb(void) { extern int pbx __attribute__((visibility(\"protected\"))); return pbx; }\n"), 0, 0, 1},
         {S8("#pragma GCC visibility push(bogus)\nint bf(void) { return 3; }\n"), 0, 1, 0},
         {S8("#pragma GCC visibility push hidden\nint bf(void) { return 3; }\n"), 0, 1, 0},
         {S8("#pragma GCC visibility\nint bf(void) { return 3; }\n"), 0, 1, 0},
@@ -11441,9 +11485,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_symbol_visibility(UnitTestArguments* a
         CIRLowerResult lowered = c_test_lower_visibility(temporary.arena, refusals[index].source, C_SYMBOL_VISIBILITY_UNSPECIFIED, &tokens);
         BUSTER_TEST(arguments, tokens.error_count == refusals[index].token_errors && tokens.warning_count == refusals[index].token_warnings);
         BUSTER_TEST(arguments, lowered.diagnostic_count == refusals[index].parse_errors);
-        if (refusals[index].token_errors || refusals[index].parse_errors)
+        // A refusal found while lowering a function body keeps the module.
+        bool body_refusal = string_first_sequence(refusals[index].source, S8("{ extern ")) != BUSTER_STRING_NO_MATCH;
+        if ((refusals[index].token_errors || refusals[index].parse_errors) && !body_refusal)
         {
             BUSTER_TEST(arguments, lowered.program == 0);
+        }
+        if (body_refusal && lowered.diagnostic_count)
+        {
+            BUSTER_TEST(arguments, string_first_sequence(lowered.diagnostics[0].message, S8("protected")) != BUSTER_STRING_NO_MATCH);
         }
         scratch_end(temporary);
     }

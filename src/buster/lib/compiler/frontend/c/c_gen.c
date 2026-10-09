@@ -292,20 +292,49 @@ BUSTER_C_INTERNAL u32 c_declaration_initializer_priority(CPreprocessResult prepr
     return result;
 }
 
+// The longest decoded visibility argument worth keeping: "protected" is nine
+// bytes, so anything longer names none of the four values.
+enum
+{
+    C_VISIBILITY_ARGUMENT_CAPACITY = 16,
+};
+
 // The CSymbolVisibility named by the argument of `visibility` at token
 // `item`, UNSPECIFIED unless it is `("default"|"hidden"|"internal"|"protected")`.
-BUSTER_C_INTERNAL u8 c_declaration_visibility_argument(CPreprocessResult preprocess, u32 item, u32 end)
+// The argument is one string literal or several adjacent ones, each possibly
+// u8-prefixed, which concatenate as everywhere else.
+BUSTER_C_INTERNAL u8 c_declaration_visibility_argument(Arena* arena, CPreprocessResult preprocess, u32 item, u32 end)
 {
     u8 result = C_SYMBOL_VISIBILITY_UNSPECIFIED;
-    if (item + 3 < end && c_token_is_punctuator(&preprocess.tokens[item + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-        preprocess.tokens[item + 2].kind == C_TOKEN_STRING_LITERAL && c_token_is_punctuator(&preprocess.tokens[item + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    u32 close = item + 2;
+    while (close < end && preprocess.tokens[close].kind == C_TOKEN_STRING_LITERAL)
     {
-        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[item + 2]);
-        result = string_equal(spelling, S8("\"default\""))     ? C_SYMBOL_VISIBILITY_DEFAULT
-                 : string_equal(spelling, S8("\"hidden\""))    ? C_SYMBOL_VISIBILITY_HIDDEN
-                 : string_equal(spelling, S8("\"internal\""))  ? C_SYMBOL_VISIBILITY_INTERNAL
-                 : string_equal(spelling, S8("\"protected\"")) ? C_SYMBOL_VISIBILITY_PROTECTED
-                                                               : C_SYMBOL_VISIBILITY_UNSPECIFIED;
+        close += 1;
+    }
+    if (item + 1 < end && c_token_is_punctuator(&preprocess.tokens[item + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) && close > item + 2 && close < end &&
+        c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        u64 length = 0;
+        u8* bytes = arena_allocate(arena, u8, C_VISIBILITY_ARGUMENT_CAPACITY);
+        bool decodable = true;
+        for (u32 literal = item + 2; literal < close && decodable; literal += 1)
+        {
+            ByteSlice decoded = {0};
+            decodable = c_ir_decode_quoted(arena, c_token_spelling(preprocess.spelling_base, preprocess.tokens[literal]), '"', &decoded) &&
+                        length + decoded.length <= C_VISIBILITY_ARGUMENT_CAPACITY;
+            for (u64 byte = 0; decodable && byte < decoded.length; byte += 1)
+            {
+                bytes[length + byte] = decoded.pointer[byte];
+            }
+            length += decodable ? decoded.length : 0;
+        }
+        String8 spelling = {.pointer = (char8*)bytes, .length = length};
+        result = !decodable                                       ? C_SYMBOL_VISIBILITY_UNSPECIFIED
+                 : string_equal(spelling, S8("default"))          ? C_SYMBOL_VISIBILITY_DEFAULT
+                 : string_equal(spelling, S8("hidden"))           ? C_SYMBOL_VISIBILITY_HIDDEN
+                 : string_equal(spelling, S8("internal"))         ? C_SYMBOL_VISIBILITY_INTERNAL
+                 : string_equal(spelling, S8("protected"))        ? C_SYMBOL_VISIBILITY_PROTECTED
+                                                                  : C_SYMBOL_VISIBILITY_UNSPECIFIED;
     }
     return result;
 }
@@ -331,6 +360,10 @@ BUSTER_C_INTERNAL bool c_entity_symbol_hidden(u8 stated, u8 default_visibility, 
 BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end, CDeclarationBinding* binding)
 {
     u32 group_depth = 0;
+    // Whether the previous token is the `}` that closed a struct, union or
+    // enum body, possibly followed by attribute lists since: such an attribute
+    // belongs to the type, as GCC and Clang read it, not to the declarators.
+    bool after_tag_body = false;
     for (u32 index = start; index + 2 < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
@@ -349,6 +382,7 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
             {
                 break;
             }
+            after_tag_body = !group_depth && token.punctuator == C_PUNCTUATOR_RIGHT_BRACE;
             continue;
         }
         if (!c_token_in_well_known_set(preprocess.spelling_base, token,
@@ -356,6 +390,7 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
             !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
             !c_token_is_punctuator(&preprocess.tokens[index + 2], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
+            after_tag_body = false;
             continue;
         }
         // Depth two is the attribute list itself; anything deeper belongs to
@@ -377,11 +412,11 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
             {
                 binding->is_weak |= c_token_in_well_known_set(preprocess.spelling_base, inner,
                                                               C_ATTRIBUTE_WORDS_WEAK);
-                if (c_token_in_well_known_set(preprocess.spelling_base, inner, C_ATTRIBUTE_WORDS_VISIBILITY) && !group_depth &&
+                if (c_token_in_well_known_set(preprocess.spelling_base, inner, C_ATTRIBUTE_WORDS_VISIBILITY) && !group_depth && !after_tag_body &&
                     !(index > start && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 1],
                                                                  C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM))))
                 {
-                    u8 requested = c_declaration_visibility_argument(preprocess, item, end);
+                    u8 requested = c_declaration_visibility_argument(arena, preprocess, item, end);
                     binding->visibility_invalid |= requested == C_SYMBOL_VISIBILITY_UNSPECIFIED;
                     binding->visibility = binding->visibility ? binding->visibility : requested;
                 }
@@ -8013,6 +8048,24 @@ BUSTER_C_INTERNAL bool c_ir_entity_has_function_type(CIntegerIrBuilder* builder,
     return type.value < builder->parse.type_count && builder->parse.types[type.value].kind == C_TYPE_FUNCTION;
 }
 
+// The CSymbolVisibility a block-scope `extern` object declaration states, by
+// its attribute or the #pragma GCC visibility state at its first token. It is
+// an undefined reference, so -fvisibility= never applies to it.
+// The shared specifier tokens and this declarator's own are scanned apart so
+// that the attribute of one declarator of a list does not reach the next.
+BUSTER_C_INTERNAL u8 c_local_extern_visibility(Arena* arena, CPreprocessResult preprocess, CEntity const* entity)
+{
+    CDeclarationBinding binding = {0};
+    u32 end = entity->declaration_token_start + entity->declaration_token_count;
+    end = end < preprocess.token_count ? end : (u32)preprocess.token_count;
+    u32 shared_end = c_ir_declarator_list_specifier_end(preprocess, entity->declaration_statement_start, end);
+    shared_end = shared_end < end ? shared_end : end;
+    u32 own_start = entity->declaration_token_start > shared_end ? entity->declaration_token_start : shared_end;
+    c_declaration_binding_scan(arena, preprocess, entity->declaration_statement_start, shared_end, &binding);
+    c_declaration_binding_scan(arena, preprocess, own_start, end, &binding);
+    return binding.visibility ? binding.visibility : (u8)c_preprocess_symbol_visibility(&preprocess, entity->declaration_statement_start);
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_global_place(CIntegerIrBuilder* builder, CEntityId entity, IrSourceRange source)
 {
     if (entity.value >= builder->parse.entity_count || !builder->entity_symbols)
@@ -8046,18 +8099,31 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_global_place(CIntegerIrBuilder* builder, C
     {
         IrTypeId type = builder->c_type_ir_map[entity_value->type.value];
         bool internal = entity_value->is_static_storage;
-        String8 link_name = internal ? c_ir_static_local_link_name(builder, entity) : entity_value->name;
-        symbol = ir_program_add_symbol(builder->program, (IrSymbol){
-                                                               .name = entity_value->name,
-                                                               .link_name = link_name,
-                                                               .source = source,
-                                                               .type = type,
-                                                               .kind = IR_SYMBOL_DATA,
-                                                               .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
-                                                               .is_definition = internal,
-                                                               .is_thread_local = entity_value->is_thread_local,
-                                                           });
-        builder->entity_symbols[entity.value] = symbol;
+        u8 stated_visibility = internal ? (u8)C_SYMBOL_VISIBILITY_UNSPECIFIED
+                                        : c_local_extern_visibility(builder->arena, builder->preprocess, entity_value);
+        if (stated_visibility == C_SYMBOL_VISIBILITY_PROTECTED)
+        {
+            // No symbol is made, so the check below fails the place.
+            builder->failure_message = string_format(builder->arena, S8("visibility(\"protected\") on '{S8}' is not supported: protected visibility has no object-model representation"),
+                                                     entity_value->name);
+            builder->failure_token_index = entity_value->declaration_token_plus_one ? entity_value->declaration_token_plus_one - 1 : UINT32_MAX;
+        }
+        else
+        {
+            String8 link_name = internal ? c_ir_static_local_link_name(builder, entity) : entity_value->name;
+            symbol = ir_program_add_symbol(builder->program, (IrSymbol){
+                                                                   .name = entity_value->name,
+                                                                   .link_name = link_name,
+                                                                   .source = source,
+                                                                   .type = type,
+                                                                   .kind = IR_SYMBOL_DATA,
+                                                                   .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
+                                                                   .is_definition = internal,
+                                                                   .is_hidden = c_entity_symbol_hidden(stated_visibility, C_SYMBOL_VISIBILITY_UNSPECIFIED, false, internal),
+                                                                   .is_thread_local = entity_value->is_thread_local,
+                                                               });
+            builder->entity_symbols[entity.value] = symbol;
+        }
     }
     IrSymbol* symbol_value = ir_symbol_from_id(&builder->program->symbols, symbol);
     if (!symbol_value || symbol_value->kind != IR_SYMBOL_DATA)
@@ -46492,7 +46558,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     IrValueId place = c_ir_emit_global_place(builder, entity, c_ir_token_source_range(builder, name));
                     if (place.value == IR_ID_UNDERLYING_INVALID)
                     {
-                        builder->failure_message = string_format(builder->arena, S8("could not resolve local extern '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, name));
+                        builder->failure_message = builder->failure_message.length
+                                                       ? builder->failure_message
+                                                       : string_format(builder->arena, S8("could not resolve local extern '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, name));
                         return false;
                     }
                     index = end == task.end ? task.end : end + 1;

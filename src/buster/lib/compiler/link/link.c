@@ -7455,7 +7455,13 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
                 }
                 else
                 {
-                    valid = !(symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) && !is_thread_local &&
+                    // A call to a weak function nothing here defines and that
+                    // cannot be imported (a hidden one) resolves to address
+                    // zero, as ld does; code guards such a call by testing the
+                    // address, which takes the GOT slot above.
+                    bool absent_weak_call = (symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) && relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 &&
+                                            symbol->weak && symbol->kind == OBJECT_SYMBOL_FUNCTION;
+                    valid = (!(symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) || absent_weak_call) && !is_thread_local &&
                             !((symbol_class & LINK_ELF_PIC_SYMBOL_PREEMPTIBLE) && symbol->kind == OBJECT_SYMBOL_DATA &&
                               (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PC64));
                 }
