@@ -27912,6 +27912,75 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_global_array_sizeof_bound(UnitTestArgu
     return result;
 }
 
+// A member array bound of sizeof(string literal) is (code units + 1) times the
+// element width of the concatenated literal. Before the layout agenda read it,
+// such a member left its record without a parser layout, so sizeof and
+// offsetof of the record were refused (pristine CPython pystate.c and
+// pylifecycle.c, #1570). Each row matches gcc and clang; the wide rows scale by
+// the target's wchar_t through sizeof(L'a').
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_sizeof_array_bound(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("struct Plain { char d[sizeof(\"ab\")]; char e; };\n"
+                                               "struct Parenthesized { char d[sizeof((\"ab\"))]; char e; };\n"
+                                               "struct Nested { char d[sizeof(((\"ab\")))]; char e; };\n"
+                                               "struct Empty { char d[sizeof(\"\")]; char e; };\n"
+                                               "struct Joined { char d[sizeof(\"ab\" \"cd\")]; char e; };\n"
+                                               "struct Escapes { char d[sizeof(\"\\n\\x41\\0\")]; char e; };\n"
+                                               "struct Utf8 { char d[sizeof(u8\"ab\")]; char e; };\n"
+                                               "struct Utf8Joined { char d[sizeof(u8\"ab\" \"c\")]; char e; };\n"
+                                               "struct Utf16 { char d[sizeof(u\"ab\")]; char e; };\n"
+                                               "struct Utf32 { char d[sizeof(U\"ab\")]; char e; };\n"
+                                               "struct Wide { char d[sizeof(L\"ab\")]; char e; };\n"
+                                               "struct Plus { char d[sizeof(\"ab\") + 1]; char e; };\n"
+                                               "struct Scaled { char d[2 * sizeof(\"ab\")]; char e; };\n"
+                                               "struct Shorts { short d[sizeof(\"abcd\") / sizeof(short)]; char e; };\n"
+                                               "_Static_assert(sizeof(struct Plain) == 4 && __builtin_offsetof(struct Plain, e) == 3, \"plain\");\n"
+                                               "_Static_assert(sizeof(struct Parenthesized) == 4 && __builtin_offsetof(struct Parenthesized, e) == 3, \"parenthesized\");\n"
+                                               "_Static_assert(sizeof(struct Nested) == 4 && __builtin_offsetof(struct Nested, e) == 3, \"nested\");\n"
+                                               "_Static_assert(sizeof(struct Empty) == 2 && __builtin_offsetof(struct Empty, e) == 1, \"empty\");\n"
+                                               "_Static_assert(sizeof(struct Joined) == 6 && __builtin_offsetof(struct Joined, e) == 5, \"joined\");\n"
+                                               "_Static_assert(sizeof(struct Escapes) == 5 && __builtin_offsetof(struct Escapes, e) == 4, \"escapes\");\n"
+                                               "_Static_assert(sizeof(struct Utf8) == 4 && __builtin_offsetof(struct Utf8, e) == 3, \"utf8\");\n"
+                                               "_Static_assert(sizeof(struct Utf8Joined) == 5 && __builtin_offsetof(struct Utf8Joined, e) == 4, \"utf8 joined\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Utf16, e) == 6, \"utf16\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Utf32, e) == 12, \"utf32\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Wide, e) == 3 * sizeof(L'a'), \"wide\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Plus, e) == 4, \"plus\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Scaled, e) == 6, \"scaled\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Shorts, e) == 4, \"shorts\");\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("string-literal-sizeof-array-bound.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+    // Mismatched encodings and a trailing token are invalid operands; they keep
+    // the record without a layout and fail with a diagnostic, never a bound.
+    String8 invalid_sources[] = {
+        S8("struct B { char d[sizeof(u8\"a\" u\"b\")]; char e; };\nint x = sizeof(struct B);\n"),
+        S8("struct B { char d[sizeof(\"a\" 1)]; char e; };\nint x = sizeof(struct B);\n"),
+        S8("struct B { char d[sizeof(\"a\" \"b\" c)]; char e; };\nint x = sizeof(struct B);\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_sources); invalid_index += 1)
+    {
+        CPreprocessResult invalid_tokens = c_preprocess(temporary.arena, invalid_sources[invalid_index], (CPreprocessOptions){0});
+        CParseResult invalid_parse = c_parse(temporary.arena, invalid_tokens);
+        CIRLowerResult invalid_ir = c_lower_to_ir(temporary.arena, S8("string-literal-sizeof-array-bound-invalid.c"), invalid_tokens, invalid_parse, target_native);
+        BUSTER_TEST(arguments, invalid_tokens.diagnostic_count + invalid_parse.diagnostic_count + invalid_ir.diagnostic_count != 0);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 // Regression coverage for the 2026-08-16 enum-constant miscompile: enumerator
 // initializers were folded by the preprocessor's #if evaluator, which reads
 // `sizeof` as an ordinary identifier and substitutes zero for it, so
@@ -56731,6 +56800,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_elifdef_and_wide_character_constants);
     C_TEST_FIXTURE(arguments, c_test_abstract_declarator_and_pointer_typing);
     C_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
+    C_TEST_FIXTURE(arguments, c_test_string_literal_sizeof_array_bound);
     C_TEST_FIXTURE(arguments, c_test_global_identifier_updates);
     C_TEST_FIXTURE(arguments, c_test_gnu_attribute_queries);
     C_TEST_FIXTURE(arguments, c_test_gnu_omitted_conditional);
