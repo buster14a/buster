@@ -833,9 +833,10 @@ def sampling_authority(environment: dict) -> tuple[Api, dict]:
             raise ValueError("sampling native admission data is unavailable")
         output = directory / "admitted.env"
         command = [str(root / "build.sh"), "compiler_profile_qualification", "--admit",
-                   "--allowlist", str(root / direct_authorize.SAMPLING_ALLOWLIST),
+                   "--allowlist", str(directory / "allowlist.tsv"),
                    "--request", str(directory / "request.txt"), "--facts", str(directory / "facts.tsv"),
                    "--history", str(directory / "history.tsv"), "--freeze", str(directory / "freeze.tsv"),
+                   "--parent-freeze", str(directory / "parent-freeze.tsv"),
                    "--output", str(output)]
         child_environment = {key: value for key, value in environment.items() if key not in ("GH_TOKEN", "GITHUB_TOKEN")}
         try:
@@ -857,6 +858,7 @@ def sampling_authority(environment: dict) -> tuple[Api, dict]:
             "sampling_family": "BQ_SAMPLING_FAMILY", "sampling_freeze_revision": "BQ_SAMPLING_FREEZE_REVISION",
             "sampling_freeze_sha256": "BQ_SAMPLING_FREEZE_SHA256",
             "sampling_campaign_parent": "BQ_SAMPLING_CAMPAIGN_PARENT",
+            "sampling_parent_freeze_revision": "BQ_SAMPLING_PARENT_FREEZE_REVISION",
             "sampling_protocol_sha256": "BQ_SAMPLING_PROTOCOL_SHA256", "sampling_base": "BQ_SAMPLING_BASE",
             "sampling_base_tree": "BQ_SAMPLING_BASE_TREE", "sampling_candidate_revision": "BQ_SAMPLING_CANDIDATE_REVISION",
             "sampling_trusted_revision": "BQ_SAMPLING_TRUSTED_REVISION"}
@@ -868,6 +870,10 @@ def sampling_authority(environment: dict) -> tuple[Api, dict]:
         if hashlib.sha256(freeze_bytes).hexdigest() != admitted["sampling_freeze_sha256"]:
             raise ValueError("committed freeze differs from native admission digest")
         authority = {"admitted": admitted, "freeze": sampling_tsv(freeze_bytes), "freeze_bytes": freeze_bytes,
+                     "parent_freeze": sampling_tsv((directory / "parent-freeze.tsv").read_bytes()) if
+                         (directory / "parent-freeze.tsv").stat().st_size else {},
+                     "acquisition_plan": sampling_tsv((directory / "acquisition-plan.tsv").read_bytes()),
+                     "acquisition_plan_bytes": (directory / "acquisition-plan.tsv").read_bytes(),
                      "facts": sampling_tsv((directory / "facts.tsv").read_bytes()),
                      "history": sampling_tsv((directory / "history.tsv").read_bytes(), True),
                      "request_line": selected[0], "request": request, "executor": execution,
@@ -882,15 +888,19 @@ def sampling_check_marker(authority: dict) -> str:
             authority["request_id"] + ":" + authority["run_id"] + ":1")
 
 
+def sampling_owned(row: object, authority: dict) -> bool:
+    from compiler_github import GITHUB_ACTIONS_APP_ID
+    return isinstance(row, dict) and type(row.get("id")) is int and row["id"] > 0 and \
+        row.get("name") == SAMPLING_CHECK_NAME and row.get("head_sha") == authority["head"] and \
+        row.get("external_id") == sampling_check_marker(authority) and isinstance(row.get("app"), dict) and \
+        row["app"].get("id") == GITHUB_ACTIONS_APP_ID and row.get("status") in ("queued", "in_progress", "completed")
+
+
 def sampling_checks(api: Api, authority: dict) -> list[dict]:
     from compiler_github import GITHUB_ACTIONS_APP_ID
     query = urllib.parse.urlencode({"check_name": SAMPLING_CHECK_NAME, "filter": "all", "app_id": GITHUB_ACTIONS_APP_ID})
-    marker = sampling_check_marker(authority)
     rows = api.pages(f"/commits/{authority['head']}/check-runs?{query}", "check_runs")
-    owned = [row for row in rows if isinstance(row, dict) and type(row.get("id")) is int and
-             row.get("name") == SAMPLING_CHECK_NAME and row.get("head_sha") == authority["head"] and
-             row.get("external_id") == marker and isinstance(row.get("app"), dict) and
-             row["app"].get("id") == GITHUB_ACTIONS_APP_ID and row.get("status") in ("queued", "in_progress", "completed")]
+    owned = [row for row in rows if sampling_owned(row, authority)]
     if len(owned) > 1:
         raise ValueError("sampling attempt has duplicate owned checks")
     return owned
@@ -904,23 +914,24 @@ def sampling_write(api: Api, authority: dict, fields: dict) -> dict:
     body = dict(fields, name=SAMPLING_CHECK_NAME, head_sha=authority["head"],
                 external_id=sampling_check_marker(authority))
     try:
-        write_check(api, None, body)
+        written = write_check(api, None, body)
+        if sampling_owned(written, authority):
+            return written
     except (urllib.error.URLError, TimeoutError, ValueError):
-        # Resolve a lost response through ownership before any second POST.
         pass
+    # A lost POST can become visible later. One lookup may resolve ownership;
+    # an empty lookup does not prove absence and can never authorize another POST.
     rows = sampling_checks(api, authority)
-    if not rows:
-        write_check(api, None, body)
-        rows = sampling_checks(api, authority)
     if len(rows) != 1:
-        raise ValueError("sampling check write has no unique owned result")
+        raise ValueError("sampling check creation is ambiguous; no duplicate write or host work authorized")
     return rows[0]
 
 
 def sampling_queue(environment: dict) -> int:
     api, authority = sampling_authority(environment)
     admitted = authority["admitted"]
-    summary = ("Unqualified sampling research; routine profile remains disabled.\n\n" +
+    summary = ("Unqualified sampling research; routine profile remains disabled.\n\n"
+               "Lifecycle protocol: sampling-terminal-native-v1.\n" +
                f"Phase {admitted['sampling_phase']}, packet {admitted['sampling_packet']}; "
                f"whole physical-job reservation {admitted['sampling_reservation_seconds']} seconds.\n"
                "Native Actions state shows scheduling and execution. This short controller has not measured a compiler.\n\n" +
@@ -929,16 +940,577 @@ def sampling_queue(environment: dict) -> int:
     row = sampling_write(api, authority, {"status": "queued",
                          "details_url": run_url(authority["repository"], authority["run_id"], "1"),
                          "output": {"title": "Queued unqualified sampling research", "summary": summary}})
+    if row.get("status") != "queued":
+        raise ValueError("sampling queue is already running or terminal; no new physical assignment authorized")
     print(f"COMPILER_SAMPLING_QUEUED check={row.get('id')} state={row.get('status')} qualification=unqualified")
     return 0
 
-def main() -> int:
-    if sys.argv[1:] == ["sampling-queue"]:
+
+def sampling_read_artifact(api: Api, authority: dict) -> tuple[dict[str, bytes], dict]:
+    name = SAMPLING_ARTIFACT_PREFIX + authority["head"] + "-1"
+    listing = api.request(f"/actions/runs/{authority['run_id']}/artifacts?" +
+                          urllib.parse.urlencode({"name": name, "per_page": 10}))
+    rows = listing.get("artifacts") if isinstance(listing, dict) else None
+    if not isinstance(rows, list) or len(rows) >= 10:
+        raise ValueError("sampling artifact inventory is unavailable or capped")
+    matches = [row for row in rows if isinstance(row, dict) and row.get("name") == name]
+    if len(matches) != 1:
+        raise ValueError("sampling attempt has no unique evidence artifact")
+    row = matches[0]
+    origin = row.get("workflow_run")
+    if type(row.get("id")) is not int or row["id"] <= 0 or row.get("expired") is not False or \
+            type(row.get("size_in_bytes")) is not int or not 0 < row["size_in_bytes"] <= ARTIFACT_LIMIT or \
+            not isinstance(origin, dict) or str(origin.get("id")) != authority["run_id"] or \
+            origin.get("head_sha") != authority["executor"].get("head_sha"):
+        raise ValueError("sampling artifact is expired, oversized or belongs to another executor")
+    # Construct the authenticated repository endpoint; never accept a download
+    # host or executable path supplied by an artifact or request.
+    payload = api.download(api.prefix + f"/actions/artifacts/{row['id']}/zip")
+    return sampling_archive(payload), row
+
+
+def sampling_json(files: dict[str, bytes], name: str, object_only: bool = True) -> object:
+    """Read bounded JSON data, rejecting duplicate keys and non-finite values."""
+    raw = files.get(name)
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= ANALYZER_MEMBER_LIMIT:
+        raise ValueError("sampling JSON missing or oversized: " + name)
+    def unique(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate sampling JSON key")
+            result[key] = value
+        return result
+    def nonfinite(unused):
+        raise ValueError("non-finite sampling JSON number")
+    def finite(value):
+        import math
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError("non-finite sampling JSON number")
+        return result
+    value = json.loads(raw.decode("utf-8"), object_pairs_hook=unique, parse_constant=nonfinite, parse_float=finite)
+    if object_only and not isinstance(value, dict):
+        raise ValueError("sampling JSON is not an object: " + name)
+    return value
+
+
+def sampling_integer(value: object, positive: bool = False) -> int:
+    if not isinstance(value, str) or not re.fullmatch(r"0|[1-9][0-9]{0,19}", value):
+        raise ValueError("sampling integer is unavailable or noncanonical")
+    result = int(value)
+    if result > (1 << 64) - 1 or (positive and result == 0):
+        raise ValueError("sampling integer is outside its bound")
+    return result
+
+
+def sampling_plan(authority: dict) -> dict:
+    """Use only the acquisition bytes authenticated by native phase admission."""
+    from sampling_qualification_receipt import schedule
+    admitted, frozen, parent = authority["admitted"], authority["freeze"], authority["parent_freeze"]
+    plan = authority["acquisition_plan"]
+    raw = authority["acquisition_plan_bytes"]
+    digest = hashlib.sha256(raw).hexdigest()
+    phase = admitted["sampling_phase"]
+    if phase == "acquire":
+        expected_hash, revision = admitted["sampling_freeze_sha256"], admitted["sampling_freeze_revision"]
+    elif phase == "pilot":
+        expected_hash, revision = frozen["campaign_parent"], frozen["campaign_parent_revision"]
+    else:
+        expected_hash, revision = parent["campaign_parent"], parent["campaign_parent_revision"]
+    if digest != expected_hash or plan.get("schema") != "buster-main-sampling-acquisition-v1" or \
+            plan.get("phase") != "acquire" or plan.get("trusted_revision") != admitted["sampling_trusted_revision"] or \
+            plan.get("protocol_sha256") != admitted["sampling_protocol_sha256"]:
+        raise ValueError("sampling acquisition bytes do not bind the admitted phase ancestry")
+    packet = sampling_integer(admitted["sampling_packet"])
+    planned = schedule(phase, packet)
+    if not planned or admitted.get("sampling_family") != planned["family"] or \
+            sampling_integer(admitted.get("sampling_reservation_seconds"), True) != planned["reservation_seconds"]:
+        raise ValueError("sampling native admission contradicts the deterministic reservation")
+    return {"record": plan, "sha256": digest, "revision": revision, "phase": phase, "packet": packet,
+            "schedule": planned, "output": plan["store_root"] + "/" + digest + "/prepared"}
+
+
+def sampling_prepared(api: Api, authority: dict, files: dict[str, bytes], context: dict) -> dict:
+    """Replay the actual producer inventory through the existing data adapter."""
+    from compiler_preparation import validate_prepared
+    plan = context["record"]
+    pins = {}
+    for role, revision in (("base", plan["base"]), ("head", plan["ab1_revision"]),
+                           ("secondary_head", plan["ab2_revision"])):
+        row = api.request("/git/commits/" + revision)
+        tree = row.get("tree") if isinstance(row, dict) else None
+        if not isinstance(row, dict) or row.get("sha") != revision or not isinstance(tree, dict) or \
+                not SHA.fullmatch(str(tree.get("sha", ""))):
+            raise ValueError("sampling immutable source tree is unavailable")
+        pins[role] = revision
+        pins[{"base": "base_tree", "head": "head_tree", "secondary_head": "secondary_tree"}[role]] = tree["sha"]
+    if pins["base_tree"] != plan["base_tree"]:
+        raise ValueError("sampling acquisition baseline tree differs from GitHub's immutable object")
+    expected = dict(pins, root=plan["source_root"], output=context["output"], policy="snapshot-v1", arm_count=3)
+    immediate = {}
+    for name, raw in files.items():
+        if name.startswith("prepared/"):
+            basename = name[len("prepared/"):]
+            if "/" in basename or not re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", basename):
+                raise ValueError("sampling prepared export has a nested or malformed member")
+            immediate[basename] = raw
+    prepared = sampling_json(files, "prepared/prepared.json")
+    closure = {op: sampling_json(files, "prepared/closure-" + op + ".json") for op in ("snapshot", "restore", "verify")}
+    manifests = {op: immediate.get("closure-" + op + ".json.manifest.tsv") for op in closure}
+    bundle = {"manifest": immediate.get("prepared.manifest.tsv"), "workload": immediate.get("prepared.workload.tsv"),
+              "ledger": immediate.get("phases.tsv"), "files": immediate, "closure": closure, "closure_manifests": manifests}
+    problems = validate_prepared(expected, prepared, bundle)
+    if problems:
+        raise ValueError("sampling acquisition preparation replay failed: " + "; ".join(problems[:8]))
+    for role in ("baseline", "candidate", "candidate2"):
+        value = prepared.get(role + "_bytes")
+        if type(value) is not int or not 0 < value <= 536870912:
+            raise ValueError("sampling acquired compiler size is unavailable or exceeds its declared bound")
+    if immediate.get("closure.manifest.tsv") != bundle["manifest"]:
+        raise ValueError("sampling persistent closure export differs from the actual preparation inventory")
+    return {"record": prepared, "bytes": immediate["prepared.json"], "sha256": hashlib.sha256(immediate["prepared.json"]).hexdigest(),
+            "expected": expected, "bundle": bundle, "files": immediate}
+
+
+def sampling_host(authority: dict, files: dict[str, bytes], context: dict) -> dict:
+    host = sampling_json(files, "host.json")
+    wanted = {"schema": "buster-main-sampling-host-v1", "state": "complete",
+              "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor", "observed_from": "/proc/cpuinfo",
+              "request_head": authority["head"], "run_id": authority["run_id"], "run_attempt": "1",
+              "request_run_id": authority["request_id"],
+              "measurement_trusted_revision": context["record"]["trusted_revision"],
+              "policy_trusted_revision": authority["executor"]["head_sha"],
+              "freeze_sha256": authority["admitted"]["sampling_freeze_sha256"],
+              "acquisition_campaign": context["sha256"], "protocol_sha256": context["record"]["protocol_sha256"]}
+    if set(host) != set(wanted) | {"logical_processor_records"} or \
+            any(type(host.get(key)) is not type(value) or host.get(key) != value for key, value in wanted.items()) or \
+            type(host.get("logical_processor_records")) is not int or not 0 < host["logical_processor_records"] <= 4096:
+        raise ValueError("sampling actual CPU observation or executor/source bindings are incomplete")
+    return host
+
+
+def sampling_host_job(api: Api, authority: dict) -> dict:
+    rows = api.pages(f"/actions/runs/{authority['run_id']}/attempts/1/jobs", "jobs")
+    matches = [row for row in rows if isinstance(row, dict) and row.get("name") == SAMPLING_HOST_JOB]
+    if len(matches) != 1:
+        raise ValueError("sampling physical attempt has no unique platform job")
+    job = matches[0]
+    if type(job.get("id")) is not int or job["id"] <= 0 or \
+            str(job.get("run_id")) != authority["run_id"] or job.get("run_attempt") != 1 or \
+            type(job.get("runner_id")) is not int or job["runner_id"] <= 0 or \
+            not isinstance(job.get("runner_name"), str) or not job["runner_name"] or \
+            not isinstance(job.get("labels"), list) or not job["labels"] or \
+            any(not isinstance(label, str) or not label for label in job["labels"]):
+        raise ValueError("sampling physical platform runner provenance is unavailable")
+    return job
+
+
+def sampling_phase_proofs(files: dict[str, bytes], context: dict, prepared: dict) -> tuple[dict, dict]:
+    from compiler_receipt import validate_closure
+    owner = sampling_tsv(files.get("owner.tsv"))
+    owner_keys = {"schema", "physical_packet_wall_us", "process_state", "timed_out", "cleanup_failed", "within_reservation", "cancelled"}
+    if set(owner) != owner_keys or owner.get("schema") != "buster-main-sampling-owner-v1" or \
+            owner.get("process_state") != "complete" or owner.get("within_reservation") != "true" or \
+            any(owner.get(key) != "0" for key in ("timed_out", "cleanup_failed", "cancelled")):
+        raise ValueError("sampling outer worker ownership is failed, cancelled or incomplete")
+    owner_wall = sampling_integer(owner["physical_packet_wall_us"], True)
+    terminal = sampling_tsv(files.get("packet.tsv"))
+    terminal_keys = {"physical_packet_wall_us", "prep_us", "captured_input_files_unchanged", "within_reservation",
+                     "process_state", "qualification_state", "queue_delay"}
+    if set(terminal) != terminal_keys or terminal.get("process_state") != "complete" or \
+            terminal.get("captured_input_files_unchanged") != "true" or terminal.get("within_reservation") != "true" or \
+            terminal.get("qualification_state") != "unvalidated" or terminal.get("queue_delay") != "unavailable":
+        raise ValueError("sampling native packet is incomplete or claims unsupported qualification")
+    packet_wall = sampling_integer(terminal["physical_packet_wall_us"], True)
+    prep = sampling_integer(terminal["prep_us"])
+    if prep > packet_wall or packet_wall > owner_wall or owner_wall > context["schedule"]["reservation_seconds"] * 1000000:
+        raise ValueError("sampling preparation, packet and worker wall accounting contradict")
+    phases = sampling_tsv(files.get("controller.tsv"), True)
+    wanted = ["trusted-harness-pin"]
+    if context["phase"] == "acquire":
+        wanted += ["clone-sources", "fetch-pinned-arms", "baseline-tree", "ab1-tree", "ab2-tree",
+                   "primary-arm-checkout", "acquire-prepared-closure"]
+    else:
+        wanted += ["full-default-corpus"]
+    columns = {"stage", "phase", "wall_us", "exit_status", "timed_out", "cleanup_failed", "cancelled", "state"}
+    if len(phases) != len(wanted):
+        raise ValueError("sampling controller phase ledger is missing or changed")
+    proofs = {"owner-supervision.tsv"}
+    phase_wall = 0
+    for index, (row, name) in enumerate(zip(phases, wanted), 1):
+        if set(row) != columns or row.get("stage") != str(index) or row.get("phase") != name or row.get("state") != "complete" or \
+                any(row.get(key) != "0" for key in ("exit_status", "timed_out", "cleanup_failed", "cancelled")):
+            raise ValueError("sampling controller phase is failed, undeclared or not run")
+        phase_wall += sampling_integer(row["wall_us"], True)
+        stem = f"controller-{index}-{name}"
+        proofs.add(stem + "-supervision.tsv")
+        for stream in ("stdout", "stderr"):
+            raw = files.get(stem + "." + stream + ".log")
+            if not isinstance(raw, bytes) or len(raw) > 1024 * 1024:
+                raise ValueError("sampling controller bounded phase output is missing")
+    if phase_wall > packet_wall:
+        raise ValueError("sampling controller phases exceed native packet occupancy")
+    if context["phase"] != "acquire":
+        verify_indexes = [99, *range(len(context["schedule"]["slots"]))]
+        for index in verify_indexes:
+            for side in ("before", "after"):
+                stem = f"closure-{index}-{side}"
+                record = sampling_json(files, stem + ".json")
+                raw = files.get(stem + ".json.manifest.tsv")
+                closure = dict(prepared["bundle"]["closure"], verify=record)
+                manifests = dict(prepared["bundle"]["closure_manifests"], verify=raw)
+                replay = {"preparation_policy": "snapshot-v1", "identity": prepared["expected"],
+                          "binaries": {"baseline": {"sha256": prepared["record"]["baseline_sha256"]}},
+                          "closure": {"policy": "snapshot-v1", "fallback": None, **closure}}
+                issues = validate_closure(replay, manifests, expected_policy="snapshot-v1")
+                if raw != prepared["bundle"]["manifest"] or issues:
+                    raise ValueError("sampling per-phase native closure changed: " + "; ".join(issues[:3]))
+                proofs.add(stem + "-supervision.tsv")
+        for index in range(len(context["schedule"]["slots"])):
+            proofs.add(f"trial-{index}-supervision.tsv")
+            for stream in ("stdout", "stderr"):
+                raw = files.get(f"trial-{index}.{stream}.log")
+                if not isinstance(raw, bytes) or len(raw) > 1024 * 1024:
+                    raise ValueError("sampling measured phase bounded output is missing")
+    observed = {name for name in files if name.endswith("-supervision.tsv")}
+    if observed != proofs:
+        raise ValueError("sampling complete native supervision proof set is missing or undeclared")
+    for name in proofs:
+        sampling_supervision(files[name])
+    return owner, terminal
+
+
+def sampling_acquisition(authority: dict, files: dict[str, bytes], context: dict, prepared: dict) -> dict:
+    row = sampling_tsv(files.get("acquisition.tsv"))
+    plan = context["record"]
+    wanted = {"schema": "buster-main-sampling-acquisition-receipt-v1", "phase": "acquire", "packet": "0",
+              "measurement": "false", "campaign": context["sha256"], "base": plan["base"], "base_tree": plan["base_tree"],
+              "request_head": plan["request_head"], "trusted_revision": plan["trusted_revision"],
+              "ab1_revision": plan["ab1_revision"], "ab2_revision": plan["ab2_revision"],
+              "protocol_sha256": plan["protocol_sha256"], "prepared_sha256": prepared["sha256"],
+              "reservation_seconds": "1800", "process_state": "complete", "qualification_state": "unvalidated"}
+    digests = {"lab_sha256", "python_sha256", "driver_sha256"}
+    if set(row) != set(wanted) | digests or any(row.get(key) != value for key, value in wanted.items()) or \
+            any(not re.fullmatch(r"[a-f0-9]{64}", row.get(key, "")) for key in digests) or \
+            any(name == "identity.tsv" or name == "attempts.tsv" or name.startswith("trial-") or name.startswith("throughput/")
+                for name in files):
+        raise ValueError("sampling acquisition identity is incomplete or contains measured outcomes")
+    return row
+
+
+def sampling_source_hashes(api: Api, authority: dict, context: dict, acquired: dict) -> None:
+    import base64
+    revision = context["record"]["trusted_revision"]
+    for path, key in (("tools/uarch_lab.py", "lab_sha256"),
+                      ("docs/compiler-main-sampling-qualification-v1.json", "protocol_sha256")):
+        record = api.request("/contents/" + path + "?ref=" + revision)
+        if not isinstance(record, dict) or record.get("type") != "file" or record.get("encoding") != "base64" or \
+                type(record.get("size")) is not int or not 0 < record["size"] <= 1024 * 1024 or \
+                not isinstance(record.get("content"), str):
+            raise ValueError("sampling fixed trusted source is missing or exceeds its bound")
+        raw = base64.b64decode(record["content"].replace("\n", ""), validate=True)
+        if len(raw) != record["size"] or hashlib.sha256(raw).hexdigest() != acquired[key]:
+            raise ValueError("sampling fixed trusted source differs from acquisition " + key)
+
+
+def sampling_prior_acquisition(api: Api, authority: dict, context: dict) -> tuple[dict, dict]:
+    """Re-read the previously authenticated acquisition, never current-copy authority."""
+    history = authority["history"]
+    rows = [row for row in history if row.get("phase") == "acquire" and row.get("packet") == "0"]
+    if len(rows) != 1 or rows[0].get("campaign") != context["sha256"] or rows[0].get("freeze_revision") != context["revision"] or \
+            rows[0].get("state") != "complete" or rows[0].get("request_run_attempt") != "1" or rows[0].get("executor_run_attempt") != "1":
+        raise ValueError("sampling lacks its unique authenticated complete acquisition")
+    previous = rows[0]
+    request = api.request("/actions/runs/" + previous["request_run_id"])
+    execution = api.request("/actions/runs/" + previous["executor_run_id"])
+    if not isinstance(request, dict) or not isinstance(execution, dict) or \
+            str(request.get("id")) != previous["request_run_id"] or request.get("run_attempt") != 1 or \
+            str(execution.get("id")) != previous["executor_run_id"] or execution.get("run_attempt") != 1 or \
+            not SHA.fullmatch(str(request.get("head_sha", ""))) or execution.get("path") != BENCH_WORKFLOW or \
+            execution.get("event") != "workflow_run" or execution.get("head_branch") != "main" or \
+            not isinstance(execution.get("repository"), dict) or execution["repository"].get("full_name") != authority["repository"] or \
+            execution.get("display_title") != f"9700X request {previous['request_run_id']}.1 head {request['head_sha']}":
+        raise ValueError("sampling acquisition executor provenance is unavailable")
+    old = dict(authority, head=request["head_sha"], request_id=previous["request_run_id"],
+               run_id=previous["executor_run_id"], request=request, executor=execution,
+               admitted=dict(authority["admitted"], sampling_phase="acquire", sampling_packet="0",
+                             sampling_family="acquire", sampling_freeze_sha256=context["sha256"],
+                             sampling_freeze_revision=context["revision"], sampling_reservation_seconds="1800"))
+    old_context = dict(context, phase="acquire", packet=0, schedule={"family": "acquire", "reservation_seconds": 1800, "slots": []})
+    files, unused_artifact = sampling_read_artifact(api, old)
+    prepared = sampling_prepared(api, old, files, old_context)
+    host = sampling_host(old, files, old_context)
+    owner, unused_terminal = sampling_phase_proofs(files, old_context, prepared)
+    sampling_job_accounting(sampling_host_job(api, old), sampling_integer(owner["physical_packet_wall_us"], True), 1800)
+    acquired = sampling_acquisition(old, files, old_context, prepared)
+    sampling_source_hashes(api, old, old_context, acquired)
+    return prepared, acquired
+
+
+def sampling_history(api: Api, authority: dict, context: dict, occupancy: dict, state: str) -> list[dict]:
+    """Retain every admitted attempted row and charge platform job occupancy."""
+    from sampling_qualification_receipt import schedule
+    result = []
+    for source in authority["history"]:
+        phase, packet = source["phase"], sampling_integer(source["packet"])
+        plan = schedule(phase, packet)
+        if not plan or source.get("state") != "complete" or source.get("request_run_attempt") != "1" or source.get("executor_run_attempt") != "1":
+            raise ValueError("sampling previous attempted history is incomplete or forbidden")
+        run_id = source["executor_run_id"]
+        execution = api.request("/actions/runs/" + run_id)
+        request = api.request("/actions/runs/" + source["request_run_id"])
+        if not isinstance(execution, dict) or str(execution.get("id")) != run_id or execution.get("run_attempt") != 1 or \
+                execution.get("path") != BENCH_WORKFLOW or execution.get("event") != "workflow_run" or \
+                not isinstance(request, dict) or str(request.get("id")) != source["request_run_id"] or request.get("run_attempt") != 1 or \
+                execution.get("display_title") != f"9700X request {source['request_run_id']}.1 head {request.get('head_sha')}":
+            raise ValueError("sampling prior platform attempt identity changed")
+        prior = dict(authority, run_id=run_id, executor=execution)
+        job = sampling_host_job(api, prior)
+        # Native admission history stores the API second-resolution upper bound.
+        expected_upper = sampling_integer(source["physical_wall_us"], True)
+        account = sampling_job_accounting(job, 1, plan["reservation_seconds"])
+        if account["physical_job_wall_upper_us"] != expected_upper:
+            raise ValueError("sampling authenticated attempt occupancy changed during publication")
+        result.append({"phase": phase, "packet": packet, "request_run_id": source["request_run_id"],
+                       "run_id": run_id, "run_attempt": "1", "state": source["state"],
+                       "reservation_seconds": plan["reservation_seconds"], "actions_job_occupancy_us": expected_upper,
+                       "physical_packet_wall_us": None, "campaign": source["campaign"], "freeze_revision": source["freeze_revision"]})
+    result.append({"phase": context["phase"], "packet": context["packet"], "request_run_id": authority["request_id"],
+                   "run_id": authority["run_id"], "run_attempt": "1", "state": state,
+                   "reservation_seconds": context["schedule"]["reservation_seconds"],
+                   "actions_job_occupancy_us": occupancy["physical_job_wall_upper_us"],
+                   "physical_packet_wall_us": occupancy["native_packet_wall_us"],
+                   "campaign": authority["admitted"]["sampling_freeze_sha256"],
+                   "freeze_revision": authority["admitted"]["sampling_freeze_revision"]})
+    return result
+
+def sampling_trusted(authority: dict, context: dict, prepared: dict, acquired: dict, host: dict,
+                     terminal: dict, occupancy: dict, history: list[dict]) -> dict:
+    """Construct frozen expectations from committed metadata and API facts."""
+    from sampling_qualification_receipt import REQUEST_SELECTORS, _lab
+    frozen, admitted, plan = authority["freeze"], authority["admitted"], context["record"]
+    family = context["schedule"]["family"]
+    candidate_role = "baseline" if family == "aa" else "candidate" if family == "ab1" else "candidate2"
+    revision = plan["base"] if family == "aa" else plan["ab1_revision"] if family == "ab1" else plan["ab2_revision"]
+    record = prepared["record"]
+    wanted = {"prepared_sha256": prepared["sha256"], "closure_sha256": record["snapshot_digest"],
+              "baseline_sha256": record["baseline_sha256"], "aa_candidate_sha256": record["baseline_sha256"],
+              "ab1_candidate_sha256": record["candidate_sha256"], "ab2_candidate_sha256": record["candidate2_sha256"],
+              "baseline_bytes": str(record["baseline_bytes"]), "ab1_candidate_bytes": str(record["candidate_bytes"]),
+              "ab2_candidate_bytes": str(record["candidate2_bytes"]), "base": plan["base"], "base_tree": plan["base_tree"],
+              "trusted_revision": plan["trusted_revision"], "baseline_revision": plan["base"],
+              "aa_candidate_revision": plan["base"], "ab1_revision": plan["ab1_revision"], "ab2_revision": plan["ab2_revision"],
+              "protocol_sha256": plan["protocol_sha256"],
+              **{key: acquired[key] for key in ("lab_sha256", "python_sha256", "driver_sha256")}}
+    if any(frozen.get(key) != value for key, value in wanted.items()):
+        raise ValueError("sampling committed freeze contradicts the authenticated acquisition artifacts")
+    identity = {"schema": "buster-main-sampling-packet-v1", "phase": context["phase"], "packet": str(context["packet"]),
+                "campaign": admitted["sampling_freeze_sha256"], "reservation_seconds": str(context["schedule"]["reservation_seconds"]),
+                "family": family, "trials": str(len(context["schedule"]["slots"])), "base": plan["base"],
+                "base_tree": plan["base_tree"], "request_head": authority["head"], "baseline_revision": plan["base"],
+                "candidate_revision": revision, "baseline_sha256": record["baseline_sha256"],
+                "candidate_sha256": record[candidate_role + "_sha256"], "lab_sha256": acquired["lab_sha256"],
+                "protocol_sha256": plan["protocol_sha256"], "python_sha256": acquired["python_sha256"],
+                "driver_sha256": acquired["driver_sha256"], "closure_sha256": record["snapshot_digest"],
+                "freeze_sha256": admitted["sampling_freeze_sha256"], "trusted_revision": plan["trusted_revision"],
+                "prepared_sha256": prepared["sha256"], "baseline_bytes": str(record["baseline_bytes"]),
+                "candidate_bytes": str(record[candidate_role + "_bytes"]), "cpu": "2", "warmups": "1", "seed": "20261003",
+                "floor_percent": "0.5", "fresh_copy": "true", "routine_enabled": "false",
+                "evidence_class": "unqualified-sampling-research"}
+    binaries = {"baseline": {"sha256": record["baseline_sha256"], "revision": plan["base"],
+                              "size_bytes": record["baseline_bytes"], "path": context["output"] + "/bin/ide-base"},
+                "candidate": {"sha256": record[candidate_role + "_sha256"], "revision": revision,
+                              "size_bytes": record[candidate_role + "_bytes"],
+                              "path": context["output"] + "/bin/" + {"baseline": "ide-base", "candidate": "ide-cand", "candidate2": "ide-cand2"}[candidate_role]}}
+    workload = {"command": _lab.shell_join(["IDE"] + _lab.DEFAULT_COMPILE + ["-o", "OUT"]),
+                "repo_root": plan["source_root"], "perf": "perf", "extra": [], "extra_by_variant": {"a": [], "b": []}}
+    request = {"repository": authority["repository"], "actor": authority["facts"]["actor_login"],
+               "owner": authority["facts"]["owner_login"], "selector": REQUEST_SELECTORS[context["phase"]],
+               "request_run_id": authority["request_id"], "request_head": authority["head"],
+               "freeze_revision": admitted["sampling_freeze_revision"], "phase": context["phase"], "packet": context["packet"],
+               "campaign": admitted["sampling_freeze_sha256"], "acquisition_campaign": context["sha256"],
+               "acquisition_revision": context["revision"],
+               "pilot_campaign": frozen["campaign_parent"] if context["phase"] == "confirm" else admitted["sampling_freeze_sha256"],
+               "pilot_revision": frozen["campaign_parent_revision"] if context["phase"] == "confirm" else admitted["sampling_freeze_revision"]}
+    executor = {"repository": authority["repository"], "request_run_id": authority["request_id"],
+                "run_id": authority["run_id"], "run_attempt": "1", "cpu_model": host["cpu_model"],
+                "physical_packet_wall_us": sampling_integer(terminal["physical_packet_wall_us"], True),
+                "actions_job_occupancy_us": occupancy["physical_job_wall_upper_us"],
+                "queue_delay_seconds": occupancy["queue_delay_seconds"]}
+    # Current is provisional complete for raw replay. A validator failure
+    # rewrites the current history row to invalid before publication.
+    return {"authenticated": True, "request": request, "executor": executor, "identity": identity,
+            "binaries": binaries, "workload_config": workload, "attempts": history}
+
+
+def sampling_validate(api: Api, authority: dict, files: dict[str, bytes]) -> dict:
+    from sampling_qualification_receipt import validate_packet
+    context = sampling_plan(authority)
+    prepared = sampling_prepared(api, authority, files, context)
+    host = sampling_host(authority, files, context)
+    owner, terminal = sampling_phase_proofs(files, context, prepared)
+    job = sampling_host_job(api, authority)
+    occupancy = sampling_job_accounting(job, sampling_integer(owner["physical_packet_wall_us"], True),
+                                        context["schedule"]["reservation_seconds"])
+    occupancy["native_packet_wall_us"] = sampling_integer(terminal["physical_packet_wall_us"], True)
+    if context["phase"] == "acquire":
+        acquired = sampling_acquisition(authority, files, context, prepared)
+        sampling_source_hashes(api, authority, context, acquired)
+        if authority["history"]:
+            raise ValueError("sampling acquisition has prior campaign attempts")
+        result = {"schema": "buster-main-sampling-acquisition-validation-v1", "packet_state": "complete-valid-research",
+                  "qualification_state": "unqualified", "evidence_class": "unqualified-sampling-research",
+                  "routine_profile_enabled": False, "phase": "acquire", "packet": 0, "family": "acquire",
+                  "reservation_seconds": 1800, "measurement": False, "series": [], "problems": []}
+        history = sampling_history(api, authority, context, occupancy, "complete")
+    else:
+        original, acquired = sampling_prior_acquisition(api, authority, context)
+        if prepared["files"] != original["files"]:
+            raise ValueError("sampling packet preparation metadata differs from the authenticated acquisition")
+        history = sampling_history(api, authority, context, occupancy, "complete")
+        trusted = sampling_trusted(authority, context, original, acquired, host, terminal, occupancy, history)
+        identity = sampling_tsv(files.get("identity.tsv"))
+        attempts = sampling_tsv(files.get("attempts.tsv"), True)
+        if any(row.get("cpu_status") != "1" or row.get("memory_status") != "1" for row in attempts):
+            raise ValueError("sampling nominal CPU or memory observation is unavailable")
+        series = {}
+        for index in range(len(context["schedule"]["slots"])):
+            root = f"trial-{index}/"
+            raw = sampling_json(files, root + "compare.json")
+            pairs = sampling_json(files, root + "pairs.json", False)
+            summary = sampling_json(files, root + "summary.json")
+            variants = raw.get("variants")
+            if not isinstance(variants, dict) or any(not isinstance(variants.get(key), dict) or
+                    variants[key].get("ide") != trusted["binaries"][role]["path"]
+                    for key, role in (("a", "baseline"), ("b", "candidate"))):
+                raise ValueError("sampling raw stream compiler path differs from the acquired binary")
+            series[index] = {"compare": raw, "pairs": pairs, "summary": summary}
+        corpus_summary = sampling_json(files, "throughput/summary.json")
+        corpus_metadata = sampling_json(files, "throughput/metadata.json")
+        problems = classify_throughput(corpus_summary, corpus_metadata, trusted["binaries"])
+        provenance = corpus_metadata.get("compiler_provenance")
+        if not isinstance(provenance, list) or len(provenance) != 2 or any(
+                not isinstance(row, dict) or row.get("path") != trusted["binaries"][role]["path"] or
+                row.get("revision_label") != trusted["binaries"][role]["revision"] or
+                type(row.get("bytes")) is not int or row["bytes"] != trusted["binaries"][role]["size_bytes"]
+                for row, role in zip(provenance or [], ("baseline", "candidate"))):
+            problems.append("full corpus compiler path/source/size differs from acquired binaries")
+        if corpus_metadata.get("flags") != [] or corpus_metadata.get("allocation_compilers") != [] or \
+                corpus_metadata.get("scale") != 1 or corpus_metadata.get("seed") != 20260907:
+            problems.append("full corpus launch configuration differs from the unchanged CI profile")
+        result = validate_packet(identity, attempts, terminal, series, trusted)
+        result["problems"].extend(problems)
+        result["full_required_corpus"] = throughput_digest(corpus_summary)
+        if result["problems"]:
+            result["packet_state"] = "incomplete"
+            history[-1]["state"] = "invalid"
+        else:
+            result["outstanding_qualification"] = [item for item in result["outstanding_qualification"] if item != "full required corpus"]
+    result.update(physical_packet_wall_us=sampling_integer(terminal["physical_packet_wall_us"], True),
+                  prep_us=sampling_integer(terminal["prep_us"]), accounting=occupancy,
+                  authenticated_attempt_history=history, host=host,
+                  platform_runner={key: job.get(key) for key in ("id", "runner_id", "runner_name", "runner_group_id", "runner_group_name", "labels")},
+                  acquisition_campaign=context["sha256"], acquisition_revision=context["revision"],
+                  prepared_sha256=prepared["sha256"],
+                  acquisition_preparation_costs=sampling_json(files, "prepared/prepared-cost.json") if "prepared/prepared-cost.json" in files else None,
+                  acquired_binaries={role: {"sha256": prepared["record"][role + "_sha256"],
+                                           "size_bytes": prepared["record"][role + "_bytes"]}
+                                     for role in ("baseline", "candidate", "candidate2")})
+    return result
+
+
+def sampling_observed_costs(api: Api, authority: dict, files: dict[str, bytes]) -> dict:
+    """Show unavailable and failed measurements honestly, without zero filling."""
+    observed = {"physical_packet_wall_us": None, "owner_wall_us": None, "prep_us": None,
+                "physical_job_wall_us": None, "physical_job_wall_upper_us": None, "queue_delay_seconds": None}
+    for name, mappings in (("packet.tsv", (("physical_packet_wall_us", "physical_packet_wall_us"), ("prep_us", "prep_us"))),
+                           ("owner.tsv", (("physical_packet_wall_us", "owner_wall_us"),))):
         try:
-            return sampling_queue(dict(os.environ))
+            row = sampling_tsv(files.get(name))
+            for source, target in mappings:
+                observed[target] = sampling_integer(row.get(source), target != "prep_us")
+        except (ValueError, UnicodeError, TypeError):
+            pass
+    try:
+        job = sampling_host_job(api, authority)
+        observed["platform_job_state"] = job.get("status")
+        observed["platform_job_conclusion"] = job.get("conclusion")
+        stamps = [datetime.fromisoformat(job[key].replace("Z", "+00:00")) for key in ("created_at", "started_at", "completed_at")]
+        if all(stamp.utcoffset() is not None for stamp in stamps):
+            wall = round((stamps[2] - stamps[1]).total_seconds() * 1000000)
+            queue = (stamps[1] - stamps[0]).total_seconds()
+            if wall > 0 and queue >= 0:
+                observed.update(physical_job_wall_us=wall, physical_job_wall_upper_us=wall + 2000000,
+                                queue_delay_seconds=queue)
+    except (ValueError, KeyError, TypeError, AttributeError, OverflowError, OSError, urllib.error.URLError, TimeoutError):
+        pass
+    return observed
+
+
+def sampling_publish(environment: dict) -> int:
+    """Bounded hosted publication; all evidence remains data and unqualified."""
+    api, authority = sampling_authority(environment)
+    admitted = authority["admitted"]
+    files, artifact = {}, {}
+    result = {"schema": "buster-main-sampling-publication-v1", "packet_state": "incomplete",
+              "qualification_state": "unqualified", "evidence_class": "unqualified-sampling-research",
+              "routine_profile_enabled": False, "phase": admitted["sampling_phase"],
+              "packet": sampling_integer(admitted["sampling_packet"]), "family": admitted["sampling_family"],
+              "reservation_seconds": sampling_integer(admitted["sampling_reservation_seconds"], True),
+              "problems": []}
+    try:
+        files, artifact = sampling_read_artifact(api, authority)
+        result = sampling_validate(api, authority, files)
+    except (OSError, ValueError, UnicodeError, TypeError, KeyError, IndexError, AttributeError, RecursionError,
+            urllib.error.URLError, TimeoutError) as error:
+        result["problems"].append(("evidence validation failed: " + type(error).__name__ + ": " + str(error))[:1000])
+        result["accounting"] = sampling_observed_costs(api, authority, files)
+        result["authenticated_attempt_history"] = list(authority["history"]) + [{
+            "phase": admitted["sampling_phase"], "packet": result["packet"], "request_run_id": authority["request_id"],
+            "run_id": authority["run_id"], "run_attempt": "1", "state": "incomplete",
+            "reservation_seconds": result["reservation_seconds"],
+            "actions_job_occupancy_us": result["accounting"]["physical_job_wall_upper_us"],
+            "physical_packet_wall_us": result["accounting"]["physical_packet_wall_us"],
+            "campaign": admitted["sampling_freeze_sha256"], "freeze_revision": admitted["sampling_freeze_revision"]}]
+    success = result["packet_state"] == "complete-valid-research" and not result["problems"]
+    conclusion = "success" if success else "failure"
+    title = "Valid unqualified sampling packet" if success else "Incomplete unqualified sampling packet"
+    workflow_url = run_url(authority["repository"], authority["run_id"], "1")
+    summary = ("Unqualified sampling research; routine profile remains disabled.\n\n"
+               "Lifecycle protocol: sampling-terminal-native-v1.\n"
+               f"Phase {admitted['sampling_phase']}, packet {admitted['sampling_packet']}; "
+               f"whole physical-job reservation {admitted['sampling_reservation_seconds']} seconds.\n"
+               f"Packet state: {result['packet_state']}. Qualification state: unqualified.\n\n" +
+               f"Request run {authority['request_id']} attempt 1: {run_url(authority['repository'], authority['request_id'], '1')}\n" +
+               f"Workflow run {authority['run_id']} attempt 1: {workflow_url}\n\n")
+    if result["problems"]:
+        summary += "Evidence problems:\n" + "\n".join("- " + str(problem)[:1000] for problem in result["problems"][:30]) + "\n\n"
+    fence = chr(96) * 3
+    summary += "Observed accounting:\n" + fence + "json\n" + json.dumps(result.get("accounting", {}), sort_keys=True) + "\n" + fence + "\n"
+    if artifact:
+        summary += "\nEvidence: " + artifact_link(authority["repository"], authority["run_id"], artifact) + "\n"
+    report = json.dumps(result, sort_keys=True, indent=2)
+    row = sampling_write(api, authority, {"status": "completed", "conclusion": conclusion, "details_url": workflow_url,
+                         "output": {"title": title, "summary": summary[:TEXT_LIMIT],
+                                    "text": fence + "json\n" + report[:TEXT_LIMIT - 16] + "\n" + fence}})
+    with open(environment.get("GITHUB_STEP_SUMMARY") or os.devnull, "a", encoding="utf-8") as stream:
+        stream.write(summary + "\n")
+    print(f"COMPILER_SAMPLING_PUBLISHED {conclusion} check={row.get('id')} state={row.get('status')} qualification=unqualified")
+    return 0 if success and row.get("status") == "completed" and row.get("conclusion") == "success" else 1
+
+
+
+def main() -> int:
+    if sys.argv[1:] in (["sampling-queue"], ["sampling-publish"]):
+        try:
+            return (sampling_queue if sys.argv[1] == "sampling-queue" else sampling_publish)(dict(os.environ))
         except (OSError, ValueError, urllib.error.URLError, TimeoutError) as error:
             print(f"COMPILER_SAMPLING_PUBLICATION_REFUSED {error}", file=sys.stderr)
             return 1
+    if sys.argv[1:]:
+        print("BENCH_COMPILER_PUBLISH_FAIL unsupported command", file=sys.stderr)
+        return 1
     environment = os.environ
     get = lambda key: environment.get(key, "")  # noqa: E731
     recover = bool(get("BQ_RECOVER_RUN_ID"))
