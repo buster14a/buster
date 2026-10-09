@@ -9609,6 +9609,215 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_fast_consumer_register_hint(Unit
     return result;
 }
 
+
+// Diagnostic-only reduced input: these inner/outer bodies and source lines
+// match the RAD fixture. The real SDK compile remains the runtime/debugger
+// oracle; this bounded snapshot exposes canonical identity and allocation.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_parameter_location_snapshot(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "#define DEBUGGEE_NOINLINE __declspec(noinline)\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "typedef struct DebuggeeRecord DebuggeeRecord;\n"
+        "struct DebuggeeRecord\n"
+        "{\n"
+        "    int tag;\n"
+        "    unsigned int flags : 3;\n"
+        "    unsigned int code : 13;\n"
+        "    int samples[3];\n"
+        "};\n"
+        "\n"
+        "static DEBUGGEE_NOINLINE int debuggee_inner(int seed, const DebuggeeRecord *input_record)\n"
+        "{\n"
+        "    // The Win64 by-value aggregate uses CodeView S_DEFRANGE_REGISTER_REL_INDIR,\n"
+        "    // which pinned RAD does not parse. Keep the aggregate/array/bitfield oracle\n"
+        "    // on this normal local copy; by-value parameter evaluation is out of scope.\n"
+        "    DebuggeeRecord record = *input_record;\n"
+        "    volatile int inner_value = seed + record.samples[1];\n"
+        "    volatile int inner_total = inner_value + record.samples[0] + record.samples[2] + // RAD_BPT_INNER\n"
+        "                               (int)record.flags + (int)record.code + record.tag;\n"
+        "    return inner_total;\n"
+        "}\n"
+        "\n"
+        "static DEBUGGEE_NOINLINE int debuggee_outer(int seed)\n"
+        "{\n"
+        "    int values[3] = {2, 3, 5};\n"
+        "    DebuggeeRecord record = {17, 5, 257, {7, 11, 13}};\n"
+        "    volatile int outer_value = seed + values[1];\n"
+        "    volatile int outer_result = debuggee_inner(outer_value, &record); // RAD_BPT_OUTER: inspect array and aggregate.\n"
+        "    volatile int final_result = outer_result + values[0] + values[1] + values[2] + seed;\n"
+        "    return final_result;\n"
+        "}\n"
+        "\n"
+        "int debuggee_probe_entry(void) { return debuggee_outer(3); }\n"
+    );
+    String8 names[] = {S8("debuggee_inner"), S8("debuggee_outer")};
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = {.cpu_arch = architecture ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS};
+        IrProgram* program = machine_test_compile_c(temporary.arena, S8("rad-parameter-snapshot.c"), source, target);
+        BUSTER_TEST(arguments, program && program->module_count == 1);
+        if (program && program->module_count == 1)
+        {
+            program->fast_passes = IR_FAST_ALL;
+            IrModule* module = program->modules;
+            IrValidationResult prepared = ir_prepare_canonical_module(program, module, false);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+            if (prepared.error == IR_VALIDATION_NONE)
+            {
+                codegen_prewarm_for_target(target);
+                CodegenModule located = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                    (CodegenModuleOptions){.debug_info = true, .verify_invariants = true, .register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST});
+                BUSTER_TEST(arguments, located.error == CODEGEN_ERROR_NONE);
+                for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+                {
+                    IrFunction* ir_function = machine_test_ir_function_find(module, names[name_index]);
+                    BUSTER_TEST(arguments, ir_function != 0);
+                    if (ir_function)
+                    {
+                        string_print(S8("RAD_PARAMETER_SNAPSHOT cpu={u32} function={S8} symbol={u32} pin={u32} locals={u32} ir_rows={u32}\n"),
+                                     (u32)target.cpu_arch, ir_function->name, ir_function->symbol.value,
+                                     (u32)program->pin_debug_locals, ir_function->debug_local_count, ir_function->instruction_count);
+                        for (u32 local_index = 0; local_index < BUSTER_MIN(ir_function->debug_local_count, 32u); local_index += 1)
+                        {
+                            IrDebugLocal* local = ir_function->debug_locals + local_index;
+                            string_print(S8("RAD_PARAMETER_LOCAL index={u32} name={S8} id={u32} parameter={u32} type={u32}\n"),
+                                         local_index, local->name, local->id.value, (u32)local->is_parameter, local->type.value);
+                        }
+                        for (u32 ir_row = 0; ir_row < BUSTER_MIN(ir_function->instruction_count, 256u); ir_row += 1)
+                        {
+                            IrInstruction* instruction = ir_function->instructions + ir_row;
+                            string_print(S8("RAD_PARAMETER_IR row={u32} opcode={u32} result={u32} local={u32} operands={u32}\n"),
+                                         ir_row, (u32)instruction->opcode, instruction->result.value,
+                                         instruction->canonical_local.value, instruction->operand_count);
+                            for (u32 operand = 0; operand < BUSTER_MIN(instruction->operand_count, 4u); operand += 1)
+                            {
+                                string_print(S8("RAD_PARAMETER_IR_OPERAND row={u32} slot={u32} value={u32}\n"),
+                                             ir_row, operand, instruction->operands[operand].value);
+                            }
+                        }
+                        for (u32 ir_row = 0; ir_row < BUSTER_MIN(ir_function->instruction_count, 256u); ir_row += 1)
+                        {
+                            IrInstruction* instruction = ir_function->instructions + ir_row;
+                            for (u32 immediate = 0; immediate < BUSTER_MIN((u32)instruction->immediate_count, 2u); immediate += 1)
+                            {
+                                string_print(S8("RAD_PARAMETER_IR_IMMEDIATE row={u32} slot={u32} value={u64}\n"),
+                                             ir_row, immediate, instruction->immediates[immediate]);
+                            }
+                        }
+                        MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, ir_function, target);
+                        BUSTER_TEST(arguments, selected.supported);
+                        if (selected.supported)
+                        {
+                            MachineFunction* machine = &selected.function;
+                            MachineVerifyResult verified = machine_verify_function(machine);
+                            BUSTER_TEST(arguments, verified.error == MACHINE_VERIFY_NONE);
+                            if (verified.error == MACHINE_VERIFY_NONE)
+                            {
+                                MachineStackPlacement placement = machine_fast_placement_build(temporary.arena, machine);
+                                BUSTER_TEST(arguments, placement.valid);
+                                if (placement.valid)
+                                {
+                                    MachineEncodeResult encoded = architecture ? machine_encode_aarch64(temporary.arena, machine, &placement)
+                                                                               : machine_encode_x86_64(temporary.arena, machine, &placement);
+                                    BUSTER_TEST(arguments, encoded.valid);
+                                    string_print(S8("RAD_PARAMETER_MACHINE rows={u32} vregs={u32} debug_values={u32} edits={u32} frame={u32} incoming={u32} bytes={u32} distinct={u32}\n"),
+                                                 machine->instruction_count, machine->virtual_register_count, machine->debug_value_count,
+                                                 placement.edit_count, placement.frame_size, placement.incoming_base, encoded.byte_count,
+                                                 (u32)machine->distinct_frame_objects);
+                                    for (u32 value_index = 0; value_index < BUSTER_MIN(machine->virtual_register_count, 256u); value_index += 1)
+                                    {
+                                        MachineVirtualRegister* value = machine->virtual_registers + value_index;
+                                        string_print(S8("RAD_PARAMETER_VREG id={u32} origin={u32} definition={u32} flags={u32} home={u32}\n"),
+                                                     value_index, value->typed_origin, value->definition_point, (u32)value->flags,
+                                                     placement.virtual_register_offsets[value_index]);
+                                    }
+                                    for (u32 value_index = 0; value_index < BUSTER_MIN(machine->debug_value_count, 32u); value_index += 1)
+                                    {
+                                        MachineDebugValue* value = machine->debug_values + value_index;
+                                        string_print(S8("RAD_PARAMETER_DEBUG local={u32} kind={u32} first_ir={u32} ir_count={u32} pieces={u32} ref0={u32} ref1={u32}\n"),
+                                                     value->local.value, (u32)value->kind, value->first_instruction, value->instruction_count,
+                                                     (u32)value->piece_count, value->pieces[0], value->pieces[1]);
+                                    }
+                                    for (u32 machine_row = 0; machine_row < BUSTER_MIN(machine->instruction_count, 256u); machine_row += 1)
+                                    {
+                                        MachineInstruction* instruction = machine->instructions + machine_row;
+                                        u32 byte_offset = encoded.valid && encoded.row_offsets ? encoded.row_offsets[machine_row] : UINT32_MAX;
+                                        string_print(S8("RAD_PARAMETER_MIR row={u32} byte={u32} opcode={u32} flags={u32} payload={u32} ref0={u32} ref1={u32} ref2={u32} ref3={u32} reg0={u32} reg1={u32} reg2={u32} reg3={u32}\n"),
+                                                     machine_row, byte_offset, (u32)instruction->opcode, (u32)instruction->flags, instruction->payload,
+                                                     instruction->operands[0], instruction->operands[1], instruction->operands[2], instruction->operands[3],
+                                                     (u32)placement.operand_registers[machine_row * 4u],
+                                                     (u32)placement.operand_registers[machine_row * 4u + 1u],
+                                                     (u32)placement.operand_registers[machine_row * 4u + 2u],
+                                                     (u32)placement.operand_registers[machine_row * 4u + 3u]);
+                                    }
+                                    for (u32 mark_index = 0; mark_index < BUSTER_MIN(machine->line_mark_count, 256u); mark_index += 1)
+                                    {
+                                        MachineLineMark* mark = machine->line_marks + mark_index;
+                                        string_print(S8("RAD_PARAMETER_MARK row={u32} ir={u32}\n"), mark->row, mark->instruction);
+                                    }
+                                    for (u32 edit_index = 0; edit_index < BUSTER_MIN(placement.edit_count, 512u); edit_index += 1)
+                                    {
+                                        MachineEdit* edit = placement.edits + edit_index;
+                                        string_print(S8("RAD_PARAMETER_EDIT point={u32} kind={u32} subject={u32} location={u32} flags={u32}\n"),
+                                                     edit->point, (u32)edit->kind, edit->subject, edit->location, (u32)edit->flags);
+                                    }
+                                }
+                            }
+                        }
+                        if (located.error == CODEGEN_ERROR_NONE)
+                        {
+                            for (u32 location_index = 0; location_index < BUSTER_MIN(located.debug_location_count, 512u); location_index += 1)
+                            {
+                                DebugLocationSeed* location = located.debug_locations + location_index;
+                                if (location->function_symbol.value == ir_function->symbol.value)
+                                {
+                                    string_print(S8("RAD_PARAMETER_LOCATION local={u32} start={u32} end={u32} kind={u32} register={u32} offset={s32}\n"),
+                                                 location->local.value, location->start, location->end, (u32)location->location.kind,
+                                                 (u32)location->location.reg, location->location.frame_offset);
+                                }
+                            }
+                            for (u32 entry_index = 0; entry_index < BUSTER_MIN(located.line_entry_count, 256u); entry_index += 1)
+                            {
+                                CodegenLineEntry* entry = located.line_entries + entry_index;
+                                string_print(S8("RAD_PARAMETER_LINE byte={u32} line={u32} column={u32}\n"),
+                                             entry->code_offset, entry->line, (u32)entry->column);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9623,6 +9832,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_trace_equivalence);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_capacity);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_differential);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_parameter_location_snapshot);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_sparse_work);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_traffic);

@@ -23577,6 +23577,15 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
             u32 builtin_depth = 0;
             while (builtin_index < body_end)
             {
+                CToken builtin_token = preprocess.tokens[builtin_index];
+                if (builtin_token.kind == C_TOKEN_IDENTIFIER &&
+                    string_equal(c_token_spelling(preprocess.spelling_base, builtin_token), S8("__fp16")) &&
+                    c_parse_storage_half_value_call_argument(result, preprocess, scope_stack[scope_count - 1], builtin_index))
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, builtin_token),
+                                       C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                       S8("type name '__fp16' used where an expression argument is required"));
+                }
                 if (c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, builtin_index)) == C_PUNCTUATOR_LEFT_PARENTHESIS)
                 {
                     builtin_depth += 1;
