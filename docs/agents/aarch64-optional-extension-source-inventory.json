@@ -1,0 +1,1162 @@
+{
+  "schema": "aarch64-optional-extension-source-inventory/v1",
+  "repository": "buster14a/buster",
+  "frozen_revision": "a555b470ca17de0a027be1c19ffd8bf9f55819a7",
+  "provenance": {
+    "manifest_path": "src/buster/lib/compiler/assembly/generated/manifest.json",
+    "manifest_blob_sha": "f1df4980c55dd209a85bc0fe919a0429248bc0ca",
+    "reduced_profile_path": "src/buster/lib/compiler/assembly/generated/aarch64-apple-m1-profile.generated.jsonl",
+    "reduced_profile_blob_sha": "ea37a59b4cafb8bed6b74a9e9cd819971bb52865",
+    "profile_name": "apple-m1",
+    "profile_version": "1",
+    "profile_source_identity": "checked-in-reduced-jsonl",
+    "llvm_release": "llvmorg-22.1.8",
+    "llvm_commit": "ca7933e47d3a3451d81e72ac174dcb5aa28b59d1",
+    "reduced_input_checksum": "f2e553abd71696e5",
+    "raw_llvm_snapshot_provenance": false,
+    "no_external_dataset_import": true,
+    "source_manifest_acceptance": "blocked",
+    "arm_xml_crosscheck": {
+      "status": "independent-cross-check-only",
+      "source": "official-arm-a64-isa-data-not-vendored",
+      "release": "2026-06",
+      "source_url": "https://developer.arm.com/-/cdn-downloads/permalink/Exploration-Tools-A64-ISA/ISA_A64/ISA_A64_xml_A_profile-2026-06.tar.gz",
+      "archive_sha256": "63a01a1696483bbe2edfef9e0f0cd053d6c1c619ec0587876cb7a60bb344f354",
+      "raw_xml_policy": "non-vendored-license-restricted",
+      "candidate_count": 4623,
+      "selected_count": 1695,
+      "canonical_count": 1523,
+      "alias_count": 172,
+      "selected_excluding_system_count": 1653,
+      "canonical_excluding_system_count": 1490,
+      "alias_excluding_system_count": 163,
+      "denominator_is_independent_of_reduced_llvm_rows": true
+    }
+  },
+  "denominators": {
+    "reduced_llvm_rows": 7491,
+    "m1_profile_rows": 2898,
+    "outside_m1_rows": 4593,
+    "outside_exclusion_reason_rows": {
+      "non_m1_predicate": 4592,
+      "custom_operand_requires_sme": 1
+    },
+    "generated_classification_rows": {
+      "DIRECT": 37,
+      "NORMALIZED": 4271,
+      "ALIAS": 0,
+      "PRIVILEGED/SYSTEM": 25,
+      "RESERVED/UNENCODABLE": 145,
+      "UNSUPPORTED_TOKEN": 3013,
+      "UNCLASSIFIED": 0
+    },
+    "apple_m1_admitted_classification_rows": {
+      "DIRECT": 22,
+      "NORMALIZED": 1942,
+      "ALIAS": 0,
+      "PRIVILEGED/SYSTEM": 18,
+      "RESERVED/UNENCODABLE": 0,
+      "UNSUPPORTED_TOKEN": 916,
+      "UNCLASSIFIED": 0
+    },
+    "outside_apple_m1_classification_rows": {
+      "DIRECT": 15,
+      "NORMALIZED": 2329,
+      "ALIAS": 0,
+      "PRIVILEGED/SYSTEM": 7,
+      "RESERVED/UNENCODABLE": 145,
+      "UNSUPPORTED_TOKEN": 2097,
+      "UNCLASSIFIED": 0
+    },
+    "outside_predicate_occurrences": 4962
+  },
+  "classification_code_order": {
+    "0": "DIRECT",
+    "1": "NORMALIZED",
+    "2": "ALIAS",
+    "3": "PRIVILEGED/SYSTEM",
+    "4": "RESERVED/UNENCODABLE",
+    "5": "UNSUPPORTED_TOKEN"
+  },
+  "encoder_families": {
+    "SCALAR_INTEGER": {
+      "rows": 619,
+      "apple_m1_admitted_rows": 186,
+      "outside_apple_m1_rows": 433,
+      "classification_rows": {
+        "DIRECT": 36,
+        "NORMALIZED": 234,
+        "UNSUPPORTED_TOKEN": 349
+      }
+    },
+    "SVE_SVE2": {
+      "rows": 2881,
+      "apple_m1_admitted_rows": 0,
+      "outside_apple_m1_rows": 2881,
+      "classification_rows": {
+        "NORMALIZED": 1696,
+        "RESERVED/UNENCODABLE": 50,
+        "UNSUPPORTED_TOKEN": 1135
+      }
+    },
+    "FP_SIMD_NEON": {
+      "rows": 2004,
+      "apple_m1_admitted_rows": 1854,
+      "outside_apple_m1_rows": 150,
+      "classification_rows": {
+        "NORMALIZED": 1508,
+        "RESERVED/UNENCODABLE": 5,
+        "UNSUPPORTED_TOKEN": 491
+      }
+    },
+    "MTE": {
+      "rows": 11,
+      "apple_m1_admitted_rows": 0,
+      "outside_apple_m1_rows": 11,
+      "classification_rows": {
+        "NORMALIZED": 11
+      }
+    },
+    "SME_SME2": {
+      "rows": 669,
+      "apple_m1_admitted_rows": 4,
+      "outside_apple_m1_rows": 665,
+      "classification_rows": {
+        "NORMALIZED": 83,
+        "RESERVED/UNENCODABLE": 88,
+        "UNSUPPORTED_TOKEN": 498
+      }
+    },
+    "BRANCH": {
+      "rows": 67,
+      "apple_m1_admitted_rows": 31,
+      "outside_apple_m1_rows": 36,
+      "classification_rows": {
+        "NORMALIZED": 47,
+        "UNSUPPORTED_TOKEN": 20
+      }
+    },
+    "CRYPTO": {
+      "rows": 45,
+      "apple_m1_admitted_rows": 36,
+      "outside_apple_m1_rows": 9,
+      "classification_rows": {
+        "NORMALIZED": 41,
+        "UNSUPPORTED_TOKEN": 4
+      }
+    },
+    "ATOMIC_LSE": {
+      "rows": 116,
+      "apple_m1_admitted_rows": 64,
+      "outside_apple_m1_rows": 52,
+      "classification_rows": {
+        "NORMALIZED": 116
+      }
+    },
+    "SYSTEM": {
+      "rows": 25,
+      "apple_m1_admitted_rows": 18,
+      "outside_apple_m1_rows": 7,
+      "classification_rows": {
+        "PRIVILEGED/SYSTEM": 25
+      }
+    },
+    "LOAD_STORE": {
+      "rows": 1054,
+      "apple_m1_admitted_rows": 705,
+      "outside_apple_m1_rows": 349,
+      "classification_rows": {
+        "DIRECT": 1,
+        "NORMALIZED": 535,
+        "RESERVED/UNENCODABLE": 2,
+        "UNSUPPORTED_TOKEN": 516
+      }
+    }
+  },
+  "extension_predicate_tokens": {
+    "count": 92,
+    "semantics": "Exact predicate-token row counts from the checked-in reduced JSONL. A row may carry multiple tokens; tokens with _or_ encode alternatives. These are overlapping token populations, not unique instructions per architecture extension. classification_rows are generated metadata classes, not source parser support.",
+    "rows": {
+      "HasCSSC": {
+        "rows": 22,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 22,
+        "classification_rows": {
+          "NORMALIZED": 22
+        }
+      },
+      "HasSVE_or_SME": {
+        "rows": 1236,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 1236,
+        "classification_rows": {
+          "NORMALIZED": 812,
+          "RESERVED/UNENCODABLE": 30,
+          "UNSUPPORTED_TOKEN": 394
+        }
+      },
+      "HasSVE2p2_or_SME2p2": {
+        "rows": 163,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 163,
+        "classification_rows": {
+          "NORMALIZED": 155,
+          "UNSUPPORTED_TOKEN": 8
+        }
+      },
+      "HasSVE2_or_SME": {
+        "rows": 668,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 668,
+        "classification_rows": {
+          "NORMALIZED": 465,
+          "RESERVED/UNENCODABLE": 18,
+          "UNSUPPORTED_TOKEN": 185
+        }
+      },
+      "HasMTE": {
+        "rows": 49,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 49,
+        "classification_rows": {
+          "NORMALIZED": 49
+        }
+      },
+      "HasSMEI16I64": {
+        "rows": 100,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 100,
+        "classification_rows": {
+          "NORMALIZED": 18,
+          "RESERVED/UNENCODABLE": 24,
+          "UNSUPPORTED_TOKEN": 58
+        }
+      },
+      "HasSME": {
+        "rows": 57,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 57,
+        "classification_rows": {
+          "NORMALIZED": 24,
+          "PRIVILEGED/SYSTEM": 1,
+          "UNSUPPORTED_TOKEN": 32
+        }
+      },
+      "HasCPA": {
+        "rows": 10,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 10,
+        "classification_rows": {
+          "NORMALIZED": 8,
+          "UNSUPPORTED_TOKEN": 2
+        }
+      },
+      "HasSVE2p3_or_SME2p3": {
+        "rows": 50,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 50,
+        "classification_rows": {
+          "NORMALIZED": 32,
+          "RESERVED/UNENCODABLE": 1,
+          "UNSUPPORTED_TOKEN": 17
+        }
+      },
+      "HasSVE2p1_or_SME2p1": {
+        "rows": 96,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 96,
+        "classification_rows": {
+          "NORMALIZED": 68,
+          "UNSUPPORTED_TOKEN": 28
+        }
+      },
+      "HasSMEandIsNonStreamingSafe": {
+        "rows": 6,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 6,
+        "classification_rows": {
+          "NORMALIZED": 3,
+          "UNSUPPORTED_TOKEN": 3
+        }
+      },
+      "HasSME2": {
+        "rows": 732,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 732,
+        "classification_rows": {
+          "NORMALIZED": 6,
+          "RESERVED/UNENCODABLE": 58,
+          "UNSUPPORTED_TOKEN": 668
+        }
+      },
+      "HasSVE": {
+        "rows": 279,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 279,
+        "classification_rows": {
+          "DIRECT": 1,
+          "NORMALIZED": 70,
+          "UNSUPPORTED_TOKEN": 208
+        }
+      },
+      "HasSVEAES2": {
+        "rows": 10,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 10,
+        "classification_rows": {
+          "UNSUPPORTED_TOKEN": 10
+        }
+      },
+      "HasNonStreamingSVE_or_SSVE_AES": {
+        "rows": 16,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 16,
+        "classification_rows": {
+          "NORMALIZED": 6,
+          "UNSUPPORTED_TOKEN": 10
+        }
+      },
+      "HasSVEAES": {
+        "rows": 6,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 6,
+        "classification_rows": {
+          "NORMALIZED": 6
+        }
+      },
+      "HasPAuthLR": {
+        "rows": 16,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 16,
+        "classification_rows": {
+          "DIRECT": 8,
+          "NORMALIZED": 8
+        }
+      },
+      "HasHBC": {
+        "rows": 1,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 1,
+        "classification_rows": {
+          "NORMALIZED": 1
+        }
+      },
+      "HasSVEBitPerm": {
+        "rows": 12,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 12,
+        "classification_rows": {
+          "NORMALIZED": 12
+        }
+      },
+      "HasNonStreamingSVE_or_SSVE_BitPerm": {
+        "rows": 12,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 12,
+        "classification_rows": {
+          "NORMALIZED": 12
+        }
+      },
+      "HasBF16": {
+        "rows": 21,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 21,
+        "classification_rows": {
+          "NORMALIZED": 13,
+          "UNSUPPORTED_TOKEN": 8
+        }
+      },
+      "HasFP8": {
+        "rows": 53,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 53,
+        "classification_rows": {
+          "NORMALIZED": 25,
+          "UNSUPPORTED_TOKEN": 28
+        }
+      },
+      "HasNonStreamingSVE2_or_SME2": {
+        "rows": 23,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 23,
+        "classification_rows": {
+          "NORMALIZED": 14,
+          "RESERVED/UNENCODABLE": 1,
+          "UNSUPPORTED_TOKEN": 8
+        }
+      },
+      "HasSMEB16B16": {
+        "rows": 27,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 27,
+        "classification_rows": {
+          "NORMALIZED": 2,
+          "RESERVED/UNENCODABLE": 9,
+          "UNSUPPORTED_TOKEN": 16
+        }
+      },
+      "HasSVEB16B16": {
+        "rows": 34,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 34,
+        "classification_rows": {
+          "NORMALIZED": 13,
+          "UNSUPPORTED_TOKEN": 21
+        }
+      },
+      "HasNonStreamingSVE_or_SME2": {
+        "rows": 16,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 16,
+        "classification_rows": {
+          "NORMALIZED": 13,
+          "UNSUPPORTED_TOKEN": 3
+        }
+      },
+      "HasSVE2p1_or_SME2": {
+        "rows": 51,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 51,
+        "classification_rows": {
+          "NORMALIZED": 8,
+          "UNSUPPORTED_TOKEN": 43
+        }
+      },
+      "HasSVE_B16MM": {
+        "rows": 1,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 1,
+        "classification_rows": {
+          "NORMALIZED": 1
+        }
+      },
+      "HasSME_MOP4": {
+        "rows": 136,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 136,
+        "classification_rows": {
+          "NORMALIZED": 29,
+          "RESERVED/UNENCODABLE": 20,
+          "UNSUPPORTED_TOKEN": 87
+        }
+      },
+      "HasSVEBFSCALE": {
+        "rows": 9,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 9,
+        "classification_rows": {
+          "NORMALIZED": 1,
+          "UNSUPPORTED_TOKEN": 8
+        }
+      },
+      "HasSME_TMOP": {
+        "rows": 13,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 13,
+        "classification_rows": {
+          "RESERVED/UNENCODABLE": 3,
+          "UNSUPPORTED_TOKEN": 10
+        }
+      },
+      "HasBRBE": {
+        "rows": 2,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 2,
+        "classification_rows": {
+          "DIRECT": 2
+        }
+      },
+      "HasLSUI": {
+        "rows": 64,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 64,
+        "classification_rows": {
+          "NORMALIZED": 64
+        }
+      },
+      "HasCMPBR": {
+        "rows": 36,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 36,
+        "classification_rows": {
+          "NORMALIZED": 36
+        }
+      },
+      "HasSVE2p1_or_StreamingSME2": {
+        "rows": 112,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 112,
+        "classification_rows": {
+          "NORMALIZED": 4,
+          "RESERVED/UNENCODABLE": 4,
+          "UNSUPPORTED_TOKEN": 104
+        }
+      },
+      "HasNonStreamingSVE2p2_or_SME2p2": {
+        "rows": 6,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 6,
+        "classification_rows": {
+          "NORMALIZED": 6
+        }
+      },
+      "HasNonStreamingSVE_or_SME2p2": {
+        "rows": 2,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 2,
+        "classification_rows": {
+          "NORMALIZED": 2
+        }
+      },
+      "HasMOPS": {
+        "rows": 120,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 120,
+        "classification_rows": {
+          "NORMALIZED": 24,
+          "UNSUPPORTED_TOKEN": 96
+        }
+      },
+      "HasXS": {
+        "rows": 1,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 1,
+        "classification_rows": {
+          "PRIVILEGED/SYSTEM": 1
+        }
+      },
+      "HasSMEF64F64": {
+        "rows": 26,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 26,
+        "classification_rows": {
+          "NORMALIZED": 4,
+          "UNSUPPORTED_TOKEN": 22
+        }
+      },
+      "HasSMEF16F16_or_SMEF8F16": {
+        "rows": 4,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 4,
+        "classification_rows": {
+          "UNSUPPORTED_TOKEN": 4
+        }
+      },
+      "HasFAMINMAX": {
+        "rows": 28,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 28,
+        "classification_rows": {
+          "NORMALIZED": 16,
+          "UNSUPPORTED_TOKEN": 12
+        }
+      },
+      "HasFPRCVT": {
+        "rows": 48,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 48,
+        "classification_rows": {
+          "NORMALIZED": 48
+        }
+      },
+      "HasSMEF16F16": {
+        "rows": 25,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 25,
+        "classification_rows": {
+          "NORMALIZED": 2,
+          "RESERVED/UNENCODABLE": 9,
+          "UNSUPPORTED_TOKEN": 14
+        }
+      },
+      "HasSMEF8F16": {
+        "rows": 21,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 21,
+        "classification_rows": {
+          "NORMALIZED": 1,
+          "RESERVED/UNENCODABLE": 5,
+          "UNSUPPORTED_TOKEN": 15
+        }
+      },
+      "HasSMEF8F32": {
+        "rows": 22,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 22,
+        "classification_rows": {
+          "NORMALIZED": 2,
+          "RESERVED/UNENCODABLE": 6,
+          "UNSUPPORTED_TOKEN": 14
+        }
+      },
+      "HasSSVE_FP8DOT2": {
+        "rows": 2,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 2,
+        "classification_rows": {
+          "NORMALIZED": 1,
+          "UNSUPPORTED_TOKEN": 1
+        }
+      },
+      "HasSSVE_FP8DOT4": {
+        "rows": 2,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 2,
+        "classification_rows": {
+          "NORMALIZED": 1,
+          "UNSUPPORTED_TOKEN": 1
+        }
+      },
+      "HasFP8DOT4": {
+        "rows": 4,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 4,
+        "classification_rows": {
+          "NORMALIZED": 2,
+          "UNSUPPORTED_TOKEN": 2
+        }
+      },
+      "HasFP8DOT2": {
+        "rows": 4,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 4,
+        "classification_rows": {
+          "NORMALIZED": 2,
+          "UNSUPPORTED_TOKEN": 2
+        }
+      },
+      "HasF16F32DOT": {
+        "rows": 4,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 4,
+        "classification_rows": {
+          "NORMALIZED": 2,
+          "UNSUPPORTED_TOKEN": 2
+        }
+      },
+      "HasNonStreamingSVE_or_SSVE_FEXPA": {
+        "rows": 3,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 3,
+        "classification_rows": {
+          "NORMALIZED": 3
+        }
+      },
+      "HasSSVE_FP8FMA": {
+        "rows": 12,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 12,
+        "classification_rows": {
+          "NORMALIZED": 6,
+          "UNSUPPORTED_TOKEN": 6
+        }
+      },
+      "HasFP8FMA": {
+        "rows": 12,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 12,
+        "classification_rows": {
+          "NORMALIZED": 6,
+          "UNSUPPORTED_TOKEN": 6
+        }
+      },
+      "HasSVE_F16F32MM": {
+        "rows": 1,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 1,
+        "classification_rows": {
+          "NORMALIZED": 1
+        }
+      },
+      "HasSVE2": {
+        "rows": 28,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 28,
+        "classification_rows": {
+          "NORMALIZED": 9,
+          "UNSUPPORTED_TOKEN": 19
+        }
+      },
+      "HasF8F16MM": {
+        "rows": 2,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 2,
+        "classification_rows": {
+          "NORMALIZED": 2
+        }
+      },
+      "HasF8F32MM": {
+        "rows": 2,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 2,
+        "classification_rows": {
+          "NORMALIZED": 2
+        }
+      },
+      "HasMatMulFP64": {
+        "rows": 15,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 15,
+        "classification_rows": {
+          "NORMALIZED": 7,
+          "UNSUPPORTED_TOKEN": 8
+        }
+      },
+      "HasSVE2p2": {
+        "rows": 1,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 1,
+        "classification_rows": {
+          "NORMALIZED": 1
+        }
+      },
+      "HasF16MM": {
+        "rows": 2,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 2,
+        "classification_rows": {
+          "NORMALIZED": 2
+        }
+      },
+      "HasMatMulFP32": {
+        "rows": 1,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 1,
+        "classification_rows": {
+          "NORMALIZED": 1
+        }
+      },
+      "HasF16F32MM": {
+        "rows": 1,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 1,
+        "classification_rows": {
+          "NORMALIZED": 1
+        }
+      },
+      "HasSME2p2": {
+        "rows": 12,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 12,
+        "classification_rows": {
+          "UNSUPPORTED_TOKEN": 12
+        }
+      },
+      "HasGCS": {
+        "rows": 9,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 9,
+        "classification_rows": {
+          "DIRECT": 3,
+          "NORMALIZED": 6
+        }
+      },
+      "HasSVE2p1": {
+        "rows": 10,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 10,
+        "classification_rows": {
+          "UNSUPPORTED_TOKEN": 10
+        }
+      },
+      "HasLS64": {
+        "rows": 4,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 4,
+        "classification_rows": {
+          "NORMALIZED": 4
+        }
+      },
+      "HasRCPC3": {
+        "rows": 24,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 24,
+        "classification_rows": {
+          "NORMALIZED": 22,
+          "RESERVED/UNENCODABLE": 2
+        }
+      },
+      "HasLSCP": {
+        "rows": 3,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 3,
+        "classification_rows": {
+          "NORMALIZED": 3
+        }
+      },
+      "HasLSFE": {
+        "rows": 120,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 120,
+        "classification_rows": {
+          "NORMALIZED": 120
+        }
+      },
+      "HasLSE128": {
+        "rows": 12,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 12,
+        "classification_rows": {
+          "NORMALIZED": 12
+        }
+      },
+      "HasSME2andIsNonStreamingSafe": {
+        "rows": 3,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 3,
+        "classification_rows": {
+          "UNSUPPORTED_TOKEN": 3
+        }
+      },
+      "HasLUT": {
+        "rows": 9,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 9,
+        "classification_rows": {
+          "RESERVED/UNENCODABLE": 2,
+          "UNSUPPORTED_TOKEN": 7
+        }
+      },
+      "HasSME2p1": {
+        "rows": 44,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 44,
+        "classification_rows": {
+          "NORMALIZED": 2,
+          "RESERVED/UNENCODABLE": 1,
+          "UNSUPPORTED_TOKEN": 41
+        }
+      },
+      "HasSME_LUTv2": {
+        "rows": 3,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 3,
+        "classification_rows": {
+          "UNSUPPORTED_TOKEN": 3
+        }
+      },
+      "HasSME2p3": {
+        "rows": 5,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 5,
+        "classification_rows": {
+          "UNSUPPORTED_TOKEN": 5
+        }
+      },
+      "HasSVE2p3": {
+        "rows": 1,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 1,
+        "classification_rows": {
+          "UNSUPPORTED_TOKEN": 1
+        }
+      },
+      "HasD128": {
+        "rows": 36,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 36,
+        "classification_rows": {
+          "NORMALIZED": 33,
+          "PRIVILEGED/SYSTEM": 3
+        }
+      },
+      "HasSVE2p1_or_SME": {
+        "rows": 13,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 13,
+        "classification_rows": {
+          "NORMALIZED": 9,
+          "UNSUPPORTED_TOKEN": 4
+        }
+      },
+      "HasSVESHA3": {
+        "rows": 1,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 1,
+        "classification_rows": {
+          "NORMALIZED": 1
+        }
+      },
+      "HasNonStreamingSVE_or_SME2p1": {
+        "rows": 1,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 1,
+        "classification_rows": {
+          "NORMALIZED": 1
+        }
+      },
+      "HasTHE": {
+        "rows": 64,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 64,
+        "classification_rows": {
+          "NORMALIZED": 64
+        }
+      },
+      "HasMOPS_GO": {
+        "rows": 12,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 12,
+        "classification_rows": {
+          "NORMALIZED": 12
+        }
+      },
+      "HasCMH": {
+        "rows": 2,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 2,
+        "classification_rows": {
+          "DIRECT": 1,
+          "NORMALIZED": 1
+        }
+      },
+      "HasSM4": {
+        "rows": 9,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 9,
+        "classification_rows": {
+          "NORMALIZED": 5,
+          "UNSUPPORTED_TOKEN": 4
+        }
+      },
+      "HasSVESM4": {
+        "rows": 2,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 2,
+        "classification_rows": {
+          "NORMALIZED": 2
+        }
+      },
+      "HasMatMulInt8": {
+        "rows": 15,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 15,
+        "classification_rows": {
+          "NORMALIZED": 9,
+          "UNSUPPORTED_TOKEN": 6
+        }
+      },
+      "HasPCDPHINT": {
+        "rows": 1,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 1,
+        "classification_rows": {
+          "NORMALIZED": 1
+        }
+      },
+      "HasS1POE2": {
+        "rows": 4,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 4,
+        "classification_rows": {
+          "NORMALIZED": 4
+        }
+      },
+      "HasTEV": {
+        "rows": 2,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 2,
+        "classification_rows": {
+          "NORMALIZED": 2
+        }
+      },
+      "HasITE": {
+        "rows": 1,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 1,
+        "classification_rows": {
+          "NORMALIZED": 1
+        }
+      },
+      "HasWFxT": {
+        "rows": 2,
+        "apple_m1_admitted_rows": 0,
+        "outside_apple_m1_rows": 2,
+        "classification_rows": {
+          "PRIVILEGED/SYSTEM": 2
+        }
+      }
+    }
+  },
+  "predicate_text_row_unions": {
+    "rows_with_SVE_predicate_text": 2834,
+    "rows_with_SME_predicate_text": 3530,
+    "rows_with_both_SVE_and_SME_text": 2463,
+    "rows_with_single_predicate_token_containing_both": 2437,
+    "rows_with_either": 3901
+  },
+  "four_M1_members_in_SME_SME2_family": {
+    "count": 4,
+    "rows": [
+      {
+        "name": "AUTDZA",
+        "source_hash": "54d97ee84791cde5",
+        "predicates": [
+          "HasPAuth"
+        ],
+        "classification": "NORMALIZED"
+      },
+      {
+        "name": "AUTIZA",
+        "source_hash": "5af43a1b885571de",
+        "predicates": [
+          "HasPAuth"
+        ],
+        "classification": "NORMALIZED"
+      },
+      {
+        "name": "PACDZA",
+        "source_hash": "7ffd1e2ddf8db437",
+        "predicates": [
+          "HasPAuth"
+        ],
+        "classification": "NORMALIZED"
+      },
+      {
+        "name": "PACIZA",
+        "source_hash": "17b96a734bfee2e4",
+        "predicates": [
+          "HasPAuth"
+        ],
+        "classification": "NORMALIZED"
+      }
+    ],
+    "interpretation": "These are PAuth-predicate rows in encoder family bucket SME_SME2, not evidence of an M1 SME instruction feature."
+  },
+  "source_route_static_review": {
+    "files": {
+      "src/buster/lib/target.h": "244446e942de5c900dd4e59102cde65a34859a3a",
+      "src/buster/lib/target.c": "2c94fc864a6350047b3505cac929e0c9cc2f369f",
+      "src/buster/lib/compiler/assembly/aarch64_encoding.c": "60158e6f353f9652c623b9c5c89445bc2c5cddcc",
+      "src/buster/lib/compiler/assembly/aarch64_base_assembly.c": "21c6d062de2b549e0c4e3af78778ab276140a91a",
+      "src/buster/lib/compiler/assembly/assembly.c": "4ea7cb610514d88a6c8f7602926b05a784e852f6",
+      "src/buster/lib/compiler/assembly/aarch64_system_semantics.c": "9838e8c774187a2e385015c062c0db612ab9b3e6"
+    },
+    "findings": [
+      "The generated metadata layer is not a general textual assembly route for all 7491 reduced forms.",
+      "a64_metadata_predicate_feature maps HasSME but not HasSVE, SVE2, SME2/SME2.x, or the SVE/SME alternative predicates; unknown predicates fail closed.",
+      "AArch64 target feature enum/name exposes SME but does not expose SVE, SVE2, SME2, or SME2.x; the Apple-M1 metadata gate also requires profile membership.",
+      "Handwritten base A64 feature gates are FP_ARMV8, NEON, FULLFP16, and LSE; public source routes are selective."
+    ],
+    "source_scan_observations": {
+      "ptrue": false,
+      "whilelo": false,
+      "addha": false,
+      "smstart": false,
+      "smstop": false,
+      "ld1w": false,
+      "ld1b": false
+    },
+    "scanned_source_files": [
+      "src/buster/lib/compiler/assembly/assembly.c",
+      "src/buster/lib/compiler/assembly/aarch64_base_assembly.c",
+      "src/buster/lib/compiler/assembly/aarch64_system_semantics.c"
+    ],
+    "note": "Static source census only; a specialized/helper route or hosted reproduction remains the authority for runtime source support."
+  },
+  "public_llvm_witnesses": [
+    {
+      "mnemonic": "ptrue p0.s, pow2",
+      "llvm_test": "https://github.com/llvm/llvm-project/blob/llvmorg-22.1.8/llvm/test/MC/AArch64/SVE/ptrue.s",
+      "required_features": [
+        "sve or sme"
+      ],
+      "little_endian_bytes": [
+        "00",
+        "e0",
+        "98",
+        "25"
+      ],
+      "word": "0x2598e000",
+      "reduced_row": {
+        "name": "PTRUE_S",
+        "source_hash": "491177bd1f74f683",
+        "encoder_family": "SVE_SVE2",
+        "predicates": [
+          "HasSVE_or_SME"
+        ],
+        "classification": "UNSUPPORTED_TOKEN",
+        "in_profile": false
+      },
+      "public_route_observation": "Mnemonic absent from frozen assembly/base/system public source owners."
+    },
+    {
+      "mnemonic": "addha za0.s, p0/m, p0/m, z0.s",
+      "llvm_test": "https://github.com/llvm/llvm-project/blob/llvmorg-22.1.8/llvm/test/MC/AArch64/SME/addha-u32.s",
+      "required_features": [
+        "sme"
+      ],
+      "little_endian_bytes": [
+        "00",
+        "00",
+        "90",
+        "c0"
+      ],
+      "word": "0xc0900000",
+      "reduced_row": {
+        "name": "ADDHA_MPPZ_S",
+        "source_hash": "1327ca7545fb8620",
+        "encoder_family": "SME_SME2",
+        "predicates": [
+          "HasSME"
+        ],
+        "classification": "NORMALIZED",
+        "in_profile": false
+      },
+      "public_route_observation": "Mnemonic absent from frozen assembly/base/system public source owners."
+    }
+  ],
+  "issue_search": {
+    "searched": [
+      "repo:buster14a/buster SVE",
+      "repo:buster14a/buster SME",
+      "repo:buster14a/buster \"SVE assembly\"",
+      "repo:buster14a/buster \"SME assembly\"",
+      "repo:buster14a/buster optional extension inventory"
+    ],
+    "relevant_existing_issues": [
+      {
+        "number": 2930,
+        "relation": "umbrella public x86-64/AArch64 source-form coverage; includes residual extension inventory in parent worklist"
+      },
+      {
+        "number": 2932,
+        "relation": "AdvSIMD by-element + SIMD structure-memory; does not cover SVE/SME"
+      },
+      {
+        "number": 2695,
+        "relation": "existing native C corpus runner; do not duplicate"
+      },
+      {
+        "number": 3132,
+        "relation": "CASP/LDAPR/unprivileged memory source forms; not SVE/SME"
+      },
+      {
+        "number": 3013,
+        "relation": "SVE builtin-type predefines in C frontend/glibc; unrelated to assembly source-form support"
+      }
+    ],
+    "no_dedicated_SVE_SME_public_assembler_or_extension_inventory_issue_found": true
+  },
+  "status": {
+    "classification": "source-only revision-bound inventory; no code change",
+    "full_optional_extension_inventory": "unfinished",
+    "local_builds_run": 0,
+    "hosted_llvm_probes_run": 0,
+    "claim_of_total_ISA_coverage": false
+  },
+  "recommended_followups": [
+    {
+      "title_seed": "assembler(AArch64): add baseline SVE predicate setup and SME horizontal-add source forms",
+      "concrete_seeds": [
+        "ptrue p0.s, pow2",
+        "addha za0.s, p0/m, p0/m, z0.s"
+      ],
+      "required_gates": "Hosted independent LLVM word/features and Buster public assembly route probes before issue is described as reproduced; add enabled-feature positives and disabled-feature/refusal controls."
+    },
+    {
+      "title_seed": "meta(assembler): inventory optional AArch64 extension source coverage",
+      "body_seed": "Build a revision-bound row-to-owner inventory from the checked-in reduced LLVM projection: exact predicate token/row, encoder family and metadata class, Apple-M1 profile membership, target-feature expressibility, specialized encoder owner or public source route, and minimal reference-source witness for proven gaps. Keep alternative predicates overlapping; do not turn the 7491 reduced rows, 1695 Arm XML candidates, or predicate totals into an exhaustive ISA denominator. Record explicit unfinished extensions and link bounded implementation children. No raw dataset imports or claim of full ISA coverage."
+    }
+  ]
+}
