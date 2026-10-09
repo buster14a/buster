@@ -62,60 +62,60 @@ typedef struct LcsCase LcsCase;
 struct LcsCase
 {
     const char *label, *marker, *state, *url, *summary;
-    unsigned platform, mode;
+    unsigned platform, mode, research;
     int valid;
     unsigned closed, terminal, foreign, unavailable, requests;
 };
 BUSTER_GLOBAL_LOCAL const LcsCase lcs_cases[] =
 {
-    {"sampling queued cancellation without successor", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, 1, 1, 0, 0, 0, 6},
-    {"sampling claimed cancellation keeps exact executor", lcs_text_0, lcs_text_4, lcs_text_5, lcs_text_3, 0, 0, 1, 1, 0, 0, 0, 6},
-    {"sampling acquire boundary cancellation", lcs_text_6, lcs_text_1, lcs_text_2, lcs_text_7, 0, 0, 1, 1, 0, 0, 0, 6},
-    {"sampling pilot boundary cancellation", lcs_text_8, lcs_text_1, lcs_text_2, lcs_text_9, 0, 0, 1, 1, 0, 0, 0, 6},
-    {"sampling confirm boundary cancellation", lcs_text_10, lcs_text_1, lcs_text_2, lcs_text_11, 0, 0, 1, 1, 0, 0, 0, 6},
-    {"sampling published success remains immutable", lcs_text_0, lcs_text_12, lcs_text_2, lcs_text_3, 0, 0, 1, 0, 1, 0, 0, 4},
-    {"sampling published failure remains immutable", lcs_text_0, lcs_text_12, lcs_text_2, lcs_text_3, 0, 7, 1, 0, 1, 0, 0, 4},
-    {"sampling delayed duplicate callback remains terminal", lcs_text_0, lcs_text_12, lcs_text_2, lcs_text_3, 0, 0, 1, 0, 1, 0, 0, 4},
-    {"sampling fresh terminal after listing is immutable", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 1, 1, 0, 1, 0, 0, 5},
-    {"sampling lost terminal write is observed once", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 2, 1, 1, 0, 0, 0, 7},
-    {"sampling source cancelled overrides executor success", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 7, 0, 1, 1, 0, 0, 0, 6},
-    {"sampling missing publisher after executor success is failure", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 8, 0, 1, 1, 0, 0, 0, 6},
-    {"sampling duplicate owned rows both close", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 4, 1, 2, 0, 0, 0, 8},
-    {"sampling fresh response retains exact check id", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 3, 0, 0, 0, 0, 0, 4},
-    {"sampling API failures remain bounded and incomplete", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 5, 0, 0, 0, 0, 0, 6},
-    {"sampling rejects other request", lcs_text_13, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, 1, 0, 0, 0, 1, 4},
-    {"sampling rejects other executor", lcs_text_14, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, 1, 0, 0, 0, 1, 4},
-    {"sampling rejects other executor attempt", lcs_text_15, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, 1, 0, 0, 0, 1, 4},
-    {"sampling rejects uppercase campaign", lcs_text_16, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, 1, 0, 0, 0, 1, 4},
-    {"sampling rejects short campaign", lcs_text_17, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, 1, 0, 0, 0, 1, 4},
-    {"sampling rejects unsupported phase", lcs_text_18, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, 1, 0, 0, 0, 1, 4},
-    {"sampling rejects acquire packet overflow", lcs_text_19, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, 1, 0, 0, 0, 1, 4},
-    {"sampling rejects pilot packet overflow", lcs_text_20, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, 1, 0, 0, 0, 1, 4},
-    {"sampling rejects confirm packet overflow", lcs_text_21, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, 1, 0, 0, 0, 1, 4},
-    {"sampling rejects noncanonical packet decimal", lcs_text_22, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, 1, 0, 0, 0, 1, 4},
-    {"sampling rejects marker suffix", lcs_text_23, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, 1, 0, 0, 0, 1, 4},
-    {"sampling rejects noncanonical request decimal", lcs_text_24, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, 1, 0, 0, 0, 1, 4},
-    {"sampling rejects main push source", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 3, 0, 1, 0, 0, 0, 1, 4},
-    {"sampling rejects request rerun", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 4, 0, 1, 0, 0, 0, 1, 4},
-    {"sampling rejects executor rerun", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 5, 0, 1, 0, 0, 0, 1, 4},
-    {"sampling requires owner request actor", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 1, 0, 0, 0, 0, 0, 0, 2},
-    {"sampling requires owner triggering actor", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 2, 0, 0, 0, 0, 0, 0, 2},
-    {"sampling requires canonical trusted executor title", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 6, 0, 0, 0, 0, 0, 0, 1},
-    {"sampling rejects missing executor join", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_25, 0, 0, 1, 0, 0, 1, 0, 5},
-    {"sampling rejects conflicting executor join", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_26, 0, 0, 1, 0, 0, 1, 0, 5},
-    {"sampling rejects duplicate executor join", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_27, 0, 0, 1, 0, 0, 1, 0, 5},
-    {"sampling rejects conflicting request join", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_28, 0, 0, 1, 0, 0, 1, 0, 5},
-    {"sampling rejects duplicate request join", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_29, 0, 0, 1, 0, 0, 1, 0, 5},
-    {"sampling rejects wrong request attempt", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_30, 0, 0, 1, 0, 0, 1, 0, 5},
-    {"sampling rejects missing sampling protocol", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_31, 0, 0, 1, 0, 0, 1, 0, 5},
-    {"sampling rejects conflicting protocol", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_32, 0, 0, 1, 0, 0, 1, 0, 5},
-    {"sampling rejects other check URL", lcs_text_0, lcs_text_1, lcs_text_33, lcs_text_3, 0, 0, 1, 0, 0, 1, 0, 5},
-    {"sampling rejects other repository URL", lcs_text_0, lcs_text_1, lcs_text_34, lcs_text_3, 0, 0, 1, 0, 0, 1, 0, 5},
-    {"sampling rejects generic workflow URL", lcs_text_0, lcs_text_1, lcs_text_35, lcs_text_3, 0, 0, 1, 0, 0, 1, 0, 5},
-    {"sampling rejects empty details URL", lcs_text_0, lcs_text_1, lcs_text_36, lcs_text_3, 0, 0, 1, 0, 0, 1, 0, 5},
-    {"sampling rejects other app", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 8, 1, 0, 0, 0, 1, 4},
-    {"sampling rejects other source head", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 9, 1, 0, 0, 0, 1, 4},
-    {"sampling rejects other check name", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 10, 1, 0, 0, 0, 1, 4},
+    {"sampling queued cancellation without successor", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 1, 0, 0, 0, 6},
+    {"sampling claimed cancellation keeps exact executor", lcs_text_0, lcs_text_4, lcs_text_5, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 1, 0, 0, 0, 6},
+    {"sampling acquire boundary cancellation", lcs_text_6, lcs_text_1, lcs_text_2, lcs_text_7, 0, 0, LC_RESEARCH_SAMPLING, 1, 1, 0, 0, 0, 6},
+    {"sampling pilot boundary cancellation", lcs_text_8, lcs_text_1, lcs_text_2, lcs_text_9, 0, 0, LC_RESEARCH_SAMPLING, 1, 1, 0, 0, 0, 6},
+    {"sampling confirm boundary cancellation", lcs_text_10, lcs_text_1, lcs_text_2, lcs_text_11, 0, 0, LC_RESEARCH_SAMPLING, 1, 1, 0, 0, 0, 6},
+    {"sampling published success remains immutable", lcs_text_0, lcs_text_12, lcs_text_2, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 1, 0, 0, 4},
+    {"sampling published failure remains immutable", lcs_text_0, lcs_text_12, lcs_text_2, lcs_text_3, 0, 7, LC_RESEARCH_SAMPLING, 1, 0, 1, 0, 0, 4},
+    {"sampling delayed duplicate callback remains terminal", lcs_text_0, lcs_text_12, lcs_text_2, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 1, 0, 0, 4},
+    {"sampling fresh terminal after listing is immutable", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 1, LC_RESEARCH_SAMPLING, 1, 0, 1, 0, 0, 5},
+    {"sampling lost terminal write is observed once", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 2, LC_RESEARCH_SAMPLING, 1, 1, 0, 0, 0, 7},
+    {"sampling source cancelled overrides executor success", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 7, 0, LC_RESEARCH_SAMPLING, 1, 1, 0, 0, 0, 6},
+    {"sampling missing publisher after executor success is failure", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 8, 0, LC_RESEARCH_SAMPLING, 1, 1, 0, 0, 0, 6},
+    {"sampling duplicate owned rows both close", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 4, LC_RESEARCH_SAMPLING, 1, 2, 0, 0, 0, 8},
+    {"sampling fresh response retains exact check id", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 3, LC_RESEARCH_SAMPLING, 0, 0, 0, 0, 0, 4},
+    {"sampling API failures remain bounded and incomplete", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 5, LC_RESEARCH_SAMPLING, 0, 0, 0, 0, 0, 6},
+    {"sampling rejects other request", lcs_text_13, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
+    {"sampling rejects other executor", lcs_text_14, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
+    {"sampling rejects other executor attempt", lcs_text_15, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
+    {"sampling rejects uppercase campaign", lcs_text_16, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
+    {"sampling rejects short campaign", lcs_text_17, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
+    {"sampling rejects unsupported phase", lcs_text_18, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
+    {"sampling rejects acquire packet overflow", lcs_text_19, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
+    {"sampling rejects pilot packet overflow", lcs_text_20, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
+    {"sampling rejects confirm packet overflow", lcs_text_21, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
+    {"sampling rejects noncanonical packet decimal", lcs_text_22, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
+    {"sampling rejects marker suffix", lcs_text_23, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
+    {"sampling rejects noncanonical request decimal", lcs_text_24, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
+    {"sampling rejects main push source", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 3, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
+    {"sampling rejects request rerun", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 4, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
+    {"sampling rejects executor rerun", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 5, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
+    {"sampling requires owner request actor", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 1, 0, LC_RESEARCH_SAMPLING, 0, 0, 0, 0, 0, 2},
+    {"sampling requires owner triggering actor", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 2, 0, LC_RESEARCH_SAMPLING, 0, 0, 0, 0, 0, 2},
+    {"sampling requires canonical trusted executor title", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 6, 0, LC_RESEARCH_SAMPLING, 0, 0, 0, 0, 0, 1},
+    {"sampling rejects missing executor join", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_25, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 1, 0, 5},
+    {"sampling rejects conflicting executor join", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_26, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 1, 0, 5},
+    {"sampling rejects duplicate executor join", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_27, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 1, 0, 5},
+    {"sampling rejects conflicting request join", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_28, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 1, 0, 5},
+    {"sampling rejects duplicate request join", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_29, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 1, 0, 5},
+    {"sampling rejects wrong request attempt", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_30, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 1, 0, 5},
+    {"sampling rejects missing sampling protocol", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_31, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 1, 0, 5},
+    {"sampling rejects conflicting protocol", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_32, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 1, 0, 5},
+    {"sampling rejects other check URL", lcs_text_0, lcs_text_1, lcs_text_33, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 1, 0, 5},
+    {"sampling rejects other repository URL", lcs_text_0, lcs_text_1, lcs_text_34, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 1, 0, 5},
+    {"sampling rejects generic workflow URL", lcs_text_0, lcs_text_1, lcs_text_35, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 1, 0, 5},
+    {"sampling rejects empty details URL", lcs_text_0, lcs_text_1, lcs_text_36, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 1, 0, 5},
+    {"sampling rejects other app", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 8, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
+    {"sampling rejects other source head", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 9, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
+    {"sampling rejects other check name", lcs_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 10, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
 };
 BUSTER_GLOBAL_LOCAL char *lcs_row(const LcsCase *test, unsigned id, const char *state, const char *url)
 {
@@ -125,13 +125,17 @@ BUSTER_GLOBAL_LOCAL char *lcs_row(const LcsCase *test, unsigned id, const char *
     {
         fprintf(file, "{\"id\":%u,\"head_sha\":", id);
         cm_quote(file, test->mode == 9 ? "cccccccccccccccccccccccccccccccccccccccc" : "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        fputs(",\"name\":", file); cm_quote(file, test->mode == 10 ? "another research check" : "9700X compiler sampling research");
+        fputs(",\"name\":", file); cm_quote(file, test->mode == 10 ? "another research check" :
+            test->research == LC_RESEARCH_PREPARATION ? "9700X compiler preparation research" : "9700X compiler sampling research");
         fputs(",\"external_id\":", file); cm_quote(file, test->marker);
         fputs(",\"status\":", file); cm_quote(file, state);
         fprintf(file, ",\"app\":{\"id\":%u},\"details_url\":", test->mode == 8 ? 99u : 15368u);
         cm_quote(file, url);
         fputs(",\"output\":{\"title\":", file);
-        cm_quote(file, cm_equal(state, "completed") ? (test->mode == 7 ? "Incomplete unqualified sampling packet" : "Valid unqualified sampling packet") : "Queued unqualified sampling research");
+        const char *kind = test->research == LC_RESEARCH_PREPARATION ? "preparation research" : "sampling packet";
+        char title[128]; snprintf(title, sizeof(title), "%s %s", cm_equal(state, "completed") ?
+            (test->mode == 7 ? "Incomplete unqualified" : "Valid unqualified") : "Queued unqualified", kind);
+        cm_quote(file, title);
         fputs(",\"summary\":", file); cm_quote(file, test->summary); fputs("}", file);
         if (cm_equal(state, "completed"))
         {
@@ -154,17 +158,18 @@ BUSTER_GLOBAL_LOCAL char *lcs_listing(const char *first, const char *second)
     if (file) fclose(file);
     return result;
 }
-BUSTER_GLOBAL_LOCAL unsigned lcs_test(unsigned *count)
+BUSTER_GLOBAL_LOCAL unsigned lcs_run_cases(const LcsCase *cases, unsigned count)
 {
     const char *executors[] = {lcs_executor_0, lcs_executor_1, lcs_executor_2, lcs_executor_3, lcs_executor_4, lcs_executor_5, lcs_executor_6, lcs_executor_7, lcs_executor_8};
     const char *requests[] = {lcs_request_0, lcs_request_1, lcs_request_2, lcs_request_3, lcs_request_4, lcs_request_5, lcs_request_6, lcs_request_7, lcs_request_8};
     const unsigned executor_attempt[] = {1, 1, 1, 1, 1, 2, 1, 1, 1};
     const unsigned request_attempt[] = {1, 1, 1, 1, 2, 1, 1, 1, 1};
     const char jobs[] = "{\"total_count\":2,\"jobs\":[{\"id\":20,\"name\":\"Queue sampling qualification packet\",\"status\":\"completed\",\"conclusion\":\"success\",\"created_at\":\"2026-10-09T07:12:00Z\",\"started_at\":\"2026-10-09T07:12:04Z\",\"completed_at\":\"2026-10-09T07:12:10Z\"},{\"id\":21,\"name\":\"Sampling qualification packet\",\"status\":\"completed\",\"conclusion\":\"cancelled\",\"created_at\":\"2026-10-09T07:12:00Z\",\"started_at\":\"2026-10-09T08:24:08Z\",\"completed_at\":\"2026-10-09T08:37:48Z\"}]}";
+    const char preparation_jobs[] = "{\"total_count\":2,\"jobs\":[{\"id\":20,\"name\":\"Queue compiler preparation qualification\",\"status\":\"completed\",\"conclusion\":\"success\",\"created_at\":\"2026-10-09T07:12:00Z\",\"started_at\":\"2026-10-09T07:12:04Z\",\"completed_at\":\"2026-10-09T07:12:10Z\"},{\"id\":21,\"name\":\"Compiler preparation qualification\",\"status\":\"completed\",\"conclusion\":\"cancelled\",\"created_at\":\"2026-10-09T07:12:00Z\",\"started_at\":\"2026-10-09T08:24:08Z\",\"completed_at\":\"2026-10-09T08:37:48Z\"}]}";
     unsigned failures = 0;
-    for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(lcs_cases); ++i)
+    for (unsigned i = 0; i < count; ++i)
     {
-        const LcsCase *test = &lcs_cases[i];
+        const LcsCase *test = &cases[i];
         char execution_path[128], request_path[128], jobs_path[128];
         snprintf(execution_path, sizeof(execution_path), "actions/runs/92/attempts/%u", executor_attempt[test->platform]);
         snprintf(request_path, sizeof(request_path), "actions/runs/91/attempts/%u", request_attempt[test->platform]);
@@ -199,7 +204,7 @@ BUSTER_GLOBAL_LOCAL unsigned lcs_test(unsigned *count)
                     }
                 }
             }
-            if (test->valid) fixture[used++] = (CmResponse){jobs_path, "GET", jobs, 1, 0};
+            if (test->valid) fixture[used++] = (CmResponse){jobs_path, "GET", test->research == LC_RESEARCH_PREPARATION ? preparation_jobs : jobs, 1, 0};
         }
         CmTransport transport = {0}; transport.deadline = cm_clock() + 180; transport.request_limit = 60;
         transport.fixture = fixture; transport.fixture_count = used;
@@ -214,7 +219,12 @@ BUSTER_GLOBAL_LOCAL unsigned lcs_test(unsigned *count)
             pass ? "pass" : "fail", valid, result.closed, result.terminal, result.foreign, result.unavailable, transport.requests, test->requests);
         free(row); free(second); free(listed); free(fresh); free(written); free(other);
     }
-    LcIdentity id = {0}; id.executor = 92; id.attempt = 1; id.request = 91; id.request_attempt = 1; id.pull = 1; id.sampling = 1;
+    return failures;
+}
+BUSTER_GLOBAL_LOCAL unsigned lcs_test(unsigned *count)
+{
+    unsigned failures = lcs_run_cases(lcs_cases, (unsigned)BUSTER_ARRAY_LENGTH(lcs_cases));
+    LcIdentity id = {0}; id.executor = 92; id.attempt = 1; id.request = 91; id.request_attempt = 1; id.pull = 1; id.research = LC_RESEARCH_SAMPLING;
     cm_copy(id.head, sizeof(id.head), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     cm_copy(id.trusted, sizeof(id.trusted), "9999999999999999999999999999999999999999"); lc_marker(&id);
     cm_copy(id.marker, sizeof(id.marker), lcs_text_0);
@@ -232,7 +242,8 @@ BUSTER_GLOBAL_LOCAL unsigned lcs_test(unsigned *count)
     failures += !body || !strstr(body, "\"conclusion\":\"failure\""); free(body);
     body = lc_body(&id, lcs_text_3, 1); failures += body != NULL; free(body);
     failures += !lc_physical_job("Sampling qualification packet") || lc_physical_job("Queue sampling qualification packet") ||
-        lc_physical_job("Validate sampling packet evidence");
+        lc_physical_job("Validate sampling packet evidence") || !lc_physical_job("Compiler preparation qualification") ||
+        lc_physical_job("Queue compiler preparation qualification") || lc_physical_job("Validate compiler preparation evidence");
     CmResponse bound[] = {{"actions/runs/92/attempts/1", "GET", lcs_executor_0, 1, 0}};
     CmTransport limited = {0}; limited.fixture = bound; limited.fixture_count = 1; limited.request_limit = 1; limited.deadline = cm_clock() + 180;
     LcResult result = {0};

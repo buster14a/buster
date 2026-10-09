@@ -2,7 +2,7 @@
 // Entry: --self-test (synthetic, no network) or recover RUN ATTEMPT.
 // Existing ci_metrics transport/JSON own bounded gh calls, retries and parsing.
 // lc_bind joins trusted executor title -> exact request attempt -> owned check.
-// lc_sampling_identity joins an admitted research marker without starting work.
+// lc_research_identity joins an admitted research marker without starting work.
 // lc_url_bound validates the persisted URL and exact native summary binding.
 // lc_finish only closes missing terminal results; it never validates or reports
 // measurement success, downloads artifacts, starts work or changes a runner.
@@ -21,12 +21,17 @@
 #define LC_SAMPLING_NAME "9700X compiler sampling research"
 #define LC_SAMPLING_MARKER "buster-main-sampling-v1:"
 #define LC_SAMPLING_NATIVE "Lifecycle protocol: sampling-terminal-native-v1."
+#define LC_PREPARATION_NAME "9700X compiler preparation research"
+#define LC_PREPARATION_MARKER "buster-compiler-preparation-v1:"
+#define LC_PREPARATION_NATIVE "Lifecycle protocol: preparation-terminal-native-v1."
+#define LC_RESEARCH_SAMPLING 1
+#define LC_RESEARCH_PREPARATION 2
 
 typedef struct LcIdentity LcIdentity;
 struct LcIdentity
 {
     uint64_t executor, attempt, request, request_attempt;
-    int pull, request_only, sampling;
+    int pull, request_only, research;
     char head[41], trusted[41], outcome[32], marker[192], details[256];
 };
 typedef struct LcResult LcResult;
@@ -39,7 +44,18 @@ BUSTER_GLOBAL_LOCAL const char *lc_name(int pull)
 }
 BUSTER_GLOBAL_LOCAL const char *lc_check_name(const LcIdentity *id)
 {
-    const char *result = id->sampling ? LC_SAMPLING_NAME : lc_name(id->pull);
+    const char *result = id->research == LC_RESEARCH_PREPARATION ? LC_PREPARATION_NAME :
+        id->research == LC_RESEARCH_SAMPLING ? LC_SAMPLING_NAME : lc_name(id->pull);
+    return result;
+}
+BUSTER_GLOBAL_LOCAL const char *lc_research_protocol(const LcIdentity *id)
+{
+    const char *result = id->research == LC_RESEARCH_PREPARATION ? LC_PREPARATION_NATIVE : LC_SAMPLING_NATIVE;
+    return result;
+}
+BUSTER_GLOBAL_LOCAL const char *lc_research_title(const LcIdentity *id)
+{
+    const char *result = id->research == LC_RESEARCH_PREPARATION ? "Incomplete unqualified preparation research" : "Incomplete unqualified sampling packet";
     return result;
 }
 BUSTER_GLOBAL_LOCAL int lc_repository(const CmJson *j, unsigned node)
@@ -140,33 +156,38 @@ BUSTER_GLOBAL_LOCAL int lc_owned(const CmJson *j, unsigned row, const LcIdentity
         (cm_equal(state, "queued") || cm_equal(state, "in_progress") || cm_equal(state, "completed"));
     return result;
 }
-BUSTER_GLOBAL_LOCAL int lc_sampling_identity(const CmJson *j, unsigned row, const LcIdentity *id, LcIdentity *sampling)
+BUSTER_GLOBAL_LOCAL int lc_research_identity(const CmJson *j, unsigned row, const LcIdentity *id, LcIdentity *research)
 {
-    // Only the trusted publisher's pre-existing admitted research row grants
-    // recovery authority. It never admits a selector or creates a missing row.
+    // Two exact publisher contracts grant recovery authority for an existing
+    // admitted row. No selector admission or missing-row creation occurs here.
+    const char *name = cm_get(j, row, "name"), *marker = cm_get(j, row, "external_id");
+    int kind = cm_equal(name, LC_SAMPLING_NAME) ? LC_RESEARCH_SAMPLING :
+        cm_equal(name, LC_PREPARATION_NAME) ? LC_RESEARCH_PREPARATION : 0;
+    const char *prefix = kind == LC_RESEARCH_PREPARATION ? LC_PREPARATION_MARKER : LC_SAMPLING_MARKER;
+    size_t width = strlen(prefix);
+    const char *tail = kind && strncmp(marker, prefix, width) == 0 ? marker + width : NULL;
     char campaign[65], phase[8], packet[32], request[32], executor[32], attempt[32], canonical[192];
     uint64_t number = 0, requested = 0, executed = 0, tried = 0;
-    const char *marker = cm_get(j, row, "external_id");
     int used = 0;
-    int valid = !id->request_only && id->pull && id->attempt == 1 && id->request_attempt == 1 &&
-        cm_equal(cm_get(j, row, "name"), LC_SAMPLING_NAME) &&
-        sscanf(marker, LC_SAMPLING_MARKER "%64[0-9a-f]:%7[a-z]:%31[0-9]:%31[0-9]:%31[0-9]:%31[0-9]%n",
-            campaign, phase, packet, request, executor, attempt, &used) == 6 && marker[used] == 0;
+    int valid = !id->request_only && id->pull && id->attempt == 1 && id->request_attempt == 1 && tail &&
+        sscanf(tail, "%64[0-9a-f]:%7[a-z]:%31[0-9]:%31[0-9]:%31[0-9]:%31[0-9]%n",
+            campaign, phase, packet, request, executor, attempt, &used) == 6 && tail[used] == 0;
     valid = valid && strlen(campaign) == 64 && cm_unsigned(packet, &number) &&
         cm_unsigned(request, &requested) && requested == id->request &&
         cm_unsigned(executor, &executed) && executed == id->executor && cm_unsigned(attempt, &tried) && tried == 1 &&
-        ((cm_equal(phase, "acquire") && number == 0) || (cm_equal(phase, "pilot") && number <= 2) ||
+        (kind == LC_RESEARCH_PREPARATION ? cm_equal(phase, "qualify") && number == 0 :
+         (cm_equal(phase, "acquire") && number == 0) || (cm_equal(phase, "pilot") && number <= 2) ||
          (cm_equal(phase, "confirm") && number <= 39));
     if (valid)
     {
-        snprintf(canonical, sizeof(canonical), LC_SAMPLING_MARKER "%s:%s:%" PRIu64 ":%" PRIu64 ":%" PRIu64 ":1",
-            campaign, phase, number, requested, executed);
+        snprintf(canonical, sizeof(canonical), "%s%s:%s:%" PRIu64 ":%" PRIu64 ":%" PRIu64 ":1",
+            prefix, campaign, phase, number, requested, executed);
         valid = cm_equal(marker, canonical);
         if (valid)
         {
-            *sampling = *id; sampling->sampling = 1;
-            cm_copy(sampling->marker, sizeof(sampling->marker), canonical);
-            valid = lc_owned(j, row, sampling);
+            *research = *id; research->research = kind;
+            cm_copy(research->marker, sizeof(research->marker), canonical);
+            valid = lc_owned(j, row, research);
         }
     }
     return valid;
@@ -208,7 +229,7 @@ BUSTER_GLOBAL_LOCAL int lc_url_bound(const CmJson *j, const LcIdentity *id)
     const char *details = cm_get(j, 1, "details_url");
     int result = !details[0] || cm_equal(details, id->details) ||
         cm_equal(details, "https://github.com/" CM_REPO "/actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run");
-    if (id->sampling || !result)
+    if (id->research || !result)
     {
         // GitHub Actions canonicalizes a custom check's details_url to its
         // own /runs/CHECK_ID link. Retain the exact executor/request binding
@@ -222,9 +243,9 @@ BUSTER_GLOBAL_LOCAL int lc_url_bound(const CmJson *j, const LcIdentity *id)
             id->request, id->request_attempt, id->request, id->request_attempt);
         const char *summary = cm_get(j, cm_member(j, 1, "output"), "summary");
         int binding = lc_executor_binding(summary, executor);
-        if (id->sampling)
+        if (id->research)
             result = (cm_equal(details, canonical) || cm_equal(details, id->details)) &&
-                lc_binding(summary, "Lifecycle protocol: ", LC_SAMPLING_NATIVE) == 1 &&
+                lc_binding(summary, "Lifecycle protocol: ", lc_research_protocol(id)) == 1 &&
                 lc_binding(summary, LC_REQUEST, request) == 1 && binding == 1;
         else
             result = cm_equal(details, canonical) && lc_line(summary, LC_NATIVE) &&
@@ -235,14 +256,14 @@ BUSTER_GLOBAL_LOCAL int lc_url_bound(const CmJson *j, const LcIdentity *id)
 BUSTER_GLOBAL_LOCAL const char *lc_conclusion(const LcIdentity *id)
 {
     const char *result = cm_equal(id->outcome, "cancelled") ? "cancelled" :
-        (!id->sampling && cm_equal(id->outcome, "skipped")) ? "skipped" : "failure";
+        (!id->research && cm_equal(id->outcome, "skipped")) ? "skipped" : "failure";
     return result;
 }
 BUSTER_GLOBAL_LOCAL char *lc_body(const LcIdentity *id, const char *prior, int create)
 {
     FILE *file = tmpfile();
     char *result = NULL;
-    if (file && (!id->sampling || !create))
+    if (file && (!id->research || !create))
     {
         fputs("{", file);
         if (create)
@@ -254,7 +275,7 @@ BUSTER_GLOBAL_LOCAL char *lc_body(const LcIdentity *id, const char *prior, int c
         fputs("\"status\":\"completed\",\"conclusion\":", file); cm_quote(file, lc_conclusion(id));
         fputs(",\"details_url\":", file); cm_quote(file, id->details);
         fputs(",\"output\":{\"title\":", file);
-        cm_quote(file, id->sampling ? "Incomplete unqualified sampling packet" : "Not measured: terminal lifecycle reconciliation");
+        cm_quote(file, id->research ? lc_research_title(id) : "Not measured: terminal lifecycle reconciliation");
         fputs(",\"summary\":", file);
         FILE *text = tmpfile();
         if (text)
@@ -263,14 +284,14 @@ BUSTER_GLOBAL_LOCAL char *lc_body(const LcIdentity *id, const char *prior, int c
             char executor_identity[128];
             if (id->request_only) cm_copy(executor_identity, sizeof(executor_identity), "unavailable (request ended before benchmark assignment)");
             else snprintf(executor_identity, sizeof(executor_identity), "run %" PRIu64 " attempt %" PRIu64, id->executor, id->attempt);
-            if (id->sampling)
-                fprintf(text, "**Incomplete unqualified sampling packet.** Exact benchmark run %" PRIu64 " attempt %" PRIu64
+            if (id->research)
+                fprintf(text, "**%s.** Exact benchmark run %" PRIu64 " attempt %" PRIu64
                     " finished with conclusion `%s` without a validated terminal research packet. "
                     "qualification=unqualified; routine_profile_enabled=false. "
                     "This closes research bookkeeping only; no measurement evidence is validated or promoted to success. "
                     "Repository `" CM_REPO "`, source `%s`, request %" PRIu64 " attempt %" PRIu64
                     ", trusted harness `%s`, marker `%s`. Native Actions owns execution state: %s",
-                    id->executor, id->attempt, id->outcome, id->head, id->request, id->request_attempt,
+                    lc_research_title(id), id->executor, id->attempt, id->outcome, id->head, id->request, id->request_attempt,
                     id->trusted, id->marker, id->details);
             else fprintf(text, "**%s: not measured.** The exact %s run finished with conclusion `%s` without a validated terminal measurement check. "
                 "This recovery closes bookkeeping only; it does not validate evidence or claim a successful measurement. "
@@ -304,7 +325,7 @@ BUSTER_GLOBAL_LOCAL int lc_finish(CmTransport *t, const LcIdentity *id, LcResult
             ++count;
             LcIdentity owned = *id;
             int is_owned = lc_owned(&rows, row, &owned);
-            if (!is_owned) is_owned = lc_sampling_identity(&rows, row, id, &owned);
+            if (!is_owned) is_owned = lc_research_identity(&rows, row, id, &owned);
             if (is_owned)
             {
                 ++matched;
@@ -367,7 +388,7 @@ BUSTER_GLOBAL_LOCAL int lc_physical_job(const char *name)
 {
     int result = cm_equal(name, "Compare the main commit compiler") ||
         cm_equal(name, "Compare the pull request compiler") || cm_equal(name, "bench") ||
-        cm_equal(name, "Sampling qualification packet");
+        cm_equal(name, "Sampling qualification packet") || cm_equal(name, "Compiler preparation qualification");
     return result;
 }
 BUSTER_GLOBAL_LOCAL int lc_observe(CmTransport *t, const LcIdentity *id)

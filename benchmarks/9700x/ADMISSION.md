@@ -336,7 +336,7 @@ request's verified head, never the trusted harness revision `github.sha`.
   after its exact trusted executor finishes without validated publication.
   It requires the owner's same-repository pull-request source, request and
   executor attempts both `1`, the separate app-15368 research name and
-  `buster-main-sampling-v1` marker, a lowercase 64-digit campaign digest, and
+  `buster-main-sampling-v1` marker, a 64-character lowercase hexadecimal campaign digest, and
   the bounded phase/packet identity (`acquire:0`, `pilot:0..2`,
   `confirm:0..39`). Its unique `sampling-terminal-native-v1` protocol,
   original request line and exact executor line must agree; conflicting or
@@ -353,6 +353,21 @@ request's verified head, never the trusted harness revision `github.sha`.
   queue apply, with no physical work. Sampling job observations identify
   `Sampling qualification packet` as physical; queue and publisher jobs
   remain hosted control.
+- **Disabled preparation research recovery.** The same controller separately
+  recognizes only `9700X compiler preparation research` from app 15368 and
+  `buster-compiler-preparation-v1:PLAN_SHA:qualify:0:REQUEST:EXECUTOR:1`,
+  with a 64-character lowercase hexadecimal plan digest. The unique
+  `preparation-terminal-native-v1` protocol and canonical Request/Workflow
+  attempt-1 lines must agree with the owner's exact source and completed
+  trusted executor. Sampling names, markers or protocols cannot authorize a
+  preparation write, and the reverse is also rejected. This contract closes
+  only pre-existing admitted preparation bookkeeping as
+  `Incomplete unqualified preparation research`, `cancelled` or `failure`,
+  with qualification unqualified and the routine profile disabled. It cannot
+  create a missing research row, validate preparation evidence or overwrite
+  a terminal result. The same request/time/writer bounds apply. Native Actions
+  identifies `Compiler preparation qualification` as physical and its queue
+  and publisher as hosted control; recovery starts no work.
 - **Commit report.** `comment-compiler`, the only bench job with
   `contents: write` (the permission of the commit-comment API), upserts one
   general comment on the main commit with `compiler_comment.py`. It downloads
