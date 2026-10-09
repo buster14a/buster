@@ -973,31 +973,41 @@ static bool buster_a64_complex_simd_operand_concat_parts(BusterA64SemanticForm f
 static bool buster_a64_complex_simd_assign_concat_operand_fields(BusterA64SemanticForm form, BusterA64SemanticOperand operand,
                                                                  u32 raw, u32* fields, u64* assigned)
 {
-    if (!fields || !assigned)
-    {
-        return false;
-    }
+    bool valid = fields && assigned;
     bool has_concat = false;
     u32 locals[8] = {0}, part_count = 0, total_width = 0;
     u8 widths[8] = {0};
-    if (!buster_a64_complex_simd_operand_concat_parts(form, operand, &has_concat, locals, widths, &part_count, &total_width) ||
-        !has_concat || total_width == 0 || (total_width < 32 && raw >= (UINT32_C(1) << total_width)))
+    if (valid)
     {
-        return false;
+        valid = buster_a64_complex_simd_operand_concat_parts(form, operand, &has_concat, locals, widths, &part_count, &total_width) &&
+                has_concat && part_count > 0u && part_count <= BUSTER_ARRAY_LENGTH(widths) &&
+                total_width > 0u && total_width <= 32u &&
+                (total_width == 32u || raw < (UINT32_C(1) << total_width));
     }
-    u32 remaining_width = total_width;
-    for (u32 index = 0; index < part_count; index += 1)
+    u32 remaining_width = valid ? total_width : 0;
+    for (u32 index = 0; valid && index < part_count; index += 1)
     {
         u32 width = widths[index];
-        remaining_width -= width;
-        u32 mask = width == 32 ? UINT32_MAX : (UINT32_C(1) << width) - 1;
-        u32 part = (raw >> remaining_width) & mask;
-        if (!buster_a64_complex_simd_assign_field(form, locals[index], part, fields, assigned))
+        if (width == 0u || width > 32u || width > remaining_width)
         {
-            return false;
+            valid = false;
+        }
+        else
+        {
+            remaining_width -= width;
+            if (remaining_width >= 32u)
+            {
+                valid = false;
+            }
+            else
+            {
+                u32 mask = width == 32u ? UINT32_MAX : (UINT32_C(1) << width) - 1;
+                u32 part = (raw >> remaining_width) & mask;
+                valid = buster_a64_complex_simd_assign_field(form, locals[index], part, fields, assigned);
+            }
         }
     }
-    return true;
+    return valid;
 }
 
 static bool buster_a64_complex_simd_decode_concat_operand_number(BusterA64SemanticForm form, BusterA64SemanticOperand operand,
