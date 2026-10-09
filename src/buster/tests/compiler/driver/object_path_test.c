@@ -2040,6 +2040,50 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_coff_comdat_assembly_tests(Un
     BUSTER_TEST(arguments, os_file_delete(output));
     return result;
 }
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_codeview_reserved_tag_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 source = buster_test_temporary_path(arena, S8("codeview-reserved-tag"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("codeview-reserved-output"), S8(".obj"));
+    String8 sentinel = S8("existing object\n");
+    String8 bad = S8("struct __unnamed { struct __unnamed *next; int value; };\nstruct __unnamed root;\nint main(void) { return root.value; }\n");
+    String8 good = S8("struct UserNode { struct UserNode *next; int value; };\nstruct UserNode root;\nint main(void) { return root.value; }\n");
+    String8 targets[] = {S8_INITIALIZER("x86_64-pc-windows-msvc"), S8_INITIALIZER("aarch64-pc-windows-msvc")};
+    BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(bad)));
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+        String8 command[] = {S8("-g"), S8("-c"), S8("-target"), targets[target], S8("-o"), output, source};
+        CompilerDriverResult refused = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_OBJECT && refused.object_error == OBJECT_ERROR_DEBUG_INFO);
+        BUSTER_TEST(arguments, !refused.output.length);
+        BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, S8("forward aggregate '__unnamed'")) < refused.diagnostic.length);
+        BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, source) < refused.diagnostic.length);
+        BUSTER_TEST(arguments, string_ends_with_sequence(refused.diagnostic, S8("reserved anonymous tag spelling")));
+        ByteSlice preserved = file_read(arena, output, (FileReadOptions){0});
+        BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, preserved), sentinel);
+        // This is a debug-format limit: ordinary object generation still accepts
+        // the source, and a recursive non-reserved tag retains debug output.
+        command[0] = S8("-g0");
+        CompilerDriverResult ordinary = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST_RAW(arguments, ordinary.error == COMPILER_DRIVER_ERROR_NONE, ordinary.diagnostic);
+        BUSTER_TEST(arguments, ordinary.output.length);
+        BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(good)));
+        command[0] = S8("-g");
+        CompilerDriverResult neighbor = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST_RAW(arguments, neighbor.error == COMPILER_DRIVER_ERROR_NONE, neighbor.diagnostic);
+        BUSTER_TEST(arguments, neighbor.output.length);
+        BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(bad)));
+    }
+    BUSTER_TEST(arguments, os_file_delete(source));
+    BUSTER_TEST(arguments, os_file_delete(output));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_coff_comdat_link_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2111,6 +2155,7 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
 #if !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_coff_comdat_assembly_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_coff_comdat_link_tests);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_codeview_reserved_tag_tests);
 #endif
 #if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_stack_tests);

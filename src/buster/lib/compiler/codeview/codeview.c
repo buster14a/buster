@@ -2,7 +2,9 @@
 // and .debug$T type streams a COFF object carries for Windows debuggers,
 // built from DebugModule records. codeview_emit_field_list chains bounded
 // type records, and codeview_scope_walk_make indexes scopes once per build.
-// ByteWriter owns bounded primitive writes; this file owns allocation/layout.
+// codeview_emit_aggregate keeps canonical IDs as forward declarations and emits
+// complete aggregates after their field lists; reserved names fail in the
+// existing type-budget walk. ByteWriter owns bounded primitive writes/layout.
 // pdb.c packages these streams into a standalone PDB at link time.
 
 #include <buster/lib/compiler/codeview/codeview.h>
@@ -751,11 +753,89 @@ BUSTER_GLOBAL_LOCAL u32 codeview_emit_field_list(ByteWriter* types, DebugModel* 
     return continuation;
 }
 
-BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(ByteWriter* types, DebugModel* model, u64* auxiliary_offsets)
+// Primary aggregate IDs denote reference-free declarations. Complete records
+// follow their field lists, so a self pointer never closes a type-hash cycle.
+// Scoped unique names distinguish anonymous and shadowed C tags without
+// changing canonical IDs or imposing cross-translation-unit C++ identity.
+// These exact external PDB anonymous-tag spellings use full-record CRCs,
+// even on scoped complete tags, so name-based FwdRef lookup cannot resolve them.
+BUSTER_GLOBAL_LOCAL bool codeview_reserved_aggregate_name(String8 name)
+{
+    bool result = false;
+    String8 spellings[] = {S8_INITIALIZER("__unnamed"), S8_INITIALIZER("<unnamed-tag>")};
+    for (u32 spelling_index = 0; spelling_index < BUSTER_ARRAY_LENGTH(spellings); spelling_index += 1)
+    {
+        String8 spelling = spellings[spelling_index];
+        if (name.length >= spelling.length && !memcmp(name.pointer + name.length - spelling.length, spelling.pointer, spelling.length))
+        {
+            u64 prefix = name.length - spelling.length;
+            result |= !prefix || (prefix >= 2 && name.pointer[prefix - 1] == ':' && name.pointer[prefix - 2] == ':');
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void codeview_emit_identity_word(ByteWriter* types, u32 value)
+{
+    for (u32 digit = 0; digit < 8; digit += 1)
+    {
+        u32 nibble = (value >> ((7 - digit) * 4)) & 15;
+        byte_writer_emit_u8(types, (u8)(nibble < 10 ? '0' + nibble : 'a' + nibble - 10));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void codeview_emit_aggregate_name(ByteWriter* types, DebugModel* model, DebugType* type, u32 type_index, String8 unit_path)
+{
+    codeview_emit_name(types, type->name.length ? type->name : S8("$anonymous"));
+    String8 prefix = S8("$buster$");
+    byte_writer_emit_bytes(types, prefix.pointer, prefix.length);
+    String8 source = {0};
+    if (type->declaration.line && type->declaration.source < model->source_count && model->source_paths)
+    {
+        source = model->source_paths[type->declaration.source];
+    }
+    String8 paths[] = {model->comp_dir, unit_path, source};
+    for (u32 part = 0; part < BUSTER_ARRAY_LENGTH(paths); part += 1)
+    {
+        // Length prefixes keep arbitrary dollar signs and path bytes distinct.
+        types->overflow |= paths[part].length > UINT32_MAX;
+        codeview_emit_identity_word(types, (u32)BUSTER_MIN(paths[part].length, UINT32_MAX));
+        byte_writer_emit_bytes(types, paths[part].pointer, paths[part].length);
+    }
+    codeview_emit_identity_word(types, type->declaration.offset);
+    codeview_emit_identity_word(types, type_index);
+    byte_writer_emit_u8(types, 0);
+}
+
+BUSTER_GLOBAL_LOCAL void codeview_emit_aggregate(ByteWriter* types, DebugModel* model, DebugType* type, u32 type_index,
+                                                String8 unit_path, u32 fields, bool forward)
+{
+    u64 record = codeview_type_record_begin(types, type->kind == DEBUG_TYPE_STRUCT ? CV_LF_STRUCTURE : CV_LF_UNION);
+    types->overflow |= !forward && type->field_count > UINT16_MAX;
+    byte_writer_emit_u16_le(types, (u16)(forward ? 0 : type->field_count));
+    // Scoped + HasUniqueName; forward records additionally set FwdRef.
+    byte_writer_emit_u16_le(types, (u16)(0x0300u | (forward ? 0x0080u : 0)));
+    byte_writer_emit_u32_le(types, fields);
+    if (type->kind == DEBUG_TYPE_STRUCT)
+    {
+        byte_writer_emit_u32_le(types, 0);
+        byte_writer_emit_u32_le(types, 0);
+    }
+    codeview_emit_numeric_u32(types, forward ? 0 : type->size);
+    codeview_emit_aggregate_name(types, model, type, type_index, unit_path);
+    codeview_type_record_end(types, record);
+}
+
+BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(ByteWriter* types, DebugModel* model, u64* auxiliary_offsets, String8 unit_path)
 {
     for (u32 type_index = 0; type_index < model->type_count && !types->overflow; type_index += 1)
     {
         DebugType* type = model->types + type_index;
+        if (type->kind == DEBUG_TYPE_STRUCT || type->kind == DEBUG_TYPE_UNION)
+        {
+            codeview_emit_aggregate(types, model, type, type_index, unit_path, 0, true);
+            continue;
+        }
         u64 record = codeview_type_record_begin(types, type->kind == DEBUG_TYPE_POINTER ? CV_LF_POINTER
                                                                                            : type->kind == DEBUG_TYPE_ARRAY || type->kind == DEBUG_TYPE_VECTOR ? CV_LF_ARRAY
                                                                                            : type->kind == DEBUG_TYPE_STRUCT ? CV_LF_STRUCTURE
@@ -776,21 +856,6 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(ByteWriter* types, DebugModel
             byte_writer_emit_u32_le(types, codeview_model_type_index(model, type->element_type));
             byte_writer_emit_u32_le(types, 0x0074);
             // The array's size in bytes, not its element count (#1440).
-            codeview_emit_numeric_u32(types, type->size);
-            codeview_emit_name(types, type->name);
-        }
-        else if (type->kind == DEBUG_TYPE_STRUCT || type->kind == DEBUG_TYPE_UNION)
-        {
-            types->overflow |= type->field_count > UINT16_MAX;
-            byte_writer_emit_u16_le(types, (u16)type->field_count);
-            byte_writer_emit_u16_le(types, 0);
-            auxiliary_offsets[type_index] = types->count;
-            byte_writer_emit_u32_le(types, 0);
-            if (type->kind == DEBUG_TYPE_STRUCT)
-            {
-                byte_writer_emit_u32_le(types, 0);
-                byte_writer_emit_u32_le(types, 0);
-            }
             codeview_emit_numeric_u32(types, type->size);
             codeview_emit_name(types, type->name);
         }
@@ -837,7 +902,15 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(ByteWriter* types, DebugModel
         if (type->kind == DEBUG_TYPE_STRUCT || type->kind == DEBUG_TYPE_UNION || type->kind == DEBUG_TYPE_ENUM)
         {
             u32 field_index = codeview_emit_field_list(types, model, type, &next_index);
-            byte_writer_patch_u32_le(types, auxiliary_offsets[type_index], field_index);
+            if (type->kind == DEBUG_TYPE_ENUM)
+            {
+                byte_writer_patch_u32_le(types, auxiliary_offsets[type_index], field_index);
+            }
+            else
+            {
+                codeview_emit_aggregate(types, model, type, type_index, unit_path, field_index, false);
+                next_index += 1;
+            }
         }
         else if (type->kind == DEBUG_TYPE_FUNCTION)
         {
@@ -1115,6 +1188,20 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
                 DebugType* type = input.model->types + type_index;
                 type_capacity += type->name.length + 1 + (u64)type->field_count * 48 + (u64)type->enum_member_count * 32 +
                                  (u64)type->parameter_count * 8;
+                if (type->kind == DEBUG_TYPE_STRUCT || type->kind == DEBUG_TYPE_UNION)
+                {
+                    if (!result.unsupported_type && codeview_reserved_aggregate_name(type->name))
+                    {
+                        result.unsupported_type = true;
+                        result.unsupported_type_id = type_index;
+                    }
+                    u64 identity_bytes = input.model->comp_dir.length + input.file_paths[0].length + 49;
+                    if (type->declaration.line && type->declaration.source < input.model->source_count && input.model->source_paths)
+                    {
+                        identity_bytes += input.model->source_paths[type->declaration.source].length;
+                    }
+                    type_capacity += 64 + type->name.length + 1 + identity_bytes * 2;
+                }
                 for (u32 field = 0; field < type->field_count; field += 1)
                 {
                     type_capacity += type->fields[field].name.length + 1;
@@ -1127,12 +1214,12 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
         }
         ByteWriter types = byte_writer_make(arena_allocate(arena, u8, type_capacity), type_capacity);
         byte_writer_emit_u32_le(&types, CV_SIGNATURE_C13);
-        if (input.model && input.model->valid)
+        if (input.model && input.model->valid && !result.unsupported_type)
         {
             u64* auxiliary_offsets = arena_allocate(arena, u64, input.model->type_count ? input.model->type_count : 1);
-            codeview_emit_model_types(&types, input.model, auxiliary_offsets);
+            codeview_emit_model_types(&types, input.model, auxiliary_offsets, input.file_paths[0]);
         }
-        if (!symbols.overflow && !types.overflow && symbols.count <= UINT32_MAX)
+        if (!result.unsupported_type && !symbols.overflow && !types.overflow && symbols.count <= UINT32_MAX)
         {
             result.valid = byte_writer_commit(&symbols, &result.symbols) && byte_writer_commit(&types, &result.types);
         }

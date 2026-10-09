@@ -74,6 +74,150 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_global_linkage(UnitTestArgument
 
 // Decode the produced stream independently, following LF_INDEX rather than
 // assuming field lists are contiguous or are emitted in primary-type order.
+// Resolve a forward aggregate by its scoped unique name, independently of
+// record order. This also exercises the consumer rule used by PDB readers.
+BUSTER_GLOBAL_LOCAL u64 codeview_test_complete_aggregate(ByteSlice types, u64 forward)
+{
+    u64 result = 0;
+    if (forward + 26 <= types.length)
+    {
+        u16 kind = codeview_test_u16(types.pointer + forward + 2);
+        u64 name_offset = forward + (kind == 0x1505 ? 26 : 18);
+        u64 forward_end = forward + 2 + codeview_test_u16(types.pointer + forward);
+        u64 unique = name_offset;
+        while (unique < forward_end && types.pointer[unique])
+        {
+            unique += 1;
+        }
+        unique += 1;
+        u64 unique_end = unique;
+        while (unique_end < forward_end && types.pointer[unique_end])
+        {
+            unique_end += 1;
+        }
+        for (u64 cursor = 4; unique_end < forward_end && cursor + 4 <= types.length;)
+        {
+            u64 size = 2 + (u64)codeview_test_u16(types.pointer + cursor);
+            if (size < 4 || size > types.length - cursor)
+            {
+                break;
+            }
+            if (codeview_test_u16(types.pointer + cursor + 2) == kind && size >= (kind == 0x1505 ? 26u : 18u) &&
+                !(codeview_test_u16(types.pointer + cursor + 6) & 0x80))
+            {
+                u64 candidate = cursor + (kind == 0x1505 ? 26 : 18);
+                while (candidate < cursor + size && types.pointer[candidate])
+                {
+                    candidate += 1;
+                }
+                candidate += 1;
+                u64 length = unique_end - unique;
+                if (candidate < cursor + size && length < cursor + size - candidate &&
+                    !memcmp(types.pointer + candidate, types.pointer + unique, length) && !types.pointer[candidate + length])
+                {
+                    result = cursor;
+                    break;
+                }
+            }
+            cursor += size;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_recursive_aggregates(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 path = S8("recursive.c");
+    DebugTypeField next[] = {{.name = S8("next"), .type = 1}};
+    DebugTypeField previous[] = {{.name = S8("previous"), .type = 1}};
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_STRUCT, .name = S8("Node"), .size = 8, .fields = next, .field_count = 1},
+        {.kind = DEBUG_TYPE_POINTER, .element_type = 0, .size = 8},
+        {.kind = DEBUG_TYPE_UNION, .name = S8("Node"), .size = 8, .fields = previous, .field_count = 1},
+        {.kind = DEBUG_TYPE_STRUCT, .size = 8, .fields = next, .field_count = 1},
+        {.kind = DEBUG_TYPE_STRUCT, .size = 8, .fields = next, .field_count = 1},
+        {.kind = DEBUG_TYPE_STRUCT, .name = S8("Node"), .size = 8, .fields = next, .field_count = 1},
+    };
+    DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .valid = true};
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        CodeviewResult built = codeview_build(arguments->arena, (CodeviewInput){
+            .model = &model, .file_paths = &path, .file_count = 1,
+            .machine = architecture ? CODEVIEW_MACHINE_ARM64 : CODEVIEW_MACHINE_X64});
+        BUSTER_TEST(arguments, built.valid);
+        u64 cursor = 4;
+        u64 complete[6] = {0};
+        for (u32 index = 0; built.valid && index < BUSTER_ARRAY_LENGTH(types) && cursor + 4 <= built.types.length; index += 1)
+        {
+            u8* record = built.types.pointer + cursor;
+            u64 size = 2 + (u64)codeview_test_u16(record);
+            BUSTER_TEST(arguments, size >= 4 && size <= built.types.length - cursor);
+            if (size < 4 || size > built.types.length - cursor)
+            {
+                break;
+            }
+            if (index == 1)
+            {
+                // The self pointer names the original canonical aggregate ID.
+                BUSTER_TEST(arguments, codeview_test_u16(record + 2) == 0x1002 && codeview_test_u32(record + 4) == 0x1000);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, size >= 26 && codeview_test_u16(record + 6) == 0x0380 &&
+                    !codeview_test_u16(record + 4) && !codeview_test_u32(record + 8));
+                complete[index] = codeview_test_complete_aggregate(built.types, cursor);
+                BUSTER_TEST(arguments, complete[index] > cursor);
+                if (complete[index])
+                {
+                    u8* full = built.types.pointer + complete[index];
+                    BUSTER_TEST(arguments, codeview_test_u16(full + 6) == 0x0300 &&
+                        codeview_test_u16(full + 4) == 1 && codeview_test_u32(full + 8) >= 0x1006);
+                }
+            }
+            cursor += size;
+        }
+        // Empty friendly names remain different types, as do shadowed tags.
+        BUSTER_TEST(arguments, complete[0] && complete[2] && complete[3] && complete[4] &&
+            complete[0] != complete[2] && complete[3] != complete[4] && complete[5] && complete[0] != complete[5]);
+        // Every field list references only canonical declarations/pointers;
+        // complete records are not reachable from those declarations, so the
+        // recursive source graph has no record-reference cycle.
+        u32 lists = 0;
+        for (u64 offset = cursor; built.valid && offset + 4 <= built.types.length;)
+        {
+            u64 size = 2 + (u64)codeview_test_u16(built.types.pointer + offset);
+            if (size < 4 || size > built.types.length - offset)
+            {
+                break;
+            }
+            if (codeview_test_u16(built.types.pointer + offset + 2) == 0x1203)
+            {
+                BUSTER_TEST(arguments, size >= 18 && codeview_test_u16(built.types.pointer + offset + 4) == 0x150d &&
+                    codeview_test_u32(built.types.pointer + offset + 8) == 0x1001);
+                lists += 1;
+            }
+            offset += size;
+        }
+        BUSTER_TEST(arguments, lists == 5);
+    }
+    String8 reserved[] = {S8_INITIALIZER("__unnamed"), S8_INITIALIZER("<unnamed-tag>"),
+                          S8_INITIALIZER("scope::__unnamed"), S8_INITIALIZER("scope::<unnamed-tag>")};
+    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(reserved); name_index += 1)
+    {
+        types[2].name = reserved[name_index];
+        CodeviewResult refused = codeview_build(arguments->arena, (CodeviewInput){
+            .model = &model, .file_paths = &path, .file_count = 1, .machine = CODEVIEW_MACHINE_X64});
+        BUSTER_TEST(arguments, !refused.valid && refused.unsupported_type && refused.unsupported_type_id == 2);
+        BUSTER_TEST(arguments, !refused.symbols.length && !refused.types.length);
+    }
+    types[2].name = S8("scope__unnamed");
+    CodeviewResult neighbor = codeview_build(arguments->arena, (CodeviewInput){
+        .model = &model, .file_paths = &path, .file_count = 1, .machine = CODEVIEW_MACHINE_X64});
+    BUSTER_TEST(arguments, neighbor.valid && !neighbor.unsupported_type);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_large_types(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -128,7 +272,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_large_types(UnitTestArguments* 
         for (u32 type_index = 2; type_index <= 4; type_index += 1)
         {
             bool enumeration = type_index == 3;
-            u32 field_index = codeview_test_u32(built.types.pointer + offsets[type_index] + (enumeration ? 12 : 8));
+            u64 aggregate = enumeration ? offsets[type_index] : codeview_test_complete_aggregate(built.types, offsets[type_index]);
+            BUSTER_TEST(arguments, aggregate != 0);
+            u32 field_index = aggregate ? codeview_test_u32(built.types.pointer + aggregate + (enumeration ? 12 : 8)) : 0;
             u32 seen = 0;
             u32 links = 0;
             bool valid = true;
@@ -456,6 +602,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_bit_fields_and_arrays(UnitTestA
 UnitTestResult codeview_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codeview_test_large_types(arguments);
+    UnitTestResult recursive = codeview_test_recursive_aggregates(arguments);
+    result.test_count += recursive.test_count;
+    result.succeeded_test_count += recursive.succeeded_test_count;
     UnitTestResult linkage = codeview_test_global_linkage(arguments);
     result.test_count += linkage.test_count;
     result.succeeded_test_count += linkage.succeeded_test_count;

@@ -69,8 +69,13 @@ struct CodeviewResult
     u32 function_count;
     u32 relocation_count;
     bool valid;
-    u8 reserved[3];
+    bool unsupported_type;
+    u8 reserved[2];
+    // Meaningful only when unsupported_type is true. Fits existing tail padding.
+    u32 unsupported_type_id;
 };
+
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CodeviewResult) == 64);
 
 enum
 {

@@ -71,6 +71,135 @@ BUSTER_GLOBAL_LOCAL ByteSlice pdb_test_stream_bytes(Arena* arena, ByteSlice imag
     return (ByteSlice){.pointer = bytes, .length = size};
 }
 
+// Independent debugger-style forward lookup: locate a complete scoped tag in
+// the name bucket carried by the TPI hash stream, then inspect its field list.
+BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_forward_type_hashes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 path = S8("recursive.c");
+    DebugTypeField fields[] = {{.name = S8("next"), .type = 1}, {.name = S8("next"), .type = 3}};
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_STRUCT, .name = S8("Node"), .size = 8, .fields = fields, .field_count = 1},
+        {.kind = DEBUG_TYPE_POINTER, .element_type = 0, .size = 8},
+        {.kind = DEBUG_TYPE_STRUCT, .name = S8("Node"), .size = 8, .fields = fields + 1, .field_count = 1},
+        {.kind = DEBUG_TYPE_POINTER, .element_type = 2, .size = 8},
+        {.kind = DEBUG_TYPE_STRUCT, .size = 8, .fields = fields, .field_count = 1},
+    };
+    DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .valid = true};
+    String8 expected_names[] = {
+        S8_INITIALIZER("$buster$000000000000000brecursive.c000000000000000000000000"),
+        S8_INITIALIZER("$buster$000000000000000brecursive.c000000000000000000000002"),
+        S8_INITIALIZER("$buster$000000000000000brecursive.c000000000000000000000004"),
+    };
+    // Frozen string-v1 buckets modulo 0x3ffff; pointer record CRC-v8 bucket.
+    u32 expected_buckets[] = {188470, 188472, 188474};
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        CodeviewResult codeview = codeview_build(arguments->arena, (CodeviewInput){
+            .model = &model, .file_paths = &path, .file_count = 1,
+            .machine = architecture ? CODEVIEW_MACHINE_ARM64 : CODEVIEW_MACHINE_X64});
+        PdbSection section = {.name = S8(".text"), .virtual_address = 0x1000, .virtual_size = 8,
+                              .raw_offset = 0x400, .raw_size = 0x200, .characteristics = 0x60000020};
+        PdbResult built = pdb_build(arguments->arena, (PdbInput){
+            .module_name = S8("recursive.obj"), .codeview_symbols = codeview.symbols, .codeview_types = codeview.types,
+            .sections = &section, .section_count = 1, .age = 1, .code_section = 1, .code_size = 8,
+            .machine = architecture ? 0xaa64 : 0x8664});
+        if (BUSTER_REQUIRE(arguments, codeview.valid && built.valid))
+        {
+            ByteSlice tpi = pdb_test_stream_bytes(arguments->arena, built.bytes, PDB_TEST_STREAM_TPI);
+            if (BUSTER_REQUIRE(arguments, tpi.length >= 56))
+            {
+                u16 hash_stream = 0;
+                memcpy(&hash_stream, tpi.pointer + 20, sizeof(hash_stream));
+                ByteSlice hashes = pdb_test_stream_bytes(arguments->arena, built.bytes, hash_stream);
+                u32 count = pdb_read_u32(tpi, 12) - pdb_read_u32(tpi, 8);
+                u32 hash_size = pdb_read_u32(tpi, 36);
+                u32 index_offset = pdb_read_u32(tpi, 40);
+                u32 index_size = pdb_read_u32(tpi, 44);
+                bool valid = hash_stream != UINT16_MAX && hashes.length >= hash_size && hash_size == (u64)count * 4 &&
+                    pdb_read_u32(tpi, 24) == 4 && pdb_read_u32(tpi, 28) == 0x3ffff &&
+                    index_offset <= hashes.length && index_size <= hashes.length - index_offset && !(index_size & 7);
+                BUSTER_TEST(arguments, valid);
+                u64 offsets[32] = {0};
+                u64 cursor = 56;
+                u32 records = 0;
+                while (valid && cursor + 4 <= tpi.length && records < BUSTER_ARRAY_LENGTH(offsets))
+                {
+                    u16 length = 0;
+                    memcpy(&length, tpi.pointer + cursor, sizeof(length));
+                    u64 size = 2 + (u64)length;
+                    valid = size >= 4 && size <= tpi.length - cursor;
+                    if (valid)
+                    {
+                        offsets[records++] = cursor;
+                        cursor += size;
+                    }
+                }
+                valid = valid && cursor == tpi.length && records == count;
+                BUSTER_TEST(arguments, valid);
+                if (valid)
+                {
+                    BUSTER_TEST(arguments, count >= 5 && pdb_read_u32(hashes, 4) == 161053);
+                    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(expected_names); target += 1)
+                    {
+                        String8 expected = expected_names[target];
+                        u32 matches = 0;
+                        for (u32 record = 0; record < count; record += 1)
+                        {
+                            if (pdb_read_u32(hashes, (u64)record * 4) != expected_buckets[target])
+                            {
+                                continue;
+                            }
+                            u64 offset = offsets[record];
+                            u16 kind = 0;
+                            u16 properties = 0;
+                            memcpy(&kind, tpi.pointer + offset + 2, sizeof(kind));
+                            memcpy(&properties, tpi.pointer + offset + 6, sizeof(properties));
+                            if (kind == 0x1505 && properties == 0x0300)
+                            {
+                                u64 name = offset + 26;
+                                u64 end = record + 1 < count ? offsets[record + 1] : tpi.length;
+                                while (name < end && tpi.pointer[name])
+                                {
+                                    name += 1;
+                                }
+                                name += 1;
+                                bool identity = name < end && expected.length < end - name &&
+                                    !memcmp(tpi.pointer + name, expected.pointer, expected.length) && !tpi.pointer[name + expected.length];
+                                if (identity)
+                                {
+                                    u32 field_index = pdb_read_u32(tpi, offset + 8);
+                                    BUSTER_TEST(arguments, field_index >= 0x1000 && field_index - 0x1000 < count);
+                                    if (field_index >= 0x1000 && field_index - 0x1000 < count)
+                                    {
+                                        u64 field = offsets[field_index - 0x1000];
+                                        BUSTER_TEST(arguments, pdb_read_u32(tpi, field + 8) == (target == 1 ? 0x1003u : 0x1001u));
+                                    }
+                                    matches += 1;
+                                }
+                            }
+                        }
+                        BUSTER_TEST(arguments, matches == 1);
+                    }
+                    BUSTER_TEST(arguments, index_size >= 8 && pdb_read_u32(hashes, index_offset) == 0x1000 &&
+                        !pdb_read_u32(hashes, (u64)index_offset + 4));
+                    for (u32 entry = 0; entry < index_size / 8; entry += 1)
+                    {
+                        u32 index = pdb_read_u32(hashes, index_offset + (u64)entry * 8);
+                        u32 offset = pdb_read_u32(hashes, index_offset + (u64)entry * 8 + 4);
+                        BUSTER_TEST(arguments, index >= 0x1000 && index - 0x1000 < count);
+                        if (index >= 0x1000 && index - 0x1000 < count)
+                        {
+                            BUSTER_TEST(arguments, offsets[index - 0x1000] == 56 + (u64)offset);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void pdb_test_emit_type_u16(PdbTestTypeBuffer* buffer, u16 value)
 {
     if (buffer->count + sizeof(value) <= sizeof(buffer->bytes))
@@ -416,7 +545,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_continuation_merge(UnitTestArguments
         {
             u16 kind = 0;
             memcpy(&kind, tpi.pointer + offsets[index] + 2, 2);
-            if (kind != 0x1505)
+            u16 properties = 0;
+            if (kind == 0x1505)
+            {
+                memcpy(&properties, tpi.pointer + offsets[index] + 6, sizeof(properties));
+            }
+            if (kind != 0x1505 || (properties & 0x0080))
             {
                 continue;
             }
@@ -856,6 +990,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_large_source_count(UnitTestArguments
 UnitTestResult pdb_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = pdb_test_checksum_records(arguments);
+    UnitTestResult forwards = pdb_test_forward_type_hashes(arguments);
+    result.test_count += forwards.test_count;
+    result.succeeded_test_count += forwards.succeeded_test_count;
     UnitTestResult source_count = pdb_test_large_source_count(arguments);
     result.test_count += source_count.test_count;
     result.succeeded_test_count += source_count.succeeded_test_count;
