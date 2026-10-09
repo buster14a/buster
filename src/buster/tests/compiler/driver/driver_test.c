@@ -3773,6 +3773,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int g(const char *q) { *--q = 1; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place")},
         {S8("int g(void) { int a[2] = {0}; a++; return a[0]; }\n"), false, false, S8("increment or decrement operand is not a modifiable place")},
         {S8("int g(int *const p) { p++; return 0; }\n"), false, false, S8("increment or decrement operand is not a modifiable place")},
+        {S8("int g(void) { unsigned char a[4] = {0}; int i = 2; ++*(unsigned char *)(a + i); return a[2]; }\n"), true},
+        {S8("int g(void) { unsigned char a[4] = {0}; int i = 2; return (*(unsigned char *)(a + i++))--; }\n"), true},
+        {S8("int g(void) { unsigned char a[4] = {0}; unsigned char *p = a; return ++*(unsigned char *)(p++); }\n"), true},
         // A qualifier inside the brackets qualifies the adjusted pointer.
         {S8("long g(long v[const 2], long w[restrict 2]) { v[0] = 7; v[1]++; w++; return v[0] + w[0]; }\n"), true},
         {S8("long g(long v[const 2]) { (v)++; return 0; }\n"), false, false, S8("increment or decrement operand is not a modifiable place")},
