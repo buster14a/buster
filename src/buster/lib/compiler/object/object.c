@@ -109,6 +109,15 @@
 
 BUSTER_GLOBAL_LOCAL void object_debug_module_set(Arena* arena, ObjectFile* object, String8 name, u64 code_size);
 
+// The one section name `ld` and `lld` run as the preinit array
+// (DT_PREINIT_ARRAY): their default scripts collect exactly `.preinit_array`,
+// whatever its section type, and leave a `.preinit_array.5`, a `.mypre` or any
+// other SHT_PREINIT_ARRAY section as ordinary data that nothing runs.
+BUSTER_GLOBAL_LOCAL bool object_elf_name_is_preinit_array(String8 name)
+{
+    return string_equal(name, S8(".preinit_array"));
+}
+
 typedef struct ObjectBuffer ObjectBuffer;
 struct ObjectBuffer
 {
@@ -4256,8 +4265,8 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_named_section_directive(ObjectAs
                          : section->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? S8(",\"awT\",@nobits\n")
                          : section->kind == OBJECT_SECTION_FINI_ARRAY      ? S8(",\"aw\",@fini_array\n")
                          : section->kind != OBJECT_SECTION_INIT_ARRAY      ? S8(",\"aw\",@progbits\n")
-                         : string_starts_with_sequence(section->name, S8(".preinit_array")) ? S8(",\"aw\",@preinit_array\n")
-                                                                                            : S8(",\"aw\",@init_array\n");
+                         : object_elf_name_is_preinit_array(section->name) ? S8(",\"aw\",@preinit_array\n")
+                                                                           : S8(",\"aw\",@init_array\n");
     object_assembly_append_string(buffer, bare ? S8("\t.section ") : S8("\t.section \""));
     object_assembly_append_string(buffer, section->name);
     object_assembly_append_string(buffer, bare ? S8("") : S8("\""));
@@ -4280,20 +4289,29 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_section_alignment(ObjectAssembly
 BUSTER_GLOBAL_LOCAL void object_assembly_append_initializer_group_directive(ObjectAssemblyBuffer* buffer, ObjectSectionKind kind, u32 priority)
 {
     object_assembly_append_string(buffer, S8("\t.section "));
-    object_assembly_append_string(buffer, object_section_name_for_kind(kind));
-    if (priority != IR_INITIALIZER_PRIORITY_NONE)
+    if (priority == IR_INITIALIZER_PRIORITY_PREINIT && kind == OBJECT_SECTION_INIT_ARRAY)
     {
-        char8 digits[5];
-        u32 value = priority;
-        for (u32 index = 5; index; index -= 1)
-        {
-            digits[index - 1] = (char8)('0' + value % 10);
-            value /= 10;
-        }
-        object_assembly_append_string(buffer, S8("."));
-        object_assembly_append_string(buffer, (String8){.pointer = digits, .length = 5});
+        // The preinit array has no priority suffix: `ld` runs the section of
+        // exactly this name ahead of every constructor.
+        object_assembly_append_string(buffer, S8(".preinit_array,\"aw\",@preinit_array\n"));
     }
-    object_assembly_append_string(buffer, kind == OBJECT_SECTION_FINI_ARRAY ? S8(",\"aw\",@fini_array\n") : S8(",\"aw\",@init_array\n"));
+    else
+    {
+        object_assembly_append_string(buffer, object_section_name_for_kind(kind));
+        if (priority != IR_INITIALIZER_PRIORITY_NONE)
+        {
+            char8 digits[5];
+            u32 value = priority;
+            for (u32 index = 5; index; index -= 1)
+            {
+                digits[index - 1] = (char8)('0' + value % 10);
+                value /= 10;
+            }
+            object_assembly_append_string(buffer, S8("."));
+            object_assembly_append_string(buffer, (String8){.pointer = digits, .length = 5});
+        }
+        object_assembly_append_string(buffer, kind == OBJECT_SECTION_FINI_ARRAY ? S8(",\"aw\",@fini_array\n") : S8(",\"aw\",@init_array\n"));
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target, u32 section_index)
@@ -4984,17 +5002,30 @@ enum
 BUSTER_GLOBAL_LOCAL String8 object_initializer_section_name(Arena* arena, ObjectFormat format, ObjectSectionKind kind, u32 priority)
 {
     String8 result;
-    if (format == OBJECT_FORMAT_COFF)
+    // Only the ELF constructor array has a preinit array to name; anywhere
+    // else IR_INITIALIZER_PRIORITY_PREINIT is the earliest priority there is,
+    // zero, which keeps it ahead of every other group of that format.
+    bool preinit = priority == IR_INITIALIZER_PRIORITY_PREINIT;
+    bool preinit_array = preinit && format == OBJECT_FORMAT_ELF64 && kind == OBJECT_SECTION_INIT_ARRAY;
+    u32 spelled = preinit ? 0 : priority;
+    // A COFF object holding both a preinit group and a `constructor(0)` group
+    // would name two sections `.CRT$XCA00000`. No path builds one: the sentinel
+    // comes only from an ELF reader, and an ELF input is not rewritten to COFF.
+    if (preinit_array)
     {
-        result = priority == IR_INITIALIZER_PRIORITY_NONE ? (kind == OBJECT_SECTION_INIT_ARRAY ? S8(".CRT$XCU") : S8(".CRT$XTX"))
-                                                          : string_format(arena, S8("{S8}{u32:width=[0,5]}"),
-                                                                          kind == OBJECT_SECTION_INIT_ARRAY ? S8(".CRT$XCA") : S8(".CRT$XTA"), priority);
+        result = S8(".preinit_array");
+    }
+    else if (format == OBJECT_FORMAT_COFF)
+    {
+        result = spelled == IR_INITIALIZER_PRIORITY_NONE ? (kind == OBJECT_SECTION_INIT_ARRAY ? S8(".CRT$XCU") : S8(".CRT$XTX"))
+                                                         : string_format(arena, S8("{S8}{u32:width=[0,5]}"),
+                                                                         kind == OBJECT_SECTION_INIT_ARRAY ? S8(".CRT$XCA") : S8(".CRT$XTA"), spelled);
     }
     else
     {
-        result = priority == IR_INITIALIZER_PRIORITY_NONE
+        result = spelled == IR_INITIALIZER_PRIORITY_NONE
                      ? object_section_name_for_kind(kind)
-                     : string_format(arena, S8("{S8}.{u32:width=[0,5]}"), object_section_name_for_kind(kind), priority);
+                     : string_format(arena, S8("{S8}.{u32:width=[0,5]}"), object_section_name_for_kind(kind), spelled);
     }
 
     return result;
@@ -5009,16 +5040,17 @@ BUSTER_GLOBAL_LOCAL String8 object_initializer_section_name(Arena* arena, Object
 //
 // A `.preinit_array` -- which only a section attribute or a foreign object
 // spells, and which this model keeps as an INIT_ARRAY (issue 1276) -- answers
-// priority zero whatever its suffix: `ld` runs that array before every
-// initializer, and zero is the priority only a GNU-reserved `constructor(0)`
-// can tie, which keeps input order.
+// IR_INITIALIZER_PRIORITY_PREINIT: `ld` and `lld` run that array before every
+// constructor of every priority, `constructor(0)` and a dependency's included,
+// and the priority sorts it ahead of all of them (issue 1243).  Only the exact
+// name is that array; see object_elf_name_is_preinit_array.
 u32 object_elf_initializer_section_priority(String8 name, ObjectSectionKind kind)
 {
     String8 unsuffixed = object_section_name_for_kind(kind);
     u32 result = IR_INITIALIZER_PRIORITY_NONE;
-    if (kind == OBJECT_SECTION_INIT_ARRAY && string_starts_with_sequence(name, S8(".preinit_array")))
+    if (kind == OBJECT_SECTION_INIT_ARRAY && object_elf_name_is_preinit_array(name))
     {
-        result = 0;
+        result = IR_INITIALIZER_PRIORITY_PREINIT;
     }
     else if (name.length > unsuffixed.length + 1 && string_equal(string_slice(name, 0, unsuffixed.length), unsuffixed) && name.pointer[unsuffixed.length] == '.')
     {
@@ -5128,7 +5160,7 @@ BUSTER_GLOBAL_LOCAL bool object_reader_merge_initializer_arrays(Arena* arena, Ob
         // Placing in (priority, input index) order one at a time, each step
         // taking the smallest pair after the last placed, is a stable sort
         // that needs no per-record state beyond that pair.
-        u32 placed_priority = 0;
+        u32 placed_key = 0;
         u32 placed_index = 0;
         bool placed_any = false;
         bool placing = true;
@@ -5138,10 +5170,10 @@ BUSTER_GLOBAL_LOCAL bool object_reader_merge_initializer_arrays(Arena* arena, Ob
             for (u32 index = 0; index < record_count; index += 1)
             {
                 ObjectInitializerSection* record = records + index;
-                bool after_placed =
-                    !placed_any || record->priority > placed_priority || (record->priority == placed_priority && record->index > placed_index);
-                bool before_next = next == record_count || record->priority < records[next].priority ||
-                                   (record->priority == records[next].priority && record->index < records[next].index);
+                u32 key = IR_INITIALIZER_PRIORITY_ORDER_KEY(record->priority);
+                u32 next_key = next == record_count ? 0 : IR_INITIALIZER_PRIORITY_ORDER_KEY(records[next].priority);
+                bool after_placed = !placed_any || key > placed_key || (key == placed_key && record->index > placed_index);
+                bool before_next = next == record_count || key < next_key || (key == next_key && record->index < records[next].index);
                 next = record->kind == (u32)kind && after_placed && before_next ? index : next;
             }
             placing = next != record_count;
@@ -5158,7 +5190,7 @@ BUSTER_GLOBAL_LOCAL bool object_reader_merge_initializer_arrays(Arena* arena, Ob
                     base = aligned_base;
                     section_bases[records[next].index] = base;
                     base += records[next].size;
-                    placed_priority = records[next].priority;
+                    placed_key = IR_INITIALIZER_PRIORITY_ORDER_KEY(records[next].priority);
                     placed_index = records[next].index;
                     placed_any = true;
                 }
@@ -5574,16 +5606,21 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
             {
                 unwind_type = section_type == 1 || (target.cpu_arch == CPU_ARCH_X86_64 && section_type == 0x70000001);
             }
-            // SHT_INIT_ARRAY, SHT_FINI_ARRAY and SHT_PREINIT_ARRAY.  Their
-            // type is what names them, not their section name: `ld` sorts
-            // `.init_array.NNNNN` into the array by priority and every one of
-            // those spellings is the same kind here.  A preinit array joins the
-            // initializers ahead of every priority
-            // (object_elf_initializer_section_priority, issue 1276).
+            // SHT_INIT_ARRAY and SHT_FINI_ARRAY.  Their type is what names
+            // them, not their section name: `ld` sorts `.init_array.NNNNN`
+            // into the array by priority and every one of those spellings is
+            // the same kind here.  The preinit array is the opposite: `ld` and
+            // `lld` run exactly the section named `.preinit_array`, of type
+            // SHT_PREINIT_ARRAY or SHT_PROGBITS, ahead of every constructor
+            // (object_elf_initializer_section_priority), and run no other
+            // SHT_PREINIT_ARRAY section at all, so one with another name is
+            // ordinary data here too (issue 1243).
+            bool preinit_type = section_type == 16;
             bool initializer_array = false;
             if (read_ok)
             {
-                initializer_array = section_type == 14 || section_type == 15 || section_type == 16;
+                initializer_array = section_type == 14 || section_type == 15 ||
+                                    ((preinit_type || section_type == 1) && object_elf_name_is_preinit_array(name));
             }
             bool ignored = false;
             if (read_ok)
@@ -5595,7 +5632,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
             if (read_ok)
             {
                 bool allocated = (flags & 0x2) != 0;
-                bool supported_type = unwind ? unwind_type : initializer_array || section_type == 1 || section_type == 8;
+                bool supported_type = unwind ? unwind_type : initializer_array || preinit_type || section_type == 1 || section_type == 8;
                 debug_kind = allocated ? OBJECT_SECTION_COUNT : object_debug_section_kind_from_name(name);
                 if (!allocated && (debug_kind == OBJECT_SECTION_COUNT || !supported_type || ignored))
                 {
@@ -12007,10 +12044,10 @@ struct ObjectNamedSectionPlan
 
 // The initializer array an ELF section name states, or OBJECT_SECTION_COUNT
 // for any other name: `.init_array`, `.fini_array` and `.preinit_array`, bare
-// or with the `.NNNNN` priority suffix `ld` sorts by. A preinit array is an
-// INIT_ARRAY here: its entries run before every other initializer
-// (object_elf_initializer_section_priority), and only its name tells the ELF
-// writer to give it SHT_PREINIT_ARRAY.
+// or with the `.NNNNN` priority suffix `ld` sorts by; the preinit array only
+// by its exact name. A preinit array is an INIT_ARRAY here: its entries run
+// before every other initializer (object_elf_initializer_section_priority),
+// and only its name tells the ELF writer to give it SHT_PREINIT_ARRAY.
 BUSTER_GLOBAL_LOCAL ObjectSectionKind object_elf_named_initializer_kind(String8 name)
 {
     ObjectSectionKind result = OBJECT_SECTION_COUNT;
@@ -12022,7 +12059,10 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind object_elf_named_initializer_kind(String8 
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(spellings) && result == OBJECT_SECTION_COUNT; index += 1)
     {
         String8 spelling = spellings[index];
-        bool matches = string_starts_with_sequence(name, spelling) && (name.length == spelling.length || name.pointer[spelling.length] == '.');
+        // `.preinit_array` is that array only by its exact name; a suffix
+        // (`.preinit_array.5`) is a section `ld` leaves as data.
+        bool matches = index == 1 ? object_elf_name_is_preinit_array(name)
+                                  : string_starts_with_sequence(name, spelling) && (name.length == spelling.length || name.pointer[spelling.length] == '.');
         result = !matches ? OBJECT_SECTION_COUNT : index == 2 ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
     }
 
@@ -13848,7 +13888,7 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
         // its name is what keeps it SHT_PREINIT_ARRAY (issue 1276).
         else if (source->kind == OBJECT_SECTION_INIT_ARRAY)
         {
-            type = string_starts_with_sequence(source->name, S8(".preinit_array")) ? 16 : 14;
+            type = object_elf_name_is_preinit_array(source->name) ? 16 : 14;
         }
         else if (source->kind == OBJECT_SECTION_FINI_ARRAY)
         {
