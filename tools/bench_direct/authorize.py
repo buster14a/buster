@@ -879,6 +879,11 @@ def _review_sampling_attempt(api, repository: str, original_executor_attempt: di
             "facts": facts, "history": [dict(zip(SAMPLING_HISTORY_HEADER, row)) for row in history],
             "request_line": line, "request": request, "executor": execution, "repository": repository,
             "head": head, "request_id": request_id, "run_id": run_id, "historical_review": True,
+            "raw": {name: records[key].encode("utf-8") for name, key in
+                    (("request.txt", "request"), ("allowlist.tsv", "allowlist"), ("facts.tsv", "facts"),
+                     ("history.tsv", "history"), ("freeze.tsv", "freeze"), ("parent-freeze.tsv", "parent"),
+                     ("acquisition-plan.tsv", "acquisition"))},
+            "historical_records": {key: value.encode("utf-8") for key, value in records.items()}, "native_api_proof": proof,
             "terminal_api_envelope": envelope, "terminal_api_sha256": hashlib.sha256(envelope).hexdigest()}
 
 
@@ -899,6 +904,307 @@ def review_sampling_authority(api, repository: str, original_executor_attempt: d
             raise ValueError("historical sampling acquisition was relabeled from the current attempt")
         authority["historical_acquisition"] = acquisition
     return authority
+
+def prerequisite_review_native(records: dict[str, str], *, utility: bool = False) -> dict[str, str]:
+    """Fixed native historical prerequisite data validation, with no execution authority."""
+    import subprocess
+    import tempfile
+    root = Path(__file__).resolve().parents[2]
+    order = ("allowlist", "request", "facts", "history", "plan", "api")
+    prefix = "utility" if utility else "preparation"
+    with tempfile.TemporaryDirectory(prefix=prefix + "-historical-review-") as temporary:
+        directory = Path(temporary)
+        for name in order:
+            (directory / (name + ".tsv")).write_text(records[name], encoding="utf-8")
+        output = directory / "review.txt"
+        command = [str(root / "build.sh"), "compiler_profile_qualification", "--validate-historical-" + prefix,
+                   *(str(directory / (name + ".tsv")) for name in order), str(output)]
+        with (directory / "native.log").open("xb") as log:
+            completed = subprocess.run(command, cwd=root, stdin=subprocess.DEVNULL,
+                                       stdout=log, stderr=subprocess.STDOUT, timeout=120, check=False)
+        if completed.returncode != 0 or not output.is_file() or output.stat().st_size > 16384:
+            raise ValueError("native historical prerequisite validation refused the attempt")
+        result = {}
+        for row in output.read_text(encoding="ascii").splitlines():
+            key, separator, value = row.partition("=")
+            if not separator or not key.startswith(prefix + "_") or key in result or not value:
+                raise ValueError("native historical prerequisite output is ambiguous")
+            result[key] = value
+        if result.get(prefix + "_historical_valid") != "true" or prefix + "_admitted" in result or \
+                result.get(prefix + "_historical_execution_authority") != "false" or \
+                result.get(prefix + "_historical_qualification") != "unqualified":
+            raise ValueError("historical prerequisite output changed its data-only boundary")
+    return result
+
+
+def review_prerequisite_authority(api, repository: str, original_executor_attempt: dict,
+                             original_request_attempt: dict, prefix_attempts=None, *, utility: bool = False) -> dict:
+    """Re-select immutable original API records and committed P_i/F_i; never current OPEN authority."""
+    import hashlib
+    from types import SimpleNamespace
+    if repository != "buster14a/buster":
+        raise ValueError("historical prerequisite repository is foreign")
+    observations = {}
+    def read(path):
+        if path not in observations:
+            observations[path] = api.request(path)
+        return observations[path]
+    observed_api = SimpleNamespace(request=read)
+    pairs = []
+    for supplied in (original_executor_attempt, original_request_attempt):
+        if not isinstance(supplied, dict) or type(supplied.get("id")) is not int or supplied["id"] <= 0 or \
+                type(supplied.get("run_attempt")) is not int or supplied["run_attempt"] != 1:
+            raise ValueError("historical prerequisite caller lacks a typed original first attempt")
+        run_id = str(supplied["id"])
+        actual = read(f"/actions/runs/{run_id}/attempts/1")
+        latest = read(f"/actions/runs/{run_id}")
+        if not isinstance(actual, dict) or type(actual.get("id")) is not int or actual["id"] != supplied["id"] or \
+                type(actual.get("run_attempt")) is not int or actual["run_attempt"] != 1 or \
+                not isinstance(latest, dict) or type(latest.get("id")) is not int or latest["id"] != actual["id"] or \
+                type(latest.get("run_attempt")) is not int or latest["run_attempt"] != 1:
+            raise ValueError("historical prerequisite original attempt is unavailable or was rerun")
+        for key in ("id", "run_attempt", "head_sha", "path", "event", "repository", "head_repository", "display_title"):
+            if supplied.get(key) != actual.get(key):
+                raise ValueError("historical prerequisite caller relabeled an original API attempt")
+        pairs.append((actual, latest))
+    (execution, latest_execution), (request, latest_request) = pairs
+    head, policy_revision = request.get("head_sha"), execution.get("head_sha")
+    if not isinstance(head, str) or not COMMIT.fullmatch(head) or \
+            not isinstance(policy_revision, str) or not COMMIT.fullmatch(policy_revision):
+        raise ValueError("historical prerequisite lacks immutable source/workflow revisions")
+    request_id, run_id = str(request["id"]), str(execution["id"])
+    if execution.get("path") != ".github/workflows/9700x-direct-bench.yml" or \
+            execution.get("event") != "workflow_run" or execution.get("head_branch") != "main" or \
+            execution.get("display_title") != f"9700X request {request_id}.1 head {head}" or \
+            request.get("path") != REQUEST_WORKFLOW or request.get("event") != "pull_request" or \
+            request.get("status") != "completed" or request.get("conclusion") != "success" or \
+            any(full_name(row.get(key)) != repository for row in (execution, request)
+                for key in ("repository", "head_repository")) or \
+            any(identity(row.get(key)) != MAINTAINER for row in (execution, request)
+                for key in ("actor", "triggering_actor")):
+        raise ValueError("historical prerequisite original workflow/request provenance is foreign")
+    on_main = read(f"/compare/{policy_revision}...main")
+    relation = on_main.get("status") if isinstance(on_main, dict) else None
+    if relation not in ("ahead", "identical"):
+        raise ValueError("historical prerequisite original policy is outside protected main")
+    source_commit = read(f"/commits/{head}")
+    parents = source_commit.get("parents") if isinstance(source_commit, dict) else None
+    if not isinstance(parents, list) or not 1 <= len(parents) <= 2 or any(
+            not isinstance(row, dict) or not isinstance(row.get("sha"), str) or
+            not COMMIT.fullmatch(row["sha"]) for row in parents):
+        raise ValueError("historical prerequisite source parent inventory is unavailable")
+    comparisons = [read(f"/compare/{row['sha']}...{head}") for row in parents]
+    compared_heads = [sampling_review_compare_head(row, head) for row in comparisons]
+    unused_files, problems = request_delta(head, source_commit, comparisons)
+    if problems:
+        raise ValueError("historical prerequisite every-parent source proof failed: " + "; ".join(problems))
+    marker_text = sampling_content(repository, COMPARE_REQUEST, head, "", api=observed_api)
+    selected = utility_fresh_selector(marker_text, comparisons) if utility else preparation_fresh_selector(marker_text, comparisons)
+    if selected is None:
+        raise ValueError("historical prerequisite selector was inherited, moved or not fresh")
+    line, phase, packet, revision = selected
+    associated = read(f"/commits/{head}/pulls?per_page=100")
+    snapshot = request.get("pull_requests", [])
+    if not isinstance(snapshot, list) or len(snapshot) > 1:
+        raise ValueError("historical prerequisite request has ambiguous pull membership")
+    number = snapshot[0].get("number") if snapshot and isinstance(snapshot[0], dict) else None
+    if snapshot and (type(number) is not int or number <= 0):
+        raise ValueError("historical prerequisite pull snapshot has no typed number")
+    matches = [row for row in associated if isinstance(row, dict) and
+               (number is None or row.get("number") == number)] if isinstance(associated, list) and len(associated) < 100 else []
+    if len(matches) != 1:
+        raise ValueError("historical prerequisite commit has no unique original owning pull")
+    pull = matches[0]
+    if type(pull.get("number")) is not int or pull["number"] <= 0 or identity(pull.get("user")) != MAINTAINER or \
+            pull.get("state") not in ("open", "closed") or \
+            not isinstance(pull.get("head"), dict) or not isinstance(pull["head"].get("sha"), str) or \
+            not COMMIT.fullmatch(pull["head"]["sha"]) or \
+            full_name(pull["head"].get("repo")) != repository or \
+            not isinstance(pull.get("base"), dict) or full_name(pull["base"].get("repo")) != repository:
+        raise ValueError("historical prerequisite observed pull membership/owner is foreign")
+    allowlist_text = sampling_content(repository, UTILITY_ALLOWLIST if utility else PREPARATION_ALLOWLIST,
+                                      policy_revision, "", api=observed_api)
+    allowlist = sampling_review_record(allowlist_text)
+    plan_text = sampling_content(repository, UTILITY_PLAN if utility else PREPARATION_PLAN,
+                                 revision, "", api=observed_api)
+    frozen = sampling_review_record(plan_text)
+    for reference in {revision, frozen.get("trusted_revision", "-")}:
+        if not COMMIT.fullmatch(reference):
+            raise ValueError("historical prerequisite immutable reference is malformed")
+        lineage = read(f"/compare/{reference}...{policy_revision}")
+        if not isinstance(lineage, dict) or lineage.get("status") not in ("ahead", "identical"):
+            raise ValueError("historical prerequisite source is outside its original protected policy")
+    executors = sampling_executor_inventory(repository, "", allowlist.get("history_since", "-"), api=observed_api)
+    selected_executors = [row for row in executors if isinstance(row.get("display_title"), str) and
+                          row["display_title"].startswith(f"9700X request {request_id}.1 ")]
+    if len(selected_executors) != 1 or selected_executors[0]["id"] != execution["id"] or \
+            selected_executors[0]["display_title"] != execution["display_title"]:
+        raise ValueError("historical original executor is not the unique complete inventory member")
+    history = sampling_attempt_history(repository, "", request_id, allowlist.get("history_since", "-"),
+        revision, allowlist.get("freeze_sha256", "-"), "-", "-", preparation=not utility, utility=utility,
+        api=observed_api, historical=True, before_created=request.get("created_at"))
+    if prefix_attempts is not None and prefix_attempts != history:
+        raise ValueError("historical prerequisite supplied prefix differs from complete original API history")
+    facts = {
+        "schema": "buster-main-sampling-github-facts-v1", "repository": repository,
+        "request_run_id": request_id, "request_run_attempt": "1", "executor_run_id": run_id,
+        "executor_run_attempt": "1", "request_head": head, "trusted_revision": policy_revision,
+        "owner_login": MAINTAINER["login"], "owner_id": str(MAINTAINER["id"]),
+        "actor_login": request["actor"]["login"], "actor_id": str(request["actor"]["id"]),
+        "triggering_login": request["triggering_actor"]["login"], "triggering_id": str(request["triggering_actor"]["id"]),
+        "pull_author_login": pull["user"]["login"], "pull_author_id": str(pull["user"]["id"]),
+        "request_repository": full_name(request["repository"]), "request_head_repository": full_name(request["head_repository"]),
+        "pull_repository": full_name(pull["head"]["repo"]), "pull_state": pull["state"],
+        "parent_count": str(len(parents)), "fresh_parent_0": sampling_added(comparisons[0], line),
+        "fresh_parent_1": sampling_added(comparisons[1], line) if len(parents) == 2 else "-"}
+    facts_text = "".join(f"{key}\t{value}\n" for key, value in facts.items())
+    history_text = "\t".join(SAMPLING_HISTORY_HEADER) + "\n" + "".join("\t".join(row) + "\n" for row in history)
+    plan_sha = hashlib.sha256(plan_text.encode()).hexdigest()
+    check_external = ("buster-compiler-closure-utility-v1:" if utility else "buster-compiler-preparation-v1:") + \
+        f"{plan_sha}:{phase}:{packet}:{request_id}:{run_id}:1"
+    check_name = UTILITY_CHECK if utility else PREPARATION_CHECK
+    listed = read(f"/commits/{head}/check-runs?check_name={urllib.parse.quote(check_name)}&filter=all&per_page=100")
+    checks = listed.get("check_runs") if isinstance(listed, dict) else None
+    own = [row for row in checks if isinstance(row, dict) and row.get("name") == check_name and
+           row.get("head_sha") == head and isinstance(row.get("app"), dict) and row["app"].get("id") == 15368 and
+           row.get("external_id") == check_external] if isinstance(checks, list) and len(checks) < 100 else []
+    if len(own) != 1:
+        raise ValueError("historical prerequisite has no unique retained exact native-admitted check")
+    check = own[0]
+    def digest(text):
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    proof = {
+        "schema": "buster-compiler-prerequisite-historical-api-v1", "repository": repository,
+        "policy_revision": policy_revision, "policy_main_relation": relation,
+        "request_run_id": request_id, "request_run_attempt": "1", "request_latest_attempt": str(latest_request["run_attempt"]),
+        "request_workflow": request["path"], "request_event": request["event"], "request_status": request["status"],
+        "request_conclusion": request["conclusion"], "request_head": head, "source_commit": source_commit["sha"],
+        "first_parent": parents[0]["sha"], "second_parent": parents[1]["sha"] if len(parents) == 2 else "-",
+        "compare_parent_0": comparisons[0]["base_commit"]["sha"], "compare_head_0": compared_heads[0],
+        "compare_parent_1": comparisons[1]["base_commit"]["sha"] if len(parents) == 2 else "-",
+        "compare_head_1": compared_heads[1] if len(parents) == 2 else "-",
+        "executor_run_id": run_id, "executor_run_attempt": "1", "executor_latest_attempt": str(latest_execution["run_attempt"]),
+        "executor_workflow": execution["path"], "executor_event": execution["event"], "executor_branch": execution["head_branch"],
+        "executor_head": execution["head_sha"], "executor_title": execution["display_title"],
+        "executor_status": execution.get("status", "-"), "executor_conclusion": execution.get("conclusion", "-"),
+        "executor_actor_login": execution["actor"]["login"], "executor_actor_id": str(execution["actor"]["id"]),
+        "executor_triggering_login": execution["triggering_actor"]["login"], "executor_triggering_id": str(execution["triggering_actor"]["id"]),
+        "pull_number": str(pull["number"]), "associated_pull_number": str(pull["number"]), "associated_commit": head,
+        "pull_state": pull["state"], "pull_current_head": pull["head"]["sha"],
+        "allowlist_sha256": digest(allowlist_text), "facts_sha256": digest(facts_text), "history_sha256": digest(history_text),
+        "freeze_sha256": plan_sha, "parent_freeze_sha256": "-",
+        "acquisition_sha256": "-", "check_name": check["name"], "check_app_id": str(check["app"]["id"]),
+        "check_head": check["head_sha"], "check_external_id": check["external_id"], "check_status": check.get("status", "-"),
+        "check_conclusion": check.get("conclusion", "-"),
+        "check_title": check.get("output", {}).get("title", "-") if isinstance(check.get("output"), dict) else "-"}
+    records = {"allowlist": allowlist_text, "request": line + "\n", "facts": facts_text, "history": history_text,
+               "plan": plan_text, "api": "".join(f"{key}\t{value}\n" for key, value in proof.items())}
+    admitted = prerequisite_review_native(records, utility=utility)
+    envelope = json.dumps({"schema": "buster-compiler-prerequisite-original-api-envelope-v1",
+                          "repository": repository, "request_run": request_id, "executor_run": run_id,
+                          "api_observations": observations, "native_api_proof": proof},
+                         sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    if len(envelope) > 8 * 1024 * 1024:
+        raise ValueError("historical prerequisite API envelope exceeds the bounded archive size")
+    return {"admitted": admitted, "plan": frozen, "plan_bytes": plan_text.encode("utf-8"),
+            "facts": facts, "history": [dict(zip(SAMPLING_HISTORY_HEADER, row)) for row in history],
+            "request_line": line, "request": request, "executor": execution, "repository": repository,
+            "head": head, "request_id": request_id, "run_id": run_id, "pull": str(pull["number"]), "historical_review": True,
+            "raw": {name: records[key].encode("utf-8") for name, key in
+                    (("request.txt", "request"), ("allowlist.tsv", "allowlist"), ("facts.tsv", "facts"),
+                     ("history.tsv", "history"), ("plan.tsv", "plan"))},
+            "historical_records": {key: value.encode("utf-8") for key, value in records.items()}, "native_api_proof": proof,
+            "terminal_api_envelope": envelope, "terminal_api_sha256": hashlib.sha256(envelope).hexdigest()}
+
+
+def bind_historical_original_transport(authority: dict, files: dict[str, bytes], kind: str) -> dict:
+    """Bind retained original transport to separately reviewed observed API facts."""
+    import hashlib
+    import subprocess
+    import tempfile
+    if kind not in ("sampling", "preparation", "utility"):
+        raise ValueError("historical transport kind is foreign")
+    admitted = authority.get("admitted", {})
+    raw = authority.get("raw")
+    proof = authority.get("native_api_proof")
+    records = authority.get("historical_records")
+    if authority.get("historical_review") is not True or \
+            admitted.get(kind + "_historical_valid") != "true" or \
+            admitted.get(kind + "_historical_execution_authority") != "false" or \
+            admitted.get(kind + "_historical_qualification") != "unqualified" or \
+            kind + "_admitted" in admitted or not isinstance(raw, dict) or \
+            not isinstance(proof, dict) or not isinstance(records, dict):
+        raise ValueError("original transport lacks native historical API validation")
+    names = {"request.txt", "allowlist.tsv", "facts.tsv", "history.tsv"}
+    names |= {"freeze.tsv", "parent-freeze.tsv", "acquisition-plan.tsv"} if kind == "sampling" else {"plan.tsv"}
+    if set(raw) != names or any(not isinstance(raw[name], bytes) for name in names):
+        raise ValueError("historical transport has an ambiguous current record population")
+    api_raw = records.get("api")
+    proof_raw = "".join(f"{key}\t{value}\n" for key, value in proof.items()).encode("utf-8")
+    if not isinstance(api_raw, bytes) or proof_raw != api_raw or \
+            sampling_review_record(api_raw.decode("utf-8")) != proof or \
+            admitted.get(kind + "_historical_api_sha256") != hashlib.sha256(api_raw).hexdigest() or \
+            proof.get("facts_sha256") != hashlib.sha256(raw["facts.tsv"]).hexdigest():
+        raise ValueError("current facts do not bind the native original API proof")
+    record_names = {"request.txt": "request", "allowlist.tsv": "allowlist", "facts.tsv": "facts", "history.tsv": "history"}
+    record_names.update({"freeze.tsv": "freeze", "parent-freeze.tsv": "parent", "acquisition-plan.tsv": "acquisition"}
+                        if kind == "sampling" else {"plan.tsv": "plan"})
+    hash_names = {"allowlist.tsv": "allowlist_sha256", "facts.tsv": "facts_sha256",
+                  "history.tsv": "history_sha256", ("freeze.tsv" if kind == "sampling" else "plan.tsv"): "freeze_sha256"}
+    if kind == "sampling":
+        hash_names.update({"parent-freeze.tsv": "parent_freeze_sha256", "acquisition-plan.tsv": "acquisition_sha256"})
+    for name, record in record_names.items():
+        if records.get(record) != raw[name]:
+            raise ValueError("current transport differs from the exact native record map")
+    for name, field in hash_names.items():
+        digest = "-" if name == "parent-freeze.tsv" and not raw[name] else hashlib.sha256(raw[name]).hexdigest()
+        if proof.get(field) != digest:
+            raise ValueError("current transport digest differs from the native original API proof")
+    if kind != "sampling" and (proof.get("parent_freeze_sha256") != "-" or proof.get("acquisition_sha256") != "-"):
+        raise ValueError("prerequisite transport invents a sampling parent")
+    current_facts = sampling_review_record(raw["facts.tsv"].decode("utf-8"))
+    line = current_facts.get("fresh_parent_0")
+    if current_facts != authority.get("facts") or not isinstance(line, str) or not line or line == "-" or \
+            raw["request.txt"] != (line + "\n").encode("utf-8") or \
+            current_facts.get("parent_count") not in ("1", "2") or \
+            current_facts.get("fresh_parent_1") != (line if current_facts["parent_count"] == "2" else "-"):
+        raise ValueError("current request is not the exact every-parent selector in observed facts")
+    original = {}
+    for name in sorted(names):
+        value = files.get(name)
+        if not isinstance(value, bytes) or len(value) > 8 * 1024 * 1024 or \
+                (name != "facts.tsv" and value != raw[name]):
+            raise ValueError("original transport differs from committed data or its exact first-attempt prefix")
+        original[name] = value
+    root = Path(__file__).resolve().parents[2]
+    with tempfile.TemporaryDirectory(prefix="compiler-historical-original-facts-") as temporary:
+        directory = Path(temporary)
+        current_path, original_path, output = directory / "current.tsv", directory / "original.tsv", directory / "binding.txt"
+        current_path.write_bytes(raw["facts.tsv"])
+        original_path.write_bytes(original["facts.tsv"])
+        command = [str(root / "build.sh"), "compiler_profile_qualification", "--validate-historical-original-facts",
+                   str(current_path), str(original_path), str(output)]
+        with (directory / "native.log").open("xb") as log:
+            completed = subprocess.run(command, cwd=root, stdin=subprocess.DEVNULL,
+                                       stdout=log, stderr=subprocess.STDOUT, timeout=120, check=False)
+        if completed.returncode != 0 or not output.is_file() or output.stat().st_size > 16384:
+            raise ValueError("native original facts binding refused the retained transport")
+        binding = {}
+        for row in output.read_text(encoding="ascii").splitlines():
+            key, separator, value = row.partition("=")
+            if not separator or key in binding or not value:
+                raise ValueError("native original facts binding output is ambiguous")
+            binding[key] = value
+    wanted = {"historical_original_facts_valid": "true",
+              "current_facts_sha256": hashlib.sha256(raw["facts.tsv"]).hexdigest(),
+              "original_facts_sha256": hashlib.sha256(original["facts.tsv"]).hexdigest(),
+              "historical_execution_authority": "false", "qualification": "unqualified"}
+    if binding != wanted:
+        raise ValueError("native original transport digest or data-only boundary differs")
+    result = dict(authority)
+    result["raw_original"] = original
+    result["historical_original_facts_binding"] = binding
+    return result
 
 def sampling_fresh_selector(text: str, compared_parents: list) -> tuple[str, str, str, str] | None:
     lines = [line for line in text.splitlines() if line.startswith(SAMPLING_PREFIX)]
