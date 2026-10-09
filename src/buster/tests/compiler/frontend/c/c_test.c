@@ -458,8 +458,34 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sync_builtins_runtime(UnitTestArgument
             "    return 0;\n"
             "}\n"
             "int main(void) { return run_all(); }\n");
+    // GCC accepts an enumeration object for every legacy builtin; canonical atomics are
+    // integer-only, so these lower through the unsigned view of the storage.
+    String8 enum_source = S8(
+            "enum En { EN_BASE = 100, EN_MAX = 0xffff };\n"
+            "int main(void)\n"
+            "{\n"
+            "    enum En e = EN_BASE; enum En r;\n"
+            "    r = __sync_fetch_and_add(&e, 5); if (r != 100 || e != 105) return 1;\n"
+            "    r = __sync_fetch_and_sub(&e, 6); if (r != 105 || e != 99) return 2;\n"
+            "    r = __sync_fetch_and_or(&e, 0x140); if (r != 99 || e != (99 | 0x140)) return 3;\n"
+            "    e = 0x3c; r = __sync_fetch_and_and(&e, 0x0f); if (r != 0x3c || e != 0x0c) return 4;\n"
+            "    r = __sync_fetch_and_xor(&e, 5); if (r != 0x0c || e != 9) return 5;\n"
+            "    r = __sync_fetch_and_nand(&e, 3); if (r != 9 || (unsigned)e != ~(9u & 3u)) return 6;\n"
+            "    e = 10; r = __sync_add_and_fetch(&e, 3); if (r != 13 || e != 13) return 7;\n"
+            "    r = __sync_sub_and_fetch(&e, 4); if (r != 9 || e != 9) return 8;\n"
+            "    r = __sync_or_and_fetch(&e, 6); if (r != 15 || e != 15) return 9;\n"
+            "    r = __sync_and_and_fetch(&e, 6); if (r != 6 || e != 6) return 10;\n"
+            "    r = __sync_xor_and_fetch(&e, 3); if (r != 5 || e != 5) return 11;\n"
+            "    r = __sync_nand_and_fetch(&e, 3); if ((unsigned)r != ~(5u & 3u) || (unsigned)e != ~(5u & 3u)) return 12;\n"
+            "    e = EN_BASE; if (!__sync_bool_compare_and_swap(&e, EN_BASE, EN_MAX) || e != EN_MAX) return 13;\n"
+            "    r = __sync_val_compare_and_swap(&e, EN_MAX, EN_BASE); if (r != EN_MAX || e != EN_BASE) return 14;\n"
+            "    r = __sync_lock_test_and_set(&e, EN_MAX); if (r != EN_BASE || e != EN_MAX) return 15;\n"
+            "    __sync_lock_release(&e); return e != 0 ? 16 : 0;\n"
+            "}\n");
     // Sixteen-byte read-modify-write and lock forms reuse the __atomic lowering (a
-    // runtime call without cmpxchg16b, native with it); compare-and-swap is refused.
+    // runtime call without cmpxchg16b, native with it); this program passes +cx16, and the
+    // no-cx16 lowering is checked in canonical IR by c_test_sync_builtins_wide_no_cx16.
+    // Compare-and-swap is refused.
     String8 wide_source = S8(
             "static __int128 w;\n"
             "int main(void)\n"
@@ -469,8 +495,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sync_builtins_runtime(UnitTestArgument
             "    r = __sync_xor_and_fetch(&w, 1); if (r != 8 || w != 8) return 3;\n"
             "    __sync_lock_release(&w); return w != 0 ? 4 : 0;\n"
             "}\n");
-    String8 sources[] = {source, second_source, wide_source};
-    u32 source_count = BUSTER_CPU_ARCH_X86_64 ? 3 : 2;
+    String8 sources[] = {source, second_source, enum_source, wide_source};
+    u32 source_count = BUSTER_CPU_ARCH_X86_64 ? 4 : 3;
     for (u32 source_index = 0; source_index < source_count; source_index += 1)
     {
         String8 path = buster_test_temporary_path(arguments->arena, S8("sync-builtins"), S8(".c"));
@@ -589,7 +615,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sync_builtins_canonical_ir(UnitTestArg
 {
     UnitTestResult result = {0};
     String8 source = S8(
-        "int *p; char *q; _Bool b; int x, y;\n"
+        "int *p; char *q; _Bool b; int x, y; unsigned ux;\n"
         "int *f_add(void) { return __sync_fetch_and_add(&p, 3); }\n"
         "int *f_sub(void) { return __sync_fetch_and_sub(&p, 3); }\n"
         "int *f_and(void) { return __sync_fetch_and_and(&p, 12); }\n"
@@ -609,7 +635,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sync_builtins_canonical_ir(UnitTestArg
         "_Bool bool_cas(void) { return __sync_bool_compare_and_swap(&b, 0, 1); }\n"
         "_Bool val_cas(void) { return __sync_val_compare_and_swap(&b, 0, 1); }\n"
         "_Bool bool_lock(void) { __sync_lock_release(&b); return __sync_lock_test_and_set(&b, 1); }\n"
-        "int trailing(int v) { return __sync_fetch_and_add(&x, 1, v++, y); }\n");
+        "int trailing(int v) { return __sync_fetch_and_add(&x, 1, v++, y); }\n"
+        "unsigned u_nand(void) { return __sync_nand_and_fetch(&ux, 3); }\n"
+        "enum En { EN_A, EN_B } en;\n"
+        "enum En e_fadd(void) { return __sync_fetch_and_add(&en, 1); }\n"
+        "enum En e_fsub(void) { return __sync_fetch_and_sub(&en, 1); }\n"
+        "enum En e_fand(void) { return __sync_fetch_and_and(&en, 1); }\n"
+        "enum En e_for(void) { return __sync_fetch_and_or(&en, 1); }\n"
+        "enum En e_fxor(void) { return __sync_fetch_and_xor(&en, 1); }\n"
+        "enum En e_fnand(void) { return __sync_fetch_and_nand(&en, 1); }\n"
+        "enum En e_aadd(void) { return __sync_add_and_fetch(&en, 1); }\n"
+        "enum En e_asub(void) { return __sync_sub_and_fetch(&en, 1); }\n"
+        "enum En e_aand(void) { return __sync_and_and_fetch(&en, 1); }\n"
+        "enum En e_aor(void) { return __sync_or_and_fetch(&en, 1); }\n"
+        "enum En e_axor(void) { return __sync_xor_and_fetch(&en, 1); }\n"
+        "enum En e_anand(void) { return __sync_nand_and_fetch(&en, 1); }\n"
+        "enum En e_lock(void) { enum En r = __sync_lock_test_and_set(&en, EN_B); __sync_lock_release(&en); return r; }\n"
+        "int e_cas(void) { return __sync_bool_compare_and_swap(&en, EN_A, EN_B) + (int)__sync_val_compare_and_swap(&en, EN_A, EN_B); }\n");
     Target targets[] = {
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX, .cpu_features_explicit = true,
@@ -643,6 +685,78 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sync_builtins_canonical_ir(UnitTestArg
             }
             scratch_end(temporary);
         }
+    }
+    return result;
+}
+
+// Sixteen-byte legacy RMW and lock forms without cmpxchg16b take the libatomic
+// helpers `__atomic_*_16` that `__atomic_store_n` and friends use, never a
+// direct sixteen-byte canonical atomic; with cmpxchg16b they stay native.
+// Compare-and-swap of such an object is refused on both.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sync_builtins_wide_no_cx16(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "__int128 w;\n"
+        "__int128 f_add(__int128 v) { return __sync_fetch_and_add(&w, v); }\n"
+        "__int128 a_xor(__int128 v) { return __sync_xor_and_fetch(&w, v); }\n"
+        "__int128 f_nand(__int128 v) { return __sync_fetch_and_nand(&w, v); }\n"
+        "__int128 exchange(__int128 v) { return __sync_lock_test_and_set(&w, v); }\n"
+        "void release(void) { __sync_lock_release(&w); }\n");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_INTEL_HASWELL, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = targets[target_index];
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parsed = c_parse(temporary.arena, preprocess);
+        bool parsed_ok = preprocess.diagnostic_count == 0 && parsed.diagnostic_count == 0;
+        BUSTER_TEST(arguments, parsed_ok);
+        if (parsed_ok)
+        {
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("sync-wide.c"), preprocess, parsed, target);
+            BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0, string_format(temporary.arena,
+                S8("__sync 16-byte target={u32}: {S8}"), target_index, lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            if (lowered.diagnostic_count == 0 && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                u32 native = 0;
+                u32 runtime = 0;
+                u32 store_runtime = 0;
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    IrFunction* function = module->functions + function_index;
+                    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                    {
+                        IrInstruction* instruction = function->instructions + instruction_index;
+                        native += instruction->opcode == IR_OPCODE_ATOMIC_STORE || instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE;
+                        if (instruction->opcode == IR_OPCODE_CALL)
+                        {
+                            IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, instruction->symbol);
+                            runtime += symbol && string_starts_with_sequence(symbol->link_name, S8("__atomic_"));
+                            store_runtime += symbol && string_equal(symbol->link_name, S8("__atomic_store_16"));
+                        }
+                    }
+                }
+                if (target_index == 0)
+                {
+                    BUSTER_TEST_RAW(arguments, native == 0 && runtime == 5 && store_runtime == 1, string_format(temporary.arena,
+                        S8("__sync 16-byte without cx16: native={u32} runtime={u32} store={u32}"), native, runtime, store_runtime));
+                }
+                else
+                {
+                    BUSTER_TEST_RAW(arguments, native == 5 && runtime == 0, string_format(temporary.arena,
+                        S8("__sync 16-byte with cx16: native={u32} runtime={u32}"), native, runtime));
+                }
+                BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+            }
+        }
+        scratch_end(temporary);
     }
     return result;
 }
@@ -59126,6 +59240,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_sync_builtins_runtime);
     C_TEST_FIXTURE(arguments, c_test_sync_builtins_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_sync_builtins_canonical_ir);
+    C_TEST_FIXTURE(arguments, c_test_sync_builtins_wide_no_cx16);
     C_TEST_FIXTURE(arguments, c_test_gnu_void_return);
     C_TEST_FIXTURE(arguments, c_test_has_builtin);
     C_TEST_FIXTURE(arguments, c_test_header_operands);

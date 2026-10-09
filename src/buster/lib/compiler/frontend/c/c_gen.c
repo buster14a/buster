@@ -25353,9 +25353,14 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 return false;
             }
             // Canonical atomic arithmetic and bitwise operations are integer
-            // operations: a pointer object takes them through the unsigned
-            // integer view of its storage (GNU's offsets are unscaled bytes).
-            bool pointer_view = sync_modify && pointer_value;
+            // operations: a pointer or enumeration object takes them through
+            // the unsigned integer view of its storage (GNU's pointer offsets
+            // are unscaled bytes). An enumeration exchange takes the view too,
+            // since canonical exchange admits only integer, boolean and
+            // pointer values.
+            bool enum_value = unqualified->kind == IR_TYPE_ENUM;
+            bool pointer_view = (sync_modify && (pointer_value || enum_value)) ||
+                                (selected->builtin_atomic_sequential && selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_EXCHANGE && enum_value);
             // The unsigned integer type that views a _Bool or enumeration
             // object's storage for the legacy compare-and-swap.
             IrTypeId cas_view_type = IR_TYPE_ID_INVALID;
@@ -25701,12 +25706,13 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 {
                     return false;
                 }
-                // A pointer object is cleared through the unsigned integer view
-                // of its storage: canonical constants are integer, boolean or
-                // enumeration values, never pointers.
+                // A pointer or enumeration object is cleared through the
+                // unsigned integer view of its storage: canonical constants
+                // are integer or boolean values, never pointers, and an
+                // enumeration store of one would need an enum constant.
                 IrTypeId flag_type = value_type_id;
                 IrValueId flag_place = place;
-                if (clearing && pointer_value)
+                if (clearing && (pointer_value || enum_value))
                 {
                     flag_type = c_ir_unsigned_type_of_size(builder, atomic_width);
                     flag_place = flag_type.value != IR_ID_UNDERLYING_INVALID
@@ -25730,7 +25736,17 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 instruction.operands[1] = flag;
                 instruction.operand_count = 2;
                 instruction.memory_order = (u8)order;
-                if (clearing)
+                if (clearing && wide_atomic_runtime)
+                {
+                    // Without cmpxchg16b a sixteen-byte store is the libatomic
+                    // helper, exactly as `__atomic_store_n` lowers it.
+                    if (!c_ir_emit_wide_atomic_runtime_store(builder, place, atomic_type, flag, source, order))
+                    {
+                        return false;
+                    }
+                    selected->result = c_ir_emit_integer_value(builder, 0, false, token);
+                }
+                else if (clearing)
                 {
                     c_ir_append_instruction(builder, instruction, instruction_source);
                     selected->result = c_ir_emit_integer_value(builder, 0, false, token);
@@ -25907,6 +25923,11 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 else if (!selected->builtin_atomic_generic)
                 {
                     value = c_ir_emit_cast(builder, value, value_type_id, source);
+                    // The `*_fetch` recomputation combines this operand with the
+                    // previous value, and canonical binary operations take two
+                    // operands of one type: an `int` literal against an unsigned
+                    // or enumeration object would otherwise fail validation.
+                    operand_value = value;
                 }
                 if (value.value == IR_ID_UNDERLYING_INVALID)
                 {
