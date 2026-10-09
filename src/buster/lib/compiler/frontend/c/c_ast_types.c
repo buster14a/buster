@@ -36,10 +36,15 @@
 //
 // File-scope initializers. c_parse_validate_static_initializers makes nearly
 // every query outside a body, so before it validates a file-scope object's
-// initializer it calls c_ast_types_initializer_begin, which types that
-// initializer's subtree as a body is typed (the region's arrays sit in the
-// scratch arena and go back after the validation), and
-// c_ast_types_initializer_end. The binder records no identifier use there, and
+// initializer it calls c_ast_types_initializer_begin, and
+// c_ast_types_initializer_end after. The begin reserves the arrays for that
+// initializer's subtree in the scratch arena (they go back after the
+// validation), and the subtree is typed as a body is, but only when the
+// first query the literal fast path does not take reaches it: an initializer
+// asked only about lone literals, a numeric table, is never typed, and those
+// queries keep the literal path (c_ast_types_waiting). The typing runs inside
+// a validator's scratch use, so it writes only the reserved arrays. The
+// binder records no identifier use there, and
 // where it records none the machine resolves an identifier, and a cast's or
 // compound literal's typedef name, by spelling in the query's scope. The pass
 // does the same lookup in the initializer's scope, keeps the entity it found
@@ -145,9 +150,10 @@
 //   CAstTypeBodyIndex, CAstTypeBody              top-level index, per-region arrays
 //   c_ast_types_bodies_prepare, c_ast_types_find_definition,
 //   c_ast_types_find_initializer
-//   c_ast_types_region_type                      allocates and types one region
+//   c_ast_types_region_create, _fill             reserves, then types, one region
 //   c_ast_types_body_begin, c_ast_types_body_end the per-body entry points
-//   c_ast_types_initializer_begin, _end          the per-initializer entry points
+//   c_ast_types_initializer_begin, _end,         the per-initializer entry points
+//   c_ast_types_waiting
 //   c_ast_types_looked_up_entity                 an initializer's unbound names
 //   c_ast_types_span, c_ast_types_expand         span rules
 //   c_ast_types_type_body, c_ast_types_type_node the eager pass and its rules
@@ -236,6 +242,9 @@ struct CAstTypeBody
     bool scalars_published;
     // GNU dialect: the machine reads `c ?: b` as a conditional.
     bool gnu;
+    // An initializer whose eager pass waits for its first query that the
+    // literal fast path does not answer (c_ast_types_region_fill).
+    bool waiting;
     CAstTypeStatistics local_statistics;
 };
 
@@ -1403,11 +1412,12 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_ready(CTypeParseMachine* machine, CParseRes
     return ready;
 }
 
-// Types the node interval of `node` over the tokens [token_start, token_end)
-// in the machine's scratch arena and makes it the machine's typed region. An
-// initializer (`initializer` set) resolves unbound names in `scope`.
-BUSTER_GLOBAL_LOCAL CAstTypeBody* c_ast_types_region_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess, u32 node,
-                                                          u32 token_start, u32 token_end, CScopeId scope, bool initializer)
+// Reserves the arrays for the node interval of `node` over the tokens
+// [token_start, token_end) in the machine's scratch arena and makes it the
+// machine's region; c_ast_types_region_fill types it. An initializer
+// (`initializer` set) resolves unbound names in `scope`.
+BUSTER_GLOBAL_LOCAL CAstTypeBody* c_ast_types_region_create(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
+                                                            u32 node, u32 token_start, u32 token_end, CScopeId scope, bool initializer)
 {
     CAst const* ast = machine->syntax_tree;
     u32 count = ast->extents[node];
@@ -1435,12 +1445,20 @@ BUSTER_GLOBAL_LOCAL CAstTypeBody* c_ast_types_region_type(CTypeParseMachine* mac
         .token_total = (u32)preprocess->token_count,
         .scalars_published = machine->ast_bodies->scalars_published,
         .gnu = c_preprocess_dialect_is_gnu(preprocess->dialect),
+        .waiting = initializer,
     };
     body->statistics = machine->ast_type_statistics ? machine->ast_type_statistics : &body->local_statistics;
-    memset(body->start_head, 0, sizeof(*body->start_head) * token_count);
-    c_ast_types_type_body(body, machine, preprocess);
     machine->ast_types = body;
     return body;
+}
+
+// The eager pass over a created region, into the arrays it reserved, so it
+// allocates nothing and may run while a validator holds scratch above them.
+BUSTER_GLOBAL_LOCAL void c_ast_types_region_fill(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess)
+{
+    memset(body->start_head, 0, sizeof(*body->start_head) * (body->token_end - body->token_start));
+    c_ast_types_type_body(body, machine, preprocess);
+    body->waiting = false;
 }
 
 BUSTER_C_SHARED void c_ast_types_body_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
@@ -1456,11 +1474,16 @@ BUSTER_C_SHARED void c_ast_types_body_begin(CTypeParseMachine* machine, CParseRe
     if (definition != C_AST_TYPE_NONE && ast->kinds[definition - 1] == C_AST_COMPOUND_STATEMENT &&
         result->position_index->matching_delimiters_plus_one[token_start - 1] - 1 == token_end)
     {
-        CAstTypeBody* body = c_ast_types_region_type(machine, result, preprocess, definition - 1, token_start, (u32)token_end, (CScopeId){0}, false);
+        CAstTypeBody* body = c_ast_types_region_create(machine, result, preprocess, definition - 1, token_start, (u32)token_end, (CScopeId){0}, false);
+        c_ast_types_region_fill(body, machine, preprocess);
         body->statistics->bodies += 1;
     }
 }
 
+// An initializer's region is created here but typed only when a query the
+// literal fast path does not answer reaches it (c_ast_types_answer): 61 of
+// the unity self-host's 2,777 initializers, its numeric tables, hold 75% of
+// their expression nodes and are only ever asked about lone literals.
 BUSTER_C_SHARED void c_ast_types_initializer_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess, CScopeId scope,
                                                    u32 start, u32 end)
 {
@@ -1469,9 +1492,13 @@ BUSTER_C_SHARED void c_ast_types_initializer_begin(CTypeParseMachine* machine, C
     u32 initializer = eligible ? c_ast_types_find_initializer(machine->syntax_tree, machine->ast_bodies, start) : C_AST_TYPE_NONE;
     if (initializer != C_AST_TYPE_NONE)
     {
-        CAstTypeBody* body = c_ast_types_region_type(machine, result, preprocess, initializer, start, end, scope, true);
-        body->statistics->initializers += 1;
+        c_ast_types_region_create(machine, result, preprocess, initializer, start, end, scope, true);
     }
+}
+
+BUSTER_C_SHARED bool c_ast_types_waiting(CTypeParseMachine const* machine)
+{
+    return machine->ast_types && machine->ast_types->waiting;
 }
 
 BUSTER_C_SHARED void c_ast_types_body_end(CTypeParseMachine* machine)
@@ -1565,6 +1592,11 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
     }
     else
     {
+        if (body->waiting)
+        {
+            c_ast_types_region_fill(body, machine, preprocess);
+            body->statistics->initializers += 1;
+        }
         u32 relative = c_ast_types_locate(body, start, end);
         if (relative == C_AST_TYPE_NONE)
         {
@@ -1865,10 +1897,10 @@ CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult prepro
         probe.status = C_TEST_AST_TYPE_PROBE_UNTYPED;
         if (machine.ast_types)
         {
-            probe.nodes_typed = machine.ast_types->local_statistics.nodes_typed;
-            probe.nodes_accepted = machine.ast_types->local_statistics.nodes_accepted;
             CScopeId scope = body ? c_parse_scope_for_token(result, declaration->scope, start) : (CScopeId){.value = 0};
             CAstTypeAnswer answer = c_ast_types_answer(&machine, &preprocess, result, scope, start, end);
+            probe.nodes_typed = machine.ast_types->local_statistics.nodes_typed;
+            probe.nodes_accepted = machine.ast_types->local_statistics.nodes_accepted;
             probe.status = (u32)answer.status;
             probe.node_kind = answer.node_kind;
             probe.type = answer.type;

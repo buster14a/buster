@@ -1509,10 +1509,13 @@ BUSTER_C_EXTERN void c_ast_types_body_end(CTypeParseMachine* machine);
 // One file-scope object's initializer [start, end), typed for the queries
 // c_parse_validate_static_initializers makes about it, with names the binder
 // did not record resolved in `scope`; the region lasts until
-// c_ast_types_initializer_end.
+// c_ast_types_initializer_end. It is typed on the first query the literal
+// fast path does not answer; until then c_ast_types_waiting holds, and a
+// literal query takes the literal path.
 BUSTER_C_EXTERN void c_ast_types_initializer_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess, CScopeId scope,
                                                    u32 start, u32 end);
 BUSTER_C_EXTERN void c_ast_types_initializer_end(CTypeParseMachine* machine);
+BUSTER_C_EXTERN bool c_ast_types_waiting(CTypeParseMachine const* machine);
 BUSTER_C_EXTERN CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                   u32 start, u32 end);
 // The machine state a tree answer leaves, as a valid machine answer with no

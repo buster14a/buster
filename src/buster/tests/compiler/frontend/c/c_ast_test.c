@@ -1774,14 +1774,14 @@ enum
     // sees nothing cannot pass.
     C_AST_CORPUS_RECORD_FLOOR = 6000,
     // Tree expression-typer answers checked against the type machine
-    // (c_ast_corpus_types): about 60,200 from the fixtures on Linux x86-64
-    // and about 52,600 with the fixtures preprocessed for aarch64-windows (the
-    // fewest: Windows AArch64 reaches fewer typed bodies, and before
-    // initializers were typed it counted about 49,900 against 56,000), and
-    // about 335,800 in all with the frontend's own sources where the host
+    // (c_ast_corpus_types): about 56,100 from the fixtures on Linux x86-64
+    // and about 50,800 with the fixtures preprocessed for aarch64-windows
+    // (Windows AArch64 itself, which reaches fewer typed bodies, counted about
+    // 49,900 before initializers were typed, which only adds answers), and
+    // about 320,300 in all with the frontend's own sources where the host
     // headers exist.
-    C_AST_CORPUS_TYPE_ANSWER_FLOOR = 48000,
-    C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR = 300000,
+    C_AST_CORPUS_TYPE_ANSWER_FLOOR = 46000,
+    C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR = 290000,
     // Designator probes the const-assignment walk skipped in the fixtures,
     // each checked against the machine: about 1,400 (1,370 for
     // aarch64-windows).

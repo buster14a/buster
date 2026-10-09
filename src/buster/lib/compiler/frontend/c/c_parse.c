@@ -7704,9 +7704,11 @@ BUSTER_C_INTERNAL bool c_parse_expression_tree_query(CTypeParseMachine* machine,
 
 // One expression-type query: the per-body memo, then the tree expression typer
 // (c_ast_types.c), then the literal fast path, then a speculative run of the
-// explicit frame stack. Inside a function body whose syntax tree has been
-// typed, a range the memo does not hold that is exactly an accepted expression
-// node's tokens (parentheses aside) is answered from the tree. The answer
+// explicit frame stack. Inside a function body or a file-scope initializer
+// whose syntax tree has been typed, a range the memo does not hold that is
+// exactly an accepted expression node's tokens (parentheses aside) is answered
+// from the tree; an initializer not yet typed leaves a lone literal to the
+// literal path and is typed by the first other query. The answer
 // leaves the machine, and the memo entry, as the machine's valid,
 // constraint-free answer would, so a later machine run over an enclosing range
 // reads it as a task result exactly as it would have read the machine's.
@@ -7758,7 +7760,8 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
         machine->result_nonplace_projection = (stored & C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION) != 0;
         valid = true;
     }
-    else if (machine->ast_types && c_parse_expression_tree_query(machine, &preprocess, result, scope, start, end, slot, flags, type_out, pending_out))
+    else if (machine->ast_types && !(literal && c_ast_types_waiting(machine)) &&
+             c_parse_expression_tree_query(machine, &preprocess, result, scope, start, end, slot, flags, type_out, pending_out))
     {
         valid = true;
     }

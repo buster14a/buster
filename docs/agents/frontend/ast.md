@@ -208,7 +208,7 @@ Under `-v` the driver prints three rows with the other verbose counters:
   over every node into a scratch buffer> child_entries=<sum of child counts>
   scan_calls=<CALL nodes the scan counted>`
 - `C_AST_TYPES bodies=<function bodies typed> initializers=<file-scope
-  initializers typed> nodes_typed=<expression nodes the eager pass visited>
+  initializers a query had typed> nodes_typed=<expression nodes the eager pass visited>
   nodes_accepted=<those it gave a type> answers=<type queries answered from
   the tree> declines=<queries that mapped to a node the typer does not vouch
   for> misses=<queries that mapped to no node> gated=<queries met in a machine
@@ -247,10 +247,15 @@ does; without one, analysis is unchanged.
   nearly all of the queries outside a typed body: 77,545 of 79,035 on the unity
   self-host, at about 190 M machine Ir, against at most 3 M for any other
   validator (audit `2026-10-09T213311Z`). Before it validates a file-scope
-  object's initializer, `c_ast_types_initializer_begin` types that
-  initializer's subtree the same way, over the initializer's tokens, and
-  releases it afterwards. The binder records no identifier use outside
-  bodies. Where it recorded none, the machine resolves an identifier, and a
+  object's initializer, `c_ast_types_initializer_begin` reserves the arrays
+  for that initializer's subtree, over the initializer's tokens, and they are
+  released afterwards. The subtree is typed the same way, but only when the
+  first query that the literal fast path does not answer reaches it. Until
+  then a lone literal keeps the literal path (`c_ast_types_waiting`). That
+  matters: 61 of the self-host's 2,777 initializers are numeric tables that
+  are only asked about lone literals, and they hold 551,736 of the 736,333
+  expression nodes. Typing them all cost more than the machine runs it
+  removed. The binder records no identifier use outside bodies. Where it recorded none, the machine resolves an identifier, and a
   cast's or compound literal's typedef name, by spelling in the query's scope,
   so the pass does the same lookup in the file scope. Each such node keeps the
   entity it found and carries the lookup mark, so the query repeats the lookup
@@ -376,8 +381,8 @@ tree, with it, and with it in verify mode (`c_test_ast_type_verify_set`), where
 the type machine also answers every query the tree answered. The first two
 runs must end with the same diagnostics and the same type-table sizes. Every
 tree answer must match the machine's in validity, structural type, constraint,
-nonplace fact, diagnostics and table growth. The fixtures give about 60,200
-checked answers, and the hosted frontend sources about 275,600 more. Verify
+nonplace fact, diagnostics and table growth. The fixtures give about 56,100
+checked answers, and the hosted frontend sources about 264,200 more. Verify
 mode also has the machine answer every designator probe the const-assignment
 walk skips (about 1,400 in the fixtures, 27,600 in all), and each must fail
 without a diagnostic or a new table row.
