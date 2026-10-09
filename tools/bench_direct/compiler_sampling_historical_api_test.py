@@ -124,6 +124,8 @@ class OriginalApi:
         self.executor = self.current + 10000
         self.inventory = [copy.deepcopy(self.records[f"/actions/runs/{run}"])
                           for run in ((10000, 10010) if pilot else (10000,))]
+        self.executor_inventory = [copy.deepcopy(self.records[f"/actions/runs/{run}"])
+                                   for run in ((20000, 20010) if pilot else (20000,))]
 
     def _add_attempt(self, request_id, executor_id, head, policy, phase, revision, frozen, created, merge=False):
         line = f"profile: compiler-main-sampling-{phase}-v1 packet: 0 freeze: {revision}"
@@ -194,6 +196,12 @@ class OriginalApi:
             if query != {"event": ["pull_request"], "created": [">=" + SINCE], "per_page": ["100"], "page": ["1"]}:
                 raise AssertionError(f"unexpected incomplete inventory query {path}")
             return {"total_count": len(self.inventory), "workflow_runs": copy.deepcopy(self.inventory)}
+        if path.startswith("/actions/workflows/9700x-direct-bench.yml/runs?"):
+            query = parse_qs(urlsplit(path).query)
+            if query != {"event": ["workflow_run"], "created": [">=" + SINCE], "per_page": ["100"], "page": ["1"]}:
+                raise AssertionError(f"unexpected incomplete executor inventory query {path}")
+            return {"total_count": getattr(self, "executor_inventory_total", len(self.executor_inventory)),
+                    "workflow_runs": copy.deepcopy(self.executor_inventory)}
         if path in self.records:
             return copy.deepcopy(self.records[path])
         if path.startswith("/compare/"):
@@ -484,6 +492,7 @@ class HistoricalSamplingApiTest(unittest.TestCase):
                     execution = changed.records["/actions/runs/20000/attempts/1"]
                     execution["display_title"] = f"9700X request 30000.1 head {ACQUISITION_HEAD}"
                     changed.records["/actions/runs/20000"]["display_title"] = execution["display_title"]
+                    changed.executor_inventory[0]["display_title"] = execution["display_title"]
                     changed.check(ACQUISITION_HEAD)["external_id"] = (
                         f"buster-main-sampling-v1:{digest(changed.plan)}:acquire:0:30000:20000:1")
                 with self.assertRaises(ValueError):
@@ -534,6 +543,128 @@ class HistoricalSamplingApiTest(unittest.TestCase):
                     api.records[f"/compare/{FIRST_PARENT}...{ACQUISITION_HEAD}"]["commits"][-1]["sha"] = ADVANCED_HEAD
                 with self.assertRaises(ValueError):
                     self.review(api, public=True)
+
+    def prefix_history(self, api):
+        return authorize.sampling_attempt_history(
+            REPOSITORY, "", str(api.current), SINCE, PILOT_REVISION, digest(api.freeze),
+            ACQUISITION_REVISION, digest(api.plan), api=api, historical=True,
+            before_created=api.originals()[1]["created_at"])
+
+    def test_prequeue_cancelled_executor_is_retained_and_continuation_is_refused(self):
+        api = OriginalApi(pilot=True)
+        check_path = (f"/commits/{ACQUISITION_HEAD}/check-runs?"
+                      "check_name=9700X%20compiler%20sampling%20research&filter=all&per_page=100")
+        api.records[check_path] = {"check_runs": []}
+        for endpoint in ("/actions/runs/20000", "/actions/runs/20000/attempts/1"):
+            api.records[endpoint]["conclusion"] = "cancelled"
+        api.executor_inventory[0]["conclusion"] = "cancelled"
+        api.records["/actions/runs/20000/attempts/1/jobs?per_page=100"] = {"jobs": []}
+        rows = self.prefix_history(api)
+        self.assertEqual(len(rows), 1)
+        row = dict(zip(authorize.SAMPLING_HISTORY_HEADER, rows[0]))
+        self.assertEqual(row["request_run_id"], "10000")
+        self.assertEqual(row["executor_run_id"], "20000")
+        self.assertEqual(row["executor_run_attempt"], "1")
+        self.assertEqual(row["state"], "cancelled")
+        self.assertEqual(row["physical_wall_us"], "-")
+        self.assertIn("/actions/runs/20000/attempts/1", api.calls)
+        with self.assertRaises(ValueError):
+            self.review(api)
+
+    def test_hostless_success_is_preserved_and_never_becomes_unattempted(self):
+        api = OriginalApi(pilot=True)
+        api.executor_inventory = api.executor_inventory[1:]
+        check_path = (f"/commits/{ACQUISITION_HEAD}/check-runs?"
+                      "check_name=9700X%20compiler%20sampling%20research&filter=all&per_page=100")
+        api.records[check_path] = {"check_runs": []}
+        rows = self.prefix_history(api)
+        self.assertEqual(len(rows), 1)
+        row = dict(zip(authorize.SAMPLING_HISTORY_HEADER, rows[0]))
+        self.assertEqual(row["state"], "hostless")
+        self.assertEqual(row["executor_run_id"], "-")
+        self.assertEqual(row["executor_run_attempt"], "-")
+        self.assertEqual(row["physical_wall_us"], "-")
+        with self.assertRaises(ValueError):
+            self.review(api)
+
+    def test_independent_executor_inventory_refuses_duplicates_and_counterfeit_provenance(self):
+        for kind in ("duplicate", "foreign-owner", "renamed-workflow", "counterfeit-title", "rerun"):
+            with self.subTest(kind=kind):
+                api = OriginalApi(pilot=True)
+                if kind == "duplicate":
+                    extra = copy.deepcopy(api.executor_inventory[0])
+                    extra["id"] = 20001
+                    api.executor_inventory.append(extra)
+                    api.records["/actions/runs/20001"] = copy.deepcopy(extra)
+                    api.records["/actions/runs/20001/attempts/1"] = copy.deepcopy(extra)
+                elif kind == "foreign-owner":
+                    api.records["/actions/runs/20000/attempts/1"]["actor"] = {"login": "davidgmbb", "id": 7}
+                elif kind == "renamed-workflow":
+                    api.records["/actions/runs/20000/attempts/1"]["path"] = ".github/workflows/foreign.yml"
+                elif kind == "counterfeit-title":
+                    title = f"9700X request 10000.1 head {ADVANCED_HEAD}"
+                    api.executor_inventory[0]["display_title"] = title
+                    api.records["/actions/runs/20000/attempts/1"]["display_title"] = title
+                    api.records["/actions/runs/20000"]["display_title"] = title
+                else:
+                    api.records["/actions/runs/20000"]["run_attempt"] = 2
+                    api.executor_inventory[0]["run_attempt"] = 2
+                with self.assertRaises(ValueError):
+                    self.prefix_history(api)
+
+    def test_current_original_executor_must_be_a_unique_independent_inventory_member(self):
+        for kind in ("absent", "duplicate"):
+            with self.subTest(kind=kind):
+                api = OriginalApi()
+                if kind == "absent":
+                    api.executor_inventory = []
+                else:
+                    extra = copy.deepcopy(api.executor_inventory[0])
+                    extra["id"] = 20001
+                    api.executor_inventory.append(extra)
+                    api.records["/actions/runs/20001"] = copy.deepcopy(extra)
+                    api.records["/actions/runs/20001/attempts/1"] = copy.deepcopy(extra)
+                self.rejects_before_native(api)
+
+    def test_executor_for_earlier_request_may_be_created_after_current_request(self):
+        api = OriginalApi(pilot=True)
+        for endpoint in ("/actions/runs/20000", "/actions/runs/20000/attempts/1"):
+            api.records[endpoint]["created_at"] = "2026-10-09T00:03:00Z"
+        api.executor_inventory[0]["created_at"] = "2026-10-09T00:03:00Z"
+        rows = self.prefix_history(api)
+        self.assertEqual(rows[0][2:6], ["10000", "1", "20000", "1"])
+        self.assertEqual(rows[0][6], "complete")
+
+    def test_executor_inventory_total_and_id_population_are_complete_and_typed(self):
+        for kind in ("total-bool", "total-large", "total-short", "duplicate-id", "typed-id"):
+            with self.subTest(kind=kind):
+                api = OriginalApi()
+                if kind == "total-bool":
+                    api.executor_inventory_total = True
+                elif kind == "total-large":
+                    api.executor_inventory_total = 1001
+                elif kind == "total-short":
+                    api.executor_inventory_total = 2
+                elif kind == "duplicate-id":
+                    api.executor_inventory.append(copy.deepcopy(api.executor_inventory[0]))
+                else:
+                    api.executor_inventory[0]["id"] = float(api.executor)
+                self.rejects_before_native(api)
+
+    def test_prequeue_failed_executor_keeps_original_policy_and_unknown_wall(self):
+        api = OriginalApi(pilot=True)
+        check_path = (f"/commits/{ACQUISITION_HEAD}/check-runs?"
+                      "check_name=9700X%20compiler%20sampling%20research&filter=all&per_page=100")
+        api.records[check_path] = {"check_runs": []}
+        for endpoint in ("/actions/runs/20000", "/actions/runs/20000/attempts/1"):
+            api.records[endpoint]["conclusion"] = "failure"
+        api.executor_inventory[0]["conclusion"] = "failure"
+        api.records["/actions/runs/20000/attempts/1/jobs?per_page=100"] = {"jobs": []}
+        rows = self.prefix_history(api)
+        self.assertEqual(rows[0][2:8], ["10000", "1", "20000", "1", "failed", "-"])
+        self.assertEqual(api.records["/actions/runs/20000/attempts/1"]["head_sha"], ACQUISITION_POLICY)
+        with self.assertRaises(ValueError):
+            self.review(api)
 
     def test_original_acquisition_cannot_borrow_the_later_policy(self):
         api = OriginalApi(pilot=True)
