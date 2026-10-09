@@ -466,6 +466,7 @@ class SamplingTransportTest(unittest.TestCase):
                  "status": "completed", "conclusion": "success",
                  "output": {"title": "Valid unqualified sampling packet"}}
         executor = {"id": 101, "path": ".github/workflows/9700x-direct-bench.yml", "event": "workflow_run",
+                    "status": "completed", "conclusion": "success",
                     "head_branch": "main", "run_attempt": 1, "head_sha": "e" * 40,
                     "display_title": f"9700X request 91.1 head {HEAD}",
                     "repository": {"full_name": REPOSITORY}, "head_repository": {"full_name": REPOSITORY},
@@ -522,6 +523,11 @@ class SamplingTransportTest(unittest.TestCase):
             # membership, without requiring the live head to equal old HEAD.
             old.pop("pull_requests")
             self.assertEqual(history()[0][6], "complete")
+            for result in ("failure", "cancelled"):
+                with self.subTest(executor_terminal=result):
+                    executor["conclusion"] = result
+                    self.assertNotEqual(history()[0][6], "complete")
+            executor["conclusion"] = "success"
             original_patch = delta["files"][0]["patch"]
             for patch in ("@@ -1 +1,2 @@\n " + marker.rstrip("\n") + "\n+ordinary request",
                           "@@ -1 +1 @@\n-" + marker.rstrip("\n") + "\n+" + marker.rstrip("\n")):

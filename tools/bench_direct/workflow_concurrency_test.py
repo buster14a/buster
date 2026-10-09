@@ -4,6 +4,7 @@
 from pathlib import Path
 import re
 import unittest
+from lifecycle_pipeline_test import LifecyclePipelineTests
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ("bench-service-policy",)

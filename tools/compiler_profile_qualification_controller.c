@@ -562,7 +562,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_export(CompilerSamplingCon
     String8 output = path_join(controller->arena, controller->evidence, S8("prepared"));
     OsDirectoryCreateResult created = os_make_directory_exclusive(output);
     bool result = !created.error.v && created.created;
-    String8 required[] = {S8("prepared.json"), S8("prepared.manifest.tsv"), S8("prepared.workload.tsv"),
+    String8 required[] = {S8("prepared.json"), S8("preparation-cost.json"), S8("prepared.manifest.tsv"), S8("prepared.workload.tsv"),
         S8("baseline.binary.json"), S8("candidate.binary.json"), S8("candidate2.binary.json"), S8("phases.tsv"),
         S8("baseline.CMakeCache.txt"), S8("candidate.CMakeCache.txt"), S8("candidate2.CMakeCache.txt"),
         S8("closure-snapshot.json"), S8("closure-restore.json"), S8("closure-verify.json"),

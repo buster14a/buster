@@ -21,6 +21,8 @@ SELECTOR = "compiler-baseline-closure-qualification-v1"
 REQUEST_LINE = "profile: " + SELECTOR
 SCHEMA = "buster-compiler-closure-qualification-v1"
 PREPARATION_SCHEMA = "buster-compiler-preparation-v1"
+COST_SCHEMA = "buster-compiler-preparation-cost-v1"
+COST_SCOPE = "initialization+preparation_execute+preparation_write"
 OWNERSHIP_SCHEMA = "buster-native-qualification-supervisor-v1"
 IDENTITY = ("base", "base_tree", "head", "head_tree")
 HASH = re.compile(r"[a-f0-9]{64}\Z")
@@ -434,18 +436,67 @@ def binary_check_reasons(raw: object, wanted: tuple[tuple, tuple]) -> list[str]:
         return ["external frozen binary byte/size/mode check missing or changed"]
 
 
-def preparation_timings(record: dict, ledger: bytes) -> dict:
-    """Observed prep span, with stage/gap diagnostics; never claim net savings.
+def preparation_cost(record: dict, prepared_raw: bytes, cost_raw: bytes,
+                     stages: list[dict] | None = None) -> dict:
+    """Validate the complete native operation cost against its raw prep receipt.
 
-    The span includes time between native phases from the first post-initial-pins
-    stage through prepared.finish. The final controller/receipt publication tail
-    needs an independent trusted observation; native duration_us is sampled
-    before final publication and, for qualification, includes later measurement.
+    This scope includes preparation_write but excludes the cost receipt's own
+    publication and final qualification export. It contains no stage-sum estimate.
+    """
+    cost = json_object(cost_raw)
+    fields = {"schema", "state", "policy", "arm_count", *IDENTITY, "secondary_head", "secondary_tree",
+              "root_sha256", "prepared_receipt_sha256", "scope", "ownership_schema", "cleanup_proven",
+              "complete_cost_available", "initialization_us", "execute_us", "finalize_us", "total_us"}
+    fixed = {"schema": COST_SCHEMA, "state": "complete", "scope": COST_SCOPE,
+             "ownership_schema": OWNERSHIP_SCHEMA, "cleanup_proven": True, "complete_cost_available": True}
+    if set(cost) != fields or any(not exact(cost.get(key), value) for key, value in fixed.items()) or \
+            not isinstance(record, dict) or record.get("schema") != PREPARATION_SCHEMA or \
+            record.get("state") != "complete" or record.get("ownership_schema") != OWNERSHIP_SCHEMA or \
+            record.get("cleanup_proven") is not True or \
+            record.get("policy") not in ("legacy-rebuild", "snapshot-v1") or \
+            not any(exact(record.get("arm_count"), count) for count in (2, 3)) or \
+            any(not exact(cost.get(key), record.get(key)) for key in
+                (*IDENTITY, "policy", "arm_count", "secondary_head", "secondary_tree", "root_sha256")) or \
+            any(not isinstance(cost.get(key), str) or not COMMIT.fullmatch(cost[key]) for key in IDENTITY) or \
+            not digest(cost.get("root_sha256")) or not digest(cost.get("prepared_receipt_sha256")) or \
+            json_object(prepared_raw) != record or sha(prepared_raw) != cost["prepared_receipt_sha256"]:
+        raise ValueError("native whole-operation cost identity/scope/prepared receipt binding mismatch")
+    if record["arm_count"] == 3:
+        if record["policy"] != "snapshot-v1" or any(not isinstance(cost.get(key), str) or
+                not COMMIT.fullmatch(cost[key]) for key in ("secondary_head", "secondary_tree")):
+            raise ValueError("native whole-operation cost secondary pins malformed")
+    elif cost["secondary_head"] != "" or cost["secondary_tree"] != "":
+        raise ValueError("native two-arm whole-operation cost has secondary pins")
+    durations = ("initialization_us", "execute_us", "finalize_us")
+    if any(not uint(cost.get(key), TIME_LIMIT_US) for key in (*durations, "total_us")) or \
+            cost["total_us"] != sum(cost[key] for key in durations):
+        raise ValueError("native whole-operation cost duration types/sum malformed")
+    if stages is not None:
+        prepared_index = next(index for index, row in enumerate(stages) if row["phase"] == "prepared")
+        body = [row for row in stages[:prepared_index + 1] if row["phase"] not in ("pins", "secondary-pins")]
+        pins = [row for row in stages[:prepared_index + 1] if row["phase"] in ("pins", "secondary-pins")]
+        if not body or not pins or cost["initialization_us"] < pins[-1]["finish"] - pins[0]["start"] or \
+                cost["execute_us"] < body[-1]["finish"] - body[0]["start"]:
+            raise ValueError("native whole-operation cost omits preparation ledger wall span")
+    return cost
+
+
+def preparation_timings(record: dict, ledger: bytes, cost_record: bytes | None = None, *,
+                        prepared_receipt: bytes | None = None,
+                        receipt_publication_us: int | None = None) -> dict:
+    """Replay observed costs; ledger spans remain diagnostic and no job net is inferred.
+
+    Supply raw cost_record and prepared_receipt for the native operation scope.
+    receipt_publication_us must come from the validated qualification pointer or
+    a trusted outer observation; None keeps the cost receipt's own tail unassigned.
+    Final qualification export always remains outside this scope.
     """
     reported = record.get("duration_us") if isinstance(record, dict) else None
     reported = reported if uint(reported, TIME_LIMIT_US) else None
     unavailable = {"available": False, "complete_cost_available": False,
-                   "controller_reported_duration_us": reported, "publication_us": None}
+                   "complete_job_cost_available": False,
+                   "controller_reported_duration_us": reported, "publication_us": None,
+                   "qualification_publication_us": None}
     if not isinstance(record, dict) or record.get("schema") != PREPARATION_SCHEMA or record.get("state") != "complete" or \
             record.get("ownership_schema") != OWNERSHIP_SCHEMA or record.get("cleanup_proven") is not True:
         return unavailable
@@ -458,15 +509,32 @@ def preparation_timings(record: dict, ledger: bytes) -> dict:
             return unavailable
         span = body[-1]["finish"] - body[0]["start"]
         stage_total = sum(row["elapsed"] for row in body)
-        return {"available": True, "complete_cost_available": False,
-                "cost_scope": "first post-initial-pins start through prepared.finish",
-                "preparation_span_us": span, "stage_total_us": stage_total,
-                "unassigned_us": span - stage_total,
-                "initial_pins_us": sum(row["elapsed"] for row in preparation if row["phase"] in ("pins", "secondary-pins")),
-                "stages_us": {row["phase"]: row["elapsed"] for row in preparation},
-                "controller_reported_duration_us": reported, "publication_us": None,
-                "snapshot_includes_harness_preparation": True}
-    except (ValueError, UnicodeError, TypeError, KeyError, IndexError, StopIteration):
+        timing = {"available": True, "complete_cost_available": False, "complete_job_cost_available": False,
+                  "cost_scope": "first post-initial-pins start through prepared.finish",
+                  "preparation_span_us": span, "stage_total_us": stage_total,
+                  "unassigned_us": span - stage_total,
+                  "initial_pins_us": sum(row["elapsed"] for row in preparation if row["phase"] in ("pins", "secondary-pins")),
+                  "stages_us": {row["phase"]: row["elapsed"] for row in preparation},
+                  "controller_reported_duration_us": reported, "publication_us": None,
+                  "qualification_publication_us": None, "snapshot_includes_harness_preparation": True}
+        if cost_record is None:
+            if prepared_receipt is not None or receipt_publication_us is not None:
+                return unavailable
+            return timing
+        cost = preparation_cost(record, prepared_receipt, cost_record, stages)
+        timing.update(complete_cost_available=True, cost_scope=COST_SCOPE,
+                      initialization_us=cost["initialization_us"], execute_us=cost["execute_us"],
+                      finalize_us=cost["finalize_us"], native_operation_total_us=cost["total_us"],
+                      cost_receipt_sha256=sha(cost_record))
+        if receipt_publication_us is not None:
+            if not uint(receipt_publication_us, TIME_LIMIT_US) or \
+                    cost["total_us"] + receipt_publication_us > TIME_LIMIT_US:
+                return unavailable
+            timing.update(publication_us=receipt_publication_us,
+                          total_us=cost["total_us"] + receipt_publication_us,
+                          cost_scope=COST_SCOPE + "+cost_receipt_publication")
+        return timing
+    except (ValueError, UnicodeError, TypeError, KeyError, IndexError, StopIteration, AttributeError, RecursionError):
         return unavailable
 
 
@@ -504,6 +572,8 @@ def preparation_reasons(expected: dict, arm_name: str, arm: object, wanted_phase
         if root != expected["root"] or files.get("phases.tsv") != arm.get("ledger") or \
                 json_object(files.get("prepared.json")) != prepared:
             raise ValueError("preparation file/ledger binding mismatch")
+        cost_raw = files.get("preparation-cost.json")
+        cost = preparation_cost(prepared, files.get("prepared.json"), cost_raw, stages)
         manifest = arm.get("manifest")
         if not isinstance(manifest, bytes) or prepared["prepared_manifest_sha256"] != sha(manifest) or \
                 files.get("prepared.manifest.tsv") != manifest:
@@ -581,7 +651,8 @@ def preparation_reasons(expected: dict, arm_name: str, arm: object, wanted_phase
         elif arm.get("closure") not in (None, {}) or arm.get("closure_manifests") not in (None, {}):
             reasons.append("legacy preparation unexpectedly contains a snapshot transfer")
         return reasons, {"record": prepared, "files": files, "stages": stages, "rows": rows,
-                         "bindings": bindings, "workload": workload, "manifest": manifest}
+                         "bindings": bindings, "workload": workload, "manifest": manifest,
+                         "cost": cost, "cost_raw": cost_raw}
     except (ValueError, UnicodeError, TypeError, KeyError, IndexError, AttributeError, RecursionError) as error:
         diagnostic = (type(error).__name__ + ": " + str(error))[:200]
         diagnostic = "".join(char if ord(char) >= 32 and ord(char) != 127 else " " for char in diagnostic)
@@ -647,7 +718,9 @@ def validate(expected: dict, receipt: object, bundles: object) -> list[str]:
               "python_sha256": expected["python_sha256"]}
     if not isinstance(receipt, dict) or any(not exact(receipt.get(key), value) for key, value in wanted.items()) or \
             any(receipt.get(key) != expected[key] for key in IDENTITY) or \
-            not uint(receipt.get("duration_us"), TIME_LIMIT_US) or not isinstance(bundles, dict):
+            not uint(receipt.get("duration_us"), TIME_LIMIT_US) or not isinstance(bundles, dict) or \
+            "qualification_publication_us" not in receipt or receipt["qualification_publication_us"] is not None or \
+            not isinstance(receipt.get("preparation_costs"), dict) or set(receipt["preparation_costs"]) != {"legacy", "snapshot"}:
         return ["native preparation qualification identity/plan/ownership incomplete or unsupported"]
     reasons, arms = [], {}
     for arm in ("legacy", "snapshot"):
@@ -659,6 +732,22 @@ def validate(expected: dict, receipt: object, bundles: object) -> list[str]:
                 reasons.append(arm + " preparation duration exceeds the entire qualification attempt")
     if len(arms) != 2:
         return reasons
+    total_preparation_us = 0
+    for arm_name in ("legacy", "snapshot"):
+        pointer = receipt["preparation_costs"].get(arm_name)
+        cost = arms[arm_name]["cost"]
+        if not isinstance(pointer, dict) or set(pointer) != {
+                "receipt_sha256", "receipt_publication_us", "total_us", "complete_cost_available"} or \
+                pointer.get("receipt_sha256") != sha(arms[arm_name]["cost_raw"]) or \
+                pointer.get("complete_cost_available") is not True or \
+                not uint(pointer.get("receipt_publication_us"), TIME_LIMIT_US) or \
+                not uint(pointer.get("total_us"), TIME_LIMIT_US) or \
+                pointer["total_us"] != cost["total_us"] + pointer["receipt_publication_us"]:
+            reasons.append(arm_name + " qualification whole-operation cost pointer/hash/publication/sum malformed")
+        else:
+            total_preparation_us += pointer["total_us"]
+    if total_preparation_us > receipt["duration_us"]:
+        reasons.append("preparation whole-operation costs exceed the entire qualification observation")
     left, right = arms["legacy"]["record"], arms["snapshot"]["record"]
     legacy_stages, snapshot_stages = arms["legacy"]["stages"], arms["snapshot"]["stages"]
     if legacy_stages[0]["finish"] > snapshot_stages[0]["start"] or \
@@ -709,7 +798,7 @@ def validate_prepared(expected: dict, prepared: object, bundle: object) -> list[
     expected: four Git pins, root/output absolute paths, policy, optional
     secondary_head/secondary_tree and arm_count=3. output is native prepare OUT.
     bundle: manifest/workload/ledger bytes, immediate-basename files byte map,
-    and snapshot closure records plus closure_manifests. No measured outcomes.
+    and snapshot closure records plus closure_manifests. files must include the\n    complete, raw preparation-cost.json bound to prepared.json. No measured outcomes.
     """
     if not isinstance(expected, dict) or \
             any(not isinstance(expected.get(key), str) or not COMMIT.fullmatch(expected[key]) for key in IDENTITY) or \

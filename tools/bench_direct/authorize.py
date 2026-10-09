@@ -416,7 +416,7 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
             executor_attempt = str(execution.get("run_attempt"))
             host = [job for job in jobs if isinstance(job, dict) and job.get("name") == "Sampling qualification packet"]
             published = [job for job in jobs if isinstance(job, dict) and job.get("name") == "Validate sampling packet evidence"]
-            state = "cancelled" if execution.get("conclusion") == "cancelled" else "incomplete"
+            state = "cancelled" if execution.get("conclusion") == "cancelled" else "failed" if execution.get("conclusion") == "failure" else "incomplete"
             if len(host) == 1:
                 start, end = host[0].get("started_at"), host[0].get("completed_at")
                 if isinstance(start, str) and isinstance(end, str):
@@ -425,7 +425,7 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
                     if duration <= 0:
                         raise ValueError("sampling physical occupancy timestamps are invalid")
                     physical = str(round(duration * 1000000) + 2000000)
-            if check.get("status") == "completed":
+            if check.get("status") == "completed" and execution.get("status") == "completed" and execution.get("conclusion") == "success":
                 state = "complete" if check.get("conclusion") == "success" and \
                     isinstance(check.get("output"), dict) and check["output"].get("title") == "Valid unqualified sampling packet" and \
                     len(host) == len(published) == 1 and host[0].get("conclusion") == published[0].get("conclusion") == "success" \

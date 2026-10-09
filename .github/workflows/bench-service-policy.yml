@@ -50,8 +50,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tools/bench_policy_reuse.py decide --receipt "$RUNNER_TEMP/bench-policy-reuse.json"
       - name: Prove the direct 9700X workflow gate
+        shell: bash
         if: ${{ steps.reuse.outputs.reused != 'true' }}
         run: |
+          # Native producer failure must propagate through tee.
+          set -o pipefail
           clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/lifecycle.c -lm -o "$RUNNER_TEMP/9700x-lifecycle"
           "$RUNNER_TEMP/9700x-lifecycle" --self-test | tee "$RUNNER_TEMP/9700x-lifecycle-fixtures.jsonl"
           python3 -B tools/bench_direct/workflow_policy_test.py

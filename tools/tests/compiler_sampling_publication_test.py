@@ -178,6 +178,7 @@ import base64
 import copy
 import hashlib
 import json
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import compiler_preparation as preparation
@@ -240,10 +241,9 @@ def physical_files(authority, context, prepared, packet_wall, prep_us):
 
 
 def publication_fixture(phase="pilot", packet=0):
-    expected, bundles = preparation_fixture.fixture(False, 3)
-    producer = bundles["snapshot"]
+    expected, actual_prepared, producer = preparation_fixture.fixture(False, 3)
     expected = dict(expected)
-    lab_bytes, protocol_bytes = b"trusted synthetic lab source\n", b"trusted synthetic frozen protocol\n"
+    lab_bytes, protocol_bytes = Path(sampling._lab.__file__).read_bytes(), b"trusted synthetic frozen protocol\n"
     plan = {"schema": "buster-main-sampling-acquisition-v1", "phase": "acquire", "base": expected["base"],
         "base_tree": expected["base_tree"], "request_head": "8" * 40, "trusted_revision": "9" * 40,
         "baseline_revision": expected["base"], "ab1_revision": expected["head"], "ab2_revision": expected["secondary_head"],
@@ -381,7 +381,7 @@ def publication_fixture(phase="pilot", packet=0):
                 self.runs[request_id] = {"id": int(request_id), "run_attempt": 1, "head_sha": item["head"]}
                 self.runs[run_id] = {"id": int(run_id), "run_attempt": 1, "head_sha": item["executor"]["head_sha"],
                     "path": publisher.BENCH_WORKFLOW, "event": "workflow_run", "head_branch": "main",
-                    "repository": {"full_name": "buster14a/buster"},
+                    "repository": {"full_name": "buster14a/buster"}, "status": "completed", "conclusion": "success",
                     "display_title": f"9700X request {request_id}.1 head {item['head']}"}
                 duration = 120
                 if run_id == authority["run_id"]:
@@ -574,6 +574,61 @@ class SamplingPublicationOutcomes(unittest.TestCase):
         with mock.patch.object(publisher.sys, "argv", ["compiler_publish.py", "sampling-publish", "extra"]), \
                 mock.patch.object(publisher, "Api", side_effect=AssertionError("unsupported args reached API")):
             self.assertEqual(publisher.main(), 1)
+
+
+
+    def test_corrupt_zip_failure_is_terminal_and_cannot_escape_reader(self):
+        import zlib
+        raw = archive([("host.json", b"{}", stat.S_IFREG)])
+        for exception in (zipfile.BadZipFile("invalid central directory"), zlib.error("corrupt stream")):
+            with self.subTest(exception=exception):
+                api, authority, unused_files = publication_fixture()
+                with mock.patch.object(zipfile.ZipFile, "read", side_effect=exception), \
+                        mock.patch.object(publisher, "sampling_authority", return_value=(api, authority)), \
+                        mock.patch.object(publisher, "sampling_read_artifact", side_effect=lambda api, owner: (publisher.sampling_archive(raw), {})), \
+                        mock.patch.object(publisher, "sampling_write", side_effect=lambda api, owner, body: dict(body, id=303)) as write:
+                    self.assertEqual(publisher.sampling_publish({}), 1)
+                self.assertEqual(write.call_args[0][2]["conclusion"], "failure")
+
+    def test_current_statistics_checkout_must_match_acquired_lab(self):
+        api, authority, files = publication_fixture("acquire", 0)
+        row = publisher.sampling_tsv(files["acquisition.tsv"])
+        row["lab_sha256"] = hashlib.sha256(b"different lab\n").hexdigest()
+        files["acquisition.tsv"] = tsv_bytes(row)
+        api.contents["tools/uarch_lab.py"] = b"different lab\n"
+        with self.assertRaisesRegex(ValueError, "statistical replay module"):
+            publisher.sampling_validate(api, authority, files)
+
+    def test_whole_native_owner_cost_is_separate_from_packet_cost(self):
+        api, authority, files = publication_fixture()
+        result = publisher.sampling_validate(api, authority, files)
+        self.assertGreater(result["accounting"]["native_owner_wall_us"], result["accounting"]["native_packet_wall_us"])
+        self.assertIsNotNone(result["acquisition_preparation_costs"])
+        self.assertTrue(result["acquisition_preparation_costs"]["complete_cost_available"])
+
+    def test_complete_cost_is_required_and_supervision_has_real_clock_bound(self):
+        api, authority, files = publication_fixture()
+        files.pop("prepared/preparation-cost.json")
+        with self.assertRaises(ValueError):
+            publisher.sampling_validate(api, authority, files)
+        for name in ("owner-supervision.tsv", "controller-1-trusted-harness-pin-supervision.tsv", "trial-0-supervision.tsv"):
+            api, authority, files = publication_fixture()
+            proof = publisher.sampling_tsv(files[name])
+            proof["wall_us"] = "99999999999"
+            files[name] = tsv_bytes(proof)
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                publisher.sampling_validate(api, authority, files)
+
+
+
+    def test_cancelled_executor_cannot_be_replaced_by_successful_host_job(self):
+        for state in ("cancelled", "failure"):
+            api, authority, files = publication_fixture()
+            api.runs["101"]["conclusion"] = state
+            # Its host job and retained prior artifact stay complete; the
+            # attempted workflow itself must still stop this campaign.
+            with self.subTest(state=state), self.assertRaises(ValueError):
+                publisher.sampling_validate(api, authority, files)
 
 
 

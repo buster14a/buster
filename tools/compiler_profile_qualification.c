@@ -196,6 +196,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_output_valid(Arena* arena, String8 ou
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_self_test(Arena* arena);
+BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_self_test(Arena* arena);
 
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_self_test(Arena* arena)
 {
@@ -230,6 +231,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_self_test(Arena* arena)
     good = good && compiler_preparation_admission_self_test(arena);
     good = good && compiler_sampling_schedule_self_test(arena) == PROCESS_RESULT_SUCCESS;
     good = good && compiler_sampling_controller_self_test(arena);
+    good = good && compiler_preparation_controller_self_test(arena);
     if (!good) result = PROCESS_RESULT_FAILED;
     string_print(S8("COMPILER_SAMPLING_SELF_TEST status={S8} routine_enabled=false\n"),
         good ? S8("pass") : S8("fail"));
@@ -433,7 +435,7 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingVerification compiler_sampling_closure_verif
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSamplingOptions options)
+BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_internal(Arena* arena, CompilerSamplingOptions options, bool fixture_host)
 {
     u64 entry = os_now_microseconds();
     SliceString8 child_keys = {0}, child_values = {0};
@@ -494,7 +496,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
     String8 actual_reservation = BYTE_SLICE_TO_STRING(8, file_read(arena, path_join(arena, persistent, S8("reservation.tsv")),
         (FileReadOptions){.map_required = 0}));
     bool claimed = string_equal(expected_claim, actual_claim) && string_equal(expected_claim, actual_reservation);
-    if (owned && compiler_sampling_observed_host(arena) && identities_valid && claimed)
+    if (owned && (fixture_host || compiler_sampling_observed_host(arena)) && identities_valid && claimed)
     {
         OsDirectoryCreateResult execution = os_make_directory_exclusive(path_join(arena, persistent, S8("execution")));
         bool success = !execution.error.v && execution.created;
@@ -648,6 +650,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
 }
 
 
+BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSamplingOptions options)
+{
+    // The public/controller runner always requires the actual approved CPU.
+    // Only fixed private hosted fixtures may exercise the writer with synthetic data.
+    return compiler_sampling_run_internal(arena, options, false);
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, CompilerSamplingOptions options, SliceString8 arguments)
 {
     CompilerSamplingPacket planned = compiler_sampling_schedule(options.phase, options.packet);
@@ -713,6 +722,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
 }
 
 #include "compiler_profile_qualification_controller.c"
+#include "compiler_preparation_qualification_controller.c"
 
 
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_preparation_admit(Arena* arena, SliceString8 arguments)
@@ -740,7 +750,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_preparation_admit(Arena* are
     {
         CompilerPreparationPlan plan = admitted.plan;
         String8 outputs = string_format(arena,
-            S8("preparation_admitted=true\npreparation_phase=qualify\npreparation_packet=0\npreparation_reservation_seconds={u64}\n"
+            S8("preparation_admitted=true\npreparation_phase=qualify\npreparation_packet=0\npreparation_family=preparation\npreparation_reservation_seconds={u64}\n"
                "preparation_worker_seconds={u64}\npreparation_timeout_minutes={u64}\npreparation_plan_revision={S8}\npreparation_plan_sha256={S8}\n"
                "preparation_protocol_sha256={S8}\npreparation_base={S8}\npreparation_base_tree={S8}\n"
                "preparation_candidate_revision={S8}\npreparation_candidate_tree={S8}\npreparation_trusted_revision={S8}\n"),
@@ -756,7 +766,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* are
 {
     CompilerSamplingOptions options = compiler_sampling_parse(arguments);
     ProcessResult result = PROCESS_RESULT_FAILED;
-    if (arguments.length && string_equal(arguments.pointer[0], S8("--admit-preparation")))
+    if (arguments.length && (string_equal(arguments.pointer[0], S8("--execute-preparation")) ||
+        string_equal(arguments.pointer[0], S8("--self-test-preparation-controller"))))
+    {
+        result = compiler_preparation_qualification_main(arena, arguments);
+    }
+    else if (arguments.length && string_equal(arguments.pointer[0], S8("--admit-preparation")))
     {
         result = compiler_sampling_preparation_admit(arena, arguments);
     }
