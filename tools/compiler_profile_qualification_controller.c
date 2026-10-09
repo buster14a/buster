@@ -581,11 +581,13 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_export(CompilerSamplingCon
     for (u64 i = 0; listed && i < count; i += 1)
     {
         String8 name = entries[i].name;
-        bool proof = string_ends_with_sequence(name, S8(".cleanup.json"));
+        bool proof = string_ends_with_sequence(name, S8(".cleanup.json")) ||
+            string_ends_with_sequence(name, S8(".argv")) || string_ends_with_sequence(name, S8(".stdout")) ||
+            string_ends_with_sequence(name, S8(".stderr"));
         if (proof && !entries[i].is_directory)
         {
             String8 bytes = compiler_sampling_controller_read(controller->arena,
-                path_join(controller->arena, controller->prepared, name), 65536);
+                path_join(controller->arena, controller->prepared, name), BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT);
             bool retained = compiler_sampling_controller_path_safe(name) && bytes.length &&
                 file_write(path_join(controller->arena, output, name), BUSTER_SLICE_TO_BYTE_SLICE(bytes));
             result = retained && result;
