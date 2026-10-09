@@ -3950,36 +3950,57 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_hardened_layout(UnitTestArgumen
 // AArch64 initial-exec TLS (#2582) in a fixed-address executable. The adjacent
 // ADRP/LDR pair is relaxed to MOVZ/MOVK of the symbol's thread-pointer offset
 // (variant I: the block follows the 16-byte TCB), so the check needs bytes
-// only. Anything but the exact pair fails the link.
-BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_test_aarch64_tls_ie_link(Arena* arena, u32* text_words, u32 text_word_count, bool high, bool low,
-                                                                           u32 low_offset, bool tls_symbol, u64 symbol_value, u64* text_file_offset)
+// only. Pairs are matched by exact section/offset, symbol, addend and
+// register; anything else fails the link. Symbol 1 is a TLS variable at
+// 0x11234, symbol 2 another at 0x2008 and symbol 3 an ordinary data object.
+enum
+{
+    LINK_TEST_TLS_IE_HIGH = 1,
+    LINK_TEST_TLS_IE_LOW = 2,
+};
+
+typedef struct LinkTestTlsIeSite LinkTestTlsIeSite;
+struct LinkTestTlsIeSite
+{
+    u32 kind;
+    u32 offset;
+    u32 symbol;
+    s64 addend;
+};
+
+BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_test_aarch64_tls_ie_link(Arena* arena, u32* text_words, u32 text_word_count, LinkTestTlsIeSite* sites,
+                                                                           u32 site_count, u64* text_file_offset)
 {
     ObjectSymbol symbols[] = {
         {.name = S8("main"), .size = text_word_count * 4, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
-        {.name = S8("tv"), .value = symbol_value, .size = 4, .section = tls_symbol ? OBJECT_SECTION_THREAD_LOCAL_DATA : OBJECT_SECTION_DATA,
-         .kind = OBJECT_SYMBOL_DATA, .global = true},
+        {.name = S8("tv"), .value = 0x11234, .size = 4, .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        {.name = S8("tw"), .value = 0x2008, .size = 4, .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        {.name = S8("dv"), .value = 0, .size = 4, .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
     };
-    ObjectRelocation relocations[2] = {0};
-    u32 relocation_count = 0;
-    if (high)
+    ObjectRelocation* relocations = arena_allocate(arena, ObjectRelocation, site_count);
+    for (u32 index = 0; index < site_count; index += 1)
     {
-        relocations[relocation_count++] =
-            (ObjectRelocation){.offset = 0, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21};
-    }
-    if (low)
-    {
-        relocations[relocation_count++] =
-            (ObjectRelocation){.offset = low_offset, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12};
+        relocations[index] = (ObjectRelocation){
+            .offset = sites[index].offset,
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = sites[index].symbol,
+            .addend = sites[index].addend,
+            .kind = sites[index].kind == LINK_TEST_TLS_IE_HIGH ? OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21
+                                                               : OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12,
+        };
     }
     ObjectFile object = link_test_object_make(arena, (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
                                               (ByteSlice){.pointer = (u8*)text_words, .length = text_word_count * 4}, symbols, BUSTER_ARRAY_LENGTH(symbols),
-                                              relocations, relocation_count);
+                                              relocations, site_count);
     // 0x12000 initialized bytes of 8-byte alignment put the block at TP + 16.
     u8* tls_bytes = arena_allocate(arena, u8, 0x12000);
     ObjectSection* thread_local_data = object.sections + OBJECT_SECTION_THREAD_LOCAL_DATA;
     thread_local_data->data = (ByteSlice){.pointer = tls_bytes, .length = 0x12000};
     thread_local_data->virtual_size = 0x12000;
     thread_local_data->alignment = 8;
+    u8* data_bytes = arena_allocate(arena, u8, 8);
+    object.sections[OBJECT_SECTION_DATA].data = (ByteSlice){.pointer = data_bytes, .length = 8};
+    object.sections[OBJECT_SECTION_DATA].virtual_size = 8;
     NativeExecutableLinkResult linked = link_native_executable(arena, &object, (NativeExecutableLinkOptions){.image_kind = (u8)NATIVE_IMAGE_EXECUTABLE});
     u64 header = 0;
     if (linked.error == LINK_ERROR_NONE && link_test_elf_section_find(linked.executable, S8(".text"), 0, &header))
@@ -4001,9 +4022,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_tls_initial_exec_relaxation
         u32 text[] = {UINT32_C(0x90000000) | reg, UINT32_C(0xf9400000) | (reg << 5) | reg, UINT32_C(0xd65f03c0)};
         u32 original[3];
         memcpy(original, text, sizeof(original));
+        LinkTestTlsIeSite sites[] = {{LINK_TEST_TLS_IE_HIGH, 0, 1, 0}, {LINK_TEST_TLS_IE_LOW, 4, 1, 0}};
         u64 text_offset = 0;
         // tprel = 16 + 0x11234: MOVZ #1, LSL #16 then MOVK #0x1244.
-        NativeExecutableLinkResult linked = link_test_aarch64_tls_ie_link(arena, text, 3, true, true, 4, true, 0x11234, &text_offset);
+        NativeExecutableLinkResult linked = link_test_aarch64_tls_ie_link(arena, text, 3, sites, 2, &text_offset);
         if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE && text_offset && text_offset + 12 <= linked.executable.length))
         {
             BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, text_offset) == (UINT32_C(0xd2a00000) | (1u << 5) | reg));
@@ -4014,32 +4036,69 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_tls_initial_exec_relaxation
         BUSTER_TEST(arguments, memcmp(text, original, sizeof(text)) == 0);
         scratch_end(temporary);
     }
+    {
+        // Two independent pairs for different variables and registers resolve
+        // each to its own offset: tw is 16 + 0x2008 = 0x2018.
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 text[] = {UINT32_C(0x90000001), UINT32_C(0xf9400021), UINT32_C(0x90000012), UINT32_C(0xf9400252), UINT32_C(0xd65f03c0)};
+        LinkTestTlsIeSite sites[] = {{LINK_TEST_TLS_IE_LOW, 12, 2, 0}, {LINK_TEST_TLS_IE_HIGH, 8, 2, 0},
+                                     {LINK_TEST_TLS_IE_LOW, 4, 1, 0}, {LINK_TEST_TLS_IE_HIGH, 0, 1, 0}};
+        u64 text_offset = 0;
+        NativeExecutableLinkResult linked = link_test_aarch64_tls_ie_link(temporary.arena, text, 5, sites, 4, &text_offset);
+        if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE && text_offset && text_offset + 20 <= linked.executable.length))
+        {
+            BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, text_offset) == (UINT32_C(0xd2a00000) | (1u << 5) | 1));
+            BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, text_offset + 4) == (UINT32_C(0xf2800000) | (0x1244u << 5) | 1));
+            BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, text_offset + 8) == (UINT32_C(0xd2a00000) | (0u << 5) | 18));
+            BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, text_offset + 12) == (UINT32_C(0xf2800000) | (0x2018u << 5) | 18));
+        }
+        scratch_end(temporary);
+    }
     // Everything that is not the exact pair is refused instead of leaving a
     // GOT load or a half-rewritten sequence behind.
+    enum
+    {
+        IE_H = LINK_TEST_TLS_IE_HIGH,
+        IE_L = LINK_TEST_TLS_IE_LOW,
+    };
     struct
     {
-        u32 words[3];
-        bool high;
-        bool low;
-        u32 low_offset;
-        bool tls_symbol;
+        u32 words[5];
+        LinkTestTlsIeSite sites[3];
+        u32 site_count;
     } refused[] = {
-        {{UINT32_C(0x90000008), UINT32_C(0xf9400108), UINT32_C(0xd65f03c0)}, true, false, 4, true},  // ADRP alone
-        {{UINT32_C(0x90000008), UINT32_C(0xf9400108), UINT32_C(0xd65f03c0)}, false, true, 4, true},  // LDR alone
-        {{UINT32_C(0x90000008), UINT32_C(0xd503201f), UINT32_C(0xf9400108)}, true, true, 8, true},   // not adjacent
-        {{UINT32_C(0x90000008), UINT32_C(0xf9400109), UINT32_C(0xd65f03c0)}, true, true, 4, true},   // destination differs
-        {{UINT32_C(0x90000008), UINT32_C(0xf9400128), UINT32_C(0xd65f03c0)}, true, true, 4, true},   // base differs
-        {{UINT32_C(0x90000008), UINT32_C(0xf9400508), UINT32_C(0xd65f03c0)}, true, true, 4, true},   // nonzero offset
-        {{UINT32_C(0x90000008), UINT32_C(0xf9400108), UINT32_C(0xd65f03c0)}, true, true, 4, false},  // not a TLS symbol
+        // ADRP alone, LDR alone, not adjacent.
+        {{0x90000008, 0xf9400108, 0xd65f03c0, 0, 0}, {{IE_H, 0, 1, 0}}, 1},
+        {{0x90000008, 0xf9400108, 0xd65f03c0, 0, 0}, {{IE_L, 4, 1, 0}}, 1},
+        {{0x90000008, 0xd503201f, 0xf9400108, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        // Destination, base and offset mismatches inside the words.
+        {{0x90000008, 0xf9400109, 0xd65f03c0, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 4, 1, 0}}, 2},
+        {{0x90000008, 0xf9400128, 0xd65f03c0, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 4, 1, 0}}, 2},
+        {{0x90000008, 0xf9400508, 0xd65f03c0, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 4, 1, 0}}, 2},
+        // A non-TLS symbol, and halves that name different symbols or addends.
+        {{0x90000008, 0xf9400108, 0xd65f03c0, 0, 0}, {{IE_H, 0, 3, 0}, {IE_L, 4, 3, 0}}, 2},
+        {{0x90000008, 0xf9400108, 0xd65f03c0, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 4, 2, 0}}, 2},
+        {{0x90000008, 0xf9400108, 0xd65f03c0, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 4, 1, 4}}, 2},
+        // A repeated half and a doubled LDR.
+        {{0x90000008, 0xf9400108, 0xd65f03c0, 0, 0}, {{IE_H, 0, 1, 0}, {IE_H, 0, 1, 0}, {IE_L, 4, 1, 0}}, 3},
+        {{0x90000008, 0xf9400108, 0xd65f03c0, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 4, 1, 0}, {IE_L, 4, 1, 0}}, 3},
+        // Adversarial: HIGH(A, x1), an ordinary MOVZ x2 whose half matches B, and
+        // LOW(B, x2). The counts match but the HIGH has no LDR partner.
+        {{0x90000001, 0xd2a00002 | (0u << 5), 0xf9400042, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 2, 0}}, 2},
+        // The same shape with the same symbol but a different register, and
+        // with the same register but a different symbol.
+        {{0x90000001, 0xd2a00022 | (1u << 5), 0xf9400042, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x90000002, 0xd2a00002, 0xf9400042, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 2, 0}}, 2},
+        // HIGH at 0 and LOW at 4 for x1, plus a second LOW at 8 reusing the MOVZ.
+        {{0x90000001, 0xf9400021, 0xf9400021, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 4, 1, 0}, {IE_L, 8, 1, 0}}, 3},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         u64 text_offset = 0;
-        u32 text[3];
+        u32 text[5];
         memcpy(text, refused[index].words, sizeof(text));
-        NativeExecutableLinkResult linked = link_test_aarch64_tls_ie_link(temporary.arena, text, 3, refused[index].high, refused[index].low,
-                                                                         refused[index].low_offset, refused[index].tls_symbol, 4, &text_offset);
+        NativeExecutableLinkResult linked = link_test_aarch64_tls_ie_link(temporary.arena, text, 5, refused[index].sites, refused[index].site_count, &text_offset);
         BUSTER_TEST(arguments, linked.error != LINK_ERROR_NONE);
         scratch_end(temporary);
     }

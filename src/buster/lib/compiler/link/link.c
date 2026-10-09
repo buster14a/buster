@@ -8790,6 +8790,105 @@ BUSTER_GLOBAL_LOCAL bool link_aarch64_elf_tprel_offset(ObjectFile* object, Objec
     return valid;
 }
 
+// One initial-exec relocation site, keyed by section and byte offset.
+typedef struct LinkTlsIeSite LinkTlsIeSite;
+struct LinkTlsIeSite
+{
+    u64 key;
+    u32 relocation;
+    u32 reserved;
+};
+
+enum
+{
+    LINK_TLS_IE_OFFSET_BITS = 48,
+};
+
+BUSTER_GLOBAL_LOCAL void link_tls_ie_site_sift(LinkTlsIeSite* sites, u32 count, u32 root)
+{
+    while (root < count / 2)
+    {
+        u32 child = 2 * root + 1;
+        if (child + 1 < count && sites[child + 1].key > sites[child].key)
+        {
+            child += 1;
+        }
+        if (sites[child].key <= sites[root].key)
+        {
+            break;
+        }
+        LinkTlsIeSite swapped = sites[root];
+        sites[root] = sites[child];
+        sites[child] = swapped;
+        root = child;
+    }
+}
+
+// Rewrite every AArch64 initial-exec pair into MOVZ/MOVK of its thread-pointer
+// offset. Sites are paired by exact identity: the LDR relocation must sit in
+// the same section four bytes after its ADRP relocation, name the same symbol
+// and addend, and use the same register. Each ADRP is consumed by exactly one
+// LDR and the other way round, so a repeated, unmatched or overlapping half
+// fails instead of leaving a rewritten ADRP whose partner is something else.
+BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_ie_relax(Arena* arena, ObjectFile* object, u8* bytes, u64 const* section_offsets)
+{
+    u32 count = 0;
+    for (u32 index = 0; index < object->relocation_count; index += 1)
+    {
+        count += object_relocation_kind_is_aarch64_elf_tls_ie(object->relocations[index].kind);
+    }
+    bool valid = true;
+    LinkTlsIeSite* sites = count ? arena_allocate(arena, LinkTlsIeSite, count) : 0;
+    u32 site_count = 0;
+    for (u32 index = 0; valid && index < object->relocation_count; index += 1)
+    {
+        ObjectRelocation* relocation = &object->relocations[index];
+        if (object_relocation_kind_is_aarch64_elf_tls_ie(relocation->kind))
+        {
+            valid = relocation->section < OBJECT_SECTION_COUNT && relocation->symbol < object->symbol_count && !(relocation->offset & 3) &&
+                    relocation->offset < ((u64)1 << LINK_TLS_IE_OFFSET_BITS) && relocation->offset <= object->sections[relocation->section].data.length &&
+                    4 <= object->sections[relocation->section].data.length - relocation->offset &&
+                    object->sections[relocation->section].alignment >= 4;
+            if (valid)
+            {
+                sites[site_count++] = (LinkTlsIeSite){.key = ((u64)relocation->section << LINK_TLS_IE_OFFSET_BITS) | relocation->offset, .relocation = index};
+            }
+        }
+    }
+    for (u32 root = site_count / 2; root > 0; root -= 1)
+    {
+        link_tls_ie_site_sift(sites, site_count, root - 1);
+    }
+    for (u32 remaining = site_count; remaining > 1; remaining -= 1)
+    {
+        LinkTlsIeSite swapped = sites[0];
+        sites[0] = sites[remaining - 1];
+        sites[remaining - 1] = swapped;
+        link_tls_ie_site_sift(sites, remaining - 1, 0);
+    }
+    for (u32 cursor = 0; valid && cursor < site_count; cursor += 2)
+    {
+        ObjectRelocation* high = &object->relocations[sites[cursor].relocation];
+        ObjectRelocation* low = cursor + 1 < site_count ? &object->relocations[sites[cursor + 1].relocation] : 0;
+        u64 tprel = 0;
+        u32 high_word = 0;
+        u32 low_word = 0;
+        valid = low && high->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21 &&
+                low->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12 && sites[cursor + 1].key == sites[cursor].key + 4 &&
+                low->symbol == high->symbol && low->addend == high->addend &&
+                link_aarch64_elf_tprel_offset(object, &object->symbols[high->symbol], high->addend, UINT32_MAX, &tprel) &&
+                object_aarch64_elf_tls_ie_relax(high->kind, link_read_u32(object->sections[high->section].data.pointer, high->offset), tprel, &high_word) &&
+                object_aarch64_elf_tls_ie_relax(low->kind, link_read_u32(object->sections[low->section].data.pointer, low->offset), tprel, &low_word) &&
+                (high_word & 31) == (low_word & 31);
+        if (valid)
+        {
+            link_write_u32(bytes, section_offsets[high->section] + high->offset, high_word);
+            link_write_u32(bytes, section_offsets[low->section] + low->offset, low_word);
+        }
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarch64_dynamic(Arena* arena, ObjectFile* object,
                                                                                             NativeExecutableLinkOptions options, LinkElfIndex* exports, bool export_thread_local)
 {
@@ -9075,14 +9174,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         result.error = LINK_ERROR_RELOCATION;
         return result;
     }
-    u32 tls_ie_high_count = 0;
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation* relocation = &object->relocations[index];
         if (relocation->kind != OBJECT_RELOCATION_AARCH64_CALL26 && relocation->kind != OBJECT_RELOCATION_AARCH64_JUMP26 &&
             relocation->kind != OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 &&
             relocation->kind != OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 &&
-            relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21 &&
             !object_relocation_kind_is_aarch64_elf_page(relocation->kind))
         {
             continue;
@@ -9105,25 +9202,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             instruction &= ~(UINT32_C(0xfff) << 10);
             instruction |= immediate << 10;
             link_write_u32(bytes, output_offset, instruction);
-            continue;
-        }
-        if (relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21)
-        {
-            // Initial-exec to local-exec: the ADRP becomes MOVZ of the offset's
-            // high half. The LDR is rewritten below, once every such ADRP
-            // has been seen, so that a pair must be complete to survive.
-            u64 thread_pointer_offset = 0;
-            u32 patched = 0;
-            if (!link_aarch64_elf_tprel_offset(object, symbol, relocation->addend, UINT32_MAX, &thread_pointer_offset) ||
-                !object_aarch64_elf_tls_ie_relax(relocation->kind, link_read_u32(object->sections[relocation->section].data.pointer, relocation->offset),
-                                                 thread_pointer_offset, &patched))
-            {
-                result.error = LINK_ERROR_RELOCATION;
-                result.symbol = symbol->name;
-                return result;
-            }
-            link_write_u32(bytes, output_offset, patched);
-            tls_ie_high_count += 1;
             continue;
         }
         u64 symbol_address = 0;
@@ -9197,53 +9275,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         }
         link_write_u32(bytes, output_offset, patched);
     }
-    // Complete the initial-exec pairs. Each LDR must directly follow a MOVZ the
-    // loop above wrote for the same offset and register, and each MOVZ must
-    // end up followed by the MOVK written here, so a missing, misplaced or
-    // mismatched half fails the link instead of leaving a GOT load behind.
-    u32 tls_ie_low_count = 0;
-    for (u32 index = 0; index < object->relocation_count && result.error == LINK_ERROR_NONE; index += 1)
-    {
-        ObjectRelocation* relocation = &object->relocations[index];
-        if (relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12)
-        {
-            continue;
-        }
-        ObjectSymbol* symbol = relocation->symbol < object->symbol_count ? &object->symbols[relocation->symbol] : 0;
-        u64 thread_pointer_offset = 0;
-        u32 patched = 0;
-        u32 movz = 0;
-        u64 output_offset = 0;
-        bool paired = symbol && relocation->section < OBJECT_SECTION_COUNT && relocation->offset >= 4 &&
-                      relocation->offset <= object->sections[relocation->section].data.length &&
-                      4 <= object->sections[relocation->section].data.length - relocation->offset;
-        if (paired)
-        {
-            output_offset = section_offsets[relocation->section] + relocation->offset;
-            movz = link_read_u32(bytes, output_offset - 4);
-            paired = link_aarch64_elf_tprel_offset(object, symbol, relocation->addend, UINT32_MAX, &thread_pointer_offset) &&
-                     (movz & UINT32_C(0xffe00000)) == UINT32_C(0xd2a00000) && ((movz >> 5) & 0xffff) == (u32)(thread_pointer_offset >> 16) &&
-                     object_aarch64_elf_tls_ie_relax(relocation->kind, link_read_u32(object->sections[relocation->section].data.pointer, relocation->offset),
-                                                     thread_pointer_offset, &patched) &&
-                     (patched & 31) == (movz & 31);
-        }
-        if (paired)
-        {
-            link_write_u32(bytes, output_offset, patched);
-            tls_ie_low_count += 1;
-        }
-        else
-        {
-            result.error = LINK_ERROR_RELOCATION;
-            result.symbol = symbol ? symbol->name : (String8){0};
-        }
-    }
-    if (result.error == LINK_ERROR_NONE && tls_ie_low_count != tls_ie_high_count)
+    if (!link_aarch64_tls_ie_relax(arena, object, bytes, section_offsets))
     {
         result.error = LINK_ERROR_RELOCATION;
-    }
-    if (result.error != LINK_ERROR_NONE)
-    {
         return result;
     }
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
