@@ -683,7 +683,7 @@ def sampling_archive(payload: bytes) -> dict[str, bytes]:
                 name = entry.filename
                 alias = member_identity(name)
                 components = name.rstrip("/").split("/")
-                if not name or len(name) > 512 or "\\" in name or name.startswith("/") or \
+                if entry.orig_filename != name or not name or len(name) > 512 or "\\" in name or name.startswith("/") or \
                         any(part in ("", ".", "..") for part in components) or \
                         any(ord(byte) < 32 or ord(byte) > 126 for byte in name) or alias in aliases:
                     raise ValueError("sampling ZIP has an unsafe or duplicate member")
@@ -1721,7 +1721,7 @@ def preparation_archive(payload: bytes) -> dict[str, bytes]:
                 name = entry.filename
                 alias = member_identity(name)
                 components = name.rstrip("/").split("/")
-                if not name or len(name) > 512 or "\\" in name or name.startswith("/") or \
+                if entry.orig_filename != name or not name or len(name) > 512 or "\\" in name or name.startswith("/") or \
                         any(part in ("", ".", "..") for part in components) or \
                         any(ord(char) < 32 or ord(char) > 126 for char in name) or alias in aliases:
                     raise ValueError("preparation ZIP has an unsafe or duplicate member")
