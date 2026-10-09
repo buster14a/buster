@@ -14305,6 +14305,7 @@ CPreprocessRunView c_preprocess_run_lines(CPreprocessRun* run, u64 output_target
         .tokens = token_stream.base,
         .spelling_base = space->base,
         .symbols = symbol_table,
+        .dialect = options.dialect,
         .produced = output_count,
         .lines_done = run->lines_done,
     };
@@ -14326,7 +14327,6 @@ CPreprocessResult c_preprocess_run_finish(CPreprocessRun* run, u64* rewritten_to
     COutputSpacingBlock* first_spacing = run->first_spacing;
     CPragmaStateRecorder pragma_changes = run->pragma_changes;
     CPreprocessFileTable file_table = run->file_table;
-    CIncludeFileTable include_files = run->include_files;
     CSpellingSpace* space = &run->space;
     Arena* result_arena = run->result_arena;
     Arena* phase_arena = run->phase_arena;
@@ -14386,7 +14386,7 @@ CPreprocessResult c_preprocess_run_finish(CPreprocessRun* run, u64* rewritten_to
         result.detail->macro_dump = c_macro_dump_text(arena, first_macro, space->base);
     }
 #if BUSTER_INCLUDE_TESTS
-    result.detail->include_file_probe_count = include_files.probe_count;
+    result.detail->include_file_probe_count = run->include_files.probe_count;
 #endif
     // Origin recovery and publication both require the stable key order.
     c_source_map_sort(arena, map.regions, map.count);

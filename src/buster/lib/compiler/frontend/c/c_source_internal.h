@@ -50,6 +50,8 @@ struct CPreprocessRunView
     char8 const* spelling_base;
     // The run's symbol table, still growing: ids already handed out are final.
     CSymbolTable* symbols;
+    // The run's dialect, after c_preprocess_run_begin normalized it.
+    CPreprocessDialect dialect;
     u64 produced;
     // No line is left; the run's next call must be c_preprocess_run_finish.
     bool lines_done;

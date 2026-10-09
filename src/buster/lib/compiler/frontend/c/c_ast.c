@@ -710,6 +710,20 @@ struct CAstBuilder
     u32 ring_capacity;
     u32 refill_batch;
     CToken eof_token;
+    // ---- fused stream (c_ast_build_fused). While `stream` is set the window
+    // borrows the run's output in place, `filled` is what the run has
+    // committed, and a refill runs more of its lines (c_ast_stream_refill).
+    // Keywords the run had not interned when the build began wait in
+    // `stream_words` (indices into c_ast_word_spellings) until it does.
+    CPreprocessRun* stream;
+    u32 stream_batch;
+    u32 stream_symbols;
+    u32 stream_word_count;
+    u8 stream_words[BUSTER_ARRAY_LENGTH(c_ast_word_spellings)];
+    // A final-stream pass changed a row the build had read, or the build met
+    // a token it could not classify without interning: the fused tree is
+    // discarded and built again from the finished array.
+    bool stream_rebuild;
     // ---- node columns: the open chunk and the chunk table.
     u32 node_count;
     u8* chunk_kinds;
@@ -764,6 +778,7 @@ struct CAstBuilder
     CPreprocessResult preprocess;
     CAstStatistics statistics;
 };
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(c_ast_word_spellings) <= 256);
 
 // ---- stacks ---------------------------------------------------------------
 
@@ -903,10 +918,20 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_describe_token(CAstBuilder* builder, CToken to
 
 // ---- token cursor ---------------------------------------------------------
 
+BUSTER_GLOBAL_LOCAL void c_ast_stream_refill(CAstBuilder* builder, u32 at);
+
 BUSTER_GLOBAL_LOCAL CToken c_ast_peek_slow(CAstBuilder* builder, u32 at)
 {
     CToken result = builder->eof_token;
-    if (builder->ring_capacity)
+    if (builder->stream)
+    {
+        c_ast_stream_refill(builder, at);
+        if (at < builder->filled)
+        {
+            result = builder->window[at];
+        }
+    }
+    else if (builder->ring_capacity)
     {
         while (builder->filled <= at && builder->filled < builder->token_count)
         {
@@ -1047,12 +1072,105 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_word_for_spelling(CAstBuilder* builder, String8 sp
     return result;
 }
 
+// Gives the keywords waiting in stream_words their table entries once the run
+// has interned them. A refill calls this after the run's lines and before the
+// build reads any row they committed, and a token can only carry an id the
+// run has already handed out, so no row is read through a missing entry.
+BUSTER_GLOBAL_LOCAL void c_ast_stream_words(CAstBuilder* builder, CSymbolTable const* symbols)
+{
+    u32 kept = 0;
+    for (u32 index = 0; index < builder->stream_word_count; index += 1)
+    {
+        CAstWordSpelling const* entry = &c_ast_word_spellings[builder->stream_words[index]];
+        u32 symbol = c_symbol_find(symbols, entry->spelling);
+        if (symbol)
+        {
+            c_ast_info_ensure(builder, symbol);
+            builder->info[symbol] = entry->word;
+        }
+        else
+        {
+            builder->stream_words[kept] = builder->stream_words[index];
+            kept += 1;
+        }
+    }
+    builder->stream_word_count = kept;
+    builder->stream_symbols = symbols->count;
+}
+
+// The run's lines are done: finish it, and read the finished result from here
+// on. The rows already read stay valid only when no final-stream pass touched
+// them; otherwise the build stops and is redone from the finished array.
+BUSTER_GLOBAL_LOCAL void c_ast_stream_finish(CAstBuilder* builder)
+{
+    u64 rewritten = 0;
+    CPreprocessResult finished = c_preprocess_run_finish(builder->stream, &rewritten);
+    builder->stream = 0;
+    builder->preprocess = finished;
+    if (rewritten || finished.token_count >= C_AST_NODE_LIMIT)
+    {
+        builder->stream_rebuild = true;
+        builder->failed = true;
+    }
+    else
+    {
+        builder->symbols = finished.symbols;
+        builder->source = finished.tokens;
+        builder->window = finished.tokens;
+        builder->token_count = (u32)finished.token_count;
+        builder->filled = builder->token_count;
+    }
+}
+
+// Runs the preprocessing run until the window holds token `at` or the stream
+// has ended. Each call asks for stream_batch tokens past `at`, so the build
+// then reads a batch the run has just written.
+BUSTER_GLOBAL_LOCAL void c_ast_stream_refill(CAstBuilder* builder, u32 at)
+{
+    while (builder->stream && builder->filled <= at && !builder->failed)
+    {
+        CPreprocessRunView view = c_preprocess_run_lines(builder->stream, (u64)at + builder->stream_batch);
+        C_AST_COUNT(builder, refills, 1);
+        if (view.produced >= C_AST_NODE_LIMIT)
+        {
+            builder->stream_rebuild = true;
+            builder->failed = true;
+        }
+        else
+        {
+            builder->filled = (u32)view.produced;
+            builder->token_count = builder->filled;
+            if (view.symbols->count != builder->stream_symbols)
+            {
+                c_ast_stream_words(builder, view.symbols);
+            }
+        }
+        if (view.lines_done)
+        {
+            c_ast_stream_finish(builder);
+        }
+    }
+}
+
 // The symbol an identifier token stands for. Interned tokens carry theirs;
 // a token the intern pass never saw is interned here, into a local value
-// that is never written back into the stream.
+// that is never written back into the stream. While a fused stream is open the
+// table is still the run's, and an insertion would shift every id the run
+// hands out afterwards: an interned token's own id is what c_symbol_intern
+// would answer, and an uninterned one sends the build back to the finished
+// array.
 BUSTER_GLOBAL_LOCAL u32 c_ast_symbol_slow(CAstBuilder* builder, CToken token)
 {
-    u32 symbol = c_symbol_intern(builder->symbols, c_token_spelling(builder->preprocess.spelling_base, token));
+    u32 symbol = token.symbol;
+    if (!builder->stream)
+    {
+        symbol = c_symbol_intern(builder->symbols, c_token_spelling(builder->preprocess.spelling_base, token));
+    }
+    else if (!symbol)
+    {
+        builder->stream_rebuild = true;
+        builder->failed = true;
+    }
     c_ast_info_ensure(builder, symbol);
     return symbol;
 }
@@ -5897,9 +6015,9 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_power_of_two_at_least(u32 value)
     return result;
 }
 
-// Prepares the cursor, the symbol-indexed table and the dialect flags. A
-// stream the pass cannot address marks the builder failed instead.
-BUSTER_GLOBAL_LOCAL void c_ast_builder_init(CAstBuilder* builder, CPreprocessResult preprocess, CAstOptions options)
+// The dialect flags, the symbol table and the end-of-file token, for either
+// kind of input.
+BUSTER_GLOBAL_LOCAL void c_ast_builder_dialect(CAstBuilder* builder, CPreprocessResult preprocess)
 {
     builder->preprocess = preprocess;
     builder->dialect = preprocess.dialect;
@@ -5908,6 +6026,43 @@ BUSTER_GLOBAL_LOCAL void c_ast_builder_init(CAstBuilder* builder, CPreprocessRes
     builder->symbols = preprocess.symbols;
     builder->eof_token = (CToken){.kind = C_TOKEN_END_OF_FILE};
     builder->ret_name_token = C_AST_NODE_INVALID;
+}
+
+// Fills the symbol-indexed table with this dialect's keywords. On a fused
+// stream a keyword the run has not interned yet waits in stream_words; on a
+// finished stream it does not occur in the unit.
+BUSTER_GLOBAL_LOCAL void c_ast_builder_words(CAstBuilder* builder)
+{
+    builder->info_count = builder->symbols->count + 64;
+    builder->info = arena_allocate_zeroed(builder->phase, u8, builder->info_count);
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(c_ast_word_spellings); index += 1)
+    {
+        CAstWordSpelling const* entry = &c_ast_word_spellings[index];
+        bool enabled = entry->gate == C_AST_GATE_ALWAYS || (entry->gate == C_AST_GATE_GNU && builder->gnu) ||
+                       (entry->gate == C_AST_GATE_C23 && builder->c23) ||
+                       (entry->gate == C_AST_GATE_GNU_OR_C23 && (builder->gnu || builder->c23));
+        if (enabled)
+        {
+            u32 symbol = c_symbol_find(builder->symbols, entry->spelling);
+            if (symbol && symbol < builder->info_count)
+            {
+                builder->info[symbol] = entry->word;
+            }
+            else if (builder->stream)
+            {
+                builder->stream_words[builder->stream_word_count] = (u8)index;
+                builder->stream_word_count += 1;
+            }
+        }
+    }
+    builder->stream_symbols = builder->symbols->count;
+}
+
+// Prepares the cursor, the symbol-indexed table and the dialect flags. A
+// stream the pass cannot address marks the builder failed instead.
+BUSTER_GLOBAL_LOCAL void c_ast_builder_init(CAstBuilder* builder, CPreprocessResult preprocess, CAstOptions options)
+{
+    c_ast_builder_dialect(builder, preprocess);
     if (preprocess.token_count >= C_AST_NODE_LIMIT)
     {
         c_ast_fail(builder, 0, C_DIAGNOSTIC_SOURCE_TOO_LARGE, S8("the token stream is too long for a syntax tree"));
@@ -5934,24 +6089,29 @@ BUSTER_GLOBAL_LOCAL void c_ast_builder_init(CAstBuilder* builder, CPreprocessRes
             builder->window = builder->ring;
             builder->window_mask = builder->ring_capacity - 1;
         }
-        builder->info_count = preprocess.symbols->count + 64;
-        builder->info = arena_allocate_zeroed(builder->phase, u8, builder->info_count);
-        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(c_ast_word_spellings); index += 1)
-        {
-            CAstWordSpelling const* entry = &c_ast_word_spellings[index];
-            bool enabled = entry->gate == C_AST_GATE_ALWAYS || (entry->gate == C_AST_GATE_GNU && builder->gnu) ||
-                           (entry->gate == C_AST_GATE_C23 && builder->c23) ||
-                           (entry->gate == C_AST_GATE_GNU_OR_C23 && (builder->gnu || builder->c23));
-            if (enabled)
-            {
-                u32 symbol = c_symbol_find(preprocess.symbols, entry->spelling);
-                if (symbol && symbol < builder->info_count)
-                {
-                    builder->info[symbol] = entry->word;
-                }
-            }
-        }
+        c_ast_builder_words(builder);
     }
+}
+
+// The fused cursor: the window borrows the run's output in place and each
+// refill asks the run for refill_batch tokens past the one it needs, or
+// C_AST_STREAM_BATCH by default. Until the run is finished the builder knows
+// only the rows it has committed and the symbols it has interned so far.
+BUSTER_GLOBAL_LOCAL void c_ast_builder_init_stream(CAstBuilder* builder, CPreprocessRun* run, CPreprocessRunView view, CAstOptions options)
+{
+    c_ast_builder_dialect(builder, (CPreprocessResult){
+                                       .spelling_base = view.spelling_base,
+                                       .symbols = view.symbols,
+                                       .dialect = view.dialect,
+                                   });
+    builder->stream = run;
+    builder->stream_batch = options.refill_batch ? options.refill_batch : C_AST_STREAM_BATCH;
+    builder->source = view.tokens;
+    builder->window = view.tokens;
+    builder->window_mask = UINT32_MAX;
+    builder->filled = (u32)BUSTER_MIN(view.produced, (u64)C_AST_NODE_LIMIT);
+    builder->token_count = builder->filled;
+    c_ast_builder_words(builder);
 }
 
 // Copies the chunked columns into exact-sized contiguous ones in the caller's
@@ -6080,28 +6240,86 @@ BUSTER_GLOBAL_LOCAL void c_ast_finalize_layout(Arena* arena, CAst* ast, CAstLayo
     statistics->retained_bytes += total * sizeof(u32);
 }
 
-CAstResult c_ast_build(Arena* arena, CPreprocessResult preprocess, CAstOptions options)
+// The builder's phase arena: the caller's, or a private one created here.
+BUSTER_GLOBAL_LOCAL Arena* c_ast_phase_open(CAstOptions options)
 {
-    CAstResult result = {0};
-    result.ast.root = C_AST_NODE_INVALID;
     Arena* phase = options.phase_arena;
-    bool phase_owned = !phase;
-    if (phase_owned)
+    if (!phase)
     {
         phase = c_frontend_arena_create((ArenaCreation){
             .reserved_size = C_PHASE_ARENA_RESERVED_SIZE,
             .flags = {.pool_reuse = 1},
         }, C_FRONTEND_RESERVATION_ANALYSIS);
     }
-    if (!phase)
+    return phase;
+}
+
+BUSTER_GLOBAL_LOCAL void c_ast_phase_close(Arena* phase, CAstOptions options, u64 phase_start)
+{
+    if (!options.phase_arena)
     {
-        result.diagnostics = arena_allocate(arena, CDiagnostic, 1);
-        result.diagnostics[0] = (CDiagnostic){
-            .message = S8("could not reserve the syntax tree builder arena"),
-            .kind = C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+        c_phase_arena_retire(phase);
+    }
+    else
+    {
+        arena_release_to_position(phase, phase_start);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void c_ast_phase_failure(Arena* arena, CAstResult* result)
+{
+    result->diagnostics = arena_allocate(arena, CDiagnostic, 1);
+    result->diagnostics[0] = (CDiagnostic){
+        .message = S8("could not reserve the syntax tree builder arena"),
+        .kind = C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+        .severity = C_DIAGNOSTIC_ERROR,
+    };
+    result->diagnostic_count = 1;
+}
+
+// Publishes a stopped builder: the sealed tree in the caller's arena, or the
+// one diagnostic of its first syntax error, located through `preprocess`.
+BUSTER_GLOBAL_LOCAL void c_ast_publish(CAstBuilder* builder, Arena* arena, CPreprocessResult const* preprocess, CAstOptions options, u64 phase_start,
+                                       CAstResult* result)
+{
+    if (!builder->failed)
+    {
+        c_ast_seal(builder, arena, &result->ast);
+        if (options.layout != C_AST_LAYOUT_IMPLICIT)
+        {
+            c_ast_finalize_layout(arena, &result->ast, options.layout, &builder->statistics);
+        }
+        result->complete = true;
+    }
+    else
+    {
+        CDiagnostic diagnostic = {
+            .message = builder->fail_message,
+            .kind = builder->fail_kind,
             .severity = C_DIAGNOSTIC_ERROR,
         };
-        result.diagnostic_count = 1;
+        if (preprocess->tokens && preprocess->token_count)
+        {
+            u64 index = BUSTER_MIN((u64)builder->fail_token, preprocess->token_count - 1);
+            diagnostic.location = c_preprocess_token_location(preprocess, preprocess->tokens[index]);
+        }
+        result->diagnostics = arena_allocate(arena, CDiagnostic, 1);
+        result->diagnostics[0] = diagnostic;
+        result->diagnostic_count = 1;
+    }
+    result->statistics = builder->statistics;
+    result->statistics.node_count = result->ast.node_count;
+    result->statistics.transient_high_water = builder->phase->position - phase_start;
+}
+
+CAstResult c_ast_build(Arena* arena, CPreprocessResult preprocess, CAstOptions options)
+{
+    CAstResult result = {0};
+    result.ast.root = C_AST_NODE_INVALID;
+    Arena* phase = c_ast_phase_open(options);
+    if (!phase)
+    {
+        c_ast_phase_failure(arena, &result);
     }
     else
     {
@@ -6114,41 +6332,70 @@ CAstResult c_ast_build(Arena* arena, CPreprocessResult preprocess, CAstOptions o
         {
             c_ast_run(&builder);
         }
+        c_ast_publish(&builder, arena, &preprocess, options, phase_start, &result);
+        c_ast_phase_close(phase, options, phase_start);
+    }
+    return result;
+}
+
+CAstFusedResult c_ast_build_fused(Arena* arena, String8 source, CPreprocessOptions preprocess_options, CAstOptions options)
+{
+    CAstFusedResult result = {0};
+    result.tree.ast.root = C_AST_NODE_INVALID;
+    Arena* phase = c_ast_phase_open(options);
+    CPreprocessRun* run = phase ? c_preprocess_run_begin(arena, source, preprocess_options, &result.preprocess) : 0;
+    if (!phase)
+    {
+        result.preprocess = c_preprocess(arena, source, preprocess_options);
+        c_ast_phase_failure(arena, &result.tree);
+    }
+    else if (!run)
+    {
+        // Nothing streams: build what c_ast_build builds from the early result.
+        c_ast_phase_close(phase, options, phase->position);
+        result.tree = c_ast_build(arena, result.preprocess, options);
+    }
+    else
+    {
+        u64 phase_start = phase->position;
+        CAstBuilder builder = {0};
+        builder.arena = arena;
+        builder.phase = phase;
+        u32 batch = options.refill_batch ? options.refill_batch : C_AST_STREAM_BATCH;
+        CPreprocessRunView view = c_preprocess_run_lines(run, batch);
+        c_ast_builder_init_stream(&builder, run, view, options);
+        if (view.produced >= C_AST_NODE_LIMIT)
+        {
+            builder.stream_rebuild = true;
+            builder.failed = true;
+        }
+        if (view.lines_done)
+        {
+            c_ast_stream_finish(&builder);
+        }
         if (!builder.failed)
         {
-            c_ast_seal(&builder, arena, &result.ast);
-            if (options.layout != C_AST_LAYOUT_IMPLICIT)
-            {
-                c_ast_finalize_layout(arena, &result.ast, options.layout, &builder.statistics);
-            }
-            result.complete = true;
+            c_ast_run(&builder);
+        }
+        // Every view that reports the lines done is followed by a finish, so a
+        // run still open here has lines left: the build stopped first, on a
+        // syntax error or a rebuild, and the run still owes its result.
+        if (builder.stream)
+        {
+            c_preprocess_run_lines(builder.stream, UINT64_MAX);
+            c_ast_stream_finish(&builder);
+        }
+        result.preprocess = builder.preprocess;
+        if (builder.stream_rebuild)
+        {
+            c_ast_phase_close(phase, options, phase_start);
+            result.tree = c_ast_build(arena, result.preprocess, options);
+            result.tree.statistics.stream_rebuilds = 1;
         }
         else
         {
-            CDiagnostic diagnostic = {
-                .message = builder.fail_message,
-                .kind = builder.fail_kind,
-                .severity = C_DIAGNOSTIC_ERROR,
-            };
-            if (preprocess.tokens && preprocess.token_count)
-            {
-                u64 index = BUSTER_MIN((u64)builder.fail_token, preprocess.token_count - 1);
-                diagnostic.location = c_preprocess_token_location(&preprocess, preprocess.tokens[index]);
-            }
-            result.diagnostics = arena_allocate(arena, CDiagnostic, 1);
-            result.diagnostics[0] = diagnostic;
-            result.diagnostic_count = 1;
-        }
-        result.statistics = builder.statistics;
-        result.statistics.node_count = result.ast.node_count;
-        result.statistics.transient_high_water = phase->position - phase_start;
-        if (phase_owned)
-        {
-            c_phase_arena_retire(phase);
-        }
-        else
-        {
-            arena_release_to_position(phase, phase_start);
+            c_ast_publish(&builder, arena, &result.preprocess, options, phase_start, &result.tree);
+            c_ast_phase_close(phase, options, phase_start);
         }
     }
     return result;

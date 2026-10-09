@@ -2273,6 +2273,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             {
                 invocation.c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_EXPLICIT;
             }
+            else if (string_equal(value, S8("fused")))
+            {
+                invocation.c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_FUSED;
+            }
             else
             {
                 compiler_driver_argument_error(arena, &invocation, S8("unsupported -fc-ast-pilot layout: {S8}"), value);
@@ -4314,6 +4318,9 @@ String8 compiler_driver_c_ast_pilot_name(CompilerDriverCAstPilot pilot)
     case COMPILER_DRIVER_C_AST_PILOT_EXPLICIT:
         name = S8("explicit");
         break;
+    case COMPILER_DRIVER_C_AST_PILOT_FUSED:
+        name = S8("fused");
+        break;
     case COMPILER_DRIVER_C_AST_PILOT_OFF:
     case COMPILER_DRIVER_C_AST_PILOT_COUNT:
     default:
@@ -4336,6 +4343,7 @@ BUSTER_GLOBAL_LOCAL CAstLayout compiler_driver_c_ast_pilot_layout(CompilerDriver
         break;
     case COMPILER_DRIVER_C_AST_PILOT_OFF:
     case COMPILER_DRIVER_C_AST_PILOT_IMPLICIT:
+    case COMPILER_DRIVER_C_AST_PILOT_FUSED:
     case COMPILER_DRIVER_C_AST_PILOT_COUNT:
     default:
         layout = C_AST_LAYOUT_IMPLICIT;
@@ -4354,13 +4362,17 @@ BUSTER_GLOBAL_LOCAL CAstLayout compiler_driver_c_ast_pilot_layout(CompilerDriver
 // same clock as the build: one c_ast_walk over the root, one linear pass over
 // the kinds column counting CALL nodes, and c_ast_children over every node
 // into a scratch buffer. Each pass feeds a counter that the -v line prints, so
-// none can be optimized away.
+// none can be optimized away. Under -fc-ast-pilot=fused the tree was built
+// while the unit preprocessed; it arrives in `fused`, and the time recorded is
+// the whole fused call's, preprocessing included.
 BUSTER_GLOBAL_LOCAL CAstResult compiler_driver_c_ast_pilot_run(Arena* arena, CompilerDriverInvocation const* invocation, CPreprocessResult preprocess,
-                                                               CompilerDriverCAstPilotResult* pilot)
+                                                               CAstResult const* fused, u64 fused_nanoseconds, CompilerDriverCAstPilotResult* pilot)
 {
     TimeDataType start = timestamp_take();
-    CAstResult built = c_ast_build(arena, preprocess, (CAstOptions){.layout = compiler_driver_c_ast_pilot_layout(invocation->c_ast_pilot)});
-    u64 build_nanoseconds = timestamp_ns_between(start, timestamp_take());
+    CAstResult built = fused ? *fused
+                             : c_ast_build(arena, preprocess, (CAstOptions){.layout = compiler_driver_c_ast_pilot_layout(invocation->c_ast_pilot)});
+    u64 build_nanoseconds = fused ? fused_nanoseconds : timestamp_ns_between(start, timestamp_take());
+    pilot->stream_rebuilds += built.statistics.stream_rebuilds;
     if (built.complete)
     {
         pilot->units += 1;
@@ -5394,32 +5406,48 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         definitions[index] = compiler_driver_c_definition(invocation.definitions[index]);
     }
     WORK_LEDGER_PHASE(PREPROCESS);
-    preprocess = c_preprocess(arena, BYTE_SLICE_TO_STRING(8, bytes),
-                                                (CPreprocessOptions){
-                                                    .macro_operations = invocation.macro_operations,
-                                                    .definitions = definitions,
-                                                    .undefinitions = invocation.undefinitions,
-                                                    .include_paths = invocation.include_paths,
-                                                    .system_include_paths = invocation.system_include_paths,
-                                                    .source_path = invocation.input_paths[0],
-                                                    .source_identity = source_file.identity,
-                                                    .target = invocation.target,
-                                                    .data_layout = target_data_layout(invocation.target),
-                                                    .dialect = compiler_driver_preprocess_dialect(invocation.c_dialect),
-                                                    .position_independent_level = invocation.position_independent_level,
-                                                    .position_independent_executable = invocation.position_independent_executable,
-                                                    .macro_operation_count = invocation.macro_operation_count,
-                                                    .definition_count = invocation.definition_count,
-                                                    .undefinition_count = invocation.undefinition_count,
-                                                    .include_path_count = invocation.include_path_count,
-                                                    .system_include_path_count = invocation.system_include_path_count,
-                                                    .already_preprocessed = compiler_driver_c_input_phase(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) == COMPILER_DRIVER_C_INPUT_PREPROCESSED,
-                                                    .omit_spelled_bytes = invocation.omit_spelled_bytes,
-                                                    .retain_output_spacing = invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
-                                                    .dump_macros = invocation.dump_macros && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
-                                                    .source_cache = invocation.source_cache,
-                                                    .preserve_spellings = invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
-                                                });
+    CPreprocessOptions preprocess_options = {
+        .macro_operations = invocation.macro_operations,
+        .definitions = definitions,
+        .undefinitions = invocation.undefinitions,
+        .include_paths = invocation.include_paths,
+        .system_include_paths = invocation.system_include_paths,
+        .source_path = invocation.input_paths[0],
+        .source_identity = source_file.identity,
+        .target = invocation.target,
+        .data_layout = target_data_layout(invocation.target),
+        .dialect = compiler_driver_preprocess_dialect(invocation.c_dialect),
+        .position_independent_level = invocation.position_independent_level,
+        .position_independent_executable = invocation.position_independent_executable,
+        .macro_operation_count = invocation.macro_operation_count,
+        .definition_count = invocation.definition_count,
+        .undefinition_count = invocation.undefinition_count,
+        .include_path_count = invocation.include_path_count,
+        .system_include_path_count = invocation.system_include_path_count,
+        .already_preprocessed = compiler_driver_c_input_phase(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) == COMPILER_DRIVER_C_INPUT_PREPROCESSED,
+        .omit_spelled_bytes = invocation.omit_spelled_bytes,
+        .retain_output_spacing = invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
+        .dump_macros = invocation.dump_macros && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
+        .source_cache = invocation.source_cache,
+        .preserve_spellings = invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
+    };
+    // -fc-ast-pilot=fused builds the tree while the unit preprocesses, so its
+    // time lands in this phase; the pilot hook below publishes the tree.
+    bool fused_pilot = invocation.c_ast_pilot == COMPILER_DRIVER_C_AST_PILOT_FUSED && invocation.action != COMPILER_DRIVER_ACTION_PREPROCESS;
+    CAstResult fused_tree = {0};
+    u64 fused_nanoseconds = 0;
+    if (fused_pilot)
+    {
+        TimeDataType fused_start = timestamp_take();
+        CAstFusedResult fused = c_ast_build_fused(arena, BYTE_SLICE_TO_STRING(8, bytes), preprocess_options, (CAstOptions){0});
+        fused_nanoseconds = timestamp_ns_between(fused_start, timestamp_take());
+        preprocess = fused.preprocess;
+        fused_tree = fused.tree;
+    }
+    else
+    {
+        preprocess = c_preprocess(arena, BYTE_SLICE_TO_STRING(8, bytes), preprocess_options);
+    }
     // Reported even when a later stage fails: the units the frontend read are
     // measured by then, and a failing compile is exactly when the size of
     // what it read is worth knowing.
@@ -5478,7 +5506,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     bool pilot_tree_built = false;
     if (invocation.c_ast_pilot != COMPILER_DRIVER_C_AST_PILOT_OFF)
     {
-        CAstResult tree = compiler_driver_c_ast_pilot_run(arena, &invocation, preprocess, &result.c_ast);
+        CAstResult tree = compiler_driver_c_ast_pilot_run(arena, &invocation, preprocess, fused_pilot ? &fused_tree : 0, fused_nanoseconds, &result.c_ast);
         if (!tree.complete)
         {
             result.parser_diagnostic_count = tree.diagnostic_count;
@@ -7235,6 +7263,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.transient_high_water += unit.c_ast.transient_high_water;
         result.c_ast.sealed_copy_bytes += unit.c_ast.sealed_copy_bytes;
         result.c_ast.finalize_child_entries += unit.c_ast.finalize_child_entries;
+        result.c_ast.stream_rebuilds += unit.c_ast.stream_rebuilds;
         result.c_ast.walk_nanoseconds += unit.c_ast.walk_nanoseconds;
         result.c_ast.walk_steps += unit.c_ast.walk_steps;
         result.c_ast.scan_nanoseconds += unit.c_ast.scan_nanoseconds;
