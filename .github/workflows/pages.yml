@@ -38,7 +38,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  no_code_plan:
+    name: No-code plan
+    if: ${{ github.server_url == 'https://github.com' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    uses: ./.github/workflows/ci-no-code-plan.yml
+
   build:
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') }}
+    needs: no_code_plan
     name: Pages validation and artifact
     runs-on: ubuntu-24.04
     timeout-minutes: 5

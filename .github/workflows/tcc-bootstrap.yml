@@ -18,8 +18,14 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 jobs:
+  no_code_plan:
+    name: No-code plan
+    if: ${{ github.server_url == 'https://github.com' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    uses: ./.github/workflows/ci-no-code-plan.yml
+
   bootstrap:
-    if: ${{ github.server_url == 'https://github.com' }}
+    needs: no_code_plan
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com') }}
     name: Canonical TCC bootstrap
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -32,8 +38,15 @@ jobs:
       - name: Require CI admission to be enabled
         shell: bash
         env:
+          PLAN_RESULT: ${{ needs.no_code_plan.result }}
+          EVENT_NAME: ${{ github.event_name }}
           CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
         run: |
+          if [[ ("${EVENT_NAME:-}" == pull_request || "${EVENT_NAME:-}" == merge_group) &&
+                "${PLAN_RESULT:-skipped}" != success ]]; then
+            echo '::error::Trusted classification failed; refusing no-code admission.'
+            exit 1
+          fi
           if [[ "$CI_ENABLED" != true ]]; then
             echo '::error::Required validation is disabled; refusing a skipped admission check.'
             exit 1
@@ -175,4 +188,7 @@ jobs:
             cat "$report"
             printf '```\n'
           } >>"$GITHUB_STEP_SUMMARY"
+          # Temporary hosted generation of this combined source acknowledgement.
+          ./build.sh source_size --write-baseline
+          cat docs/source-size-baseline.txt
           exit "$status"
