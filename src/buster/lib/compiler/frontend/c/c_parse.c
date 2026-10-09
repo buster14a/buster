@@ -26386,6 +26386,42 @@ BUSTER_C_INTERNAL CParserTreeScan c_parser_tree_scan(CParserTreeSplit const* spl
     return scan;
 }
 
+// Collects the SPECIFIER_WORD nodes spelling `typedef` or `constexpr`, in
+// node order, with one compare per 64-node window of the kinds column; only
+// the specifier-word lanes read their data word. The list grows by doubling
+// in the scratch arena, since such words are few.
+BUSTER_C_INTERNAL void c_parser_tree_storage_words(CParserTreeSplit* split)
+{
+    CAst const* ast = split->ast;
+    u32 node_count = ast->root;
+    u32 capacity = 64;
+    u32* words = arena_allocate(split->scratch, u32, capacity);
+    u32 count = 0;
+    Simd512 specifier_word = simd512_splat((u8)C_AST_SPECIFIER_WORD);
+    for (u32 base = 0; base < node_count; base += 64)
+    {
+        Mask64 valid = mask64_prefix(node_count - base);
+        Mask64 lanes = mask64_and(simd512_equal_u8(simd512_load_masked(ast->kinds + base, valid), specifier_word), valid);
+        for (; lanes; lanes = mask64_and(lanes, lanes - 1))
+        {
+            u32 node = base + mask64_first_set(lanes);
+            if (ast->data[node] == C_AST_WORD_TYPEDEF || ast->data[node] == C_AST_WORD_CONSTEXPR)
+            {
+                if (count == capacity)
+                {
+                    u32* grown = arena_allocate(split->scratch, u32, (u64)capacity * 2);
+                    memcpy(grown, words, sizeof(*words) * count);
+                    words = grown;
+                    capacity *= 2;
+                }
+                words[count++] = node;
+            }
+        }
+    }
+    split->storage_words = words;
+    split->storage_word_count = count;
+}
+
 typedef struct CParserTreeStorage CParserTreeStorage;
 struct CParserTreeStorage
 {
@@ -27147,10 +27183,12 @@ BUSTER_C_INTERNAL bool c_parser_tree_return_operand(CPreprocessResult const* pre
 // run here, into a one-row result, over a superset of the tokens it
 // validates: it steps over declaration decorations outside bodies, and checks
 // return operands only inside bodies, where the body's `{` has already
-// cleared its return state. A clean probe therefore means a clean walk. Two
-// filters skip only calls that cannot report: a number whose fact converted
-// as an integer, and an identifier that is not a type word or lies inside a
-// specifier run already validated.
+// cleared its return state. A clean probe therefore means a clean walk. The
+// stream is read in 64-token windows of the shape sidecar, and only number
+// and identifier lanes do scalar work. Two filters skip only calls that
+// cannot report: a number whose fact converted as an integer (its flags are
+// read by ordinal, as c_number_fact reads them), and an identifier that is
+// not a type word or lies inside a specifier run already validated.
 BUSTER_C_INTERNAL bool c_parser_tree_probe(Arena* arena, CPreprocessResult const* preprocess, CNumberFacts const* facts)
 {
     CParserResult probe = {.number_facts = facts, .diagnostic_capacity = 1};
@@ -27158,19 +27196,32 @@ BUSTER_C_INTERNAL bool c_parser_tree_probe(Arena* arena, CPreprocessResult const
     u32 token_count = (u32)preprocess->token_count;
     u32 validated_end = 0;
     bool missing = false;
-    for (u32 index = 0; index < token_count; index += 1)
+    Simd512 number_shape = simd512_splat((u8)C_TOKEN_PREPROCESSING_NUMBER);
+    Simd512 identifier_shape = simd512_splat((u8)C_TOKEN_IDENTIFIER);
+    for (u32 base = 0; base < token_count; base += 64)
     {
-        CTokenShape shape = c_preprocess_token_shape_at(token_shapes, preprocess, index);
-        if (shape == C_TOKEN_PREPROCESSING_NUMBER)
+        Mask64 valid = mask64_prefix(token_count - base);
+        Simd512 shapes = simd512_load_masked(token_shapes + base, valid);
+        Mask64 numbers = mask64_and(simd512_equal_u8(shapes, number_shape), valid);
+        Mask64 identifiers = mask64_and(simd512_equal_u8(shapes, identifier_shape), valid);
+        Mask64 with_facts = facts ? facts->number_masks[base / 64] : 0;
+        for (Mask64 lanes = numbers; lanes; lanes = mask64_and(lanes, lanes - 1))
         {
-            CNumberFact fact = c_number_fact(facts, preprocess->tokens, index);
-            if (!fact.present || (fact.flags & (C_NUMBER_FACT_CONVERTED | C_NUMBER_FACT_FLOATING)) != C_NUMBER_FACT_CONVERTED)
+            u32 lane = mask64_first_set(lanes);
+            bool integer = false;
+            if ((with_facts >> lane) & 1)
             {
-                c_parser_validate_integer_token(arena, &probe, preprocess, index);
+                u8 flags = facts->flags[facts->number_ranks[base / 64] + mask64_count(mask64_and(with_facts, mask64_prefix(lane)))];
+                integer = (flags & (C_NUMBER_FACT_CONVERTED | C_NUMBER_FACT_FLOATING)) == C_NUMBER_FACT_CONVERTED;
+            }
+            if (!integer)
+            {
+                c_parser_validate_integer_token(arena, &probe, preprocess, base + lane);
             }
         }
-        else if (shape == C_TOKEN_IDENTIFIER)
+        for (Mask64 lanes = identifiers; lanes; lanes = mask64_and(lanes, lanes - 1))
         {
+            u32 index = base + mask64_first_set(lanes);
             CToken token = preprocess->tokens[index];
             if (index >= validated_end && c_parse_type_word_for_dialect_token(*preprocess, token))
             {
@@ -27236,9 +27287,10 @@ CParserResult c_parse_ast_from_tree(Arena* arena, CPreprocessResult preprocess, 
         .preprocess = preprocess,
         .fallback_token = UINT32_MAX,
     };
+    // The probe reads the shape sidecar; a stream without one is the walker's.
     bool usable = arena && ast && ast->node_count && ast->root == ast->node_count - 1 && ast->kinds[ast->root] == C_AST_TRANSLATION_UNIT &&
                   !(preprocess.error_count && preprocess.diagnostic_count) && preprocess.tokens && preprocess.token_count &&
-                  preprocess.token_count <= (UINT32_MAX - 1) / 2;
+                  preprocess.token_count <= (UINT32_MAX - 1) / 2 && c_preprocess_token_shapes(&preprocess);
     if (!usable)
     {
         c_parser_tree_refuse(&split, C_PARSER_TREE_FALLBACK_INPUT, UINT32_MAX);
@@ -27257,20 +27309,7 @@ CParserResult c_parse_ast_from_tree(Arena* arena, CPreprocessResult preprocess, 
             c_parser_tree_refuse(&split, C_PARSER_TREE_FALLBACK_DIAGNOSTIC, UINT32_MAX);
         }
         u32 root = ast->root;
-        u32 storage_count = 0;
-        for (u32 node = 0; node < root; node += 1)
-        {
-            storage_count += ast->kinds[node] == C_AST_SPECIFIER_WORD &&
-                             (ast->data[node] == C_AST_WORD_TYPEDEF || ast->data[node] == C_AST_WORD_CONSTEXPR);
-        }
-        split.storage_words = arena_allocate(split.scratch, u32, (u64)storage_count + 1);
-        for (u32 node = 0; node < root && split.storage_word_count < storage_count; node += 1)
-        {
-            if (ast->kinds[node] == C_AST_SPECIFIER_WORD && (ast->data[node] == C_AST_WORD_TYPEDEF || ast->data[node] == C_AST_WORD_CONSTEXPR))
-            {
-                split.storage_words[split.storage_word_count++] = node;
-            }
-        }
+        c_parser_tree_storage_words(&split);
         u32 count = c_ast_list_count(ast, root);
         u32* externals = arena_allocate(split.scratch, u32, (u64)count + 1);
         c_ast_children(ast, root, externals, count + 1);

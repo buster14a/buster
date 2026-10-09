@@ -3557,7 +3557,8 @@ BUSTER_GLOBAL_LOCAL CAstSplitCase const c_ast_split_cases[] = {
      C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 2},
     // `typedef` and `constexpr` words the walker reads outside the top-level
     // specifiers make it record the whole declaration as a typedef or as
-    // constexpr. The split matches it by scanning such a declaration whole.
+    // constexpr (#3310). The split matches it by scanning such a declaration
+    // whole.
     {S8_INITIALIZER("int sx = ({ typedef int T9; T9 t = 1; t; }), sy; struct Q9 { int a; } typedef q9;"), C_PREPROCESS_DIALECT_GNU17,
      C_PARSER_TREE_FALLBACK_NONE, 0},
     {S8_INITIALIZER("int cy = (constexpr int){3}, cz; constexpr int cw = 2;"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_NONE, 0},
