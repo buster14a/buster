@@ -40,7 +40,29 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena, Strin
             "int main(int argc, char** argv)\n"
             "{\n"
             "    int result = 1;\n"
-            "    if (argc == 3 && strcmp(argv[1], \"bench_throughput\") == 0 && strcmp(argv[2], \"help\") == 0)\n"
+            "    if (argc >= 2 && strcmp(argv[1], \"generate\") == 0)\n"
+            "    {\n"
+            "        char directory[4096];\n"
+            "        if (!getcwd(directory, sizeof(directory))) return 1;\n"
+            "        if (mkdir(\"build\",0755) != 0 && errno != EEXIST) return 1;\n"
+            "        if (mkdir(\"build/generated\",0755) != 0 && errno != EEXIST) return 1;\n"
+            "        if (mkdir(\"build/Release\",0755) != 0 && errno != EEXIST) return 1;\n"
+            "        if (mkdir(\"src\",0755) != 0 && errno != EEXIST) return 1;\n"
+            "        if (mkdir(\"src/generated\",0755) != 0 && errno != EEXIST) return 1;\n"
+            "        FILE* cache = fopen(\"build/CMakeCache.txt\",\"w\");\n"
+            "        if (!cache) return 1;\n"
+            "        int printed = fprintf(cache,\"BUSTER_INCLUDE_TESTS:BOOL=OFF\\nCMAKE_HOME_DIRECTORY:INTERNAL=%s\\n\"\n"
+            "            \"CMAKE_C_COMPILER:FILEPATH=%s\\nCMAKE_LINKER:FILEPATH=%s\\nCMAKE_MAKE_PROGRAM:FILEPATH=%s\\n\",\n"
+            "            directory,FIXTURE_CLANG,FIXTURE_LINKER,FIXTURE_NINJA);\n"
+            "        int closed = fclose(cache);\n"
+            "        FILE* ignored = fopen(\"src/generated/ignored.h\",\"w\");\n"
+            "        if (!ignored) return 1;\n"
+            "        int generated = fputs(\"baseline ignored generated source\\n\",ignored);\n"
+            "        int ignored_closed = fclose(ignored);\n"
+            "        return printed > 0 && !closed && generated >= 0 && !ignored_closed ? 0 : 1;\n"
+            "    }\n"
+            "    if ((argc == 3 && strcmp(argv[1], \"bench_throughput\") == 0 && strcmp(argv[2], \"help\") == 0) ||\n"
+            "        (argc >= 2 && strcmp(argv[1], \"build\") == 0))\n"
             "    {\n"
             "        int directories = (mkdir(\"build\", 0755) == 0 || errno == EEXIST);\n"
             "        directories = directories && (mkdir(\"build/throughput-tools\", 0755) == 0 || errno == EEXIST);\n"
@@ -49,7 +71,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena, Strin
             "        {\n"
             "            execlp(\"clang\", \"clang\", \"-std=c11\", \"-O2\", \"-Wall\", \"-Wextra\", \"-Werror\",\n"
             "                \"-fwrapv\", \"-fno-strict-aliasing\", \"-funsigned-char\",\n"
-            "                \"tools/throughput/fixture.c\", \"-o\", \"build/throughput-tools/throughput\", (char*)0);\n"
+            "                \"tools/throughput/fixture.c\", \"-o\", strcmp(argv[1],\"build\") == 0 ?\n"
+            "                    \"build/Release/ide\" : \"build/throughput-tools/throughput\", (char*)0);\n"
             "            _exit(127);\n"
             "        }\n"
             "        if (child > 0)\n"
@@ -62,7 +85,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena, Strin
             "    }\n"
             "    return result;\n"
             "}\n")) &&
-        production_profile_write(path_join(arena, root, S8("fixture-dependency.h")), S8("#define FIXTURE_BASELINE 1\n")) &&
+        production_profile_write(path_join(arena, root, S8("fixture-dependency.h")), string_format(arena, S8("#define FIXTURE_BASELINE 1\n#define FIXTURE_CLANG \"{S8}\"\n"
+                "#define FIXTURE_LINKER \"{S8}\"\n#define FIXTURE_NINJA \"{S8}\"\n"), clang, linker, ninja)) &&
         production_profile_write(path_join(arena, root, S8("tools/throughput/fixture.c")),
             S8("#include <stdio.h>\nint main(void) { puts(\"baseline corpus consumer\"); return 0; }\n")) &&
         file_copy((CopyFileArguments){.original_path = S8("tools/bootstrap_driver.sh"),
@@ -184,6 +208,53 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena, Strin
         // Even same bytes with changed timestamps are refused until restored;
         // the successful round trip above proves the original mtimes survive.
         passed = !compiler_closure_transfer(arena, S8("verify"), root, snapshot, base, base_tree, report, digest) && passed;
+    }
+    if (passed)
+    {
+        // Run the actual native three-arm acquisition on the historical tiny
+        // baseline driver. Its generate/build commands recreate ignored inputs;
+        // the snapshot operation itself owns native corpus preparation.
+        String8 original_compiler = {0};
+        struct stat original_compiler_status = {0};
+        passed = compiler_closure_hash(arena, ide, &original_compiler, &original_compiler_status);
+        String8 wrong_secondary[] = {S8("prepare"), root, path_join(arena, directory, S8("wrong-secondary")),
+            S8("snapshot-v1"), base, base_tree, base, base_tree, base, S8("0000000000000000000000000000000000000000")};
+        String8 unsupported_legacy[] = {S8("prepare"), root, path_join(arena, directory, S8("unsupported-legacy")),
+            S8("legacy-rebuild"), base, base_tree, base, base_tree, base, base_tree};
+        passed = compiler_closure_prepare_main(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wrong_secondary)) != PROCESS_RESULT_SUCCESS &&
+            compiler_closure_prepare_main(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unsupported_legacy)) != PROCESS_RESULT_SUCCESS && passed;
+        String8 after_compiler = {0};
+        struct stat after_compiler_status = {0};
+        passed = compiler_closure_hash(arena, ide, &after_compiler, &after_compiler_status) &&
+            string_equal(original_compiler, after_compiler) &&
+            original_compiler_status.st_mode == after_compiler_status.st_mode &&
+            original_compiler_status.st_size == after_compiler_status.st_size && passed;
+        String8 acquisition_output = path_join(arena, directory, S8("acquisition"));
+        String8 prepare[] = {S8("prepare"), root, acquisition_output, S8("snapshot-v1"), base, base_tree, base, base_tree, base, base_tree};
+        passed = passed && compiler_closure_prepare_main(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(prepare)) == PROCESS_RESULT_SUCCESS;
+        String8 acquired = compiler_closure_read(arena, path_join(arena, acquisition_output, S8("prepared.json")),
+            BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
+        passed = passed && production_profile_contains(acquired, S8("\"state\":\"complete\"")) &&
+            path_exists(arena, path_join(arena, acquisition_output, S8("closure-verify.json"))) &&
+            path_exists(arena, path_join(arena, acquisition_output, S8("bin/ide-base"))) &&
+            path_exists(arena, path_join(arena, acquisition_output, S8("bin/ide-cand"))) &&
+            path_exists(arena, path_join(arena, acquisition_output, S8("bin/ide-cand2"))) &&
+            production_profile_contains(acquired, S8("\"arm_count\":3"));
+        String8 ignored = compiler_closure_read(arena, header, BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
+        passed = passed && string_equal(ignored, S8("baseline ignored generated source\n"));
+        if (passed && export.length)
+        {
+            String8 files[] = {S8("prepared.json"), S8("prepared.manifest.tsv"), S8("prepared.workload.tsv"), S8("phases.tsv"),
+                S8("baseline.binary.json"), S8("candidate.binary.json"), S8("candidate2.binary.json"),
+                S8("baseline.CMakeCache.txt"), S8("candidate.CMakeCache.txt"), S8("candidate2.CMakeCache.txt"),
+                S8("closure-snapshot.json"), S8("closure-restore.json"), S8("closure-verify.json"),
+                S8("closure-snapshot.json.manifest.tsv"), S8("closure-restore.json.manifest.tsv"), S8("closure-verify.json.manifest.tsv")};
+            for (u64 index = 0; passed && index < BUSTER_ARRAY_LENGTH(files); index += 1)
+            {
+                passed = file_copy((CopyFileArguments){.original_path = path_join(arena, acquisition_output, files[index]),
+                    .new_path = path_join(arena, export, files[index])});
+            }
+        }
     }
     bool cleaned = os_directory_delete(directory);
     passed = passed && cleaned;

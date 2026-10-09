@@ -1,4 +1,7 @@
 // Fixed native preparation and closure qualification, included after compiler_closure.c.
+// Prepare accepts ROOT OUT POLICY BASE BASE_TREE HEAD HEAD_TREE, with optional
+// SECONDARY_HEAD SECONDARY_TREE only under snapshot-v1. All three pins are
+// checked before source mutation; one baseline snapshot serves both candidates.
 // Entry points: compiler_closure_prepare_main (prepare) and
 // compiler_closure_qualification_main (qualify). The trusted outer runner owns
 // process-tree cancellation and the existing 90-minute host cap.
@@ -17,15 +20,29 @@ struct CompilerClosurePreparation
 {
     Arena* arena;
     String8 root, output, policy, base, base_tree, head, head_tree;
-    String8 baseline, candidate, baseline_sha256, candidate_sha256, harness_sha256;
+    String8 secondary_head, secondary_tree;
+    String8 baseline, candidate, candidate2, baseline_sha256, candidate_sha256, candidate2_sha256, harness_sha256;
+    String8 baseline_cache_sha256, candidate_cache_sha256, candidate2_cache_sha256;
+    String8 baseline_receipt_sha256, candidate_receipt_sha256, candidate2_receipt_sha256;
     String8 frozen_manifest, snapshot_digest, frozen_workload_sha256;
     String8 bootstrap_configuration, bootstrap_artifact_sha256;
-    u64 baseline_bytes, candidate_bytes, harness_bytes;
+    u64 baseline_bytes, candidate_bytes, candidate2_bytes, harness_bytes;
+    u64 baseline_mode, candidate_mode, candidate2_mode, harness_mode;
     String8List ledger;
     String8 phase;
     u64 stage, started_us, phase_started_us;
+    bool secondary_requested;
     bool owned;
     bool success;
+};
+
+typedef struct CompilerClosureFrozenBinary CompilerClosureFrozenBinary;
+struct CompilerClosureFrozenBinary
+{
+    String8 path;
+    String8 sha256;
+    u64 bytes;
+    u64 mode;
 };
 
 BUSTER_GLOBAL_LOCAL bool compiler_closure_commit_valid(String8 text)
@@ -233,15 +250,18 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_initialize(CompilerClosure
         TemporalArena temporary = scratch_begin(&arena, 1);
         ProductionProfileCommandResult revision = compiler_closure_git(temporary.arena, root, S8("HEAD"));
         ProductionProfileCommandResult current_tree = compiler_closure_git(temporary.arena, root, S8("HEAD^{tree}"));
+        ProductionProfileCommandResult baseline_commit = compiler_closure_git(temporary.arena, root,
+            string_format(temporary.arena, S8("{S8}^{{commit}}"), base));
         ProductionProfileCommandResult baseline_tree = compiler_closure_git(temporary.arena, root,
             string_format(temporary.arena, S8("{S8}^{{tree}}"), base));
         String8 ancestor[] = {S8("git"), S8("-C"), root, S8("merge-base"), S8("--is-ancestor"), base, head};
         String8 clean[] = {S8("git"), S8("-C"), root, S8("diff"), S8("--quiet"), S8("--exit-code"), S8("HEAD"), S8("--")};
         ProductionProfileCommandResult ancestry = compiler_closure_capture(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(ancestor));
         ProductionProfileCommandResult clean_result = compiler_closure_capture(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(clean));
-        result = revision.success && current_tree.success && baseline_tree.success && ancestry.success && clean_result.success &&
+        result = revision.success && current_tree.success && baseline_commit.success && baseline_tree.success && ancestry.success && clean_result.success &&
             string_equal(production_profile_trim(revision.output), head) &&
             string_equal(production_profile_trim(current_tree.output), head_tree) &&
+            string_equal(production_profile_trim(baseline_commit.output), base) &&
             string_equal(production_profile_trim(baseline_tree.output), base_tree);
         result = compiler_closure_preparation_end(preparation, result, 0);
         scratch_end(temporary);
@@ -253,6 +273,44 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_initialize(CompilerClosure
         preparation->success = preparation->success && result;
     }
     return preparation->success;
+}
+
+
+BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_secondary_pins(CompilerClosurePreparation* preparation,
+    String8 secondary_head, String8 secondary_tree)
+{
+    preparation->secondary_requested = true;
+    bool before_mutation = preparation->stage == 1 && !preparation->baseline.length && !preparation->candidate.length;
+    bool result = compiler_closure_preparation_begin(preparation, S8("secondary-pins"));
+    if (result)
+    {
+        TemporalArena temporary = scratch_begin(&preparation->arena, 1);
+        result = before_mutation && string_equal(preparation->policy, S8("snapshot-v1")) &&
+            compiler_closure_commit_valid(secondary_head) && compiler_closure_commit_valid(secondary_tree);
+        if (result)
+        {
+            preparation->secondary_head = string_duplicate_arena(preparation->arena, secondary_head, true);
+            preparation->secondary_tree = string_duplicate_arena(preparation->arena, secondary_tree, true);
+            ProductionProfileCommandResult revision = compiler_closure_git(temporary.arena, preparation->root,
+                string_format(temporary.arena, S8("{S8}^{{commit}}"), secondary_head));
+            ProductionProfileCommandResult tree = compiler_closure_git(temporary.arena, preparation->root,
+                string_format(temporary.arena, S8("{S8}^{{tree}}"), secondary_head));
+            String8 ancestor[] = {S8("git"), S8("-C"), preparation->root, S8("merge-base"), S8("--is-ancestor"),
+                preparation->base, secondary_head};
+            ProductionProfileCommandResult ancestry = compiler_closure_capture(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(ancestor));
+            result = revision.success && tree.success && ancestry.success &&
+                string_equal(production_profile_trim(revision.output), secondary_head) &&
+                string_equal(production_profile_trim(tree.output), secondary_tree);
+            if (result)
+            {
+                string8_list_push(preparation->arena, &preparation->ledger,
+                    string_format(preparation->arena, S8("secondary_head\t{S8}\nsecondary_tree\t{S8}\n"), secondary_head, secondary_tree));
+            }
+        }
+        result = compiler_closure_preparation_end(preparation, result, 0);
+        scratch_end(temporary);
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_checkout(CompilerClosurePreparation* preparation, String8 phase, String8 commit)
@@ -293,48 +351,96 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_build(CompilerClosurePrepa
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_freeze(CompilerClosurePreparation* preparation, bool baseline)
+BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_freeze(CompilerClosurePreparation* preparation, u64 arm)
 {
-    String8 role = baseline ? S8("baseline") : S8("candidate");
+    String8 role = arm == 0 ? S8("baseline") : (arm == 1 ? S8("candidate") : S8("candidate2"));
+    String8 basename = arm == 0 ? S8("bin/ide-base") : (arm == 1 ? S8("bin/ide-cand") : S8("bin/ide-cand2"));
+    String8 commit = arm == 0 ? preparation->base : (arm == 1 ? preparation->head : preparation->secondary_head);
+    String8 tree = arm == 0 ? preparation->base_tree : (arm == 1 ? preparation->head_tree : preparation->secondary_tree);
     bool result = compiler_closure_preparation_begin(preparation,
         string_format(preparation->arena, S8("{S8}-freeze"), role));
     if (result)
     {
         TemporalArena temporary = scratch_begin(&preparation->arena, 1);
         String8 source = path_join(temporary.arena, preparation->root, S8("build/Release/ide"));
-        String8 destination = path_join(preparation->arena, preparation->output, baseline ? S8("bin/ide-base") : S8("bin/ide-cand"));
+        String8 destination = path_join(preparation->arena, preparation->output, basename);
         String8 source_hash = {0};
         String8 destination_hash = {0};
         struct stat source_status = {0};
         struct stat destination_status = {0};
-        result = compiler_closure_hash(temporary.arena, source, &source_hash, &source_status) &&
+        result = arm <= 2 && compiler_closure_hash(temporary.arena, source, &source_hash, &source_status) &&
             source_status.st_size > 0 && (source_status.st_mode & 0111) &&
             file_copy((CopyFileArguments){.original_path = source, .new_path = destination}) &&
             chmod((char*)destination.pointer, source_status.st_mode & 07777) == 0 &&
             compiler_closure_hash(temporary.arena, destination, &destination_hash, &destination_status) &&
             string_equal(source_hash, destination_hash) && source_status.st_size == destination_status.st_size &&
             (source_status.st_mode & 07777) == (destination_status.st_mode & 07777);
+        String8 cache_source = path_join(temporary.arena, preparation->root, S8("build/CMakeCache.txt"));
+        String8 cache_destination = path_join(temporary.arena, preparation->output,
+            string_format(temporary.arena, S8("{S8}.CMakeCache.txt"), role));
+        String8 cache_source_hash = {0};
+        String8 cache_destination_hash = {0};
+        struct stat cache_source_status = {0};
+        struct stat cache_destination_status = {0};
+        result = result && compiler_closure_hash(temporary.arena, cache_source, &cache_source_hash, &cache_source_status) &&
+            cache_source_status.st_size > 0 &&
+            file_copy((CopyFileArguments){.original_path = cache_source, .new_path = cache_destination}) &&
+            chmod((char*)cache_destination.pointer, cache_source_status.st_mode & 07777) == 0 &&
+            compiler_closure_hash(temporary.arena, cache_destination, &cache_destination_hash, &cache_destination_status) &&
+            string_equal(cache_source_hash, cache_destination_hash) &&
+            cache_source_status.st_size == cache_destination_status.st_size &&
+            (cache_source_status.st_mode & 07777) == (cache_destination_status.st_mode & 07777);
         if (result)
         {
             String8 digest = string_duplicate_arena(preparation->arena, destination_hash, true);
-            if (baseline)
+            String8 cache_digest = string_duplicate_arena(preparation->arena, cache_destination_hash, true);
+            u64 bytes = (u64)destination_status.st_size;
+            u64 mode = (u64)(destination_status.st_mode & 07777);
+            if (arm == 0)
             {
                 preparation->baseline = destination;
                 preparation->baseline_sha256 = digest;
-                preparation->baseline_bytes = (u64)destination_status.st_size;
+                preparation->baseline_bytes = bytes;
+                preparation->baseline_mode = mode;
+                preparation->baseline_cache_sha256 = cache_digest;
             }
-            else
+            else if (arm == 1)
             {
                 preparation->candidate = destination;
                 preparation->candidate_sha256 = digest;
-                preparation->candidate_bytes = (u64)destination_status.st_size;
+                preparation->candidate_bytes = bytes;
+                preparation->candidate_mode = mode;
+                preparation->candidate_cache_sha256 = cache_digest;
             }
-            result = file_copy((CopyFileArguments){
-                .original_path = path_join(temporary.arena, preparation->root, S8("build/CMakeCache.txt")),
-                .new_path = path_join(temporary.arena, preparation->output,
-                    baseline ? S8("baseline.CMakeCache.txt") : S8("candidate.CMakeCache.txt"))});
+            else
+            {
+                preparation->candidate2 = destination;
+                preparation->candidate2_sha256 = digest;
+                preparation->candidate2_bytes = bytes;
+                preparation->candidate2_mode = mode;
+                preparation->candidate2_cache_sha256 = cache_digest;
+            }
         }
-        result = compiler_closure_preparation_end(preparation, result, 0);
+        String8 receipt = string_format(temporary.arena, S8("{{\"schema\":\"buster-compiler-frozen-binary-v1\","
+            "\"state\":\"{S8}\",\"role\":\"{S8}\",\"commit\":\"{S8}\",\"tree\":\"{S8}\","
+            "\"sha256\":\"{S8}\",\"bytes\":{u64},\"mode\":{u64},"
+            "\"cache_sha256\":\"{S8}\",\"cache_bytes\":{u64},\"cache_mode\":{u64}\n}\n"),
+            result ? S8("complete") : S8("failed"), role, commit, tree, destination_hash,
+            destination_status.st_size > 0 ? (u64)destination_status.st_size : 0ull,
+            (u64)(destination_status.st_mode & 07777), cache_destination_hash,
+            cache_destination_status.st_size > 0 ? (u64)cache_destination_status.st_size : 0ull,
+            (u64)(cache_destination_status.st_mode & 07777));
+        bool receipt_written = file_publish(path_join(temporary.arena, preparation->output,
+            string_format(temporary.arena, S8("{S8}.binary.json"), role)), BUSTER_SLICE_TO_BYTE_SLICE(receipt));
+        if (result && receipt_written)
+        {
+            String8 receipt_digest = string_duplicate_arena(preparation->arena,
+                production_profile_sha256_text(temporary.arena, receipt), true);
+            if (arm == 0) { preparation->baseline_receipt_sha256 = receipt_digest; }
+            else if (arm == 1) { preparation->candidate_receipt_sha256 = receipt_digest; }
+            else { preparation->candidate2_receipt_sha256 = receipt_digest; }
+        }
+        result = compiler_closure_preparation_end(preparation, result && receipt_written, 0);
         scratch_end(temporary);
     }
     return result;
@@ -408,10 +514,15 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_execute(CompilerClosurePre
     bool snapshot = string_equal(preparation->policy, S8("snapshot-v1"));
     bool result = compiler_closure_preparation_reset(preparation) &&
         compiler_closure_preparation_build(preparation, S8("baseline"), preparation->base) &&
-        compiler_closure_preparation_freeze(preparation, true);
+        compiler_closure_preparation_freeze(preparation, 0);
     if (result && snapshot) { result = compiler_closure_preparation_transfer(preparation, S8("snapshot")); }
     result = result && compiler_closure_preparation_build(preparation, S8("candidate"), preparation->head) &&
-        compiler_closure_preparation_freeze(preparation, false);
+        compiler_closure_preparation_freeze(preparation, 1);
+    if (result && preparation->secondary_requested)
+    {
+        result = compiler_closure_preparation_build(preparation, S8("candidate2"), preparation->secondary_head) &&
+            compiler_closure_preparation_freeze(preparation, 2);
+    }
     if (result && snapshot)
     {
         result = compiler_closure_preparation_checkout(preparation, S8("baseline-restore-checkout"), preparation->base) &&
@@ -437,6 +548,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_execute(CompilerClosurePre
         {
             preparation->harness_sha256 = digest;
             preparation->harness_bytes = (u64)status.st_size;
+            preparation->harness_mode = (u64)(status.st_mode & 07777);
         }
         result = compiler_closure_preparation_end(preparation, result, 0);
     }
@@ -453,22 +565,49 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_write(CompilerClosurePrepa
         String8 ledger = string_join_arena(temporary.arena, string8_list_to_slice(temporary.arena, preparation->ledger), false);
         bool complete = preparation->success && stage_object_sha256_valid(preparation->baseline_sha256) &&
             stage_object_sha256_valid(preparation->candidate_sha256) && stage_object_sha256_valid(preparation->harness_sha256) &&
+            stage_object_sha256_valid(preparation->baseline_cache_sha256) &&
+            stage_object_sha256_valid(preparation->candidate_cache_sha256) &&
+            stage_object_sha256_valid(preparation->baseline_receipt_sha256) &&
+            stage_object_sha256_valid(preparation->candidate_receipt_sha256) &&
             stage_object_sha256_valid(preparation->frozen_workload_sha256) &&
             stage_object_sha256_valid(preparation->bootstrap_configuration) &&
             stage_object_sha256_valid(preparation->bootstrap_artifact_sha256) && preparation->frozen_manifest.length &&
-            preparation->baseline_bytes && preparation->candidate_bytes && preparation->harness_bytes;
+            preparation->baseline_bytes && preparation->candidate_bytes && preparation->harness_bytes &&
+            (preparation->baseline_mode & 0111) && (preparation->candidate_mode & 0111) && (preparation->harness_mode & 0111);
+        if (preparation->secondary_requested)
+        {
+            complete = complete && string_equal(preparation->policy, S8("snapshot-v1")) &&
+                compiler_closure_commit_valid(preparation->secondary_head) && compiler_closure_commit_valid(preparation->secondary_tree) &&
+                stage_object_sha256_valid(preparation->candidate2_sha256) &&
+                stage_object_sha256_valid(preparation->candidate2_cache_sha256) &&
+                stage_object_sha256_valid(preparation->candidate2_receipt_sha256) && preparation->candidate2_bytes &&
+                (preparation->candidate2_mode & 0111);
+        }
         String8 text = string_format(temporary.arena, S8("{{\"schema\":\"buster-compiler-preparation-v1\","
-            "\"state\":\"{S8}\",\"policy\":\"{S8}\",\"base\":\"{S8}\",\"base_tree\":\"{S8}\",\"head\":\"{S8}\",\"head_tree\":\"{S8}\","
+            "\"state\":\"{S8}\",\"policy\":\"{S8}\",\"arm_count\":{u64},"
+            "\"base\":\"{S8}\",\"base_tree\":\"{S8}\",\"head\":\"{S8}\",\"head_tree\":\"{S8}\","
+            "\"secondary_head\":\"{S8}\",\"secondary_tree\":\"{S8}\","
             "\"root_sha256\":\"{S8}\",\"prepared_manifest_sha256\":\"{S8}\",\"frozen_workload_sha256\":\"{S8}\","
-            "\"ledger_sha256\":\"{S8}\",\"baseline_sha256\":\"{S8}\",\"candidate_sha256\":\"{S8}\",\"harness_sha256\":\"{S8}\","
-            "\"baseline_bytes\":{u64},\"candidate_bytes\":{u64},\"harness_bytes\":{u64},\"snapshot_digest\":\"{S8}\","
-            "\"bootstrap_configuration\":\"{S8}\",\"bootstrap_artifact_sha256\":\"{S8}\",\"stage_count\":{u64},"
-            "\"ownership_schema\":\"buster-native-qualification-supervisor-v1\",\"cleanup_proven\":{S8},\"duration_us\":{u64}\n}\n"),
-            complete ? S8("complete") : S8("failed"), preparation->policy, preparation->base, preparation->base_tree,
-            preparation->head, preparation->head_tree, production_profile_sha256_text(temporary.arena, preparation->root),
+            "\"ledger_sha256\":\"{S8}\",\"baseline_sha256\":\"{S8}\",\"candidate_sha256\":\"{S8}\","
+            "\"candidate2_sha256\":\"{S8}\",\"harness_sha256\":\"{S8}\","
+            "\"baseline_bytes\":{u64},\"candidate_bytes\":{u64},\"candidate2_bytes\":{u64},\"harness_bytes\":{u64},"
+            "\"baseline_mode\":{u64},\"candidate_mode\":{u64},\"candidate2_mode\":{u64},\"harness_mode\":{u64},"
+            "\"baseline_cache_sha256\":\"{S8}\",\"candidate_cache_sha256\":\"{S8}\",\"candidate2_cache_sha256\":\"{S8}\","
+            "\"baseline_receipt_sha256\":\"{S8}\",\"candidate_receipt_sha256\":\"{S8}\",\"candidate2_receipt_sha256\":\"{S8}\","
+            "\"snapshot_digest\":\"{S8}\",\"bootstrap_configuration\":\"{S8}\",\"bootstrap_artifact_sha256\":\"{S8}\","
+            "\"stage_count\":{u64},\"ownership_schema\":\"buster-native-qualification-supervisor-v1\","
+            "\"cleanup_proven\":{S8},\"duration_us\":{u64}\n}\n"),
+            complete ? S8("complete") : S8("failed"), preparation->policy, preparation->secondary_requested ? 3ull : 2ull,
+            preparation->base, preparation->base_tree, preparation->head, preparation->head_tree,
+            preparation->secondary_head, preparation->secondary_tree,
+            production_profile_sha256_text(temporary.arena, preparation->root),
             production_profile_sha256_text(temporary.arena, preparation->frozen_manifest), preparation->frozen_workload_sha256,
             production_profile_sha256_text(temporary.arena, ledger), preparation->baseline_sha256, preparation->candidate_sha256,
-            preparation->harness_sha256, preparation->baseline_bytes, preparation->candidate_bytes, preparation->harness_bytes,
+            preparation->candidate2_sha256, preparation->harness_sha256,
+            preparation->baseline_bytes, preparation->candidate_bytes, preparation->candidate2_bytes, preparation->harness_bytes,
+            preparation->baseline_mode, preparation->candidate_mode, preparation->candidate2_mode, preparation->harness_mode,
+            preparation->baseline_cache_sha256, preparation->candidate_cache_sha256, preparation->candidate2_cache_sha256,
+            preparation->baseline_receipt_sha256, preparation->candidate_receipt_sha256, preparation->candidate2_receipt_sha256,
             preparation->snapshot_digest, preparation->bootstrap_configuration, preparation->bootstrap_artifact_sha256,
             preparation->stage, !compiler_closure_cleanup_failed ? S8("true") : S8("false"), os_now_microseconds() - preparation->started_us);
         result = compiler_closure_preparation_flush(preparation) &&
@@ -479,8 +618,80 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_write(CompilerClosurePrepa
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL CompilerClosureFrozenBinary compiler_closure_preparation_binary_identity(CompilerClosurePreparation* preparation, u64 arm)
+{
+    CompilerClosureFrozenBinary result = {0};
+    if (arm == 0)
+    {
+        result = (CompilerClosureFrozenBinary){.path = preparation->baseline, .sha256 = preparation->baseline_sha256,
+            .bytes = preparation->baseline_bytes, .mode = preparation->baseline_mode};
+    }
+    else if (arm == 1)
+    {
+        result = (CompilerClosureFrozenBinary){.path = preparation->candidate, .sha256 = preparation->candidate_sha256,
+            .bytes = preparation->candidate_bytes, .mode = preparation->candidate_mode};
+    }
+    else if (arm == 2)
+    {
+        result = (CompilerClosureFrozenBinary){.path = preparation->candidate2, .sha256 = preparation->candidate2_sha256,
+            .bytes = preparation->candidate2_bytes, .mode = preparation->candidate2_mode};
+    }
+    return result;
+}
+
+// Post-command checks still run after a failed child, preserving its failure.
+// They launch no process and do not relax the cutoff on launching new stages.
+// Each actual measurement is surrounded by byte/size/executable-mode checks,
+// including the external legacy binary in the cross-build same-source pair.
+BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_binary_check(CompilerClosurePreparation* preparation,
+    String8 phase, CompilerClosureFrozenBinary baseline, CompilerClosureFrozenBinary candidate, bool post)
+{
+    bool result = preparation->owned && (preparation->success || post) &&
+        preparation->stage < COMPILER_CLOSURE_QUALIFICATION_STAGE_LIMIT;
+    if (result)
+    {
+        preparation->stage += 1;
+        preparation->phase = phase;
+        preparation->phase_started_us = os_now_microseconds();
+        string8_list_push(preparation->arena, &preparation->ledger,
+            string_format(preparation->arena, S8("start\t{u64}\t{S8}\t{u64}\n"),
+                preparation->stage, phase, preparation->phase_started_us));
+        result = compiler_closure_preparation_flush(preparation);
+        TemporalArena temporary = scratch_begin(&preparation->arena, 1);
+        CompilerClosureFrozenBinary binaries[] = {baseline, candidate};
+        String8List records = {0};
+        string8_list_push(temporary.arena, &records, S8("BUSTER_COMPILER_FROZEN_BINARY_CHECK_V1\n"));
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(binaries); index += 1)
+        {
+            CompilerClosureFrozenBinary expected = binaries[index];
+            String8 observed = {0};
+            struct stat status = {0};
+            bool matched = expected.path.length && stage_object_sha256_valid(expected.sha256) && expected.bytes &&
+                expected.mode <= 07777 && (expected.mode & 0111) &&
+                compiler_closure_hash(temporary.arena, expected.path, &observed, &status) &&
+                status.st_size > 0 && (u64)status.st_size == expected.bytes &&
+                (u64)(status.st_mode & 07777) == expected.mode && string_equal(observed, expected.sha256);
+            string8_list_push(temporary.arena, &records, string_format(temporary.arena,
+                S8("{S8}\t{S8}\t{u64}\t{u64}\t{S8}\t{u64}\t{u64}\t{S8}\n"),
+                expected.path, expected.sha256, expected.bytes, expected.mode, observed,
+                status.st_size > 0 ? (u64)status.st_size : 0ull, (u64)(status.st_mode & 07777),
+                matched ? S8("complete") : S8("failed")));
+            result = matched && result;
+        }
+        String8 records_text = string_join_arena(temporary.arena, string8_list_to_slice(temporary.arena, records), false);
+        bool retained = file_publish(path_join(temporary.arena, preparation->output,
+            string_format(temporary.arena, S8("{u64}-{S8}.binaries.tsv"), preparation->stage, phase)),
+            BUSTER_SLICE_TO_BYTE_SLICE(records_text));
+        result = compiler_closure_preparation_end(preparation, result && retained, 0);
+        scratch_end(temporary);
+    }
+    else { preparation->success = false; }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_closure_qualification_pair(CompilerClosurePreparation* preparation,
-    String8 name, String8 lab, String8 python, String8 baseline, String8 candidate, bool same_source)
+    String8 name, String8 lab, String8 python, CompilerClosureFrozenBinary baseline,
+    CompilerClosureFrozenBinary candidate, bool same_source)
 {
     TemporalArena temporary = scratch_begin(&preparation->arena, 1);
     String8 lab_output = path_join(temporary.arena, preparation->output, string_format(temporary.arena, S8("{S8}-lab"), name));
@@ -488,24 +699,40 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_qualification_pair(CompilerClosurePrep
     OsDirectoryCreateResult directory = preparation->success ? os_make_directory(lab_output) : (OsDirectoryCreateResult){0};
     bool result = preparation->success && directory.created && !directory.error.v && !path_exists(temporary.arena, corpus_output);
     preparation->success = preparation->success && result;
-    String8 lab_arguments[] = {python, S8("-B"), lab, S8("compare"), S8("--baseline"), baseline, S8("--candidate"), candidate,
+    String8 lab_arguments[] = {python, S8("-B"), lab, S8("compare"), S8("--baseline"), baseline.path, S8("--candidate"), candidate.path,
         S8("--repo-root"), preparation->root, S8("--cpu"), S8("2"), S8("--output"), lab_output,
         S8("--target-minutes"), S8("10"), S8("--warmups"), S8("1"), S8("--require-identical-output")};
     SliceString8 lab_slice = BUSTER_ARRAY_TO_SLICE(lab_arguments);
     if (!same_source) { lab_slice.length -= 1; }
-    result = result && compiler_closure_preparation_command(preparation,
-        string_format(temporary.arena, S8("{S8}-lab"), name), lab_slice, true);
+    result = result && compiler_closure_preparation_binary_check(preparation,
+        string_format(temporary.arena, S8("{S8}-lab-binaries-before"), name), baseline, candidate, false);
+    if (result)
+    {
+        bool child = compiler_closure_preparation_command(preparation,
+            string_format(temporary.arena, S8("{S8}-lab"), name), lab_slice, true);
+        bool verified = compiler_closure_preparation_binary_check(preparation,
+            string_format(temporary.arena, S8("{S8}-lab-binaries-after"), name), baseline, candidate, true);
+        result = child && verified;
+    }
     String8 corpus_arguments[] = {path_join(temporary.arena, preparation->root, S8("build/throughput-tools/throughput")), S8("run"),
-        S8("--baseline"), baseline, S8("--candidate"), candidate, S8("--output"), corpus_output,
+        S8("--baseline"), baseline.path, S8("--candidate"), candidate.path, S8("--output"), corpus_output,
         S8("--baseline-id"), preparation->base, S8("--candidate-id"), same_source ? preparation->base : preparation->head,
         S8("--profile"), S8("ci"), S8("--mode"), S8("all"), S8("--pairs"), S8("20"), S8("--warmups"), S8("2"),
         S8("--timeout"), S8("120"), S8("--cpu"), S8("2"), S8("--require-identical-output")};
     SliceString8 corpus_slice = BUSTER_ARRAY_TO_SLICE(corpus_arguments);
     if (!same_source) { corpus_slice.length -= 1; }
-    result = result && compiler_closure_preparation_command(preparation,
-        string_format(temporary.arena, S8("{S8}-throughput"), name), corpus_slice, false) &&
-        compiler_closure_preparation_inventory(preparation,
-            string_format(temporary.arena, S8("{S8}-post"), name), false);
+    result = result && compiler_closure_preparation_binary_check(preparation,
+        string_format(temporary.arena, S8("{S8}-throughput-binaries-before"), name), baseline, candidate, false);
+    if (result)
+    {
+        bool child = compiler_closure_preparation_command(preparation,
+            string_format(temporary.arena, S8("{S8}-throughput"), name), corpus_slice, false);
+        bool verified = compiler_closure_preparation_binary_check(preparation,
+            string_format(temporary.arena, S8("{S8}-throughput-binaries-after"), name), baseline, candidate, true);
+        result = child && verified;
+    }
+    result = result && compiler_closure_preparation_inventory(preparation,
+        string_format(temporary.arena, S8("{S8}-post"), name), false);
     scratch_end(temporary);
     return result;
 }
@@ -541,11 +768,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_prepare_main(Arena* arena, Sl
 {
     ProcessResult result = PROCESS_RESULT_FAILED;
     CompilerClosurePreparation preparation = {0};
-    if (arguments.length == 8 && string_equal(arguments.pointer[0], S8("prepare")))
+    if ((arguments.length == 8 || arguments.length == 10) && string_equal(arguments.pointer[0], S8("prepare")))
     {
         bool complete = compiler_closure_preparation_initialize(&preparation, arena,
             arguments.pointer[1], arguments.pointer[2], arguments.pointer[3],
             arguments.pointer[4], arguments.pointer[5], arguments.pointer[6], arguments.pointer[7]);
+        preparation.secondary_requested = arguments.length == 10;
+        if (complete && arguments.length == 10)
+        {
+            complete = compiler_closure_preparation_secondary_pins(&preparation, arguments.pointer[8], arguments.pointer[9]);
+        }
         complete = complete && compiler_closure_preparation_execute(&preparation);
         bool written = compiler_closure_preparation_write(&preparation);
         if (complete && written && preparation.success) { result = PROCESS_RESULT_SUCCESS; }
@@ -610,8 +842,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_qualification_main(Arena* are
             complete = legacy_pins && snapshot_pins;
         }
         complete = complete && compiler_closure_preparation_execute(&legacy) &&
-            compiler_closure_qualification_pair(&legacy, S8("ab"), lab, python, legacy.baseline, legacy.candidate, false) &&
-            compiler_closure_qualification_pair(&legacy, S8("immutable-aa"), lab, python, legacy.baseline, legacy.baseline, true) &&
+            compiler_closure_qualification_pair(&legacy, S8("ab"), lab, python,
+                compiler_closure_preparation_binary_identity(&legacy, 0), compiler_closure_preparation_binary_identity(&legacy, 1), false) &&
+            compiler_closure_qualification_pair(&legacy, S8("immutable-aa"), lab, python,
+                compiler_closure_preparation_binary_identity(&legacy, 0), compiler_closure_preparation_binary_identity(&legacy, 0), true) &&
             compiler_closure_preparation_execute(&snapshot);
         if (complete)
         {
@@ -622,13 +856,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_qualification_main(Arena* are
                     string_equal(legacy.harness_sha256, snapshot.harness_sha256) &&
                     string_equal(legacy.bootstrap_configuration, snapshot.bootstrap_configuration) &&
                     string_equal(legacy.bootstrap_artifact_sha256, snapshot.bootstrap_artifact_sha256) &&
-                    string_equal(legacy.candidate_sha256, snapshot.candidate_sha256);
+                    string_equal(legacy.candidate_sha256, snapshot.candidate_sha256) &&
+                    legacy.candidate_bytes == snapshot.candidate_bytes && legacy.candidate_mode == snapshot.candidate_mode;
                 complete = compiler_closure_preparation_end(&snapshot, matched, 0);
             }
         }
-        complete = complete && compiler_closure_qualification_pair(&snapshot, S8("ab"), lab, python, snapshot.baseline, snapshot.candidate, false) &&
-            compiler_closure_qualification_pair(&snapshot, S8("immutable-aa"), lab, python, snapshot.baseline, snapshot.baseline, true) &&
-            compiler_closure_qualification_pair(&snapshot, S8("cross-build-aa"), lab, python, legacy.baseline, snapshot.baseline, true);
+        complete = complete && compiler_closure_qualification_pair(&snapshot, S8("ab"), lab, python,
+                compiler_closure_preparation_binary_identity(&snapshot, 0), compiler_closure_preparation_binary_identity(&snapshot, 1), false) &&
+            compiler_closure_qualification_pair(&snapshot, S8("immutable-aa"), lab, python,
+                compiler_closure_preparation_binary_identity(&snapshot, 0), compiler_closure_preparation_binary_identity(&snapshot, 0), true) &&
+            compiler_closure_qualification_pair(&snapshot, S8("cross-build-aa"), lab, python,
+                compiler_closure_preparation_binary_identity(&legacy, 0), compiler_closure_preparation_binary_identity(&snapshot, 0), true);
         bool legacy_written = legacy.owned ? compiler_closure_preparation_write(&legacy) : false;
         bool snapshot_written = snapshot.owned ? compiler_closure_preparation_write(&snapshot) : false;
         complete = complete && legacy_written && snapshot_written && legacy.success && snapshot.success;
