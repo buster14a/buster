@@ -755,6 +755,8 @@ typedef enum CVendorBuiltinMicrosoftOperation
     C_VENDOR_BUILTIN_MICROSOFT_STOSW,
     C_VENDOR_BUILTIN_MICROSOFT_STOSD,
     C_VENDOR_BUILTIN_MICROSOFT_STOSQ,
+    C_VENDOR_BUILTIN_MICROSOFT_POPCNT,
+    C_VENDOR_BUILTIN_MICROSOFT_POPCNT64,
 } CVendorBuiltinMicrosoftOperation;
 BUSTER_C_EXTERN CVendorBuiltinMicrosoftOperation c_vendor_builtin_microsoft_operation(String8 name);
 BUSTER_C_EXTERN bool c_vendor_builtin_microsoft_fallback_definition_allowed(Target target, String8 name);

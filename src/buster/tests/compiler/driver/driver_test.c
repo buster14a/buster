@@ -24487,9 +24487,171 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_cpuidex(UnitTestArgument
 }
 
 
+// The two RAD-required Microsoft counts have unsigned signatures and share
+// canonical count lowering, including software expansion without POPCNT.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_microsoft_popcnt(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa"), S8("-fc-ast-pilot=implicit")};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 features[] = {S8("-mattr=-popcnt"), S8("-mattr=+popcnt")};
+    String8 positive_source = S8(
+        "#if __has_builtin(__popcnt) != 1 || __has_builtin(__popcnt64) != 1\n#error missing Windows x64 counts\n#endif\n"
+        "extern unsigned int __popcnt(unsigned int);\n"
+        "extern unsigned long long __popcnt64(unsigned long long);\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__popcnt(0u)), unsigned int), \"unsigned 32 result\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__popcnt64(0ull)), unsigned long long), \"unsigned 64 result\");\n"
+        "_Static_assert(sizeof(__popcnt(0u)) == sizeof(unsigned int), \"32 result size\");\n"
+        "_Static_assert(sizeof(__popcnt64(0ull)) == sizeof(unsigned long long), \"64 result size\");\n"
+        "static __attribute__((noinline)) unsigned int count32(unsigned int value) { return __popcnt(value); }\n"
+        "static __attribute__((noinline)) unsigned long long count64(unsigned long long value) { return __popcnt64(value); }\n"
+        "int main(void)\n"
+        "{ int mismatch = 0;\n"
+        "  mismatch |= count32(0u) != 0u || count32(1u) != 1u || count32(0xffffffffu) != 32u;\n"
+        "  mismatch |= count64(0ull) != 0ull || count64(1ull) != 1ull || count64(0xffffffffffffffffull) != 64ull;\n"
+        "  for (unsigned int bit = 0; bit < 32; bit += 1) mismatch |= count32(1u << bit) != 1u;\n"
+        "  for (unsigned int bit = 0; bit < 64; bit += 1) mismatch |= count64(1ull << bit) != 1ull;\n"
+        "  volatile unsigned int value32 = 0xf0f0f0f0u;\n"
+        "  volatile unsigned long long value64 = 0xf0f0f0f0f0f0f0f0ull;\n"
+        "  mismatch |= __popcnt(value32++) != 16u || value32 != 0xf0f0f0f1u;\n"
+        "  mismatch |= __popcnt64(value64++) != 32ull || value64 != 0xf0f0f0f0f0f0f0f1ull;\n"
+        "  volatile unsigned int unevaluated = 0;\n"
+        "  mismatch |= sizeof(__popcnt(unevaluated++)) != 4 || sizeof(__popcnt64(unevaluated++)) != 8 || unevaluated != 0;\n"
+        "  mismatch |= __popcnt(0x100000001ull) != 1u || __popcnt64(-1) != 64ull;\n"
+        "  return mismatch; }\n");
+    for (u32 feature = 0; feature < BUSTER_ARRAY_LENGTH(features); feature += 1)
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                String8 input = buster_test_temporary_path(arena, S8("buster-microsoft-popcnt"), S8(".c"));
+                String8 output = buster_test_temporary_path(arena, S8("buster-microsoft-popcnt"), S8(".obj"));
+                if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(positive_source))))
+                {
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"),
+                                         S8("x86_64-windows"), features[feature], allocators[allocator], forms[form],
+                                         S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, input};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                    String8 description = string_format(arena, S8("Microsoft popcnt {S8} {S8} {S8}: {S8}"),
+                                                        features[feature], allocators[allocator], forms[form], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                }
+                os_file_delete(output);
+                os_file_delete(input);
+                scratch_end(temporary);
+            }
+        }
+    }
+    String8 ordinary_source = S8(
+        "#if __has_builtin(__popcnt) || __has_builtin(__popcnt64)\n#error off-target counts advertised\n#endif\n"
+        "extern unsigned int __popcnt(unsigned int);\n"
+        "extern unsigned long long __popcnt64(unsigned long long);\n"
+        "unsigned int ordinary32(unsigned int value) { return __popcnt(value); }\n"
+        "unsigned long long ordinary64(unsigned long long value) { return __popcnt64(value); }\n");
+    String8 ordinary_targets[] = {S8("x86_64-linux"), S8("aarch64-windows")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(ordinary_targets); target += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-microsoft-popcnt-ordinary"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-microsoft-popcnt-ordinary"), S8(".s"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(ordinary_source))))
+            {
+                String8 command[] = {S8("-S"), S8("-g0"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"),
+                                     ordinary_targets[target], forms[form], S8("-fno-machine-fallback"),
+                                     S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                String8 assembly = BYTE_SLICE_TO_STRING(8, file_read(arena, output, (FileReadOptions){0}));
+                String8 call32 = target == 0 ? S8("call \"__popcnt\"") : S8("bl __popcnt");
+                String8 call64 = target == 0 ? S8("call \"__popcnt64\"") : S8("bl __popcnt64");
+                String8 description = string_format(arena, S8("ordinary Microsoft count calls {S8} {S8}: {S8}"),
+                                                    ordinary_targets[target], forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE &&
+                                string_first_sequence(assembly, call32) != BUSTER_STRING_NO_MATCH &&
+                                string_first_sequence(assembly, call64) != BUSTER_STRING_NO_MATCH, description);
+            }
+            os_file_delete(output);
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+    String8 invalid_sources[] = {
+        S8("void bad(void) { (void)__popcnt(); return; }\n"),
+        S8("void bad(void) { (void)__popcnt64(1ull, 2ull); return; }\n"),
+    };
+    String8 invalid_messages[] = {
+        S8("too few arguments in the call to '__popcnt'"),
+        S8("too many arguments in the call to '__popcnt64'"),
+    };
+    for (u32 invalid = 0; invalid < BUSTER_ARRAY_LENGTH(invalid_sources); invalid += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-microsoft-popcnt-invalid"), S8(".c"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(invalid_sources[invalid]))))
+            {
+                String8 command[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"),
+                                     S8("x86_64-windows"), forms[form], input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                String8 description = string_format(arena, S8("Microsoft count arity {u32} {S8}: {S8}"),
+                                                    invalid, forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_ANALYSIS &&
+                                compiler_driver_test_diagnostic_contains(compiled.diagnostic, invalid_messages[invalid]), description);
+            }
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64
+    // Explicitly disable POPCNT so execution never depends on the runner's
+    // hardware feature. Both register allocators exercise the software path.
+    for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-microsoft-popcnt-runtime"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-microsoft-popcnt-runtime"), S8(".exe"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(positive_source))))
+            {
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), S8("-mattr=-popcnt"), allocators[allocator], forms[form],
+                                     S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                String8 description = string_format(arena, S8("Microsoft count baseline runtime {S8} {S8}: {S8}"),
+                                                    allocators[allocator], forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(arena, output), description);
+                }
+            }
+            os_file_delete(output);
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+#endif
+    return result;
+}
+
 // LLVM's Windows x64 intrin.h gives a finite set of static inline asm
 // fallbacks after external prototypes. Keep that linkage exception distinct
-// from builtin capability: only the eight lowered operations report true.
+// from builtin capability: these eight lowered memory operations report true.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_microsoft_intrin_fallbacks(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -28603,6 +28765,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_cpuidex);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_microsoft_popcnt);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_microsoft_intrin_fallbacks);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_direct_emitter_preparation);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_borrowed_payloads);

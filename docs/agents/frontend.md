@@ -550,6 +550,22 @@ does not relax ordinary external-to-static linkage diagnostics.
 `compiler_driver_test_cpuidex` covers both SSA forms, the AST pilot, target
 capability answers, malformed calls and the ordinary linkage negative control.
 
+Microsoft's `__popcnt` and `__popcnt64` are separately admitted only for
+Windows x64. Their exact signatures are `unsigned int(unsigned int)` and
+`unsigned long long(unsigned long long)`, including unevaluated result typing.
+Prepared arguments are converted and evaluated once. Both reuse the canonical
+population-count helper: targets with POPCNT emit the canonical unary operation;
+baseline targets use ordinary unsigned scalar SWAR operations. Capability does
+not promise that hardware POPCNT is enabled. Off-target queries are false and
+ordinary user declarations and calls retain their semantics. No 16-bit spelling,
+new static-inline linkage exception, or wider Microsoft-intrinsic claim is made.
+`compiler_driver_test_microsoft_popcnt` covers all three frontends and FAST/QUALITY,
+feature-present and feature-absent native objects, exact unsigned types, malformed
+arity, off-target calls, and baseline Windows runtime counts with once-only
+argument side effects. The signatures follow [Microsoft's contract](https://learn.microsoft.com/en-us/cpp/intrinsics/popcnt16-popcnt-popcnt64)
+and Clang 23.1.3's `MSPopCount` declaration; no upstream implementation is copied.
+The finite compatibility owner is [#3288](https://github.com/buster14a/buster/issues/3288).
+
 Clang 23.1.3's Windows x64 `intrin.h` also defines a finite set of static
 inline fallbacks after external prototypes. The parser permits that transition
 only for compatible function types, only on x86-64 Windows, and only for
@@ -557,7 +573,8 @@ only for compatible function types, only on x86-64 Windows, and only for
 `__stosq`, `__halt`, `__inbyte`, `__inword`, `__indword`, `__outbyte`,
 `__outword`, `__outdword`, `__nop`, `__readmsr`, `__readcr3`, and
 `__writecr3`. This fallback-name policy is separate from builtin admission:
-only `__cpuidex` and the eight memory operations report `__has_builtin` true.
+only `__cpuidex`, the eight memory operations, and the two population-count
+operations above report `__has_builtin` true within this Microsoft subset.
 The 11 other wrappers remain ordinary functions, and their bodies are lowered
 only when reachable; unsupported inline-assembly forms retain normal structured
 diagnostics. `__stosb` has no static fallback definition and receives no

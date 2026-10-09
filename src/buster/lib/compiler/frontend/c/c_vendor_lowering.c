@@ -143,6 +143,13 @@ BUSTER_C_INTERNAL CVendorBuiltinBudget c_ir_vendor_builtin_budget(String8 name)
     {
         result = (CVendorBuiltinBudget){64, 64, 0};
     }
+    if (microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_POPCNT ||
+        microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_POPCNT64)
+    {
+        // The feature-absent SWAR path emits eight constants and twelve binary
+        // rows; retain room for operand/result conversions without new blocks.
+        result = (CVendorBuiltinBudget){64, 64, 0};
+    }
     return result;
 }
 
@@ -892,6 +899,16 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_builtin(CIntegerIrBuilder* builder,
              c_vendor_builtin_microsoft_operation(name) <= C_VENDOR_BUILTIN_MICROSOFT_STOSQ)
     {
         result = c_ir_emit_vendor_microsoft_memory(builder, name, arguments, count, token);
+    }
+    else if (builder->target.cpu_arch == CPU_ARCH_X86_64 && builder->target.os == OPERATING_SYSTEM_WINDOWS &&
+             arguments && count == 1 && arguments[0].value < builder->function->value_count &&
+             (c_vendor_builtin_microsoft_operation(name) == C_VENDOR_BUILTIN_MICROSOFT_POPCNT ||
+              c_vendor_builtin_microsoft_operation(name) == C_VENDOR_BUILTIN_MICROSOFT_POPCNT64))
+    {
+        u32 width = c_vendor_builtin_microsoft_operation(name) == C_VENDOR_BUILTIN_MICROSOFT_POPCNT ? 32 : 64;
+        // The prepared operand already has the signature conversion. Reuse the
+        // GNU count expansion, including its software path without POPCNT.
+        result = c_ir_emit_population_count(builder, arguments[0], c_ir_vendor_unsigned_type(builder, width), token, source);
     }
     if (result.value == IR_ID_UNDERLYING_INVALID && !builder->failure_message.length)
     {
