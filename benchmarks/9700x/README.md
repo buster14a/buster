@@ -102,8 +102,10 @@ request: issue #2769 owner-requested compiler comparison; candidate experiment D
 ```
 
 This is an example of a deliberate request, not a line to append for routine
-compiler work. The fresh line must be present in the diff against every parent;
-editing a comment or inheriting historical marker lines does not renew it.
+compiler work. The fresh line must be present in the diff against every parent.
+The gate checks line freshness, not the meaning of `request:`: a newly added
+comment can also activate this route. Edit this file only to express an
+authorized experiment; inheriting historical lines does not renew it.
 Combine it with requested workloads if applicable. The same gate applies,
 and these jobs follow `authorize`:
 
