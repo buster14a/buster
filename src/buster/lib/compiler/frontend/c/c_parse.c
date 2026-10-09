@@ -32440,7 +32440,16 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         u32 maximum = UINT32_MAX;
         switch (builtin)
         {
-        case C_SYMBOL_BUILTIN_ATOMIC: minimum = maximum = c_semantic_atomic_builtin_arity(c_ir_atomic_builtin_spelling(name)); break;
+        case C_SYMBOL_BUILTIN_ATOMIC:
+        {
+            // GNU documents trailing "protected variable" arguments for the
+            // legacy `__sync_*` family only: they are parsed and typed but
+            // never evaluated, as GCC does.
+            CIrAtomicBuiltinSpelling atomic_arity = c_ir_atomic_builtin_spelling(name);
+            minimum = c_semantic_atomic_builtin_arity(atomic_arity);
+            maximum = atomic_arity.sequential ? UINT32_MAX : minimum;
+        }
+        break;
         case C_SYMBOL_BUILTIN_EXPECT: minimum = 2; break;
         case C_SYMBOL_BUILTIN_MEMORY: minimum = maximum = c_semantic_memory_builtin_arity(name); break;
         case C_SYMBOL_BUILTIN_OVERFLOW: minimum = maximum = 3; break;
