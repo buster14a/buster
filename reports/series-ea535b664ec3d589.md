@@ -2,7 +2,7 @@
 
 [Trusted main](index.md) · [All series](all.md) · [JSON](recent.jsonl) · [CSV](recent.csv)
 
-Policy hosted-ci-cohort-v1; refresh 2026-10-09T09:39:53Z. Cohort fields and missing values:
+Policy hosted-ci-cohort-v1; refresh 2026-10-09T16:37:57Z. Cohort fields and missing values:
 
 | Field | Value |
 |---|---|
@@ -57,17 +57,6 @@ These are descriptive CI signals, not independent significance tests or paired e
 
 | Started | Outcome / population | Elapsed s | Source evidence |
 |---|---|---:|---|
-| 2026-10-08T17:26:32Z | success / executed / physical-execution | 33 | [job 113446633875](https://github.com/buster14a/buster/actions/runs/37816577415/job/113446633875) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37816577415/attempts/1) / tested source unavailable |
-| 2026-10-08T17:27:17Z | success / executed / physical-execution | 38 | [job 113446968364](https://github.com/buster14a/buster/actions/runs/37816675646/job/113446968364) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37816675646/attempts/1) / tested source unavailable |
-| 2026-10-08T17:29:43Z | success / executed / physical-execution | 37 | [job 113448023479](https://github.com/buster14a/buster/actions/runs/37816986461/job/113448023479) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37816986461/attempts/1) / tested source unavailable |
-| 2026-10-08T17:29:51Z | success / executed / physical-execution | 35 | [job 113448086272](https://github.com/buster14a/buster/actions/runs/37817003997/job/113448086272) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37817003997/attempts/1) / tested source unavailable |
-| 2026-10-08T17:30:29Z | success / executed / physical-execution | 44 | [job 113448366557](https://github.com/buster14a/buster/actions/runs/37817088588/job/113448366557) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37817088588/attempts/1) / tested source unavailable |
-| 2026-10-08T17:32:02Z | success / executed / physical-execution | 29 | [job 113449064800](https://github.com/buster14a/buster/actions/runs/37817295013/job/113449064800) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37817295013/attempts/1) / tested source unavailable |
-| 2026-10-08T17:36:11Z | success / executed / physical-execution | 35 | [job 113450901421](https://github.com/buster14a/buster/actions/runs/37817833585/job/113450901421) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37817833585/attempts/1) / tested source unavailable |
-| 2026-10-08T22:29:32Z | success / executed / physical-execution | 39 | [job 113573006523](https://github.com/buster14a/buster/actions/runs/37853794776/job/113573006523) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37853794776/attempts/1) / tested source unavailable |
-| 2026-10-08T22:29:42Z | success / executed / physical-execution | 34 | [job 113573065018](https://github.com/buster14a/buster/actions/runs/37853812582/job/113573065018) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37853812582/attempts/1) / tested source unavailable |
-| 2026-10-08T22:29:58Z | success / executed / physical-execution | 35 | [job 113573154362](https://github.com/buster14a/buster/actions/runs/37853839793/job/113573154362) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37853839793/attempts/1) / tested source unavailable |
-| 2026-10-08T22:30:52Z | success / executed / physical-execution | 39 | [job 113573472700](https://github.com/buster14a/buster/actions/runs/37853941316/job/113573472700) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37853941316/attempts/1) / tested source unavailable |
 | 2026-10-08T22:30:55Z | success / executed / physical-execution | 36 | [job 113573490861](https://github.com/buster14a/buster/actions/runs/37853946932/job/113573490861) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37853946932/attempts/1) / tested source unavailable |
 | 2026-10-08T22:30:59Z | success / executed / physical-execution | 33 | [job 113573514183](https://github.com/buster14a/buster/actions/runs/37853954543/job/113573514183) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37853954543/attempts/1) / tested source unavailable |
 | 2026-10-08T22:31:03Z | success / executed / physical-execution | 36 | [job 113573536621](https://github.com/buster14a/buster/actions/runs/37853961095/job/113573536621) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37853961095/attempts/1) / tested source unavailable |

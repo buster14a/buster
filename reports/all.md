@@ -7,8 +7,8 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | Job / matrix | OS / actual CPU | Event / branch | Successful samples | Missing context | History |
 |---|---|---|---:|---:|---|
 | Exact merge-tree preflight /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 31 | [series](series-ea535b664ec3d589.md) |
-| watch-merge-group /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 40 | [series](series-c451c74a07da770f.md) |
-| Reconcile exact-group admission /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 23 | [series](series-45fa970274f35d52.md) |
+| watch-merge-group /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 67 | [series](series-c451c74a07da770f.md) |
+| Reconcile exact-group admission /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 31 | [series](series-45fa970274f35d52.md) |
 | Preflight regression tests /  | unknown OS / unknown CPU | pull&#95;request / codex/2431-owned-ios-mock-cleanup | 0 | 1 | [series](series-071dcc81a8c503ec.md) |
 | GPU Linux consumers /  | unknown OS / unknown CPU | pull&#95;request / codex/2431-owned-ios-mock-cleanup | 0 | 1 | [series](series-65652222c5c72667.md) |
 | GPU Metal consumer /  | unknown OS / unknown CPU | pull&#95;request / codex/2431-owned-ios-mock-cleanup | 0 | 1 | [series](series-52be6273b2cac488.md) |

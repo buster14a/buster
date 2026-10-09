@@ -2,7 +2,7 @@
 
 [Trusted main](index.md) · [All series](all.md) · [JSON](recent.jsonl) · [CSV](recent.csv)
 
-Policy hosted-ci-cohort-v1; refresh 2026-10-09T09:39:53Z. Cohort fields and missing values:
+Policy hosted-ci-cohort-v1; refresh 2026-10-09T16:37:57Z. Cohort fields and missing values:
 
 | Field | Value |
 |---|---|
@@ -57,6 +57,5 @@ These are descriptive CI signals, not independent significance tests or paired e
 
 | Started | Outcome / population | Elapsed s | Source evidence |
 |---|---|---:|---|
-| 2026-10-08T18:03:00Z | success / executed / physical-execution | 818 | [job 113446023095](https://github.com/buster14a/buster/actions/runs/37816355781/job/113446023095) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37816355781/attempts/1) / tested source unavailable |
 | 2026-10-08T22:51:05Z | success / executed / physical-execution | 830 | [job 113573479321](https://github.com/buster14a/buster/actions/runs/37853924403/job/113573479321) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37853924403/attempts/1) / tested source unavailable |
 | 2026-10-09T02:37:14Z | success / executed / physical-execution | 828 | [job 113638390610](https://github.com/buster14a/buster/actions/runs/37874021695/job/113638390610) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37874021695/attempts/1) / tested source unavailable |
