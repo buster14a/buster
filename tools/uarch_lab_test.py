@@ -2136,5 +2136,63 @@ class CanonicalInlinePairTest(unittest.TestCase):
                           "--canonical-inline-pair", "--", "-O3"])
 
 
+@unittest.skipUnless(sys.platform.startswith("linux"), "experimental ownership is Linux only")
+class ExperimentalOwnerGroupTest(unittest.TestCase):
+    def test_invalid_explicit_owner_is_rejected_before_spawn(self):
+        for value in ("1", "invalid", str(os.getpgrp() + 1)):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {"BUSTER_MEASUREMENT_OWNER_GROUP": value}):
+                with self.assertRaises(ValueError):
+                    lab.run_measured([sys.executable, "-c", "pass"], None, dict(os.environ), 1)
+
+    def test_measured_descendants_inherit_the_explicit_owned_session(self):
+        source = ("import os,sys; import uarch_lab as lab; "
+                  "os.environ['BUSTER_MEASUREMENT_OWNER_GROUP']=str(os.getpgrp()); "
+                  "status,out,err,*_=lab.run_measured([sys.executable,'-c',"
+                  "'import os; print(os.getpgrp())'],None,dict(os.environ),2); "
+                  "assert status==0 and int(out)==os.getpgrp(),(status,out,err)")
+        completed = subprocess.run([sys.executable, "-B", "-c", source], cwd=os.path.dirname(lab.__file__),
+                                   start_new_session=True, capture_output=True, timeout=5)
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode(errors="replace"))
+
+    def test_timeout_aborts_the_owned_group_and_its_grandchild(self):
+        import signal
+        import time
+        with tempfile.TemporaryDirectory() as directory:
+            marker = os.path.join(directory, "grandchild.pid")
+            grandchild = "import os,time;open(%r,'w').write(str(os.getpid()));time.sleep(30)" % marker
+            child = "import subprocess,sys,time;subprocess.Popen([sys.executable,'-c',%r]);time.sleep(30)" % grandchild
+            source = ("import os,sys; import uarch_lab as lab; "
+                      "os.environ['BUSTER_MEASUREMENT_OWNER_GROUP']=str(os.getpgrp()); "
+                      "lab.run_measured([sys.executable,'-c',%r],None,dict(os.environ),0.5)" % child)
+            process = subprocess.Popen([sys.executable, "-B", "-c", source], cwd=os.path.dirname(lab.__file__),
+                                       start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                _, errors = process.communicate(timeout=5)
+                self.assertEqual(process.returncode, -signal.SIGKILL, errors.decode(errors="replace"))
+                self.assertTrue(os.path.isfile(marker), "timeout control did not start a descendant")
+                def active_group():
+                    active = []
+                    for entry in os.listdir("/proc"):
+                        if entry.isdecimal():
+                            try:
+                                with open("/proc/" + entry + "/stat") as handle:
+                                    fields = handle.read().rpartition(")")[2].split()
+                                if fields[0] != "Z" and fields[2] == str(process.pid):
+                                    active.append(entry)
+                            except (OSError, IndexError):
+                                pass
+                    return active
+                deadline = time.monotonic() + 2
+                while active_group() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(active_group(), [], "a timed descendant escaped owned cancellation")
+            finally:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=5)
+
+
 if __name__ == "__main__":
     unittest.main()
