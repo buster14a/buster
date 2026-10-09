@@ -818,10 +818,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_controller_execute(Arena* ar
                 S8("schema\tbuster-main-sampling-acquisition-receipt-v1\nphase\tacquire\npacket\t0\nmeasurement\tfalse\n"
                    "campaign\t{S8}\nbase\t{S8}\nbase_tree\t{S8}\nrequest_head\t{S8}\ntrusted_revision\t{S8}\n"
                    "ab1_revision\t{S8}\nab2_revision\t{S8}\nprotocol_sha256\t{S8}\nlab_sha256\t{S8}\npython_sha256\t{S8}\n"
-                   "driver_sha256\t{S8}\nprepared_sha256\t{S8}\nreservation_seconds\t1800\nprocess_state\t{S8}\nqualification_state\tunvalidated\n"),
+                   "driver_sha256\t{S8}\npython_path\t{S8}\nprepared_sha256\t{S8}\nreservation_seconds\t1800\nprocess_state\t{S8}\nqualification_state\tunvalidated\n"),
                 plan_sha, controller.plan.base, controller.plan.base_tree, controller.plan.request_head, admitted.trusted_revision,
                 controller.plan.ab1_revision, controller.plan.ab2_revision, protocol_sha, lab_sha, python_sha, driver_sha,
-                controller.prepared_sha256, controller.success ? S8("complete") : S8("failed"));
+                controller.packet.python, controller.prepared_sha256, controller.success ? S8("complete") : S8("failed"));
             controller.success = file_write(path_join(arena, evidence, S8("acquisition.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(acquired)) && controller.success;
             if (controller.success) controller.success = file_write(path_join(arena, path_parent(arena, controller.prepared), S8("acquisition.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(acquired));
         }
