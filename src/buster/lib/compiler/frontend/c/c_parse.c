@@ -7092,7 +7092,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_literal_query(CTypeParseMachine* machi
         start >= machine->expression_query_start && end <= machine->expression_query_end
             ? start - machine->expression_query_start : UINT32_MAX;
     machine->mutation_type_limit = result->type_count;
-    CTypeId type = c_parse_expression_query_lookup(machine, result, slot, end, scope, flags)
+    CTypeId type = slot != UINT32_MAX && c_parse_expression_query_lookup(machine, result, slot, end, scope, flags)
                        ? machine->expression_queries[slot].type
                        : c_parse_expression_leaf_without_cast(arena, preprocess, result, scope, start, end);
     bool valid = type.value < result->type_count;
