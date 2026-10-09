@@ -1973,6 +1973,112 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_semantic_tests(UnitTestAr
     }
     return result;
 }
+
+// Issue 1243: `ld` and `lld` run `.preinit_array` before every constructor of
+// every priority, `constructor(0)` and a dependency's included, whichever
+// input names it first; only the section of exactly that name is that array;
+// and a shared object cannot hold one. The two objects are host-compiled and
+// linked by this linker in both orders and by the host linker as the oracle.
+// The executables return the digits the entries appended, 9 (preinit), 1
+// (`constructor(0)`) then 2 (plain), as the exit code of a comparison.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_preinit_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 compiler = S8(BUSTER_HOST_C_COMPILER_ID);
+    bool supported = string_equal(compiler, S8("GNU")) || string_equal(compiler, S8("Clang")) || string_equal(compiler, S8("AppleClang"));
+    if (supported)
+    {
+        String8 root = buster_test_temporary_path(arena, S8("buster-elf-preinit"), S8(""));
+        OsDirectoryCreateResult created = os_make_directory(root);
+        BUSTER_TEST(arguments, created.error.v == 0);
+        String8 dependency_source = string_format_z(arena, S8("{S8}/dependency.c"), root);
+        String8 dependency_object = string_format_z(arena, S8("{S8}/dependency.o"), root);
+        String8 main_source = string_format_z(arena, S8("{S8}/main.c"), root);
+        String8 main_object = string_format_z(arena, S8("{S8}/main.o"), root);
+        String8 pic_object = string_format_z(arena, S8("{S8}/main-pic.o"), root);
+        String8 data_source = string_format_z(arena, S8("{S8}/data.c"), root);
+        String8 data_object = string_format_z(arena, S8("{S8}/data.o"), root);
+        BUSTER_TEST(arguments, file_write(dependency_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "extern volatile int trace;\n"
+            "__attribute__((constructor(0))) static void zero(void) { trace = trace * 10 + 1; }\n"
+            "__attribute__((constructor)) static void plain(void) { trace = trace * 10 + 2; }\n"))));
+        BUSTER_TEST(arguments, file_write(main_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "volatile int trace;\n"
+            "static void early(void) { trace = trace * 10 + 9; }\n"
+            "__attribute__((section(\".preinit_array\"), used)) static void (*entry)(void) = early;\n"
+            "int main(void) { return trace != 912; }\n"))));
+        // Neither an `.preinit_array.5` nor a type-16 section of another name
+        // is run by the host linkers, so neither may run here.
+        BUSTER_TEST(arguments, file_write(data_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "volatile int trace;\n"
+            "static void hook(void) { trace = 7; }\n"
+            "__attribute__((section(\".preinit_array.5\"), used)) static void (*suffixed)(void) = hook;\n"
+            "__asm__(\".section .mypre,\\\"aw\\\",@preinit_array\\n.quad hook\\n.previous\");\n"
+            "int main(void) { return trace != 0; }\n"))));
+        String8 dependency_compile[] = {S8("-w"), S8("-O2"), S8("-fno-pie"), S8("-c"), dependency_source, S8("-o"), dependency_object};
+        String8 main_compile[] = {S8("-w"), S8("-O2"), S8("-fno-pie"), S8("-c"), main_source, S8("-o"), main_object};
+        String8 pic_compile[] = {S8("-w"), S8("-O2"), S8("-fPIC"), S8("-c"), main_source, S8("-o"), pic_object};
+        String8 data_compile[] = {S8("-w"), S8("-O2"), S8("-fno-pie"), S8("-c"), data_source, S8("-o"), data_object};
+        bool produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(dependency_compile)) &&
+                        compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(main_compile)) &&
+                        compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(pic_compile)) &&
+                        compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(data_compile));
+        BUSTER_TEST(arguments, produced);
+        if (produced)
+        {
+            struct
+            {
+                String8 name;
+                String8 first;
+                String8 second;
+            } orders[] = {
+                {S8("dependency-first"), dependency_object, main_object},
+                {S8("main-first"), main_object, dependency_object},
+            };
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(orders); index += 1)
+            {
+                String8 oracle = string_format_z(arena, S8("{S8}/{S8}-oracle"), root, orders[index].name);
+                String8 output = string_format_z(arena, S8("{S8}/{S8}-buster"), root, orders[index].name);
+                String8 host_link[] = {S8("-no-pie"), orders[index].first, orders[index].second, S8("-o"), oracle};
+                bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
+                BUSTER_TEST(arguments, linked);
+                if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, oracle));
+                String8 command[] = {S8("-no-pie"), orders[index].first, orders[index].second, S8("-o"), output};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
+            }
+            // The host's own data sections stay data.
+            String8 data_oracle = string_format_z(arena, S8("{S8}/data-oracle"), root);
+            String8 data_output = string_format_z(arena, S8("{S8}/data-buster"), root);
+            String8 data_host_link[] = {S8("-no-pie"), data_object, S8("-o"), data_oracle};
+            bool data_linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(data_host_link));
+            BUSTER_TEST(arguments, data_linked);
+            if (data_linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, data_oracle));
+            String8 data_command[] = {S8("-no-pie"), data_object, S8("-o"), data_output};
+            CompilerDriverResult data_compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(data_command)));
+            BUSTER_TEST(arguments, data_compiled.error == COMPILER_DRIVER_ERROR_NONE);
+            if (data_compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, data_output));
+            // A shared object cannot hold a preinit array: GNU ld refuses it,
+            // and so does this linker, naming the section, with no output.
+            String8 shared_oracle = string_format_z(arena, S8("{S8}/preinit-oracle.so"), root);
+            String8 shared_output = string_format_z(arena, S8("{S8}/preinit-buster.so"), root);
+            String8 shared_host[] = {S8("-shared"), pic_object, S8("-o"), shared_oracle};
+            BUSTER_TEST(arguments, !compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(shared_host)));
+            String8 shared_command[] = {S8("-shared"), pic_object, S8("-o"), shared_output};
+            CompilerDriverResult shared = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(shared_command)));
+            BUSTER_TEST(arguments, shared.error != COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, string_first_sequence(shared.diagnostic, S8(".preinit_array")) < shared.diagnostic.length);
+            BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(shared_output));
+        }
+        BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+    return result;
+}
 #endif
 
 UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
@@ -1990,6 +2096,7 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_aarch64_printer_roundtrip);
 #if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_semantic_tests);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_preinit_tests);
 #endif
 #if BUSTER_ANDROID || BUSTER_IOS
     BUSTER_UNUSED(arguments);

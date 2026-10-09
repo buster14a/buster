@@ -14640,12 +14640,11 @@ bool link_validate_linker_arguments(Target target, NativeExecutableLinkOptions o
 }
 
 // Whether the merged constructor array holds a `.preinit_array` entry
-// (IR_INITIALIZER_PRIORITY_PREINIT), and the symbol its first relocation
-// names, or the empty string when no relocation fills that slot.  The ELF
-// gABI runs DT_PREINIT_ARRAY only in an executable and `ld` refuses it in a
-// shared object, where this linker would otherwise fold the entry into
-// DT_INIT_ARRAY and run it as a plain constructor.
-BUSTER_GLOBAL_LOCAL bool link_object_first_preinit_entry(ObjectFile* object, String8* name)
+// (IR_INITIALIZER_PRIORITY_PREINIT).  The ELF gABI runs DT_PREINIT_ARRAY only
+// in an executable and `ld` refuses it in a shared object, where this linker
+// would otherwise fold the entry into DT_INIT_ARRAY and run it as a plain
+// constructor.
+BUSTER_GLOBAL_LOCAL bool link_object_has_preinit_entry(ObjectFile* object)
 {
     u32* priorities = object->initializer_priorities[0];
     u64 entries = priorities ? object->sections[OBJECT_SECTION_INIT_ARRAY].data.length / OBJECT_INITIALIZER_ENTRY_SIZE : 0;
@@ -14653,16 +14652,6 @@ BUSTER_GLOBAL_LOCAL bool link_object_first_preinit_entry(ObjectFile* object, Str
     while (first < entries && priorities[first] != IR_INITIALIZER_PRIORITY_PREINIT)
     {
         first += 1;
-    }
-    *name = (String8){0};
-    for (u32 index = 0; first < entries && index < object->relocation_count && !name->length; index += 1)
-    {
-        ObjectRelocation relocation = object->relocations[index];
-        if (relocation.section == (u32)OBJECT_SECTION_INIT_ARRAY && relocation.offset == first * OBJECT_INITIALIZER_ENTRY_SIZE &&
-            relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 && relocation.symbol < object->symbol_count)
-        {
-            *name = object->symbols[relocation.symbol].name;
-        }
     }
 
     return first < entries;
@@ -14691,11 +14680,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
         result.symbol = string_format(arena, S8("{S8}: executable-stack request (.note.GNU-stack) is unsupported"),
                                       object->executable_stack_source.length ? object->executable_stack_source : S8("input object"));
     }
-    else if (options.image_kind == NATIVE_IMAGE_SHARED && link_object_first_preinit_entry(object, &result.symbol))
+    else if (options.image_kind == NATIVE_IMAGE_SHARED && link_object_has_preinit_entry(object))
     {
         result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
-        String8 reason = S8("a .preinit_array entry is not valid in a shared object (DT_PREINIT_ARRAY runs only in an executable)");
-        result.symbol = result.symbol.length ? string_format(arena, S8("{S8}: {S8}"), result.symbol, reason) : reason;
+        result.symbol = S8(".preinit_array entry is not valid in a shared object (DT_PREINIT_ARRAY runs only in an executable)");
     }
     else if ((object->target.os == OPERATING_SYSTEM_LINUX || object->target.os == OPERATING_SYSTEM_ANDROID) &&
              !link_elf_index_initialize(temporary, options, exports))
