@@ -5651,7 +5651,8 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
     else
     {
         bool initializer_valid = false;
-        if (symbol && type && type->layout.resolved && symbol->kind == IR_SYMBOL_DATA && symbol->is_definition && symbol->type.value == global->type.value)
+        if (symbol && type && type->layout.resolved && symbol->kind == IR_SYMBOL_DATA && symbol->is_definition &&
+            !symbol->is_link_once && symbol->type.value == global->type.value)
         {
             switch (global->initializer_kind)
             {
@@ -7003,6 +7004,13 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_function(IrProgram*
     IR_CONSTRUCTION_RECORD(VALIDATION_FUNCTIONS, 1);
     IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTION_SCANS, 1);
     IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
+    IrSymbol* symbol = ir_symbol_from_id(&program->symbols, function->symbol);
+    if (symbol && symbol->is_link_once &&
+        (symbol->kind != IR_SYMBOL_FUNCTION || !symbol->is_definition || symbol->linkage != IR_LINKAGE_EXTERNAL ||
+         symbol->is_weak || symbol->is_thread_local || symbol->section_name.length))
+    {
+        result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+    }
     if ((function->block_count && !function->blocks) || (function->instruction_count && !function->instructions) ||
         (function->value_count && !function->values) ||
         (function->label_metadata_count && (!function->label_metadata || !function->label_metadata_values)) ||
@@ -7251,7 +7259,11 @@ IrValidationResult ir_test_validate_canonical_module_reference(IrProgram* progra
         if (function->state == IR_FUNCTION_LOWERED)
         {
             IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
-            if (!signature || signature->kind != IR_TYPE_FUNCTION || (signature->parameter_count && !signature->parameter_types) ||
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, function->symbol);
+            bool invalid_link_once = symbol && symbol->is_link_once &&
+                                     (symbol->kind != IR_SYMBOL_FUNCTION || !symbol->is_definition || symbol->linkage != IR_LINKAGE_EXTERNAL ||
+                                      symbol->is_weak || symbol->is_thread_local || symbol->section_name.length);
+            if (invalid_link_once || !signature || signature->kind != IR_TYPE_FUNCTION || (signature->parameter_count && !signature->parameter_types) ||
                 !ir_type_from_id(&program->types, signature->return_type) || function->entry.value >= function->block_count)
             {
                 result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);

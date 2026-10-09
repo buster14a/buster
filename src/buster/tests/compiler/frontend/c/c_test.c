@@ -39002,18 +39002,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
             S8("struct Packet { unsigned char bytes[]; int tag; };\n"),
             S8("struct Packet { unsigned char bytes[]; };\n"),
         };
-        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(invalid_flexible_array_sources); source_index += 1)
+        TargetParseResult linux_result = target_parse_triple(S8("x86_64-unknown-linux"));
+        if (BUSTER_REQUIRE(arguments, linux_result.error == TARGET_PARSE_ERROR_NONE))
         {
-            TemporalArena temporary = scratch_begin(0, 0);
-            CPreprocessResult invalid_tokens = c_preprocess(temporary.arena, invalid_flexible_array_sources[source_index], (CPreprocessOptions){0});
-            CParseResult invalid_parse = c_parse(temporary.arena, invalid_tokens);
-            BUSTER_TEST(arguments, invalid_tokens.diagnostic_count == 0);
-            BUSTER_TEST(arguments, invalid_parse.diagnostic_count == 1);
-            if (invalid_parse.diagnostic_count == 1)
+            Target linux_target = linux_result.target;
+            for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(invalid_flexible_array_sources); source_index += 1)
             {
-                BUSTER_TEST(arguments, invalid_parse.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_FLEXIBLE_ARRAY_MEMBER);
+                TemporalArena temporary = scratch_begin(0, 0);
+                CPreprocessResult invalid_tokens = c_preprocess(temporary.arena, invalid_flexible_array_sources[source_index], (CPreprocessOptions){
+                    .target = linux_target,
+                    .data_layout = target_data_layout(linux_target),
+                    .dialect = C_PREPROCESS_DIALECT_C17,
+                });
+                CParseResult invalid_parse = c_parse(temporary.arena, invalid_tokens);
+                BUSTER_TEST(arguments, invalid_tokens.diagnostic_count == 0);
+                BUSTER_TEST(arguments, invalid_parse.diagnostic_count == 1);
+                if (invalid_parse.diagnostic_count == 1)
+                {
+                    BUSTER_TEST(arguments, invalid_parse.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_FLEXIBLE_ARRAY_MEMBER);
+                }
+                c_test_scratch_end(temporary);
             }
-            c_test_scratch_end(temporary);
         }
     }
     {
@@ -54081,6 +54090,205 @@ struct CTestWindowsVaStartCursorCase
     String8 source;
 };
 
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_inline_link_once(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TargetParseResult parsed_target = target_parse_triple(S8("x86_64-pc-windows-msvc"));
+    if (BUSTER_REQUIRE(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE))
+    {
+        Target target = parsed_target.target;
+        String8 source = S8(
+            "int prototype_first(int);\n"
+            "__inline int prototype_first(int x) { static int private_state = 5; return x + private_state; }\n"
+            "__inline int definition_first(int x) { return x + 2; }\n"
+            "int definition_first(int);\n"
+            "__forceinline int force_body(int x) { return x + 3; }\n"
+            "inline int c99_inline_only(int x) { return x + 4; }\n"
+            "static __inline int internal_body(int x) { return x + 5; }\n"
+            "__inline __attribute__((gnu_inline)) int gnu_inline_body(int x) { return x + 6; }\n"
+            "__inline __attribute__((weak)) int weak_inline_body(int x) { return x + 7; }\n"
+            "int call_inline_bodies(int x) { return prototype_first(x) + definition_first(x) + force_body(x) + "
+            "c99_inline_only(x) + internal_body(x) + gnu_inline_body(x) + weak_inline_body(x); }\n");
+        struct
+        {
+            String8 name;
+            bool is_definition;
+            bool is_link_once;
+            bool is_weak;
+            IrLinkage linkage;
+        } expected[] = {
+            {S8("prototype_first"), true, true, false, IR_LINKAGE_EXTERNAL},
+            {S8("definition_first"), true, true, false, IR_LINKAGE_EXTERNAL},
+            {S8("force_body"), true, true, false, IR_LINKAGE_EXTERNAL},
+            {S8("c99_inline_only"), false, false, false, IR_LINKAGE_EXTERNAL},
+            {S8("internal_body"), true, false, false, IR_LINKAGE_INTERNAL},
+            {S8("gnu_inline_body"), true, false, false, IR_LINKAGE_EXTERNAL},
+            {S8("weak_inline_body"), true, false, true, IR_LINKAGE_EXTERNAL},
+        };
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                .source_path = S8("windows-inline-link-once.c"),
+                .target = target,
+                .data_layout = target_data_layout(target),
+                .dialect = C_PREPROCESS_DIALECT_C17,
+            });
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(
+                temporary.arena, S8("windows-inline-link-once.c"), tokens, parse, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            String8 context = string_format(temporary.arena, S8("Windows link-once form={u32}"), form);
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+            BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified,
+                            lowered.diagnostic_count ? lowered.diagnostics[0].message : context);
+            if (lowered.program && lowered.canonical_ir_certified && !lowered.diagnostic_count &&
+                BUSTER_REQUIRE(arguments, lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected); expected_index += 1)
+                {
+                    u32 found = 0;
+                    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                    {
+                        IrFunction* function = module->functions + function_index;
+                        if (!string_equal(function->name, expected[expected_index].name))
+                        {
+                            continue;
+                        }
+                        found += 1;
+                        IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, function->symbol);
+                        BUSTER_TEST_RAW(arguments,
+                            symbol && symbol->kind == IR_SYMBOL_FUNCTION &&
+                            symbol->is_definition == expected[expected_index].is_definition &&
+                            symbol->is_link_once == expected[expected_index].is_link_once &&
+                            symbol->is_weak == expected[expected_index].is_weak &&
+                            symbol->linkage == expected[expected_index].linkage,
+                            string_format(temporary.arena, S8("{S8} {S8}"), context, expected[expected_index].name));
+                    }
+                    BUSTER_TEST_RAW(arguments, found == 1, context);
+                }
+
+                u32 internal_data_count = 0;
+                for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+                {
+                    IrGlobal* global = module->globals + global_index;
+                    IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, global->symbol);
+                    if (symbol && symbol->kind == IR_SYMBOL_DATA && symbol->linkage == IR_LINKAGE_INTERNAL)
+                    {
+                        internal_data_count += 1;
+                        BUSTER_TEST(arguments, symbol->is_definition && !symbol->is_link_once && !symbol->is_weak);
+                    }
+                }
+                BUSTER_TEST(arguments, internal_data_count == 1);
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_union_flexible_array_layout(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TargetParseResult windows_result = target_parse_triple(S8("x86_64-pc-windows-msvc"));
+    TargetParseResult linux_result = target_parse_triple(S8("x86_64-unknown-linux"));
+    if (BUSTER_REQUIRE(arguments, windows_result.error == TARGET_PARSE_ERROR_NONE) &&
+        BUSTER_REQUIRE(arguments, linux_result.error == TARGET_PARSE_ERROR_NONE))
+    {
+        Target windows_target = windows_result.target;
+        String8 windows_source = S8(
+            "typedef struct Entry1 { unsigned Value; } Entry1;\n"
+            "typedef struct Entry2 { unsigned Value; } Entry2;\n"
+            "#pragma warning(push)\n"
+            "#pragma warning(disable: 4200)\n"
+            "typedef struct Response {\n"
+            "    unsigned ResponseLevel;\n"
+            "    unsigned NumberEntries;\n"
+            "    union { Entry1 Lev1Depends[]; Entry2 Lev2Depends[]; } DUMMYUNIONNAME;\n"
+            "} Response;\n"
+            "#pragma warning(pop)\n"
+            "_Static_assert(sizeof(Response) == 8, \"MSVC union flexible arrays have zero extent\");\n");
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, windows_source, (CPreprocessOptions){
+                .source_path = S8("windows-union-flexible-array.c"),
+                .target = windows_target,
+                .data_layout = target_data_layout(windows_target),
+                .dialect = C_PREPROCESS_DIALECT_C17,
+            });
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(
+                temporary.arena, S8("windows-union-flexible-array.c"), tokens, parse, windows_target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            String8 context = string_format(temporary.arena, S8("Windows union flexible-array form={u32}"), form);
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+            BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified,
+                            lowered.diagnostic_count ? lowered.diagnostics[0].message : context);
+            if (lowered.program && lowered.canonical_ir_certified && !lowered.diagnostic_count)
+            {
+                IrType* response = 0;
+                for (u32 type_index = 0; type_index < lowered.program->types.count; type_index += 1)
+                {
+                    IrType* type = lowered.program->types.types + type_index;
+                    if (type->kind == IR_TYPE_STRUCT && string_equal(type->name, S8("Response")))
+                    {
+                        response = type;
+                        break;
+                    }
+                }
+                BUSTER_TEST_RAW(arguments, response && response->layout.resolved && response->field_count == 3 &&
+                    response->layout.size == 8 && response->layout.alignment == 4 && response->fields[2].offset == 8,
+                    context);
+                if (response && response->field_count == 3)
+                {
+                    IrType* flexible_union = ir_type_from_id(&lowered.program->types, response->fields[2].type);
+                    BUSTER_TEST_RAW(arguments,
+                        flexible_union && flexible_union->kind == IR_TYPE_UNION && flexible_union->layout.resolved &&
+                        flexible_union->layout.size == 0 && flexible_union->layout.alignment == 4 &&
+                        flexible_union->field_count == 2,
+                        context);
+                    if (flexible_union && flexible_union->field_count == 2)
+                    {
+                        for (u32 field_index = 0; field_index < flexible_union->field_count; field_index += 1)
+                        {
+                            IrType* array = ir_type_from_id(&lowered.program->types, flexible_union->fields[field_index].type);
+                            BUSTER_TEST(arguments, array && array->kind == IR_TYPE_ARRAY && array->element_count == 0);
+                        }
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+
+        Target linux_target = linux_result.target;
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult linux_tokens = c_preprocess(temporary.arena,
+            S8("union Packet { int tag; unsigned char bytes[]; };\n"),
+            (CPreprocessOptions){
+                .source_path = S8("linux-union-flexible-array.c"),
+                .target = linux_target,
+                .data_layout = target_data_layout(linux_target),
+                .dialect = C_PREPROCESS_DIALECT_C17,
+            });
+        CParseResult linux_parse = c_parse(temporary.arena, linux_tokens);
+        BUSTER_TEST(arguments, linux_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, linux_parse.diagnostic_count == 1);
+        if (linux_parse.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, linux_parse.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_FLEXIBLE_ARRAY_MEMBER);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_va_start_cursor(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -57022,6 +57230,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_wide_numeric_literal_runtime);
     C_TEST_FIXTURE(arguments, c_test_wide_pragma_operands);
     C_TEST_FIXTURE(arguments, c_test_windows_inline_bodies);
+    C_TEST_FIXTURE(arguments, c_test_windows_inline_link_once);
+    C_TEST_FIXTURE(arguments, c_test_windows_union_flexible_array_layout);
     C_TEST_FIXTURE(arguments, c_test_windows_va_start_cursor);
     C_TEST_FIXTURE(arguments, c_test_windows_va_start_semantics);
     C_TEST_FIXTURE(arguments, c_test_word_class_token_kinds);

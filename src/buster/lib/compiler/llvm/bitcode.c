@@ -1842,9 +1842,14 @@ static bool llvm_bc_add_function_entity(LlvmBcContext* context, IrFunction* func
                      symbol ? symbol->id : IR_SYMBOL_ID_INVALID);
         return false;
     }
-    if (context->symbol_seen[symbol->id.value])
+    if (context->symbol_seen[symbol->id.value] || (!declaration && symbol->is_link_once))
     {
-        llvm_bc_fail(context, LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL, llvm_bc_s8("duplicate LLVM bitcode function symbol"), function, 0, 0, symbol->id);
+        if (context->symbol_seen[symbol->id.value])
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL, llvm_bc_s8("duplicate LLVM bitcode function symbol"), function, 0, 0, symbol->id);
+        else
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION,
+                         llvm_bc_s8("Microsoft C link-once function definitions require native COFF emission"),
+                         function, 0, 0, symbol->id);
         return false;
     }
     IrTypeId type_id = function ? function->canonical_type : symbol->type;

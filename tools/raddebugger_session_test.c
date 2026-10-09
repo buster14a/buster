@@ -2055,7 +2055,7 @@ expect_values(Session *session, const State *state, const ExpectedValue *values,
     {
         ok = 0;
     }
-    for(size_t i = 0; i < count; i += 1)
+    for(size_t i = 0; i < count && ok; i += 1)
     {
         char base[MAX_VALUE_BYTES];
         size_t out = 0;

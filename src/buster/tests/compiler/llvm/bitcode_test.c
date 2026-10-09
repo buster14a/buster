@@ -5046,6 +5046,13 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
         }
     }
 
+    symbols[0].is_link_once = true;
+    LlvmBitcodeArtifact link_once = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    BUSTER_TEST(arguments, !llvm_bitcode_artifact_is_valid(link_once));
+    BUSTER_TEST(arguments, link_once.error.code == LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION);
+    BUSTER_TEST(arguments, !link_once.bytes.length);
+    symbols[0].is_link_once = false;
+
     LlvmBitcodeArtifact invalid = llvm_bitcode_emit_with_options(0, &program, modules, 1, options);
     BUSTER_TEST(arguments, !llvm_bitcode_artifact_is_valid(invalid));
     BUSTER_TEST(arguments, invalid.error.code == LLVM_BITCODE_ERROR_INVALID_ARGUMENT);

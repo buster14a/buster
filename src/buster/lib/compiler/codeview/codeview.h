@@ -46,7 +46,17 @@ struct CodeviewInput
     u32 function_count;
     u32 line_count;
     u16 machine;
-    u8 reserved[2];
+    bool record_function_ranges;
+    u8 reserved[1];
+};
+
+// Consecutive function symbols/lines subsections in the shared symbols image.
+// Ranges exclude its C13 signature; split contributions add their own signature.
+typedef struct CodeviewFunctionRange CodeviewFunctionRange;
+struct CodeviewFunctionRange
+{
+    u64 offset;
+    u64 size;
 };
 
 typedef struct CodeviewResult CodeviewResult;
@@ -55,6 +65,8 @@ struct CodeviewResult
     ByteSlice symbols;
     ByteSlice types;
     CodeviewRelocation* relocations;
+    CodeviewFunctionRange* functions;
+    u32 function_count;
     u32 relocation_count;
     bool valid;
     u8 reserved[3];

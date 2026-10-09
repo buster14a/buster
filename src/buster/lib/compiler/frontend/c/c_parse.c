@@ -1662,21 +1662,31 @@ BUSTER_C_INTERNAL bool c_parse_type_is_incomplete_array(CParseResult* result, CT
     return !bound.token_count && !bound.is_star && !bound.has_inferred_count;
 }
 
-BUSTER_C_INTERNAL bool c_parse_type_is_flexible_array_member(CParseResult* result, CType* aggregate, u32 member_index)
+BUSTER_C_INTERNAL bool c_parse_type_is_flexible_array_member(CParseResult* result, Target target, CType* aggregate, u32 member_index)
 {
-    if (!result || !aggregate || aggregate->kind != C_TYPE_STRUCT || member_index + 1 != aggregate->member_count)
+    bool msvc_union_array = aggregate && aggregate->kind == C_TYPE_UNION && target.os == OPERATING_SYSTEM_WINDOWS;
+    if (!result || !aggregate || member_index >= aggregate->member_count ||
+        (aggregate->kind != C_TYPE_STRUCT && !msvc_union_array) ||
+        (aggregate->kind == C_TYPE_STRUCT && member_index + 1 != aggregate->member_count))
     {
         return false;
-    }
-    u32 named_member_count = 0;
-    for (u32 index = 0; index < aggregate->member_count; index += 1)
-    {
-        named_member_count += result->members[aggregate->member_start + index].name.length != 0;
     }
     CMember* member = result->members + aggregate->member_start + member_index;
-    if (!member->name.length || named_member_count < 2 || member->is_bit_field || !c_parse_type_is_incomplete_array(result, member->type))
+    if (!member->name.length || member->is_bit_field || !c_parse_type_is_incomplete_array(result, member->type))
     {
         return false;
+    }
+    if (aggregate->kind == C_TYPE_STRUCT)
+    {
+        u32 named_member_count = 0;
+        for (u32 index = 0; index < aggregate->member_count; index += 1)
+        {
+            named_member_count += result->members[aggregate->member_start + index].name.length != 0;
+        }
+        if (named_member_count < 2)
+        {
+            return false;
+        }
     }
     CType* array = result->types + member->type.value;
     return array->element_type.value < result->type_count;
@@ -1688,6 +1698,11 @@ BUSTER_C_INTERNAL void c_parse_validate_flexible_array_members(CParseResult* res
     {
         return;
     }
+    // The Windows target uses the MSVC ABI and supplies _MSC_EXTENSIONS. Keep
+    // the SDK's incomplete-array union extension behind that target boundary;
+    // C17 and GNU targets outside Windows retain the standard diagnostic.
+    bool msvc_union_array = aggregate->kind == C_TYPE_UNION && preprocess &&
+                            preprocess->target.os == OPERATING_SYSTEM_WINDOWS;
     u32 named_member_count = 0;
     for (u32 member_index = 0; member_index < aggregate->member_count; member_index += 1)
     {
@@ -1701,7 +1716,7 @@ BUSTER_C_INTERNAL void c_parse_validate_flexible_array_members(CParseResult* res
             continue;
         }
         String8 message = {0};
-        if (aggregate->kind != C_TYPE_STRUCT)
+        if (aggregate->kind != C_TYPE_STRUCT && !msvc_union_array)
         {
             message = S8("flexible array member is only allowed in a structure");
         }
@@ -1709,11 +1724,11 @@ BUSTER_C_INTERNAL void c_parse_validate_flexible_array_members(CParseResult* res
         {
             message = S8("flexible array member must have a name");
         }
-        else if (member_index + 1 != aggregate->member_count)
+        else if (aggregate->kind == C_TYPE_STRUCT && member_index + 1 != aggregate->member_count)
         {
             message = S8("flexible array member must be the last structure member");
         }
-        else if (named_member_count < 2)
+        else if (aggregate->kind == C_TYPE_STRUCT && named_member_count < 2)
         {
             message = S8("structure with a flexible array member must have another named member");
         }
@@ -2674,7 +2689,7 @@ BUSTER_C_INTERNAL void c_parse_layout_agenda_expand(CParseLayoutContext* context
             {
                 // Only an array member can be flexible, so the named-member
                 // count behind the answer is skipped for every other one.
-                bool flexible = result->types[member.type.value].kind == C_TYPE_ARRAY && c_parse_type_is_flexible_array_member(result, type, member_index);
+                bool flexible = result->types[member.type.value].kind == C_TYPE_ARRAY && c_parse_type_is_flexible_array_member(result, context->preprocess.target, type, member_index);
                 c_parse_layout_agenda_expect(context, waiter, flexible ? result->types[member.type.value].element_type : member.type);
                 c_parse_layout_agenda_expect_specifiers(context, waiter, member.alignment_start, member.alignment_count);
             }
@@ -3542,7 +3557,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                     fields_resolved = false;
                     break;
                 }
-                bool flexible = c_parse_type_is_flexible_array_member(result, &type, member_index);
+                bool flexible = c_parse_type_is_flexible_array_member(result, context->preprocess.target, &type, member_index);
                 CType* member_type = result->types + member.type.value;
                 CTypeId layout_type = flexible ? member_type->element_type : member.type;
                 if (layout_type.value >= type_count || !c_parse_layout_resolved(context, agenda, layout_type.value))

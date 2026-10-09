@@ -4409,7 +4409,10 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
         if (!result->output.length)
         {
             result->error = COMPILER_DRIVER_ERROR_OBJECT;
-            result->diagnostic = S8("could not format native object as textual assembly");
+            bool grouped_coff = object.comdat_count && object_format_for_target(object.target) == OBJECT_FORMAT_COFF;
+            if (grouped_coff) result->object_error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+            result->diagnostic = grouped_coff ? S8("textual assembly cannot preserve native COFF COMDAT contributions")
+                                             : S8("could not format native object as textual assembly");
             return;
         }
         if (invocation.output_path.length)

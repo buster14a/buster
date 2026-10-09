@@ -468,6 +468,11 @@ struct IrSymbol
     // __attribute__((weak)).  The object layer carries it as
     // ObjectSymbol.weak; see that field for what each format spells it as.
     bool is_weak;
+    // A needed externally linked function whose callable copies
+    // may be selected once by the object linker. Separate from a GNU weak
+    // definition: local static objects retain their translation-unit identity.
+    // Currently produced for Microsoft C inline functions on Windows only.
+    bool is_link_once;
     // Not exported from the final image (ELF STV_HIDDEN). Only a `.hidden`
     // directive in module-level assembly sets it today; the object layer
     // carries it as ObjectSymbol.hidden.

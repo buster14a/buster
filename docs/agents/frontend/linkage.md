@@ -180,8 +180,8 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   its pthread surface as weak aliases of internal names. Weak is
   `IrSymbol.is_weak` and becomes `ObjectSymbol.weak`, which ELF writes as
   `STB_WEAK` and Mach-O as `N_WEAK_DEF`. COFF spells a weak definition as a
-  selectany COMDAT, which needs a section per symbol while this model merges
-  sections by kind, so the writer still cannot synthesize it. The reader does
+  selectany COMDAT. GNU weak alone still does not authorize a native COFF
+  group; the writer does not infer selection semantics from that flag. The reader does
   preserve each source contribution's key, selection, associated parent, byte
   range and relocation range. `link_objects` resolves those groups first:
   ANY keeps one, SAME_SIZE and EXACT_MATCH validate their contracts, LARGEST
@@ -203,9 +203,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   permits associative parents that are themselves associative, requires a final
   non-associative root and forbids cycles (GitHub #2232).
   Only then does the surviving definition enter ordinary weak/strong
-  arbitration. A COFF object therefore reads `weak` back but cannot write it
-  and carries a compiler-produced weak symbol as an ordinary external. That is the one gap of the
-  three formats, and it predates aliases: `object.c`'s header states it. An
+  arbitration. A COFF object reads grouped replaceable definitions back as `weak`.
+  A compiler-produced GNU weak symbol without an explicit group remains an
+  ordinary external on COFF. The Microsoft C callable-inline path below has
+  its own canonical fact and explicit groups. An
   alias is a pair in `IrModule.aliases` rather than a field on every symbol:
   it is a relation between two symbols rather than a property of one, and
   nearly every module has none. The object writer gives
@@ -626,3 +627,47 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   build/Release/ide cc -target aarch64-unknown-linux -fverify-codegen -fregister-allocator=quality tests/basic_c_aarch64_elf_page_callee.c /tmp/page-caller.o -o /tmp/page-caller
   qemu-aarch64 /tmp/page-caller
   ```
+
+- **Microsoft C callable inline definitions use native COFF ANY groups (#3208).**
+  A needed, externally linked Windows `__inline` (including normalized
+  `__forceinline`) body carries `IrSymbol.is_link_once`, independently of
+  `is_weak`. Ordinary C99/GNU inline rules and static inline bodies retain
+  their existing definition decisions. Canonical validation permits this fact
+  only on an external function definition without GNU weak, TLS or a named
+  section. The native object builder refuses it on non-COFF targets.
+
+  One ANY contribution owns the callable code. Its x64 12-byte or ARM64
+  8-byte pdata entry, corresponding xdata record, and per-function CodeView
+  symbol/line subsections are direct ASSOCIATIVE children. Private local
+  statics stay ordinary translation-unit data: selecting a callable body also
+  selects the private storage its relocations name, without coalescing storage
+  independently or imposing C++ ODR rules on inlined copies. The COFF writer
+  splits only a private object view, remaps section-anchor addends, and emits
+  section-definition auxiliary records before external keys. Surviving ordinary
+  offsets preserve their alignment residue. The neutral object retains its
+  original ranges for existing consumers.
+
+  This writer handles explicit ANY roots and direct ASSOCIATIVE children;
+  other selection kinds or association chains are refused rather than silently
+  dropping group semantics. GNU weak synthesis remains outside this repair.
+  LLVM bitcode currently returns a structured unsupported-instruction error
+  for these definitions and publishes no bitcode artifact. Textual COFF
+  assembly refuses grouped objects with a structured driver object error and
+  leaves an existing output file intact; ordinary assembly remains supported.
+  The registered
+  object tests inspect raw selection, parent and section characteristic fields
+  and exercise both native unwind layouts. The Windows qualification independently
+  links and runs two translation units in both object orders and mixed trusted
+  Clang/Buster assignments with debug information and private-static mutation.
+
+  On supported 64-bit native hosts, the facts use existing tail padding:
+  IrSymbol remains 88 bytes, ObjectSymbol 56, and CodeviewInput 64.
+  CodeviewResult grows from 48 to 64 bytes. Only affected modules allocate
+  16 bytes per emitted debug function for CodeView ranges and checked
+  relocation copies proportional to R. Group indexing uses iterative
+  O(C log C) sorting and binary searches; stable relocation placement costs
+  O(R + C). The existing serializer census also records two u32 interval
+  bounds per contribution, so new native physical sections scan their own
+  contiguous rows rather than every relocation. Unaffected modules retain
+  their existing path. This is a correctness change; the required 9700X
+  performance qualification has not been run or claimed.

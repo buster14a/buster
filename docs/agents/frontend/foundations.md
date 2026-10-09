@@ -1023,6 +1023,13 @@ without facts for identical bitcode and diagnostics.
   pointer back through a live object so an address that folds correctly and
   lowers wrongly still fails; `c_test_void_object_refusals` pins both layout
   engines' number and the four refusals.
+- **Windows SDK union flexible arrays are an MSVC-target extension.**
+  Buster's Windows target uses the MSVC ABI and supplies `_MSC_EXTENSIONS`.
+  Named incomplete-array members inside a union are accepted there, map to
+  zero elements and retain their element alignment in both layout engines.
+  Non-Windows C17/GNU targets keep the invalid-union-member diagnostic, and
+  ordinary struct flexible arrays retain the standard name, final-member and
+  preceding-named-member requirements.
 - An integer converted to a pointer reaches pointer width in the frontend,
   before `IR_CONVERSION_INTEGER_TO_POINTER`, sign-extending when the operand is
   signed. All four backends lower that conversion as a plain register copy and

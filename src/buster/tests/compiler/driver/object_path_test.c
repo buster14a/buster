@@ -1975,9 +1975,50 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_semantic_tests(UnitTestAr
 }
 #endif
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_coff_comdat_assembly_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 input = buster_test_temporary_path(arena, S8("coff-inline-assembly"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("coff-inline-assembly"), S8(".s"));
+    String8 sentinel = S8("existing assembly artifact\n");
+    String8 source = S8("__declspec(noinline) __inline int *helper(void) { static int local = 17; return &local; }\n"
+                        "int *caller(void) { return helper(); }\n");
+    String8 targets[] = {S8("x86_64-pc-windows-msvc"), S8("aarch64-pc-windows-msvc")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+        String8 command[] = {S8("-S"), S8("-target"), targets[index], S8("-o"), output, input};
+        CompilerDriverResult refused = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_OBJECT);
+        BUSTER_TEST(arguments, refused.object_error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+        BUSTER_TEST(arguments, !refused.output.length);
+        BUSTER_TEST(arguments, refused.diagnostic_count != 0);
+        BUSTER_STRING_TEST(arguments, refused.diagnostic, S8("textual assembly cannot preserve native COFF COMDAT contributions"));
+        ByteSlice preserved = file_read(arena, output, (FileReadOptions){0});
+        BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, preserved), sentinel);
+
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(S8("int ordinary(void) { return 17; }\n"))));
+        CompilerDriverResult ordinary = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST_RAW(arguments, ordinary.error == COMPILER_DRIVER_ERROR_NONE, ordinary.diagnostic);
+        BUSTER_TEST(arguments, ordinary.output.length != 0);
+    }
+    BUSTER_TEST(arguments, os_file_delete(input));
+    BUSTER_TEST(arguments, os_file_delete(output));
+    return result;
+}
+#endif
+
 UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_coff_comdat_assembly_tests);
+#endif
 #if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_stack_tests);
 #endif

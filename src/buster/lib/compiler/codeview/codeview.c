@@ -907,6 +907,11 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
         return result;
     }
     result.relocations = arena_allocate(arena, CodeviewRelocation, relocation_capacity ? relocation_capacity : 1);
+        if (input.record_function_ranges)
+        {
+            result.functions = arena_allocate(arena, CodeviewFunctionRange, input.function_count);
+            result.function_count = input.function_count;
+        }
         byte_writer_emit_u32_le(&symbols, CV_SIGNATURE_C13);
 
         // Translation-unit records: object name and compiler description.
@@ -954,6 +959,7 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
         for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
         {
             DwarfFunction* function = input.functions + function_index;
+            u64 function_start = symbols.count;
             u64 function_symbols = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
             u64 procedure = codeview_record_begin(&symbols, S_GPROC32);
             // COFF producers leave pParent/pEnd/pNext as zero placeholders.
@@ -1063,6 +1069,13 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
                 byte_writer_patch_u32_le(&symbols, count_offset + 4, (u32)(symbols.count - block_start));
             }
             codeview_subsection_end(&symbols, function_lines);
+            if (result.functions)
+            {
+                result.functions[function_index] = (CodeviewFunctionRange){
+                    .offset = function_start,
+                    .size = symbols.count - function_start,
+                };
+            }
         }
 
         // File checksum table (checksum kind "none") and the string table it

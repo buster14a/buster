@@ -15,8 +15,10 @@
 // COFF first preserves each source section's COMDAT key, selection, parent,
 // byte range and relocation range in ObjectFile.comdats; link_objects resolves
 // those groups before ordinary weak/strong arbitration. ELF and Mach-O write
-// weak definitions back out. COFF still cannot synthesize them because a
-// COMDAT needs its own section and the producer model merges sections by kind.
+// weak definitions back out. Microsoft C callable inline definitions carry
+// an independent canonical fact; COFF splits their ANY code and associative
+// metadata contributions in a private writer view. GNU weak alone still does
+// not authorize synthesized COFF selection semantics.
 //
 // DWARF 4/5 section payloads are carried without parsing unit headers;
 // object_debug_section_kind_from_name defines the supported section family.
@@ -319,6 +321,10 @@ BUSTER_GLOBAL_LOCAL bool object_writer_capacity_aligned(ObjectFile* object, Obje
     {
         u64 relocation_overhead = format == OBJECT_FORMAT_MACH_O64 ? OBJECT_WRITER_MACH_RELOCATION_RESERVATION : OBJECT_WRITER_COFF_RELOCATION_RESERVATION;
         result = object_writer_capacity_add(&total, (u64)object->relocation_count * relocation_overhead);
+    }
+    if (result && format == OBJECT_FORMAT_COFF)
+    {
+        result = object_writer_capacity_add(&total, (u64)object->comdat_count * 36);
     }
     if (result)
     {
@@ -4372,6 +4378,7 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
 {
     String8 result = {0};
     bool valid = arena && object && object->error == OBJECT_ERROR_NONE && object->sections &&
+                 (!object->comdat_count || object_format_for_target(object->target) != OBJECT_FORMAT_COFF) &&
                  (!object->symbol_count || object->symbols) && (!object->relocation_count || object->relocations) &&
                  (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64);
     u64 capacity = 1024;
@@ -6393,6 +6400,24 @@ BUSTER_GLOBAL_LOCAL bool object_coff_comdat_is_replaceable(u8 selection)
     return selection >= OBJECT_COMDAT_SELECTION_ANY && selection <= OBJECT_COMDAT_SELECTION_LARGEST;
 }
 
+// A COFF section definition is untyped, at zero, with one auxiliary row
+// and the physical section's name. A static function's auxiliary record
+// does not establish a section base.
+BUSTER_GLOBAL_LOCAL bool object_coff_symbol_is_section_anchor(ByteSlice bytes, u32 string_offset, u32 string_size,
+                                                              u16 section, u16 type, u32 value, u8 storage,
+                                                              u8 auxiliary_count, String8 name)
+{
+    bool result = section && !type && !value && storage == OBJECT_COFF_STORAGE_STATIC && auxiliary_count == 1;
+    if (result)
+    {
+        bool valid_name = false;
+        String8 section_name = object_read_coff_name(bytes, 20 + (u64)(section - 1) * 40,
+                                                   string_offset, string_size, true, &valid_name);
+        result = valid_name && string_equal(name, section_name);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, Target target)
 {
     bool read_ok = true;
@@ -6886,8 +6911,14 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                     section_comdat_selections[section_number - 1] == OBJECT_COFF_COMDAT_PENDING)
                 {
                     u16 section_index = (u16)section_number - 1;
+                    bool definition_name_valid = false;
+                    String8 definition_name = object_read_coff_name(bytes, source, string_offset, string_size, false,
+                                                                    &definition_name_valid);
+                    bool section_definition = definition_name_valid &&
+                        object_coff_symbol_is_section_anchor(bytes, string_offset, string_size, (u16)section_number,
+                                                             symbol_type, value, storage, auxiliary_count, definition_name);
                     u8 selection = bytes.pointer[source + COFF_SYMBOL_SIZE + 14];
-                    if (selection >= OBJECT_COMDAT_SELECTION_NO_DUPLICATES && selection < OBJECT_COMDAT_SELECTION_COUNT)
+                    if (section_definition && selection >= OBJECT_COMDAT_SELECTION_NO_DUPLICATES && selection < OBJECT_COMDAT_SELECTION_COUNT)
                     {
                         section_comdat_selections[section_index] = selection;
                         u32 comdat_index = section_comdat_indices[section_index];
@@ -6993,6 +7024,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                             .kind = symbol_type & 0x20 ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
                             .global = storage == OBJECT_COFF_STORAGE_EXTERNAL || storage == OBJECT_COFF_STORAGE_WEAK_EXTERNAL,
                             .weak = section_number != 0 && object_coff_comdat_is_replaceable(section_comdat_selections[section_index]),
+                            .section_anchor = section_number > 0 && object_coff_symbol_is_section_anchor(bytes, string_offset, string_size,
+                                              (u16)section_number, symbol_type, value, storage, auxiliary_count, name),
                         };
                         if (comdat_index != UINT32_MAX && result.symbols[destination_index].global &&
                             result.comdats[comdat_index].selection != OBJECT_COMDAT_SELECTION_ASSOCIATIVE &&
@@ -11720,6 +11753,7 @@ BUSTER_GLOBAL_LOCAL bool object_append_windows_unwind(Arena* arena, ObjectFile* 
             object->symbols[xdata_symbol] = (ObjectSymbol){
                 .name = string_format(arena, S8(".Lxdata.{u32}"), xdata_symbol),
                 .size = built.xdata.length,
+                .section_anchor = true,
                 .section = OBJECT_SECTION_WINDOWS_XDATA,
                 .kind = OBJECT_SYMBOL_DATA,
             };
@@ -12065,6 +12099,242 @@ BUSTER_GLOBAL_LOCAL u32 object_named_section_map(ObjectNamedSectionPlan const* p
     return result;
 }
 
+// Microsoft C callable inline definitions retain private local objects. Only
+// their code and instruction-relative metadata form one replaceable group.
+typedef struct ObjectCoffComdatIndex ObjectCoffComdatIndex;
+struct ObjectCoffComdatIndex
+{
+    u32* groups;
+    u32* first;
+};
+
+BUSTER_GLOBAL_LOCAL void* object_coff_comdat_allocate(Arena* arena, u64 count, u64 size, u64 alignment)
+{
+    void* result = 0;
+    if (object_reader_arena_can_allocate_count(arena, count ? count : 1, size, alignment))
+    {
+        result = arena_allocate_bytes(arena, (count ? count : 1) * size, alignment);
+    }
+    return result;
+}
+
+#define object_coff_comdat_table(arena, T, count) ((T*)object_coff_comdat_allocate((arena), (count), sizeof(T), BUSTER_ALIGN_OF(T)))
+
+BUSTER_GLOBAL_LOCAL bool object_coff_comdat_before(ObjectFile* object, u32 left, u32 right)
+{
+    ObjectComdat* a = object->comdats + left;
+    ObjectComdat* b = object->comdats + right;
+    return a->section < b->section ||
+           (a->section == b->section && (a->offset < b->offset || (a->offset == b->offset && left < right)));
+}
+
+BUSTER_GLOBAL_LOCAL bool object_coff_comdat_index(Arena* arena, ObjectFile* object, ObjectCoffComdatIndex* index)
+{
+    bool valid = object->comdats && object->comdat_count && object->section_count &&
+                 object->section_count < UINT32_MAX && object->comdat_count <= UINT32_MAX / 2;
+    u32* temporary = 0;
+    if (valid)
+    {
+        index->groups = object_coff_comdat_table(arena, u32, object->comdat_count);
+        index->first = object_coff_comdat_table(arena, u32, (u64)object->section_count + 1);
+        temporary = object_coff_comdat_table(arena, u32, object->comdat_count);
+        valid = index->groups && index->first && temporary;
+    }
+    if (valid)
+    {
+        memset(index->first, 0, ((u64)object->section_count + 1) * sizeof(*index->first));
+        for (u32 group = 0; group < object->comdat_count && valid; group += 1)
+        {
+            ObjectComdat* source = object->comdats + group;
+            valid = source->section < object->section_count;
+            if (valid)
+            {
+                u64 size = object_section_kind_is_zero_fill(object->sections[source->section].kind)
+                               ? object->sections[source->section].virtual_size : object->sections[source->section].data.length;
+                valid = source->offset <= size && source->size <= size - source->offset &&
+                        (source->selection == OBJECT_COMDAT_SELECTION_ANY || source->selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE) &&
+                        (source->selection != OBJECT_COMDAT_SELECTION_ANY || source->key.length) &&
+                        (source->selection != OBJECT_COMDAT_SELECTION_ASSOCIATIVE ||
+                         (source->associated < object->comdat_count && source->associated != group &&
+                          object->comdats[source->associated].selection == OBJECT_COMDAT_SELECTION_ANY));
+                index->groups[group] = group;
+                index->first[source->section + 1] += 1;
+            }
+        }
+    }
+    if (valid)
+    {
+        for (u32 section = 0; section < object->section_count; section += 1)
+        {
+            index->first[section + 1] += index->first[section];
+        }
+        u32* source = index->groups;
+        u32* destination = temporary;
+        for (u64 width = 1; width < object->comdat_count; width *= 2)
+        {
+            for (u64 start = 0; start < object->comdat_count; start += width * 2)
+            {
+                u64 middle = BUSTER_MIN(start + width, object->comdat_count);
+                u64 finish = BUSTER_MIN(start + width * 2, object->comdat_count);
+                u64 left = start;
+                u64 right = middle;
+                for (u64 slot = start; slot < finish; slot += 1)
+                {
+                    bool take_left = left < middle && (right == finish || object_coff_comdat_before(object, source[left], source[right]));
+                    destination[slot] = take_left ? source[left++] : source[right++];
+                }
+            }
+            u32* swap = source;
+            source = destination;
+            destination = swap;
+        }
+        if (source != index->groups)
+        {
+            memcpy(index->groups, source, (u64)object->comdat_count * sizeof(*source));
+        }
+        for (u32 section = 0; section < object->section_count && valid; section += 1)
+        {
+            u64 end = 0;
+            for (u32 slot = index->first[section]; slot < index->first[section + 1] && valid; slot += 1)
+            {
+                ObjectComdat* group = object->comdats + index->groups[slot];
+                valid = end <= group->offset;
+                end = group->offset + group->size;
+            }
+        }
+    }
+    return valid;
+}
+
+// Return the preceding contribution, if any; callers distinguish a contained
+// byte from the ordinary bytes following it. One-based result keeps zero absent.
+BUSTER_GLOBAL_LOCAL u32 object_coff_comdat_at(ObjectFile* object, ObjectCoffComdatIndex* index, u32 section, u64 offset)
+{
+    u32 result = 0;
+    if (section < object->section_count)
+    {
+        u32 begin = index->first[section];
+        u32 first = begin;
+        u32 end = index->first[section + 1];
+        while (begin < end)
+        {
+            u32 middle = begin + (end - begin) / 2;
+            if (object->comdats[index->groups[middle]].offset <= offset) begin = middle + 1;
+            else end = middle;
+        }
+        if (begin > first) result = index->groups[begin - 1] + 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_codegen_link_once_groups(Arena* arena, ObjectFile* object, IrProgram* program,
+                                                         CodegenModule* module, ObjectWindowsUnwindResult unwind,
+                                                         CodeviewResult codeview, u32 function_count)
+{
+    u64 capacity = (u64)function_count * 4;
+    bool valid = capacity <= UINT32_MAX && !object->comdat_count;
+    if (valid)
+    {
+        object->comdats = object_coff_comdat_table(arena, ObjectComdat, capacity);
+        valid = object->comdats != 0;
+    }
+    for (u32 entry = 0; entry < module->entry_count && valid; entry += 1)
+    {
+        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, module->entries[entry].symbol);
+        if (!symbol || !symbol->is_link_once) continue;
+        ObjectSymbol* function = object->symbols + entry;
+        u32 parent = object->comdat_count++;
+        object->comdats[parent] = (ObjectComdat){
+            .key = function->name, .offset = function->value, .size = function->size,
+            .section = function->section, .source_section = function->section,
+            .associated = OBJECT_COMDAT_ASSOCIATED_NONE, .selection = OBJECT_COMDAT_SELECTION_ANY,
+        };
+        function->comdat = parent + 1;
+        function->weak = true;
+        if (unwind.valid && entry < unwind.function_count)
+        {
+            u32 width = unwind.aarch64 ? 8u : 12u;
+            object->comdats[object->comdat_count++] = (ObjectComdat){
+                .offset = (u64)entry * width, .size = width,
+                .section = OBJECT_SECTION_WINDOWS_PDATA, .source_section = OBJECT_SECTION_WINDOWS_PDATA,
+                .associated = parent, .selection = OBJECT_COMDAT_SELECTION_ASSOCIATIVE,
+            };
+            u32 xdata_group = object->comdat_count++;
+            u64 xdata_end = entry + 1 < unwind.function_count ? unwind.xdata_offsets[entry + 1] : unwind.xdata.length;
+            object->comdats[xdata_group] = (ObjectComdat){
+                .offset = unwind.xdata_offsets[entry], .size = xdata_end - unwind.xdata_offsets[entry],
+                .section = OBJECT_SECTION_WINDOWS_XDATA, .source_section = OBJECT_SECTION_WINDOWS_XDATA,
+                .associated = parent, .selection = OBJECT_COMDAT_SELECTION_ASSOCIATIVE,
+            };
+        }
+        if (codeview.valid && entry < codeview.function_count)
+        {
+            CodeviewFunctionRange range = codeview.functions[entry];
+            object->comdats[object->comdat_count++] = (ObjectComdat){
+                .offset = range.offset, .size = range.size,
+                .section = OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS, .source_section = OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS,
+                .associated = parent, .selection = OBJECT_COMDAT_SELECTION_ASSOCIATIVE,
+            };
+        }
+    }
+    ObjectCoffComdatIndex index = {0};
+    if (valid) valid = object_coff_comdat_index(arena, object, &index);
+    for (u32 symbol = 0; symbol < object->symbol_count && valid; symbol += 1)
+    {
+        ObjectSymbol* value = object->symbols + symbol;
+        if (value->section == OBJECT_SECTION_UNDEFINED || value->section_anchor) continue;
+        u32 group = object_coff_comdat_at(object, &index, value->section, value->value);
+        if (group && value->value - object->comdats[group - 1].offset < object->comdats[group - 1].size)
+        {
+            value->comdat = group;
+            value->weak = true;
+        }
+    }
+    for (u32 relocation = 0; relocation < object->relocation_count && valid; relocation += 1)
+    {
+        ObjectRelocation* value = object->relocations + relocation;
+        u32 group = object_coff_comdat_at(object, &index, value->section, value->offset);
+        if (group && value->offset - object->comdats[group - 1].offset < object->comdats[group - 1].size)
+        {
+            value->comdat = group;
+            ObjectComdat* contribution = object->comdats + group - 1;
+            if (!contribution->relocation_count) contribution->first_relocation = relocation;
+            contribution->relocation_count += 1;
+        }
+    }
+    // Neutral COMDAT records require contiguous relocation ranges. Source
+    // order need not group contributions, so use stable counting placement
+    // only for affected modules; ordinary rows remain first.
+    if (valid)
+    {
+        ObjectRelocation* grouped = object_coff_comdat_table(arena, ObjectRelocation, object->relocation_count);
+        valid = grouped != 0;
+        if (valid)
+        {
+            u32 ordinary_count = object->relocation_count;
+            for (u32 group = 0; group < object->comdat_count; group += 1)
+                ordinary_count -= object->comdats[group].relocation_count;
+            u32 next = ordinary_count;
+            for (u32 group = 0; group < object->comdat_count; group += 1)
+            {
+                object->comdats[group].first_relocation = next;
+                index.groups[group] = next;
+                next += object->comdats[group].relocation_count;
+            }
+            u32 ordinary = 0;
+            for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
+            {
+                ObjectRelocation value = object->relocations[relocation];
+                u32 destination = value.comdat ? index.groups[value.comdat - 1]++ : ordinary++;
+                grouped[destination] = value;
+            }
+            object->relocations = grouped;
+        }
+    }
+    return valid;
+}
+
+
 ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program, CodegenModule* module, Target target)
 {
     ObjectFile result = {
@@ -12096,9 +12366,23 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     u32 writable_alignment = 16;
     u32 thread_local_alignment = 16;
     u32 text_section_alignment = 16;
+    u32 link_once_count = 0;
     for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
     {
-        text_section_alignment = BUSTER_MAX(text_section_alignment, object_function_alignment(ir_symbol_from_id(&program->symbols, module->entries[entry_index].symbol)));
+        IrSymbol* function_symbol = ir_symbol_from_id(&program->symbols, module->entries[entry_index].symbol);
+        text_section_alignment = BUSTER_MAX(text_section_alignment, object_function_alignment(function_symbol));
+        if (function_symbol && function_symbol->is_link_once)
+        {
+            link_once_count += 1;
+            if (function_symbol->kind != IR_SYMBOL_FUNCTION || !function_symbol->is_definition ||
+                function_symbol->linkage != IR_LINKAGE_EXTERNAL || function_symbol->is_weak ||
+                function_symbol->is_thread_local || function_symbol->section_name.length)
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+        }
+    }
+    if (link_once_count && object_format_for_target(target) != OBJECT_FORMAT_COFF)
+    {
+        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
     }
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
     {
@@ -12343,6 +12627,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                                                });
             codeview = codeview_build(arena, (CodeviewInput){
                                                  .model = &debug_model,
+                                                 .record_function_ranges = link_once_count != 0,
                                                  .producer = S8("buster"),
                                                  .file_paths = file_paths,
                                                  .functions = functions,
@@ -12770,6 +13055,10 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         {
             result.error = OBJECT_ERROR_INVALID_INPUT;
         }
+        else if (link_once_count && !object_codegen_link_once_groups(arena, &result, program, module, windows_unwind, codeview, link_once_count))
+        {
+            result.error = OBJECT_ERROR_INVALID_INPUT;
+        }
         else
         {
             object_debug_module_set(arena, &result, program->sources.count ? program->sources.sources[0].path : S8("buster.obj"), module->code.length);
@@ -12861,8 +13150,10 @@ BUSTER_GLOBAL_LOCAL bool object_writer_32_capacity(ObjectFile* object, ObjectFor
     {
         u64 relocation_reservation = coff ? OBJECT_WRITER_COFF_RELOCATION_RESERVATION : OBJECT_WRITER_MACH_RELOCATION_RESERVATION;
         u64 fixed = OBJECT_WRITER_RESERVATION_BASE + (u64)object->section_count * OBJECT_WRITER_SECTION_RESERVATION +
-                    (u64)object->symbol_count * OBJECT_WRITER_SYMBOL_RESERVATION + (u64)object->relocation_count * relocation_reservation;
+                    (u64)object->symbol_count * OBJECT_WRITER_SYMBOL_RESERVATION + (u64)object->relocation_count * relocation_reservation +
+                    (coff ? (u64)object->comdat_count * 36 : 0);
         result = object->section_count <= (u32)(coff ? OBJECT_COFF_MAX_SECTIONS : UINT8_MAX) && fixed <= UINT32_MAX &&
+                 (!coff || (u64)object->symbol_count + (u64)object->comdat_count * 2 <= UINT32_MAX) &&
                  (!object->section_count || object->sections) && (!object->symbol_count || object->symbols);
     }
     u64 virtual_size = 0;
@@ -13990,6 +14281,248 @@ BUSTER_GLOBAL_LOCAL bool object_coff_section_alignment_characteristics(ObjectSec
     return result;
 }
 
+typedef struct ObjectCoffComdatSplit ObjectCoffComdatSplit;
+struct ObjectCoffComdatSplit
+{
+    ObjectFile* original;
+    ObjectFile* output;
+    ObjectCoffComdatIndex index;
+    u64* removed;
+    u32* anchors;
+};
+
+BUSTER_GLOBAL_LOCAL u32 object_coff_comdat_prefix(ObjectSectionKind kind)
+{
+    return kind == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS ? 4u : 0u;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_coff_comdat_position(ObjectCoffComdatSplit* split, u32 section, u64 offset,
+                                                     u32 group, bool section_anchor, u32* destination, u64* value)
+{
+    ObjectFile* original = split->original;
+    bool valid = section < original->section_count;
+    if (valid)
+    {
+        u64 size = object_section_kind_is_zero_fill(original->sections[section].kind)
+                       ? original->sections[section].virtual_size : original->sections[section].data.length;
+        valid = offset <= size;
+    }
+    if (valid && group)
+    {
+        valid = group <= original->comdat_count;
+        if (valid)
+        {
+            ObjectComdat* contribution = original->comdats + group - 1;
+            valid = contribution->section == section && offset >= contribution->offset &&
+                    offset - contribution->offset <= contribution->size;
+            if (valid)
+            {
+                *destination = original->section_count + group - 1;
+                *value = offset - contribution->offset + object_coff_comdat_prefix(original->sections[section].kind);
+            }
+        }
+    }
+    else if (valid)
+    {
+        u32 previous = object_coff_comdat_at(original, &split->index, section, offset);
+        u64 removed = previous ? split->removed[previous - 1] : 0;
+        if (previous && offset - original->comdats[previous - 1].offset < original->comdats[previous - 1].size)
+        {
+            valid = section_anchor;
+            if (valid)
+            {
+                u32 slot = split->index.first[section];
+                u32 limit = split->index.first[section + 1];
+                while (slot < limit && split->index.groups[slot] != previous - 1) slot += 1;
+                removed = slot > split->index.first[section] ? split->removed[split->index.groups[slot - 1]] : 0;
+            }
+        }
+        if (valid)
+        {
+            valid = removed <= offset;
+            *destination = section;
+            *value = offset - removed;
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_split_coff_comdats(Arena* arena, ObjectFile* original, ObjectFile* output)
+{
+    *output = *original;
+    bool valid = !original->comdat_count;
+    ObjectCoffComdatSplit split = {.original = original, .output = output};
+    if (original->comdat_count)
+    {
+        valid = original->section_count <= OBJECT_COFF_MAX_SECTIONS &&
+                original->comdat_count <= OBJECT_COFF_MAX_SECTIONS - original->section_count &&
+                original->symbol_count <= UINT32_MAX - original->comdat_count &&
+                object_coff_comdat_index(arena, original, &split.index);
+    }
+    if (valid && original->comdat_count)
+    {
+        u32 section_count = original->section_count + original->comdat_count;
+        output->sections = object_coff_comdat_table(arena, ObjectSection, section_count);
+        output->symbols = object_coff_comdat_table(arena, ObjectSymbol, (u64)original->symbol_count + original->comdat_count);
+        output->relocations = object_coff_comdat_table(arena, ObjectRelocation, original->relocation_count);
+        output->comdats = object_coff_comdat_table(arena, ObjectComdat, original->comdat_count);
+        split.removed = object_coff_comdat_table(arena, u64, original->comdat_count);
+        split.anchors = object_coff_comdat_table(arena, u32, original->comdat_count);
+        valid = output->sections && output->symbols && output->relocations && output->comdats && split.removed && split.anchors;
+        if (valid)
+        {
+            output->section_count = section_count;
+            memcpy(output->sections, original->sections, (u64)original->section_count * sizeof(*output->sections));
+            memcpy(output->symbols, original->symbols, (u64)original->symbol_count * sizeof(*output->symbols));
+            memset(split.anchors, 0xff, (u64)original->comdat_count * sizeof(*split.anchors));
+        }
+    }
+    for (u32 section = 0; valid && original->comdat_count && section < original->section_count; section += 1)
+    {
+        ObjectSection* source = original->sections + section;
+        bool zero_fill = object_section_kind_is_zero_fill(source->kind);
+        u64 size = zero_fill ? source->virtual_size : source->data.length;
+        u32 alignment = source->alignment ? source->alignment : object_section_default_alignment(source->kind);
+        valid = alignment && !(alignment & (alignment - 1));
+        u32 first = split.index.first[section];
+        u32 end = split.index.first[section + 1];
+        u64 removed = 0;
+        for (u32 slot = first; valid && slot < end; slot += 1)
+        {
+            u32 id = split.index.groups[slot];
+            ObjectComdat* group = original->comdats + id;
+            // Leave the remainder as padding in the ordinary section. Every
+            // surviving offset keeps its original residue modulo alignment.
+            removed += group->size & ~((u64)alignment - 1);
+            split.removed[id] = removed;
+            u32 prefix = object_coff_comdat_prefix(source->kind);
+            valid = prefix <= group->offset && group->size <= UINT32_MAX - prefix;
+            ObjectSection contribution = *source;
+            contribution.virtual_size = zero_fill ? group->size : 0;
+            contribution.data = (ByteSlice){0};
+            if (valid && !zero_fill)
+            {
+                u64 contribution_size = group->size + prefix;
+                contribution.data.pointer = object_coff_comdat_table(arena, u8, contribution_size);
+                contribution.data.length = contribution_size;
+                valid = contribution.data.pointer != 0;
+                if (valid)
+                {
+                    if (prefix) memcpy(contribution.data.pointer, source->data.pointer, prefix);
+                    if (group->size) memcpy(contribution.data.pointer + prefix, source->data.pointer + group->offset, group->size);
+                }
+            }
+            if (valid)
+            {
+                u32 destination = original->section_count + id;
+                output->sections[destination] = contribution;
+                output->comdats[id] = *group;
+                output->comdats[id].offset = prefix;
+                output->comdats[id].section = destination;
+                output->comdats[id].source_section = destination;
+            }
+        }
+        if (valid && first < end)
+        {
+            valid = removed <= size;
+            if (valid && zero_fill)
+            {
+                output->sections[section].virtual_size = size - removed;
+            }
+            else if (valid)
+            {
+                u64 kept_size = size - removed;
+                u8* kept = object_coff_comdat_table(arena, u8, kept_size);
+                valid = kept != 0;
+                if (valid)
+                {
+                    memset(kept, 0, kept_size);
+                    u64 cursor = 0;
+                    u64 prior_removed = 0;
+                    for (u32 slot = first; slot < end; slot += 1)
+                    {
+                        u32 id = split.index.groups[slot];
+                        ObjectComdat* group = original->comdats + id;
+                        u64 bytes = group->offset - cursor;
+                        if (bytes) memcpy(kept + cursor - prior_removed, source->data.pointer + cursor, bytes);
+                        cursor = group->offset + group->size;
+                        prior_removed = split.removed[id];
+                    }
+                    if (cursor < size) memcpy(kept + cursor - prior_removed, source->data.pointer + cursor, size - cursor);
+                    output->sections[section].data = (ByteSlice){.pointer = kept, .length = kept_size};
+                    if (source->virtual_size) output->sections[section].virtual_size = kept_size;
+                }
+            }
+        }
+    }
+    for (u32 symbol = 0; valid && original->comdat_count && symbol < original->symbol_count; symbol += 1)
+    {
+        ObjectSymbol* source = original->symbols + symbol;
+        if (source->section == OBJECT_SECTION_UNDEFINED) continue;
+        valid = object_coff_comdat_position(&split, source->section, source->value, source->comdat, source->section_anchor,
+                                           &output->symbols[symbol].section, &output->symbols[symbol].value);
+        if (valid && source->section_anchor && !source->comdat)
+        {
+            output->symbols[symbol].size = object_section_kind_is_zero_fill(output->sections[source->section].kind)
+                                             ? output->sections[source->section].virtual_size : output->sections[source->section].data.length;
+        }
+    }
+    for (u32 relocation = 0; valid && original->comdat_count && relocation < original->relocation_count; relocation += 1)
+    {
+        ObjectRelocation source = original->relocations[relocation];
+        ObjectRelocation* destination = output->relocations + relocation;
+        *destination = source;
+        valid = source.symbol < original->symbol_count &&
+                object_coff_comdat_position(&split, source.section, source.offset, source.comdat, false,
+                                            &destination->section, &destination->offset);
+        ObjectSymbol* target = valid ? original->symbols + source.symbol : 0;
+        if (valid && target->section_anchor && target->section != OBJECT_SECTION_UNDEFINED &&
+            source.kind != OBJECT_RELOCATION_COFF_SECTION16)
+        {
+            s64 bias = source.kind == OBJECT_RELOCATION_X86_64_PC32 || source.kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
+                       source.kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32 ? 4 : 0;
+            valid = target->value <= INT64_MAX && source.addend <= INT64_MAX - bias &&
+                    source.addend + bias >= -(s64)target->value &&
+                    source.addend + bias <= INT64_MAX - (s64)target->value;
+            u64 position = valid ? (u64)((s64)target->value + source.addend + bias) : 0;
+            u32 group = valid ? object_coff_comdat_at(original, &split.index, target->section, position) : 0;
+            if (group && position - original->comdats[group - 1].offset >= original->comdats[group - 1].size) group = 0;
+            u32 mapped_section = 0;
+            u64 mapped_position = 0;
+            if (valid) valid = object_coff_comdat_position(&split, target->section, position, group, false, &mapped_section, &mapped_position);
+            u32 mapped_symbol = source.symbol;
+            if (valid && group && output->symbols[mapped_symbol].section != mapped_section)
+            {
+                u32 id = group - 1;
+                if (split.anchors[id] == UINT32_MAX)
+                {
+                    valid = object_reader_arena_can_allocate_count(arena, 64, 1, 8);
+                    if (!valid) break;
+                    split.anchors[id] = output->symbol_count++;
+                    output->symbols[split.anchors[id]] = (ObjectSymbol){
+                        .name = string_format(arena, S8(".Lcoff.{u32}"), id),
+                        .value = object_coff_comdat_prefix(original->sections[target->section].kind),
+                        .size = original->comdats[id].size, .section = mapped_section,
+                        .comdat = group, .kind = OBJECT_SYMBOL_DATA, .section_anchor = true,
+                    };
+                }
+                mapped_symbol = split.anchors[id];
+            }
+            if (valid)
+            {
+                valid = mapped_position <= INT64_MAX && output->symbols[mapped_symbol].value <= mapped_position;
+                if (valid)
+                {
+                    destination->symbol = mapped_symbol;
+                    destination->addend = (s64)(mapped_position - output->symbols[mapped_symbol].value) - bias;
+                }
+            }
+        }
+    }
+    return valid;
+}
+
+
 BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena, ObjectFile* object, u64 capacity,
                                                                   ObjectWriteStatistics* statistics)
 {
@@ -14008,6 +14541,22 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
         COFF_SYMBOL_SIZE = 18,
     };
     u32 section_count = object->section_count;
+    u32 auxiliary_prefix = object->comdat_count * 2;
+    u32* section_groups = arena_allocate(arena, u32, section_count);
+    u32* group_first_relocation = arena_allocate(arena, u32, object->comdat_count);
+    u32* group_relocation_end = arena_allocate(arena, u32, object->comdat_count);
+    memset(section_groups, 0xff, (u64)section_count * sizeof(*section_groups));
+    for (u32 group = 0; group < object->comdat_count; group += 1)
+    {
+        u32 section = object->comdats[group].section;
+        group_first_relocation[group] = object->relocation_count;
+        group_relocation_end[group] = 0;
+        if (section >= section_count || section_groups[section] != UINT32_MAX)
+        {
+            buffer.error = OBJECT_ERROR_INVALID_INPUT;
+        }
+        else section_groups[section] = group;
+    }
     object_buffer_zero(&buffer, COFF_HEADER_SIZE + (u64)section_count * COFF_SECTION_SIZE);
     u32* raw_offsets = arena_allocate(arena, u32, section_count);
     u32* relocation_offsets = arena_allocate(arena, u32, section_count);
@@ -14018,12 +14567,18 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
         ObjectRelocation* source = object->relocations + relocation;
         statistics->relocation_visits += 1;
         // Leave room for the COFF marker's N+1 count in its 32-bit field.
-        if (source->section >= section_count || relocation_counts[source->section] >= UINT32_MAX - 1)
+        if (source->symbol >= object->symbol_count || source->section >= section_count || relocation_counts[source->section] >= UINT32_MAX - 1)
         {
             buffer.error = OBJECT_ERROR_INVALID_INPUT;
             break;
         }
         relocation_counts[source->section] += 1;
+        u32 group = section_groups[source->section];
+        if (group != UINT32_MAX)
+        {
+            group_first_relocation[group] = BUSTER_MIN(group_first_relocation[group], relocation);
+            group_relocation_end[group] = relocation + 1;
+        }
     }
     for (u32 section = 0; section < section_count && buffer.error == OBJECT_ERROR_NONE; section += 1)
     {
@@ -14037,7 +14592,13 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
             object_buffer_write(&buffer, object_section->data.pointer, object_section->data.length);
             statistics->payload_bytes_copied += object_section->data.length;
         }
-        for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
+        // New physical contributions scan only their observed interval.
+        // Native producer ranges are contiguous; arbitrary public object rows
+        // still retain the source-section check below.
+        u32 group = section_groups[section];
+        u32 first_relocation = group == UINT32_MAX ? 0 : group_first_relocation[group];
+        u32 relocation_end = group == UINT32_MAX ? object->relocation_count : group_relocation_end[group];
+        for (u32 relocation = first_relocation; relocation < relocation_end; relocation += 1)
         {
             ObjectRelocation* source = object->relocations + relocation;
             statistics->relocation_visits += 1;
@@ -14121,7 +14682,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
             // The 32-bit field counts the marker as well as all real relocations.
             object_write_u32_at(&buffer, overflow_offset, relocation_counts[section] + 1);
         }
-        for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
+        for (u32 relocation = first_relocation; relocation < relocation_end; relocation += 1)
         {
             ObjectRelocation* source = object->relocations + relocation;
             statistics->relocation_visits += 1;
@@ -14138,17 +14699,19 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
             u64 offset = buffer.count;
             object_buffer_zero(&buffer, COFF_RELOCATION_SIZE);
             object_write_u32_at(&buffer, offset, object_buffer_u32(&buffer, source->offset));
-            object_write_u32_at(&buffer, offset + 4, source->symbol);
+            object_write_u32_at(&buffer, offset + 4, source->symbol + auxiliary_prefix);
             object_write_u16_at(&buffer, offset + 8, type);
         }
     }
     u32 symbol_table_offset = object_buffer_u32(&buffer, buffer.count);
     u64 symbols_offset = buffer.count;
-    object_buffer_zero(&buffer, (u64)object->symbol_count * COFF_SYMBOL_SIZE);
+    object_buffer_zero(&buffer, ((u64)object->symbol_count + auxiliary_prefix) * COFF_SYMBOL_SIZE);
     u32 string_table_offset = object_buffer_u32(&buffer, buffer.count);
     object_buffer_zero(&buffer, 4);
     u32* string_offsets = arena_allocate(arena, u32, object->symbol_count);
     u32* section_name_offsets = arena_allocate(arena, u32, section_count);
+    memset(string_offsets, 0, (u64)object->symbol_count * sizeof(*string_offsets));
+    memset(section_name_offsets, 0, (u64)section_count * sizeof(*section_name_offsets));
     u8 zero = 0;
     for (u32 symbol = 0; symbol < object->symbol_count; symbol += 1)
     {
@@ -14177,7 +14740,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
     {
         ObjectSymbol* source = object->symbols + symbol;
         statistics->symbol_visits += 1;
-        u64 offset = symbols_offset + (u64)symbol * COFF_SYMBOL_SIZE;
+        u64 offset = symbols_offset + ((u64)symbol + auxiliary_prefix) * COFF_SYMBOL_SIZE;
         object_coff_name_write(&buffer, offset, source->name, string_offsets[symbol]);
         object_write_u32_at(&buffer, offset + 8, object_buffer_u32(&buffer, source->value));
         object_write_u16_at(&buffer, offset + 12, source->section == OBJECT_SECTION_UNDEFINED ? 0 : (u16)(source->section + 1));
@@ -14185,10 +14748,36 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
         object_write_u8_at(&buffer, offset + 16, source->global ? 2 : 3);
         object_write_u8_at(&buffer, offset + 17, 0);
     }
+    // Section definitions precede external keys, so a reader sees selection
+    // before binding the first external symbol in each physical contribution.
+    for (u32 group = 0; group < object->comdat_count; group += 1)
+    {
+        ObjectComdat* contribution = object->comdats + group;
+        u32 section = contribution->section;
+        if (section >= section_count) continue;
+        ObjectSection* source = object->sections + section;
+        u64 offset = symbols_offset + (u64)group * 2 * COFF_SYMBOL_SIZE;
+        object_coff_name_write(&buffer, offset, source->name, section_name_offsets[section]);
+        object_write_u16_at(&buffer, offset + 12, (u16)(section + 1));
+        object_write_u8_at(&buffer, offset + 16, OBJECT_COFF_STORAGE_STATIC);
+        object_write_u8_at(&buffer, offset + 17, 1);
+        u64 auxiliary = offset + COFF_SYMBOL_SIZE;
+        object_write_u32_at(&buffer, auxiliary, object_buffer_u32(&buffer,
+                            object_section_kind_is_zero_fill(source->kind) ? source->virtual_size : source->data.length));
+        object_write_u16_at(&buffer, auxiliary + 4, (u16)BUSTER_MIN(relocation_counts[section], UINT16_MAX));
+        u32 association = section;
+        if (contribution->selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE)
+        {
+            if (contribution->associated >= object->comdat_count) buffer.error = OBJECT_ERROR_INVALID_INPUT;
+            else association = object->comdats[contribution->associated].section;
+        }
+        object_write_u16_at(&buffer, auxiliary + 12, (u16)(association + 1));
+        object_write_u8_at(&buffer, auxiliary + 14, (u8)contribution->selection);
+    }
     object_write_u16_at(&buffer, 0, object->target.cpu_arch == CPU_ARCH_X86_64 ? 0x8664 : 0xaa64);
     object_write_u16_at(&buffer, 2, (u16)section_count);
     object_write_u32_at(&buffer, 8, symbol_table_offset);
-    object_write_u32_at(&buffer, 12, object->symbol_count);
+    object_write_u32_at(&buffer, 12, object->symbol_count + auxiliary_prefix);
     for (u32 section = 0; section < section_count; section += 1)
     {
         ObjectSection* source = object->sections + section;
@@ -14229,6 +14818,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
                               : object_section_kind_is_zero_fill(source->kind) ? 0xc0000080
                                                                                : 0xc0000040;
         characteristics = (characteristics & ~(u32)OBJECT_COFF_SECTION_ALIGNMENT_MASK) | alignment_characteristics;
+        if (section_groups[section] != UINT32_MAX) characteristics |= 0x00001000;
         if (relocation_counts[section] > UINT16_MAX)
         {
             characteristics |= OBJECT_COFF_SECTION_LINK_NRELOC_OVFL;
@@ -14258,6 +14848,13 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
         ObjectInitializerSplit moves = {0};
         bool split = object_split_initializer_priorities(arena, object, OBJECT_FORMAT_COFF, OBJECT_COFF_MAX_SECTIONS, &split_object, &moves) &&
                      object_initializer_relocations_place(arena, &split_object, &moves, statistics);
+        if (split && split_object.comdat_count)
+        {
+            ObjectFile contributions = {0};
+            split = object_split_coff_comdats(arena, &split_object, &contributions);
+            if (split) split_object = contributions;
+            else result.error = OBJECT_ERROR_INVALID_INPUT;
+        }
         if (split && object_writer_32_capacity(&split_object, OBJECT_FORMAT_COFF, &capacity, statistics) &&
             object_writer_32_arena_fits(arena, &split_object, OBJECT_FORMAT_COFF, capacity))
         {

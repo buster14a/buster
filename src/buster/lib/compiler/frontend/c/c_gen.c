@@ -57545,7 +57545,7 @@ BUSTER_C_INTERNAL bool c_ir_alignof_object_alignment(CIntegerIrBuilder* builder,
 // The answer is a property of the whole type table, so it is collected in one
 // pass and read back by index; asking it per array type rescans every
 // aggregate and every member, which is quadratic on a large translation unit.
-BUSTER_C_INTERNAL void c_ir_collect_flexible_array_types(CParseResult* parse, bool* flexible)
+BUSTER_C_INTERNAL void c_ir_collect_flexible_array_types(CParseResult* parse, Target target, bool* flexible)
 {
     if (!parse || !flexible)
     {
@@ -57555,30 +57555,35 @@ BUSTER_C_INTERNAL void c_ir_collect_flexible_array_types(CParseResult* parse, bo
     for (u32 aggregate_index = 0; aggregate_index < parse->type_count; aggregate_index += 1)
     {
         CType* aggregate = parse->types + aggregate_index;
-        if (aggregate->kind != C_TYPE_STRUCT || !aggregate->member_count)
+        bool msvc_union_arrays = aggregate->kind == C_TYPE_UNION && target.os == OPERATING_SYSTEM_WINDOWS;
+        if ((aggregate->kind != C_TYPE_STRUCT && !msvc_union_arrays) || !aggregate->member_count)
         {
             continue;
         }
-        u32 member_index = aggregate->member_count - 1;
         u32 named_member_count = 0;
         for (u32 index = 0; index < aggregate->member_count; index += 1)
         {
             named_member_count += parse->members[aggregate->member_start + index].name.length != 0;
         }
-        CMember* member = parse->members + aggregate->member_start + member_index;
-        if (!member->name.length || named_member_count < 2 || member->is_bit_field || member->type.value >= parse->type_count)
+        u32 first_member = msvc_union_arrays ? 0 : aggregate->member_count - 1;
+        for (u32 member_index = first_member; member_index < aggregate->member_count; member_index += 1)
         {
-            continue;
-        }
-        CType* array = parse->types + member->type.value;
-        if (array->kind != C_TYPE_ARRAY || array->array_bound >= parse->array_bound_count || array->element_type.value >= parse->type_count)
-        {
-            continue;
-        }
-        CArrayBound bound = parse->array_bounds[array->array_bound];
-        if (!bound.token_count && !bound.is_star && !bound.has_inferred_count)
-        {
-            flexible[member->type.value] = true;
+            CMember* member = parse->members + aggregate->member_start + member_index;
+            if (!member->name.length || member->is_bit_field || member->type.value >= parse->type_count ||
+                (!msvc_union_arrays && named_member_count < 2))
+            {
+                continue;
+            }
+            CType* array = parse->types + member->type.value;
+            if (array->kind != C_TYPE_ARRAY || array->array_bound >= parse->array_bound_count || array->element_type.value >= parse->type_count)
+            {
+                continue;
+            }
+            CArrayBound bound = parse->array_bounds[array->array_bound];
+            if (!bound.token_count && !bound.is_star && !bound.has_inferred_count)
+            {
+                flexible[member->type.value] = true;
+            }
         }
     }
     // The pointee of `int (*)[]` is an array of unknown bound, which is a
@@ -58323,7 +58328,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         // Rebuilt each round because c_ir_infer_incomplete_array_bounds below
         // can give a bound an inferred count, which retires it as a flexible
         // array member.  Nothing inside the pass loop edits types or bounds.
-        c_ir_collect_flexible_array_types(&parse, flexible_array_types);
+        c_ir_collect_flexible_array_types(&parse, target, flexible_array_types);
         u32 type_mapping_worklist_count = 0;
         for (u32 type_index = 0; type_index < parse.type_count; type_index += 1)
         {
@@ -60061,6 +60066,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         bool microsoft_definition = target.os == OPERATING_SYSTEM_WINDOWS && entity_definition_index < parse.declaration_count &&
                                     (declaration_specifier_sets[entity_definition_index] & C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU)) != 0 &&
                                     function_needed[entity_definition_index];
+        bool link_once_definition = !internal && microsoft_definition &&
+                                    !entity_weak[declaration.entity.value] &&
+                                    !c_ir_declaration_has_gnu_inline_semantics(preprocess, parse.declarations[entity_definition_index]);
         bool inline_definition = !internal && declaration.entity.value < parse.entity_count &&
                                  !entity_external_definition[declaration.entity.value] && !microsoft_definition;
         bool unneeded_definition = (internal || inline_definition) && declaration.is_definition && !function_needed[declaration_index];
@@ -60161,6 +60169,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             if (declaration.is_definition)
             {
                 symbol->is_definition = true;
+                symbol->is_link_once = link_once_definition;
                 String8 section_name = c_declaration_section_name(arena, preprocess, declaration);
                 if (section_name.length)
                 {
@@ -60204,12 +60213,18 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                         .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
                                                         .is_definition = declaration.is_definition,
                                                         .is_weak = declaration.entity.value < parse.entity_count && entity_weak[declaration.entity.value],
+                                                        .is_link_once = link_once_definition && declaration.is_definition,
                                                         .is_returns_twice = declaration.entity.value < parse.entity_count && entity_returns_twice[declaration.entity.value],
                                                     });
             if (declaration.entity.value < parse.entity_count)
             {
                 entity_symbols[declaration.entity.value] = symbol;
             }
+        }
+        IrSymbol* function_symbol = ir_symbol_from_id(&program->symbols, symbol);
+        if (function_symbol && declaration.is_definition)
+        {
+            function_symbol->is_link_once = link_once_definition;
         }
         IrFunction* function = ir_module_add_function(arena, module,
                                                       (IrFunction){
