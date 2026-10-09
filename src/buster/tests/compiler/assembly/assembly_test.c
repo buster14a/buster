@@ -11618,7 +11618,6 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         S8_INITIALIZER("fminp v0.2d, v1.2d, v2.2d, v3.2d\n"),
         S8_INITIALIZER("fmin v0.2d, v1.2d\n"),
         S8_INITIALIZER("fmla v0.4h, v1.4h\n"),
-        S8_INITIALIZER("fmla v0.4s, v1.4s, v2.s[0]\n"),
         S8_INITIALIZER("fmls v0.2d, v1.2d, v2.2d, v3.2d\n"),
         S8_INITIALIZER("fmulx v0.1d, v1.1d, v2.1d\n"),
         S8_INITIALIZER("fmul v0.2d, v1.2d\n"),

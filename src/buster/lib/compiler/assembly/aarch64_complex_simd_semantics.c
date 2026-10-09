@@ -1253,6 +1253,18 @@ static bool buster_a64_complex_simd_inverse_lane_transform(BusterA64SemanticForm
     }
 
     u32 combinations = UINT32_C(1) << free_bits;
+    if (form.id == 283u)
+    {
+        fprintf(stderr, "lane-inverse form=%u desired=%llu count=%u free=%u assigned=%llu",
+                form.id, (unsigned long long)desired_value, operand.field_index_count, free_bits,
+                (unsigned long long)*assigned);
+        for (u32 index = 0; index < operand.field_index_count; index += 1)
+        {
+            fprintf(stderr, " field%u=%u:%u:%u", index, local_fields[index], field_widths[index],
+                    (u32)((*assigned >> local_fields[index]) & 1u));
+        }
+        fprintf(stderr, "\n");
+    }
     u32 selected[64] = {0};
     u32 match_count = 0;
     for (u32 combination = 0; combination < combinations; combination += 1)
@@ -1291,6 +1303,16 @@ static bool buster_a64_complex_simd_inverse_lane_transform(BusterA64SemanticForm
             !buster_a64_complex_simd_value_uint(transformed, &transformed_value) || transformed_value != desired_value)
         {
             continue;
+        }
+        if (form.id == 283u)
+        {
+            fprintf(stderr, "lane-match form=%u desired=%llu combination=%u", form.id,
+                    (unsigned long long)desired_value, combination);
+            for (u32 index = 0; index < operand.field_index_count; index += 1)
+            {
+                fprintf(stderr, " field%u=%u", local_fields[index], candidate_values[local_fields[index]]);
+            }
+            fprintf(stderr, "\n");
         }
         match_count += 1;
         if (match_count != 1)
@@ -2017,6 +2039,8 @@ static BusterA64ComplexSIMDStatus buster_a64_complex_simd_decode_internal(Target
         {
             if (!buster_a64_complex_simd_decode_arrangement(form, operand, &decoded.fields, &values[index]))
             {
+                if (row_index == 35u && form.id == 283u)
+                    fprintf(stderr, "decode-arrangement-fail form=%u row=%u index=%u word=%08x\n", form.id, row_index, index, word);
                 return BUSTER_A64_COMPLEX_SIMD_STATUS_RESERVED;
             }
         }
@@ -2037,8 +2061,18 @@ static BusterA64ComplexSIMDStatus buster_a64_complex_simd_decode_internal(Target
         {
             if (!buster_a64_complex_simd_decode_register(row_index, form, index, operand, &decoded.fields, values, &values[index]))
             {
+                if (row_index == 35u && form.id == 283u)
+                    fprintf(stderr, "decode-register-fail form=%u row=%u index=%u word=%08x sel1=%u sel3=%u sel5=%u fields=%u,%u,%u,%u,%u,%u,%u,%u\n",
+                            form.id, row_index, index, word, values[1].aux, values[3].aux, values[5].aux,
+                            decoded.fields.values[0], decoded.fields.values[1], decoded.fields.values[2],
+                            decoded.fields.values[3], decoded.fields.values[4], decoded.fields.values[5],
+                            decoded.fields.values[6], decoded.fields.values[7]);
                 return BUSTER_A64_COMPLEX_SIMD_STATUS_RANGE;
             }
+            if (row_index == 35u && form.id == 283u)
+                fprintf(stderr, "decode-register-ok form=%u row=%u index=%u word=%08x kind=%u width=%u aux=%u payload=%llu\n",
+                        form.id, row_index, index, word, values[index].kind, values[index].width, values[index].aux,
+                        (unsigned long long)values[index].payload);
             continue;
         }
         if ((operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LANE_INDEX) != 0 &&
@@ -2046,8 +2080,14 @@ static BusterA64ComplexSIMDStatus buster_a64_complex_simd_decode_internal(Target
         {
             if (!buster_a64_complex_simd_decode_scalar_operand(form, operand, &decoded.fields, &values[index]))
             {
+                if (row_index == 35u && form.id == 283u)
+                    fprintf(stderr, "decode-lane-fail form=%u row=%u index=%u word=%08x\n", form.id, row_index, index, word);
                 return BUSTER_A64_COMPLEX_SIMD_STATUS_RANGE;
             }
+            if (row_index == 35u && form.id == 283u)
+                fprintf(stderr, "decode-lane-ok form=%u row=%u index=%u word=%08x kind=%u width=%u aux=%u value=%llu\n",
+                        form.id, row_index, index, word, values[index].kind, values[index].width, values[index].aux,
+                        (unsigned long long)values[index].payload);
             continue;
         }
         switch (operand.kind)
@@ -2144,6 +2184,14 @@ static BusterA64ComplexSIMDStatus buster_a64_complex_simd_decode_internal(Target
     if (vm_status != BUSTER_A64_SEMANTIC_VM_STATUS_OK || reencoded != word)
     {
         return BUSTER_A64_COMPLEX_SIMD_STATUS_TARGET_MISMATCH;
+    }
+    if (row_index == 35u && form.id == 283u)
+    {
+        fprintf(stderr, "decode-complete form=%u row=%u word=%08x", form.id, row_index, word);
+        for (u32 index = 0; index < form.operand_count; index += 1)
+            fprintf(stderr, " op%u=%u:%u:%u:%llu", index, values[index].kind, values[index].width, values[index].aux,
+                    (unsigned long long)values[index].payload);
+        fprintf(stderr, "\n");
     }
     BusterA64ComplexSIMDResult candidate = {
         .status = BUSTER_A64_COMPLEX_SIMD_STATUS_OK, .row_index = row_index, .word = word, .operand_count = form.operand_count};
