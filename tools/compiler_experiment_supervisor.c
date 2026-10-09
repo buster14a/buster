@@ -232,7 +232,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_end(Arena* arena, Compil
                 sigset_t blocked = {0}, prior = {0};
                 bool masked = sigfillset(&blocked) == 0 && sigprocmask(SIG_BLOCK, &blocked, &prior) == 0;
                 bool exited = false;
-                result = masked && compiler_experiment_supervisor_owned(pid, deadline, &exited);
+                result = masked && compiler_experiment_supervisor_single_thread(state->owner_pid) &&
+                    compiler_experiment_supervisor_owned(pid, deadline, &exited);
                 if (result && !exited)
                 {
                     result = kill((pid_t)pid, SIGKILL) == 0;
@@ -334,7 +335,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_fixture_reap(pid_t manag
     bool masked = sigfillset(&blocked) == 0 && sigprocmask(SIG_BLOCK, &blocked, &prior_mask) == 0;
     bool result = masked && manager > 1 && manager != getpid();
     bool exited = false;
-    result = result && compiler_experiment_supervisor_owned((u64)manager, deadline, &exited);
+    result = result && compiler_experiment_supervisor_single_thread((u64)getpid()) &&
+        compiler_experiment_supervisor_owned((u64)manager, deadline, &exited);
     if (result && !exited) result = kill(manager, SIGKILL) == 0;
     bool reaped = false;
     while (result && !reaped && os_now_microseconds() < deadline)
