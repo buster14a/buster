@@ -63,8 +63,8 @@ from authorize_compiler import verify as verify_main
 from compiler_github import (ARTIFACT_LIMIT, BENCH_WORKFLOW, COMPARE_JOBS, SERVER, TEXT_LIMIT, Api, complete_check,
                              owned_checks, parse_chain, run_url)
 from inline_acceptance import metrics as inline_metrics, validate_documents as validate_inline_documents
-from compiler_receipt import (validate_closure, ANALYZER_PROFILE, ANALYZER_REQUIRED_FILES, ANALYZER_REQUEST_LINE,
-                              ANALYZER_REQUEST_PATH, DECIMAL, IDENTITY_KEYS,
+from compiler_receipt import (validate_closure, ANALYZER_PROFILE, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUIRED_FILES,
+                              ANALYZER_REQUEST_LINES, ANALYZER_REQUEST_PATH, DECIMAL, IDENTITY_KEYS,
                               INLINE_ACCEPTANCE_REQUEST_LINE, INLINE_ACCEPTANCE_PROFILE,
                               MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
                               check_name, classify, classify_scaling, classify_throughput, host_problem, number,
@@ -180,7 +180,9 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
         reasons.append("no readable receipt.json in this attempt's evidence artifact "
                        f"(compare job result: {compare_result or 'unknown'})")
     else:
-        analyzer_profile = receipt.get("profile") == ANALYZER_PROFILE
+        selected_profile = next((profile for profile in ANALYZER_PROFILE_BY_LINE.values()
+                                 if receipt.get("profile") == profile), None)
+        analyzer_profile = selected_profile is not None
         if receipt.get("schema") != RECEIPT_SCHEMA:
             reasons.append(f"receipt schema {receipt.get('schema')!r} is not {RECEIPT_SCHEMA}")
         identity = receipt.get("identity") if isinstance(receipt.get("identity"), dict) else {}
@@ -195,8 +197,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
             reasons.append(f"receipt coverage {receipt.get('coverage')!r} does not match {coverage!r}")
         if analyzer_profile:
             if expected.get("mode") != "pull" or receipt.get("mode") != "pull":
-                reasons.append("clang-analyze-full-v1 is valid only in pull mode")
-            if receipt.get("analyzer_profile") != ANALYZER_PROFILE:
+                reasons.append(f"{selected_profile['name']} is valid only in pull mode")
+            if receipt.get("analyzer_profile") != selected_profile:
                 reasons.append("receipt analyzer profile marker is not frozen")
         elif receipt.get("profile") != PROFILE:
             reasons.append("receipt profile is not the frozen comparison profile")
@@ -210,10 +212,10 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
             if analyzer_profile:
                 analyzer_bundle = throughput.get("analyzer") if isinstance(throughput, dict) else None
                 if receipt.get("throughput_profile") is not None or "scaling_profile" in receipt:
-                    reasons.append("clang-analyze-full-v1 cannot be combined with compiler throughput or scaling")
+                    reasons.append(f"{selected_profile['name']} cannot be combined with compiler throughput or scaling")
                 inline = receipt.get("inline_acceptance")
                 if isinstance(inline, dict) and inline.get("requested") is True:
-                    reasons.append("clang-analyze-full-v1 cannot be combined with issue #48 self-host acceptance")
+                    reasons.append(f"{selected_profile['name']} cannot be combined with issue #48 self-host acceptance")
                 reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
                 reasons.extend(validate_analyzer_bundle(receipt,
                                                         analyzer_bundle.get("summary") if isinstance(analyzer_bundle, dict) else None,
@@ -311,7 +313,7 @@ def read_evidence(api: Api, run_id: str, name: str) -> tuple[object, object, str
                     problem = f"evidence member receipt.json has duplicate JSON key {error.args[0]!r}"
                 except (UnicodeDecodeError, ValueError):
                     problem = "evidence member receipt.json is malformed JSON"
-            if not problem and isinstance(receipt, dict) and receipt.get("profile") == ANALYZER_PROFILE:
+            if not problem and isinstance(receipt, dict) and receipt.get("profile") in ANALYZER_PROFILE_BY_LINE.values():
                 superseded = receipt.get("state") == "superseded"
                 raw_files: dict[str, bytes] = {}
                 raw_bytes = 0
@@ -428,9 +430,15 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     """Derive the pull request's requested profile from its exact head and every parent."""
     if not isinstance(receipt, dict) or expected.get("mode") != "pull":
         return "pull request profile freshness check received a non-pull receipt"
-    analyzer_profile = receipt.get("profile") == ANALYZER_PROFILE
+    request_line = receipt.get("analyzer_request_line")
+    selected_profile = ANALYZER_PROFILE_BY_LINE.get(request_line) if isinstance(request_line, str) else None
+    analyzer_profile = selected_profile is not None and receipt.get("profile") == selected_profile
+    if request_line is not None and not analyzer_profile:
+        return "receipt analyzer profile marker does not match its exact selector"
     if not analyzer_profile and receipt.get("profile") != PROFILE:
         return "pull receipt does not name a recognized compiler or analyzer profile"
+    if selected_profile is not None and receipt.get("analyzer_profile") != selected_profile:
+        return "receipt analyzer profile marker does not match its exact selector"
     identity = receipt.get("identity") if isinstance(receipt.get("identity"), dict) else {}
     head = expected.get("head")
     if identity.get("head") != head or not SHA.fullmatch(str(head or "")):
@@ -453,9 +461,9 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
         head_lines = head_bytes.decode("utf-8").splitlines()
     except UnicodeDecodeError:
         return "authorized pull request profile file is not UTF-8"
-    head_count = head_lines.count(ANALYZER_REQUEST_LINE)
+    head_counts = {line: head_lines.count(line) for line in ANALYZER_REQUEST_LINES}
     head_inline_count = head_lines.count(INLINE_ACCEPTANCE_REQUEST_LINE)
-    parent_analyzer_deltas = []
+    parent_analyzer_deltas = {line: [] for line in ANALYZER_REQUEST_LINES}
     parent_inline_counts = []
     for parent in parent_shas:
         parent_bytes, problem = _github_file(api, parent)
@@ -465,12 +473,18 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
             parent_lines = parent_bytes.decode("utf-8").splitlines()
         except UnicodeDecodeError:
             return f"parent pull request profile file is not UTF-8 at {parent}"
-        parent_analyzer_deltas.append(head_count - parent_lines.count(ANALYZER_REQUEST_LINE))
+        for line in ANALYZER_REQUEST_LINES:
+            parent_analyzer_deltas[line].append(head_counts[line] - parent_lines.count(line))
         parent_inline_counts.append(parent_lines.count(INLINE_ACCEPTANCE_REQUEST_LINE))
     if analyzer_profile:
-        if not parent_analyzer_deltas or not all(delta == 1 for delta in parent_analyzer_deltas):
+        selected_deltas = parent_analyzer_deltas[request_line]
+        other_deltas = [delta for line, values in parent_analyzer_deltas.items() if line != request_line
+                        for delta in values]
+        if not selected_deltas or not all(delta == 1 for delta in selected_deltas):
             return ("the exact analyzer selector was not freshly added once at this head relative to every parent; "
                     "append one selector line for each explicit full-inventory request")
+        if any(delta != 0 for delta in other_deltas):
+            return "the other recognized analyzer selector count changed at this head"
         analyzer = throughput.get("analyzer") if isinstance(throughput, dict) else None
         files = analyzer.get("files") if isinstance(analyzer, dict) else None
         if not isinstance(files, dict) or not isinstance(files.get("request.txt"), bytes):
@@ -478,10 +492,10 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
         if head_bytes != files["request.txt"]:
             return "retained analyzer request bytes do not match the authorized GitHub head"
         if any(head_inline_count > count for count in parent_inline_counts):
-            return "clang-analyze-full-v1 cannot be combined with a newly requested inline acceptance profile"
+            return f"{selected_profile['name']} cannot be combined with a newly requested inline acceptance profile"
         if receipt.get("analyzer_request_sha256") != hashlib.sha256(head_bytes).hexdigest():
             return "receipt analyzer request digest does not match the authorized GitHub head"
-    elif any(delta > 0 for delta in parent_analyzer_deltas):
+    elif any(delta > 0 for values in parent_analyzer_deltas.values() for delta in values):
         return "a fresh analyzer selector does not match the legacy compiler-profile receipt"
     return ""
 
@@ -517,7 +531,7 @@ def commit_report(shown: dict, summary: object, conclusion: str, title: str, not
     """The commit-page report (#2804): verdict, scope, metrics with units, links; tables collapsed."""
     identity = shown.get("identity", {}) if isinstance(shown.get("identity"), dict) else {}
     summary = summary if isinstance(summary, dict) else {}
-    if shown.get("profile") == ANALYZER_PROFILE:
+    if shown.get("profile") in ANALYZER_PROFILE_BY_LINE.values():
         inventory = summary.get("inventory") if isinstance(summary.get("inventory"), dict) else {}
         profile = shown.get("profile") if isinstance(shown.get("profile"), dict) else ANALYZER_PROFILE
         timings = shown.get("timings") if isinstance(shown.get("timings"), dict) else {}

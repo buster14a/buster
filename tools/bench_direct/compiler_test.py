@@ -95,13 +95,14 @@ def receipt(state: str = "measured") -> dict:
             "binaries": copy.deepcopy(BINARIES), "timings": {"build_seconds": {"baseline": 60.0}}}
 
 
-def analyzer_receipt(state: str = "measured") -> dict:
+def analyzer_receipt(state: str = "measured", request_line: str = compiler_receipt.ANALYZER_REQUEST_LINE) -> dict:
     result = receipt(state)
     result["mode"] = "pull"
     result["identity"].update(mode="pull", ref="refs/pull/7/head")
-    result["profile"] = copy.deepcopy(compiler_receipt.ANALYZER_PROFILE)
-    result["analyzer_profile"] = copy.deepcopy(compiler_receipt.ANALYZER_PROFILE)
-    result["analyzer_request_line"] = compiler_receipt.ANALYZER_REQUEST_LINE
+    profile = compiler_receipt.ANALYZER_PROFILE_BY_LINE[request_line]
+    result["profile"] = copy.deepcopy(profile)
+    result["analyzer_profile"] = copy.deepcopy(profile)
+    result["analyzer_request_line"] = request_line
     result.pop("throughput_profile")
     result.pop("binaries")
     return result
@@ -286,36 +287,74 @@ class AnalyzerReceiptTest(unittest.TestCase):
                          checkout_change: tuple[str, bytes] | None = None,
                          clang_change: bool = False,
                          missing_result: tuple[str, int] | None = None,
-                         helper_status: str = "pass") -> tuple[dict, dict, list[tuple[int, int]]]:
+                         helper_status: str = "pass",
+                         request_line: str = compiler_receipt.ANALYZER_REQUEST_LINE,
+                         selected_count: int = 182, alias_count: int = 47,
+                         fallback_groups: int = 0) -> tuple[dict, dict, list[tuple[int, int]]]:
         """Build a test-only complete raw V1/V2 bundle; it is never host measurement evidence."""
         identity = dict(EXPECTED, mode="pull", ref="refs/pull/7/head")
+        dynamic_inventory = request_line == compiler_receipt.ANALYZER_REQUEST_LINE_V2
         compile_commands = b"[]"
         alias_representative: dict[int, int] = {}
         alias_pairs: list[tuple[int, int]] = []
-        for shard in range(8):
-            indexes = [index for index in range(182) if index % 8 == shard]
-            pair_count = 6 if shard < 7 else 5
-            for pair in range(pair_count):
-                root_index, alias_index = indexes[pair * 2:pair * 2 + 2]
-                alias_representative[alias_index] = root_index
+        if dynamic_inventory:
+            class_count = alias_count if alias_count else fallback_groups
+            if selected_count < class_count * 2 or alias_count > selected_count:
+                raise ValueError("synthetic V2 inventory does not fit its requested alias classes")
+            for group in range(class_count):
+                root_index, alias_index = group * 2, group * 2 + 1
                 alias_pairs.append((root_index, alias_index))
+                if alias_count:
+                    alias_representative[alias_index] = root_index
+        else:
+            for shard in range(8):
+                indexes = [index for index in range(selected_count) if index % 8 == shard]
+                pair_count = alias_count // 8 + (1 if shard < alias_count % 8 else 0)
+                for pair in range(pair_count):
+                    root_index, alias_index = indexes[pair * 2:pair * 2 + 2]
+                    alias_representative[alias_index] = root_index
+                    alias_pairs.append((root_index, alias_index))
         alias_roots = {root for root, _ in alias_pairs}
         candidate_rows = []
-        for index in range(182):
+        for index in range(selected_count):
             representative = alias_representative.get(index, index)
-            duplicated = representative in alias_roots
+            group_member = next((pair for pair in alias_pairs if index in pair), None) if dynamic_inventory else None
+            duplicated = representative in alias_roots or group_member is not None
             canonical = index == representative
             has_context = duplicated and canonical
-            source = f"src/unit-{representative:03}.c"
-            output = (f"/build/000-root-{representative:03}.o" if duplicated and index == representative else
-                      f"/build/999-alias-{index:03}.o" if duplicated else f"/build/100-single-{index:03}.o")
+            if dynamic_inventory:
+                module = f"module-{group_member[0]:03}" if group_member else f"unit-{index:03}"
+                source = f"src/{module}.c"
+                directory = "/candidate"
+                output = f"/build/Release/obj/{index:03}.o"
+                original_argv = ["clang", "-c", "-DTEST=1", source, "-o", output]
+                projected_argv = compiler_receipt.analyzer_database_project(original_argv, "/usr/bin/clang")
+                shard = compiler_receipt.analyzer_database_shard(module, 8)
+                fallback_member = bool(fallback_groups and group_member is not None and not alias_count)
+                if fallback_member:
+                    representative = index
+                    has_context = False
+                reason = ("context-not-proven-for-shared-invocation" if fallback_member else
+                          "" if duplicated else "single-row")
+                proven = duplicated and not fallback_member
+            else:
+                module = f"module-{representative:03}"
+                source = f"src/unit-{representative:03}.c"
+                directory = f"/candidate/dir-{representative:03}"
+                output = (f"/build/000-root-{representative:03}.o" if duplicated and index == representative else
+                          f"/build/999-alias-{index:03}.o" if duplicated else f"/build/100-single-{index:03}.o")
+                original_argv = ["clang", "-c", source, "-o", output]
+                projected_argv = ["clang", "-c", source]
+                shard = index % 8
+                reason = "" if duplicated else "single-row"
+                proven = duplicated
             candidate_rows.append({
-                "index": index, "shard": index % 8, "representative": representative,
-                "module": f"module-{representative:03}", "file": source,
-                "directory": f"/candidate/dir-{representative:03}", "output": output,
-                "original_argv": ["clang", "-c", source, "-o", output],
-                "argv": ["clang", "-c", source], "proven": duplicated,
-                "reason": "" if duplicated else "single-row",
+                "index": index, "shard": shard, "representative": representative,
+                "module": module, "file": source,
+                "directory": directory, "output": output,
+                "original_argv": original_argv,
+                "argv": projected_argv, "proven": proven,
+                "reason": reason,
                 "proof": f"BUSTER_CLANG_ANALYZE_CONTEXT_V4:{representative}".encode() if has_context else b"",
                 "input_inventory": ([{"path": f"/candidate/{source}",
                                        "sha256": hashlib.sha256(source.encode()).hexdigest(),
@@ -324,6 +363,15 @@ class AnalyzerReceiptTest(unittest.TestCase):
                 "search_inventory": ([{"path": "/candidate/include", "entries": 2,
                                         "fingerprint": hashlib.sha256(b"include-tree").hexdigest()}] if has_context else []),
             })
+        if dynamic_inventory:
+            database_rows = [{"directory": row["directory"], "file": row["file"], "output": row["output"],
+                              "arguments": row["original_argv"]} for row in candidate_rows]
+            for index in range(selected_count):
+                database_rows.append({"directory": "/candidate", "file": f"src/debug-{index:03}.c",
+                                      "output": f"/build/Debug/obj/{index:03}.o",
+                                      "arguments": ["clang", "-c", f"src/debug-{index:03}.c",
+                                                    "-o", f"/build/Debug/obj/{index:03}.o"]})
+            compile_commands = json.dumps(database_rows, separators=(",", ":")).encode("utf-8")
 
         def encode_plan(version: int, label: str, rows: list[dict]) -> bytes:
             data = bytearray(f"BUSTER_CLANG_ANALYZE_PLAN_V{version}\n".encode("ascii"))
@@ -332,7 +380,11 @@ class AnalyzerReceiptTest(unittest.TestCase):
                 parent = results_parent_change[1]
             for value in (f"{parent}/{label}", "Release", "/usr/bin/clang"):
                 cls.record_string(data, value)
-            for value in ((8, 600, 182, 0) if version == 1 else (8, 600, 182, 0, 135, 47, 0)):
+            excluded_rows = selected_count if dynamic_inventory else 0
+            aliases = sum(row["representative"] != row["index"] for row in rows) if version == 2 else 0
+            unique = len(rows) - aliases
+            for value in ((8, 600, selected_count, excluded_rows) if version == 1 else
+                          (8, 600, selected_count, excluded_rows, unique, aliases, 0)):
                 cls.record_number(data, value)
             cls.record_string(data, compile_commands)
             for row in rows:
@@ -394,7 +446,7 @@ class AnalyzerReceiptTest(unittest.TestCase):
             return bytes(data)
 
         files: dict[str, bytes] = {
-            "request.txt": (compiler_receipt.ANALYZER_REQUEST_LINE + "\n").encode(),
+            "request.txt": (request_line + "\n").encode(),
             "compile_commands.json": compile_commands,
             "clang.json": json.dumps({
                 "schema": "buster-analyzer-clang-provenance-v1", "path": "/usr/bin/clang",
@@ -439,11 +491,16 @@ class AnalyzerReceiptTest(unittest.TestCase):
         for role, trial in (("baseline", 0), ("candidate", 0)):
             label = f"prepare-{role}"
             if role == "candidate":
-                candidate_groups = len({representative for representative in alias_representative.values()})
+                candidate_partition = compiler_receipt.analyzer_candidate_partition_counts({"rows": candidate_rows})
+                candidate_groups = candidate_partition["candidate_groups"]
+                proven_groups = candidate_partition["proven_groups"]
+                aliases = candidate_partition["alias_rows"]
+                unique = candidate_partition["unique_executions"]
                 files[f"profile/{label}.stdout.log"] = (
-                    f"ANALYZE_PREPARE selected_rows=182 unique_executions=135 aliases=47 "
-                    f"candidate_groups={candidate_groups} proven_groups={candidate_groups} "
-                    "excluded_config_or_language=0 planning_us=1 context_proof_us=1 status=pass\n").encode()
+                    f"ANALYZE_PREPARE selected_rows={selected_count} unique_executions={unique} aliases={aliases} "
+                    f"candidate_groups={candidate_groups} proven_groups={proven_groups} "
+                    f"excluded_config_or_language={selected_count if dynamic_inventory else 0} "
+                    "planning_us=1 context_proof_us=1 status=pass\n").encode()
             else:
                 files[f"profile/{label}.stdout.log"] = b""
             files[f"profile/{label}.stderr.log"] = b""
@@ -487,21 +544,21 @@ class AnalyzerReceiptTest(unittest.TestCase):
             expected_exec = sum(row["representative"] == row["index"] for row in rows)
             expected_alias = len(rows) - expected_exec if version == 2 else 0
             if version == 2:
-                aggregate_record = (f"ANALYZE_AGGREGATE selected_rows=182 checked=182 unique_executions={expected_exec} "
-                                    f"aliased_rows={expected_alias} excluded_config_or_language=0 failures=0 shards=8 "
+                aggregate_record = (f"ANALYZE_AGGREGATE selected_rows={selected_count} checked={selected_count} unique_executions={expected_exec} "
+                                    f"aliased_rows={expected_alias} excluded_config_or_language={selected_count if dynamic_inventory else 0} failures=0 shards=8 "
                                     "peak_child_rss_bytes=1024 status=pass\n")
-                aggregate_plan = (f"ANALYZE_PLAN mode=aggregate selected_rows=182 unique_executions={expected_exec} "
+                aggregate_plan = (f"ANALYZE_PLAN mode=aggregate selected_rows={selected_count} unique_executions={expected_exec} "
                                   f"aliases={expected_alias} planning_us=100 context_proof_us=80\n")
                 aggregate_stdout = aggregate_plan + aggregate_record
                 analysis_records = [
-                    f"ANALYZE_PLAN mode=run selected_rows=182 unique_executions={expected_exec} aliases={expected_alias} "
+                    f"ANALYZE_PLAN mode=run selected_rows={selected_count} unique_executions={expected_exec} aliases={expected_alias} "
                     "planning_us=300 context_proof_us=200"]
                 for shard in range(8):
                     shard_rows = [row for row in rows if row["shard"] == shard]
                     shard_exec = sum(row["representative"] == row["index"] for row in shard_rows)
                     shard_alias = len(shard_rows) - shard_exec
                     analysis_records.append(
-                        f"ANALYZE_PLAN mode=worker shard={shard} selected_rows=182 unique_executions={expected_exec} "
+                        f"ANALYZE_PLAN mode=worker shard={shard} selected_rows={selected_count} unique_executions={expected_exec} "
                         f"aliases={expected_alias} planning_us={10 + shard} context_proof_us={shard + 1}")
                     analysis_records.append(
                         f"ANALYZE_SHARD shard={shard} selected_rows={len(shard_rows)} unique_executions={shard_exec} "
@@ -509,7 +566,8 @@ class AnalyzerReceiptTest(unittest.TestCase):
                         "context_postflight_us=6 peak_child_rss_bytes=1024 status=pass")
             else:
                 aggregate_stdout = (
-                    "ANALYZE_AGGREGATE eligible=182 checked=182 excluded_config_or_language=0 "
+                    f"ANALYZE_AGGREGATE eligible={selected_count} checked={selected_count} "
+                    f"excluded_config_or_language={selected_count if dynamic_inventory else 0} "
                     "failures=0 shards=8 peak_child_rss_bytes=1024 status=pass\n")
                 analysis_records = [
                     f"ANALYZE_SHARD shard={shard} units={len([row for row in rows if row['shard'] == shard])} "
@@ -685,6 +743,9 @@ class AnalyzerReceiptTest(unittest.TestCase):
         receipt["analyzer_driver_provenance"] = summary["driver_provenance"]
         raw_bundle = {"summary": summary, "files": files}
         self.assertEqual(compiler_receipt.validate_analyzer_bundle(receipt, summary, raw_bundle), [])
+        summary_mismatch = compiler_receipt.validate_analyzer_bundle(receipt, {"schema": "tampered"}, raw_bundle)
+        self.assertIn("retained analyzer summary does not match the raw V1/V2 plans, results and logs",
+                      summary_mismatch)
         report = compiler_receipt.render(receipt, summary, "success", [])
         for label in compiler_receipt.ANALYZER_RUNS:
             self.assertIn(label, report)
@@ -750,6 +811,138 @@ class AnalyzerReceiptTest(unittest.TestCase):
                 errors = compiler_receipt.validate_analyzer_bundle(receipt, summary, {"files": changed_files})
                 self.assertTrue(errors, description)
                 self.assertTrue(any(expected_reason in error for error in errors), (description, errors[:8]))
+
+    def test_v2_rederives_changed_full_inventory_aliases_and_safe_fallback(self) -> None:
+        line = compiler_receipt.ANALYZER_REQUEST_LINE_V2
+        files, identity, _ = self.full_raw_profile(request_line=line, selected_count=184, alias_count=47)
+        summary, problems = compiler_receipt.analyzer_profile_summary(files, identity, line)
+        self.assertEqual(problems, [], problems)
+        self.assertEqual(summary["schema"], compiler_receipt.ANALYZER_SUMMARY_SCHEMA_V2)
+        self.assertEqual(summary["status"], "complete")
+        self.assertEqual(summary["compile_commands"]["native_database_entries"], 368)
+        self.assertEqual(summary["inventory"]["selected_rows"], 184)
+        self.assertEqual(summary["inventory"]["excluded_rows"], 184)
+        self.assertEqual(summary["inventory"]["candidate_unique_executions"], 137)
+        self.assertEqual(summary["inventory"]["candidate_alias_rows"], 47)
+        self.assertEqual(summary["inventory"]["candidate_groups"], 47)
+        self.assertEqual(summary["inventory"]["candidate_proven_groups"], 47)
+        self.assertEqual(len(summary["per_tu"]), 184)
+
+        inventory = compiler_receipt.analyzer_native_release_inventory(files["compile_commands.json"], "/usr/bin/clang")
+        baseline = compiler_receipt.analyzer_parse_plan(files["profile/prepare-baseline/manifest.txt"])
+        candidate = compiler_receipt.analyzer_parse_plan(files["profile/prepare-candidate/manifest.txt"])
+        self.assertEqual(compiler_receipt.analyzer_inventory_plan_problems(inventory, baseline, candidate), [])
+        omission_baseline, omission_candidate = copy.deepcopy(baseline), copy.deepcopy(candidate)
+        omission_baseline["rows"].pop()
+        omission_candidate["rows"].pop()
+        self.assertTrue(any("omits or adds rows" in item for item in
+                            compiler_receipt.analyzer_inventory_plan_problems(
+                                inventory, omission_baseline, omission_candidate)))
+        foreign_baseline, foreign_candidate = copy.deepcopy(baseline), copy.deepcopy(candidate)
+        foreign_baseline["rows"][10]["file"] = "foreign/omitted.c"
+        foreign_candidate["rows"][10]["file"] = "foreign/omitted.c"
+        self.assertTrue(compiler_receipt.analyzer_inventory_plan_problems(
+            inventory, foreign_baseline, foreign_candidate))
+        reordered_baseline, reordered_candidate = copy.deepcopy(baseline), copy.deepcopy(candidate)
+        reordered_baseline["rows"][10:12] = reversed(reordered_baseline["rows"][10:12])
+        reordered_candidate["rows"][10:12] = reversed(reordered_candidate["rows"][10:12])
+        self.assertTrue(compiler_receipt.analyzer_inventory_plan_problems(
+            inventory, reordered_baseline, reordered_candidate))
+        wrong_context = copy.deepcopy(candidate)
+        wrong_context["rows"][10]["directory"] = "/foreign/build"
+        self.assertTrue(any("directory" in item for item in
+                            compiler_receipt.analyzer_inventory_plan_problems(inventory, baseline, wrong_context)))
+        alias_failure = copy.deepcopy(candidate)
+        alias_index = next(index for index, row in enumerate(alias_failure["rows"])
+                           if row["representative"] != row["index"])
+        alias_failure["rows"][alias_index]["representative"] = alias_index
+        self.assertTrue(compiler_receipt.analyzer_candidate_plan_problems(alias_failure, allow_fallback=True))
+
+        v2_receipt = analyzer_receipt(request_line=line)
+        v2_receipt["identity"] = identity
+        v2_receipt["analyzer"] = summary
+        v2_receipt["analyzer_request_sha256"] = summary["request"]["sha256"]
+        v2_receipt["analyzer_clang_provenance"] = summary["clang"]
+        v2_receipt["analyzer_driver_checkouts"] = summary["driver_checkouts"]
+        v2_receipt["analyzer_driver_provenance"] = summary["driver_provenance"]
+        raw_bundle = {"summary": summary, "files": files}
+        self.assertEqual(compiler_receipt.validate_analyzer_bundle(v2_receipt, summary, raw_bundle), [])
+        v2_summary_mismatch = compiler_receipt.validate_analyzer_bundle(
+            v2_receipt, {"schema": "tampered"}, raw_bundle)
+        self.assertIn("retained analyzer summary does not match the raw V2 plans, derived inventory, results and logs",
+                      v2_summary_mismatch)
+        self.assertEqual(compiler_publish.decide(identity, True, "success", v2_receipt, summary, "",
+                                                 {"analyzer": raw_bundle})[0], "success")
+        self.assertIn("clang-analyze-full-v2", compiler_receipt.render(v2_receipt, summary, "success", []))
+        self.assertIn("clang-analyze-full-v2", compiler_publish.commit_report(
+            v2_receipt, summary, "success", "Measured", [], "links"))
+
+        fallback_files, fallback_identity, _ = self.full_raw_profile(
+            request_line=line, selected_count=184, alias_count=0, fallback_groups=47)
+        fallback_summary, fallback_problems = compiler_receipt.analyzer_profile_summary(
+            fallback_files, fallback_identity, line)
+        self.assertEqual(fallback_problems, [], fallback_problems)
+        self.assertEqual(fallback_summary["inventory"]["candidate_unique_executions"], 184)
+        self.assertEqual(fallback_summary["inventory"]["candidate_alias_rows"], 0)
+        self.assertEqual(fallback_summary["inventory"]["candidate_groups"], 47)
+        self.assertEqual(fallback_summary["inventory"]["candidate_proven_groups"], 0)
+        fallback_candidate = compiler_receipt.analyzer_parse_plan(
+            fallback_files["profile/prepare-candidate/manifest.txt"])
+        mixed_class = copy.deepcopy(fallback_candidate)
+        mixed_class["rows"][1]["representative"] = 0
+        self.assertTrue(compiler_receipt.analyzer_candidate_plan_problems(mixed_class, allow_fallback=True))
+        generic_reason = copy.deepcopy(fallback_candidate)
+        generic_reason["rows"][0]["reason"] = "single-row"
+        self.assertTrue(compiler_receipt.analyzer_candidate_plan_problems(generic_reason, allow_fallback=True))
+        proof_fallback = copy.deepcopy(fallback_candidate)
+        proof_fallback["rows"][0]["context_proof_present"] = True
+        self.assertTrue(compiler_receipt.analyzer_candidate_plan_problems(proof_fallback, allow_fallback=True))
+        sampler_files, sampler_identity, _ = self.full_raw_profile(
+            request_line=line, selected_count=184, alias_count=47,
+            tree_status_change=("candidate-0", "incomplete"))
+        _, sampler_problems = compiler_receipt.analyzer_profile_summary(sampler_files, sampler_identity, line)
+        self.assertTrue(any("sampler is incomplete" in item for item in sampler_problems))
+
+    def test_v2_inventory_matches_linux_cmake_selection_and_rejects_ambiguous_database(self) -> None:
+        clang = "/usr/bin/clang-21"
+        database = [
+            {"directory": "/work/build", "file": "../src/mod_test.c", "output": "obj/Release/mod_test.o",
+             "command": "/usr/bin/cc -DNAME=\"two words\" -c ../src/mod_test.c -o obj/Release/mod_test.o -MMD -MF dep.d"},
+            {"directory": "/work/build", "file": "../src/debug.c", "output": "obj/Debug/debug.o",
+             "arguments": ["/usr/bin/cc", "-DCMAKE_INTDIR=Debug", "-c", "../src/debug.c", "-o", "obj/Debug/debug.o"]},
+            {"directory": "/work/build", "file": "../src/tool.cpp", "output": "obj/Release/tool.o",
+             "arguments": ["/usr/bin/c++", "-DCMAKE_INTDIR=Release", "-c", "../src/tool.cpp", "-o", "obj/Release/tool.o"]},
+        ]
+        inventory = compiler_receipt.analyzer_native_release_inventory(
+            json.dumps(database, separators=(",", ":")).encode(), clang)
+        self.assertEqual((inventory["entries"], inventory["selected_rows"], inventory["excluded_rows"]), (3, 1, 2))
+        row = inventory["rows"][0]
+        self.assertEqual((row["index"], row["file"], row["module"], row["shard"]),
+                         (0, "../src/mod_test.c", "mod", compiler_receipt.analyzer_database_shard("mod", 8)))
+        self.assertEqual(row["original_argv"], ["/usr/bin/cc", "-DNAME=two words", "-c", "../src/mod_test.c",
+                                                "-o", "obj/Release/mod_test.o", "-MMD", "-MF", "dep.d"])
+        self.assertEqual(row["argv"], [clang, "--analyze", "-Xanalyzer", "-analyzer-output=text",
+                                       "-fno-color-diagnostics", "-Wno-error=unused-command-line-argument",
+                                       "-DNAME=two words", "../src/mod_test.c"])
+
+        self.assertTrue(compiler_receipt.analyzer_database_path_equal("/work/src.c/", r"\work\src.c"))
+        self.assertFalse(compiler_receipt.analyzer_database_path_equal("/work/Release/src.c", "/work/Debug/src.c"))
+        self.assertFalse(compiler_receipt.analyzer_database_path_equal("C:/work/src.c", "c:/work/src.c"))
+
+        duplicate_property = b'[{"directory":"/work/build","directory":"/work/other","file":"x.c","arguments":["cc","x.c","-DCMAKE_INTDIR=Release"]}]'
+        with self.assertRaisesRegex(ValueError, "repeats a JSON property"):
+            compiler_receipt.analyzer_native_release_inventory(duplicate_property, clang)
+
+        duplicate_identity = [database[0], dict(database[0])]
+        with self.assertRaisesRegex(ValueError, "duplicate selected TU identity"):
+            compiler_receipt.analyzer_native_release_inventory(
+                json.dumps(duplicate_identity, separators=(",", ":")).encode(), clang)
+
+        unbound_source = [{"directory": "/work/build", "file": "../src/expected.c", "output": "obj/Release/expected.o",
+                           "arguments": ["cc", "-DCMAKE_INTDIR=Release", "-c", "../src/foreign.c", "-o", "obj/Release/expected.o"]}]
+        with self.assertRaisesRegex(ValueError, "does not explicitly name its source"):
+            compiler_receipt.analyzer_native_release_inventory(
+                json.dumps(unbound_source, separators=(",", ":")).encode(), clang)
 
     def test_failed_profile_retains_observations_and_remains_unqualifiable(self) -> None:
         files, identity, _ = self.failed_raw_profile()
@@ -1163,6 +1356,51 @@ class AnalyzerReceiptTest(unittest.TestCase):
                 self.assertIsNone(compiler_compare.request_selector_count(
                     repo, duplicate_request, compiler_receipt.ANALYZER_REQUEST_LINE))
 
+    def test_v2_freshness_allows_historical_v1_but_rejects_mixed_or_duplicate_additions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            def git(*args: str) -> str:
+                return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                                      text=True).stdout.strip()
+            git("init", "-q")
+            git("config", "user.name", "Analyzer Test")
+            git("config", "user.email", "analyzer@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            (repo / "tracked.c").write_text("int seed;\n", encoding="utf-8")
+            history = (compiler_receipt.ANALYZER_REQUEST_LINE + "\n") * 4
+            request.write_text("# historical profile requests\n" + history, encoding="utf-8")
+            git("add", ".")
+            git("commit", "-qm", "retain historical v1 request lines")
+            parent = git("rev-parse", "HEAD")
+            self.assertFalse(compiler_compare.analyzer_profile_requested(repo, parent))
+            request.write_text(request.read_text(encoding="utf-8") +
+                               compiler_receipt.ANALYZER_REQUEST_LINE_V2 + "\n", encoding="utf-8")
+            git("commit", "-qam", "fresh v2 request with v1 history unchanged")
+            v2_head = git("rev-parse", "HEAD")
+            selected, problem = compiler_compare.analyzer_profile_request_selection(repo, v2_head)
+            self.assertEqual((selected, problem), (compiler_receipt.ANALYZER_REQUEST_LINE_V2, ""))
+            self.assertEqual(compiler_compare.request_selector_parent_deltas(
+                repo, v2_head, compiler_receipt.ANALYZER_REQUEST_LINE), [0])
+
+            request.write_text(request.read_text(encoding="utf-8") + compiler_receipt.ANALYZER_REQUEST_LINE + "\n" +
+                               compiler_receipt.ANALYZER_REQUEST_LINE_V2 + "\n", encoding="utf-8")
+            git("add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            git("commit", "-qm", "mixed fresh v1 and v2 selectors")
+            mixed_head = git("rev-parse", "HEAD")
+            selected, problem = compiler_compare.analyzer_profile_request_selection(repo, mixed_head)
+            self.assertIsNone(selected)
+            self.assertIn("only one versioned analyzer selector", problem)
+
+            request.write_text(request.read_text(encoding="utf-8") +
+                               (compiler_receipt.ANALYZER_REQUEST_LINE_V2 + "\n") * 2, encoding="utf-8")
+            git("add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            git("commit", "-qm", "duplicate fresh v2 selectors")
+            duplicate_head = git("rev-parse", "HEAD")
+            selected, problem = compiler_compare.analyzer_profile_request_selection(repo, duplicate_head)
+            self.assertIsNone(selected)
+            self.assertIn("exactly once", problem)
+
     def test_publisher_rechecks_fresh_selector_against_every_github_parent(self) -> None:
         head, first_parent, second_parent = "a" * 40, "b" * 40, "c" * 40
         selector = (compiler_receipt.ANALYZER_REQUEST_LINE + "\n").encode("utf-8")
@@ -1231,6 +1469,8 @@ class AnalyzerReceiptTest(unittest.TestCase):
 
         ordinary_bytes = b"# no active analyzer request\n"
         legacy = dict(profile_receipt, profile=copy.deepcopy(compiler_receipt.PROFILE))
+        legacy.pop("analyzer_request_line", None)
+        legacy.pop("analyzer_profile", None)
         legacy_bundle = {"analyzer": {"files": {}}}
         self.assertEqual(compiler_publish.verify_analyzer_request_freshness(
             Api(parent_counts=(0, 0), remote_head=ordinary_bytes), expected, legacy, legacy_bundle), "")
@@ -1257,6 +1497,50 @@ class AnalyzerReceiptTest(unittest.TestCase):
                 raise OSError("injected GitHub commit read failure")
         self.assertIn("commit read failed", compiler_publish.verify_analyzer_request_freshness(
             ReadFailure(), expected, legacy, legacy_bundle))
+
+    def test_publisher_v2_binds_selector_marker_head_bytes_and_every_parent(self) -> None:
+        head, first_parent, second_parent = "a" * 40, "b" * 40, "c" * 40
+        v1 = (compiler_receipt.ANALYZER_REQUEST_LINE + "\n").encode("utf-8")
+        v2 = (compiler_receipt.ANALYZER_REQUEST_LINE_V2 + "\n").encode("utf-8")
+        history = b"# retained requests\n" + v1 * 4
+
+        class Api:
+            def __init__(self, head_bytes: bytes, parent_bytes: tuple[bytes, bytes] = (history, history)):
+                self.contents = {head: head_bytes, first_parent: parent_bytes[0], second_parent: parent_bytes[1]}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": first_parent}, {"sha": second_parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = self.contents[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        head_bytes = history + v2
+        profile_receipt = analyzer_receipt(request_line=compiler_receipt.ANALYZER_REQUEST_LINE_V2)
+        profile_receipt["analyzer_request_sha256"] = hashlib.sha256(head_bytes).hexdigest()
+        expected = {"mode": "pull", "head": head}
+        bundle = {"analyzer": {"files": {"request.txt": head_bytes}}}
+        self.assertEqual(compiler_publish.verify_analyzer_request_freshness(
+            Api(head_bytes), expected, profile_receipt, bundle), "")
+
+        mixed_bytes = head_bytes + v1
+        mixed_receipt = dict(profile_receipt,
+                             analyzer_request_sha256=hashlib.sha256(mixed_bytes).hexdigest())
+        mixed_bundle = {"analyzer": {"files": {"request.txt": mixed_bytes}}}
+        self.assertIn("other recognized analyzer selector count changed",
+                      compiler_publish.verify_analyzer_request_freshness(
+                          Api(mixed_bytes), expected, mixed_receipt, mixed_bundle))
+
+        duplicate_bytes = history + v2 * 2
+        duplicate_receipt = dict(profile_receipt,
+                                 analyzer_request_sha256=hashlib.sha256(duplicate_bytes).hexdigest())
+        duplicate_bundle = {"analyzer": {"files": {"request.txt": duplicate_bytes}}}
+        self.assertIn("not freshly added once", compiler_publish.verify_analyzer_request_freshness(
+            Api(duplicate_bytes), expected, duplicate_receipt, duplicate_bundle))
+
+        wrong_marker = dict(profile_receipt, analyzer_request_line=compiler_receipt.ANALYZER_REQUEST_LINE)
+        self.assertIn("does not match its exact selector", compiler_publish.verify_analyzer_request_freshness(
+            Api(head_bytes), expected, wrong_marker, bundle))
 
     def test_superseded_analyzer_profile_does_not_become_failed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1358,6 +1642,26 @@ class FrozenClosureTest(unittest.TestCase):
                               "snapshot": dict(record, operation="snapshot"), "restore": dict(record, operation="restore"),
                               "verify": dict(record, operation="verify")}
         return current, {"snapshot": manifest, "restore": manifest, "verify": manifest}
+
+    def test_unproven_native_cleanup_retains_work_and_aborts_bridge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = root / "evidence"
+            evidence.mkdir()
+            work = root / "work"
+            work.mkdir()
+            arguments = argparse.Namespace(base=EXPECTED["base"], base_tree=EXPECTED["base_tree"])
+            record = {"state": "failed", "cleanup_proven": False, "harness_preparation_us": 0}
+            receipt = {"closure": {"policy": "snapshot-v1"}, "timings": {}}
+            with mock.patch.object(compiler_compare, "run", return_value=1), \
+                    mock.patch.object(compiler_compare, "read_exported_json", return_value=(record, "")):
+                with self.assertRaises(compiler_compare.ClosureCleanupUncertain):
+                    compiler_compare.closure_phase(arguments, root / "candidate", work, evidence, receipt, "snapshot")
+            self.assertIs(receipt["cleanup_proven"], False)
+            self.assertEqual(receipt["work_retained"], str(work))
+            self.assertTrue((evidence / "cleanup-uncertain").is_file())
+            self.assertTrue(work.is_dir())
+
 
     def test_snapshot_policy_cannot_be_stripped_to_legacy(self):
         current, bundle = self.fixture()
@@ -1756,6 +2060,19 @@ class EvidenceTest(unittest.TestCase):
         with mock.patch.object(compiler_publish, "ANALYZER_MEMBER_LIMIT", 64):
             rejected = self.evidence(oversized)
         self.assertIn("size bound", rejected[2])
+
+    def test_analyzer_v2_bundle_is_loaded_by_its_exact_profile_marker(self) -> None:
+        profile_receipt = analyzer_receipt(request_line=compiler_receipt.ANALYZER_REQUEST_LINE_V2)
+        profile_summary = {"schema": compiler_receipt.ANALYZER_SUMMARY_SCHEMA_V2, "status": "failed",
+                           "inventory": {"selected_rows": 184}}
+        raw = {name: f"raw {name}\n".encode("utf-8") for name in compiler_receipt.ANALYZER_REQUIRED_FILES}
+        raw["request.txt"] = (compiler_receipt.ANALYZER_REQUEST_LINE_V2 + "\n").encode("utf-8")
+        members = {"receipt.json": json.dumps(profile_receipt),
+                   **{f"analyzer/{name}": value for name, value in raw.items()},
+                   "analyzer/summary.json": json.dumps(profile_summary)}
+        got = self.evidence(members)
+        self.assertEqual(got[:3], (profile_receipt, profile_summary, ""))
+        self.assertEqual(got[4]["analyzer"]["files"]["request.txt"], raw["request.txt"])
 
     def test_superseded_analyzer_receipt_needs_no_measurement_bundle_to_stay_neutral(self) -> None:
         head, parent = "a" * 40, "b" * 40

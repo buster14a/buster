@@ -139,8 +139,10 @@ SCALING_PROFILE = {
 # The analyzer comparison is a separate, explicitly requested workload on the
 # existing pull-compare route. Keep its command and trial order immutable.
 ANALYZER_REQUEST_LINE = "profile: clang-analyze-full-v1"
+ANALYZER_REQUEST_LINE_V2 = "profile: clang-analyze-full-v2"
 ANALYZER_REQUEST_PATH = "benchmarks/9700x/compiler-compare.request"
 ANALYZER_SUMMARY_SCHEMA = "buster-clang-analyze-full-v1"
+ANALYZER_SUMMARY_SCHEMA_V2 = "buster-clang-analyze-full-v2"
 ANALYZER_PROFILE = {
     "name": "clang-analyze-full-v1",
     "workload": "complete split-source Release clang_analyze inventory from one candidate compile database",
@@ -163,6 +165,36 @@ ANALYZER_PROFILE = {
     "native_budget_seconds": 4500,
     "report_only": True,
 }
+ANALYZER_PROFILE_V2 = {
+    "name": "clang-analyze-full-v2",
+    "workload": "complete split-source Release clang_analyze inventory derived from the retained candidate compile database",
+    "source": "candidate HEAD source and exact compile_commands.json bytes, shared byte-for-byte by both drivers",
+    "database": "trusted merge-base driver generate --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF",
+    "inventory": "ordered native Release/LinuxCMake selection and analyzer projection re-derived from the complete candidate database; baseline PLAN_V1 and every candidate PLAN_V2 must match",
+    "analysis": "clang_analyze <database> --config Release --shards 8 --jobs 2 --timeout 600 --quiet --clang <trusted resolved executable>",
+    "clang_identity": "trusted-main captures the resolved Clang executable and complete resource-directory file-tree digests; that absolute executable is passed to every analyzer driver",
+    "aggregate": "independent clang_analyze <same database> --config Release --shards 8 --aggregate --results <run results>",
+    "preflight": "separate fresh --prepare runs for baseline and candidate; excluded from four matched analysis arms",
+    "order": ["baseline", "candidate", "candidate", "baseline"],
+    "repeats_per_driver": 2,
+    "shards": 8,
+    "jobs": 2,
+    "timeout_per_tu_seconds": 600,
+    "candidate_alias_policy": "canonical partition and context envelope are recomputed from exact PLAN_V2 rows; an unproven invocation class is accepted only when every row remains self-represented, carries the same explicit reason, and has no context proof or inventories",
+    "driver_resource_observation": "ProcessWaitResult.resources wait4 CPU and largest individual RSS high-water; both statuses must be observed",
+    "whole_tree_sampler": "each full ANALYZE_RUN must report process_tree_status=complete; RSS remains sampled, not a continuous high-water",
+    "native_budget_seconds": 4500,
+    "report_only": True,
+}
+ANALYZER_PROFILE_BY_LINE = {
+    ANALYZER_REQUEST_LINE: ANALYZER_PROFILE,
+    ANALYZER_REQUEST_LINE_V2: ANALYZER_PROFILE_V2,
+}
+ANALYZER_SCHEMA_BY_LINE = {
+    ANALYZER_REQUEST_LINE: ANALYZER_SUMMARY_SCHEMA,
+    ANALYZER_REQUEST_LINE_V2: ANALYZER_SUMMARY_SCHEMA_V2,
+}
+ANALYZER_REQUEST_LINES = tuple(ANALYZER_PROFILE_BY_LINE)
 ANALYZER_RUNS = ("baseline-0", "candidate-0", "candidate-1", "baseline-1")
 ANALYZER_PHASE_FIELDS = (
     "phase", "role", "trial", "wall_us", "user_cpu_us", "system_cpu_us", "peak_rss_bytes",
@@ -968,8 +1000,14 @@ def analyzer_plan_identity(plan: dict) -> dict:
                  for row in plan["rows"]]}
 
 
-def analyzer_candidate_plan_problems(plan: dict) -> list[str]:
-    """Validate the V2 representative-owned context envelope and alias map."""
+def analyzer_candidate_plan_problems(plan: dict, *, allow_fallback: bool = False) -> list[str]:
+    """Validate the V2 representative-owned context envelope and alias map.
+
+    Historical V1 receipts keep the original all-or-nothing duplicate-class
+    rule. V2 may retain an exact invocation class as independent executions
+    when the native planner could not prove a safe shared context; that class
+    must then be entirely self-represented and have no proof envelope.
+    """
     problems: list[str] = []
     if plan.get("version") != 2:
         return ["candidate analyzer plan is not V2"]
@@ -1006,6 +1044,14 @@ def analyzer_candidate_plan_problems(plan: dict) -> list[str]:
                 problems.append(f"candidate singleton row {canonical['index']} has an invalid context envelope")
             continue
 
+        if allow_fallback and all(row["representative"] == row["index"] for row in members):
+            unique += len(members)
+            reason = members[0]["reason"]
+            if not reason or reason == "single-row" or any(row["proven"] or row["reason"] != reason or row["context_proof_present"] or
+                                 row["input_inventory"] or row["search_inventory"] for row in members):
+                problems.append(f"candidate fallback invocation class rooted at {canonical['index']} has an invalid context envelope")
+            continue
+
         aliases += len(members) - 1
         unique += 1
         root = canonical
@@ -1032,6 +1078,23 @@ def analyzer_candidate_plan_problems(plan: dict) -> list[str]:
             unique + aliases != plan.get("selected_rows"):
         problems.append("candidate V2 alias and unique-execution totals differ from its canonical mapping")
     return problems
+
+
+def analyzer_candidate_partition_counts(plan: dict) -> dict:
+    """Recompute potential groups, proven alias groups, executions and aliases from plan rows."""
+    classes: dict[tuple, list[dict]] = {}
+    for row in plan.get("rows", []) if isinstance(plan, dict) else []:
+        key = (row.get("directory"), row.get("file"), row.get("shard"), tuple(row.get("argv", [])))
+        classes.setdefault(key, []).append(row)
+    aliases = sum(row.get("representative") != row.get("index")
+                  for row in plan.get("rows", []) if isinstance(row, dict))
+    return {"selected_rows": len(plan.get("rows", [])),
+            "unique_executions": len(plan.get("rows", [])) - aliases,
+            "alias_rows": aliases,
+            "candidate_groups": sum(len(members) > 1 for members in classes.values()),
+            "proven_groups": sum(len(members) > 1 and any(row.get("representative") != row.get("index")
+                                                            for row in members)
+                                  for members in classes.values())}
 
 
 def analyzer_bootstrap_provenance(driver: bytes, marker: bytes) -> dict:
@@ -1088,13 +1151,232 @@ def analyzer_phase_rows(data: bytes) -> list[dict]:
     return parsed
 
 
-def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[str]]:
+ANALYZER_DATABASE_ENTRY_LIMIT = 16384
+
+
+def analyzer_database_shell_split(command: str) -> list[str]:
+    """Match the build driver's POSIX compile-command tokenizer for CMake's command field."""
+    arguments: list[str] = []
+    index = 0
+    whitespace = " \t\n\r\v\f"
+    while index < len(command):
+        while index < len(command) and command[index] in whitespace:
+            index += 1
+        if index == len(command):
+            break
+        argument: list[str] = []
+        while index < len(command) and command[index] not in whitespace:
+            character = command[index]
+            index += 1
+            if character == "'":
+                end = command.find("'", index)
+                if end < 0:
+                    raise ValueError("compile database command has an unterminated single quote")
+                argument.extend(command[index:end])
+                index = end + 1
+            elif character == '"':
+                while index < len(command) and command[index] != '"':
+                    quoted = command[index]
+                    index += 1
+                    if quoted == "\\" and index < len(command):
+                        quoted = command[index]
+                        index += 1
+                    argument.append(quoted)
+                if index == len(command):
+                    raise ValueError("compile database command has an unterminated double quote")
+                index += 1
+            elif character == "\\":
+                if index == len(command):
+                    raise ValueError("compile database command ends in an escape")
+                argument.append(command[index])
+                index += 1
+            else:
+                argument.append(character)
+        arguments.append("".join(argument))
+    return arguments
+
+
+def analyzer_database_path_equal(left: str, right: str) -> bool:
+    """Match the build driver's Linux path equality: slash folding and trailing slash trimming only."""
+    while len(left) > 1 and left[-1] in "/\\":
+        left = left[:-1]
+    while len(right) > 1 and right[-1] in "/\\":
+        right = right[:-1]
+    return left.replace("\\", "/") == right.replace("\\", "/")
+
+
+def analyzer_database_relative_path(directory: str, path: str) -> str:
+    """Match build_relative_path on the Linux analyzer route without resolving the filesystem."""
+    return path if path.startswith("/") else directory + ("" if directory.endswith(("/", "\\")) else "/") + path
+
+
+def analyzer_database_has_component(path: str, component: str) -> bool:
+    return any(part == component for part in re.split(r"[/\\]", path))
+
+
+def analyzer_database_matches_config(output: str, arguments: list[str], config: str) -> bool:
+    """Mirror clang_analyze_entry_matches_config for its exact Release selection predicate."""
+    if not config:
+        return True
+    markers = (f"CMAKE_INTDIR={config}", f'CMAKE_INTDIR="{config}"', f'CMAKE_INTDIR=\\"{config}\\"')
+    return any(analyzer_database_has_component(value, config) or any(marker in value for marker in markers)
+               for value in ([output] if output else []) + arguments)
+
+
+def analyzer_database_project(arguments: list[str], clang: str) -> list[str]:
+    """Mirror clang_analyzer_command, preserving semantic argv in original order."""
+    if not arguments:
+        raise ValueError("compile database command has no arguments")
+    dropped = {"-c", "-fcolor-diagnostics", "-MD", "-MMD", "-MP"}
+    separate = {"-MF", "-MJ", "-MQ", "-MT", "-o", "--output", "-dependency-file"}
+    joined = ("-MF", "-MJ", "-MQ", "-MT", "-o", "--output=", "-dependency-file=")
+    projected = [clang or arguments[0], "--analyze", "-Xanalyzer", "-analyzer-output=text",
+                 "-fno-color-diagnostics", "-Wno-error=unused-command-line-argument"]
+    index = 1
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument in dropped:
+            index += 1
+        elif argument in separate:
+            index += 2 if index + 1 < len(arguments) else 1
+        elif any(len(argument) > len(prefix) and argument.startswith(prefix) for prefix in joined):
+            index += 1
+        else:
+            projected.append(argument)
+            index += 1
+    return projected
+
+
+def analyzer_database_module(file: str) -> str:
+    """Mirror clang_analyze_module's basename and paired *_test ownership rule."""
+    basename = re.split(r"[/\\]", file)[-1]
+    module = basename[:-2]
+    return module[:-5] if module.endswith("_test") else module
+
+
+def analyzer_database_shard(module: str, shards: int) -> int:
+    """Mirror the C driver's byte-stable 64-bit FNV-1a module shard assignment."""
+    value = 14695981039346656037
+    for byte in module.encode("utf-8"):
+        value = ((value ^ byte) * 1099511628211) & 0xffffffffffffffff
+    return value % shards
+
+
+def analyzer_native_release_inventory(data: bytes, clang: str, *, config: str = "Release", shards: int = 8) -> dict:
+    """Derive the ordered eligible Linux CMake inventory from exact retained CDB bytes."""
+    if not isinstance(data, bytes) or not data or len(data) > ANALYZER_STRING_LIMIT:
+        raise ValueError("compile database is empty or exceeds its byte bound")
+
+    def unique_object(pairs: list[tuple[str, object]]) -> dict:
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("compile database object repeats a JSON property")
+            result[key] = value
+        return result
+
+    database = json.loads(data.decode("utf-8"), object_pairs_hook=unique_object)
+    if not isinstance(database, list) or not database or len(database) > ANALYZER_DATABASE_ENTRY_LIMIT:
+        raise ValueError("compile database is not a bounded nonempty CMake array")
+    selected: list[dict] = []
+    excluded = 0
+    identities = set()
+    for entry in database:
+        if not isinstance(entry, dict):
+            raise ValueError("compile database contains a non-object entry")
+        directory = entry.get("directory", "")
+        file = entry.get("file", "")
+        output = entry.get("output", "")
+        command = entry.get("command", "")
+        original = entry.get("arguments", [])
+        if not isinstance(directory, str) or not directory or not isinstance(file, str) or not file or \
+                not isinstance(output, str) or not isinstance(command, str) or not isinstance(original, list) or \
+                any(not isinstance(argument, str) for argument in original):
+            raise ValueError("compile database entry has malformed directory, file, output or arguments")
+        arguments = list(original)
+        if not arguments and command:
+            arguments = analyzer_database_shell_split(command)
+        if not arguments or not arguments[0]:
+            raise ValueError("compile database entry has no usable compiler command")
+        is_c_source = file.lower().endswith(".c")
+        if not is_c_source or not analyzer_database_matches_config(output, arguments, config):
+            excluded += 1
+            continue
+        source = analyzer_database_relative_path(directory, file)
+        source_found = False
+        for argument in arguments:
+            if "\x00" in argument or (argument and argument[0] == "@"):
+                raise ValueError("selected compile command contains a NUL byte or response file")
+            if argument and argument[0] != "-" and argument.lower().endswith(".c") and \
+                    analyzer_database_path_equal(source, analyzer_database_relative_path(directory, argument)):
+                source_found = True
+        if not source_found:
+            raise ValueError("selected compile command does not explicitly name its source")
+        if "\x00" in directory or "\x00" in file or "\x00" in output:
+            raise ValueError("selected compile database identity contains a NUL byte")
+        if not output:
+            for index in range(1, len(arguments) - 1):
+                if arguments[index] == "-o":
+                    output = arguments[index + 1]
+        identity = (directory, file, output)
+        if identity in identities:
+            raise ValueError("compile database has a duplicate selected TU identity")
+        identities.add(identity)
+        module = analyzer_database_module(file)
+        selected.append({"index": len(selected), "shard": analyzer_database_shard(module, shards),
+                         "module": module, "file": file, "directory": directory, "output": output,
+                         "original_argv": arguments, "argv": analyzer_database_project(arguments, clang)})
+        if len(selected) > ANALYZER_ROW_LIMIT:
+            raise ValueError("selected analyzer inventory exceeds its row bound")
+    if not selected:
+        raise ValueError("compile database has no eligible Release C translation units")
+    return {"entries": len(database), "selected_rows": len(selected), "excluded_rows": excluded, "rows": selected}
+
+
+def analyzer_inventory_plan_problems(inventory: dict, baseline_plan: dict, candidate_plan: dict) -> list[str]:
+    """Bind both plan versions to the complete ordered CDB inventory.
+
+    PLAN_V1 does not serialize directory, output or original argv. Its exact
+    database bytes plus every ordered row's module, file, shard and projection
+    bind those legacy rows to their derived inventory entries. PLAN_V2 carries
+    the full identity and must match every field directly.
+    """
+    problems: list[str] = []
+    expected = inventory.get("rows") if isinstance(inventory, dict) else None
+    baseline_rows = baseline_plan.get("rows") if isinstance(baseline_plan, dict) else None
+    candidate_rows = candidate_plan.get("rows") if isinstance(candidate_plan, dict) else None
+    if not isinstance(expected, list) or not isinstance(baseline_rows, list) or not isinstance(candidate_rows, list):
+        return ["analyzer plans do not contain ordered rows for the derived database inventory"]
+    if len(baseline_rows) != len(expected) or len(candidate_rows) != len(expected):
+        problems.append("baseline or candidate plan omits or adds rows from the complete derived CDB inventory")
+        return problems
+    baseline_fields = ("index", "shard", "module", "file", "argv")
+    candidate_fields = ("index", "shard", "module", "file", "directory", "output", "original_argv", "argv")
+    expected_baseline = [{key: row[key] for key in baseline_fields} for row in expected]
+    observed_baseline = [{key: row.get(key) for key in baseline_fields} for row in baseline_rows]
+    expected_candidate = [{key: row[key] for key in candidate_fields} for row in expected]
+    observed_candidate = [{key: row.get(key) for key in candidate_fields} for row in candidate_rows]
+    if observed_baseline != expected_baseline:
+        problems.append("baseline PLAN_V1 ordered row identities or projections differ from the complete derived CDB inventory")
+    if observed_candidate != expected_candidate:
+        problems.append("candidate PLAN_V2 directory, file, output, original/projected argv, module or shard differs from the complete derived CDB inventory")
+    return problems
+
+
+def analyzer_profile_summary(files: dict, identity: dict,
+                             request_line: str = ANALYZER_REQUEST_LINE) -> tuple[dict, list[str]]:
     """Re-derive the full analyzer evidence from raw plans, shard results and logs."""
     problems: list[str] = []
-    profile = json.loads(json.dumps(ANALYZER_PROFILE))
+    if request_line not in ANALYZER_PROFILE_BY_LINE:
+        problems.append("requested analyzer profile selector is not recognized")
+        request_line = ANALYZER_REQUEST_LINE
+    selected_profile = ANALYZER_PROFILE_BY_LINE[request_line]
+    profile = json.loads(json.dumps(selected_profile))
+    schema = ANALYZER_SCHEMA_BY_LINE[request_line]
+    dynamic_inventory = request_line == ANALYZER_REQUEST_LINE_V2
     baseline_revision = identity.get("base") if isinstance(identity, dict) else None
     candidate_revision = identity.get("head") if isinstance(identity, dict) else None
-    summary = {"schema": ANALYZER_SUMMARY_SCHEMA, "status": "failed", "profile": profile,
+    summary = {"schema": schema, "status": "failed", "profile": profile,
                "baseline_revision": baseline_revision, "candidate_revision": candidate_revision,
                "request": {}, "clang": {}, "driver_checkouts": {}, "driver_provenance": {}, "compile_commands": {},
                "inventory": {}, "preparation": {},
@@ -1119,9 +1401,9 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
             problems.append("native helper did not complete the fixed ten-phase analyzer profile")
         request_bytes = files["request.txt"]
         request_lines = analyzer_text(request_bytes).splitlines()
-        if ANALYZER_REQUEST_LINE not in request_lines:
+        if request_line not in request_lines:
             raise ValueError("retained profile request lacks the analyzer selector")
-        summary["request"] = {"line": ANALYZER_REQUEST_LINE, "sha256": hashlib.sha256(request_bytes).hexdigest(),
+        summary["request"] = {"line": request_line, "sha256": hashlib.sha256(request_bytes).hexdigest(),
                               "size_bytes": len(request_bytes)}
         compile_commands = files["compile_commands.json"]
         if not compile_commands:
@@ -1135,6 +1417,9 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
                 not SHA256.fullmatch(str(clang.get("resource_tree_sha256", ""))):
             raise ValueError("trusted Clang executable/resource provenance is malformed")
         summary["clang"] = clang
+        derived_inventory = analyzer_native_release_inventory(compile_commands, clang["path"]) if dynamic_inventory else None
+        if derived_inventory is not None:
+            summary["compile_commands"]["native_database_entries"] = derived_inventory["entries"]
         for role, revision in (("baseline", baseline_revision), ("candidate", candidate_revision)):
             checkout = analyzer_text(files[f"drivers/{role}.checkout"]).strip()
             if not SHA.fullmatch(checkout):
@@ -1171,11 +1456,13 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
             plans_ok = plans_ok and all(plan["config"] == "Release" and plan["shards"] == 8 and plan["timeout"] == 600 and
                                         plan["clang"] == clang["path"]
                                         for plan in (baseline_plan, candidate_plan))
-            plans_ok = plans_ok and baseline_plan["selected_rows"] == ANALYZER_PROFILE["expected_rows"]
+            expected_selected = derived_inventory["selected_rows"] if derived_inventory else ANALYZER_PROFILE["expected_rows"]
+            expected_excluded = derived_inventory["excluded_rows"] if derived_inventory else baseline_plan["excluded_rows"]
+            plans_ok = plans_ok and baseline_plan["selected_rows"] == expected_selected
             plans_ok = plans_ok and candidate_plan["selected_rows"] == baseline_plan["selected_rows"]
             plans_ok = plans_ok and baseline_plan["database"] == candidate_plan["database"] == compile_commands
             plans_ok = plans_ok and baseline_plan["clang"] == candidate_plan["clang"]
-            plans_ok = plans_ok and baseline_plan["excluded_rows"] == candidate_plan["excluded_rows"]
+            plans_ok = plans_ok and baseline_plan["excluded_rows"] == candidate_plan["excluded_rows"] == expected_excluded
             baseline_semantics = [{key: row[key] for key in ("index", "shard", "module", "file", "argv")}
                                   for row in baseline_plan["rows"]]
             candidate_semantics = [{key: row[key] for key in ("index", "shard", "module", "file", "argv")}
@@ -1184,16 +1471,35 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
             plans_ok = plans_ok and baseline_semantics == candidate_semantics
             aliases = sum(row["representative"] != row["index"] for row in candidate_plan["rows"])
             unique = candidate_plan["selected_rows"] - aliases
-            plans_ok = plans_ok and candidate_plan["unique_executions"] == unique == ANALYZER_PROFILE["expected_candidate_executions"]
-            plans_ok = plans_ok and candidate_plan["aliases"] == aliases == ANALYZER_PROFILE["expected_candidate_aliases"]
+            plans_ok = plans_ok and candidate_plan["unique_executions"] == unique
+            plans_ok = plans_ok and candidate_plan["aliases"] == aliases
+            if not dynamic_inventory:
+                plans_ok = plans_ok and unique == ANALYZER_PROFILE["expected_candidate_executions"]
+                plans_ok = plans_ok and aliases == ANALYZER_PROFILE["expected_candidate_aliases"]
             plans_ok = plans_ok and baseline_plan["unique_executions"] == baseline_plan["selected_rows"] and not baseline_plan["aliases"]
             plans_ok = plans_ok and not candidate_plan["fixture"]
-            candidate_envelope_problems = analyzer_candidate_plan_problems(candidate_plan)
+            candidate_envelope_problems = analyzer_candidate_plan_problems(candidate_plan, allow_fallback=dynamic_inventory)
             if candidate_envelope_problems:
                 problems.extend(candidate_envelope_problems)
                 plans_ok = False
-            candidate_alias_groups = len({row["representative"] for row in candidate_plan["rows"]
-                                          if row["representative"] != row["index"]})
+            partition = analyzer_candidate_partition_counts(candidate_plan)
+            candidate_alias_groups = partition["proven_groups"]
+            if dynamic_inventory and derived_inventory:
+                candidate_inventory_rows = [{key: row[key] for key in ("index", "shard", "module", "file", "directory",
+                                                                        "output", "original_argv", "argv")}
+                                             for row in derived_inventory["rows"]]
+                inventory_problems = analyzer_inventory_plan_problems(
+                    derived_inventory, baseline_plan, candidate_plan)
+                if inventory_problems:
+                    problems.extend(inventory_problems)
+                    plans_ok = False
+                plans_ok = plans_ok and partition["selected_rows"] == derived_inventory["selected_rows"]
+                plans_ok = plans_ok and partition["unique_executions"] == candidate_plan["unique_executions"]
+                plans_ok = plans_ok and partition["alias_rows"] == candidate_plan["aliases"]
+                full_inventory_digest = hashlib.sha256(json.dumps(candidate_inventory_rows, sort_keys=True,
+                                                                   separators=(",", ":")).encode()).hexdigest()
+            else:
+                full_inventory_digest = None
             summary["inventory"] = {"selected_rows": baseline_plan["selected_rows"],
                                     "excluded_rows": baseline_plan["excluded_rows"],
                                     "baseline_unique_executions": baseline_plan["selected_rows"],
@@ -1202,8 +1508,17 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
                                     "candidate_alias_groups": candidate_alias_groups,
                                     "semantic_argv_sha256": semantic_digest,
                                     "database_sha256": hashlib.sha256(compile_commands).hexdigest()}
+            if dynamic_inventory and derived_inventory:
+                summary["inventory"].update({"raw_database_entries": derived_inventory["entries"],
+                                             "candidate_groups": partition["candidate_groups"],
+                                             "candidate_proven_groups": partition["proven_groups"],
+                                             "inventory_rows_sha256": full_inventory_digest})
             if not plans_ok:
-                problems.append("baseline V1 and candidate V2 plans differ from the fixed common full inventory or alias contract")
+                if dynamic_inventory:
+                    problems.append("baseline V1 and candidate V2 plans differ from the common derived complete CDB inventory or alias contract")
+                else:
+                    # Preserve the exact historical V1 diagnostic text, which is part of its archived summary schema.
+                    problems.append("baseline V1 and candidate V2 plans differ from the fixed common full inventory or alias contract")
         else:
             baseline_semantics = []
             candidate_semantics = []
@@ -1238,8 +1553,10 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
                     expected_prepare = {"selected_rows": candidate_plan["selected_rows"],
                                         "unique_executions": candidate_plan["unique_executions"],
                                         "aliases": candidate_plan["aliases"],
-                                        "candidate_groups": summary["inventory"].get("candidate_alias_groups"),
-                                        "proven_groups": summary["inventory"].get("candidate_alias_groups"),
+                                        "candidate_groups": summary["inventory"].get("candidate_groups",
+                                                                                      summary["inventory"].get("candidate_alias_groups")),
+                                        "proven_groups": summary["inventory"].get("candidate_proven_groups",
+                                                                                    summary["inventory"].get("candidate_alias_groups")),
                                         "excluded_config_or_language": candidate_plan["excluded_rows"]}
                     for key, expected in expected_prepare.items():
                         if not re.fullmatch(r"(?:0|[1-9][0-9]*)", fields.get(key, "")) or int(fields[key]) != expected:
@@ -1255,7 +1572,7 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
         phase_rows = analyzer_phase_rows(files["profile/profile.tsv"])
         # The native helper records every analysis immediately before its matching aggregate.
         expected_phases = [("prepare-baseline", "baseline", 0), ("prepare-candidate", "candidate", 0)]
-        for trial, (name, role) in enumerate(zip(ANALYZER_RUNS, ANALYZER_PROFILE["order"])):
+        for trial, (name, role) in enumerate(zip(ANALYZER_RUNS, selected_profile["order"])):
             expected_phases.extend(((f"analysis-{name}", role, trial), (f"aggregate-{name}", role, trial)))
         if len(phase_rows) != len(expected_phases):
             problems.append("native measurement table does not contain all 10 profile phases")
@@ -1274,7 +1591,7 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
         sampler_states = []
         measurements = {row["phase"]: row for row in phase_rows}
         verified_run_count = 0
-        for label, role in zip(ANALYZER_RUNS, ANALYZER_PROFILE["order"]):
+        for label, role in zip(ANALYZER_RUNS, selected_profile["order"]):
             plan = plans.get(label)
             expected_version = 1 if role == "baseline" else 2
             version = plan["version"] if plan else expected_version
@@ -1293,7 +1610,7 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
                         plan["shards"] != 8 or plan["timeout"] != 600:
                     problems.append(f"analyzer run {label} does not reproduce its separate prepare plan")
                 if plan["version"] == 2:
-                    problems.extend(analyzer_candidate_plan_problems(plan))
+                    problems.extend(analyzer_candidate_plan_problems(plan, allow_fallback=dynamic_inventory))
             rows_by_index = {row["index"]: row for row in plan_rows}
             run_log_rows = {}
             run_log_data = {}
@@ -1419,9 +1736,9 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
             if not sampler_complete:
                 problems.append(f"analyzer run {label} whole-tree sampler is incomplete or unavailable")
             if run_fields.get("status") != "pass" or (plan and run_fields.get("results") != plan["results"]) or \
-                    parsed_run_counters.get("jobs") != ANALYZER_PROFILE["jobs"] or \
+                    parsed_run_counters.get("jobs") != selected_profile["jobs"] or \
                     not (isinstance(parsed_run_counters.get("peak_pending_workers"), int) and
-                         1 <= parsed_run_counters["peak_pending_workers"] <= ANALYZER_PROFILE["jobs"]):
+                         1 <= parsed_run_counters["peak_pending_workers"] <= selected_profile["jobs"]):
                 problems.append(f"analyzer run {label} driver record does not match the fixed successful run")
 
             analysis_phase = measurements.get(f"analysis-{label}", {})
@@ -1571,7 +1888,7 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
             if len(phase_rows) == len(expected_phases) else None,
             "whole_tree_sampler_complete": summary["sampler"].get("status") == "complete",
         }
-    except (ValueError, KeyError, TypeError, IndexError, UnicodeDecodeError, OverflowError) as error:
+    except (ValueError, KeyError, TypeError, IndexError, UnicodeDecodeError, OverflowError, RecursionError) as error:
         problems.append(f"analyzer evidence is malformed or incomplete: {error}")
     summary["status"] = "complete" if not problems else "failed"
     summary["comparison_invalid"] = bool(problems)
@@ -1586,18 +1903,30 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
 def validate_analyzer_bundle(receipt: object, summary: object, bundle: object) -> list[str]:
     """Re-derive the report from raw evidence and bind it to the authorized request."""
     problems: list[str] = []
-    if not isinstance(receipt, dict) or receipt.get("profile") != ANALYZER_PROFILE:
-        return ["receipt does not name the frozen clang-analyze-full-v1 profile"]
+    if not isinstance(receipt, dict):
+        return ["receipt does not name a frozen full Clang analyzer profile"]
+    request_line = receipt.get("analyzer_request_line")
+    if not isinstance(request_line, str):
+        return ["receipt does not name a frozen full Clang analyzer selector"]
+    selected_profile = ANALYZER_PROFILE_BY_LINE.get(request_line)
+    if selected_profile is None or receipt.get("profile") != selected_profile:
+        return ["receipt does not name a frozen full Clang analyzer profile and selector"]
     if receipt.get("mode") != "pull":
-        problems.append("clang-analyze-full-v1 is valid only in pull mode")
-    if receipt.get("analyzer_request_line") != ANALYZER_REQUEST_LINE:
+        problems.append(f"{selected_profile['name']} is valid only in pull mode")
+    if receipt.get("analyzer_profile") != selected_profile:
+        problems.append("receipt analyzer profile marker is not frozen")
+    if receipt.get("analyzer_request_line") != request_line:
         problems.append("receipt does not name the exact analyzer profile selector")
     if not isinstance(bundle, dict) or not isinstance(bundle.get("files"), dict):
         return [*problems, "raw analyzer evidence bundle is missing"]
-    derived, errors = analyzer_profile_summary(bundle["files"], receipt.get("identity"))
+    derived, errors = analyzer_profile_summary(bundle["files"], receipt.get("identity"), request_line)
     problems.extend(errors)
     if summary != derived:
-        problems.append("retained analyzer summary does not match the raw V1/V2 plans, results and logs")
+        if request_line == ANALYZER_REQUEST_LINE:
+            # Keep the original diagnostic byte-for-byte for archived V1 evidence.
+            problems.append("retained analyzer summary does not match the raw V1/V2 plans, results and logs")
+        else:
+            problems.append("retained analyzer summary does not match the raw V2 plans, derived inventory, results and logs")
     if receipt.get("analyzer") != derived:
         problems.append("receipt analyzer section does not match the independently re-derived evidence")
     if receipt.get("analyzer_request_sha256") != derived.get("request", {}).get("sha256"):
@@ -2261,7 +2590,7 @@ def render_analyzer(receipt: dict, summary: dict, conclusion: str, notes: list[s
 
 def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) -> str:
     """Readable per-candidate report: identities, verdict, core metrics and timings."""
-    if isinstance(receipt, dict) and receipt.get("profile") == ANALYZER_PROFILE:
+    if isinstance(receipt, dict) and receipt.get("profile") in ANALYZER_PROFILE_BY_LINE.values():
         return render_analyzer(receipt, summary if isinstance(summary, dict) else {}, conclusion, notes)
     identity = receipt.get("identity", {}) if isinstance(receipt, dict) else {}
     timings = receipt.get("timings", {}) if isinstance(receipt, dict) else {}

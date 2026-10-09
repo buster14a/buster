@@ -1160,11 +1160,17 @@ struct CompilerDriverResponseFileSplit
 };
 
 // Requests one byte past `limit`, so an oversized file, pipe or device is
-// detected without trusting a reported size or reading it to its end.
+// detected without trusting a reported size or reading it to its end. A
+// directory is refused without being opened: Windows would fail the open with
+// access denied and log it, which CI triage mistakes for a real failure.
 BUSTER_GLOBAL_LOCAL CompilerDriverResponseFileStatus compiler_driver_response_file_read(Arena* arena, String8 path, u64 limit, String8* content)
 {
     CompilerDriverResponseFileStatus status = COMPILER_DRIVER_RESPONSE_FILE_UNREADABLE;
-    OsFileOpenResult opened = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
+    OsFileOpenResult opened = {0};
+    if (os_path_followed_stats(path).kind != OS_FILE_KIND_DIRECTORY)
+    {
+        opened = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
+    }
     if (opened.file)
     {
         u8* buffer = (u8*)arena_allocate_bytes(arena, limit + 1, 1);

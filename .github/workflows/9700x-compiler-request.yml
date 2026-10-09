@@ -44,6 +44,10 @@ jobs:
     permissions:
       checks: write
     timeout-minutes: 3
+    concurrency:
+      group: buster-9700x-check-writer
+      cancel-in-progress: false
+      queue: max
     continue-on-error: true
     steps:
       - name: Check out the trusted check writer
