@@ -54,7 +54,8 @@ from pathlib import Path
 
 from compiler_github import ARTIFACT_LIMIT, RECONCILE_DEPTH
 from compiler_receipt import (IDENTITY_KEYS, INLINE_ACCEPTANCE_PROFILE, INLINE_ACCEPTANCE_REQUEST_LINE,
-                              INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE, ANALYZER_REQUEST_LINE,
+                              INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUEST_LINE,
+                              ANALYZER_REQUEST_LINES,
                               ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, RECEIPT_SCHEMA, SCALING_PROFILE,
                               SCALING_REQUEST, SHA, THROUGHPUT_PROFILE, classify, classify_scaling,
                               classify_throughput, dumps, host_problem, inline_acceptance_requested,
@@ -514,22 +515,35 @@ def request_selector_added_at_head(candidate: Path, head: str, selector: str) ->
 
 
 def analyzer_profile_requested(candidate: Path, head: str) -> bool:
-    """Require one new exact analyzer selector occurrence in the current head versus every parent."""
-    return request_selector_added_at_head(candidate, head, ANALYZER_REQUEST_LINE)
+    """Whether one versioned analyzer selector was freshly added at this head."""
+    selected, _ = analyzer_profile_request_selection(candidate, head)
+    return selected is not None
+
+
+def analyzer_profile_request_selection(candidate: Path, head: str) -> tuple[str | None, str]:
+    """Select one profile only when its exact line is the sole fresh selector at every parent."""
+    deltas = {line: request_selector_parent_deltas(candidate, head, line) for line in ANALYZER_REQUEST_LINES}
+    if any(value is None for value in deltas.values()):
+        return None, "could not prove the analyzer profile selector counts against every head parent"
+    positive = [line for line, values in deltas.items() if any(value > 0 for value in values)]
+    if not positive:
+        return None, ""
+    if len(positive) != 1:
+        return None, "only one versioned analyzer selector may be freshly added at the head"
+    selected = positive[0]
+    selected_deltas = deltas[selected]
+    if selected_deltas is None or any(value != 1 for value in selected_deltas):
+        return None, "analyzer selector must be added exactly once relative to every head parent"
+    for line, values in deltas.items():
+        if line != selected and (values is None or any(value != 0 for value in values)):
+            return None, "the other recognized analyzer selector count must remain unchanged at every head parent"
+    return selected, ""
 
 
 def analyzer_profile_request_status(candidate: Path, head: str) -> tuple[bool, str]:
-    """Select the analyzer profile or fail closed on an unprovable/multiple fresh request."""
-    deltas = request_selector_parent_deltas(candidate, head, ANALYZER_REQUEST_LINE)
-    if deltas is None:
-        return False, "could not prove the analyzer profile selector count against every head parent"
-    if all(delta == 0 for delta in deltas):
-        return False, ""
-    if all(delta == 1 for delta in deltas):
-        return True, ""
-    if any(delta > 0 for delta in deltas):
-        return False, "analyzer selector must be added exactly once relative to every head parent"
-    return False, ""
+    """Compatibility boolean wrapper for callers interested only in selection state."""
+    selected, problem = analyzer_profile_request_selection(candidate, head)
+    return selected is not None, problem
 
 
 def request_selector_increased_at_head(candidate: Path, head: str, selector: str) -> bool:
@@ -699,8 +713,10 @@ def collect_analyzer_files(root: Path) -> dict[str, bytes]:
 
 
 def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path,
-                             receipt: dict, summaries: list) -> None:
-    """Run only the fixed full analyzer profile from the trusted merge-base driver."""
+                             receipt: dict, summaries: list,
+                             request_line: str = ANALYZER_REQUEST_LINE) -> None:
+    """Run the selected analyzer profile from the trusted merge-base driver."""
+    selected_profile = ANALYZER_PROFILE_BY_LINE[request_line]
     profile_started = time.monotonic()
     setup_deadline = profile_started + ANALYZER_SETUP_BUDGET_SECONDS
     profile_deadline = profile_started + ANALYZER_PROFILE_BUDGET_SECONDS
@@ -708,8 +724,9 @@ def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, wor
     analyzer_root = work / "analyzer"
     analyzer_root.mkdir(parents=True, exist_ok=True)
     (analyzer_root / "profile").mkdir()
-    receipt["analyzer_request_line"] = ANALYZER_REQUEST_LINE
-    receipt["analyzer_profile"] = ANALYZER_PROFILE
+    receipt["analyzer_request_line"] = request_line
+    receipt["analyzer_profile"] = selected_profile
+    receipt["profile"] = selected_profile
     request_path = candidate / "benchmarks/9700x/compiler-compare.request"
     try:
         request_stat = os.lstat(request_path)
@@ -732,15 +749,15 @@ def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, wor
     except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as error:
         reasons.append(f"trusted Clang provenance is incomplete: {error}")
     if arguments.mode != "pull":
-        reasons.append("clang-analyze-full-v1 is supported only by the authorized pull-compare route")
+        reasons.append(f"{selected_profile['name']} is supported only by the authorized pull-compare route")
     inline_selector_deltas = request_selector_parent_deltas(candidate, arguments.head,
                                                             INLINE_ACCEPTANCE_REQUEST_LINE)
     if inline_selector_deltas is None:
         reasons.append("could not prove the inline acceptance selector count against every head parent")
     elif any(delta > 0 for delta in inline_selector_deltas):
-        reasons.append("clang-analyze-full-v1 cannot be combined with the inline acceptance selector")
+        reasons.append(f"{selected_profile['name']} cannot be combined with the inline acceptance selector")
     if scaling_requested(candidate, arguments.base, arguments.head):
-        reasons.append("clang-analyze-full-v1 cannot be combined with a scaling.request profile")
+        reasons.append(f"{selected_profile['name']} cannot be combined with a scaling.request profile")
     drivers: dict[str, Path] = {}
     if not reasons:
         for role, commit in (("baseline", arguments.base), ("candidate", arguments.head)):
@@ -805,7 +822,7 @@ def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, wor
         if source_problem:
             reasons.append(source_problem)
     raw = collect_analyzer_files(analyzer_root)
-    summary, validation = analyzer_profile_summary(raw, receipt.get("identity", {}))
+    summary, validation = analyzer_profile_summary(raw, receipt.get("identity", {}), request_line)
     receipt["analyzer"] = summary
     reasons.extend(item for item in validation if item not in reasons)
     try:
@@ -908,7 +925,8 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             receipt: dict, summaries: list) -> None:
     """Build both revisions and run the lab, corpus and scaling legs; the lab summary goes to summaries."""
     if arguments.mode == "pull" and getattr(arguments, "analyzer_profile_requested", False):
-        measure_analyzer_profile(arguments, candidate, work, evidence, receipt, summaries)
+        measure_analyzer_profile(arguments, candidate, work, evidence, receipt, summaries,
+                                 arguments.analyzer_request_line)
         return
     reasons = receipt["reasons"]
     request_problem = getattr(arguments, "analyzer_profile_request_problem", "")
@@ -1032,14 +1050,16 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     prepare_scratch(work)
     prepare_scratch(evidence)
-    analyzer_requested, analyzer_request_problem = False, ""
+    analyzer_request_line, analyzer_request_problem = None, ""
     if arguments.mode == "pull":
-        analyzer_requested, analyzer_request_problem = analyzer_profile_request_status(candidate, arguments.head)
+        analyzer_request_line, analyzer_request_problem = analyzer_profile_request_selection(candidate, arguments.head)
+    analyzer_requested = analyzer_request_line is not None
     arguments.analyzer_profile_requested = analyzer_requested
+    arguments.analyzer_request_line = analyzer_request_line
     arguments.analyzer_profile_request_problem = analyzer_request_problem
     identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}
     receipt = {"schema": RECEIPT_SCHEMA, "mode": arguments.mode, "state": "failed", "reasons": [], "identity": identity,
-               "profile": ANALYZER_PROFILE if analyzer_requested else PROFILE,
+               "profile": ANALYZER_PROFILE_BY_LINE[analyzer_request_line] if analyzer_requested else PROFILE,
                "throughput_profile": THROUGHPUT_PROFILE if not analyzer_requested else None,
                "host": {"hostname": socket.gethostname(), "cpu_model": cpu_model()},
                "toolchain": toolchain(), "binaries": {}, "lab": {},

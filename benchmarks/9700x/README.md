@@ -109,21 +109,30 @@ gate applies, and these jobs follow `authorize`:
   missing, partial or invalid corpus run, or one whose compiler hashes are
   not the measured binaries, fails the check like a failed self-host run.
 
-The same trusted `compare-pull` route also supports a fixed full Clang
-analyzer profile when the request file contains a fresh added occurrence of
-the exact line `profile: clang-analyze-full-v1` in the exact head commit.
-Append that same selector line once for each explicit analyzer request;
-historical occurrences do not replay the profile. The publisher rechecks the
-line-count increase against every GitHub parent and the retained request bytes
-against the exact head. This opts into an analyzer-only run in place
-of the compiler timing/corpus profiles; `scaling.request` and the separate
-inline-acceptance selector cannot be combined with it. The trusted merge-base
-driver generates one Release split-source compile database from candidate
-HEAD, and both separately built native drivers analyze those same 182 selected
-rows. Candidate alias proof reduces its inventory to 135 executions and 47
-aliases. The profile runs two fresh preflights outside the matched timings,
-then baseline, candidate, candidate, baseline, with eight shards, two jobs and
-the normal ten-minute per-TU bound. Each full run is followed by an independent
+The same trusted `compare-pull` route supports versioned full Clang analyzer
+profiles when the request file contains one fresh exact selector in the head:
+`profile: clang-analyze-full-v1` or `profile: clang-analyze-full-v2`. Append one
+selector line for each explicit analyzer request. Historical occurrences of
+either selector do not replay the profile; the selected line must increase
+exactly once against every GitHub parent while the other recognized selector
+count stays unchanged. The publisher checks the exact head request bytes and
+hash. Analyzer profiles run in place of compiler timing/corpus profiles;
+`scaling.request` and a newly requested inline-acceptance selector cannot be
+combined with them.
+
+V1 preserves its historical fixed 182-row qualification and 135-execution,
+47-alias candidate profile. V2 independently derives the ordered Release
+inventory and analyzer argument projection from the exact retained candidate
+compile database, then checks every baseline and candidate plan and aggregate
+count against that inventory. Its selected, unique and alias totals are
+recomputed from candidate PLAN_V2 rows and their context proof; a whole
+invocation class may safely run as unique executions only when every row is
+self-represented and carries the same explicit unproven reason with no proof
+envelope. V2 does not bake in a TU or alias count.
+
+Both profiles use two fresh preflights outside the matched timings, then
+baseline, candidate, candidate, baseline, with eight shards, two jobs and the
+normal ten-minute per-TU bound. Each full run is followed by an independent
 fresh aggregate verification. Raw plans, terminal shard results, logs,
 process observations and the exact request are retained and independently
 revalidated by `compiler_publish.py`.
