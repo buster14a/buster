@@ -1774,9 +1774,11 @@ enum
     // sees nothing cannot pass.
     C_AST_CORPUS_RECORD_FLOOR = 6000,
     // Tree expression-typer answers checked against the type machine
-    // (c_ast_corpus_types): about 56,000 from the fixtures, and about 302,600
-    // in all with the frontend's own sources where the host headers exist.
-    C_AST_CORPUS_TYPE_ANSWER_FLOOR = 50000,
+    // (c_ast_corpus_types): about 56,000 from the fixtures on Linux x86-64
+    // (the fewest, about 49,900, on Windows AArch64, where fewer fixtures
+    // reach typed bodies), and about 302,600 in all with the frontend's own
+    // sources where the host headers exist.
+    C_AST_CORPUS_TYPE_ANSWER_FLOOR = 45000,
     C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR = 270000,
 };
 
@@ -3188,7 +3190,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_oracle(UnitTestArguments* argument
 // The tree expression typer (c_ast_types.c): one range of a function body per
 // case, answered on a private machine from a tree built over the source, with
 // and without constraint checks. Each case states the C type the range has by
-// the standard (LP64 for size_t and ptrdiff_t); an accepted kind answers it,
+// the standard (size_t and ptrdiff_t by the native target's data model, LP64 or
+// LLP64); an accepted kind answers it,
 // a shape whose machine answer would append a type row declines, and a range
 // that is no expression node misses. The corpus half of the contract (every
 // tree answer equals the machine's, and no diagnostic changes) is
@@ -3207,6 +3210,9 @@ struct CAstTypeCase
     // Answered only without constraint checks: with them the machine types an
     // operand the tree does not, so the query declines.
     bool unchecked_only;
+    // The type under the LLP64 data model, where size_t and ptrdiff_t are the
+    // long long kinds; C_TYPE_INVALID when it is `kind` in both.
+    CTypeKind llp64_kind;
 };
 
 BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
@@ -3260,10 +3266,12 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     {S8_INITIALIZER("int f(long a, int b) { return (a, b); }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("double f(int c, int a, double b) { return c ? a : b; }"), S8_INITIALIZER("c"), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_DOUBLE},
     {S8_INITIALIZER("long f(long a, long b) { return a ?: b; }"), S8_INITIALIZER("a"), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
-    {S8_INITIALIZER("unsigned long f(int a) { return sizeof a; }"), S8_INITIALIZER("sizeof"), 0, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_LONG},
-    {S8_INITIALIZER("unsigned long f(void) { return sizeof(int); }"), S8_INITIALIZER("sizeof"), 0, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_LONG},
+    {S8_INITIALIZER("unsigned long f(int a) { return sizeof a; }"), S8_INITIALIZER("sizeof"), 0, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_LONG,
+     false, C_TYPE_UNSIGNED_LONG_LONG},
+    {S8_INITIALIZER("unsigned long f(void) { return sizeof(int); }"), S8_INITIALIZER("sizeof"), 0, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_LONG,
+     false, C_TYPE_UNSIGNED_LONG_LONG},
     {S8_INITIALIZER("unsigned long f(void) { return _Alignof(double); }"), S8_INITIALIZER("_Alignof"), 0, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
-     C_TYPE_UNSIGNED_LONG},
+     C_TYPE_UNSIGNED_LONG, false, C_TYPE_UNSIGNED_LONG_LONG},
     {S8_INITIALIZER("typedef unsigned short U16; U16 f(int a) { return (U16)a; }"), S8_INITIALIZER("("), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
      C_TYPE_UNSIGNED_SHORT},
     {S8_INITIALIZER("typedef struct P { int x; } P; P f(void) { return (P){1}; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER,
@@ -3273,7 +3281,8 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     // appends a row), and it decides whether two pointers may be subtracted
     // by comparing their element types, where the tree vouches only for one
     // shared row (each `char*` here has its own `char` row).
-    {S8_INITIALIZER("long f(char* p, char* q) { return p - q; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, true},
+    {S8_INITIALIZER("long f(char* p, char* q) { return p - q; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, true,
+     C_TYPE_LONG_LONG},
     {S8_INITIALIZER("typedef long L; L f(int a) { return (L)&a; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, true},
     {S8_INITIALIZER("int f(int* p, int a) { return &p ? a : 0; }"), S8_INITIALIZER("&"), 0, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT, true},
     // Declined: whatever would make the machine append a type row (a
@@ -3333,8 +3342,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
                 CTestAstTypeProbe probe = c_test_ast_type_probe(temporary.arena, preprocess, &analysis, &built.ast, S8("f"), start,
                                                                 start + type_case->count, checked != 0);
                 bool declined = checked && type_case->unchecked_only;
+                bool llp64 = target_uses_llp64_data_model(preprocess.target) && type_case->llp64_kind != C_TYPE_INVALID;
                 u32 status = declined ? C_TEST_AST_TYPE_PROBE_DECLINE : type_case->status;
-                CTypeKind kind = declined ? C_TYPE_INVALID : type_case->kind;
+                CTypeKind kind = declined ? C_TYPE_INVALID : llp64 ? type_case->llp64_kind : type_case->kind;
                 BUSTER_TEST_RAW(arguments, probe.status == status && probe.kind == kind && probe.nodes_typed > 0,
                                 string_format(temporary.arena, S8("{S8} (checked {u32}): status {u32} kind {u32}, expected status {u32} kind {u32}"),
                                               type_case->source, checked, probe.status, (u32)probe.kind, status, (u32)kind));
