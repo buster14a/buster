@@ -530,6 +530,22 @@ does not relax ordinary external-to-static linkage diagnostics.
 `compiler_driver_test_cpuidex` covers both SSA forms, the AST pilot, target
 capability answers, malformed calls and the ordinary linkage negative control.
 
+Clang 23.1.3's Windows x64 `intrin.h` also defines a finite set of static
+inline fallbacks after external prototypes. The parser permits that transition
+only for compatible function types, only on x86-64 Windows, and only for
+`__movsb`, `__movsw`, `__movsd`, `__movsq`, `__stosw`, `__stosd`,
+`__stosq`, `__halt`, `__inbyte`, `__inword`, `__indword`, `__outbyte`,
+`__outword`, `__outdword`, `__nop`, `__readmsr`, `__readcr3`, and
+`__writecr3`. This fallback-name policy is separate from builtin admission:
+only `__cpuidex` and the eight memory operations report `__has_builtin` true.
+The 11 other wrappers remain ordinary functions, and their bodies are lowered
+only when reachable; unsupported inline-assembly forms retain normal structured
+diagnostics. `__stosb` has no static fallback definition and receives no
+linkage exception. `compiler_driver_test_microsoft_intrin_fallbacks` checks
+the full allowed name set, truthful capability queries, ordinary fallback
+calls on unsupported targets, an unreachable `%w` body and its used diagnostic,
+and type, linkage, and target negative controls.
+
 Generic operators have their own explicit type-machine stages: bit-cast and
 vector conversion parse their type-name slots, elementwise operators preserve
 narrow integer operands, reductions return a lane, and shuffles retain logical

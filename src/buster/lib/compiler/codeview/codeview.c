@@ -38,10 +38,9 @@ enum
     S_GDATA32 = 0x110d,
     S_OBJNAME = 0x1101,
     S_LOCAL = 0x113e,
-    S_DEFRANGE_SUBFIELD = 0x1140,
     S_GPROC32 = 0x1110,
     S_DEFRANGE_REGISTER = 0x1141,
-    S_DEFRANGE_FRAMEPOINTER_REL = 0x1142,
+    S_DEFRANGE_REGISTER_REL = 0x1145,
     S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
     S_INLINESITE = 0x114d,
     S_INLINESITE_END = 0x114e,
@@ -306,7 +305,7 @@ BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add(u64* capacity, u64 cou
 }
 
 BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_variable(u64* capacity, DebugModel* model,
-                                                                    DebugVariableId id)
+                                                                    DebugVariableId id, CodeviewResult* diagnostic)
 {
     if (!model || id >= model->variable_count || model->variables[id].kind == DEBUG_VARIABLE_GLOBAL)
     {
@@ -328,6 +327,12 @@ BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_variable(u64* capacity
             for (u32 piece_index = 0; piece_index < range->location.piece_count; piece_index += 1)
             {
                 DebugLocationKind kind = range->location.pieces[piece_index].kind;
+                if (kind == DEBUG_LOCATION_FRAME && range->end > range->start &&
+                    !diagnostic->unsupported_type && !diagnostic->unsupported_location)
+                {
+                    diagnostic->unsupported_location = true;
+                    diagnostic->unsupported_variable_id = id;
+                }
                 if ((kind == DEBUG_LOCATION_REGISTER || kind == DEBUG_LOCATION_FRAME) &&
                     !codeview_relocation_capacity_add(capacity, 2))
                 {
@@ -340,7 +345,7 @@ BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_variable(u64* capacity
 }
 
 BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_scope_variables(u64* capacity, DebugModel* model,
-                                                                           DebugScope* scope)
+                                                                           DebugScope* scope, CodeviewResult* diagnostic)
 {
     if (!scope)
     {
@@ -348,7 +353,7 @@ BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_scope_variables(u64* c
     }
     for (u32 variable_index = 0; variable_index < scope->variable_count; variable_index += 1)
     {
-        if (!codeview_relocation_capacity_add_variable(capacity, model, scope->variables[variable_index]))
+        if (!codeview_relocation_capacity_add_variable(capacity, model, scope->variables[variable_index], diagnostic))
         {
             return false;
         }
@@ -378,7 +383,16 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(ByteWriter* symbols, Debug
     }
     else if (range->location.kind == DEBUG_LOCATION_FRAME)
     {
-        u64 record = codeview_record_begin(symbols, S_DEFRANGE_FRAMEPOINTER_REL);
+        // FRAME offsets are normalized by codegen to RBP/X29, the same
+        // bases used by DWARF. Name that base explicitly; FRAMEPOINTER_REL
+        // requires a separate FRAMEPROC record which this producer lacks.
+        u64 record = codeview_record_begin(symbols, S_DEFRANGE_REGISTER_REL);
+        DebugRegister frame = machine == CODEVIEW_MACHINE_ARM64 ? DEBUG_REGISTER_AARCH64_X29 : DEBUG_REGISTER_X86_RBP;
+        u32 reg = debug_register_codeview_number((Target){.cpu_arch = (CpuArch)codeview_model_register_target(machine)}, frame);
+        symbols->overflow |= machine != CODEVIEW_MACHINE_X64 && machine != CODEVIEW_MACHINE_ARM64;
+        symbols->overflow |= reg == UINT32_MAX || reg > UINT16_MAX;
+        byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(reg, UINT16_MAX));
+        byte_writer_emit_u16_le(symbols, 0);
         byte_writer_emit_u32_le(symbols, (u32)range->location.frame_offset);
         codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, start);
         byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(length, UINT16_MAX));
@@ -404,12 +418,9 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(ByteWriter* symbols, Debug
             }
             else if (piece->kind == DEBUG_LOCATION_FRAME)
             {
-                u64 record = codeview_record_begin(symbols, S_DEFRANGE_SUBFIELD);
-                byte_writer_emit_u32_le(symbols, 0);
-                byte_writer_emit_u32_le(symbols, piece->value_offset);
-                codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, piece_start);
-                byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));
-                codeview_record_end(symbols, record);
+                // The capacity walk supplies the variable's named refusal.
+                // A CodeView expression program cannot be replaced by zero.
+                symbols->overflow = true;
             }
         }
     }
@@ -509,7 +520,7 @@ BUSTER_GLOBAL_LOCAL CodeviewScopeWalk codeview_scope_walk_make(Arena* arena, Deb
 }
 
 BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_scope_tree(u64* capacity, DebugModel* model,
-                                                                      DebugScopeId root, CodeviewScopeWalk* walk)
+                                                                      DebugScopeId root, CodeviewScopeWalk* walk, CodeviewResult* diagnostic)
 {
     if (!capacity || !model || !walk || !walk->stack || root >= model->scope_count)
     {
@@ -527,7 +538,7 @@ BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_scope_tree(u64* capaci
             frame->next_child = walk->next_sibling[child];
             if (stack_count == model->scope_count ||
                 !codeview_relocation_capacity_add(capacity, 2) ||
-                !codeview_relocation_capacity_add_scope_variables(capacity, model, model->scopes + child))
+                !codeview_relocation_capacity_add_scope_variables(capacity, model, model->scopes + child, diagnostic))
             {
                 return false;
             }
@@ -541,7 +552,7 @@ BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_scope_tree(u64* capaci
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL u64 codeview_relocation_capacity(DebugModel* model, u32 function_count, CodeviewScopeWalk* walk)
+BUSTER_GLOBAL_LOCAL u64 codeview_relocation_capacity(DebugModel* model, u32 function_count, CodeviewScopeWalk* walk, CodeviewResult* diagnostic)
 {
     u64 capacity = 0;
     if (!codeview_relocation_capacity_add(&capacity, (u64)function_count * 4))
@@ -568,8 +579,8 @@ BUSTER_GLOBAL_LOCAL u64 codeview_relocation_capacity(DebugModel* model, u32 func
         {
             continue;
         }
-        if (!codeview_relocation_capacity_add_scope_variables(&capacity, model, model->scopes + root) ||
-            !codeview_relocation_capacity_add_scope_tree(&capacity, model, root, walk))
+        if (!codeview_relocation_capacity_add_scope_variables(&capacity, model, model->scopes + root, diagnostic) ||
+            !codeview_relocation_capacity_add_scope_tree(&capacity, model, root, walk, diagnostic))
         {
             return UINT64_MAX;
         }
@@ -972,7 +983,6 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
             symbol_capacity += (u64)input.model->variable_count * 192 + (u64)input.model->scope_count * 96 +
                                (u64)input.model->inline_site_count * 64 + 256;
         }
-        ByteWriter symbols = byte_writer_make(arena_allocate(arena, u8, symbol_capacity), symbol_capacity);
         // Count the same scope tree once per emitted function. Debug models may
         // intentionally share a root scope, so a single model-wide scan can
         // under-allocate the relocation array and invalidate the second use.
@@ -981,11 +991,15 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
         {
             scope_walk = codeview_scope_walk_make(arena, input.model);
         }
-        u64 relocation_capacity = codeview_relocation_capacity(input.model, input.function_count, &scope_walk);
+        u64 relocation_capacity = codeview_relocation_capacity(input.model, input.function_count, &scope_walk, &result);
     if (relocation_capacity == UINT64_MAX)
     {
         return result;
     }
+        // Each address-bearing range owns two relocations. The explicit
+        // register-relative frame header needs four extra bytes per range.
+        symbol_capacity += relocation_capacity * 2;
+        ByteWriter symbols = byte_writer_make(arena_allocate(arena, u8, symbol_capacity), symbol_capacity);
     result.relocations = arena_allocate(arena, CodeviewRelocation, relocation_capacity ? relocation_capacity : 1);
         if (input.record_function_ranges)
         {
@@ -1197,7 +1211,7 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
                                  (u64)type->parameter_count * 8;
                 if (type->kind == DEBUG_TYPE_STRUCT || type->kind == DEBUG_TYPE_UNION)
                 {
-                    if (!result.unsupported_type && codeview_reserved_aggregate_name(type->name))
+                    if (!result.unsupported_type && !result.unsupported_location && codeview_reserved_aggregate_name(type->name))
                     {
                         result.unsupported_type = true;
                         result.unsupported_type_id = type_index;
@@ -1221,12 +1235,12 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
         }
         ByteWriter types = byte_writer_make(arena_allocate(arena, u8, type_capacity), type_capacity);
         byte_writer_emit_u32_le(&types, CV_SIGNATURE_C13);
-        if (input.model && input.model->valid && !result.unsupported_type)
+        if (input.model && input.model->valid && !result.unsupported_type && !result.unsupported_location)
         {
             u64* auxiliary_offsets = arena_allocate(arena, u64, input.model->type_count ? input.model->type_count : 1);
             codeview_emit_model_types(&types, input.model, auxiliary_offsets, input.file_paths[0]);
         }
-        if (!result.unsupported_type && !symbols.overflow && !types.overflow && symbols.count <= UINT32_MAX)
+        if (!result.unsupported_type && !result.unsupported_location && !symbols.overflow && !types.overflow && symbols.count <= UINT32_MAX)
         {
             result.valid = byte_writer_commit(&symbols, &result.symbols) && byte_writer_commit(&types, &result.types);
         }

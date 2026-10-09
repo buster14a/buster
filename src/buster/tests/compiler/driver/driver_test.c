@@ -24484,6 +24484,287 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_cpuidex(UnitTestArgument
     return result;
 }
 
+
+// LLVM's Windows x64 intrin.h gives a finite set of static inline asm
+// fallbacks after external prototypes. Keep that linkage exception distinct
+// from builtin capability: only the eight lowered operations report true.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_microsoft_intrin_fallbacks(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa"), S8("-fc-ast-pilot=implicit")};
+    String8 windows_x64 = S8("x86_64-windows");
+    String8 supported_source = S8(
+        "#if __has_builtin(__cpuidex) != 1\n#error missing __cpuidex support\n#endif\n"
+        "#if !__has_builtin(__movsb) || !__has_builtin(__movsw) || !__has_builtin(__movsd) || !__has_builtin(__movsq) || "
+        "!__has_builtin(__stosb) || !__has_builtin(__stosw) || !__has_builtin(__stosd) || !__has_builtin(__stosq)\n"
+        "#error missing Windows x64 memory intrinsic support\n#endif\n"
+        "#if __has_builtin(__halt) || __has_builtin(__inbyte) || __has_builtin(__inword) || __has_builtin(__indword) || "
+        "__has_builtin(__outbyte) || __has_builtin(__outword) || __has_builtin(__outdword) || __has_builtin(__nop) || "
+        "__has_builtin(__readmsr) || __has_builtin(__readcr3) || __has_builtin(__writecr3)\n"
+        "#error unsupported fallback advertised as a builtin\n#endif\n"
+        "extern void __movsb(unsigned char *destination, const unsigned char *source, unsigned long long count);\n"
+        "static inline void __movsb(unsigned char *destination, const unsigned char *source, unsigned long long count) {}\n"
+        "extern void __movsw(unsigned short *destination, const unsigned short *source, unsigned long long count);\n"
+        "static inline void __movsw(unsigned short *destination, const unsigned short *source, unsigned long long count) {}\n"
+        "extern void __movsd(unsigned long *destination, const unsigned long *source, unsigned long long count);\n"
+        "static inline void __movsd(unsigned long *destination, const unsigned long *source, unsigned long long count) {}\n"
+        "extern void __movsq(unsigned long long *destination, const unsigned long long *source, unsigned long long count);\n"
+        "static inline void __movsq(unsigned long long *destination, const unsigned long long *source, unsigned long long count) {}\n"
+        "extern void __stosw(unsigned short *destination, unsigned short value, unsigned long long count);\n"
+        "static inline void __stosw(unsigned short *destination, unsigned short value, unsigned long long count) {}\n"
+        "extern void __stosd(unsigned long *destination, unsigned long value, unsigned long long count);\n"
+        "static inline void __stosd(unsigned long *destination, unsigned long value, unsigned long long count) {}\n"
+        "extern void __stosq(unsigned long long *destination, unsigned long long value, unsigned long long count);\n"
+        "static inline void __stosq(unsigned long long *destination, unsigned long long value, unsigned long long count) {}\n"
+        "extern void __halt(void); static inline void __halt(void) {}\n"
+        "extern unsigned char __inbyte(unsigned short port); static inline unsigned char __inbyte(unsigned short port) { return 0; }\n"
+        "extern unsigned short __inword(unsigned short port); static inline unsigned short __inword(unsigned short port) { return 0; }\n"
+        "extern unsigned long __indword(unsigned short port); static inline unsigned long __indword(unsigned short port) { return 0; }\n"
+        "extern void __outbyte(unsigned short port, unsigned char data); static inline void __outbyte(unsigned short port, unsigned char data) {}\n"
+        "extern void __outword(unsigned short port, unsigned short data); static inline void __outword(unsigned short port, unsigned short data) {}\n"
+        "extern void __outdword(unsigned short port, unsigned long data); static inline void __outdword(unsigned short port, unsigned long data) {}\n"
+        "extern void __nop(void); static inline void __nop(void) {}\n"
+        "extern unsigned long long __readmsr(unsigned long register_id); static inline unsigned long long __readmsr(unsigned long register_id) { return 0; }\n"
+        "extern unsigned long long __readcr3(void); static inline unsigned long long __readcr3(void) { return 0; }\n"
+        "extern void __writecr3(unsigned long long value); static inline void __writecr3(unsigned long long value) {}\n");
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-intrin-fallback-positive"), S8(".c"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(supported_source))))
+        {
+            String8 command[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-target"), windows_x64, forms[form], input};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            String8 description = string_format(arena, S8("Windows x64 intrinsic fallback redeclarations {S8}: {S8}"),
+                                                forms[form], compiled.diagnostic);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+        }
+        os_file_delete(input);
+        scratch_end(temporary);
+    }
+
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64
+    // Execute every supported memory operation on the Windows x64 host. The
+    // noinline boundary also makes the move helpers exercise nonvolatile RSI/RDI.
+    String8 runtime_source = S8(
+        "static unsigned char byte_source[4] = {1, 2, 3, 4};\n"
+        "static unsigned char byte_copy[4];\n"
+        "static unsigned short word_source[3] = {11, 22, 33};\n"
+        "static unsigned short word_copy[3];\n"
+        "static unsigned long dword_source[3] = {101, 202, 303};\n"
+        "static unsigned long dword_copy[3];\n"
+        "static unsigned long long qword_source[3] = {1001, 2002, 3003};\n"
+        "static unsigned long long qword_copy[3];\n"
+        "static unsigned char byte_fill[4];\n"
+        "static unsigned short word_fill[3];\n"
+        "static unsigned long dword_fill[3];\n"
+        "static unsigned long long qword_fill[3];\n"
+        "extern void __movsb(unsigned char *, const unsigned char *, unsigned long long);\n"
+        "extern void __movsw(unsigned short *, const unsigned short *, unsigned long long);\n"
+        "extern void __movsd(unsigned long *, const unsigned long *, unsigned long long);\n"
+        "extern void __movsq(unsigned long long *, const unsigned long long *, unsigned long long);\n"
+        "extern void __stosb(unsigned char *, unsigned char, unsigned long long);\n"
+        "extern void __stosw(unsigned short *, unsigned short, unsigned long long);\n"
+        "extern void __stosd(unsigned long *, unsigned long, unsigned long long);\n"
+        "extern void __stosq(unsigned long long *, unsigned long long, unsigned long long);\n"
+        "static __attribute__((noinline)) void exercise_memory_intrinsics(void)\n"
+        "{ __movsb(byte_copy, byte_source, 4); __movsw(word_copy, word_source, 3); "
+        "__movsd(dword_copy, dword_source, 3); __movsq(qword_copy, qword_source, 3); "
+        "__stosb(byte_fill, 0x5a, 4); __stosw(word_fill, 0x1234, 3); "
+        "__stosd(dword_fill, 0x12345678ul, 3); __stosq(qword_fill, 0x123456789abcdef0ull, 3); }\n"
+        "int main(void)\n"
+        "{ exercise_memory_intrinsics();\n"
+        "  return byte_copy[0] != 1 || byte_copy[3] != 4 || word_copy[0] != 11 || word_copy[2] != 33 || "
+        "dword_copy[0] != 101 || dword_copy[2] != 303 || qword_copy[0] != 1001 || qword_copy[2] != 3003 || "
+        "byte_fill[0] != 0x5a || byte_fill[3] != 0x5a || word_fill[0] != 0x1234 || word_fill[2] != 0x1234 || "
+        "dword_fill[0] != 0x12345678ul || dword_fill[2] != 0x12345678ul || "
+        "qword_fill[0] != 0x123456789abcdef0ull || qword_fill[2] != 0x123456789abcdef0ull; }\n");
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-intrin-memory-runtime"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-intrin-memory-runtime"), S8(".exe"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(runtime_source))))
+        {
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), S8("-fregister-allocator=fast"), forms[form],
+                                 S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, input};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena,
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+            String8 description = string_format(arena, S8("Windows x64 memory intrinsic runtime {S8}: {S8}"),
+                                                forms[form], compiled.diagnostic);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(arena, output), description);
+            }
+        }
+        os_file_delete(output);
+        os_file_delete(input);
+        scratch_end(temporary);
+    }
+
+    // A fallback-only body with the unsupported %w modifier is harmless while
+    // unreachable. Calling it must reach Buster's ordinary structured asm error.
+    String8 unused_asm_source = S8(
+        "#if __has_builtin(__inbyte) != 0\n#error __inbyte must stay a source fallback\n#endif\n"
+        "extern unsigned char __inbyte(unsigned short port);\n"
+        "static inline unsigned char __inbyte(unsigned short port)\n"
+        "{ unsigned char result = 0; __asm__ volatile (\"movw %w0, %%ax\" : : \"r\"(port)); return result; }\n"
+        "int main(void) { return 0; }\n");
+    String8 used_asm_source = S8(
+        "#if __has_builtin(__inbyte) != 0\n#error __inbyte must stay a source fallback\n#endif\n"
+        "extern unsigned char __inbyte(unsigned short port);\n"
+        "static inline unsigned char __inbyte(unsigned short port)\n"
+        "{ unsigned char result = 0; __asm__ volatile (\"movw %w0, %%ax\" : : \"r\"(port)); return result; }\n"
+        "int main(void) { return __inbyte(7); }\n");
+    String8 asm_sources[] = {unused_asm_source, used_asm_source};
+    for (u32 reachable = 0; reachable < BUSTER_ARRAY_LENGTH(asm_sources); reachable += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-intrin-asm-reachability"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-intrin-asm-reachability"), S8(".obj"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(asm_sources[reachable]))))
+            {
+                String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"),
+                                     windows_x64, forms[form], S8("-fno-machine-fallback"),
+                                     S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                String8 description = string_format(arena, S8("Windows x64 fallback asm reachability {u32} {S8}: {S8}"),
+                                                    reachable, forms[form], compiled.diagnostic);
+                if (reachable)
+                {
+                    BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE &&
+                                                    compiler_driver_test_diagnostic_contains(compiled.diagnostic, S8("unsupported")),
+                                    description);
+                }
+                else
+                {
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                }
+            }
+            os_file_delete(output);
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+
+#endif
+    // These cases must keep ordinary C's linkage and type diagnostics.
+    String8 invalid_sources[] = {
+        S8("extern void __halt(void);\nstatic inline int __halt(int value) { return value; }\n"),
+        S8("extern void ordinary_linkage(void);\nstatic inline void ordinary_linkage(void) {}\n"),
+        S8("extern void __halt(void);\nstatic void __halt(void) {}\n"),
+        S8("extern void __halt(void);\nstatic inline void __halt(void);\n"),
+        S8("extern void __stosb(unsigned char *destination, unsigned char value, unsigned long long count);\n"
+           "static inline void __stosb(unsigned char *destination, unsigned char value, unsigned long long count) {}\n"),
+    };
+    String8 invalid_messages[] = {
+        S8("conflicting declaration of '__halt'"),
+        S8("static declaration of 'ordinary_linkage' follows non-static declaration"),
+        S8("static declaration of '__halt' follows non-static declaration"),
+        S8("static declaration of '__halt' follows non-static declaration"),
+        S8("static declaration of '__stosb' follows non-static declaration"),
+    };
+    for (u32 invalid = 0; invalid < BUSTER_ARRAY_LENGTH(invalid_sources); invalid += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-intrin-fallback-negative"), S8(".c"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(invalid_sources[invalid]))))
+            {
+                String8 command[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-target"), windows_x64, forms[form], input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                String8 description = string_format(arena, S8("Windows x64 intrinsic fallback rejection {u32} {S8}: {S8}"),
+                                                    invalid, forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE &&
+                                                compiler_driver_test_diagnostic_contains(compiled.diagnostic, invalid_messages[invalid]),
+                                description);
+            }
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+
+    // Unsupported targets do not advertise the Microsoft intrinsics. The same
+    // spelling can still name an ordinary user-defined C fallback there.
+    String8 fallback_targets[] = {S8("aarch64-windows"), S8("x86_64-linux")};
+    String8 fallback_source = S8(
+        "#if __has_builtin(__cpuidex) || __has_builtin(__movsb) || __has_builtin(__movsw) || __has_builtin(__movsd) || "
+        "__has_builtin(__movsq) || __has_builtin(__stosb) || __has_builtin(__stosw) || __has_builtin(__stosd) || "
+        "__has_builtin(__stosq) || __has_builtin(__halt) || __has_builtin(__inbyte) || __has_builtin(__inword) || "
+        "__has_builtin(__indword) || __has_builtin(__outbyte) || __has_builtin(__outword) || __has_builtin(__outdword) || "
+        "__has_builtin(__nop) || __has_builtin(__readmsr) || __has_builtin(__readcr3) || __has_builtin(__writecr3)\n"
+        "#error unsupported Microsoft builtin advertised\n#endif\n"
+        "static inline void __movsb(void) {}\n"
+        "int main(void) { __movsb(); return 0; }\n");
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(fallback_targets); target += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-intrin-fallback-ordinary"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-intrin-fallback-ordinary"), S8(".obj"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(fallback_source))))
+            {
+                String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"),
+                                     fallback_targets[target], forms[form], S8("-fno-machine-fallback"),
+                                     S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                String8 description = string_format(arena, S8("ordinary Microsoft intrinsic fallback {S8} {S8}: {S8}"),
+                                                    fallback_targets[target], forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+            }
+            os_file_delete(output);
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+
+    // Exact names do not grant the exception outside Windows x64.
+    String8 off_target_source = S8("extern void __halt(void);\nstatic inline void __halt(void) {}\n");
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(fallback_targets); target += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-intrin-fallback-off-target"), S8(".c"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(off_target_source))))
+            {
+                String8 command[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-target"), fallback_targets[target], forms[form], input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                String8 expected = S8("static declaration of '__halt' follows non-static declaration");
+                String8 description = string_format(arena, S8("off-target intrinsic fallback rejected {S8} {S8}: {S8}"),
+                                                    fallback_targets[target], forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE &&
+                                                compiler_driver_test_diagnostic_contains(compiled.diagnostic, expected),
+                                description);
+            }
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // The driver's ir_prepare_canonical_module is the validation boundary for the
 // direct Wasm and eBPF emitters, as it already is for native code generation
 // and LLVM bitcode: they consume that preparation instead of re-preparing
@@ -27024,6 +27305,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_cpuidex);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_microsoft_intrin_fallbacks);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_direct_emitter_preparation);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_borrowed_payloads);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_import_facts);

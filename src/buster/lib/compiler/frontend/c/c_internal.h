@@ -742,6 +742,21 @@ struct CIntegerTransformBuiltin
 BUSTER_C_EXTERN CIntegerTransformBuiltin c_semantic_integer_transform_builtin(Target target, String8 name);
 BUSTER_C_EXTERN u64 c_integer_transform_bits(CIntegerTransformBuiltin builtin, u64 value, u64 count);
 BUSTER_C_EXTERN u32 c_parse_constraint_expression_end(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end);
+typedef enum CVendorBuiltinMicrosoftOperation
+{
+    C_VENDOR_BUILTIN_MICROSOFT_NONE,
+    C_VENDOR_BUILTIN_MICROSOFT_CPUIDEX,
+    C_VENDOR_BUILTIN_MICROSOFT_MOVSB,
+    C_VENDOR_BUILTIN_MICROSOFT_MOVSW,
+    C_VENDOR_BUILTIN_MICROSOFT_MOVSD,
+    C_VENDOR_BUILTIN_MICROSOFT_MOVSQ,
+    C_VENDOR_BUILTIN_MICROSOFT_STOSB,
+    C_VENDOR_BUILTIN_MICROSOFT_STOSW,
+    C_VENDOR_BUILTIN_MICROSOFT_STOSD,
+    C_VENDOR_BUILTIN_MICROSOFT_STOSQ,
+} CVendorBuiltinMicrosoftOperation;
+BUSTER_C_EXTERN CVendorBuiltinMicrosoftOperation c_vendor_builtin_microsoft_operation(String8 name);
+BUSTER_C_EXTERN bool c_vendor_builtin_microsoft_fallback_definition_allowed(Target target, String8 name);
 BUSTER_C_EXTERN bool c_semantic_bfloat16_builtin_spelling(String8 name);
 BUSTER_C_EXTERN bool c_semantic_vendor_builtin_signature(Target target, String8 name, CVendorBuiltin* signature);
 BUSTER_C_EXTERN CTypeId c_semantic_vendor_builtin_type(CParseResult* result, Target target, CVendorBuiltinType descriptor);

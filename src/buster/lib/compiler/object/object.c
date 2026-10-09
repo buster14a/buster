@@ -12643,7 +12643,25 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             if (!codeview.valid)
             {
                 result.error = OBJECT_ERROR_DEBUG_INFO;
-                if (codeview.unsupported_type && codeview.unsupported_type_id < debug_model.type_count)
+                if (codeview.unsupported_location && codeview.unsupported_variable_id < debug_model.variable_count)
+                {
+                    DebugVariable* unsupported = debug_model.variables + codeview.unsupported_variable_id;
+                    if (unsupported->declaration.line)
+                    {
+                        String8 source = unsupported->declaration.source < debug_model.source_count && debug_model.source_paths
+                                             ? debug_model.source_paths[unsupported->declaration.source] : file_paths[0];
+                        result.diagnostic = string_format(arena,
+                            S8("CodeView cannot encode location for variable '{S8}' at {S8}:{u32}:{u32}: piecewise frame locations are unsupported"),
+                            unsupported->name, source, unsupported->declaration.line, unsupported->declaration.column);
+                    }
+                    else
+                    {
+                        result.diagnostic = string_format(arena,
+                            S8("CodeView cannot encode location for variable '{S8}' in {S8}: piecewise frame locations are unsupported"),
+                            unsupported->name, file_paths[0]);
+                    }
+                }
+                else if (codeview.unsupported_type && codeview.unsupported_type_id < debug_model.type_count)
                 {
                     DebugType* unsupported = debug_model.types + codeview.unsupported_type_id;
                     if (unsupported->declaration.line)

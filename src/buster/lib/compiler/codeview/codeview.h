@@ -70,9 +70,14 @@ struct CodeviewResult
     u32 relocation_count;
     bool valid;
     bool unsupported_type;
-    u8 reserved[2];
-    // Meaningful only when unsupported_type is true. Fits existing tail padding.
-    u32 unsupported_type_id;
+    bool unsupported_location;
+    u8 reserved[1];
+    // The active refusal names either a type or a variable, in existing padding.
+    union
+    {
+        u32 unsupported_type_id;
+        u32 unsupported_variable_id;
+    };
 };
 
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CodeviewResult) == 64);

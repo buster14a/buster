@@ -171,6 +171,15 @@ signal_handler(int signo)
 
 #if defined(_WIN32)
 static void
+log_windows_api_failure(const char *operation, unsigned long status, unsigned long error)
+{
+    FILE *stream = g_log != NULL ? g_log : stdout;
+    fprintf(stream, "RADDBG_ORACLE_API_FAILURE operation=%s status=%lu error=%lu\n",
+            operation, status, error);
+    fflush(stream);
+}
+
+static void
 log_windows_bounded_file(const char *label, const char *path, int tail)
 {
     FILE *stream = g_log != NULL ? g_log : stdout;
@@ -1121,12 +1130,21 @@ static int
 drain_gui_output(Session *session)
 {
     int ok = !session->failed;
+    if(session->failed)
+    {
+        log_text("RADDBG_ORACLE_ERROR target output drain rejected after a prior session failure", NULL);
+    }
     for(unsigned i = 0; i < 2 && ok; i += 1)
     {
         if(session->output_files[i] == NULL && session->output_paths[i][0] != 0)
         {
             wchar_t path[PATH_MAX];
-            if(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, session->output_paths[i], -1, path, PATH_MAX) <= 0) ok = 0;
+            if(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, session->output_paths[i], -1, path, PATH_MAX) <= 0)
+            {
+                DWORD error = GetLastError();
+                log_windows_api_failure("MultiByteToWideChar output path", 0, error);
+                ok = 0;
+            }
             else
             {
                 HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -1136,10 +1154,12 @@ drain_gui_output(Session *session)
                 {
                     DWORD error = GetLastError();
                     if(error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND && error != ERROR_SHARING_VIOLATION)
+                    {
+                        log_windows_api_failure("CreateFileW target output", 0, error);
                         ok = 0;
+                    }
                 }
             }
-            if(!ok) log_text("RADDBG_ORACLE_ERROR cannot open target output file", NULL);
         }
         int reading = session->output_files[i] != NULL;
         while(reading && ok)
@@ -1148,7 +1168,8 @@ drain_gui_output(Session *session)
             DWORD got = 0;
             if(!ReadFile(session->output_files[i], chunk, sizeof(chunk), &got, NULL))
             {
-                log_text("RADDBG_ORACLE_ERROR reading target output file failed", NULL);
+                DWORD error = GetLastError();
+                log_windows_api_failure("ReadFile target output", 0, error);
                 ok = 0;
             }
             else if(got == 0)
@@ -2960,17 +2981,42 @@ cleanup_session(Session *session)
             ok = 0;
         }
         free(response.data);
-        if(session->job != NULL && !TerminateJobObject(session->job, 1)) ok = 0;
-        /* Assignment can fail before the suspended GUI entered the job. */
-        if(!session->gui_reaped && WaitForSingleObject(session->gui_process, 0) != WAIT_OBJECT_0 &&
-           !TerminateProcess(session->gui_process, 1)) ok = 0;
-        if(WaitForSingleObject(session->gui_process, 5000) != WAIT_OBJECT_0)
+        if(session->job != NULL && !TerminateJobObject(session->job, 1))
         {
-            log_text("RADDBG_ORACLE_ERROR could not reap RAD GUI process", NULL);
+            DWORD error = GetLastError();
+            log_windows_api_failure("TerminateJobObject", 0, error);
             ok = 0;
         }
-        session->gui_reaped = 1;
-        CloseHandle(session->gui_process);
+        /* TerminateJobObject is asynchronous. Briefly wait before the
+         * per-process fallback; keep one 5-second GUI-reap budget. */
+        uint64_t gui_reap_deadline = monotonic_ms() + 5000u;
+        DWORD gui_wait = WaitForSingleObject(session->gui_process, 100u);
+        if(gui_wait == WAIT_TIMEOUT)
+        {
+            int terminated = TerminateProcess(session->gui_process, 1) != 0;
+            DWORD terminate_error = terminated ? 0 : GetLastError();
+            if(!terminated)
+            {
+                log_windows_api_failure("TerminateProcess", 0, terminate_error);
+                if(terminate_error != ERROR_ACCESS_DENIED) ok = 0;
+            }
+            uint64_t now = monotonic_ms();
+            DWORD remaining = now < gui_reap_deadline ? (DWORD)(gui_reap_deadline - now) : 0;
+            gui_wait = WaitForSingleObject(session->gui_process, remaining);
+        }
+        if(gui_wait != WAIT_OBJECT_0)
+        {
+            DWORD wait_error = gui_wait == WAIT_FAILED ? GetLastError() : 0;
+            log_windows_api_failure("WaitForSingleObject GUI", gui_wait, wait_error);
+            ok = 0;
+        }
+        session->gui_reaped = gui_wait == WAIT_OBJECT_0;
+        if(!CloseHandle(session->gui_process))
+        {
+            DWORD error = GetLastError();
+            log_windows_api_failure("CloseHandle GUI", 0, error);
+            ok = 0;
+        }
         session->gui_process = NULL;
         session->gui_pid = 0;
     }
@@ -2978,12 +3024,19 @@ cleanup_session(Session *session)
     {
         JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
         int job_empty = 0;
+        int job_query_ok = 1;
         uint64_t end = monotonic_ms() + 2000u;
         while(monotonic_ms() < end)
         {
             memset(&accounting, 0, sizeof(accounting));
             if(!QueryInformationJobObject(session->job, JobObjectBasicAccountingInformation,
-                                           &accounting, sizeof(accounting), NULL)) break;
+                                           &accounting, sizeof(accounting), NULL))
+            {
+                DWORD error = GetLastError();
+                log_windows_api_failure("QueryInformationJobObject", 0, error);
+                job_query_ok = 0;
+                break;
+            }
             if(accounting.ActiveProcesses == 0)
             {
                 job_empty = 1;
@@ -2993,20 +3046,40 @@ cleanup_session(Session *session)
         }
         if(!job_empty)
         {
-            log_text("RADDBG_ORACLE_ERROR owned job still has live descendants after cleanup", NULL);
+            if(job_query_ok)
+            {
+                log_windows_api_failure("job still has live descendants",
+                                            accounting.ActiveProcesses, 0);
+            }
+            else
+            {
+                log_text("RADDBG_ORACLE_ERROR could not verify owned job is empty after cleanup", NULL);
+            }
             ok = 0;
         }
-        CloseHandle(session->job);
+        if(!CloseHandle(session->job))
+        {
+            DWORD error = GetLastError();
+            log_windows_api_failure("CloseHandle job", 0, error);
+            ok = 0;
+        }
         session->job = NULL;
     }
     if(session->target_process != NULL)
     {
-        if(WaitForSingleObject(session->target_process, 2000) != WAIT_OBJECT_0)
+        DWORD target_wait = WaitForSingleObject(session->target_process, 2000);
+        if(target_wait != WAIT_OBJECT_0)
         {
-            log_text("RADDBG_ORACLE_ERROR debuggee process still exists after cleanup", NULL);
+            DWORD error = target_wait == WAIT_FAILED ? GetLastError() : 0;
+            log_windows_api_failure("WaitForSingleObject debuggee", target_wait, error);
             ok = 0;
         }
-        CloseHandle(session->target_process);
+        if(!CloseHandle(session->target_process))
+        {
+            DWORD error = GetLastError();
+            log_windows_api_failure("CloseHandle debuggee", 0, error);
+            ok = 0;
+        }
         session->target_process = NULL;
     }
     if(!drain_gui_output(session)) ok = 0;
@@ -3014,7 +3087,12 @@ cleanup_session(Session *session)
     {
         if(session->output_files[i] != NULL)
         {
-            CloseHandle(session->output_files[i]);
+            if(!CloseHandle(session->output_files[i]))
+            {
+                DWORD error = GetLastError();
+                log_windows_api_failure("CloseHandle output", 0, error);
+                ok = 0;
+            }
             session->output_files[i] = NULL;
         }
     }
@@ -3023,12 +3101,24 @@ cleanup_session(Session *session)
      * closed connections, so short-lived clients could flood its receive ring. */
     if(session->ipc_socket != INVALID_SOCKET)
     {
-        if(closesocket(session->ipc_socket) != 0) ok = 0;
+        if(closesocket(session->ipc_socket) != 0)
+        {
+            int error = WSAGetLastError();
+            log_windows_api_failure("closesocket IPC", (unsigned long)SOCKET_ERROR,
+                                        (unsigned long)error);
+            ok = 0;
+        }
         session->ipc_socket = INVALID_SOCKET;
     }
     if(session->winsock_initialized)
     {
-        if(WSACleanup() != 0) ok = 0;
+        if(WSACleanup() != 0)
+        {
+            int error = WSAGetLastError();
+            log_windows_api_failure("WSACleanup", (unsigned long)SOCKET_ERROR,
+                                        (unsigned long)error);
+            ok = 0;
+        }
         session->winsock_initialized = 0;
     }
     free(session->gui_output.data);

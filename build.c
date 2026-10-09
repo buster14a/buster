@@ -6464,7 +6464,7 @@ BUSTER_GLOBAL_LOCAL void arena_append_json_string(Arena* arena, String8 string)
             arena_append_string8(arena, S8("\\\\"));
             break;
         case '\n':
-            arena_append_string8(arena, S8("\\n"));
+            arena_append_string8(arena, S8("\n"));
             break;
         case '\r':
             arena_append_string8(arena, S8("\\r"));
@@ -14968,7 +14968,7 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_intrinsic_probes(Arena* arena, String8 ide,
                     "    _mm_pause();\n"
                     "    _mm_storeu_si128((__m128i*)values, sum);\n"
                     "    _mm_storeu_si128((__m128i*)reverse, _mm_shuffle_epi32(sum, 0x1b));\n"
-                    "    printf(\"%08x %08x %08x %08x %08x %08x %08x %08x\\n\", values[0], values[1], values[2], values[3], reverse[0], reverse[1], reverse[2], reverse[3]);\n"
+                    "    printf(\"%08x %08x %08x %08x %08x %08x %08x %08x\n\", values[0], values[1], values[2], values[3], reverse[0], reverse[1], reverse[2], reverse[3]);\n"
                     "    return 0;\n}\n")},
         {.name = S8("intrinsic-xgetbv-guard"), .kind = RADDEBUGGER_PROBE_RUNTIME_COMPARE,
          .expected = S8("Forced skip must evaluate neither query nor selector. Real query is CPUID OSXSAVE guarded, evaluates each once, and full XCR0 must match Clang. Absent OSXSAVE is hardware-pending.\n"),
@@ -15008,7 +15008,7 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_intrinsic_probes(Arena* arena, String8 ide,
                     "        if (available)\n"
                     "        {\n"
                     "            if (query_count != 1 || argument_count != 1 || !(value & 1ull)) { result = 2; }\n"
-                    "            if (!result) { printf(\"xgetbv guard=pass queried=1 value=%016llx\\n\", value); }\n"
+                    "            if (!result) { printf(\"xgetbv guard=pass queried=1 value=%016llx\n\", value); }\n"
                     "        }\n"
                     "        else\n"
                     "        {\n"
@@ -15031,7 +15031,7 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_intrinsic_probes(Arena* arena, String8 ide,
                     "    input[31] = 0x80;\n"
                     "    __m256i a = _mm256_loadu_si256((const __m256i*)input);\n"
                     "    __m256i b = _mm256_set_epi64x(0, 0, 0, 1);\n"
-                    "    printf(\"%d %08x\\n\", _mm256_testz_si256(a, b), (unsigned int)_mm256_movemask_epi8(a));\n"
+                    "    printf(\"%d %08x\n\", _mm256_testz_si256(a, b), (unsigned int)_mm256_movemask_epi8(a));\n"
                     "    return 0;\n}\n")},
         {.name = S8("intrinsic-avx512"), .kind = RADDEBUGGER_PROBE_RUNTIME, .hardware = RADDEBUGGER_PROBE_AVX512,
          .expected = S8("11 22 33 44 10 4f 80 bf 10 bf 40 ff\n"),
@@ -15059,7 +15059,7 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_intrinsic_probes(Arena* arena, String8 ide,
                     "            __m512i va = _mm512_loadu_si512((const void*)a), vb = _mm512_loadu_si512((const void*)b), vi = _mm512_loadu_si512((const void*)indices);\n"
                     "            _mm512_storeu_si512((void*)output, _mm512_mask2_permutex2var_epi8(va, vi, (__mmask64)permute_mask, vb));\n"
                     "            for (unsigned int index = 8; index < 64; index += 1) { result |= output[index] != 0; }\n"
-                    "            if (!result) { printf(\"%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\\n\", loaded[0], loaded[1], loaded[2], loaded[3], output[0], output[1], output[2], output[3], output[4], output[5], output[6], output[7]); }\n"
+                    "            if (!result) { printf(\"%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n\", loaded[0], loaded[1], loaded[2], loaded[3], output[0], output[1], output[2], output[3], output[4], output[5], output[6], output[7]); }\n"
                     "        }\n"
                     "        if (munmap(memory, (unsigned long)page * 2)) { result = 3; }\n"
                     "    }\n"
@@ -15168,7 +15168,7 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_scalar_probe(Arena* arena, String8 ide, Str
                       "    unsigned int r1 = __builtin_rotateleft32(input, counts[1]);\n"
                       "    unsigned int r2 = __builtin_rotateleft32(input, counts[2]);\n"
                       "    unsigned int r3 = __builtin_rotateleft32(input, counts[3]);\n"
-                      "    printf(\"%08x %08x %08x %08x %08x\\n\", swapped, r0, r1, r2, r3);\n"
+                      "    printf(\"%08x %08x %08x %08x %08x\n\", swapped, r0, r1, r2, r3);\n"
                       "    return 0;\n"
                       "}\n");
     bool passed = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(text)) &&
@@ -15890,17 +15890,23 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_clang_trace_arguments(Arena* arena,
     return found;
 }
 
-BUSTER_GLOBAL_LOCAL bool raddebugger_windows_lld_probe_arguments(Arena* arena, SliceString8 trace_arguments, String8 output_binary,
-                                                                 SliceString8* arguments_out)
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_lld_probe_arguments(Arena* arena, String8 clang, SliceString8 trace_arguments,
+                                                                 String8 output_binary, SliceString8* arguments_out)
 {
     SliceString8 result = {0};
     String8List arguments = {0};
-    bool valid = trace_arguments.length > 1 && raddebugger_windows_text_has(trace_arguments.pointer[0], S8("lld-link"));
+    String8 clang_executable = path_is_absolute(clang) ? clang : executable_resolve_in_path(arena, clang);
+    String8 clang_directory = clang_executable.length ? path_parent(arena, clang_executable) : (String8){0};
+    String8 lld_link = clang_directory.length ? path_join(arena, clang_directory, S8("lld-link.exe")) : (String8){0};
+    bool valid = trace_arguments.length > 1 && raddebugger_windows_text_has(trace_arguments.pointer[0], S8("lld-link")) &&
+                 lld_link.length && path_exists(arena, lld_link);
     bool has_output = false;
     u32 output_count = 0;
     if (valid)
     {
-        string8_list_push(arena, &arguments, trace_arguments.pointer[0]);
+        // Clang's -### rendering escapes Windows backslashes and omits the .exe suffix.
+        // Resolve the real sibling executable and retain every parsed linker argument below.
+        string8_list_push(arena, &arguments, lld_link);
         string8_list_push(arena, &arguments, S8("/verbose"));
         string8_list_push(arena, &arguments, S8("/time"));
         string8_list_push(arena, &arguments, S8("/threads:1"));
@@ -16364,7 +16370,175 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_link_diagnostic(Arena* arena, Strin
 // Ask LLVM's independent native PDB reader to resolve the recursive class definition.
 // The scan stops after a bounded class block, and the caller deliberately ignores this
 // diagnostic result when deciding whether the Windows debuggee check passed.
-BUSTER_GLOBAL_LOCAL bool raddebugger_windows_native_pdb_class_report(String8 pdb, String8 text)
+// These native PDB checks are independent diagnostics. Native pretty printing can
+// resolve the tag and size but LLVM's native UDT reader does not expose child members.
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_parse_numeric_at(String8 text, u64 at, u64* value_out, u64* end_out)
+{
+    u64 value = 0;
+    u64 digit_count = 0;
+    u64 base = 10;
+    bool valid = true;
+    while (at < text.length && (text.pointer[at] == ' ' || text.pointer[at] == '\t'))
+    {
+        at += 1;
+    }
+    if (at + 1 < text.length && text.pointer[at] == '0' &&
+        (text.pointer[at + 1] == 'x' || text.pointer[at + 1] == 'X'))
+    {
+        base = 16;
+        at += 2;
+    }
+    while (at < text.length)
+    {
+        u64 digit = 0;
+        char8 byte = text.pointer[at];
+        bool is_digit = byte >= '0' && byte <= '9';
+        bool is_lower_hex = byte >= 'a' && byte <= 'f';
+        bool is_upper_hex = byte >= 'A' && byte <= 'F';
+        if (is_digit)
+        {
+            digit = (u64)(byte - '0');
+        }
+        else if (base == 16 && is_lower_hex)
+        {
+            digit = 10 + (u64)(byte - 'a');
+        }
+        else if (base == 16 && is_upper_hex)
+        {
+            digit = 10 + (u64)(byte - 'A');
+        }
+        else
+        {
+            break;
+        }
+        if (digit >= base || value > ((u64)-1 - digit) / base)
+        {
+            valid = false;
+        }
+        else if (valid)
+        {
+            value = value * base + digit;
+        }
+        at += 1;
+        digit_count += 1;
+    }
+    bool boundary = at == text.length || text.pointer[at] == ' ' || text.pointer[at] == '\t' ||
+                    text.pointer[at] == '\r' || text.pointer[at] == '\n' || text.pointer[at] == ',' ||
+                    text.pointer[at] == ')' || text.pointer[at] == ']';
+    bool parsed = valid && digit_count > 0 && boundary;
+    if (parsed)
+    {
+        *value_out = value;
+        *end_out = at;
+    }
+    return parsed;
+}
+BUSTER_GLOBAL_LOCAL u32 raddebugger_windows_native_pdb_offset_row_count(String8 text)
+{
+    u32 count = 0;
+    u64 line_start = 0;
+    while (line_start < text.length)
+    {
+        u64 line_end = line_start;
+        while (line_end < text.length && text.pointer[line_end] != '\n' && text.pointer[line_end] != '\r')
+        {
+            line_end += 1;
+        }
+        String8 line = string_slice(text, line_start, line_end);
+        String8 index_marker = S8("TI: ");
+        String8 offset_marker = S8(", Offset: ");
+        u64 index_at = raddebugger_windows_text_find(line, index_marker, 0);
+        u64 offset_at = index_at < line.length ? raddebugger_windows_text_find(line, offset_marker, index_at + index_marker.length) : line.length;
+        u64 ignored = 0;
+        u64 index_end = 0;
+        u64 offset_end = 0;
+        bool index_number = index_at < line.length &&
+                            raddebugger_windows_parse_numeric_at(line, index_at + index_marker.length, &ignored, &index_end);
+        bool offset_number = offset_at < line.length &&
+                             raddebugger_windows_parse_numeric_at(line, offset_at + offset_marker.length, &ignored, &offset_end);
+        if (index_number && offset_number && count < UINT32_MAX)
+        {
+            count += 1;
+        }
+        line_start = line_end < text.length ? line_end + 1 : text.length;
+    }
+    return count;
+}
+
+BUSTER_GLOBAL_LOCAL u32 raddebugger_windows_native_pdb_numeric_hash_count(String8 text)
+{
+    u32 count = 0;
+    String8 marker = S8(", hash = 0x");
+    u64 scan = 0;
+    while (scan < text.length)
+    {
+        u64 at = raddebugger_windows_text_find(text, marker, scan);
+        if (at == text.length)
+        {
+            scan = text.length;
+        }
+        else
+        {
+            u64 digit_at = at + marker.length;
+            u64 digit_count = 0;
+            while (digit_at < text.length &&
+                   ((text.pointer[digit_at] >= '0' && text.pointer[digit_at] <= '9') ||
+                    (text.pointer[digit_at] >= 'a' && text.pointer[digit_at] <= 'f') ||
+                    (text.pointer[digit_at] >= 'A' && text.pointer[digit_at] <= 'F')))
+            {
+                digit_at += 1;
+                digit_count += 1;
+            }
+            if (digit_count && count < UINT32_MAX)
+            {
+                count += 1;
+            }
+            scan = at + marker.length;
+        }
+    }
+    return count;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_native_pdb_tpi_report(String8 compiler, String8 pdb, String8 text, bool command_ok)
+{
+    String8 stream_marker = S8("Hash Stream Index:");
+    u64 stream_at = raddebugger_windows_text_find(text, stream_marker, 0);
+    u64 stream_index = (u64)-1;
+    u64 stream_end = 0;
+    bool stream_found = stream_at < text.length &&
+                        raddebugger_windows_parse_numeric_at(text, stream_at + stream_marker.length, &stream_index, &stream_end);
+    u32 offset_rows = raddebugger_windows_native_pdb_offset_row_count(text);
+    u32 numeric_hashes = raddebugger_windows_native_pdb_numeric_hash_count(text);
+    bool structure_record = raddebugger_windows_text_has(text, S8("LF_STRUCTURE")) &&
+                            raddebugger_windows_text_has(text, S8("RaddebuggerRecursiveNode"));
+    bool pointer_record = raddebugger_windows_text_has(text, S8("LF_POINTER"));
+    bool fieldlist_record = raddebugger_windows_text_has(text, S8("LF_FIELDLIST"));
+    bool next_member_record = raddebugger_windows_text_has(text, S8("name = `next`"));
+    bool value_member_record = raddebugger_windows_text_has(text, S8("name = `value`"));
+    bool result = command_ok && stream_found && stream_index != 65535 && offset_rows > 0 && numeric_hashes > 0 &&
+                  structure_record && pointer_record && fieldlist_record && next_member_record && value_member_record;
+    u64 shown_bytes = text.length > 24576 ? 24576 : text.length;
+    String8 excerpt = string_slice(text, text.length - shown_bytes, text.length);
+    string_print(S8("RADDEBUGGER_NATIVE_PDB_TPI compiler={S8} pdb={S8} status={S8} hash_stream={u64} offset_rows={u32} numeric_hashes={u32} structure={u32} pointer={u32} fieldlist={u32} next_member_record={u32} value_member_record={u32} output_bytes={u64} shown_tail_bytes={u64} fields_consumed=0\n{S8}\n"),
+                 compiler, pdb, result ? S8("pass") : S8("diagnostic-content-incomplete"), stream_found ? stream_index : (u64)-1,
+                 offset_rows, numeric_hashes, (u32)structure_record, (u32)pointer_record, (u32)fieldlist_record,
+                 (u32)next_member_record, (u32)value_member_record, text.length, excerpt.length, excerpt);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_native_pdb_pointer_report(String8 compiler, String8 pdb, String8 text, bool command_ok)
+{
+    bool pointer_size_8 = raddebugger_windows_text_has(text, S8("length: 8"));
+    bool result = command_ok && pointer_size_8;
+    u64 shown_bytes = text.length > 8192 ? 8192 : text.length;
+    String8 excerpt = string_slice(text, 0, shown_bytes);
+    string_print(S8("RADDEBUGGER_NATIVE_PDB_POINTERS compiler={S8} pdb={S8} status={S8} length_8={u32} output_bytes={u64} shown_bytes={u64}\n{S8}\n"),
+                 compiler, pdb, result ? S8("pass") : S8("diagnostic-content-incomplete"), (u32)pointer_size_8,
+                 text.length, excerpt.length, excerpt);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_native_pdb_class_report(String8 compiler, String8 pdb, String8 text, bool command_ok)
 {
     String8 marker_text = S8("struct RaddebuggerRecursiveNode [sizeof = 16] {");
     u64 marker = raddebugger_windows_text_find(text, marker_text, 0);
@@ -16404,55 +16578,79 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_native_pdb_class_report(String8 pdb
             }
         }
     }
-    bool has_recursive_pointer = false;
-    bool has_next = false;
-    bool has_value = false;
-    String8 section = {0};
+    bool result = command_ok && balanced;
     if (balanced)
     {
-        section = string_slice(text, marker, section_end);
-        has_recursive_pointer = raddebugger_windows_text_has(section, S8("RaddebuggerRecursiveNode *"));
-        has_next = raddebugger_windows_text_has(section, S8("next"));
-        has_value = raddebugger_windows_text_has(section, S8("int value"));
+        String8 section = string_slice(text, marker, section_end);
         u64 shown_bytes = section.length > 16384 ? 16384 : section.length;
         String8 excerpt = string_slice(section, 0, shown_bytes);
-        string_print(S8("RADDEBUGGER_NATIVE_PDB_CLASS pdb={S8} status={S8} recursive_pointer={u32} next={u32} value={u32} section_bytes={u64} shown_bytes={u64}\n{S8}\n"),
-                     pdb, has_recursive_pointer && has_next && has_value ? S8("pass") : S8("field-shape-mismatch"),
-                     (u32)has_recursive_pointer, (u32)has_next, (u32)has_value, section.length, excerpt.length, excerpt);
+        string_print(S8("RADDEBUGGER_NATIVE_PDB_PRETTY compiler={S8} pdb={S8} status={S8} tag_size=16 fields_consumed=0 section_bytes={u64} shown_bytes={u64}\n{S8}\n"),
+                     compiler, pdb, result ? S8("tag-size-resolved") : S8("command-failed"), section.length, excerpt.length, excerpt);
     }
     else
     {
-        string_print(S8("RADDEBUGGER_NATIVE_PDB_CLASS pdb={S8} status=missing-or-unbalanced bytes_scanned_limit=32768\n"), pdb);
+        string_print(S8("RADDEBUGGER_NATIVE_PDB_PRETTY compiler={S8} pdb={S8} status={S8} tag_size=16 fields_consumed=0 output_bytes={u64}\n"),
+                     compiler, pdb, command_ok ? S8("tag-size-missing-or-unbalanced") : S8("command-failed"), text.length);
     }
-    bool result = balanced && has_recursive_pointer && has_next && has_value;
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool raddebugger_windows_native_pdb_consumer_diagnostic(Arena* arena, String8 ide, String8 recursive_source,
-                                                                            bool source_written, String8 output_directory,
-                                                                            String8 debugger_directory, bool* stopped)
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_native_pdb_consumer_diagnostic(Arena* arena, String8 ide, String8 llvm_readobj,
+                                                                            String8 recursive_source, bool source_written,
+                                                                            String8 output_directory, String8 debugger_directory,
+                                                                            bool* stopped)
 {
-    bool result = false;
     bool stopped_before = *stopped;
     bool compile_ran = false;
     bool compile_link_passed = false;
     bool pdb_found = false;
-    bool raw_ran = false;
-    bool raw_passed = false;
-    bool pretty_ran = false;
-    bool pretty_passed = false;
-    String8 llvm_pdbutil = executable_resolve_in_path(arena, S8("llvm-pdbutil"));
+    bool version_ran = false;
+    bool version_passed = false;
+    bool diagnostics_passed = true;
+    bool diagnostics_attempted = false;
+    String8 llvm_tools_directory = llvm_readobj.length ? path_parent(arena, llvm_readobj) : (String8){0};
+    String8 pinned_pdbutil = llvm_tools_directory.length ? path_join(arena, llvm_tools_directory, S8("llvm-pdbutil.exe")) : (String8){0};
+    String8 path_pdbutil = executable_resolve_in_path(arena, S8("llvm-pdbutil"));
+    bool pinned_tool = pinned_pdbutil.length && path_exists(arena, pinned_pdbutil);
+    String8 llvm_pdbutil = pinned_tool ? pinned_pdbutil : path_pdbutil;
+    String8 tool_source = pinned_tool ? S8("pinned-llvm-tool-dir") :
+                          (path_pdbutil.length ? S8("path-fallback") : S8("not-found"));
     String8 native_binary = path_join(arena, debugger_directory, S8("recursive-native.exe"));
     String8 native_pdb = path_join(arena, debugger_directory, S8("recursive-native.pdb"));
+    String8 clang_pdb = path_join(arena, debugger_directory, S8("recursive-node-clang-debug.pdb"));
     String8 compile_prefix = path_join(arena, debugger_directory, S8("recursive-native-driver"));
-    String8 raw_prefix = path_join(arena, debugger_directory, S8("recursive-native-pdb-types"));
-    String8 pretty_prefix = path_join(arena, debugger_directory, S8("recursive-native-pdb-pretty"));
+    String8 version_prefix = path_join(arena, debugger_directory, S8("native-pdbutil-version"));
     String8 cc = S8("cc");
     String8 debug_flag = S8("-g");
     String8 optimize_flag = S8("-O0");
     String8 target_flag = S8("-target");
     String8 target = S8("x86_64-pc-windows-msvc");
     String8 output_flag = S8("-o");
+    if (llvm_pdbutil.length && !*stopped)
+    {
+        String8 version_arguments[] = {llvm_pdbutil, S8("--version")};
+        RaddebuggerCommandResult version = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(version_arguments),
+                                                                output_directory, version_prefix,
+                                                                RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+        String8 version_text = version.output;
+        if (!version_text.length)
+        {
+            version_text = BYTE_SLICE_TO_STRING(8, version.wait.streams[STANDARD_STREAM_ERROR]);
+        }
+        version_ran = true;
+        version_passed = raddebugger_command_ok(version);
+        u64 shown_bytes = version_text.length > 1024 ? 1024 : version_text.length;
+        String8 excerpt = string_slice(version_text, 0, shown_bytes);
+        string_print(S8("RADDEBUGGER_NATIVE_PDBUTIL path={S8} source={S8} version_status={S8} version_output_bytes={u64} shown_bytes={u64}\n{S8}\n"),
+                     llvm_pdbutil, tool_source, version_passed ? S8("command-ok") : S8("command-failed"),
+                     version_text.length, excerpt.length, excerpt);
+    }
+    else
+    {
+        string_print(S8("RADDEBUGGER_NATIVE_PDBUTIL path={S8} source={S8} version_status={S8}\n"),
+                     llvm_pdbutil.length ? llvm_pdbutil : S8("not-found"), tool_source,
+                     *stopped ? S8("not-run-stopped") : S8("not-found"));
+    }
     if (source_written && !*stopped)
     {
         compile_ran = true;
@@ -16471,42 +16669,66 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_native_pdb_consumer_diagnostic(Aren
         compile_link_passed = raddebugger_command_ok(compile) && path_exists(arena, native_binary);
         pdb_found = path_exists(arena, native_pdb);
     }
-    else
+    String8 compiler_names[] = {S8("buster"), S8("clang")};
+    String8 pdb_paths[] = {native_pdb, clang_pdb};
+    bool clang_pdb_found = path_exists(arena, clang_pdb);
+    bool pdb_ready[] = {compile_link_passed && pdb_found, clang_pdb_found};
+    for (u32 compiler_index = 0; compiler_index < BUSTER_ARRAY_LENGTH(compiler_names); compiler_index += 1)
     {
-        pdb_found = path_exists(arena, native_pdb);
-    }
-    bool can_probe = compile_link_passed && pdb_found && llvm_pdbutil.length && !*stopped;
-    if (can_probe)
-    {
-        String8 raw_arguments[] = {llvm_pdbutil, S8("dump"), S8("-types"), S8("-type-extras"), native_pdb};
-        RaddebuggerCommandResult raw = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(raw_arguments),
-                                                            output_directory, raw_prefix,
-                                                            RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
-        raw_ran = true;
-        bool raw_has_type = raddebugger_windows_text_has(raw.output, S8("RaddebuggerRecursiveNode"));
-        bool raw_has_hash_stream = raddebugger_windows_text_has(raw.output, S8("Hash Stream Index:"));
-        bool raw_has_offsets = raddebugger_windows_text_has(raw.output, S8("Type Index Offsets:"));
-        bool raw_has_hash = raddebugger_windows_text_has(raw.output, S8(", hash = 0x"));
-        raw_passed = raddebugger_command_ok(raw) && raw_has_type && raw_has_hash_stream && raw_has_offsets && raw_has_hash;
-        u64 shown_bytes = raw.output.length > 16384 ? 16384 : raw.output.length;
-        String8 excerpt = string_slice(raw.output, raw.output.length - shown_bytes, raw.output.length);
-        string_print(S8("RADDEBUGGER_NATIVE_PDB_TPI pdb={S8} status={S8} type={u32} hash_stream={u32} offsets={u32} hash={u32} output_bytes={u64} shown_tail_bytes={u64}\n{S8}\n"),
-                     native_pdb, raw_passed ? S8("pass") : S8("content-or-command-failure"), (u32)raw_has_type,
-                     (u32)raw_has_hash_stream, (u32)raw_has_offsets, (u32)raw_has_hash,
-                     raw.output.length, excerpt.length, excerpt);
-        if (!*stopped)
+        String8 compiler = compiler_names[compiler_index];
+        String8 pdb = pdb_paths[compiler_index];
+        bool raw_passed = compiler_index != 0;
+        bool pretty_passed = false;
+        bool pointers_passed = false;
+        String8 raw_prefix = path_join(arena, debugger_directory, string_format(arena, S8("recursive-{S8}-pdb-types"), compiler));
+        String8 pretty_prefix = path_join(arena, debugger_directory, string_format(arena, S8("recursive-{S8}-pdb-pretty"), compiler));
+        String8 pointers_prefix = path_join(arena, debugger_directory, string_format(arena, S8("recursive-{S8}-pdb-pointers"), compiler));
+        if (pdb_ready[compiler_index] && llvm_pdbutil.length && !*stopped)
         {
-            String8 pretty_arguments[] = {llvm_pdbutil, S8("pretty"), S8("-native"), S8("-classes"), S8("-pointers"),
-                                          S8("-class-definitions=all"), S8("-class-recurse-depth=2"), native_pdb};
-            RaddebuggerCommandResult pretty = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pretty_arguments),
-                                                                  output_directory, pretty_prefix,
-                                                                  RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
-            pretty_ran = true;
-            pretty_passed = raddebugger_command_ok(pretty) &&
-                            raddebugger_windows_native_pdb_class_report(native_pdb, pretty.output);
+            diagnostics_attempted = true;
+            if (compiler_index == 0)
+            {
+                String8 raw_arguments[] = {llvm_pdbutil, S8("dump"), S8("-types"), S8("-type-extras"), pdb};
+                RaddebuggerCommandResult raw = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(raw_arguments),
+                                                                    output_directory, raw_prefix,
+                                                                    RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+                raw_passed = raddebugger_windows_native_pdb_tpi_report(compiler, pdb, raw.output, raddebugger_command_ok(raw));
+            }
+            if (!*stopped)
+            {
+                String8 pretty_arguments[] = {llvm_pdbutil, S8("pretty"), S8("-native"), S8("-classes"), S8("-pointers"),
+                                              S8("-class-definitions=all"), S8("-class-recurse-depth=2"), pdb};
+                RaddebuggerCommandResult pretty = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pretty_arguments),
+                                                                      output_directory, pretty_prefix,
+                                                                      RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+                pretty_passed = raddebugger_windows_native_pdb_class_report(compiler, pdb, pretty.output,
+                                                                             raddebugger_command_ok(pretty));
+            }
+            if (!*stopped)
+            {
+                String8 pointer_arguments[] = {llvm_pdbutil, S8("diadump"), S8("-native"), S8("-pointers"), pdb};
+                RaddebuggerCommandResult pointers = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pointer_arguments),
+                                                                        output_directory, pointers_prefix,
+                                                                        RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+                pointers_passed = raddebugger_windows_native_pdb_pointer_report(compiler, pdb, pointers.output,
+                                                                                raddebugger_command_ok(pointers));
+            }
+            string_print(S8("RADDEBUGGER_NATIVE_PDB_CAPTURE compiler={S8} pdb={S8} raw_tpi={S8} pretty_tag_size={S8} native_pointer_size={S8} raw_logs={S8} pretty_logs={S8} pointer_logs={S8} acceptance=unchanged\n"),
+                         compiler, pdb, compiler_index == 0 ? (raw_passed ? S8("observed") : S8("unavailable-or-incomplete")) : S8("control-not-run"),
+                         pretty_passed ? S8("observed") : S8("unavailable-or-incomplete"),
+                         pointers_passed ? S8("observed") : S8("unavailable-or-incomplete"),
+                         compiler_index == 0 ? raw_prefix : S8("not-run"), pretty_prefix, pointers_prefix);
+            diagnostics_passed = diagnostics_passed && raw_passed && pretty_passed && pointers_passed;
+        }
+        else
+        {
+            string_print(S8("RADDEBUGGER_NATIVE_PDB_CONSUMER compiler={S8} pdb={S8} status={S8} pdbutil={S8} acceptance=unchanged\n"),
+                         compiler, pdb, *stopped ? S8("not-run-stopped") : (pdb_ready[compiler_index] ? S8("pdbutil-not-found") : S8("pdb-not-ready")),
+                         llvm_pdbutil.length ? llvm_pdbutil : S8("not-found"));
+            diagnostics_passed = false;
         }
     }
-    String8 reason = S8("none");
+    String8 reason = S8("diagnostics-completed");
     if (!source_written)
     {
         reason = S8("recursive-source-not-written");
@@ -16527,28 +16749,137 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_native_pdb_consumer_diagnostic(Aren
     {
         reason = S8("native-pdb-not-created");
     }
+    else if (!clang_pdb_found)
+    {
+        reason = S8("clang-control-pdb-not-created");
+    }
     else if (!llvm_pdbutil.length)
     {
-        reason = S8("llvm-pdbutil-not-in-PATH");
+        reason = S8("llvm-pdbutil-not-found");
     }
-    else if (!raw_passed || !pretty_passed)
+    else if (!version_ran)
     {
-        reason = S8("consumer-command-or-content-check-failed");
+        reason = S8("llvm-pdbutil-version-not-run");
     }
-    string_print(S8("RADDEBUGGER_WINDOWS_NATIVE_PDB_CONSUMER compile_link={S8} pdb_file={S8} pdbutil={S8} raw_tpi={S8} pretty_recursive_class={S8} reason={S8} compile_logs={S8} raw_logs={S8} pretty_logs={S8} acceptance=unchanged\n"),
-                 compile_ran ? (compile_link_passed ? S8("pass") : S8("fail")) : S8("not-run"),
-                 pdb_found ? S8("present") : S8("missing"), llvm_pdbutil.length ? llvm_pdbutil : S8("not-found"),
-                 raw_ran ? (raw_passed ? S8("pass") : S8("fail")) : S8("not-run"),
-                 pretty_ran ? (pretty_passed ? S8("pass") : S8("fail")) : S8("not-run"),
-                 reason, compile_prefix, raw_prefix, pretty_prefix);
-    result = compile_link_passed && pdb_found && raw_passed && pretty_passed;
+    else if (!version_passed)
+    {
+        reason = S8("llvm-pdbutil-version-command-failed");
+    }
+    else if (!diagnostics_passed)
+    {
+        reason = S8("native-pdb-consumer-diagnostics-incomplete");
+    }
+    string_print(S8("RADDEBUGGER_WINDOWS_NATIVE_PDB_CONSUMER compile_link={S8} buster_pdb={S8} clang_control_pdb={S8} pdbutil={S8} source={S8} version={S8} reason={S8} compile_logs={S8}.command/.stdout/.stderr\n"),
+                 compile_ran ? (compile_link_passed ? S8("pass") : S8("diagnostic-failure")) : S8("not-run"),
+                 pdb_found ? S8("present") : S8("missing"), path_exists(arena, clang_pdb) ? S8("present") : S8("missing"),
+                 llvm_pdbutil.length ? llvm_pdbutil : S8("not-found"), tool_source,
+                 version_ran ? (version_passed ? S8("captured") : S8("command-failed")) : S8("not-run"),
+                 reason, compile_prefix);
+    bool result = compile_link_passed && pdb_found && clang_pdb_found && diagnostics_attempted && diagnostics_passed;
     return result;
+}
+
+// Capture a bounded raw CodeView symbol window around exact names emitted by LLVM.
+// The full llvm-readobj stdout/stderr artifacts remain available beside the test logs.
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_codeview_symbol_window(String8 compiler, String8 object, String8 kind,
+                                                                     String8 text, String8 marker_text,
+                                                                     u64 bytes_before, u64 bytes_after)
+{
+    u64 marker = raddebugger_windows_text_find(text, marker_text, 0);
+    bool found = marker < text.length;
+    if (found)
+    {
+        u64 start = marker > bytes_before ? marker - bytes_before : 0;
+        u64 end = marker + marker_text.length;
+        u64 requested_end = end + bytes_after;
+        if (requested_end < end || requested_end > text.length)
+        {
+            requested_end = text.length;
+        }
+        end = requested_end;
+        if (start)
+        {
+            while (start < marker && text.pointer[start] != '\n')
+            {
+                start += 1;
+            }
+            if (start < marker)
+            {
+                start += 1;
+            }
+        }
+        if (end < text.length)
+        {
+            while (end < text.length && text.pointer[end] != '\n')
+            {
+                end += 1;
+            }
+            if (end < text.length)
+            {
+                end += 1;
+            }
+        }
+        if (end - start > 24576)
+        {
+            end = start + 24576;
+        }
+        String8 excerpt = string_slice(text, start, end);
+        string_print(S8("RADDEBUGGER_CODEVIEW_SYMBOL_WINDOW compiler={S8} object={S8} kind={S8} marker={S8} status=found source_bytes={u64} shown_bytes={u64} max_bytes=24576\n{S8}\n"),
+                     compiler, object, kind, marker_text, text.length, excerpt.length, excerpt);
+    }
+    else
+    {
+        string_print(S8("RADDEBUGGER_CODEVIEW_SYMBOL_WINDOW compiler={S8} object={S8} kind={S8} marker={S8} status=marker-not-found source_bytes={u64} shown_bytes=0 max_bytes=24576\n"),
+                     compiler, object, kind, marker_text, text.length);
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_codeview_symbol_windows_report(String8 compiler, String8 object, String8 text)
+{
+    bool function_marker_found = raddebugger_windows_codeview_symbol_window(compiler, object, S8("debuggee_outer-procedure"),
+                                                                              text, S8("DisplayName: debuggee_outer"),
+                                                                              4096, 20480);
+    bool local_marker_found = raddebugger_windows_codeview_symbol_window(compiler, object, S8("outer_value-local-and-following-ranges"),
+                                                                          text, S8("VarName: outer_value"),
+                                                                          4096, 20480);
+    bool result = function_marker_found && local_marker_found;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_codeview_symbol_diagnostic(Arena* arena, String8 llvm_readobj, String8 compiler,
+                                                                        String8 object, String8 output_directory,
+                                                                        String8 debugger_directory, bool* stopped)
+{
+    bool ran = false;
+    bool command_passed = false;
+    String8 prefix = path_join(arena, debugger_directory, string_format(arena, S8("windows-debuggee-symbols-{S8}"), compiler));
+    if (object.length && path_exists(arena, object) && llvm_readobj.length && !*stopped)
+    {
+        String8 arguments[] = {llvm_readobj, S8("--codeview"), object};
+        RaddebuggerCommandResult command = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments),
+                                                               output_directory, prefix, RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+        String8 symbols_text = command.output;
+        if (!raddebugger_windows_text_has(symbols_text, S8("DisplayName: debuggee_outer")) &&
+            !raddebugger_windows_text_has(symbols_text, S8("VarName: outer_value")))
+        {
+            symbols_text = BYTE_SLICE_TO_STRING(8, command.wait.streams[STANDARD_STREAM_ERROR]);
+        }
+        ran = true;
+        command_passed = raddebugger_command_ok(command);
+        bool symbol_windows_found = raddebugger_windows_codeview_symbol_windows_report(compiler, object, symbols_text);
+        BUSTER_UNUSED(symbol_windows_found);
+    }
+    string_print(S8("RADDEBUGGER_CODEVIEW_SYMBOL_CAPTURE compiler={S8} object={S8} command={S8} logs={S8}.command/.stdout/.stderr acceptance=unchanged\n"),
+                 compiler, object, ran ? (command_passed ? S8("command-ok") : S8("command-failed")) : S8("not-run"),
+                 prefix);
+    return ran && command_passed;
 }
 
 BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debuggee_diagnostics(Arena* arena, String8 ide, String8 clang, String8 llvm_readobj,
                                                                   String8 source_directory, String8 output_directory,
                                                                   String8 resource_include, String8 debuggee_object,
-                                                                  String8 debuggee_binary, bool* stopped)
+                                                                  String8 clang_debuggee_object, String8 debuggee_binary, bool* stopped)
 {
     String8 debugger_directory = path_join(arena, output_directory, S8("debugger"));
     bool codeview_passed = false;
@@ -16560,6 +16891,9 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debuggee_diagnostics(Arena* arena, 
     bool no_debug_ran = false;
     bool clang_trace_ran = false;
     bool direct_lld_ran = false;
+    bool clang_symbol_diagnostic = raddebugger_windows_codeview_symbol_diagnostic(
+        arena, llvm_readobj, S8("clang"), clang_debuggee_object, output_directory, debugger_directory, stopped);
+    BUSTER_UNUSED(clang_symbol_diagnostic);
 
     if (debuggee_object.length && path_exists(arena, debuggee_object) && !*stopped)
     {
@@ -16574,6 +16908,8 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debuggee_diagnostics(Arena* arena, 
         }
         codeview_passed = raddebugger_command_ok(command) &&
                           raddebugger_windows_codeview_types_report(S8("buster"), debuggee_object, codeview_text);
+        bool buster_symbol_windows = raddebugger_windows_codeview_symbol_windows_report(S8("buster"), debuggee_object, codeview_text);
+        BUSTER_UNUSED(buster_symbol_windows);
         codeview_ran = true;
         string_print(S8("RADDEBUGGER_CODEVIEW_CAPTURE object={S8} status={S8} command={S8}.command stdout={S8}.stdout stderr={S8}.stderr status_file={S8}.status\n"),
                      debuggee_object, codeview_passed ? S8("pass") : S8("fail"), prefix, prefix, prefix, prefix);
@@ -16619,7 +16955,7 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debuggee_diagnostics(Arena* arena, 
         String8 direct_prefix = path_join(arena, debugger_directory, S8("raddebugger-debuggee-direct-lld"));
         SliceString8 direct_arguments = {0};
         bool direct_ready = clang_trace_passed &&
-                            raddebugger_windows_lld_probe_arguments(arena, trace_arguments, direct_binary, &direct_arguments);
+                            raddebugger_windows_lld_probe_arguments(arena, clang, trace_arguments, direct_binary, &direct_arguments);
         RaddebuggerCommandResult direct = {.wait = {.result = PROCESS_RESULT_NOT_EXISTENT}};
         if (direct_ready && !*stopped)
         {
@@ -16679,7 +17015,8 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debuggee_diagnostics(Arena* arena, 
                      linked ? S8("pass") : S8("fail"), recursive_source, object, binary, compile_prefix, codeview_prefix, link_prefix);
     }
     bool native_pdb_diagnostic_passed = raddebugger_windows_native_pdb_consumer_diagnostic(
-        arena, ide, recursive_source, recursive_written, output_directory, debugger_directory, stopped);
+        arena, ide, llvm_readobj, recursive_source,
+        recursive_written, output_directory, debugger_directory, stopped);
     BUSTER_UNUSED(native_pdb_diagnostic_passed);
     string_print(S8("RADDEBUGGER_WINDOWS_LINK_DIAGNOSTICS object={S8} codeview={S8} no_debug={S8} clang_trace={S8} direct_lld={S8} recursive_tpi={S8} acceptance=unchanged\n"),
                  debuggee_object, codeview_ran ? (codeview_passed ? S8("pass") : S8("fail")) : S8("not-run"),
@@ -16939,7 +17276,7 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debugger_action(Arena* arena, Strin
 
     // Preserve the split link evidence without adding diagnostic probes to acceptance.
     (void)raddebugger_windows_debuggee_diagnostics(arena, ide, clang, llvm_readobj, source_directory, output_directory,
-                                                   resource_include, fixture_objects[0], fixture_binaries[0], stopped);
+                                                   resource_include, fixture_objects[0], fixture_objects[1], fixture_binaries[0], stopped);
     for (u32 compiler_index = 0; compiler_index < BUSTER_ARRAY_LENGTH(compiler_names); compiler_index += 1)
     {
         String8 prefix = fixture_prefixes[compiler_index];
@@ -18530,7 +18867,7 @@ BUSTER_GLOBAL_LOCAL bool sbase_write_corpus(Arena* arena, String8 directory)
 // of these utilities report by exiting rather than by printing.
 BUSTER_GLOBAL_LOCAL SbaseCommandResult sbase_run_script(Arena* arena, String8 shell, String8 script, String8 working_directory)
 {
-    String8 wrapped = string_format(arena, S8("{S8}\nprintf '\\nsbase_status=%d\\n' \"$?\"\n"), script);
+    String8 wrapped = string_format(arena, S8("{S8}\nprintf '\nsbase_status=%d\n' \"$?\"\n"), script);
     String8 arguments[] = {shell, S8("-c"), wrapped};
     return sbase_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), working_directory, true, false);
 }
@@ -18563,7 +18900,7 @@ BUSTER_GLOBAL_LOCAL void sbase_report_mismatch(String8 label, String8 name, Sbas
 
 BUSTER_GLOBAL_LOCAL SbaseUtility sbase_utilities[] = {
     {S8_INITIALIZER("basename"), S8_INITIALIZER("./basename /a/b/c.txt .txt")},
-    {S8_INITIALIZER("bc"), S8_INITIALIZER("./printf '2+3\\nquit\\n' | ./bc")},
+    {S8_INITIALIZER("bc"), S8_INITIALIZER("./printf '2+3\nquit\n' | ./bc")},
     {S8_INITIALIZER("cal"), S8_INITIALIZER("./cal 3 2001")},
     {S8_INITIALIZER("cat"), S8_INITIALIZER("./cat data/text.txt | ./md5sum")},
     {S8_INITIALIZER("chgrp"), S8_INITIALIZER("./chgrp 2>&1; printf '%d' $?")},
@@ -18578,12 +18915,12 @@ BUSTER_GLOBAL_LOCAL SbaseUtility sbase_utilities[] = {
     {S8_INITIALIZER("cron"), S8_INITIALIZER("./cron -Z 2>&1; printf '%d' $?")},
     {S8_INITIALIZER("cut"), S8_INITIALIZER("./cut -d: -f1 data/fields.txt | ./md5sum")},
     {S8_INITIALIZER("date"), S8_INITIALIZER("./date -u -d 1000000000 '+%Y-%m-%dT%H:%M:%SZ'; ./date -u -d 0 '+%j %U %w'")},
-    {S8_INITIALIZER("dc"), S8_INITIALIZER("./printf '2 3 + p\\nq\\n' | ./dc")},
+    {S8_INITIALIZER("dc"), S8_INITIALIZER("./printf '2 3 + p\nq\n' | ./dc")},
     {S8_INITIALIZER("dd"), S8_INITIALIZER("./dd if=data/binary.bin bs=1024 count=2 2>/dev/null | ./cksum")},
     {S8_INITIALIZER("dirname"), S8_INITIALIZER("./dirname /a/b/c")},
     {S8_INITIALIZER("du"), S8_INITIALIZER("./du -a data | ./sort | ./md5sum")},
     {S8_INITIALIZER("echo"), S8_INITIALIZER("./echo -n a b; ./echo")},
-    {S8_INITIALIZER("ed"), S8_INITIALIZER("./printf '1p\\nq\\n' | ./ed data/unicode.txt")},
+    {S8_INITIALIZER("ed"), S8_INITIALIZER("./printf '1p\nq\n' | ./ed data/unicode.txt")},
     {S8_INITIALIZER("env"), S8_INITIALIZER("./env -i ./printenv 2>&1; printf '%d' $?")},
     {S8_INITIALIZER("expand"), S8_INITIALIZER("./expand -t 4 data/text.txt | ./md5sum")},
     {S8_INITIALIZER("expr"), S8_INITIALIZER("./expr 6 \\* 7")},
@@ -18616,7 +18953,7 @@ BUSTER_GLOBAL_LOCAL SbaseUtility sbase_utilities[] = {
     {S8_INITIALIZER("paste"), S8_INITIALIZER("./paste data/left.txt data/right.txt | ./md5sum")},
     {S8_INITIALIZER("pathchk"), S8_INITIALIZER("./pathchk /a/b/c; printf '%d' $?")},
     {S8_INITIALIZER("printenv"), S8_INITIALIZER("./printenv PATH | ./wc -c")},
-    {S8_INITIALIZER("printf"), S8_INITIALIZER("./printf '%s|%d|%x\\n' a 1 255")},
+    {S8_INITIALIZER("printf"), S8_INITIALIZER("./printf '%s|%d|%x\n' a 1 255")},
     {S8_INITIALIZER("pwd"), S8_INITIALIZER("./pwd | ./sed 's#.*/##'")},
     {S8_INITIALIZER("readlink"), S8_INITIALIZER("./ln -s data d.link && ./readlink d.link; ./rm -f d.link")},
     {S8_INITIALIZER("renice"), S8_INITIALIZER("./renice -Z 2>&1; printf '%d' $?")},
@@ -18648,7 +18985,7 @@ BUSTER_GLOBAL_LOCAL SbaseUtility sbase_utilities[] = {
     {S8_INITIALIZER("touch"), S8_INITIALIZER("./touch -t 200001010000.00 t.tmp && ./ls t.tmp; ./rm -f t.tmp")},
     {S8_INITIALIZER("tr"), S8_INITIALIZER("./tr a-z A-Z < data/text.txt | ./md5sum")},
     {S8_INITIALIZER("true"), S8_INITIALIZER("./true; printf '%d' $?")},
-    {S8_INITIALIZER("tsort"), S8_INITIALIZER("./printf 'a b\\nb c\\n' | ./tsort")},
+    {S8_INITIALIZER("tsort"), S8_INITIALIZER("./printf 'a b\nb c\n' | ./tsort")},
     {S8_INITIALIZER("tty"), S8_INITIALIZER("./tty; printf '%d' $?")},
     {S8_INITIALIZER("uname"), S8_INITIALIZER("./uname -s")},
     {S8_INITIALIZER("unexpand"), S8_INITIALIZER("./unexpand data/text.txt | ./md5sum")},
@@ -18676,11 +19013,11 @@ BUSTER_GLOBAL_LOCAL SbaseUtility sbase_cases[] = {
     {S8_INITIALIZER("stdin-rev"), S8_INITIALIZER("./rev < data/text.txt | ./md5sum")},
     {S8_INITIALIZER("binary-od"), S8_INITIALIZER("./od -A d -t x1 data/binary.bin | ./tail -n 4")},
     {S8_INITIALIZER("digests"), S8_INITIALIZER("./cksum data/binary.bin; ./md5sum data/binary.bin; ./sha1sum data/binary.bin; ./sha256sum data/binary.bin; ./sha512sum data/binary.bin")},
-    {S8_INITIALIZER("error-exit"), S8_INITIALIZER("./cat data/missing.txt; printf 'status=%d\\n' $?; ./cmp data/text.txt data/numbers.txt; printf 'status=%d\\n' $?")},
+    {S8_INITIALIZER("error-exit"), S8_INITIALIZER("./cat data/missing.txt; printf 'status=%d\n' $?; ./cmp data/text.txt data/numbers.txt; printf 'status=%d\n' $?")},
     {S8_INITIALIZER("large-arguments"), S8_INITIALIZER("./seq 1 5000 | ./xargs ./echo | ./wc -c")},
     {S8_INITIALIZER("tr-binary"), S8_INITIALIZER("./tr -d '\\000' < data/binary.bin | ./wc -c; ./tr 'a-z' 'A-Z' < data/text.txt | ./md5sum")},
     {S8_INITIALIZER("cut-paste"), S8_INITIALIZER("./cut -d: -f1,3 data/fields.txt | ./sort | ./head -n 5; ./cut -c1-8 data/text.txt | ./uniq | ./wc -l")},
-    {S8_INITIALIZER("expr-test"), S8_INITIALIZER("./expr 6 \\* 7; ./test 1 -eq 1; printf '%d ' $?; ./false; printf '%d ' $?; ./true; printf '%d\\n' $?")},
+    {S8_INITIALIZER("expr-test"), S8_INITIALIZER("./expr 6 \\* 7; ./test 1 -eq 1; printf '%d ' $?; ./false; printf '%d ' $?; ./true; printf '%d\n' $?")},
     {S8_INITIALIZER("grep-sed"), S8_INITIALIZER("./grep -c lazy data/text.txt; ./grep -n WORDS data/text.txt | ./head -n 2; ./sed -n '1,3p' data/text.txt; ./sed 's/fox/cat/g' data/text.txt | ./md5sum")},
     {S8_INITIALIZER("utf8-fold"), S8_INITIALIZER("./fold -w 12 data/unicode.txt; ./rev data/unicode.txt; ./expand -t 4 data/unicode.txt | ./unexpand | ./md5sum")},
     {S8_INITIALIZER("locale-sort"), S8_INITIALIZER("LC_ALL=C ./sort data/unicode.txt | ./md5sum; LC_ALL=C.UTF-8 ./sort data/unicode.txt | ./md5sum")},
@@ -18694,11 +19031,11 @@ BUSTER_GLOBAL_LOCAL SbaseUtility sbase_cases[] = {
     {S8_INITIALIZER("files"),
      S8_INITIALIZER("./mkdir -p tmp/a/b; ./touch -t 200001010000.00 tmp/a/b/f; ./ls tmp/a; ./ls tmp/a/b; ./du -a tmp | ./sort | ./md5sum; ./rm -rf tmp")},
     {S8_INITIALIZER("tar-roundtrip"), S8_INITIALIZER("./mkdir -p tin; ./cp data/unicode.txt tin/u.txt; ./touch -t 200001010000.00 tin/u.txt tin; ./tar -c -f out.tar tin; ./tar -t -f out.tar; ./cksum out.tar; ./rm -rf tin out.tar")},
-    {S8_INITIALIZER("printf-echo"), S8_INITIALIZER("./printf '%s|%d|%x|%c\\n' abc 42 255 Z; ./echo -n a b c; ./echo; ./basename /a/b/c.txt .txt; ./dirname /a/b/c.txt")},
+    {S8_INITIALIZER("printf-echo"), S8_INITIALIZER("./printf '%s|%d|%x|%c\n' abc 42 255 Z; ./echo -n a b c; ./echo; ./basename /a/b/c.txt .txt; ./dirname /a/b/c.txt")},
     {S8_INITIALIZER("seq-head"), S8_INITIALIZER("./seq -w 1 3 100 | ./head -n 4; ./seq 5 -1 1; ./head -c 32 data/binary.bin | ./cksum")},
     {S8_INITIALIZER("sponge-tee"), S8_INITIALIZER("./cat data/text.txt | ./tee copy.txt | ./wc -l; ./cksum copy.txt; ./rm -f copy.txt")},
-    {S8_INITIALIZER("tsort-sponge"), S8_INITIALIZER("./printf 'a b\\nb c\\nc d\\n' | ./tsort")},
-    {S8_INITIALIZER("bc-dc"), S8_INITIALIZER("./printf '10k 2v p\\n2 10 ^ p\\nq\\n' | ./dc; ./printf 'scale=10\\n2/3\\nquit\\n' | ./bc")},
+    {S8_INITIALIZER("tsort-sponge"), S8_INITIALIZER("./printf 'a b\nb c\nc d\n' | ./tsort")},
+    {S8_INITIALIZER("bc-dc"), S8_INITIALIZER("./printf '10k 2v p\n2 10 ^ p\nq\n' | ./dc; ./printf 'scale=10\n2/3\nquit\n' | ./bc")},
 };
 
 // The upstream suite as it stands at the pinned commit: 54 scripts, listed
@@ -25655,7 +25992,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compatibility_spawn_self_test(Arena* arena)
         String8 inherited_path = os_get_environment_variable(S8("PATH"));
         String8 inheritance_arguments[] = {
             S8("/bin/sh"), S8("-c"),
-            S8("test \"$PATH\" = \"$1\" && printf 'inheritance-ok\\n'"),
+            S8("test \"$PATH\" = \"$1\" && printf 'inheritance-ok\n'"),
             S8("environment-probe"), inherited_path,
         };
         CpythonCommandResult inherited = cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(inheritance_arguments), directory, true,
@@ -25678,7 +26015,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compatibility_spawn_self_test(Arena* arena)
             S8("test \"$PYTHONHASHSEED\" = 0 && test \"$TZ\" = UTC && "
                "test \"$BUSTER_HARNESS_SENTINEL\" = retained && test \"$PATH\" = /buster-harness-path && "
                "test \"$BUSTER_HARNESS_NEW\" = added && test \"${BUSTER_HARNESS_EMPTY+present}\" = present && "
-               "test -z \"$BUSTER_HARNESS_EMPTY\" && printf 'overrides-ok\\n'"),
+               "test -z \"$BUSTER_HARNESS_EMPTY\" && printf 'overrides-ok\n'"),
         };
         SliceString8 keys = (SliceString8)BUSTER_ARRAY_TO_SLICE(override_keys);
         SliceString8 values = (SliceString8)BUSTER_ARRAY_TO_SLICE(override_values);
@@ -25712,7 +26049,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compatibility_spawn_self_test(Arena* arena)
         String8 observed_path = path_join(arena, directory, S8("configure-observed.txt"));
         String8 script = S8("#!/bin/sh\n"
                             "test \"$#\" -eq 1 && test \"$1\" = --static || exit 10\n"
-                            "printf '%s\\n%s\\n' \"$0\" \"$1\" > configure-observed.txt\n");
+                            "printf '%s\n%s\n' \"$0\" \"$1\" > configure-observed.txt\n");
         bool script_written = file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script));
         bool legacy_script_ok = true;
         String8 legacy_script_status = S8("not-applicable");
@@ -36261,7 +36598,7 @@ BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_string_pool(Arena* output, Arena
         offset += (u32)node->string.length + 1;
     }
     aarch64_generated_emit_chunked_c_array(output, S8("buster_aarch64_generated_string_pool"), bytes, pool->byte_count, pool->byte_count);
-    arena_append_string8(output, S8("#define buster_aarch64_generated_string_byte(offset) \\\n    ((char8)(((u64)(offset) < (u64)BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE) ? \\\n             buster_aarch64_generated_string_pool_char(offset) : 0))\n\n"));
+    arena_append_string8(output, S8("#define buster_aarch64_generated_string_byte(offset) \n    ((char8)(((u64)(offset) < (u64)BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE) ? \n             buster_aarch64_generated_string_pool_char(offset) : 0))\n\n"));
     arena_append_string8(output, S8("#define BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE "));
     xed_generated_append_decimal(output, pool->byte_count);
     arena_append_string8(output, S8("\n\n"));
@@ -36556,27 +36893,27 @@ BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_preamble(Arena* output)
                             "#define BUSTER_AARCH64_GENERATED_BLOB_COUNT(blob) BUSTER_AARCH64_GENERATED_BLOB_COUNT_(blob)\n"
                             "#define BUSTER_AARCH64_GENERATED_BLOB_CHUNK_COUNT_(blob) blob##_CHUNK_COUNT\n"
                             "#define BUSTER_AARCH64_GENERATED_BLOB_CHUNK_COUNT(blob) BUSTER_AARCH64_GENERATED_BLOB_CHUNK_COUNT_(blob)\n"
-                            "#define buster_aarch64_generated_blob_char_in_bounds(blob, byte_count, offset) \\\n"
-                            "    ((u64)(byte_count) <= (UINT64_MAX / 4u) * 3u && \\\n"
-                            "     (u64)(offset) < ((((u64)(byte_count) + 2u) / 3u) * 4u) && \\\n"
+                            "#define buster_aarch64_generated_blob_char_in_bounds(blob, byte_count, offset) \n"
+                            "    ((u64)(byte_count) <= (UINT64_MAX / 4u) * 3u && \n"
+                            "     (u64)(offset) < ((((u64)(byte_count) + 2u) / 3u) * 4u) && \n"
                             "     (u64)(offset) < (u64)BUSTER_AARCH64_GENERATED_BLOB_CHUNK_COUNT(blob) * (u64)BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE)\n"
-                            "#define buster_aarch64_generated_blob_char(blob, byte_count, offset) \\\n"
+                            "#define buster_aarch64_generated_blob_char(blob, byte_count, offset) \n"
                             "    ((char8)(buster_aarch64_generated_blob_char_in_bounds(blob, byte_count, offset) ? blob##_char(offset) : 0))\n"
-                            "#define buster_aarch64_generated_blob_u8_counted(blob, byte_count, offset) \\\n"
+                            "#define buster_aarch64_generated_blob_u8_counted(blob, byte_count, offset) \n"
                             "    blob##_u8_counted(byte_count, offset)\n"
-                            "#define buster_aarch64_generated_blob_u8(blob, offset) \\\n"
+                            "#define buster_aarch64_generated_blob_u8(blob, offset) \n"
                             "    blob##_u8(offset)\n"
-                            "#define buster_aarch64_generated_blob_u16_counted(blob, byte_count, offset) \\\n"
+                            "#define buster_aarch64_generated_blob_u16_counted(blob, byte_count, offset) \n"
                             "    blob##_u16_counted(byte_count, offset)\n"
-                            "#define buster_aarch64_generated_blob_u16(blob, offset) \\\n"
+                            "#define buster_aarch64_generated_blob_u16(blob, offset) \n"
                             "    blob##_u16(offset)\n"
-                            "#define buster_aarch64_generated_blob_u32_counted(blob, byte_count, offset) \\\n"
+                            "#define buster_aarch64_generated_blob_u32_counted(blob, byte_count, offset) \n"
                             "    blob##_u32_counted(byte_count, offset)\n"
-                            "#define buster_aarch64_generated_blob_u32(blob, offset) \\\n"
+                            "#define buster_aarch64_generated_blob_u32(blob, offset) \n"
                             "    blob##_u32(offset)\n"
-                            "#define buster_aarch64_generated_blob_u64_counted(blob, byte_count, offset) \\\n"
+                            "#define buster_aarch64_generated_blob_u64_counted(blob, byte_count, offset) \n"
                             "    blob##_u64_counted(byte_count, offset)\n"
-                            "#define buster_aarch64_generated_blob_u64(blob, offset) \\\n"
+                            "#define buster_aarch64_generated_blob_u64(blob, offset) \n"
                             "    blob##_u64(offset)\n\n"));
 }
 
@@ -39626,7 +39963,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
     XedImportRecordList multiline = {0};
     result = result && xed_import_parse_file(
                             arena, &multiline, S8("multiline.xed.txt"),
-                            S8("INSTRUCTIONS()::\n{\nICLASS: MULTI\nPATTERN: 0x10 MODRM() \\\n+  VL128\nOPERANDS: REG0=GPRv:r \\\n+  REG1=GPRv:w # NDD\nPATTERN: 0x11\nOPERANDS:\n}\n")) &&
+                            S8("INSTRUCTIONS()::\n{\nICLASS: MULTI\nPATTERN: 0x10 MODRM() \n+  VL128\nOPERANDS: REG0=GPRv:r \n+  REG1=GPRv:w # NDD\nPATTERN: 0x11\nOPERANDS:\n}\n")) &&
              multiline.count == 2 && multiline.first->operands_present && string_equal(multiline.first->operand_annotation, S8("NDD")) &&
              multiline.last->operands_present && !multiline.last->operands.length;
 

@@ -9,8 +9,8 @@
 // Closure: the 2093 exact __builtin_ia32_ spellings found in the 133 resource
 // headers reachable lexically from immintrin.h, cpuid.h and x86intrin.h at
 // that same pin, plus the exact no-prefix __rdtsc builtin from ia32intrin.h.
-// Microsoft's Windows x64 __cpuidex intrinsic is a separate bounded case,
-// not an entry in this LLVM-derived descriptor table.
+// Microsoft's Windows x64 __cpuidex and memory move/store intrinsics are
+// a separate bounded case, not entries in this LLVM-derived descriptor table.
 // Conditional branches contribute signatures; they do not change semantics.
 // Generic custom-type-checked names use the separate finite operation metadata.
 //
@@ -3178,9 +3178,73 @@ BUSTER_C_INTERNAL u32 c_vendor_builtin_signature_index(String8 name)
     return result;
 }
 
+BUSTER_C_SHARED CVendorBuiltinMicrosoftOperation c_vendor_builtin_microsoft_operation(String8 name)
+{
+    CVendorBuiltinMicrosoftOperation result = C_VENDOR_BUILTIN_MICROSOFT_NONE;
+    if (string_equal(name, S8("__cpuidex")))
+    {
+        result = C_VENDOR_BUILTIN_MICROSOFT_CPUIDEX;
+    }
+    else if (string_equal(name, S8("__movsb")))
+    {
+        result = C_VENDOR_BUILTIN_MICROSOFT_MOVSB;
+    }
+    else if (string_equal(name, S8("__movsw")))
+    {
+        result = C_VENDOR_BUILTIN_MICROSOFT_MOVSW;
+    }
+    else if (string_equal(name, S8("__movsd")))
+    {
+        result = C_VENDOR_BUILTIN_MICROSOFT_MOVSD;
+    }
+    else if (string_equal(name, S8("__movsq")))
+    {
+        result = C_VENDOR_BUILTIN_MICROSOFT_MOVSQ;
+    }
+    else if (string_equal(name, S8("__stosb")))
+    {
+        result = C_VENDOR_BUILTIN_MICROSOFT_STOSB;
+    }
+    else if (string_equal(name, S8("__stosw")))
+    {
+        result = C_VENDOR_BUILTIN_MICROSOFT_STOSW;
+    }
+    else if (string_equal(name, S8("__stosd")))
+    {
+        result = C_VENDOR_BUILTIN_MICROSOFT_STOSD;
+    }
+    else if (string_equal(name, S8("__stosq")))
+    {
+        result = C_VENDOR_BUILTIN_MICROSOFT_STOSQ;
+    }
+    return result;
+}
+
+// LLVM's Windows x64 intrin.h uses these exact static-inline fallback
+// definitions after external prototypes. This only admits that linkage
+// transition; it does not advertise builtin support or canonical lowering.
+BUSTER_C_SHARED bool c_vendor_builtin_microsoft_fallback_definition_allowed(Target target, String8 name)
+{
+    bool result = target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_WINDOWS;
+    if (result)
+    {
+        result = string_equal(name, S8("__movsb")) || string_equal(name, S8("__movsw")) ||
+                 string_equal(name, S8("__movsd")) || string_equal(name, S8("__movsq")) ||
+                 string_equal(name, S8("__stosw")) || string_equal(name, S8("__stosd")) ||
+                 string_equal(name, S8("__stosq")) || string_equal(name, S8("__halt")) ||
+                 string_equal(name, S8("__inbyte")) || string_equal(name, S8("__inword")) ||
+                 string_equal(name, S8("__indword")) || string_equal(name, S8("__outbyte")) ||
+                 string_equal(name, S8("__outword")) || string_equal(name, S8("__outdword")) ||
+                 string_equal(name, S8("__nop")) || string_equal(name, S8("__readmsr")) ||
+                 string_equal(name, S8("__readcr3")) || string_equal(name, S8("__writecr3"));
+    }
+    return result;
+}
+
 BUSTER_C_SHARED bool c_vendor_builtin_spelling(String8 name)
 {
-    bool result = string_equal(name, S8("__cpuidex")) || c_vendor_builtin_signature_index(name) != UINT32_MAX;
+    bool result = c_vendor_builtin_microsoft_operation(name) != C_VENDOR_BUILTIN_MICROSOFT_NONE ||
+                  c_vendor_builtin_signature_index(name) != UINT32_MAX;
     return result;
 }
 
@@ -3188,15 +3252,38 @@ BUSTER_C_SHARED bool c_vendor_builtin_lookup(Target target, String8 name, CVendo
 {
     bool result = false;
     *signature = (CVendorBuiltin){0};
-    if (string_equal(name, S8("__cpuidex")))
+    CVendorBuiltinMicrosoftOperation microsoft_operation = c_vendor_builtin_microsoft_operation(name);
+    if (microsoft_operation != C_VENDOR_BUILTIN_MICROSOFT_NONE)
     {
         if (target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_WINDOWS)
         {
             signature->parameter_count = 3;
             signature->types[0] = (CVendorBuiltinType){.kind = C_TYPE_VOID};
-            signature->types[1] = (CVendorBuiltinType){.kind = C_TYPE_INT, .pointer_depth = 1};
-            signature->types[2] = (CVendorBuiltinType){.kind = C_TYPE_INT};
-            signature->types[3] = (CVendorBuiltinType){.kind = C_TYPE_INT};
+            if (microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_CPUIDEX)
+            {
+                signature->types[1] = (CVendorBuiltinType){.kind = C_TYPE_INT, .pointer_depth = 1};
+                signature->types[2] = (CVendorBuiltinType){.kind = C_TYPE_INT};
+                signature->types[3] = (CVendorBuiltinType){.kind = C_TYPE_INT};
+            }
+            else
+            {
+                bool copy = microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSB ||
+                            microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSW ||
+                            microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSD ||
+                            microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSQ;
+                CTypeKind element = microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSB ||
+                                    microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_STOSB ? C_TYPE_UNSIGNED_CHAR :
+                                    microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSW ||
+                                    microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_STOSW ? C_TYPE_UNSIGNED_SHORT :
+                                    microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSD ||
+                                    microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_STOSD ? C_TYPE_UNSIGNED_LONG :
+                                                                                             C_TYPE_UNSIGNED_LONG_LONG;
+                signature->types[1] = (CVendorBuiltinType){.kind = element, .pointer_depth = 1};
+                signature->types[2] = copy
+                    ? (CVendorBuiltinType){.kind = element, .pointer_depth = 1, .is_const = true}
+                    : (CVendorBuiltinType){.kind = element};
+                signature->types[3] = (CVendorBuiltinType){.kind = C_TYPE_UNSIGNED_LONG_LONG};
+            }
             result = true;
         }
     }

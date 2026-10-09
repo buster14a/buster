@@ -5636,14 +5636,14 @@ BUSTER_C_SHARED bool c_semantic_vendor_builtin_signature(Target target, String8 
     return valid;
 }
 
-// Only the Microsoft __cpuidex spelling changes ownership by target. On
-// unsupported targets the compiler's builtin path must stand aside so a
-// user-provided fallback is parsed and lowered as an ordinary function.
+// Microsoft x64 intrinsics belong to the compiler only where their native
+// operation is available. Elsewhere a user definition keeps ordinary C calls.
 BUSTER_C_SHARED CSymbolBuiltin c_semantic_builtin_kind_for_target(Target target, String8 name, CSymbolBuiltin builtin)
 {
-    bool microsoft_cpuidex = builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET && string_equal(name, S8("__cpuidex"));
-    bool supported = !microsoft_cpuidex || c_semantic_vendor_builtin_supported(target, name);
-    if (microsoft_cpuidex && !supported)
+    bool microsoft_vendor_builtin = builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET &&
+                                    c_vendor_builtin_microsoft_operation(name) != C_VENDOR_BUILTIN_MICROSOFT_NONE;
+    bool supported = !microsoft_vendor_builtin || c_semantic_vendor_builtin_supported(target, name);
+    if (microsoft_vendor_builtin && !supported)
     {
         builtin = C_SYMBOL_BUILTIN_NONE;
     }
@@ -33723,6 +33723,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                                                           declaration->name);
         bool declares_static = false;
         bool declares_extern = false;
+        bool declares_inline = false;
         u32 specifier_end = declaration_name_token < token_count && declaration_name_token > declaration->token_start
                                 ? declaration_name_token
                                 : declaration->token_start;
@@ -33730,7 +33731,13 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         {
             declares_static |= c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_STATIC);
             declares_extern |= c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_EXTERN);
+            declares_inline |= c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_INLINE) ||
+                              c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_INLINE_GNU) ||
+                              c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_INLINE_GNU_ALT);
         }
+        bool microsoft_fallback_definition = declares_static && declares_inline && declaration->is_definition &&
+            entity_kind == C_ENTITY_FUNCTION && declares_function_type &&
+            c_vendor_builtin_microsoft_fallback_definition_allowed(preprocess.target, declaration->name);
 #if BUSTER_REFERENCE_CHECKS
         BUSTER_CHECK(declaration_name_token >= token_count ||
                      string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[declaration_name_token]), declaration->name));
@@ -33803,10 +33810,18 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             // the linkage of a visible prior declaration instead.
             if (entity_kind != C_ENTITY_TYPEDEF && existing->kind != C_ENTITY_TYPEDEF)
             {
-                if (declares_static && !existing->has_internal_linkage)
+                bool microsoft_fallback_redeclaration = microsoft_fallback_definition && existing->kind == C_ENTITY_FUNCTION;
+                if (declares_static && !existing->has_internal_linkage && !microsoft_fallback_redeclaration)
                 {
                     c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
                                        string_format(arena, S8("static declaration of '{S8}' follows non-static declaration"), declaration->name));
+                }
+                else if (microsoft_fallback_redeclaration)
+                {
+                    // Clang's Windows intrinsic header provides these exact
+                    // static inline asm fallbacks after its extern prototypes.
+                    // Keep the merged entity internal as the definition says.
+                    existing->has_internal_linkage = true;
                 }
                 else if (!declares_static && !declares_extern && existing->has_internal_linkage && entity_kind == C_ENTITY_OBJECT &&
                          !declares_function_type)

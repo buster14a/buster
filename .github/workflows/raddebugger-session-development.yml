@@ -153,6 +153,10 @@ jobs:
           cmd /d /s /c $Build | Tee-Object -FilePath (Join-Path $Logs 'build-ide.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+          $CompilerTests = '"' + $Driver + '" build --config Release -t test_all 2>&1'
+          cmd /d /s /c $CompilerTests | Tee-Object -FilePath (Join-Path $Logs 'compiler-tests.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
           $SelfTest = '"' + $Driver + '" test_raddebugger --self-test 2>&1'
           cmd /d /s /c $SelfTest | Tee-Object -FilePath (Join-Path $Logs 'self-test.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

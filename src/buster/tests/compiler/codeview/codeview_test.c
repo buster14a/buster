@@ -125,6 +125,80 @@ BUSTER_GLOBAL_LOCAL u64 codeview_test_complete_aggregate(ByteSlice types, u64 fo
     return result;
 }
 
+// Decode a stopped scalar's explicit register-relative location and paired
+// section coordinates, including a nonzero function start and signed offset.
+BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_frame_base_locations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 path = S8("frame-local.c");
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4, .is_signed = true},
+        {.kind = DEBUG_TYPE_FUNCTION, .return_type = 0},
+    };
+    DebugLocationRange location = {.start = 0x126, .end = 0x139,
+                                   .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = -40}};
+    DebugVariable variable = {.name = S8("outer_value"), .type = 0, .locations = &location, .location_count = 1,
+                              .scope = 0, .kind = DEBUG_VARIABLE_LOCAL};
+    DebugVariableId variable_id = 0;
+    DebugScope scope = {.parent = DEBUG_SCOPE_INVALID, .kind = DEBUG_SCOPE_FUNCTION, .start = 0x120, .end = 0x140,
+                        .variables = &variable_id, .variable_count = 1};
+    DebugFunction debug_function = {.name = S8("stopped"), .type = 1, .scope = 0, .code_offset = 0x120, .code_size = 0x20};
+    DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .variables = &variable, .variable_count = 1,
+                        .scopes = &scope, .scope_count = 1, .functions = &debug_function, .function_count = 1, .valid = true};
+    DwarfFunction function = {.name = S8("stopped"), .code_offset = 0x120, .code_size = 0x20};
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        CodeviewResult built = codeview_build(arguments->arena, (CodeviewInput){
+            .model = &model, .file_paths = &path, .file_count = 1, .functions = &function, .function_count = 1,
+            .machine = architecture ? CODEVIEW_MACHINE_ARM64 : CODEVIEW_MACHINE_X64});
+        bool valid = built.valid && built.symbols.length >= 4;
+        u32 found = 0;
+        for (u64 subsection = 4; valid && subsection + 8 <= built.symbols.length;)
+        {
+            u32 kind = codeview_test_u32(built.symbols.pointer + subsection);
+            u32 size = codeview_test_u32(built.symbols.pointer + subsection + 4);
+            u64 begin = subsection + 8;
+            valid = size <= built.symbols.length - begin;
+            for (u64 record = begin; valid && kind == 0xf1 && record + 4 <= begin + size;)
+            {
+                u64 record_size = 2 + (u64)codeview_test_u16(built.symbols.pointer + record);
+                valid = record_size >= 4 && record_size <= begin + size - record;
+                if (valid && codeview_test_u16(built.symbols.pointer + record + 2) == 0x1145)
+                {
+                    found += 1;
+                    BUSTER_TEST(arguments, record_size == 20);
+                    if (record_size == 20)
+                    {
+                        BUSTER_TEST(arguments, codeview_test_u16(built.symbols.pointer + record + 4) == (architecture ? 79 : 334));
+                        BUSTER_TEST(arguments, !codeview_test_u16(built.symbols.pointer + record + 6));
+                        BUSTER_TEST(arguments, codeview_test_u32(built.symbols.pointer + record + 8) == UINT32_C(0xffffffd8));
+                        BUSTER_TEST(arguments, codeview_test_u32(built.symbols.pointer + record + 12) == 6 &&
+                            !codeview_test_u16(built.symbols.pointer + record + 16) &&
+                            codeview_test_u16(built.symbols.pointer + record + 18) == 19);
+                        u32 paired = 0;
+                        for (u32 relocation = 0; relocation + 1 < built.relocation_count; relocation += 1)
+                        {
+                            CodeviewRelocation address = built.relocations[relocation];
+                            CodeviewRelocation section = built.relocations[relocation + 1];
+                            paired += address.kind == CODEVIEW_RELOCATION_SECREL32 && section.kind == CODEVIEW_RELOCATION_SECTION16 &&
+                                address.function == 0 && section.function == 0 && address.offset == record + 12 &&
+                                section.offset == record + 16 && address.addend == 6;
+                        }
+                        BUSTER_TEST(arguments, paired == 1);
+                    }
+                }
+                record += record_size;
+            }
+            subsection = begin + ((size + 3u) & ~3u);
+        }
+        BUSTER_TEST(arguments, valid && found == 1);
+    }
+    CodeviewResult unsupported = codeview_build(arguments->arena, (CodeviewInput){
+        .model = &model, .file_paths = &path, .file_count = 1, .functions = &function, .function_count = 1, .machine = UINT16_MAX});
+    BUSTER_TEST(arguments, !unsupported.valid && !unsupported.symbols.length && !unsupported.types.length);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_recursive_aggregates(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -616,6 +690,9 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     UnitTestResult recursive = codeview_test_recursive_aggregates(arguments);
     result.test_count += recursive.test_count;
     result.succeeded_test_count += recursive.succeeded_test_count;
+    UnitTestResult frame_locations = codeview_test_frame_base_locations(arguments);
+    result.test_count += frame_locations.test_count;
+    result.succeeded_test_count += frame_locations.succeeded_test_count;
     UnitTestResult linkage = codeview_test_global_linkage(arguments);
     result.test_count += linkage.test_count;
     result.succeeded_test_count += linkage.succeeded_test_count;
@@ -775,7 +852,7 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
         },
     };
     DebugLocationPiece model_pieces[] = {
-        {.kind = DEBUG_LOCATION_FRAME, .frame_offset = -24, .value_offset = 0, .size = 4},
+        {.kind = DEBUG_LOCATION_REGISTER, .reg = DEBUG_REGISTER_X86_RDX, .value_offset = 0, .size = 4},
         {.kind = DEBUG_LOCATION_REGISTER, .reg = DEBUG_REGISTER_X86_RAX, .value_offset = 4, .size = 4},
     };
     DebugLocationRange model_locations[] = {
@@ -873,6 +950,19 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
                                                                      .line_count = 1,
                                                                      .machine = CODEVIEW_MACHINE_X64,
                                                                  });
+    // The frame/register mixture is reachable from split MIR values, but
+    // has no valid expression-program representation in this producer.
+    model_pieces[0] = (DebugLocationPiece){.kind = DEBUG_LOCATION_FRAME, .frame_offset = -24, .value_offset = 0, .size = 4};
+    for (u32 refusal_architecture = 0; refusal_architecture < 2; refusal_architecture += 1)
+    {
+        CodeviewResult mixed_refused = codeview_build(arguments->arena, (CodeviewInput){
+            .model = &model, .file_paths = files, .functions = &model_function, .function_count = 1,
+            .file_count = BUSTER_ARRAY_LENGTH(files),
+            .machine = refusal_architecture ? CODEVIEW_MACHINE_ARM64 : CODEVIEW_MACHINE_X64});
+        BUSTER_TEST(arguments, !mixed_refused.valid && mixed_refused.unsupported_location &&
+            mixed_refused.unsupported_variable_id == 0 && !mixed_refused.symbols.length && !mixed_refused.types.length);
+    }
+    model_pieces[0] = (DebugLocationPiece){.kind = DEBUG_LOCATION_REGISTER, .reg = DEBUG_REGISTER_X86_RDX, .value_offset = 0, .size = 4};
     BUSTER_TEST(arguments, model_built.valid && model_built.types.length > 4);
     BUSTER_TEST(arguments, model_built.relocation_count == 16);
     u32 nonzero_addends = 0;
@@ -939,7 +1029,7 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
                 }
                 found_local |= record_kind == CODEVIEW_TEST_S_LOCAL;
                 found_register |= record_kind == CODEVIEW_TEST_S_DEFRANGE_REGISTER;
-                found_frame |= record_kind == CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL;
+                found_frame |= record_kind == 0x1145;
                 found_subfield |= record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD || record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER;
                 found_inline |= record_kind == CODEVIEW_TEST_S_INLINESITE;
                 record_offset += 2 + record_length;

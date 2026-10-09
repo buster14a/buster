@@ -210,3 +210,144 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_cpuidex(CIntegerIrBuilder* builder,
     }
     return result;
 }
+
+
+// The Microsoft string move/store intrinsics are canonical constrained-asm
+// operations. Their fixed-register operands express the architectural RSI,
+// RDI, RCX and RAX contract; the memory clobber keeps ordinary accesses ordered.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_microsoft_memory(CIntegerIrBuilder* builder, String8 name,
+                                                              IrValueId const* arguments, u32 count, CToken token)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    CVendorBuiltinMicrosoftOperation operation = c_vendor_builtin_microsoft_operation(name);
+    bool copy = operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSB ||
+                operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSW ||
+                operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSD ||
+                operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSQ;
+    bool memory_operation = (operation >= C_VENDOR_BUILTIN_MICROSOFT_MOVSB &&
+                             operation <= C_VENDOR_BUILTIN_MICROSOFT_MOVSQ) ||
+                            (operation >= C_VENDOR_BUILTIN_MICROSOFT_STOSB &&
+                             operation <= C_VENDOR_BUILTIN_MICROSOFT_STOSQ);
+    u32 width = operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSB ||
+                operation == C_VENDOR_BUILTIN_MICROSOFT_STOSB ? 1 :
+                operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSW ||
+                operation == C_VENDOR_BUILTIN_MICROSOFT_STOSW ? 2 :
+                operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSD ||
+                operation == C_VENDOR_BUILTIN_MICROSOFT_STOSD ? 4 :
+                operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSQ ||
+                operation == C_VENDOR_BUILTIN_MICROSOFT_STOSQ ? 8 : 0;
+    String8 mnemonic = operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSB ? S8("rep movsb") :
+                       operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSW ? S8("rep movsw") :
+                       operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSD ? S8("rep movsl") :
+                       operation == C_VENDOR_BUILTIN_MICROSOFT_MOVSQ ? S8("rep movsq") :
+                       operation == C_VENDOR_BUILTIN_MICROSOFT_STOSB ? S8("rep stosb") :
+                       operation == C_VENDOR_BUILTIN_MICROSOFT_STOSW ? S8("rep stosw") :
+                       operation == C_VENDOR_BUILTIN_MICROSOFT_STOSD ? S8("rep stosl") :
+                       operation == C_VENDOR_BUILTIN_MICROSOFT_STOSQ ? S8("rep stosq") : (String8){0};
+    IrSourceRange source = builder ? c_ir_token_source_range(builder, token) : (IrSourceRange){0};
+    bool valid = builder && memory_operation && width && mnemonic.length &&
+                 builder->target.cpu_arch == CPU_ARCH_X86_64 &&
+                 builder->target.os == OPERATING_SYSTEM_WINDOWS && arguments && count == 3;
+    for (u32 argument = 0; valid && argument < count; argument += 1)
+    {
+        valid = arguments[argument].value < builder->function->value_count;
+    }
+    IrValue* destination_value = valid ? builder->function->values + arguments[0].value : 0;
+    IrType* destination_pointer = destination_value
+                                      ? ir_type_from_id(&builder->program->types, destination_value->canonical_type)
+                                      : 0;
+    IrType* destination_element = destination_pointer && destination_pointer->kind == IR_TYPE_POINTER
+                                      ? ir_type_from_id(&builder->program->types, destination_pointer->element_type)
+                                      : 0;
+    IrValue* count_value = valid ? builder->function->values + arguments[2].value : 0;
+    IrType* count_type = count_value ? ir_type_from_id(&builder->program->types, count_value->canonical_type) : 0;
+    valid = valid && destination_value->category == IR_VALUE_VALUE && destination_pointer &&
+            destination_pointer->kind == IR_TYPE_POINTER && destination_pointer->layout.resolved &&
+            destination_pointer->layout.size == 8 && destination_element &&
+            destination_element->kind == IR_TYPE_INTEGER && destination_element->bit_width == width * 8 &&
+            destination_element->layout.resolved && destination_element->layout.size == width &&
+            !destination_element->is_signed && count_value->category == IR_VALUE_VALUE &&
+            count_type && count_type->kind == IR_TYPE_INTEGER && count_type->bit_width == 64 &&
+            count_type->layout.resolved && count_type->layout.size == 8 && !count_type->is_signed;
+    IrValue* source_value = copy && valid ? builder->function->values + arguments[1].value : 0;
+    IrType* source_pointer = source_value
+                                 ? ir_type_from_id(&builder->program->types, source_value->canonical_type)
+                                 : 0;
+    IrType* source_element = source_pointer && source_pointer->kind == IR_TYPE_POINTER
+                                 ? ir_type_from_id(&builder->program->types, source_pointer->element_type)
+                                 : 0;
+    IrValue* fill_value = !copy && valid ? builder->function->values + arguments[1].value : 0;
+    IrType* fill_type = fill_value ? ir_type_from_id(&builder->program->types, fill_value->canonical_type) : 0;
+    if (copy)
+    {
+        valid = valid && source_value->category == IR_VALUE_VALUE && source_pointer &&
+                source_pointer->kind == IR_TYPE_POINTER && source_pointer->layout.resolved &&
+                source_pointer->layout.size == 8 && source_element &&
+                source_element->kind == IR_TYPE_INTEGER && source_element->bit_width == width * 8 &&
+                source_element->layout.resolved && source_element->layout.size == width && !source_element->is_signed;
+    }
+    else
+    {
+        valid = valid && fill_value->category == IR_VALUE_VALUE && fill_type &&
+                fill_type->kind == IR_TYPE_INTEGER && fill_type->bit_width == width * 8 &&
+                fill_type->layout.resolved && fill_type->layout.size == width && !fill_type->is_signed;
+    }
+    IrValueId outputs[3] = {IR_VALUE_ID_INVALID, IR_VALUE_ID_INVALID, IR_VALUE_ID_INVALID};
+    u32 output_count = copy ? 3 : 2;
+    for (u32 output = 0; valid && output < output_count; output += 1)
+    {
+        IrValueId input = copy ? arguments[output] : output == 0 ? arguments[0] : arguments[2];
+        IrTypeId type = builder->function->values[input.value].canonical_type;
+        outputs[output] = c_ir_emit_temporary(builder, type, source);
+        valid = outputs[output].value != IR_ID_UNDERLYING_INVALID &&
+                c_ir_emit_store_place(builder, outputs[output], type, input, source);
+    }
+    if (valid)
+    {
+        IrInstruction assembly = c_ir_instruction_initialize(IR_OPCODE_INLINE_ASSEMBLY, builder->void_type);
+        assembly.volatile_access = true;
+        assembly.operands = arena_allocate(builder->arena, IrValueId, 3);
+        assembly.operands[0] = outputs[0];
+        assembly.operands[1] = copy ? outputs[1] : outputs[1];
+        assembly.operands[2] = copy ? outputs[2] : arguments[1];
+        assembly.operand_count = 3;
+        assembly.immediates = arena_allocate(builder->arena, u64, 3);
+        assembly.immediates[0] = IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT | IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE |
+                                 IR_INLINE_ASSEMBLY_CONSTRAINT_DI;
+        assembly.immediates[1] = IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT | IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE |
+                                 (copy ? IR_INLINE_ASSEMBLY_CONSTRAINT_SI : IR_INLINE_ASSEMBLY_CONSTRAINT_C);
+        assembly.immediates[2] = copy
+            ? IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT | IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE | IR_INLINE_ASSEMBLY_CONSTRAINT_C
+            : IR_INLINE_ASSEMBLY_CONSTRAINT_A;
+        assembly.immediate_count = 3;
+        IrInstructionId instruction = c_ir_append_instruction(builder, assembly, source);
+        valid = instruction.value != IR_ID_UNDERLYING_INVALID;
+        if (valid)
+        {
+            IrInstructionExtra* extra = ir_instruction_extra_ensure(builder->arena, builder->function, instruction);
+            valid = extra != 0;
+            if (valid)
+            {
+                extra->literal = mnemonic;
+                extra->operand_names = arena_allocate(builder->arena, String8, 3);
+                extra->operand_name_count = 3;
+                for (u32 operand = 0; operand < 3; operand += 1)
+                {
+                    extra->operand_names[operand] = (String8){0};
+                }
+                extra->clobbers = arena_allocate(builder->arena, String8, 1);
+                extra->clobbers[0] = S8("memory");
+                extra->clobber_count = 1;
+            }
+        }
+    }
+    if (valid)
+    {
+        result = c_ir_emit_integer_value_at(builder, 0, false, source, builder->s32_type);
+    }
+    if (result.value == IR_ID_UNDERLYING_INVALID && builder && !builder->failure_message.length)
+    {
+        builder->failure_message = string_format(builder->arena, S8("unsupported or invalid Microsoft x64 memory builtin '{S8}'"), name);
+    }
+    return result;
+}

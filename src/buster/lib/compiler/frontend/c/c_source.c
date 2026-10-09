@@ -8073,15 +8073,15 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__is_target_arch",        "__is_target_environment",
         "__is_target_os",          "__is_target_vendor",
     };
-    bool microsoft_cpuidex = string_equal(name, S8("__cpuidex"));
-    bool result = microsoft_cpuidex && cpu_arch == CPU_ARCH_X86_64 && os == OPERATING_SYSTEM_WINDOWS;
-    for (u32 index = 0; !microsoft_cpuidex && index < BUSTER_ARRAY_LENGTH(supported) && !result; index += 1)
+    bool microsoft_vendor_builtin = c_vendor_builtin_microsoft_operation(name) != C_VENDOR_BUILTIN_MICROSOFT_NONE;
+    bool result = microsoft_vendor_builtin && cpu_arch == CPU_ARCH_X86_64 && os == OPERATING_SYSTEM_WINDOWS;
+    for (u32 index = 0; !microsoft_vendor_builtin && index < BUSTER_ARRAY_LENGTH(supported) && !result; index += 1)
     {
         u64 length = strlen(supported[index]);
         result = name.length == length && memcmp(name.pointer, supported[index], length) == 0;
     }
 
-    if (!result && !microsoft_cpuidex)
+    if (!result && !microsoft_vendor_builtin)
     {
         // These exact-name classes match the implemented complex constructor
         // and c_ir_atomic_builtin_spelling, not arbitrary __atomic_* prefixes.
