@@ -9273,6 +9273,23 @@ BUSTER_C_INTERNAL String8 c_parse_constant_expression_syntax_error(CTypeParseMac
     return message;
 }
 
+BUSTER_C_INTERNAL u32 c_parse_validate_array_object_sizes(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, u32 type_start);
+
+// True once an array or record was diagnosed as exceeding the target
+// object-size limit. A static assertion that fails or cannot be folded after
+// that is a consequence of the oversized type, not a second finding (#1479).
+BUSTER_C_INTERNAL bool c_parse_object_size_diagnostic_reported(CParseResult* result)
+{
+    bool reported = false;
+    for (u32 index = 0; !reported && index < result->diagnostic_count; index += 1)
+    {
+        CDiagnostic diagnostic = result->diagnostics[index];
+        reported = diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS &&
+                   string_first_sequence(diagnostic.message, S8("is too large for target object-size limit")) != BUSTER_STRING_NO_MATCH;
+    }
+    return reported;
+}
+
 BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                      CDeclaration declaration, CScopeId scope)
 {
@@ -9359,15 +9376,22 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
         {
             c_parse_defer_static_assert(preprocess, result, declaration, scope);
         }
-        else if (!evaluated)
+        else if (!evaluated || !value)
         {
-            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
-                               c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT));
-        }
-        else if (!value)
-        {
-            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
-                               c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_FAILED));
+            // Any diagnostic gates the later size validation, so an assertion
+            // measuring an oversized type would hide the size error and report
+            // a value folded from the saturated size. Diagnose sizes first
+            // (this error path only), and let that error stand for it.
+            if (machine)
+            {
+                c_parse_validate_array_object_sizes(machine, result, preprocess, 0);
+            }
+            if (!c_parse_object_size_diagnostic_reported(result))
+            {
+                CDiagnosticKind kind = evaluated ? C_DIAGNOSTIC_STATIC_ASSERT_FAILED : C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT;
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), kind,
+                                   c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, kind));
+            }
         }
     }
     return;
@@ -31501,12 +31525,15 @@ BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* m
             value = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, assertion.scope, start, end);
         }
         arena_set_position(machine->scratch_arena, mark);
-        if (!value.valid)
+        // Sizes were validated before this pass; an oversized type's error
+        // stands for the assertions measuring it (see c_parse_static_assert_check).
+        bool size_reported = c_parse_object_size_diagnostic_reported(result);
+        if (!size_reported && !value.valid)
         {
             c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, assertion.location), C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
                                c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT));
         }
-        else if (value.is_float || !c_parse_constant_truth(value))
+        else if (!size_reported && (value.is_float || !c_parse_constant_truth(value)))
         {
             c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, assertion.location), C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
                                c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_FAILED));

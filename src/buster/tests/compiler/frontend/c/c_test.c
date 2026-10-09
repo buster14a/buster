@@ -9929,6 +9929,61 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_object_size_limits(UnitTestArgum
                 }
             }
         }
+        // A static assertion that measures an oversized type reports only the
+        // size error, never a failure folded from the saturated size (#1479).
+        {
+            String8 assertion_cases[] = {
+                S8("int keep = 7;\n_Static_assert(sizeof(char[1ULL<<62][4]) != 0, \"x\");"),
+                S8("int keep = 7;\ntypedef char Big[1ULL<<62][4];\n_Static_assert(sizeof(Big) > 0, \"x\");"),
+                S8("int keep = 7;\nchar big[1ULL<<62][4];\n_Static_assert(sizeof(big) > 0, \"x\");"),
+                S8("int keep = 7;\nstruct S { char a[1ULL<<60]; char b[1ULL<<60]; };\n_Static_assert(sizeof(struct S), \"x\");"),
+                S8("int keep = 7;\nstruct S { char a[1ULL<<60]; char b[1ULL<<60]; };\n_Static_assert(sizeof(struct S) == 0, \"x\");"),
+                S8("int keep = 7;\nint f(void) { _Static_assert(sizeof(char[1ULL<<62][4]) != 0, \"x\"); return 0; }"),
+                S8("int keep = 7;\nint f(void) { typedef char Big[1ULL<<62][4]; _Static_assert(sizeof(Big) > 0, \"x\"); return 0; }"),
+                S8("int keep = 7;\nint f(void) { struct S { char a[1ULL<<60]; char b[1ULL<<60]; }; _Static_assert(sizeof(struct S), \"x\"); return 0; }"),
+                S8("int keep = 7;\n_Static_assert(sizeof(char[1ULL<<62][4]) == 0, \"x\");"),
+                S8("int keep = 7;\ntypedef char Big[1ULL<<62][4];\n_Static_assert(sizeof(Big) == 0, \"x\");"),
+                S8("int keep = 7;\nchar big[1ULL<<62][4];\n_Static_assert(sizeof(big) == 0, \"x\");"),
+                S8("int keep = 7;\n_Static_assert(sizeof(char[1ULL<<63]) + 1 == 1, \"x\");"),
+                S8("int keep = 7;\nint f(void) { typedef char Big[1ULL<<62][4]; _Static_assert(sizeof(Big) == 0, \"x\"); return 0; }"),
+                S8("int keep = 7;\nint f(void) { struct S { char a[1ULL<<60]; char b[1ULL<<60]; }; _Static_assert(sizeof(struct S) == 0, \"x\"); return 0; }"),
+            };
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(assertion_cases) && target.cpu_arch != CPU_ARCH_WASM32; case_index += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(0, 0);
+                    String8 source = assertion_cases[case_index];
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                        (CPreprocessOptions){.target = target, .data_layout = layout, .dialect = C_PREPROCESS_DIALECT_GNU17});
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("oversized-assertion.c"), tokens, syntax, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    u32 sized = 0;
+                    u32 assertions = 0;
+                    for (u32 index = 0; index < semantic.diagnostic_count; index += 1)
+                    {
+                        CDiagnostic diagnostic = semantic.diagnostics[index];
+                        sized += diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS && diagnostic.location.line == 2 &&
+                            string_first_sequence(diagnostic.message, S8("is too large for target object-size limit")) != BUSTER_STRING_NO_MATCH;
+                        assertions += diagnostic.kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED || diagnostic.kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT;
+                    }
+                    BUSTER_TEST_RAW(arguments, sized == 1 && assertions == 0 && semantic.diagnostic_count == 1, source);
+                    sized = 0;
+                    assertions = 0;
+                    for (u32 index = 0; index < lowered.diagnostic_count; index += 1)
+                    {
+                        CDiagnostic diagnostic = lowered.diagnostics[index];
+                        sized += diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS && diagnostic.location.line == 2 &&
+                            string_first_sequence(diagnostic.message, S8("is too large for target object-size limit")) != BUSTER_STRING_NO_MATCH;
+                        assertions += diagnostic.kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED || diagnostic.kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT;
+                    }
+                    BUSTER_TEST_RAW(arguments, sized == 1 && assertions == 0 && lowered.diagnostic_count == 1 && !lowered.canonical_ir_certified, source);
+                    c_test_scratch_end(temporary);
+                }
+            }
+        }
         for (u32 form = 0; form < 2; form += 1)
         {
             TemporalArena temporary = scratch_begin(0, 0);
