@@ -8233,6 +8233,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_back_edge_dead_stores(Un
 // carried around a loop on one side of a conditional, nested joins whose
 // values the code after them reads selectively, a promoted local stored
 // before its loop and dirtied inside it, and calls under register pressure.
+// The indirect call in `barrier_loop` stops IR local promotion, so `i` stays a
+// mutable value that is live out of the loop latch only around the back edge;
+// a liveness that ignores back edges drops its store and the loop overruns.
 // Every target must select without fallback, and the host runs the program
 // under every allocator and both frontend forms; the expected values were
 // cross-checked with host GCC and Clang.
@@ -8337,6 +8340,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_liveness_dead_stores(Uni
         "    }\n"
         "    return s * 7 + m;\n"
         "}\n"
+        "static int (*volatile indirect)(void);\n"
+        "static volatile int guard;\n"
+        "static int five(void) { return 5; }\n"
+        "static __attribute__((noinline)) int barrier_loop(void)\n"
+        "{\n"
+        "    int i = 0, r = 0;\n"
+        "    indirect = five;\n"
+        "    r = indirect();\n"
+        "    while (i < 4 && ++guard < 100)\n"
+        "    {\n"
+        "        i += 1;\n"
+        "        r += indirect();\n"
+        "    }\n"
+        "    return r;\n"
+        "}\n"
         "int main(void)\n"
         "{\n"
         "    int bad = 0;\n"
@@ -8348,6 +8366,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_liveness_dead_stores(Uni
         "    bad |= ladder(12) != 815858ll;\n"
         "    bad |= pressure(40) != 15052400108001533700ull;\n"
         "    bad |= churn(29) != 22676ll;\n"
+        "    bad |= barrier_loop() != 25;\n"
         "    return bad | (sink != 2871);\n"
         "}\n");
     String8 input = buster_test_temporary_path(arguments->arena, S8("buster-liveness-dead-stores"), S8(".c"));
