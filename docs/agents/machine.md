@@ -361,6 +361,18 @@ fixture as well as compiling both architectures.
   last use and an edge whose terminator is at or after it skip the store when
   that use lies below the floor. A parameter-edge source whose copy found no
   register still stores, because that copy reloads its home.
+- The shared prepass also computes block live-out for every escaping,
+  non-rematerializable value (`machine_fast_value_liveness`, one bitset row
+  per block over a dense index of those values, solved by the same worklist
+  as frame-object closure). An edge-copy source starts live out of its
+  edge's source block. A boundary write-back, or an eviction past the
+  value's last textual use, skips the store when the value is not live out
+  of the block whose exit it conforms (`machine_fast_dead_out`). The decision
+  is per block, not per edge: one store at a conditional's terminator serves
+  both successors. Contract construction still carries a dirty value that is
+  dead in the join, because dropping it would force the store onto the
+  predecessor's other path. Functions with one block, or past
+  `MACHINE_FAST_LIVENESS_WORD_LIMIT` words per plane, keep the textual rules.
 - FAST/QUALITY also drop the write-back of a strict SSA (immutable, unpinned)
   value at a backward edge whose terminator has that single target, when the
   value is defined in the header or in a block past the header's entry bypass.
