@@ -20172,6 +20172,25 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_redundant_sign_operand(CIntegerIrBuilder* 
     return result;
 }
 
+// `abs(x)` is `(x ^ s) - s` with `s = x >> (w - 1)`: s is all ones for a
+// negative x, which complements and increments it, and zero otherwise. The
+// most negative value wraps to itself under -fwrapv instead of branching.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_absolute_value(CIntegerIrBuilder* builder, IrValueId operand, CTypeKind kind, CToken token)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrSourceRange source = c_ir_token_source_range(builder, token);
+    IrTypeId type = builder->scalar_types[kind];
+    IrType* info = ir_type_from_id(&builder->program->types, type);
+    if (info && info->kind == IR_TYPE_INTEGER && info->bit_width)
+    {
+        IrValueId shift = c_ir_emit_integer_value_typed(builder, info->bit_width - 1, false, token, type);
+        IrValueId sign = shift.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, operand, shift, type, IR_BINARY_SIGNED_SHIFT_RIGHT, source) : IR_VALUE_ID_INVALID;
+        IrValueId flipped = sign.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, operand, sign, type, IR_BINARY_INTEGER_BITWISE_XOR, source) : IR_VALUE_ID_INVALID;
+        result = flipped.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, flipped, sign, type, IR_BINARY_INTEGER_SUBTRACT, source) : IR_VALUE_ID_INVALID;
+    }
+    return result;
+}
+
 // Logical negation of a bool value: the s32 conversion is compared to zero.
 BUSTER_C_INTERNAL IrValueId c_ir_emit_bool_not(CIntegerIrBuilder* builder, CToken token, IrValueId flag, IrSourceRange source)
 {
@@ -23723,7 +23742,8 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
                                             builtin_kind == C_SYMBOL_BUILTIN_PARITY)               ? IR_UNARY_INTEGER_POPULATION_COUNT
                                          // Byte swap has no canonical unary operation; the marker only routes the call
                                          // through the unary-shaped path, which dispatches on the builtin kind first.
-                                         : builtin_kind == C_SYMBOL_BUILTIN_BYTE_SWAP              ? IR_UNARY_INTEGER_BITWISE_NOT
+                                         : (builtin_kind == C_SYMBOL_BUILTIN_BYTE_SWAP ||
+                                            builtin_kind == C_SYMBOL_BUILTIN_ABSOLUTE_VALUE)       ? IR_UNARY_INTEGER_BITWISE_NOT
                                                                                                   : IR_UNARY_COUNT;
         CTypeId indirect_function_type = C_TYPE_ID_INVALID;
         if (token.kind == C_TOKEN_IDENTIFIER)
@@ -25997,6 +26017,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             CTypeKind parameter_kind = c_semantic_integer_count_parameter_kind(builtin,
                 c_token_spelling(builder->preprocess.spelling_base, token));
             CTypeKind swap_kind = c_semantic_byte_swap_kind(builder->target, builtin, c_token_spelling(builder->preprocess.spelling_base, token));
+            CTypeKind absolute_kind = c_semantic_absolute_value_kind(builtin, c_token_spelling(builder->preprocess.spelling_base, token));
             bool find_first_set = builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET;
             IrTypeId original_type = builder->function->values[operand.value].canonical_type;
             IrType* original = ir_type_from_id(&builder->program->types, original_type);
@@ -26004,6 +26025,23 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                               original->kind != IR_TYPE_FLOAT && !original->is_complex))
             {
                 return false;
+            }
+            if (absolute_kind != C_TYPE_INVALID)
+            {
+                operand = c_ir_emit_cast(builder, operand, builder->scalar_types[absolute_kind], c_ir_token_source_range(builder, token));
+                if (operand.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    operand = c_ir_emit_absolute_value(builder, operand, absolute_kind, token);
+                }
+                if (operand.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+                selected->result = operand;
+                selected->argument_count = 1;
+                selected->emitted = true;
+                remaining -= 1;
+                continue;
             }
             if (swap_kind != C_TYPE_INVALID)
             {
@@ -32545,7 +32583,9 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     // A count builtin has no declared function entity. Resolve its fixed
     // signed-int result before a surrounding conditional predicts the type
     // of either arm, even when the call has not been emitted yet.
-    if (c_semantic_integer_count_parameter_kind(c_ir_token_builtin_kind(builder, token), name) != C_TYPE_INVALID)
+    CTypeKind absolute_kind = c_semantic_absolute_value_kind(c_ir_token_builtin_kind(builder, token), name);
+    if (c_semantic_integer_count_parameter_kind(c_ir_token_builtin_kind(builder, token), name) != C_TYPE_INVALID ||
+        absolute_kind != C_TYPE_INVALID)
     {
         if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
@@ -32556,7 +32596,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
         {
             return false;
         }
-        *type_out = builder->s32_type;
+        *type_out = absolute_kind != C_TYPE_INVALID ? builder->scalar_types[absolute_kind] : builder->s32_type;
         return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
     }
 
@@ -57464,7 +57504,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                     {
                         return false;
                     }
-                    values[value_count++] = c_ir_constant_integer(integer_builtin == C_SYMBOL_BUILTIN_BYTE_SWAP ? fold_type : builder->s32_type, answer);
+                    values[value_count++] = c_ir_constant_integer(integer_builtin == C_SYMBOL_BUILTIN_BYTE_SWAP ||
+                                                                  integer_builtin == C_SYMBOL_BUILTIN_ABSOLUTE_VALUE ? fold_type : builder->s32_type, answer);
                     expect_operand = false;
                     index = close;
                     continue;

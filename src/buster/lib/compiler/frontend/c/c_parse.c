@@ -5851,6 +5851,10 @@ BUSTER_C_SHARED CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPrep
                 {
                     return c_parse_expression_scalar_type(result, c_semantic_byte_swap_kind(preprocess.target, builtin, name));
                 }
+                if (builtin == C_SYMBOL_BUILTIN_ABSOLUTE_VALUE)
+                {
+                    return c_parse_expression_scalar_type(result, c_semantic_absolute_value_kind(builtin, name));
+                }
                 if (builtin == C_SYMBOL_BUILTIN_MATH || builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET ||
                     c_semantic_integer_count_parameter_kind(builtin, name) != C_TYPE_INVALID)
                 {
@@ -26718,7 +26722,8 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_integer_builtin(CParseResult* 
         {
             folded.valid = true;
             folded.integer = answer;
-            folded.type = builtin == C_SYMBOL_BUILTIN_BYTE_SWAP ? parameter_type : c_parse_expression_scalar_type(result, C_TYPE_INT);
+            folded.type = builtin == C_SYMBOL_BUILTIN_BYTE_SWAP || builtin == C_SYMBOL_BUILTIN_ABSOLUTE_VALUE
+                              ? parameter_type : c_parse_expression_scalar_type(result, C_TYPE_INT);
         }
     }
     return folded;
@@ -26933,7 +26938,8 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 String8 builtin_spelling = c_token_spelling(preprocess.spelling_base, first);
                 CSymbolBuiltin integer_builtin = c_symbol_builtin_from_spelling(builtin_spelling);
                 if ((c_semantic_integer_count_parameter_kind(integer_builtin, builtin_spelling) != C_TYPE_INVALID ||
-                     integer_builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET || integer_builtin == C_SYMBOL_BUILTIN_BYTE_SWAP) &&
+                     integer_builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET || integer_builtin == C_SYMBOL_BUILTIN_BYTE_SWAP ||
+                     integer_builtin == C_SYMBOL_BUILTIN_ABSOLUTE_VALUE) &&
                     c_parse_matching_delimiter_indexed(result, preprocess, begin + 1) + 1 == limit &&
                     c_parse_constraint_expression_end(result, preprocess, begin + 2, limit - 1) == limit - 1)
                 {
@@ -31746,6 +31752,7 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         case C_SYMBOL_BUILTIN_FIND_FIRST_SET:
         case C_SYMBOL_BUILTIN_POPULATION_COUNT:
         case C_SYMBOL_BUILTIN_PARITY:
+        case C_SYMBOL_BUILTIN_ABSOLUTE_VALUE:
         case C_SYMBOL_BUILTIN_BYTE_SWAP: minimum = maximum = 1; break;
         case C_SYMBOL_BUILTIN_MATH: minimum = string_starts_with_sequence(name, S8("__builtin_copysign")) ? 2 : 0;
                                     maximum = string_starts_with_sequence(name, S8("__builtin_copysign")) ? 2 : UINT32_MAX; break;
@@ -31795,7 +31802,8 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
                 location = starts[0];
             }
         }
-        if ((c_semantic_integer_count_parameter_kind(builtin, name) != C_TYPE_INVALID || builtin == C_SYMBOL_BUILTIN_BYTE_SWAP) && !message.length)
+        if ((c_semantic_integer_count_parameter_kind(builtin, name) != C_TYPE_INVALID || builtin == C_SYMBOL_BUILTIN_BYTE_SWAP ||
+             builtin == C_SYMBOL_BUILTIN_ABSOLUTE_VALUE) && !message.length)
         {
             CTypeId type = C_TYPE_ID_INVALID;
             bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope,

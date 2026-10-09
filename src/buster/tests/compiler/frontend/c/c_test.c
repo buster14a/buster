@@ -21275,6 +21275,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__builtin_choose_expr"), all_targets},
         {S8("__builtin_expect"), all_targets},
         {S8("__builtin_memcpy"), all_targets},
+        {S8("__builtin_abs"), all_targets},
+        {S8("__builtin_labs"), all_targets},
+        {S8("__builtin_llabs"), all_targets},
         {S8("__builtin_ffs"), all_targets},
         {S8("__builtin_ffsl"), all_targets},
         {S8("__builtin_ffsll"), all_targets},
@@ -21464,6 +21467,61 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         }
     }
 
+    // #1394: abs/labs/llabs are signed T(T) builtins. Their result is the
+    // operand's type (not int), constants fold, and runtime calls lower to
+    // integer operations with no call on both frontend SSA paths.
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            String8 source = S8(
+                "#if !__has_builtin(__builtin_abs) || !__has_builtin(__builtin_labs) || !__has_builtin(__builtin_llabs)\n"
+                "#error hidden abs\n"
+                "#endif\n"
+                "_Static_assert(sizeof(__builtin_abs(1)) == sizeof(int), \"abs result\");\n"
+                "_Static_assert(sizeof(__builtin_labs(1)) == sizeof(long), \"labs result\");\n"
+                "_Static_assert(sizeof(__builtin_llabs(1)) == sizeof(long long), \"llabs result\");\n"
+                "_Static_assert(_Generic(__builtin_llabs(1), long long: 1, default: 0), \"llabs type\");\n"
+                "_Static_assert(_Generic(__builtin_labs(1), long: 1, default: 0), \"labs type\");\n"
+                "_Static_assert(__builtin_abs(-5) == 5 && __builtin_abs(5) == 5 && __builtin_abs(0) == 0, \"abs fold\");\n"
+                "_Static_assert(__builtin_abs(-2147483647) == 2147483647, \"abs fold max\");\n"
+                "_Static_assert(__builtin_abs((short)-4) == 4, \"abs promoted operand\");\n"
+                "_Static_assert(__builtin_labs(-7L) == 7L, \"labs fold\");\n"
+                "_Static_assert(__builtin_llabs(-9LL) == 9LL, \"llabs fold\");\n"
+                "_Static_assert(__builtin_llabs(-2147483647 - 1) == 2147483648LL, \"llabs wide fold\");\n"
+                "int bound[__builtin_abs(-3)];\n"
+                "int query_abs(int a, long b, long long c) { return __builtin_abs(a) + (int)__builtin_labs(b) + (int)__builtin_llabs(c); }\n");
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target});
+            CParseResult parse = c_parse(temporary.arena, preprocess);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("has-builtin-abs.c"), preprocess, parse, target,
+                    (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count == 1))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    IrFunction* function = c_test_find_ir_function(module, S8("query_abs"));
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        u32 subtractions = 0;
+                        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                        {
+                            IrInstruction* instruction = function->instructions + instruction_index;
+                            subtractions += instruction->opcode == IR_OPCODE_BINARY && instruction->binary_operation == IR_BINARY_INTEGER_SUBTRACT;
+                        }
+                        BUSTER_TEST(arguments, subtractions == 3);
+                        BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
+                    }
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+
     // __builtin_return_address(0) lowers to one canonical RETURN_ADDRESS row
     // (not a stack save) on both frontend forms; other levels are refused.
     for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
@@ -21510,6 +21568,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count != 0, invalid_return_address_sources[index]);
         scratch_end(temporary);
+    }
+
+    String8 invalid_abs_sources[] = {
+        S8("int f(void) { return __builtin_abs(); }"),
+        S8("int f(void) { return __builtin_abs(1, 2); }"),
+        S8("long f(void) { return __builtin_labs(); }"),
+        S8("long long f(void) { return __builtin_llabs(1, 2); }"),
+        S8("int f(void) { return __builtin_abs((int*)0); }"),
+        S8("long f(void) { return __builtin_labs((struct Bad { int x; }){0}); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_abs_sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid_abs_sources[index], (CPreprocessOptions){.target = targets[0]});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count != 0, invalid_abs_sources[index]);
+        c_test_scratch_end(temporary);
     }
 
     String8 invalid_ffs_sources[] = {
@@ -44424,11 +44500,18 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_gnu_library_builtins_sources[] = {
         "        failed |= (__builtin_clrsb((int)v) != clrsb_reference((int)v, 32)) << 1;\n"
         "        failed |= (__builtin_clrsbl((long)v) != clrsb_reference((long)v, (int)sizeof(long) * 8)) << 1;\n"
         "        failed |= (__builtin_clrsbll(v) != clrsb_reference(v, 64)) << 1;\n"
+        "        int narrow = (int)v;\n"
+        "        if (narrow != -2147483647 - 1) failed |= (__builtin_abs(narrow) != (narrow < 0 ? -narrow : narrow)) << 1;\n"
+        "        if ((long)v != -__LONG_MAX__ - 1) failed |= (__builtin_labs((long)v) != ((long)v < 0 ? -(long)v : (long)v)) << 1;\n"
+        "        if (v != -__LONG_LONG_MAX__ - 1) failed |= (__builtin_llabs(v) != (v < 0 ? -v : v)) << 1;\n"
         "    }\n"
         "    int r = 0;\n"
         "    evaluations = 0;\n"
         "    failed |= (__builtin_smul_overflow(next(6), next(7), &r) || r != 42 || evaluations != 2 || __builtin_clrsb(next(-1)) != 31 || evaluations != 3) << 2;\n"
         "    failed |= (sizeof(__builtin_sadd_overflow(1, 2, &r)) != sizeof(_Bool) || sizeof(__builtin_clrsbll(1)) != sizeof(int)) << 2;\n"
+        "    evaluations = 0;\n"
+        "    failed |= (__builtin_abs(next(-6)) != 6 || __builtin_labs(next(-7)) != 7 || __builtin_llabs(next(-8)) != 8 || evaluations != 3) << 2;\n"
+        "    failed |= (sizeof(__builtin_abs(1)) != sizeof(int) || sizeof(__builtin_labs(1)) != sizeof(long) || sizeof(__builtin_llabs(1)) != sizeof(long long)) << 2;\n"
         "    return failed;\n"
         "}\n"),
     S8_INITIALIZER(
