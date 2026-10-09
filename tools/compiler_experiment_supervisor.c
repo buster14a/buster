@@ -362,6 +362,24 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_self_test(Arena* arena)
         !compiler_experiment_supervisor_parse_children(S8("2147483648 "), 500, pids, &count) &&
         !compiler_experiment_supervisor_parse_children(S8("101 garbage"), 500, pids, &count);
 #if BUSTER_LINUX && !BUSTER_ANDROID
+    int original_subreaper = -1;
+    bool flag_read = prctl(PR_GET_CHILD_SUBREAPER, &original_subreaper, 0, 0, 0) == 0;
+    pid_t unrelated = flag_read ? fork() : -1;
+    if (unrelated == 0)
+    {
+        for (;;) poll(0, 0, -1);
+    }
+    CompilerExperimentSupervisor rejected = {0};
+    bool refused = unrelated > 1 && !compiler_experiment_supervisor_begin(arena, &rejected);
+    bool exited = false;
+    bool unrelated_live = unrelated > 1 && compiler_experiment_supervisor_owned((u64)unrelated,
+        os_now_microseconds() + 5000000, &exited) && !exited;
+    bool unrelated_reaped = unrelated > 1 && compiler_experiment_supervisor_fixture_reap(unrelated,
+        os_now_microseconds() + 5000000);
+    int after_rejection = -1;
+    result = result && flag_read && refused && unrelated_live && unrelated_reaped && !rejected.active &&
+        !rejected.signalled && !rejected.reaped &&
+        prctl(PR_GET_CHILD_SUBREAPER, &after_rejection, 0, 0, 0) == 0 && after_rejection == original_subreaper;
     CompilerExperimentSupervisor supervisor = {0};
     bool began = compiler_experiment_supervisor_begin(arena, &supervisor);
     result = result && began;
