@@ -1147,14 +1147,19 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
                 byte_writer_emit_u32_le(&symbols, 0);
                 byte_writer_emit_u32_le(&symbols, 0);
                 u32 run_lines = 0;
+                u32 previous_line = 0;
                 while (line_cursor < input.line_count && input.lines[line_cursor].code_offset < function_end && input.lines[line_cursor].file == run_file)
                 {
                     DwarfLineEntry* entry = input.lines + line_cursor;
                     line_cursor += 1;
-                    if (!entry->line)
+                    // This contribution has no column table. Preserve one
+                    // range per contiguous file/line, rather than fragmenting
+                    // it when canonical source columns change within a line.
+                    if (!entry->line || entry->line == previous_line)
                     {
                         continue;
                     }
+                    previous_line = entry->line;
                     byte_writer_emit_u32_le(&symbols, entry->code_offset - function->code_offset);
                     byte_writer_emit_u32_le(&symbols, (entry->line & CODEVIEW_LINE_NUMBER_MASK) | CODEVIEW_LINE_STATEMENT);
                     run_lines += 1;
