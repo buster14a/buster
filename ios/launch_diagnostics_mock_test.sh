@@ -530,7 +530,7 @@ run_case() {
     local label=$1 outcome=$2 expected=$3 interrupt=$4 bundles=$5
     local diagnostic_mode=${6:-success}
     local state="$test_root/$label" status=0 role token registration runner_timeout probe status_log output_log expected_probe expected_progress owner_deadline owner_wait_status
-    local producer_result signal_result bridge_result producer_token stream_dir stream_dirs capture_receipt
+    local producer_result signal_result bridge_result producer_token stream_dirs capture_receipt
     local producer_count reader_count diagnostic_count expected_diagnostic_count=0
     mkdir -p "$state/Debug/ide.app" "$state/Release/ide.app" "$state/control"
     mkfifo "$state/acknowledgments"
@@ -747,8 +747,8 @@ PY
     # Owner EOF can precede the shell's EXIT-trap removal of its private stream FIFO.
     stream_dir=
     while (( SECONDS < owner_deadline )); do
-        stream_dir=$(find "$state" -name 'buster-ios-stream.*' -print -quit)
-        if [[ -z $stream_dir ]]; then
+        stream_dirs=$(find "$state" -name 'buster-ios-stream.*' -print)
+        if [[ -z $stream_dirs ]]; then
             break
         fi
         sleep 0.05
