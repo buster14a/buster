@@ -7,8 +7,8 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | Job / matrix | OS / actual CPU | Event / branch | Successful samples | Missing context | History |
 |---|---|---|---:|---:|---|
 | Exact merge-tree preflight /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 31 | [series](series-ea535b664ec3d589.md) |
-| watch-merge-group /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 67 | [series](series-c451c74a07da770f.md) |
-| Reconcile exact-group admission /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 31 | [series](series-45fa970274f35d52.md) |
+| watch-merge-group /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 78 | [series](series-c451c74a07da770f.md) |
+| Reconcile exact-group admission /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 55 | [series](series-45fa970274f35d52.md) |
 | Preflight regression tests /  | unknown OS / unknown CPU | pull&#95;request / codex/2431-owned-ios-mock-cleanup | 0 | 1 | [series](series-071dcc81a8c503ec.md) |
 | GPU Linux consumers /  | unknown OS / unknown CPU | pull&#95;request / codex/2431-owned-ios-mock-cleanup | 0 | 1 | [series](series-65652222c5c72667.md) |
 | GPU Metal consumer /  | unknown OS / unknown CPU | pull&#95;request / codex/2431-owned-ios-mock-cleanup | 0 | 1 | [series](series-52be6273b2cac488.md) |
@@ -26,15 +26,15 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | fake-tools &#40;macos-15&#41; /  | unknown OS / unknown CPU | pull&#95;request / codex/2431-owned-ios-mock-cleanup | 0 | 1 | [series](series-468209305e54abf1.md) |
 | launch-trace &#40;ubuntu-26.04&#41; /  | unknown OS / unknown CPU | pull&#95;request / codex/2431-owned-ios-mock-cleanup | 0 | 1 | [series](series-772c4912b1e42005.md) |
 | fake-tools &#40;ubuntu-26.04&#41; /  | unknown OS / unknown CPU | pull&#95;request / codex/2431-owned-ios-mock-cleanup | 0 | 1 | [series](series-687f33c6b2ef61e1.md) |
-| authorize /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 3 | [series](series-974e42bddace4d7c.md) |
-| Authorize the main commit comparison /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 3 | [series](series-f3c9d7042e21edb3.md) |
-| Show the main commit comparison check /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 3 | [series](series-fd9520dea7e6a343.md) |
-| Compare the main commit compiler /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 3 | [series](series-1f6260be31355292.md) |
-| Publish the compiler benchmark check /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 3 | [series](series-1be8211ea92f5352.md) |
-| Publish the compiler benchmark commit report /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 3 | [series](series-568cee59811c9f4f.md) |
+| authorize /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 4 | [series](series-974e42bddace4d7c.md) |
+| Authorize the main commit comparison /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 4 | [series](series-f3c9d7042e21edb3.md) |
+| Show the main commit comparison check /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 4 | [series](series-fd9520dea7e6a343.md) |
+| Compare the main commit compiler /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 4 | [series](series-1f6260be31355292.md) |
+| Publish the compiler benchmark check /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 4 | [series](series-1be8211ea92f5352.md) |
+| Publish the compiler benchmark commit report /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 4 | [series](series-568cee59811c9f4f.md) |
 | Compare the pull request compiler /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 3 | [series](series-d8ce067a389e95bb.md) |
 | Show the pull request comparison check /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 3 | [series](series-09ebae9d0d57cd60.md) |
-| bench /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 3 | [series](series-7ab221e1da782c9b.md) |
+| bench /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 4 | [series](series-7ab221e1da782c9b.md) |
 | Publish the pull request compiler benchmark check /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 3 | [series](series-1fc7940ff060b185.md) |
 | Workflow lint /  | unknown OS / unknown CPU | pull&#95;request / codex/2930-assembler-form-coverage | 0 | 1 | [series](series-cff7c5b293b37cb8.md) |
 | macOS AArch64 release &#40;deferred for draft PR&#41; /  | unknown OS / unknown CPU | pull&#95;request / codex/2930-assembler-form-coverage | 0 | 1 | [series](series-7e2998f982500d13.md) |
