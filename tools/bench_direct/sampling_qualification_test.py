@@ -67,6 +67,7 @@ def fixture(phase: str = "confirm", packet: int = 0) -> tuple:
     identity = {"schema": receipt.SCHEMA, "phase": phase, "packet": str(packet), "campaign": DIGEST,
                 "reservation_seconds": str(plan["reservation_seconds"]), "family": family,
                 "trials": str(len(plan["slots"])), "base": SHA, "base_tree": TREE, "request_head": HEAD,
+                "trusted_revision": FREEZE,
                 "baseline_revision": SHA, "candidate_revision": SHA if family == "aa" else HEAD,
                 "baseline_sha256": DIGEST, "candidate_sha256": DIGEST if family == "aa" else "a" * 64,
                 "lab_sha256": DIGEST, "protocol_sha256": DIGEST, "python_sha256": DIGEST,
@@ -247,6 +248,7 @@ class SamplingQualificationTests(unittest.TestCase):
         mutations = [
             lambda d: d[0].__setitem__("campaign", "1" * 64),
             lambda d: d[0].__setitem__("base", "1" * 40),
+            lambda d: d[0].__setitem__("trusted_revision", "1" * 40),
             lambda d: d[0].__setitem__("cpu", "1"),
             lambda d: d[0].__setitem__("routine_enabled", "true"),
             lambda d: d[1][1].__setitem__("closure_before", "1" * 64),
