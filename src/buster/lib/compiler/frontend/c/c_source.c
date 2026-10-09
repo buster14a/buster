@@ -12858,7 +12858,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     }
     if (windows_target)
     {
-        C_DEFINE_TYPE_MACRO("__int8", S8("signed char"));
+        // __int8 is a parser type word; expanding it to signed char would make
+        // unsigned __int8 become the invalid unsigned signed char combination.
         C_DEFINE_TYPE_MACRO("__int16", S8("short"));
         C_DEFINE_TYPE_MACRO("__int32", S8("int"));
         C_DEFINE_TYPE_MACRO("__int64", S8("long long"));

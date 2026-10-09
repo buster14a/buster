@@ -15662,7 +15662,7 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_coff_oracle(Arena* arena, String8 l
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debuggee_compile(Arena* arena, String8 compiler, bool buster, String8 source,
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_c_compile(Arena* arena, String8 compiler, bool buster, String8 source,
                                                                String8 output_directory, String8 resource_include, String8 object,
                                                                String8 prefix, bool* stopped)
 {
@@ -15697,12 +15697,343 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debuggee_compile(Arena* arena, Stri
     RaddebuggerCommandResult command = raddebugger_command(arena, os_argument_builder_flush(&builder), output_directory, prefix,
                                                            RADDEBUGGER_ENVIRONMENT_INHERIT, stopped);
     bool result = raddebugger_command_ok(command) && path_exists(arena, object);
-    string_print(S8("RADDEBUGGER_DEBUGGEE_COMPILE compiler={S8} status={S8}\n"), buster ? S8("buster") : S8("clang"),
-                 result ? S8("pass") : S8("fail"));
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debugger_action(Arena* arena, String8 ide, String8 clang,
+BUSTER_GLOBAL_LOCAL u64 raddebugger_windows_text_find(String8 text, String8 needle, u64 start)
+{
+    u64 result = text.length;
+    bool search_valid = needle.length && start <= text.length && needle.length <= text.length - start;
+    if (search_valid)
+    {
+        for (u64 index = start; index <= text.length - needle.length && result == text.length; index += 1)
+        {
+            u64 match_index = 0;
+            while (match_index < needle.length && text.pointer[index + match_index] == needle.pointer[match_index])
+            {
+                match_index += 1;
+            }
+            if (match_index == needle.length)
+            {
+                result = index;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_text_has(String8 text, String8 needle)
+{
+    return raddebugger_windows_text_find(text, needle, 0) < text.length;
+}
+
+BUSTER_GLOBAL_LOCAL String8 raddebugger_windows_text_block(String8 text, u64 marker)
+{
+    String8 result = {0};
+    u64 open = raddebugger_windows_text_find(text, S8("{"), marker);
+    if (open < text.length)
+    {
+        u32 depth = 0;
+        bool scanning = true;
+        for (u64 index = open; index < text.length && scanning; index += 1)
+        {
+            if (text.pointer[index] == '{')
+            {
+                depth += 1;
+            }
+            else if (text.pointer[index] == '}')
+            {
+                if (!depth)
+                {
+                    scanning = false;
+                }
+                else
+                {
+                    depth -= 1;
+                    if (!depth)
+                    {
+                        result = string_slice(text, marker, index + 1);
+                        scanning = false;
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_coff_symbol_section(String8 symbol_block, String8* name_out, u32* number_out)
+{
+    String8 section_prefix = S8("Section: ");
+    u64 section_at = raddebugger_windows_text_find(symbol_block, section_prefix, 0);
+    bool result = false;
+    if (section_at < symbol_block.length)
+    {
+        u64 line_start = section_at + section_prefix.length;
+        u64 line_end = line_start;
+        while (line_end < symbol_block.length && symbol_block.pointer[line_end] != '\n' && symbol_block.pointer[line_end] != '\r')
+        {
+            line_end += 1;
+        }
+        String8 line = string_slice(symbol_block, line_start, line_end);
+        u64 open = line.length;
+        while (open && line.pointer[open - 1] != '(')
+        {
+            open -= 1;
+        }
+        if (open)
+        {
+            u64 name_end = open - 1;
+            while (name_end && line.pointer[name_end - 1] == ' ')
+            {
+                name_end -= 1;
+            }
+            u64 close = open;
+            while (close < line.length && line.pointer[close] != ')')
+            {
+                close += 1;
+            }
+            u32 number = 0;
+            bool valid_number = close < line.length && close > open;
+            for (u64 index = open; valid_number && index < close; index += 1)
+            {
+                char8 digit = line.pointer[index];
+                if (digit < '0' || digit > '9' || number > (UINT32_MAX - (u32)(digit - '0')) / 10)
+                {
+                    valid_number = false;
+                }
+                else
+                {
+                    number = number * 10 + (u32)(digit - '0');
+                }
+            }
+            String8 name = string_slice(line, 0, name_end);
+            result = valid_number && name.length;
+            if (result)
+            {
+                *name_out = name;
+                *number_out = number;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 raddebugger_windows_coff_section_block(Arena* arena, String8 text, String8 section_name, u32 section_number)
+{
+    String8 result = {0};
+    String8 number_text = string_format(arena, S8("Number: {u32}"), section_number);
+    String8 name_text = string_format(arena, S8("Name: {S8}"), section_name);
+    u64 scan = 0;
+    while (scan < text.length && !result.length)
+    {
+        u64 section_at = raddebugger_windows_text_find(text, S8("Section {"), scan);
+        if (section_at == text.length)
+        {
+            scan = text.length;
+        }
+        else
+        {
+            String8 block = raddebugger_windows_text_block(text, section_at);
+            if (!block.length)
+            {
+                scan = text.length;
+            }
+            else if (raddebugger_windows_text_has(block, number_text) && raddebugger_windows_text_has(block, name_text))
+            {
+                result = block;
+            }
+            else
+            {
+                scan = section_at + 1;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 raddebugger_windows_coff_aux_section_block(Arena* arena, String8 text, String8 section_name, u32 section_number)
+{
+    String8 result = {0};
+    String8 name_text = string_format(arena, S8("Name: {S8}"), section_name);
+    String8 reference_text = string_format(arena, S8("Section: {S8} ({u32})"), section_name, section_number);
+    u64 scan = 0;
+    while (scan < text.length && !result.length)
+    {
+        u64 symbol_at = raddebugger_windows_text_find(text, S8("Symbol {"), scan);
+        if (symbol_at == text.length)
+        {
+            scan = text.length;
+        }
+        else
+        {
+            String8 block = raddebugger_windows_text_block(text, symbol_at);
+            if (!block.length)
+            {
+                scan = text.length;
+            }
+            else if (raddebugger_windows_text_has(block, name_text) && raddebugger_windows_text_has(block, reference_text) &&
+                     raddebugger_windows_text_has(block, S8("AuxSectionDef {")))
+            {
+                result = block;
+            }
+            else
+            {
+                scan = symbol_at + 1;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void raddebugger_windows_coff_emit_block(String8 compiler, String8 label, String8 block)
+{
+    u64 maximum = 4096;
+    bool truncated = block.length > maximum;
+    String8 shown = truncated ? string_slice(block, 0, maximum) : block;
+    string_print(S8("RADDEBUGGER_COFF_BLOCK_BEGIN compiler={S8} kind={S8} bytes={u64} truncated={u32}\n"),
+                 compiler, label, block.length, (u32)truncated);
+    if (shown.length)
+    {
+        string_print(S8("{S8}\n"), shown);
+    }
+    string_print(S8("RADDEBUGGER_COFF_BLOCK_END compiler={S8} kind={S8}\n"), compiler, label);
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_coff_metadata_report(Arena* arena, String8 compiler, String8 object, String8 readobj_output,
+                                                                   String8 function_fragment, String8 storage_fragment, String8 optional_fragment)
+{
+    String8 fragments[] = {function_fragment, storage_fragment, optional_fragment};
+    String8 target_names[12] = {0};
+    u32 target_count = 0;
+    bool function_found = false;
+    bool storage_found = false;
+    bool optional_found = false;
+    u64 scan = 0;
+    while (scan < readobj_output.length && target_count < BUSTER_ARRAY_LENGTH(target_names))
+    {
+        u64 symbol_at = raddebugger_windows_text_find(readobj_output, S8("Symbol {"), scan);
+        if (symbol_at == readobj_output.length)
+        {
+            break;
+        }
+        String8 block = raddebugger_windows_text_block(readobj_output, symbol_at);
+        if (!block.length)
+        {
+            break;
+        }
+        u64 name_at = raddebugger_windows_text_find(block, S8("Name: "), 0);
+        if (name_at < block.length)
+        {
+            u64 name_start = name_at + S8("Name: ").length;
+            u64 name_end = name_start;
+            while (name_end < block.length && block.pointer[name_end] != '\n' && block.pointer[name_end] != '\r')
+            {
+                name_end += 1;
+            }
+            String8 name = string_slice(block, name_start, name_end);
+            bool function_target = function_fragment.length && raddebugger_windows_text_has(name, function_fragment) &&
+                                   !(storage_fragment.length && raddebugger_windows_text_has(name, storage_fragment));
+            bool storage_target = storage_fragment.length && raddebugger_windows_text_has(name, storage_fragment);
+            bool optional_target = optional_fragment.length && raddebugger_windows_text_has(name, optional_fragment);
+            bool target = function_target || storage_target || optional_target;
+            bool duplicate = false;
+            for (u32 prior = 0; prior < target_count; prior += 1)
+            {
+                duplicate |= string_equal(target_names[prior], name);
+            }
+            if (target && !duplicate)
+            {
+                target_names[target_count++] = name;
+                function_found |= function_target;
+                storage_found |= storage_target;
+                optional_found |= optional_target;
+                raddebugger_windows_coff_emit_block(compiler, S8("target-symbol"), block);
+                String8 section_name = {0};
+                u32 section_number = 0;
+                if (raddebugger_windows_coff_symbol_section(block, &section_name, &section_number))
+                {
+                    String8 section_block = raddebugger_windows_coff_section_block(arena, readobj_output, section_name, section_number);
+                    String8 aux_block = raddebugger_windows_coff_aux_section_block(arena, readobj_output, section_name, section_number);
+                    if (section_block.length)
+                    {
+                        raddebugger_windows_coff_emit_block(compiler, S8("target-section"), section_block);
+                    }
+                    else
+                    {
+                        string_print(S8("RADDEBUGGER_COFF_SECTION compiler={S8} symbol={S8} section={S8} number={u32} status=none\n"),
+                                     compiler, name, section_name, section_number);
+                    }
+                    if (aux_block.length)
+                    {
+                        raddebugger_windows_coff_emit_block(compiler, S8("target-section-aux"), aux_block);
+                    }
+                    else
+                    {
+                        string_print(S8("RADDEBUGGER_COFF_SECTION_AUX compiler={S8} symbol={S8} section={S8} number={u32} status=none\n"),
+                                     compiler, name, section_name, section_number);
+                    }
+                }
+                else
+                {
+                    string_print(S8("RADDEBUGGER_COFF_SECTION compiler={S8} symbol={S8} status=not-associated\n"), compiler, name);
+                }
+            }
+        }
+        scan = symbol_at + 1;
+    }
+    u32 relocation_count = 0;
+    scan = 0;
+    while (scan < readobj_output.length && relocation_count < 16)
+    {
+        u64 relocation_at = raddebugger_windows_text_find(readobj_output, S8("Relocation {"), scan);
+        if (relocation_at == readobj_output.length)
+        {
+            break;
+        }
+        String8 block = raddebugger_windows_text_block(readobj_output, relocation_at);
+        if (!block.length)
+        {
+            break;
+        }
+        bool relevant = false;
+        for (u32 name_index = 0; name_index < target_count; name_index += 1)
+        {
+            relevant |= raddebugger_windows_text_has(block, target_names[name_index]);
+        }
+        if (relevant)
+        {
+            raddebugger_windows_coff_emit_block(compiler, S8("target-relocation"), block);
+            relocation_count += 1;
+        }
+        scan = relocation_at + 1;
+    }
+    bool required_symbols_found = function_found && storage_found;
+    string_print(S8("RADDEBUGGER_COFF_METADATA compiler={S8} object={S8} function_fragment={S8} function_found={u32} storage_fragment={S8} storage_found={u32} optional_fragment={S8} optional_found={u32} target_symbols={u32} target_relocations={u32} status={S8}\n"),
+                 compiler, object, function_fragment, (u32)function_found, storage_fragment, (u32)storage_found,
+                 optional_fragment, (u32)optional_found, target_count, relocation_count,
+                 required_symbols_found ? S8("pass") : S8("missing-required-symbol"));
+    return required_symbols_found;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_coff_metadata_command(Arena* arena, String8 llvm_readobj, String8 output_directory,
+                                                                    String8 compiler, String8 object, String8 function_fragment,
+                                                                    String8 storage_fragment, String8 optional_fragment, bool* stopped)
+{
+    String8 prefix = path_join(arena, output_directory, string_format(arena, S8("debugger/coff-metadata-{S8}-{S8}"),
+                                                                       compiler, path_basename(object)));
+    String8 arguments[] = {llvm_readobj, S8("--sections"), S8("--symbols"), S8("--relocations"), S8("--expand-relocs"), object};
+    RaddebuggerCommandResult command = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), output_directory, prefix,
+                                                           RADDEBUGGER_ENVIRONMENT_INHERIT, stopped);
+    bool metadata_passed = raddebugger_command_ok(command) &&
+                           raddebugger_windows_coff_metadata_report(arena, compiler, object, command.output, function_fragment,
+                                                                    storage_fragment, optional_fragment);
+    string_print(S8("RADDEBUGGER_COFF_METADATA_CAPTURE compiler={S8} object={S8} status={S8} full_stdout={S8}.stdout full_stderr={S8}.stderr\n"),
+                 compiler, object, metadata_passed ? S8("pass") : S8("fail"), prefix, prefix);
+    return metadata_passed;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debugger_action(Arena* arena, String8 ide, String8 clang, String8 llvm_readobj,
                                                               String8 source_directory, String8 output_directory,
                                                               String8 resource_include, bool* stopped)
 {
@@ -15734,25 +16065,104 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debugger_action(Arena* arena, Strin
     bool fixture_ready = fixture.length && resource_include.length && path_exists(arena, fixture);
     String8 compiler_names[] = {S8("buster"), S8("clang")};
     String8 compiler_paths[] = {ide, clang};
+    String8 fixture_objects[BUSTER_ARRAY_LENGTH(compiler_names)];
+    String8 fixture_prefixes[BUSTER_ARRAY_LENGTH(compiler_names)];
     String8 fixture_binaries[BUSTER_ARRAY_LENGTH(compiler_names)];
+    bool fixture_compiled[BUSTER_ARRAY_LENGTH(compiler_names)] = {false, false};
     bool fixture_linked[BUSTER_ARRAY_LENGTH(compiler_names)] = {false, false};
     bool fixture_direct_passed[BUSTER_ARRAY_LENGTH(compiler_names)] = {false, false};
+    bool fixture_metadata_passed[BUSTER_ARRAY_LENGTH(compiler_names)] = {false, false};
     String8 expected = S8("RADDEBUGGER_DEBUGGEE main=329 worker=337 values=2,3,5 record=17,5,257,7,11,13 thread=joined\n");
     for (u32 compiler_index = 0; compiler_index < BUSTER_ARRAY_LENGTH(compiler_names); compiler_index += 1)
     {
         bool buster = compiler_index == 0;
         String8 directory = path_join(arena, output_directory, compiler_names[compiler_index]);
         String8 prefix = path_join(arena, directory, S8("raddebugger-debuggee"));
-        String8 object = string_format(arena, S8("{S8}.obj"), prefix);
+        fixture_prefixes[compiler_index] = prefix;
+        fixture_objects[compiler_index] = string_format(arena, S8("{S8}.obj"), prefix);
         fixture_binaries[compiler_index] = string_format(arena, S8("{S8}.exe"), prefix);
         make_directory_recursive(arena, directory);
         bool compile_run = fixture_ready && !*stopped;
-        bool compiled = compile_run && raddebugger_windows_debuggee_compile(arena, compiler_paths[compiler_index], buster, fixture,
-                                                                            output_directory, resource_include, object, prefix, stopped);
+        fixture_compiled[compiler_index] = compile_run &&
+            raddebugger_windows_c_compile(arena, compiler_paths[compiler_index], buster, fixture, output_directory, resource_include,
+                                          fixture_objects[compiler_index], prefix, stopped);
+    }
+
+    // Dump both pristine-source objects before either link can fail. The full
+    // llvm-readobj streams stay in the command artifacts; only target symbol,
+    // section, auxiliary-section and relocation blocks are replayed here.
+    for (u32 compiler_index = 0; compiler_index < BUSTER_ARRAY_LENGTH(compiler_names); compiler_index += 1)
+    {
+        if (fixture_compiled[compiler_index] && !*stopped)
+        {
+            fixture_metadata_passed[compiler_index] =
+                raddebugger_windows_coff_metadata_command(arena, llvm_readobj, output_directory, compiler_names[compiler_index],
+                                                          fixture_objects[compiler_index], S8("__local_stdio_printf_options"),
+                                                          S8("OptionsStorage"), S8("__local_stdio_scanf_options"), stopped);
+        }
+    }
+
+    // Two independent translation units exercise the same MSVC inline/static-
+    // local shape with stable external names, separate from SDK declarations.
+    String8 inline_fixture_names[] = {S8("a"), S8("b")};
+    String8 inline_fixture_objects[BUSTER_ARRAY_LENGTH(compiler_names)][BUSTER_ARRAY_LENGTH(inline_fixture_names)];
+    bool inline_fixture_compiled[BUSTER_ARRAY_LENGTH(compiler_names)][BUSTER_ARRAY_LENGTH(inline_fixture_names)] = {{false, false}, {false, false}};
+    for (u32 compiler_index = 0; compiler_index < BUSTER_ARRAY_LENGTH(compiler_names); compiler_index += 1)
+    {
+        bool buster = compiler_index == 0;
+        for (u32 tu_index = 0; tu_index < BUSTER_ARRAY_LENGTH(inline_fixture_names); tu_index += 1)
+        {
+            String8 tu_name = inline_fixture_names[tu_index];
+            String8 source_name = string_format(arena, S8("public-inline-{S8}-{S8}.c"), compiler_names[compiler_index], tu_name);
+            String8 object_name = string_format(arena, S8("public-inline-{S8}-{S8}.obj"), compiler_names[compiler_index], tu_name);
+            String8 source_path = path_join(arena, output_directory, source_name);
+            String8 object_path = path_join(arena, output_directory, object_name);
+            String8 prefix_declaration = string_format(arena, S8("int raddebugger_inline_fixture_prefix_{S8} = 1;\n"), tu_name);
+            String8 extra_declaration = string_equal(tu_name, S8("b")) ?
+                                        S8("int raddebugger_inline_fixture_extra_b = 2;\n") : (String8){0};
+            String8 fixture_text = string_format(arena,
+                S8("{S8}{S8}"
+                   "__declspec(noinline) __inline int* public_inline(void)\n"
+                   "{\n"
+                   "    static int local;\n"
+                   "    return &local;\n"
+                   "}\n"
+                   "int* raddebugger_inline_fixture_{S8}(void)\n"
+                   "{\n"
+                   "    return public_inline();\n"
+                   "}\n"), prefix_declaration, extra_declaration, tu_name);
+            bool written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(fixture_text));
+            String8 prefix = string_format(arena, S8("debugger/public-inline-{S8}-{S8}"), compiler_names[compiler_index], tu_name);
+            inline_fixture_objects[compiler_index][tu_index] = object_path;
+            inline_fixture_compiled[compiler_index][tu_index] = written && !*stopped &&
+                raddebugger_windows_c_compile(arena, compiler_paths[compiler_index], buster, source_path, output_directory,
+                                              resource_include, object_path, path_join(arena, output_directory, prefix), stopped);
+            string_print(S8("RADDEBUGGER_INLINE_FIXTURE_COMPILE compiler={S8} tu={S8} status={S8}\n"), compiler_names[compiler_index],
+                         tu_name, inline_fixture_compiled[compiler_index][tu_index] ? S8("pass") : S8("fail"));
+        }
+    }
+    bool inline_fixture_metadata_passed[BUSTER_ARRAY_LENGTH(compiler_names)][BUSTER_ARRAY_LENGTH(inline_fixture_names)] = {{false, false}, {false, false}};
+    for (u32 compiler_index = 0; compiler_index < BUSTER_ARRAY_LENGTH(compiler_names); compiler_index += 1)
+    {
+        for (u32 tu_index = 0; tu_index < BUSTER_ARRAY_LENGTH(inline_fixture_names); tu_index += 1)
+        {
+            if (inline_fixture_compiled[compiler_index][tu_index] && !*stopped)
+            {
+                inline_fixture_metadata_passed[compiler_index][tu_index] =
+                    raddebugger_windows_coff_metadata_command(arena, llvm_readobj, output_directory, compiler_names[compiler_index],
+                                                              inline_fixture_objects[compiler_index][tu_index],
+                                                              S8("public_inline"), S8("local"), (String8){0}, stopped);
+            }
+        }
+    }
+
+    for (u32 compiler_index = 0; compiler_index < BUSTER_ARRAY_LENGTH(compiler_names); compiler_index += 1)
+    {
+        String8 prefix = fixture_prefixes[compiler_index];
         String8 link_prefix = string_format(arena, S8("{S8}-link"), prefix);
-        fixture_linked[compiler_index] = compiled && raddebugger_windows_link(arena, clang, output_directory, source_directory,
-                                                                               object, (String8){0}, (String8){0}, false,
-                                                                               fixture_binaries[compiler_index], link_prefix, stopped);
+        fixture_linked[compiler_index] = fixture_compiled[compiler_index] &&
+            raddebugger_windows_link(arena, clang, output_directory, source_directory, fixture_objects[compiler_index],
+                                     (String8){0}, (String8){0}, false, fixture_binaries[compiler_index], link_prefix, stopped);
         bool runtime_run = fixture_linked[compiler_index] && !*stopped;
         RaddebuggerCommandResult run = {.wait = {.result = PROCESS_RESULT_NOT_EXISTENT}};
         if (runtime_run)
@@ -15765,8 +16175,8 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debugger_action(Arena* arena, Strin
         fixture_direct_passed[compiler_index] = runtime_run && raddebugger_command_ok(run) &&
             !run.wait.streams[STANDARD_STREAM_ERROR].length && string_equal(run.output, expected);
         string_print(S8("RADDEBUGGER_DEBUGGEE compiler={S8} compile={S8} link_pdb={S8} direct_run={S8}\n"), compiler_names[compiler_index],
-                     compile_run ? (compiled ? S8("pass") : S8("fail")) : S8("not-run"),
-                     compiled ? (fixture_linked[compiler_index] ? S8("pass") : S8("fail")) : S8("not-run"),
+                     fixture_compiled[compiler_index] ? S8("pass") : S8("fail"),
+                     fixture_compiled[compiler_index] ? (fixture_linked[compiler_index] ? S8("pass") : S8("fail")) : S8("not-run"),
                      runtime_run ? (fixture_direct_passed[compiler_index] ? S8("pass") : S8("fail")) : S8("not-run"));
     }
     String8List summary = {0};
@@ -15831,6 +16241,9 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debugger_action(Arena* arena, Strin
     bool summary_written = file_write(path_join(arena, debugger_directory, S8("debugger-summary.tsv")),
                                       BUSTER_SLICE_TO_BYTE_SLICE(summary_text));
     return fixture_linked[0] && fixture_linked[1] && fixture_direct_passed[0] && fixture_direct_passed[1] &&
+           fixture_metadata_passed[0] && fixture_metadata_passed[1] && inline_fixture_compiled[0][0] && inline_fixture_compiled[0][1] &&
+           inline_fixture_compiled[1][0] && inline_fixture_compiled[1][1] && inline_fixture_metadata_passed[0][0] &&
+           inline_fixture_metadata_passed[0][1] && inline_fixture_metadata_passed[1][0] && inline_fixture_metadata_passed[1][1] &&
            supervisor_built && supervisor_self_test_passed && cells_passed && summary_written;
 }
 
@@ -15887,6 +16300,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult raddebugger_windows_action(Arena* arena, TestR
                                  "COFF_machine_and_symbols=llvm-readobj AMD64 plus wWinMain+wmain; RAD_dump=Clang-DWARF fixture exit smoke\n"
                                  "Windows_session_supervisor=trusted Clang C11 -Wall -Wextra -Werror linked with ws2_32, iphlpapi, user32\n"
                                  "smoke_fixture=generated harness C compiled by Clang only; not an upstream source\n"
+                                 "COFF_metadata_fixture=two original noinline __inline TUs with one local static; compiled independently by Buster and Clang\n"
                                  "runtime=owned raddbg.com shim forwards --bin, waits, and propagates child exit; Actions console output is not an oracle\n"
                                  "source=unchanged pinned checkout; all outputs outside upstream\n");
         bool attribution_written = file_write(path_join(arena, output_directory, S8("attribution.txt")), BUSTER_SLICE_TO_BYTE_SLICE(attribution));
@@ -16094,7 +16508,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult raddebugger_windows_action(Arena* arena, TestR
                             "oracle=exit-status captured_console_output=untrusted status={S8} gui=not-run\n"), compiler_name, status);
             runtime_passed = run_ok && runtime_passed;
         }
-        bool debugger_passed = !options.debugger || raddebugger_windows_debugger_action(arena, ide, clang, source_directory,
+        bool debugger_passed = !options.debugger || raddebugger_windows_debugger_action(arena, ide, clang, llvm_readobj, source_directory,
                                                                                          output_directory, resource_include, &stopped);
         bool source_unchanged = raddebugger_git_verify(arena, git, source_directory, S8(RADDEBUGGER_COMPATIBILITY_COMMIT), &stopped);
         string8_list_push(arena, &summary, string_format(arena, S8("source\tRAD Debugger\tgit\tna\tna\t{S8}\n"),

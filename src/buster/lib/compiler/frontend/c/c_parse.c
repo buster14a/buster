@@ -10742,7 +10742,7 @@ BUSTER_C_INTERNAL bool c_parse_type_word(String8 spelling)
     {
         return string_equal(spelling, S8("signed")) || string_equal(spelling, S8("double")) || string_equal(spelling, S8("extern")) ||
                string_equal(spelling, S8("static")) || string_equal(spelling, S8("inline")) || string_equal(spelling, S8("struct")) ||
-               string_equal(spelling, S8("__bf16"));
+               string_equal(spelling, S8("__bf16")) || string_equal(spelling, S8("__int8"));
     }
     case 7:
     {
@@ -10928,9 +10928,9 @@ BUSTER_C_INTERNAL bool c_parse_float16_specifier_valid(bool seen_void, bool seen
 
 BUSTER_GLOBAL_LOCAL bool c_parse_primitive_specifiers_valid(bool seen_void, bool seen_va_list, bool seen_bool, bool seen_char,
     bool seen_short, bool seen_int, bool seen_signed, bool seen_unsigned, bool seen_float16, bool seen_bfloat16, bool seen_float, bool seen_double,
-    bool seen_int128, bool seen_complex, bool seen_imaginary, u32 long_count, bool duplicate)
+    bool seen_int128, bool seen_int8, bool seen_complex, bool seen_imaginary, u32 long_count, bool duplicate)
 {
-    u32 primary_count = (u32)seen_void + (u32)seen_va_list + (u32)seen_bool + (u32)seen_char +
+    u32 primary_count = (u32)seen_void + (u32)seen_va_list + (u32)seen_bool + (u32)seen_char + (u32)seen_int8 +
                         (u32)seen_float16 + (u32)seen_bfloat16 + (u32)seen_float + (u32)seen_double + (u32)seen_int128;
     bool valid = !duplicate && !seen_imaginary && !(seen_signed && seen_unsigned) && long_count <= 2 && primary_count <= 1;
     if (seen_void || seen_va_list || seen_bool)
@@ -10938,6 +10938,10 @@ BUSTER_GLOBAL_LOCAL bool c_parse_primitive_specifiers_valid(bool seen_void, bool
         valid &= !seen_short && !seen_int && !seen_signed && !seen_unsigned && !seen_complex && long_count == 0;
     }
     else if (seen_char)
+    {
+        valid &= !seen_short && !seen_int && !seen_complex && long_count == 0;
+    }
+    else if (seen_int8)
     {
         valid &= !seen_short && !seen_int && !seen_complex && long_count == 0;
     }
@@ -10987,6 +10991,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
     bool seen_bfloat16 = false;
     bool seen_double = false;
     bool seen_int128 = false;
+    bool seen_int8 = false;
     bool seen_complex = false;
     bool seen_imaginary = false;
     u32 long_count = 0;
@@ -11063,6 +11068,12 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
         {
             duplicate |= seen_int;
             seen_int = true;
+            seen_type = true;
+        }
+        else if (string_equal(spelling, S8("__int8")))
+        {
+            duplicate |= seen_int8;
+            seen_int8 = true;
             seen_type = true;
         }
         else if (string_equal(spelling, S8("__int128")))
@@ -11144,7 +11155,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
     }
     *declarator_start = index;
     bool valid_specifiers = c_parse_primitive_specifiers_valid(seen_void, seen_va_list, seen_bool, seen_char, seen_short,
-        seen_int, seen_signed, seen_unsigned, seen_float16, seen_bfloat16, seen_float, seen_double, seen_int128, seen_complex, seen_imaginary,
+        seen_int, seen_signed, seen_unsigned, seen_float16, seen_bfloat16, seen_float, seen_double, seen_int128, seen_int8, seen_complex, seen_imaginary,
         long_count, duplicate);
     CTypeId parsed = C_TYPE_ID_INVALID;
     if (seen_type && !valid_specifiers)
@@ -11183,6 +11194,10 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
         else if (seen_char)
         {
             type.kind = seen_unsigned ? C_TYPE_UNSIGNED_CHAR : seen_signed ? C_TYPE_SIGNED_CHAR : C_TYPE_CHAR;
+        }
+        else if (seen_int8)
+        {
+            type.kind = seen_unsigned ? C_TYPE_UNSIGNED_CHAR : C_TYPE_SIGNED_CHAR;
         }
         else if (seen_bfloat16)
         {
@@ -12176,6 +12191,7 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
     bool seen_bfloat16 = false;
     bool seen_double = false;
     bool seen_int128 = false;
+    bool seen_int8 = false;
     bool seen_complex = false;
     bool seen_imaginary = false;
     u32 long_count = 0;
@@ -12249,6 +12265,12 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
             seen_int = true;
             seen_type = true;
         }
+        else if (string_equal(spelling, S8("__int8")))
+        {
+            duplicate |= seen_int8;
+            seen_int8 = true;
+            seen_type = true;
+        }
         else if (string_equal(spelling, S8("__int128")))
         {
             duplicate |= seen_int128;
@@ -12312,7 +12334,7 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
     }
     *declarator_start = index;
     bool valid_specifiers = c_parse_primitive_specifiers_valid(seen_void, seen_va_list, seen_bool, seen_char, seen_short,
-        seen_int, seen_signed, seen_unsigned, seen_float16, seen_bfloat16, seen_float, seen_double, seen_int128, seen_complex, seen_imaginary,
+        seen_int, seen_signed, seen_unsigned, seen_float16, seen_bfloat16, seen_float, seen_double, seen_int128, seen_int8, seen_complex, seen_imaginary,
         long_count, duplicate);
     *invalid_specifier = seen_type && !valid_specifiers ? first_type : UINT32_MAX;
     CTypeKind result;
@@ -12351,6 +12373,10 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
     else if (seen_char)
     {
         result = seen_unsigned ? C_TYPE_UNSIGNED_CHAR : seen_signed ? C_TYPE_SIGNED_CHAR : C_TYPE_CHAR;
+    }
+    else if (seen_int8)
+    {
+        result = seen_unsigned ? C_TYPE_UNSIGNED_CHAR : C_TYPE_SIGNED_CHAR;
     }
     else if (seen_float)
     {

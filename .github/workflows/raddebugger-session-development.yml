@@ -172,3 +172,69 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+
+  windows-compiler-baseline:
+    name: Windows compiler baseline fc1c37e9
+    runs-on: windows-2025
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Check out Buster
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fc1c37e9c355bac9cad53c4bbda54a514d4dd6d4
+          persist-credentials: false
+      - name: Install pinned LLVM
+        shell: bash
+        env:
+          BUSTER_CI_PYTHON: python
+          GH_TOKEN: ${{ github.token }}
+          LLVM_TARGET: x86_64-windows
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/raddebugger-windows-baseline"
+          python tools/ci_llvm.py --target "$LLVM_TARGET" --work-directory "$RUNNER_TEMP/llvm" \
+            --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV" \
+            2>&1 | tee "$RUNNER_TEMP/raddebugger-windows-baseline/llvm.log"
+      - name: Preserve the pre-repair native self-host fixed point
+        shell: pwsh
+        env:
+          VS_ARCH: amd64
+          VS_COMPONENT: Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+          CLANG_ARCH: x86_64
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Logs = Join-Path $env:RUNNER_TEMP 'raddebugger-windows-baseline'
+          New-Item -ItemType Directory -Force -Path $Logs | Out-Null
+          & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT -LlvmBin $env:BUSTER_CI_LLVM_BIN -Require cl, clang, llvm-rc, llvm-ml, llvm-lib, llvm-readobj -ClangArch $env:CLANG_ARCH
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # generate recreates build/, so keep the native driver and setup logs in RUNNER_TEMP.
+          $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
+          $Bootstrap = 'clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o "' + $Driver + '" 2>&1'
+          cmd /d /s /c $Bootstrap | Tee-Object -FilePath (Join-Path $Logs 'bootstrap.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $Generate = '"' + $Driver + '" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF -DBUSTER_BENCH_ALLOCATIONS=ON 2>&1'
+          cmd /d /s /c $Generate | Tee-Object -FilePath (Join-Path $Logs 'generate.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $Build = '"' + $Driver + '" build --config Release -t ide 2>&1'
+          cmd /d /s /c $Build | Tee-Object -FilePath (Join-Path $Logs 'build-ide.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $FixedPoint = '"' + $Driver + '" test_self_host --config Release 2>&1'
+          cmd /d /s /c $FixedPoint | Tee-Object -FilePath (Join-Path $Logs 'self-host.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain pre-repair Windows compiler evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: raddebugger-windows-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/self-host
+            ${{ runner.temp }}/raddebugger-windows-baseline
+          if-no-files-found: warn
+          retention-days: 14
+

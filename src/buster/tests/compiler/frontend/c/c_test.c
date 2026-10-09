@@ -50320,6 +50320,92 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_specifier_diagnostics(UnitTestArg
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_msvc_int8_type_specifier(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TargetParseResult target_result = target_parse_triple(S8("x86_64-pc-windows-msvc"));
+    if (BUSTER_REQUIRE(arguments, target_result.error == TARGET_PARSE_ERROR_NONE))
+    {
+        Target target = target_result.target;
+        target.plain_char_policy = TARGET_PLAIN_CHAR_POLICY_UNSIGNED;
+        String8 source = S8(
+            "__int8 signed_byte;\n"
+            "unsigned __int8 unsigned_byte;\n"
+            "unsigned __int16 unsigned_short;\n"
+            "unsigned __int32 unsigned_int;\n"
+            "unsigned __int64 unsigned_long_long;\n"
+            "_Static_assert((char)-1 > 0, \"plain char override\");\n"
+            "_Static_assert((__int8)-1 < 0, \"__int8 is fixed signed\");\n"
+            "_Static_assert((unsigned __int8)-1 > 0, \"unsigned __int8 is unsigned\");\n");
+        String8 names[] = {
+            S8("signed_byte"), S8("unsigned_byte"), S8("unsigned_short"), S8("unsigned_int"), S8("unsigned_long_long")
+        };
+        CTypeKind expected_kinds[] = {
+            C_TYPE_SIGNED_CHAR, C_TYPE_UNSIGNED_CHAR, C_TYPE_UNSIGNED_SHORT, C_TYPE_UNSIGNED_INT, C_TYPE_UNSIGNED_LONG_LONG
+        };
+        u64 expected_sizes[] = {1, 1, 2, 4, 8};
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("msvc-int8.c"), target, &preprocess, &parse);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0 &&
+                                  lowered.diagnostic_count == 0, source);
+        if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+        {
+            IrModule* module = &lowered.program->modules[0];
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+            for (u32 expected = 0; expected < BUSTER_ARRAY_LENGTH(names); expected += 1)
+            {
+                bool parsed_type = false;
+                for (u32 entity = 0; entity < parse.entity_count; entity += 1)
+                {
+                    CEntity* row = parse.entities + entity;
+                    parsed_type |= string_equal(row->name, names[expected]) && row->type.value < parse.type_count &&
+                                   parse.types[row->type.value].kind == expected_kinds[expected];
+                }
+                bool lowered_type = false;
+                for (u32 global = 0; global < module->global_count; global += 1)
+                {
+                    IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, module->globals[global].symbol);
+                    if (symbol && string_equal(symbol->name, names[expected]))
+                    {
+                        IrType* type = ir_type_from_id(&lowered.program->types, module->globals[global].type);
+                        lowered_type = type && type->layout.resolved && type->layout.size == expected_sizes[expected];
+                    }
+                }
+                BUSTER_TEST_RAW(arguments, parsed_type && lowered_type, names[expected]);
+            }
+        }
+        c_test_scratch_end(temporary);
+
+        String8 refused[] = {
+            S8("unsigned signed __int8 value;\n"),
+            S8("__int8 __int8 value;\n"),
+            S8("long __int8 value;\n")
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
+        {
+            TemporalArena invalid_temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult invalid_preprocess = {0};
+            CParseResult invalid_parse = {0};
+            CIRLowerResult invalid_lowered = c_test_lower_source(invalid_temporary.arena, refused[index],
+                S8("invalid-msvc-int8.c"), target, &invalid_preprocess, &invalid_parse);
+            bool attributed = false;
+            for (u32 diagnostic = 0; diagnostic < invalid_parse.diagnostic_count; diagnostic += 1)
+            {
+                attributed |= invalid_parse.diagnostics[diagnostic].kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS;
+            }
+            for (u32 diagnostic = 0; diagnostic < invalid_lowered.diagnostic_count; diagnostic += 1)
+            {
+                attributed |= invalid_lowered.diagnostics[diagnostic].kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS;
+            }
+            BUSTER_TEST_RAW(arguments, invalid_preprocess.diagnostic_count == 0 && attributed, refused[index]);
+            c_test_scratch_end(invalid_temporary);
+        }
+    }
+    return result;
+}
+
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_same_scope_tag_redefinition_diagnostics(UnitTestArguments* arguments)
 {
@@ -56874,6 +56960,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_type_parse_snapshot_rows);
     C_TEST_FIXTURE(arguments, c_test_type_self_compatibility);
     C_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_msvc_int8_type_specifier);
     C_TEST_FIXTURE(arguments, c_test_typed_enum_integer_constants);
     C_TEST_FIXTURE(arguments, c_test_typedef_fallback_lookup);
     C_TEST_FIXTURE(arguments, c_test_typeof_anonymous_aggregate_runtime);

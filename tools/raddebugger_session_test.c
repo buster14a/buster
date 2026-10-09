@@ -248,6 +248,14 @@ buffer_append(Buffer *buffer, const char *data, size_t size)
     return ok;
 }
 
+/* Marker counting uses C strings, so captured process output must contain no NUL. */
+static int
+append_captured_output(Buffer *buffer, const char *data, size_t size)
+{
+    int ok = memchr(data, 0, size) == NULL && buffer_append(buffer, data, size);
+    return ok;
+}
+
 static int
 parse_u64(const char *text, uint64_t *value_out)
 {
@@ -397,9 +405,15 @@ balanced_md(const char *text)
     int in_string = 0;
     int escaped = 0;
     int depth = 0;
+    int roots = 0;
+    int closed = 0;
     for(const char *p = text; *p != 0; p += 1)
     {
-        if(in_string)
+        if(closed)
+        {
+            if(*p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') ok = 0;
+        }
+        else if(in_string)
         {
             if(escaped)
             {
@@ -420,21 +434,17 @@ balanced_md(const char *text)
         }
         else if(*p == '{')
         {
+            if(depth == 0) roots += 1;
             depth += 1;
         }
         else if(*p == '}')
         {
             depth -= 1;
-            if(depth < 0)
-            {
-                ok = 0;
-            }
+            if(depth < 0) ok = 0;
+            else if(depth == 0) closed = 1;
         }
     }
-    if(depth != 0 || in_string)
-    {
-        ok = 0;
-    }
+    if(depth != 0 || in_string || roots != 1 || !closed) ok = 0;
     return ok;
 }
 
@@ -444,7 +454,7 @@ parse_state(const char *text, State *state)
     int ok = 0;
     char number[MAX_VALUE_BYTES];
     uint64_t running = 0;
-    if(text != NULL && strlen(text) <= MAX_IPC_BYTES && strncmp(text, "state:", 6) == 0 && balanced_md(text) &&
+    if(text != NULL && strlen(text) <= MAX_IPC_BYTES && strncmp(text, "state:\n{", 8) == 0 && balanced_md(text) &&
        line_key_count(text, 1, "stop_event") == 1 && line_key_count(text, 1, "locals") == 1 &&
        line_key_count(text, 1, "lines") == 1 && line_key_count(text, 1, "threads") == 1 &&
        line_key_count(text, 1, "modules") == 1)
@@ -584,11 +594,39 @@ parse_state(const char *text, State *state)
     return ok;
 }
 
+/* Eval is one flat document with the four ordered fields emitted upstream. */
+static int
+eval_document_shape(const char *text)
+{
+    int ok = strncmp(text, "eval:\n{\n", 8) == 0;
+    const char *keys[] = {" expr:", " value:", " type:", " msgs:"};
+    const char *line = ok ? text + 8 : text;
+    for(unsigned i = 0; i < 4 && ok; i += 1)
+    {
+        const char *end = strchr(line, '\n');
+        size_t key_size = strlen(keys[i]);
+        ok = end != NULL && (size_t)(end - line) > key_size &&
+             memcmp(line, keys[i], key_size) == 0;
+        if(ok) line = end + 1;
+    }
+    if(ok)
+    {
+        ok = *line == '}';
+        if(ok)
+        {
+            line += 1;
+            while(*line == ' ' || *line == '\t' || *line == '\r' || *line == '\n') line += 1;
+            ok = *line == 0;
+        }
+    }
+    return ok;
+}
+
 static int
 parse_eval(const char *text, EvalResult *result)
 {
     int ok = 0;
-    if(text != NULL && strlen(text) <= MAX_IPC_BYTES && strncmp(text, "eval:\n{", 7) == 0 && balanced_md(text))
+    if(text != NULL && strlen(text) <= MAX_IPC_BYTES && strncmp(text, "eval:\n{", 7) == 0 && balanced_md(text) && eval_document_shape(text))
     {
         EvalResult parsed = {0};
         if(read_field(text, 1, "expr", parsed.expr, sizeof(parsed.expr)) &&
@@ -863,7 +901,7 @@ static int
 native_response_complete(const Buffer *output)
 {
     int complete = 0;
-    if(output->data != NULL && output->size != 0)
+    if(output->data != NULL && output->size != 0 && memchr(output->data, 0, output->size) == NULL)
     {
         size_t end = output->size;
         while(end > 0 && (output->data[end-1] == ' ' || output->data[end-1] == '\r' ||
@@ -874,6 +912,67 @@ native_response_complete(const Buffer *output)
                     balanced_md(output->data));
     }
     return complete;
+}
+
+/* Pinned Eval emits six strings joined with five NUL separators.  Validate
+ * their exact boundaries before concatenating; NUL inside a field is invalid. */
+static int
+normalize_native_response(const Buffer *raw, Buffer *output)
+{
+    int ok = 0;
+    Buffer joined = {0};
+    if(raw != NULL && raw->data != NULL && raw->size != 0 && raw->size <= MAX_IPC_BYTES &&
+       output != NULL && output->data == NULL && output->size == 0)
+    {
+        const char *separator = memchr(raw->data, 0, raw->size);
+        if(separator == NULL)
+        {
+            EvalResult eval = {0};
+            if(native_response_complete(raw) &&
+               (strncmp(raw->data, "eval:\n{", 7) != 0 || parse_eval(raw->data, &eval)))
+            {
+                ok = buffer_append(&joined, raw->data, raw->size);
+            }
+        }
+        else
+        {
+            const char *parts[6] = {0};
+            size_t sizes[6] = {0};
+            size_t offset = 0;
+            int valid = 1;
+            for(unsigned i = 0; i < 6 && valid; i += 1)
+            {
+                size_t remaining = raw->size - offset;
+                const char *end = memchr(raw->data + offset, 0, remaining);
+                parts[i] = raw->data + offset;
+                sizes[i] = end != NULL ? (size_t)(end - parts[i]) : remaining;
+                valid = i < 5 ? end != NULL : end == NULL;
+                if(valid) offset += sizes[i] + (i < 5 ? 1u : 0u);
+            }
+            const char *prefixes[] = {" expr:  ", " value: \"", " type:  \"", " msgs:  \""};
+            if(valid)
+            {
+                valid = sizes[0] == 8 && memcmp(parts[0], "eval:\n{\n", 8) == 0 &&
+                        sizes[5] == 2 && memcmp(parts[5], "}\n", 2) == 0;
+            }
+            for(unsigned i = 1; i < 5 && valid; i += 1)
+            {
+                size_t prefix_size = strlen(prefixes[i-1]);
+                valid = sizes[i] > prefix_size && memcmp(parts[i], prefixes[i-1], prefix_size) == 0 &&
+                        parts[i][sizes[i]-1] == '\n' && memchr(parts[i], '\n', sizes[i]-1) == NULL &&
+                        (i == 1 || parts[i][sizes[i]-2] == '"');
+            }
+            for(unsigned i = 0; i < 6 && valid; i += 1)
+            {
+                valid = buffer_append(&joined, parts[i], sizes[i]);
+            }
+            EvalResult eval = {0};
+            ok = valid && native_response_complete(&joined) && parse_eval(joined.data, &eval);
+        }
+    }
+    if(ok) *output = joined;
+    else free(joined.data);
+    return ok;
 }
 
 #if defined(_WIN32)
@@ -927,9 +1026,9 @@ drain_gui_output(Session *session)
             {
                 reading = 0;
             }
-            else if(!buffer_append(&session->gui_output, chunk, (size_t)got))
+            else if(!append_captured_output(&session->gui_output, chunk, (size_t)got))
             {
-                log_text("RADDBG_ORACLE_ERROR target stdout/stderr exceeds 1 MiB cap", NULL);
+                log_text("RADDBG_ORACLE_ERROR target stdout/stderr contains NUL or exceeds 1 MiB cap", NULL);
                 ok = 0;
             }
         }
@@ -1072,6 +1171,7 @@ static int
 run_ipc(Session *session, const char *command_text, Buffer *output)
 {
     int ok = 0;
+    Buffer raw_response = {0};
     SOCKET client = INVALID_SOCKET;
     uint64_t end = monotonic_ms() + 10000u;
     if(end > session->deadline_ms) end = session->deadline_ms;
@@ -1146,17 +1246,17 @@ run_ipc(Session *session, const char *command_text, Buffer *output)
                 int got = recv(client, chunk, sizeof(chunk), 0);
                 if(got <= 0)
                 {
-                    if(got == 0 && native_response_complete(output)) ok = 1;
+                    if(got == 0) log_text("RADDBG_ORACLE_ERROR RAD IPC connection closed mid-session", NULL);
                     break;
                 }
-                if(memchr(chunk, 0, (size_t)got) != NULL || !buffer_append(output, chunk, (size_t)got))
+                if(!buffer_append(&raw_response, chunk, (size_t)got))
                 {
-                    log_text("RADDBG_ORACLE_ERROR oversized or NUL-separated native IPC response", NULL);
+                    log_text("RADDBG_ORACLE_ERROR oversized native IPC response", NULL);
                     break;
                 }
                 last_byte_ms = monotonic_ms();
             }
-            else if(last_byte_ms != 0 && monotonic_ms() - last_byte_ms >= 200u && native_response_complete(output))
+            else if(last_byte_ms != 0 && monotonic_ms() - last_byte_ms >= 200u && normalize_native_response(&raw_response, output))
             {
                 ok = process_owns_ipc_listener(session);
                 break;
@@ -1168,6 +1268,7 @@ run_ipc(Session *session, const char *command_text, Buffer *output)
         session->failed = 1;
         log_text("RADDBG_ORACLE_ERROR native IPC failed, incomplete, or timed out", NULL);
     }
+    free(raw_response.data);
     return ok;
 }
 
@@ -1229,11 +1330,11 @@ drain_gui_output(Session *session)
             ssize_t got = read(session->gui_output_fd, chunk, sizeof(chunk));
             if(got > 0)
             {
-                if(!buffer_append(&session->gui_output, chunk, (size_t)got))
+                if(!append_captured_output(&session->gui_output, chunk, (size_t)got))
                 {
                     session->failed = 1;
                     ok = 0;
-                    log_text("RADDBG_ORACLE_ERROR captured GUI/debuggee output exceeds 1 MiB cap", NULL);
+                    log_text("RADDBG_ORACLE_ERROR captured GUI/debuggee output contains NUL or exceeds 1 MiB cap", NULL);
                 }
             }
             else if(got < 0 && errno == EINTR)
@@ -1390,7 +1491,7 @@ static int
 wait_for_owned_ipc(Session *session)
 {
     int ok = 0;
-    while(monotonic_ms() < session->deadline_ms && !g_interrupted)
+    while(monotonic_ms() < session->deadline_ms && !g_interrupted && !session->failed)
     {
         unsigned long inode = 0;
         int listener = tcp_listener_inode(session->args.port, &inode);
@@ -1507,6 +1608,7 @@ static int
 run_ipc(Session *session, const char *command_text, Buffer *output)
 {
     int ok = 0;
+    Buffer raw_response = {0};
     uint64_t deadline_ms = monotonic_ms() + LINUX_IPC_TIMEOUT_MS;
     if(deadline_ms > session->deadline_ms) deadline_ms = session->deadline_ms;
     int permitted = !session->failed && output != NULL && output->size == 0 && command_text != NULL &&
@@ -1593,9 +1695,9 @@ run_ipc(Session *session, const char *command_text, Buffer *output)
             ssize_t got = recv(fd, chunk, sizeof(chunk), 0);
             if(got > 0)
             {
-                if(memchr(chunk, 0, (size_t)got) != NULL || !buffer_append(output, chunk, (size_t)got))
+                if(!buffer_append(&raw_response, chunk, (size_t)got))
                 {
-                    log_text("RADDBG_ORACLE_ERROR oversized or NUL-separated native IPC response", NULL);
+                    log_text("RADDBG_ORACLE_ERROR oversized native IPC response", NULL);
                     break;
                 }
                 last_byte_ms = monotonic_ms();
@@ -1607,7 +1709,7 @@ run_ipc(Session *session, const char *command_text, Buffer *output)
             }
             else if(errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) break;
         }
-        else if(last_byte_ms != 0 && monotonic_ms() - last_byte_ms >= 200u && native_response_complete(output))
+        else if(last_byte_ms != 0 && monotonic_ms() - last_byte_ms >= 200u && normalize_native_response(&raw_response, output))
         {
             ok = linux_gui_alive(session) && process_owns_ipc_listener(session);
             break;
@@ -1618,6 +1720,7 @@ run_ipc(Session *session, const char *command_text, Buffer *output)
         session->failed = 1;
         log_text("RADDBG_ORACLE_ERROR native IPC failed, incomplete, or timed out", NULL);
     }
+    free(raw_response.data);
     return ok;
 }
 
@@ -1695,7 +1798,7 @@ wait_for_stop(Session *session, uint64_t old_stop_count, uint64_t old_run_gen, c
               unsigned expected_line, State *state_out)
 {
     int ok = 0;
-    while(monotonic_ms() < session->deadline_ms && !g_interrupted)
+    while(monotonic_ms() < session->deadline_ms && !g_interrupted && !session->failed)
     {
         State state = {0};
         Buffer response = {0};
@@ -2012,7 +2115,7 @@ wait_for_gui_window(Session *session)
     int ok = 0;
     if(session->display != NULL)
     {
-        while(monotonic_ms() < session->deadline_ms && !g_interrupted)
+        while(monotonic_ms() < session->deadline_ms && !g_interrupted && !session->failed)
         {
             if(window_class_visible(session->display, DefaultRootWindow(session->display)))
             {
@@ -2905,6 +3008,92 @@ self_test(void)
     {
         ok = 0;
     }
+    /* Actual pinned Eval wire layout, received in two independent TCP chunks. */
+    static const char segmented_eval[] =
+        "eval:\n{\n\0"
+        " expr:  inner_value\n\0"
+        " value: \"17\"\n\0"
+        " type:  \"int\"\n\0"
+        " msgs:  \"\"\n\0"
+        "}\n";
+    static const char misplaced_separator[] =
+        "eval:\n{\n \0"
+        "expr:  inner_value\n\0"
+        " value: \"17\"\n\0"
+        " type:  \"int\"\n\0"
+        " msgs:  \"\"\n\0"
+        "}\n";
+    static const char interior_separator[] =
+        "eval:\n{\n\0"
+        " expr:  inner_value\n\0"
+        " value: \"1\0" "7\"\n\0"
+        " type:  \"int\"\n\0"
+        " msgs:  \"\"\n\0"
+        "}\n";
+    static const char missing_separator[] =
+        "eval:\n{\n\0"
+        " expr:  inner_value\n"
+        " value: \"17\"\n\0"
+        " type:  \"int\"\n\0"
+        " msgs:  \"\"\n\0"
+        "}\n";
+    static const char extra_separator[] =
+        "eval:\n{\n\0"
+        " expr:  inner_value\n\0"
+        " value: \"17\"\n\0"
+        " type:  \"int\"\n\0"
+        " msgs:  \"\"\n\0"
+        "}\n\0";
+    static const char state_separator[] = "state:\n{\n\0}\n";
+    static const char second_root[] =
+        "eval:\n{\n expr: inner_value\n value: \"17\"\n type: \"int\"\n msgs: \"\"\n}\n{}\n";
+    static const char done_suffix[] =
+        "eval:\n{\n expr: inner_value\n value: \"17\"\n type: \"int\"\n msgs: \"\"\n}\ndone\n";
+    static const char unexpected_field[] =
+        "eval:\n{\n expr: inner_value\n value: \"17\"\n type: \"int\"\n msgs: \"\"\n other: \"x\"\n}\n";
+    Buffer wire = {0};
+    Buffer normalized = {0};
+    size_t first_chunk = sizeof(segmented_eval) / 2u;
+    if(!buffer_append(&wire, segmented_eval, first_chunk) ||
+       normalize_native_response(&wire, &normalized) || normalized.data != NULL ||
+       !buffer_append(&wire, segmented_eval + first_chunk, sizeof(segmented_eval) - 1u - first_chunk) ||
+       native_response_complete(&wire) || !normalize_native_response(&wire, &normalized) ||
+       !parse_eval(normalized.data, &bad_eval) || !eval_matches(&bad_eval, "inner_value", "17"))
+    {
+        ok = 0;
+    }
+    free(wire.data);
+    free(normalized.data);
+    const char *malformed_wire[] = {misplaced_separator, interior_separator, missing_separator,
+                                   extra_separator, state_separator, second_root, done_suffix, unexpected_field};
+    const size_t malformed_sizes[] = {sizeof(misplaced_separator)-1u, sizeof(interior_separator)-1u,
+                                     sizeof(missing_separator)-1u, sizeof(extra_separator)-1u,
+                                     sizeof(state_separator)-1u, sizeof(second_root)-1u,
+                                     sizeof(done_suffix)-1u, sizeof(unexpected_field)-1u};
+    for(unsigned i = 0; i < sizeof(malformed_sizes)/sizeof(malformed_sizes[0]); i += 1)
+    {
+        Buffer raw = {(char *)malformed_wire[i], malformed_sizes[i], 0};
+        Buffer rejected = {0};
+        if(normalize_native_response(&raw, &rejected) || rejected.data != NULL || rejected.size != 0) ok = 0;
+        free(rejected.data);
+    }
+    if(parse_eval(second_root, &bad_eval) || parse_eval(done_suffix, &bad_eval) ||
+       parse_eval(unexpected_field, &bad_eval) || balanced_md("state:\n{}\n{}\n") ||
+       balanced_md("state:\n{}\ndone\n"))
+    {
+        ok = 0;
+    }
+    static const char completion_line[] = "RADDEBUGGER_DEBUGGEE completion\n";
+    static const char hidden_completion[] = "\0RADDEBUGGER_DEBUGGEE completion\n";
+    Session captured = {0};
+    if(!append_captured_output(&captured.gui_output, completion_line, sizeof(completion_line)-1u) ||
+       append_captured_output(&captured.gui_output, hidden_completion, sizeof(hidden_completion)-1u) ||
+       captured.gui_output.size != sizeof(completion_line)-1u ||
+       gui_output_line_count(&captured, "RADDEBUGGER_DEBUGGEE completion") != 1)
+    {
+        ok = 0;
+    }
+    free(captured.gui_output.data);
     if(eval_matches(&eval, "inner_value", "18") || eval_matches(&eval, "wrong_name", "17"))
     {
         ok = 0;

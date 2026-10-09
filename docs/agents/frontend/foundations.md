@@ -1268,6 +1268,13 @@ without facts for identical bitcode and diagnostics.
   rejecting contradictory or repeated half-type words with a diagnostic.
   A type name refused this way pins `sizeof`/`_Alignof` to the
   recorded constraint instead of falling back to a guessed `int`.
+- The Windows prelude leaves `__int8` as a type word instead of expanding it
+  to `signed char`: that preserves its fixed signed meaning while allowing
+  `unsigned __int8` to select `unsigned char`. Its signedness is independent
+  of the target's plain-`char` policy. Type-word recognition is target independent,
+  as with the other implementation-reserved scalar extension words. The existing `__int16`, `__int32` and
+  `__int64` prelude aliases continue to expand to `short`, `int` and
+  `long long`.
 - A `struct`, `union` or `enum` specifier names a type exactly as a primitive
   word does, so a set that spells both (`int struct S`, `struct S unsigned`)
   or two tags (`struct S enum E`) is the same error at the same first
