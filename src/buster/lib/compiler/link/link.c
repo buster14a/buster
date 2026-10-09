@@ -2145,8 +2145,9 @@ BUSTER_GLOBAL_LOCAL u8 link_symbol_thread_local_state(ObjectFile* object, Object
 // ahead of all of them (IR_INITIALIZER_PRIORITY_PREINIT), whichever input they
 // arrive in and whether or not a dependency's `constructor(0)` is first
 // (issue 1243); every comparison below goes through
-// IR_INITIALIZER_PRIORITY_ORDER_KEY for that reason.  A merge that concatenates each
-// input's array in link order is that order only while no input names a
+// IR_INITIALIZER_PRIORITY_ORDER_KEY for that reason.  A merge that
+// concatenates each input's array in link order is that order only while no
+// input names a
 // priority, so this puts the merged arrays back in it -- a stable sort of the
 // 8-byte entries by ObjectFile.initializer_priorities, which is where the
 // name went (see object_read_elf64 and object_from_canonical_codegen_module).
@@ -2775,9 +2776,12 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_impl(Arena* arena, Arena* set_
                               : 0;
             bool kind_section = section_index < OBJECT_SECTION_COUNT;
             u32* priorities = merged && kind_section ? object->initializer_priorities[slot] : 0;
-            u32 named_priority = merged && !kind_section ? object_elf_initializer_section_priority(source->name, source->kind)
-                                                         : IR_INITIALIZER_PRIORITY_NONE;
-            if (merged && (priorities || !kind_section) && !(offsets[section_index] % OBJECT_INITIALIZER_ENTRY_SIZE))
+            // An object that states no priorities -- the in-memory result of
+            // assembling a `.s` input, whose named sections can sit below
+            // OBJECT_SECTION_COUNT -- is read by section name too (issue 1243).
+            u32 named_priority = merged && !priorities ? object_elf_initializer_section_priority(source->name, source->kind)
+                                                       : IR_INITIALIZER_PRIORITY_NONE;
+            if (merged && (priorities || !kind_section || named_priority != IR_INITIALIZER_PRIORITY_NONE) && !(offsets[section_index] % OBJECT_INITIALIZER_ENTRY_SIZE))
             {
                 u64 first = offsets[section_index] / OBJECT_INITIALIZER_ENTRY_SIZE;
                 for (u64 entry = 0; entry < source->data.length / OBJECT_INITIALIZER_ENTRY_SIZE; entry += 1)

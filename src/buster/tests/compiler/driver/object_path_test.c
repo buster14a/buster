@@ -1979,8 +1979,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_semantic_tests(UnitTestAr
 // input names it first; only the section of exactly that name is that array;
 // and a shared object cannot hold one. The two objects are host-compiled and
 // linked by this linker in both orders and by the host linker as the oracle.
-// The executables return the digits the entries appended, 9 (preinit), 1
-// (`constructor(0)`) then 2 (plain), as the exit code of a comparison.
+// The entries append digits to a trace, which main compares with the order `ld`
+// runs them in: 9 (preinit), 1 (`constructor(0)`), 3 (101), 5 (`.init_array.00150`),
+// then the unprioritized 2 and 4 (GCC emits `constructor(65535)` unprioritized). An assembly input, which the driver
+// assembles in memory, carries the same preinit entry and must be ordered and
+// refused in a shared output alike.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_preinit_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1997,17 +2000,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_preinit_tests(UnitTestArg
         String8 main_source = string_format_z(arena, S8("{S8}/main.c"), root);
         String8 main_object = string_format_z(arena, S8("{S8}/main.o"), root);
         String8 pic_object = string_format_z(arena, S8("{S8}/main-pic.o"), root);
+        String8 pic_source = string_format_z(arena, S8("{S8}/main-pic.c"), root);
         String8 data_source = string_format_z(arena, S8("{S8}/data.c"), root);
         String8 data_object = string_format_z(arena, S8("{S8}/data.o"), root);
         BUSTER_TEST(arguments, file_write(dependency_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
             "extern volatile int trace;\n"
+            "static void middle(void) { trace = trace * 10 + 5; }\n"
             "__attribute__((constructor(0))) static void zero(void) { trace = trace * 10 + 1; }\n"
-            "__attribute__((constructor)) static void plain(void) { trace = trace * 10 + 2; }\n"))));
+            "__attribute__((constructor)) static void plain(void) { trace = trace * 10 + 2; }\n"
+            "__attribute__((constructor(101))) static void low(void) { trace = trace * 10 + 3; }\n"
+            "__attribute__((constructor(65535))) static void high(void) { trace = trace * 10 + 4; }\n"
+            "__attribute__((section(\".init_array.00150\"), used)) static void (*named)(void) = middle;\n"))));
         BUSTER_TEST(arguments, file_write(main_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
             "volatile int trace;\n"
             "static void early(void) { trace = trace * 10 + 9; }\n"
             "__attribute__((section(\".preinit_array\"), used)) static void (*entry)(void) = early;\n"
-            "int main(void) { return trace != 912; }\n"))));
+            "int main(void) { return trace != 913524; }\n"))));
+        // The shared-output input touches no global data, so the refusal is the
+        // only reason a link of it could fail on any architecture.
+        BUSTER_TEST(arguments, file_write(pic_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "static void early(void) {}\n"
+            "__attribute__((section(\".preinit_array\"), used)) static void (*entry)(void) = early;\n"))));
         // Neither an `.preinit_array.5` nor a type-16 section of another name
         // is run by the host linkers, so neither may run here.
         BUSTER_TEST(arguments, file_write(data_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
@@ -2018,7 +2031,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_preinit_tests(UnitTestArg
             "int main(void) { return trace != 0; }\n"))));
         String8 dependency_compile[] = {S8("-w"), S8("-O2"), S8("-fno-pie"), S8("-c"), dependency_source, S8("-o"), dependency_object};
         String8 main_compile[] = {S8("-w"), S8("-O2"), S8("-fno-pie"), S8("-c"), main_source, S8("-o"), main_object};
-        String8 pic_compile[] = {S8("-w"), S8("-O2"), S8("-fPIC"), S8("-c"), main_source, S8("-o"), pic_object};
+        String8 pic_compile[] = {S8("-w"), S8("-O2"), S8("-fPIC"), S8("-c"), pic_source, S8("-o"), pic_object};
         String8 data_compile[] = {S8("-w"), S8("-O2"), S8("-fno-pie"), S8("-c"), data_source, S8("-o"), data_object};
         bool produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(dependency_compile)) &&
                         compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(main_compile)) &&
@@ -2050,6 +2063,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_preinit_tests(UnitTestArg
                 BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
             }
+            // The same entry from an assembly input assembled in this
+            // invocation, linked ahead of and behind the objects.
+            String8 asm_source = string_format_z(arena, S8("{S8}/hook.s"), root);
+            String8 hook_source = string_format_z(arena, S8("{S8}/hook.c"), root);
+            String8 hook_object = string_format_z(arena, S8("{S8}/hook.o"), root);
+            BUSTER_TEST(arguments, file_write(asm_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+                "\t.section .preinit_array,\"aw\",@preinit_array\n\t.balign 8\n\t.quad early_hook\n"))));
+            BUSTER_TEST(arguments, file_write(hook_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+                "volatile int trace;\n"
+                "void early_hook(void) { trace = trace * 10 + 9; }\n"
+                "int main(void) { return trace != 913524; }\n"))));
+            String8 hook_compile[] = {S8("-w"), S8("-O2"), S8("-fno-pie"), S8("-c"), hook_source, S8("-o"), hook_object};
+            bool hook_produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(hook_compile));
+            BUSTER_TEST(arguments, hook_produced);
+            for (u32 index = 0; hook_produced && index < 2; index += 1)
+            {
+                String8 oracle = string_format_z(arena, S8("{S8}/asm-{u32}-oracle"), root, index);
+                String8 output = string_format_z(arena, S8("{S8}/asm-{u32}-buster"), root, index);
+                String8 first = index ? dependency_object : asm_source;
+                String8 second = index ? hook_object : dependency_object;
+                String8 third = index ? asm_source : hook_object;
+                String8 host_link[] = {S8("-no-pie"), first, second, third, S8("-o"), oracle};
+                bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
+                BUSTER_TEST(arguments, linked);
+                if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, oracle));
+                String8 command[] = {S8("-no-pie"), first, second, third, S8("-o"), output};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
+            }
+            // A self-contained copy, so nothing but the preinit entry can fail it.
+            String8 shared_asm_source = string_format_z(arena, S8("{S8}/hook-shared.s"), root);
+#if BUSTER_CPU_ARCH_AARCH64
+            String8 shared_asm_text = S8("\t.text\nshared_hook:\n\tret\n\t.section .preinit_array,\"aw\",@preinit_array\n\t.balign 8\n\t.quad shared_hook\n");
+#else
+            String8 shared_asm_text = S8("\t.text\nshared_hook:\n\tretq\n\t.section .preinit_array,\"aw\",@preinit_array\n\t.balign 8\n\t.quad shared_hook\n");
+#endif
+            BUSTER_TEST(arguments, file_write(shared_asm_source, BUSTER_SLICE_TO_BYTE_SLICE(shared_asm_text)));
+            String8 asm_shared_output = string_format_z(arena, S8("{S8}/asm-preinit.so"), root);
+            String8 asm_shared_command[] = {S8("-shared"), shared_asm_source, S8("-o"), asm_shared_output};
+            CompilerDriverResult asm_shared = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(asm_shared_command)));
+            BUSTER_TEST(arguments, asm_shared.error != COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, string_first_sequence(asm_shared.diagnostic, S8(".preinit_array")) < asm_shared.diagnostic.length);
+            BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(asm_shared_output));
             // The host's own data sections stay data.
             String8 data_oracle = string_format_z(arena, S8("{S8}/data-oracle"), root);
             String8 data_output = string_format_z(arena, S8("{S8}/data-buster"), root);

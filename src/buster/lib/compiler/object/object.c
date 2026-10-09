@@ -5008,6 +5008,9 @@ BUSTER_GLOBAL_LOCAL String8 object_initializer_section_name(Arena* arena, Object
     bool preinit = priority == IR_INITIALIZER_PRIORITY_PREINIT;
     bool preinit_array = preinit && format == OBJECT_FORMAT_ELF64 && kind == OBJECT_SECTION_INIT_ARRAY;
     u32 spelled = preinit ? 0 : priority;
+    // A COFF object holding both a preinit group and a `constructor(0)` group
+    // would name two sections `.CRT$XCA00000`. No path builds one: the sentinel
+    // comes only from an ELF reader, and an ELF input is not rewritten to COFF.
     if (preinit_array)
     {
         result = S8(".preinit_array");
