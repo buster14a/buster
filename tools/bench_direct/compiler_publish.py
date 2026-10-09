@@ -2534,7 +2534,8 @@ def utility_job(api: Api, authority: dict) -> dict:
         raise ValueError("utility physical attempt has no unique platform job")
     row = matches[0]
     if type(row.get("id")) is not int or row["id"] <= 0 or str(row.get("run_id")) != authority["run_id"] or \
-            row.get("run_attempt") != 1 or type(row.get("runner_id")) is not int or row["runner_id"] <= 0 or \
+            type(row.get("run_attempt")) is not int or row["run_attempt"] != 1 or \
+            row.get("head_sha") != authority["executor"]["head_sha"] or type(row.get("runner_id")) is not int or row["runner_id"] <= 0 or \
             not isinstance(row.get("runner_name"), str) or not row["runner_name"] or \
             not isinstance(row.get("labels"), list) or not row["labels"] or any(
                 not isinstance(label, str) or not label for label in row["labels"]):
@@ -2562,6 +2563,10 @@ def utility_source_identity(api: Api, authority: dict, files: dict[str, bytes]) 
     if not isinstance(parents, list) or [row.get("sha") if isinstance(row, dict) else None for row in parents] != \
             [plan["baseline_revision"], plan["pull_head"]]:
         raise ValueError("utility candidate alias is not the exact baseline/AB1 parent join")
+    arm = api.request("/git/commits/" + plan["pull_head"])
+    if not isinstance(arm, dict) or arm.get("sha") != plan["pull_head"] or \
+            not isinstance(arm.get("tree"), dict) or arm["tree"].get("sha") != plan["candidate_tree"]:
+        raise ValueError("utility candidate alias differs from the exact frozen AB1 source tree")
     trusted = Path(__file__).resolve().parent
     sources = (("tools/uarch_lab.py", "lab_sha256", Path(_lab.__file__)),
                ("tools/bench_direct/compiler_compare.py", "comparator_sha256", trusted / "compiler_compare.py"),
@@ -2941,7 +2946,9 @@ def utility_corpus_raw(files: dict[str, bytes], prefix: str, plan: dict, leg: st
     expected_jobs = "".join(f"{index}\t{name}/{mode}\n" for index, (name, mode) in enumerate(wanted_jobs))
     if files[prefix + "jobs.tsv"] != expected_jobs.encode("ascii") or metadata.get("flags") != [] or \
             metadata.get("allocation_compilers") != [] or metadata.get("cache_policy") != "warm-filesystem-new-process" or \
-            metadata.get("clock") != "monotonic":
+            metadata.get("clock") != "monotonic" or any(
+            type(metadata.get(key)) is not int or metadata[key] != value
+            for key, value in (("seed", 20260907), ("scale", 1), ("input_schema", 1))):
         raise ValueError("utility corpus jobs, flags or original launch settings differ")
     provenance = metadata["compiler_provenance"]
     for role, row, name in zip(("baseline", "candidate"), provenance, ("ide-base", "ide-cand")):
@@ -2957,7 +2964,7 @@ def utility_corpus_raw(files: dict[str, bytes], prefix: str, plan: dict, leg: st
     corpus_root = plan["output_root"] + "/" + leg + "-work/throughput"
     for index, (row, (name, mode)) in enumerate(zip(jobs, wanted_jobs)):
         if not isinstance(row, dict) or type(row.get("job")) is not int or row["job"] != index or \
-                row.get("name") != name or row.get("mode") != mode or row.get("artifact") not in ("assembly", "object") or \
+                row.get("name") != name or row.get("mode") != mode or row.get("artifact") != "object" or \
                 not isinstance(row.get("source"), str) or not row["source"].startswith(corpus_root + "/inputs/"):
             raise ValueError("utility corpus generated-input source or mode population differs")
         suffix = row["source"][len(corpus_root) + 1:]
@@ -3048,10 +3055,16 @@ def utility_corpus_raw(files: dict[str, bytes], prefix: str, plan: dict, leg: st
         if any(type(status.get(key)) is not int or status[key] != 0 for key in ("exit_code", "signal", "timeout", "launch_error")):
             raise ValueError("utility raw corpus native child failed or was not reaped")
         row = records["commands.jsonl"][sample]
-        argv = row.get("argv")
-        if row.get("cwd") != plan["source_root"] or not isinstance(argv, list) or len(argv) < 8 or \
-                argv[0] not in [item["path"] for item in provenance] or argv[1:4] != ["cc", "-g0", "-O0"] or \
-                not any(value in ("-fregister-allocator=fast", "-fregister-allocator=quality") for value in argv) or \
+        parsed = re.search(r"-j([0-9]+)-(?:p[0-2]-|w[0-1]-)?v([01])$", sample)
+        if parsed is None:
+            raise ValueError("utility corpus sample identity cannot bind its exact command")
+        job_index, variant = map(int, parsed.groups())
+        job = jobs[job_index]
+        wanted_argv = [provenance[variant]["path"], "cc", "-g0", "-O0",
+                       "-fsource-metrics=" + corpus_root + "/artifacts/" + sample + ".metrics", "-c",
+                       "-fregister-allocator=" + job["mode"], job["source"], "-o",
+                       corpus_root + "/artifacts/" + job["name"] + "-" + job["mode"] + "-" + str(variant) + ".o"]
+        if row.get("cwd") != plan["source_root"] or row.get("argv") != wanted_argv or \
                 not isinstance(files.get(prefix + "artifacts/" + sample + ".log"), bytes):
             raise ValueError("utility corpus retained command or native raw log differs from the original harness")
     return {"complete_timed_samples": populations["samples.csv"], "diagnostic_samples": populations["telemetry.csv"],
