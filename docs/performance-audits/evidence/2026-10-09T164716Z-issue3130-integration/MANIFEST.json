@@ -1,0 +1,115 @@
+{
+  "archive": {
+    "format": "xz-compressed tar; raw member bytes preserved",
+    "path": "captures-and-toolchain.tar.xz",
+    "sha256": "96fe79b9e97d90d0f50244c6fb6cf2069c4f47610263a3531c854aba7e08fae4",
+    "size_bytes": 199424
+  },
+  "archive_members": [
+    {
+      "path": "captures/176e-analyzer-self-test.log",
+      "sha256": "2018f3a7b64451e127123cbd77b94d65f1c2c08b693c435a9dbddcea38f0cd76",
+      "size_bytes": 48750
+    },
+    {
+      "path": "captures/176e-direct-ide-attempt-1-session-cutoff.log",
+      "sha256": "866720bd6e7d480619a0612d17db8ba6f04e43441db26821927ce4643e19d1f5",
+      "size_bytes": 1428559
+    },
+    {
+      "path": "captures/176e-direct-ide-attempt-2-detached-cutoff.log",
+      "sha256": "1c1ebfa3f05d030b307bc665a11a457bff41d4cbd58e2be92489752c4100b4ae",
+      "size_bytes": 29635
+    },
+    {
+      "path": "captures/176e-direct-ide-complete.log",
+      "sha256": "1159fab5dec7a9be5d5012f7d916c17250c5541293f7b5fb83fb17c002b326dc",
+      "size_bytes": 2661713
+    },
+    {
+      "path": "captures/176e-generate-release.log",
+      "sha256": "3adf0e216e550dc651c79e6ed962cafa4b6157438006f48505e2477705b412f2",
+      "size_bytes": 10537
+    },
+    {
+      "path": "captures/176e-integrated-release-self-host.log",
+      "sha256": "366229f333a26664c7cf005530bc00bf59f400d790963ed25050533fb35ba7dc",
+      "size_bytes": 17781
+    },
+    {
+      "path": "captures/176e-source-size-vs-fbc.log",
+      "sha256": "f8481cddcf5968491c81b4fa62031b773e9ba2baa3aadc31786fbb7b096c0fad",
+      "size_bytes": 4771
+    },
+    {
+      "path": "captures/176e-test-all-partial.log",
+      "sha256": "f9b0fe052b7a6c2b4ee552a3f47f7178e8f625a783732d7816b4578cc1af3f84",
+      "size_bytes": 3369
+    },
+    {
+      "path": "captures/attempt-2-launch.txt",
+      "sha256": "e83d9b9829540ae5d5fd7f33a68c40d60b34ca6bb0ab538d8300518c0de62da2",
+      "size_bytes": 394
+    },
+    {
+      "path": "captures/attempt-2-run-ide-test.sh",
+      "sha256": "fdf932fc6601d9a8777b0e170558bceb4a4428c39f36bf7b06bd9e13dd3ac515",
+      "size_bytes": 1218
+    },
+    {
+      "path": "captures/fbc-baseline-release-self-host.log",
+      "sha256": "7e4a94c2275c3b20ad8e0be9b66899d0231ff6308e8452cafdc9b547733afd8b",
+      "size_bytes": 27492
+    },
+    {
+      "path": "toolchain/recovery-provenance.json",
+      "sha256": "16cfdd61ca0919acc62a2402d808942e36d30e54392514ec1e68ef138a0c7824",
+      "size_bytes": 13930
+    },
+    {
+      "path": "toolchain/recovery-verification.log",
+      "sha256": "39f4e82ec73f535d3dcacef7b3f61e0e83f1c233bb462837009887f06583429a",
+      "size_bytes": 3352
+    },
+    {
+      "path": "toolchain/tcc-build.log",
+      "sha256": "6b2c7348266556c9acb9ff690645934cbe5bbe08a0abbe2ec629905df6e95f06",
+      "size_bytes": 4535
+    }
+  ],
+  "evidence_id": "2026-10-09T164716Z-issue3130-integration",
+  "license_scope": {
+    "buster_first_party": "grant remains unselected under #621; see LICENSES/README.md",
+    "distribution_audit": "not package-by-package",
+    "imported_implementation": "none",
+    "llvm_clang": "SPDX Apache-2.0 WITH LLVM-exception; see LICENSES/llvm-LICENSE.txt",
+    "tinycc": "pinned local build.c bootstrap only; README says LGPL and points to COPYING (LGPL v2.1), while legacy tcc.c/libtcc.c/tcc.h headers say version 2 or later"
+  },
+  "performance": {
+    "authoritative_record": "../../2026-10-09T133729Z.md",
+    "disposition": "NoGo for same-run analyzer deduplication",
+    "this_evidence": "local validation only; no new performance ratio or claim"
+  },
+  "schema": "buster-issue3130-integration-evidence-manifest-v1",
+  "source": {
+    "commit": "176e46cb1ffa2ceeea24dbd4afca2e2f97859c9b",
+    "ordered_parents": [
+      "fdbc2806fa4e6bc5ed65bfc7be9ad9bfc3c01a6e",
+      "fbc7b5a7027270a877fcb0298bd81e72e5f8cb50"
+    ],
+    "selected_main_tree": "eefd0288b7572dbde6d49cc8f1ef55032953a7de",
+    "tree": "a399aeaf0cd29e138c84c37a4b3ff69a264494d5"
+  },
+  "top_level_files": [
+    {
+      "path": "RUNS.json",
+      "sha256": "65d9d6e227612ce77b9fcce1c96e82b49572c30c20eb0f09a9328afc1217b072",
+      "size_bytes": 7724
+    },
+    {
+      "path": "LICENSE-SCOPE.md",
+      "sha256": "342339f5cf21f921f543fc497c669bcabca5c5a77d3258a4b5cc11b356adfae5",
+      "size_bytes": 988
+    }
+  ]
+}

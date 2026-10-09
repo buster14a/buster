@@ -381,6 +381,19 @@ fixture as well as compiling both architectures.
   dead in the join, because dropping it would force the store onto the
   predecessor's other path. Functions with one block, or past
   `MACHINE_FAST_LIVENESS_WORD_LIMIT` words per plane, keep the textual rules.
+- The prepass keeps block live-in from the same solve. An edge conform
+  leaves a value its destination does not read (`machine_fast_dead_in`)
+  dirty instead of storing it, unless it sits in a register the contract
+  claims. The value is still live out of the source only for the source's
+  other successors, or as this edge's own parameter source: another
+  successor's conform stores it at the same terminator point or carries it
+  dirty in its contract, so deferring never adds a store. A parameter source
+  the edge copy reloads from its home still stores first. Scan-time conforms
+  to a backward or cold successor read that successor's live-in;
+  switch, indirect and asm-goto dispatch conforms, which serve several
+  destinations, do not defer. On unity `ide.c` this removed about 33k
+  stores: values only a conditional's later-contracted successor reads, and
+  parameter-edge sources consumed by the publication.
 - FAST/QUALITY also drop the write-back of a strict SSA (immutable, unpinned)
   value at a backward edge whose terminator has that single target, when the
   value is defined in the header or in a block past the header's entry bypass.

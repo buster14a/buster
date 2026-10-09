@@ -1,0 +1,539 @@
+{
+  "schema": "buster-analyzer-failed-observations-v1",
+  "comparison_valid": false,
+  "qualification": "incomplete",
+  "original_zip": {
+    "artifact_id": 11595239346,
+    "size_bytes": 6887111,
+    "sha256": "2af7199739e60509946562aa9ac233541808cda1401425beb444390a703f27b0",
+    "members": 422,
+    "uncompressed_member_bytes": 40137634
+  },
+  "identity": {
+    "base": "6badc05b250b18a3e76e1de396480a60373774fa",
+    "base_tree": "7367004dca93c0b74d597938e07a6e42c66a6f17",
+    "head": "14736f0092f03191bf9ea2022ec2e758c7b19745",
+    "head_tree": "76dba6203702174162b66ae1272518830c37aa7a",
+    "mode": "pull",
+    "pull": "3167",
+    "pull_head": "14736f0092f03191bf9ea2022ec2e758c7b19745",
+    "ref": "refs/pull/3167/head",
+    "repository": "buster14a/buster",
+    "request_run_id": "37884110155",
+    "run_attempt": "1",
+    "run_id": "37884120234",
+    "trusted_revision": "6badc05b250b18a3e76e1de396480a60373774fa"
+  },
+  "request_sha256": "3ba2c6d40425220f1f05926072b2da031ff019c16ba4ac7f33e730bfe50fae5f",
+  "clang_provenance": {
+    "path": "/usr/bin/clang-23",
+    "resource_directory": "/usr/lib/clang/23",
+    "resource_file_count": 442,
+    "resource_total_bytes": 74858803,
+    "resource_tree_sha256": "a7194ab47121d29da82350a1d02bc114839f4f11350ee8ea3da67c7c691886d3",
+    "schema": "buster-analyzer-clang-provenance-v1",
+    "sha256": "939a882527432ec23b094c289e7f170bf2d6ec282e74dde75e31b08602fa3eae",
+    "size_bytes": 174288,
+    "version": "clang version 23.1.1\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /usr/bin",
+    "version_sha256": "0c87db8026d995452d7d0d3f24753ea4e1a3ce5dc48f415ada610b234a8a5f43"
+  },
+  "phases": [
+    {
+      "phase": "prepare-baseline",
+      "role": "baseline",
+      "trial": 0,
+      "wall_us": 64548,
+      "user_cpu_us": 62942,
+      "system_cpu_us": 0,
+      "peak_rss_bytes": 23621632,
+      "cpu_status": "observed",
+      "memory_status": "observed",
+      "exit_status": 0,
+      "timed_out": 0,
+      "cleanup_failed": 0,
+      "capture_failed": 0,
+      "stdout_bytes": 0,
+      "stderr_bytes": 0,
+      "state": "complete"
+    },
+    {
+      "phase": "prepare-candidate",
+      "role": "candidate",
+      "trial": 0,
+      "wall_us": 5493893,
+      "user_cpu_us": 4850929,
+      "system_cpu_us": 202075,
+      "peak_rss_bytes": 70365184,
+      "cpu_status": "observed",
+      "memory_status": "observed",
+      "exit_status": 0,
+      "timed_out": 0,
+      "cleanup_failed": 0,
+      "capture_failed": 0,
+      "stdout_bytes": 193,
+      "stderr_bytes": 0,
+      "state": "complete"
+    },
+    {
+      "phase": "analysis-baseline-0",
+      "role": "baseline",
+      "trial": 0,
+      "wall_us": 306934403,
+      "user_cpu_us": 601053059,
+      "system_cpu_us": 6590884,
+      "peak_rss_bytes": 469086208,
+      "cpu_status": "observed",
+      "memory_status": "observed",
+      "exit_status": 256,
+      "timed_out": 0,
+      "cleanup_failed": 0,
+      "capture_failed": 0,
+      "stdout_bytes": 234878,
+      "stderr_bytes": 0,
+      "state": "failed"
+    },
+    {
+      "phase": "aggregate-baseline-0",
+      "role": "baseline",
+      "trial": 0,
+      "wall_us": 67200,
+      "user_cpu_us": 65735,
+      "system_cpu_us": 0,
+      "peak_rss_bytes": 23490560,
+      "cpu_status": "observed",
+      "memory_status": "observed",
+      "exit_status": 256,
+      "timed_out": 0,
+      "cleanup_failed": 0,
+      "capture_failed": 0,
+      "stdout_bytes": 1256,
+      "stderr_bytes": 0,
+      "state": "failed"
+    },
+    {
+      "phase": "analysis-candidate-0",
+      "role": "candidate",
+      "trial": 1,
+      "wall_us": 23167141,
+      "user_cpu_us": 35444718,
+      "system_cpu_us": 727584,
+      "peak_rss_bytes": 70463488,
+      "cpu_status": "observed",
+      "memory_status": "observed",
+      "exit_status": 256,
+      "timed_out": 0,
+      "cleanup_failed": 0,
+      "capture_failed": 0,
+      "stdout_bytes": 32568,
+      "stderr_bytes": 0,
+      "state": "failed"
+    },
+    {
+      "phase": "aggregate-candidate-0",
+      "role": "candidate",
+      "trial": 1,
+      "wall_us": 5294383,
+      "user_cpu_us": 4841386,
+      "system_cpu_us": 218999,
+      "peak_rss_bytes": 70496256,
+      "cpu_status": "observed",
+      "memory_status": "observed",
+      "exit_status": 256,
+      "timed_out": 0,
+      "cleanup_failed": 0,
+      "capture_failed": 0,
+      "stdout_bytes": 29939,
+      "stderr_bytes": 0,
+      "state": "failed"
+    },
+    {
+      "phase": "analysis-candidate-1",
+      "role": "candidate",
+      "trial": 2,
+      "wall_us": 23369352,
+      "user_cpu_us": 35482610,
+      "system_cpu_us": 688663,
+      "peak_rss_bytes": 70393856,
+      "cpu_status": "observed",
+      "memory_status": "observed",
+      "exit_status": 256,
+      "timed_out": 0,
+      "cleanup_failed": 0,
+      "capture_failed": 0,
+      "stdout_bytes": 32567,
+      "stderr_bytes": 0,
+      "state": "failed"
+    },
+    {
+      "phase": "aggregate-candidate-1",
+      "role": "candidate",
+      "trial": 2,
+      "wall_us": 5351589,
+      "user_cpu_us": 4810781,
+      "system_cpu_us": 256247,
+      "peak_rss_bytes": 70516736,
+      "cpu_status": "observed",
+      "memory_status": "observed",
+      "exit_status": 256,
+      "timed_out": 0,
+      "cleanup_failed": 0,
+      "capture_failed": 0,
+      "stdout_bytes": 29939,
+      "stderr_bytes": 0,
+      "state": "failed"
+    },
+    {
+      "phase": "analysis-baseline-1",
+      "role": "baseline",
+      "trial": 3,
+      "wall_us": 307568397,
+      "user_cpu_us": 601194368,
+      "system_cpu_us": 6189482,
+      "peak_rss_bytes": 459362304,
+      "cpu_status": "observed",
+      "memory_status": "observed",
+      "exit_status": 256,
+      "timed_out": 0,
+      "cleanup_failed": 0,
+      "capture_failed": 0,
+      "stdout_bytes": 234878,
+      "stderr_bytes": 0,
+      "state": "failed"
+    },
+    {
+      "phase": "aggregate-baseline-1",
+      "role": "baseline",
+      "trial": 3,
+      "wall_us": 67153,
+      "user_cpu_us": 65996,
+      "system_cpu_us": 0,
+      "peak_rss_bytes": 23425024,
+      "cpu_status": "observed",
+      "memory_status": "observed",
+      "exit_status": 256,
+      "timed_out": 0,
+      "cleanup_failed": 0,
+      "capture_failed": 0,
+      "stdout_bytes": 1256,
+      "stderr_bytes": 0,
+      "state": "failed"
+    }
+  ],
+  "runs": [
+    {
+      "label": "baseline-0",
+      "comparison_valid": false,
+      "command_phase_status": "failed",
+      "raw_records": {
+        "analysis": [
+          {
+            "kind": "ANALYZE_AGGREGATE",
+            "raw": "ANALYZE_AGGREGATE eligible=182 checked=182 excluded_config_or_language=182 failures=7 shards=8 peak_child_rss_bytes=469086208 status=fail",
+            "fields": {
+              "eligible": 182,
+              "checked": 182,
+              "excluded_config_or_language": 182,
+              "failures": 7,
+              "shards": 8,
+              "peak_child_rss_bytes": 469086208,
+              "status": "fail"
+            }
+          },
+          {
+            "kind": "ANALYZE_RUN",
+            "raw": "ANALYZE_RUN elapsed_us=306932240 peak_pending_workers=2 jobs=2 samples=12204 peak_live_processes=5 sampled_peak_tree_rss_bytes=902905856 process_tree_status=complete process_tree_reason=none results=/var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/analyzer/profile/baseline-0 status=fail",
+            "fields": {
+              "elapsed_us": 306932240,
+              "peak_pending_workers": 2,
+              "jobs": 2,
+              "samples": 12204,
+              "peak_live_processes": 5,
+              "sampled_peak_tree_rss_bytes": 902905856,
+              "process_tree_status": "complete",
+              "process_tree_reason": "none",
+              "results": "/var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/analyzer/profile/baseline-0",
+              "status": "fail"
+            }
+          }
+        ],
+        "aggregate": [
+          {
+            "kind": "ANALYZE_AGGREGATE",
+            "raw": "ANALYZE_AGGREGATE eligible=182 checked=182 excluded_config_or_language=182 failures=7 shards=8 peak_child_rss_bytes=469086208 status=fail",
+            "fields": {
+              "eligible": 182,
+              "checked": 182,
+              "excluded_config_or_language": 182,
+              "failures": 7,
+              "shards": 8,
+              "peak_child_rss_bytes": 469086208,
+              "status": "fail"
+            }
+          }
+        ]
+      },
+      "terminal_shard_result_files": [
+        "analyzer/profile/baseline-0/shard-0/result.txt",
+        "analyzer/profile/baseline-0/shard-1/result.txt",
+        "analyzer/profile/baseline-0/shard-2/result.txt",
+        "analyzer/profile/baseline-0/shard-3/result.txt",
+        "analyzer/profile/baseline-0/shard-4/result.txt",
+        "analyzer/profile/baseline-0/shard-5/result.txt",
+        "analyzer/profile/baseline-0/shard-6/result.txt",
+        "analyzer/profile/baseline-0/shard-7/result.txt"
+      ]
+    },
+    {
+      "label": "candidate-0",
+      "comparison_valid": false,
+      "command_phase_status": "failed",
+      "raw_records": {
+        "analysis": [
+          {
+            "kind": "ANALYZE_PLAN",
+            "raw": "ANALYZE_PLAN mode=run selected_rows=182 unique_executions=135 aliases=47 planning_us=5233910 context_proof_us=5150241",
+            "fields": {
+              "mode": "run",
+              "selected_rows": 182,
+              "unique_executions": 135,
+              "aliases": 47,
+              "planning_us": 5233910,
+              "context_proof_us": 5150241
+            }
+          },
+          {
+            "kind": "ANALYZE_AGGREGATE",
+            "raw": "ANALYZE_AGGREGATE selected_rows=182 checked=0 unique_executions=0 aliased_rows=0 excluded_config_or_language=182 failures=0 shards=8 peak_child_rss_bytes=0 status=fail",
+            "fields": {
+              "selected_rows": 182,
+              "checked": 0,
+              "unique_executions": 0,
+              "aliased_rows": 0,
+              "excluded_config_or_language": 182,
+              "failures": 0,
+              "shards": 8,
+              "peak_child_rss_bytes": 0,
+              "status": "fail"
+            }
+          },
+          {
+            "kind": "ANALYZE_RUN",
+            "raw": "ANALYZE_RUN elapsed_us=23164831 peak_pending_workers=2 jobs=2 samples=717 peak_live_processes=10 sampled_peak_tree_rss_bytes=157880320 process_tree_status=complete process_tree_reason=none results=/var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/analyzer/profile/candidate-0 status=fail",
+            "fields": {
+              "elapsed_us": 23164831,
+              "peak_pending_workers": 2,
+              "jobs": 2,
+              "samples": 717,
+              "peak_live_processes": 10,
+              "sampled_peak_tree_rss_bytes": 157880320,
+              "process_tree_status": "complete",
+              "process_tree_reason": "none",
+              "results": "/var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/analyzer/profile/candidate-0",
+              "status": "fail"
+            }
+          }
+        ],
+        "aggregate": [
+          {
+            "kind": "ANALYZE_PLAN",
+            "raw": "ANALYZE_PLAN mode=aggregate selected_rows=182 unique_executions=135 aliases=47 planning_us=5289443 context_proof_us=5206336",
+            "fields": {
+              "mode": "aggregate",
+              "selected_rows": 182,
+              "unique_executions": 135,
+              "aliases": 47,
+              "planning_us": 5289443,
+              "context_proof_us": 5206336
+            }
+          },
+          {
+            "kind": "ANALYZE_AGGREGATE",
+            "raw": "ANALYZE_AGGREGATE selected_rows=182 checked=0 unique_executions=0 aliased_rows=0 excluded_config_or_language=182 failures=0 shards=8 peak_child_rss_bytes=0 status=fail",
+            "fields": {
+              "selected_rows": 182,
+              "checked": 0,
+              "unique_executions": 0,
+              "aliased_rows": 0,
+              "excluded_config_or_language": 182,
+              "failures": 0,
+              "shards": 8,
+              "peak_child_rss_bytes": 0,
+              "status": "fail"
+            }
+          }
+        ]
+      },
+      "terminal_shard_result_files": []
+    },
+    {
+      "label": "candidate-1",
+      "comparison_valid": false,
+      "command_phase_status": "failed",
+      "raw_records": {
+        "analysis": [
+          {
+            "kind": "ANALYZE_PLAN",
+            "raw": "ANALYZE_PLAN mode=run selected_rows=182 unique_executions=135 aliases=47 planning_us=5384230 context_proof_us=5301027",
+            "fields": {
+              "mode": "run",
+              "selected_rows": 182,
+              "unique_executions": 135,
+              "aliases": 47,
+              "planning_us": 5384230,
+              "context_proof_us": 5301027
+            }
+          },
+          {
+            "kind": "ANALYZE_AGGREGATE",
+            "raw": "ANALYZE_AGGREGATE selected_rows=182 checked=0 unique_executions=0 aliased_rows=0 excluded_config_or_language=182 failures=0 shards=8 peak_child_rss_bytes=0 status=fail",
+            "fields": {
+              "selected_rows": 182,
+              "checked": 0,
+              "unique_executions": 0,
+              "aliased_rows": 0,
+              "excluded_config_or_language": 182,
+              "failures": 0,
+              "shards": 8,
+              "peak_child_rss_bytes": 0,
+              "status": "fail"
+            }
+          },
+          {
+            "kind": "ANALYZE_RUN",
+            "raw": "ANALYZE_RUN elapsed_us=23366686 peak_pending_workers=2 jobs=2 samples=717 peak_live_processes=7 sampled_peak_tree_rss_bytes=163332096 process_tree_status=complete process_tree_reason=none results=/var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/analyzer/profile/candidate-1 status=fail",
+            "fields": {
+              "elapsed_us": 23366686,
+              "peak_pending_workers": 2,
+              "jobs": 2,
+              "samples": 717,
+              "peak_live_processes": 7,
+              "sampled_peak_tree_rss_bytes": 163332096,
+              "process_tree_status": "complete",
+              "process_tree_reason": "none",
+              "results": "/var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/analyzer/profile/candidate-1",
+              "status": "fail"
+            }
+          }
+        ],
+        "aggregate": [
+          {
+            "kind": "ANALYZE_PLAN",
+            "raw": "ANALYZE_PLAN mode=aggregate selected_rows=182 unique_executions=135 aliases=47 planning_us=5346725 context_proof_us=5263732",
+            "fields": {
+              "mode": "aggregate",
+              "selected_rows": 182,
+              "unique_executions": 135,
+              "aliases": 47,
+              "planning_us": 5346725,
+              "context_proof_us": 5263732
+            }
+          },
+          {
+            "kind": "ANALYZE_AGGREGATE",
+            "raw": "ANALYZE_AGGREGATE selected_rows=182 checked=0 unique_executions=0 aliased_rows=0 excluded_config_or_language=182 failures=0 shards=8 peak_child_rss_bytes=0 status=fail",
+            "fields": {
+              "selected_rows": 182,
+              "checked": 0,
+              "unique_executions": 0,
+              "aliased_rows": 0,
+              "excluded_config_or_language": 182,
+              "failures": 0,
+              "shards": 8,
+              "peak_child_rss_bytes": 0,
+              "status": "fail"
+            }
+          }
+        ]
+      },
+      "terminal_shard_result_files": []
+    },
+    {
+      "label": "baseline-1",
+      "comparison_valid": false,
+      "command_phase_status": "failed",
+      "raw_records": {
+        "analysis": [
+          {
+            "kind": "ANALYZE_AGGREGATE",
+            "raw": "ANALYZE_AGGREGATE eligible=182 checked=182 excluded_config_or_language=182 failures=7 shards=8 peak_child_rss_bytes=459362304 status=fail",
+            "fields": {
+              "eligible": 182,
+              "checked": 182,
+              "excluded_config_or_language": 182,
+              "failures": 7,
+              "shards": 8,
+              "peak_child_rss_bytes": 459362304,
+              "status": "fail"
+            }
+          },
+          {
+            "kind": "ANALYZE_RUN",
+            "raw": "ANALYZE_RUN elapsed_us=307566020 peak_pending_workers=2 jobs=2 samples=12229 peak_live_processes=5 sampled_peak_tree_rss_bytes=895315968 process_tree_status=complete process_tree_reason=none results=/var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/analyzer/profile/baseline-1 status=fail",
+            "fields": {
+              "elapsed_us": 307566020,
+              "peak_pending_workers": 2,
+              "jobs": 2,
+              "samples": 12229,
+              "peak_live_processes": 5,
+              "sampled_peak_tree_rss_bytes": 895315968,
+              "process_tree_status": "complete",
+              "process_tree_reason": "none",
+              "results": "/var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/analyzer/profile/baseline-1",
+              "status": "fail"
+            }
+          }
+        ],
+        "aggregate": [
+          {
+            "kind": "ANALYZE_AGGREGATE",
+            "raw": "ANALYZE_AGGREGATE eligible=182 checked=182 excluded_config_or_language=182 failures=7 shards=8 peak_child_rss_bytes=459362304 status=fail",
+            "fields": {
+              "eligible": 182,
+              "checked": 182,
+              "excluded_config_or_language": 182,
+              "failures": 7,
+              "shards": 8,
+              "peak_child_rss_bytes": 459362304,
+              "status": "fail"
+            }
+          }
+        ]
+      },
+      "terminal_shard_result_files": [
+        "analyzer/profile/baseline-1/shard-0/result.txt",
+        "analyzer/profile/baseline-1/shard-1/result.txt",
+        "analyzer/profile/baseline-1/shard-2/result.txt",
+        "analyzer/profile/baseline-1/shard-3/result.txt",
+        "analyzer/profile/baseline-1/shard-4/result.txt",
+        "analyzer/profile/baseline-1/shard-5/result.txt",
+        "analyzer/profile/baseline-1/shard-6/result.txt",
+        "analyzer/profile/baseline-1/shard-7/result.txt"
+      ]
+    }
+  ],
+  "original_summary_problems": [
+    "native helper did not complete the fixed ten-phase analyzer profile",
+    "native analysis-baseline-0 observation is incomplete",
+    "native aggregate-baseline-0 observation is incomplete",
+    "native analysis-candidate-0 observation is incomplete",
+    "native aggregate-candidate-0 observation is incomplete",
+    "native analysis-candidate-1 observation is incomplete",
+    "native aggregate-candidate-1 observation is incomplete",
+    "native analysis-baseline-1 observation is incomplete",
+    "native aggregate-baseline-1 observation is incomplete",
+    "analyzer run baseline-0 row 78 is incomplete or inconsistent",
+    "analyzer run baseline-0 row 79 is incomplete or inconsistent",
+    "analyzer run baseline-0 row 97 is incomplete or inconsistent",
+    "analyzer run baseline-0 row 80 is incomplete or inconsistent",
+    "analyzer run baseline-0 row 114 is incomplete or inconsistent",
+    "analyzer run baseline-0 row 111 is incomplete or inconsistent",
+    "analyzer run baseline-0 row 58 is incomplete or inconsistent",
+    "analyzer evidence is malformed or incomplete: baseline-0 in-run aggregate failures does not match its analyzer plan"
+  ],
+  "limitations": [
+    "Baseline warnings are analyzer reports, not independent proof of feasible source defects.",
+    "Candidate execution/alias counts are plan-only; workers aborted before TU execution.",
+    "Largest-individual wait4 RSS and sampled simultaneous tree RSS have different scopes.",
+    "No valid timing ratio or speedup can be derived from these failed arms."
+  ]
+}
