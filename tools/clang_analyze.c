@@ -2398,6 +2398,21 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_context_matches(Arena* arena, ClangAnalyz
     return clang_analyze_context_matches_cached(arena, unit, &cache);
 }
 
+BUSTER_GLOBAL_LOCAL bool clang_analyze_record_matches_exact_string(String8 text, u64* cursor, String8 expected)
+{
+    u64 length = 0;
+    bool valid = cursor && build_artifact_fanout_provenance_record_read_u64(text, cursor, &length) &&
+                 length == expected.length && *cursor <= text.length && length <= text.length - *cursor;
+    if (valid)
+    {
+        String8 value = string_slice(text, *cursor, *cursor + length);
+        *cursor += length;
+        valid = string_equal(value, expected) && *cursor < text.length && text.pointer[*cursor] == '\n';
+        if (valid) *cursor += 1;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool clang_analyze_worker_manifest_matches(Arena* arena, ClangAnalyzeOptions options,
                                                                  String8 database, ClangAnalyzePlan* plan)
 {
@@ -2408,7 +2423,6 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_worker_manifest_matches(Arena* arena, Cla
     String8 result_directory = {0};
     String8 config = {0};
     String8 clang = {0};
-    String8 stored_database = {0};
     u64 shards = 0;
     u64 timeout = 0;
     u64 count = 0;
@@ -2429,11 +2443,11 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_worker_manifest_matches(Arena* arena, Cla
         build_artifact_fanout_provenance_record_read_u64(stored, &cursor, &unique) &&
         build_artifact_fanout_provenance_record_read_u64(stored, &cursor, &aliases) &&
         build_artifact_fanout_provenance_record_read_u64(stored, &cursor, &fixture) &&
-        build_artifact_fanout_provenance_record_read_string(stored, &cursor, &stored_database);
+        clang_analyze_record_matches_exact_string(stored, &cursor, database);
     valid = valid && string_equal(result_directory, os_path_absolute_lexical(arena, options.results, true)) &&
         string_equal(config, options.config) && string_equal(clang, options.clang) && shards == options.shards &&
         timeout == options.timeout && count == plan->count && excluded == plan->excluded && fixture == options.fixture_compiler &&
-        string_equal(stored_database, database) && unique <= count && aliases == count - unique;
+        unique <= count && aliases == count - unique;
     u64* representatives = arena_allocate(arena, u64, plan->count);
     u64* proven = arena_allocate(arena, u64, plan->count);
     u64* input_counts = arena_allocate(arena, u64, plan->count);
@@ -4381,6 +4395,20 @@ BUSTER_GLOBAL_LOCAL String8 clang_analyze_test_remove_last_result_row(Arena* are
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool clang_analyze_test_skip_record_string(String8 text, u64* cursor)
+{
+    u64 length = 0;
+    bool valid = cursor && build_artifact_fanout_provenance_record_read_u64(text, cursor, &length) &&
+                 *cursor <= text.length && length <= text.length - *cursor;
+    if (valid)
+    {
+        *cursor += length;
+        valid = *cursor < text.length && text.pointer[*cursor] == '\n';
+        if (valid) *cursor += 1;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL String8 clang_analyze_test_rewrite_plan_row_u64(Arena* arena, String8 manifest, u64 target_row,
                                                                     u64 field, u64 replacement)
 {
@@ -4393,7 +4421,7 @@ BUSTER_GLOBAL_LOCAL String8 clang_analyze_test_rewrite_plan_row_u64(Arena* arena
         build_artifact_fanout_provenance_record_read_string(manifest, &cursor, &discarded_string) &&
         build_artifact_fanout_provenance_record_read_string(manifest, &cursor, &discarded_string);
     for (u64 i = 0; valid && i < 7; i += 1) valid = build_artifact_fanout_provenance_record_read_u64(manifest, &cursor, &discarded_u64);
-    valid = valid && build_artifact_fanout_provenance_record_read_string(manifest, &cursor, &discarded_string);
+    valid = valid && clang_analyze_test_skip_record_string(manifest, &cursor);
     u64 field_start = 0;
     u64 field_end = 0;
     for (u64 row = 0; valid && row <= target_row; row += 1)
@@ -4552,6 +4580,37 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
     clang_analyze_test_begin(S8("expect-rejection-requires-worker"), true);
     bool unscoped = clang_analyze_main(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unscoped_arguments)) == PROCESS_RESULT_FAILED;
     clang_analyze_test_check(unscoped, S8("expect-rejection-requires-worker"), &state);
+    String8 large_database_prefix = S8("[{\"directory\":\".\",\"file\":\"a.c\",\"output\":\"a.o\",\"arguments\":[\"clang\",\"-c\",\"a.c\",\"-o\",\"a.o\"]}]");
+    String8 large_database = {.pointer = arena_allocate(arena, char8, BUSTER_MB(1) + 257), .length = BUSTER_MB(1) + 257};
+    memset(large_database.pointer, ' ', large_database.length);
+    memcpy(large_database.pointer, large_database_prefix.pointer, large_database_prefix.length);
+    String8List large_database_record_parts = {0};
+    string8_list_push(arena, &large_database_record_parts, string_format(arena, S8("{u64}\n"), large_database.length));
+    string8_list_push(arena, &large_database_record_parts, large_database);
+    string8_list_push(arena, &large_database_record_parts, S8("\n"));
+    String8 large_database_record = string_join_arena(arena, string8_list_to_slice(arena, large_database_record_parts), true);
+    u64 large_database_cursor = 0;
+    bool large_database_accepted = clang_analyze_record_matches_exact_string(large_database_record, &large_database_cursor, large_database) &&
+                                   large_database_cursor == large_database_record.length;
+    clang_analyze_test_check(large_database_accepted, S8("manifest-accepts-exact-database-over-1mib"), &state);
+    String8List mismatched_database_record_parts = {0};
+    string8_list_push(arena, &mismatched_database_record_parts,
+        string_format(arena, S8("{u64}\n"), large_database.length + 1));
+    string8_list_push(arena, &mismatched_database_record_parts, large_database);
+    string8_list_push(arena, &mismatched_database_record_parts, S8("\n"));
+    String8 mismatched_database_record = string_join_arena(arena, string8_list_to_slice(arena, mismatched_database_record_parts), true);
+    u64 mismatched_database_cursor = 0;
+    clang_analyze_test_begin(S8("manifest-database-length-mismatch-rejected"), true);
+    clang_analyze_test_check(!clang_analyze_record_matches_exact_string(mismatched_database_record, &mismatched_database_cursor, large_database),
+                             S8("manifest-database-length-mismatch-rejected"), &state);
+    String8List truncated_database_record_parts = {0};
+    string8_list_push(arena, &truncated_database_record_parts, string_format(arena, S8("{u64}\n"), large_database.length));
+    string8_list_push(arena, &truncated_database_record_parts, string_slice(large_database, 0, large_database.length - 1));
+    String8 truncated_database_record = string_join_arena(arena, string8_list_to_slice(arena, truncated_database_record_parts), true);
+    u64 truncated_database_cursor = 0;
+    clang_analyze_test_begin(S8("manifest-database-truncation-rejected"), true);
+    clang_analyze_test_check(!clang_analyze_record_matches_exact_string(truncated_database_record, &truncated_database_cursor, large_database),
+                             S8("manifest-database-truncation-rejected"), &state);
     bool split_valid = true;
     SliceString8 split = shell_split(arena, S8("\"clang tool\" \"-DBUSTER_HOST_C_COMPILER=\\\"C:/Program Files/clang.exe\\\"\" -I\"dir with spaces\" -c \"source file.c\" -o output.o"), &split_valid);
     String8 expected_macro = S8("-DBUSTER_HOST_C_COMPILER=\"C:/Program Files/clang.exe\"");
@@ -5015,13 +5074,16 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
                 clang_analyze_test_fixture_database_row(arena, source_directory, S8("alpha.c"), S8("obj/worker-z.o"), fixture, (SliceString8){0}, count_path),
                 clang_analyze_test_fixture_database_row(arena, source_directory, S8("alpha.c"), S8("obj/worker-a.o"), fixture, (SliceString8){0}, count_path),
             };
-            String8 worker_probe_text = string_format(arena, S8("[{S8},{S8}]"), worker_probe_rows[0], worker_probe_rows[1]);
+            String8 worker_probe_rows_text = string_format(arena, S8("[{S8},{S8}]"), worker_probe_rows[0], worker_probe_rows[1]);
+            String8 worker_probe_text = {.pointer = arena_allocate(arena, char8, BUSTER_MB(1) + 257), .length = BUSTER_MB(1) + 257};
+            memset(worker_probe_text.pointer, ' ', worker_probe_text.length);
+            memcpy(worker_probe_text.pointer, worker_probe_rows_text.pointer, worker_probe_rows_text.length);
             ClangAnalyzeOptions worker_probe_options = dedup_options;
             worker_probe_options.database = worker_probe_database;
             worker_probe_options.results = worker_probe_results;
             worker_probe_options.shards = 17;
             ClangAnalyzePlan worker_probe_full = {0};
-            bool worker_probe_ready = clang_analyze_write(arena, worker_probe_database, worker_probe_text) &&
+            bool worker_probe_ready = worker_probe_text.length > BUSTER_MB(1) && clang_analyze_write(arena, worker_probe_database, worker_probe_text) &&
                 clang_analyze_plan(arena, worker_probe_options, &worker_probe_full) && worker_probe_full.count == 2 &&
                 clang_analyze_new_directory(arena, worker_probe_results) &&
                 clang_analyze_write(arena, path_join(arena, worker_probe_results, S8("manifest.txt")), worker_probe_full.manifest);
@@ -5080,7 +5142,62 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
             bool restored_worker_manifest = clang_analyze_write(arena, worker_manifest_path, worker_manifest);
             clang_analyze_test_check(restored_worker_manifest && (!BUSTER_LINUX || worker_probe_full.aliased_rows == 1),
                 S8("worker-proof-control-has-native-alias"), &state);
-            bool prepared = dedup_planned && clang_analyze_new_directory(arena, dedup_options.results) &&
+            ClangAnalyzeOptions large_database_options = dedup_options;
+            large_database_options.database = worker_probe_database;
+            large_database_options.results = path_join(arena, dedup_root, S8("large-database-results"));
+            large_database_options.shards = 1;
+            large_database_options.worker = false;
+            large_database_options.aggregate = false;
+            ClangAnalyzePlan large_database_full_plan = {0};
+            bool large_database_prepared = worker_probe_ready && clang_analyze_new_directory(arena, large_database_options.results) &&
+                clang_analyze_plan(arena, large_database_options, &large_database_full_plan) &&
+                clang_analyze_write(arena, path_join(arena, large_database_options.results, S8("manifest.txt")), large_database_full_plan.manifest);
+            large_database_options.worker = true;
+            ClangAnalyzePlan large_database_worker_plan = {0};
+            bool large_database_worker_replanned = large_database_prepared &&
+                clang_analyze_plan(arena, large_database_options, &large_database_worker_plan);
+            bool large_database_launches_cleared = clang_analyze_write(arena, count_path, S8(""));
+            bool large_database_worker_passed = large_database_worker_replanned && large_database_launches_cleared &&
+                clang_analyze_worker(arena, large_database_options, large_database_worker_plan);
+            large_database_options.worker = false;
+            large_database_options.aggregate = true;
+            bool large_database_aggregate_passed = large_database_worker_passed &&
+                clang_analyze_aggregate(arena, large_database_options, large_database_full_plan);
+            String8 large_database_result = clang_analyze_read(arena, path_join(arena,
+                clang_analyze_shard_directory(arena, large_database_options, 0), S8("result.txt")));
+            u64 large_database_result_cursor = 0;
+            String8 large_database_result_magic = {0};
+            String8 large_database_result_fingerprint = {0};
+            u64 large_database_result_shard = 0;
+            u64 large_database_result_selected = 0;
+            u64 large_database_result_executions = 0;
+            u64 large_database_result_aliases = 0;
+            u64 large_database_result_elapsed = 0;
+            u64 large_database_result_rss = 0;
+            bool large_database_result_accounted = build_artifact_fanout_provenance_record_read_line(
+                    large_database_result, &large_database_result_cursor, &large_database_result_magic) &&
+                string_equal(large_database_result_magic, S8("BUSTER_CLANG_ANALYZE_RESULT_V2")) &&
+                build_artifact_fanout_provenance_record_read_line(large_database_result, &large_database_result_cursor,
+                    &large_database_result_fingerprint) && string_equal(large_database_result_fingerprint, large_database_full_plan.fingerprint) &&
+                build_artifact_fanout_provenance_record_read_u64(large_database_result, &large_database_result_cursor,
+                    &large_database_result_shard) && large_database_result_shard == 0 &&
+                build_artifact_fanout_provenance_record_read_u64(large_database_result, &large_database_result_cursor,
+                    &large_database_result_selected) && large_database_result_selected == large_database_full_plan.count &&
+                build_artifact_fanout_provenance_record_read_u64(large_database_result, &large_database_result_cursor,
+                    &large_database_result_executions) && large_database_result_executions == large_database_full_plan.unique_executions &&
+                build_artifact_fanout_provenance_record_read_u64(large_database_result, &large_database_result_cursor,
+                    &large_database_result_aliases) && large_database_result_aliases == large_database_full_plan.aliased_rows &&
+                build_artifact_fanout_provenance_record_read_u64(large_database_result, &large_database_result_cursor,
+                    &large_database_result_elapsed) &&
+                build_artifact_fanout_provenance_record_read_u64(large_database_result, &large_database_result_cursor,
+                    &large_database_result_rss);
+            bool large_database_launch_counted = clang_analyze_test_line_count(clang_analyze_read(arena, count_path)) ==
+                                                  large_database_full_plan.unique_executions;
+            clang_analyze_test_check(large_database_prepared && large_database_worker_replanned && large_database_worker_passed &&
+                large_database_aggregate_passed && large_database_result_accounted && large_database_launch_counted,
+                S8("large-database-manifest-worker-aggregate-round-trips-every-row"), &state);
+            bool dedup_launches_cleared = clang_analyze_write(arena, count_path, S8(""));
+            bool prepared = dedup_launches_cleared && dedup_planned && clang_analyze_new_directory(arena, dedup_options.results) &&
                 clang_analyze_write(arena, path_join(arena, dedup_options.results, S8("manifest.txt")), dedup_plan.manifest);
             dedup_options.worker = true;
             bool worker_passed = prepared && clang_analyze_worker(arena, dedup_options, dedup_plan);
