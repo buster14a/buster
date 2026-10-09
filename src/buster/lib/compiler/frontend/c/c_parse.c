@@ -25,7 +25,10 @@
 //   lowering stage consumes: interned types, entities, scopes, and
 //   diagnostics. Layout queries (c_parse_type_layout_solve) keep their
 //   query-local tables in the machine's phase arena and release them on
-//   return (docs/compiler-lifetime.md).
+//   return (docs/compiler-lifetime.md). When the caller supplies the unit's
+//   syntax tree (CParserResult.ast), c_parse_expression_type_query offers
+//   function-body ranges the per-body memo does not hold to the tree
+//   expression typer (c_ast_types.c) before running the machine.
 //
 // Types and declarators are parsed by CTypeParseMachine (types in
 // c_internal.h), an explicit frame stack in place of recursion: each
@@ -4731,7 +4734,7 @@ BUSTER_C_INTERNAL bool c_parse_member_cursor_next(CMemberCursor* cursor, u32* me
 }
 
 // `symbol` is the id the member-name token carries, 0 when it has none.
-BUSTER_C_INTERNAL CTypeId c_parse_member_type(Arena* arena, CParseResult* result, CTypeId type, u32 symbol, String8 name, u32* bit_width_out,
+BUSTER_C_SHARED CTypeId c_parse_member_type(Arena* arena, CParseResult* result, CTypeId type, u32 symbol, String8 name, u32* bit_width_out,
                                                CTypeId* aggregate_out, u32* member_out)
 {
     if (bit_width_out)
@@ -5236,7 +5239,7 @@ BUSTER_C_INTERNAL u32 c_parse_matching_delimiter(CPreprocessResult preprocess, u
     return end;
 }
 
-BUSTER_C_INTERNAL CTypeId c_parse_expression_scalar_type(CParseResult* result, CTypeKind kind)
+BUSTER_C_SHARED CTypeId c_parse_expression_scalar_type(CParseResult* result, CTypeKind kind)
 {
     CTypeId type = result->expression_scalar_types ? result->expression_scalar_types[kind] : C_TYPE_ID_INVALID;
     if (type.value >= result->type_count || result->types[type.value].kind != kind ||
@@ -5253,7 +5256,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_scalar_type(CParseResult* result, C
     return type;
 }
 
-BUSTER_C_INTERNAL bool c_parse_expression_integer_kind(CTypeKind kind)
+BUSTER_C_SHARED bool c_parse_expression_integer_kind(CTypeKind kind)
 {
     return kind == C_TYPE_BOOL || kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_UNSIGNED_CHAR || kind == C_TYPE_SHORT ||
            kind == C_TYPE_UNSIGNED_SHORT || kind == C_TYPE_INT || kind == C_TYPE_UNSIGNED_INT || kind == C_TYPE_LONG || kind == C_TYPE_UNSIGNED_LONG ||
@@ -5502,6 +5505,23 @@ BUSTER_C_INTERNAL CEnumMember const* c_parse_pending_enum_member(CPreprocessResu
     return found;
 }
 
+// Whether c_parse_pending_enum_member could answer a lone identifier at all.
+// It scans enum members only when the newest one is not yet published, or when
+// that member's enum is still incomplete (its list is being parsed); with every
+// list published and complete its scan starts past the last member and finds
+// nothing, so the tree typer may answer identifiers by their bindings.
+BUSTER_C_SHARED bool c_parse_pending_enum_possible(CParseResult const* result)
+{
+    bool possible = false;
+    if (result->enum_member_count)
+    {
+        CEnumMember const* last = result->enum_members + result->enum_member_count - 1;
+        possible = !last->is_published ||
+                   (last->enum_type.value < result->type_count && !result->types[last->enum_type.value].is_complete);
+    }
+    return possible;
+}
+
 BUSTER_C_INTERNAL CTypeId c_parse_expression_arithmetic_type(CParseResult* result, Target target, CTypeId left_id, CTypeId right_id,
                                                                 u32 left_bit_field_width, u32 right_bit_field_width)
 {
@@ -5668,7 +5688,7 @@ BUSTER_C_SHARED CTypeId c_semantic_vendor_builtin_type(CParseResult* result, Tar
     return type;
 }
 
-BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPreprocessResult preprocess,
+BUSTER_C_SHARED CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPreprocessResult preprocess,
                                                                  CParseResult* result, CScopeId scope, u32 start, u32 end)
 {
     if (start >= end)
@@ -7092,7 +7112,9 @@ BUSTER_C_INTERNAL bool c_parse_expression_literal_query(CTypeParseMachine* machi
         start >= machine->expression_query_start && end <= machine->expression_query_end
             ? start - machine->expression_query_start : UINT32_MAX;
     machine->mutation_type_limit = result->type_count;
-    CTypeId type = c_parse_expression_query_lookup(machine, result, slot, end, scope, flags)
+    // The slot test repeats the lookup's own guard where the static analyzer
+    // sees it: a slot exists only while the memo does.
+    CTypeId type = slot != UINT32_MAX && c_parse_expression_query_lookup(machine, result, slot, end, scope, flags)
                        ? machine->expression_queries[slot].type
                        : c_parse_expression_leaf_without_cast(arena, preprocess, result, scope, start, end);
     bool valid = type.value < result->type_count;
@@ -7106,6 +7128,54 @@ BUSTER_C_INTERNAL bool c_parse_expression_literal_query(CTypeParseMachine* machi
     return valid;
 }
 
+// The tree expression typer's turn in c_parse_expression_type_query, on a
+// range the per-body memo does not hold. True when the tree answered, which
+// leaves the machine state, *type_out and the memo entry exactly as the
+// machine's valid, constraint-free answer would: a later machine run over an
+// enclosing range then reads it as a task result exactly as it would have read
+// the machine's. Under the test seam c_test_ast_type_verify_set an answer is
+// held in *pending instead and false is returned, so the caller's literal path
+// or machine run answers the same range and c_parse_expression_type_query
+// compares the two at its end.
+BUSTER_C_INTERNAL bool c_parse_expression_tree_query(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
+                                                       u32 start, u32 end, u32 slot, u32 flags, CTypeId* type_out, CAstTypePending* pending)
+{
+    CAstTypeAnswer tree = c_ast_types_answer(machine, preprocess, result, scope, start, end);
+    bool answered = tree.status == C_AST_TYPE_ANSWER;
+#if BUSTER_INCLUDE_TESTS
+    if (answered && c_ast_types_verifying())
+    {
+        *pending = (CAstTypePending){.answer = tree, .mark = c_ast_types_verify_begin(result)};
+        answered = false;
+    }
+#else
+    BUSTER_UNUSED(pending);
+#endif
+    if (answered)
+    {
+        c_ast_types_publish(machine, result, tree, end);
+        *type_out = tree.type;
+        if (slot != UINT32_MAX && !machine->expression_constraint.length)
+            c_parse_expression_query_publish(machine, slot, end, scope, tree.type,
+                flags | (tree.nonplace_projection ? C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION : 0u));
+    }
+    return answered;
+}
+
+// One expression-type query: the per-body memo, then the tree expression typer
+// (c_ast_types.c), then the literal fast path, then a speculative run of the
+// explicit frame stack. Inside a function body whose syntax tree has been
+// typed, a range the memo does not hold that is exactly an accepted expression
+// node's tokens (parentheses aside) is answered from the tree. The answer
+// leaves the machine, and the memo entry, as the machine's valid,
+// constraint-free answer would, so a later machine run over an enclosing range
+// reads it as a task result exactly as it would have read the machine's.
+// Everything else runs the machine unchanged, so the machine stays the one
+// producer of every diagnostic and of every answer the tree does not vouch
+// for. Under the test seam c_test_ast_type_verify_set the literal path or the
+// machine also answers each range the tree answered, and the two are compared
+// at the end; the tree answer is still what the caller gets and what the memo
+// keeps.
 BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                        CScopeId scope, u32 start, u32 end, CTypeId* type_out)
 {
@@ -7133,11 +7203,23 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
     literal &= !c_parse_literal_query_machine_only;
 #endif
     u32 stored = c_parse_expression_query_lookup(machine, result, slot, end, scope, flags);
+#if BUSTER_INCLUDE_TESTS
+    // Only the status is read until c_parse_expression_tree_query fills it.
+    CAstTypePending pending;
+    pending.answer.status = C_AST_TYPE_INACTIVE;
+    CAstTypePending* pending_out = &pending;
+#else
+    CAstTypePending* pending_out = 0;
+#endif
     if (stored)
     {
         WORK_LEDGER_RECORD(REDERIVE_TYPE_QUERY_CACHE_HITS, 1);
         *type_out = machine->expression_queries[slot].type;
         machine->result_nonplace_projection = (stored & C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION) != 0;
+        valid = true;
+    }
+    else if (machine->ast_types && c_parse_expression_tree_query(machine, &preprocess, result, scope, start, end, slot, flags, type_out, pending_out))
+    {
         valid = true;
     }
     else if (literal)
@@ -7182,6 +7264,18 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
             c_parse_expression_query_publish(machine, slot, end, scope, *type_out,
                 flags | (machine->result_nonplace_projection ? C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION : 0u));
     }
+#if BUSTER_INCLUDE_TESTS
+    if (pending.answer.status == C_AST_TYPE_ANSWER)
+    {
+        // Verify mode: compare the tree's held answer with the one just made,
+        // then leave the tree's, and its memo entry, as the tree branch does.
+        c_ast_types_verify_end(machine, result, pending.mark, pending.answer, start, end, valid, valid ? *type_out : C_TYPE_ID_INVALID, type_out);
+        valid = true;
+        if (slot != UINT32_MAX && !machine->expression_constraint.length)
+            c_parse_expression_query_publish(machine, slot, end, scope, pending.answer.type,
+                flags | (pending.answer.nonplace_projection ? C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION : 0u));
+    }
+#endif
     return valid;
 }
 
@@ -7596,6 +7690,22 @@ BUSTER_C_INTERNAL void c_parse_type_identity_prepare(CTypeParseMachine* machine,
         }
         machine->type_identity_queries_active = false;
     }
+}
+
+// True when c_parse_type_identity_prepare would have nothing to settle for
+// [start, end): the position index lists no _Generic or
+// __builtin_types_compatible_p token there. The index being absent proves
+// nothing, so that answers false.
+BUSTER_C_SHARED bool c_parse_type_identity_sites_absent(CParseResult* result, u32 start, u32 end)
+{
+    CTokenPositionIndex const* positions = result->position_index;
+    bool absent = positions && positions->built;
+    if (absent)
+    {
+        absent = c_parse_position_lower_bound(positions->type_identity_positions, positions->type_identity_count, start) ==
+                 c_parse_position_lower_bound(positions->type_identity_positions, positions->type_identity_count, end);
+    }
+    return absent;
 }
 
 BUSTER_C_INTERNAL bool c_parse_generic_selection_range(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
@@ -33375,6 +33485,9 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
             }
         }
     }
+    // The function-definition index of the syntax tree, when there is one,
+    // lives with the other tables built once outside the per-body checkpoints.
+    c_ast_types_bodies_prepare(machine, result);
     for (u32 declaration_index = 0; declaration_index < result->declaration_count; declaration_index += 1)
     {
         CDeclaration* declaration = result->declarations + declaration_index;
@@ -33439,6 +33552,9 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         if (!c_parse_body_delimiters_valid(machine, result, preprocess, declaration))
             c_parse_lowering_constraint_consider(&diagnostic, S8("function body has mismatched delimiters"), declaration->body_start,
                 declaration->syntax_declaration ? declaration->syntax_declaration->function_name_token : declaration->body_start);
+        // Typed once per body, after the binder has recorded every identifier
+        // use, and released with the body's other scratch below.
+        c_ast_types_body_begin(machine, result, &preprocess, declaration);
         machine->runtime_expression_constraints = true;
         c_parse_validate_generic_duplicates(machine, arena, result, preprocess, declaration, skipped, &diagnostic);
         c_parse_validate_named_call_arities(arena, result, preprocess, declaration, skipped, &diagnostic);
@@ -33465,6 +33581,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         c_parse_validate_control_statements(machine, result, preprocess, declaration, skipped, &diagnostic);
         c_parse_validate_statement_expressions(machine, result, preprocess, declaration, skipped, &diagnostic);
         machine->runtime_expression_constraints = false;
+        c_ast_types_body_end(machine);
         machine->expression_queries = 0;
         machine->expression_query_flags = 0;
         machine->expression_query_result = 0;
@@ -33483,6 +33600,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
                                string_format(arena, S8("in function '{S8}': {S8}"), declaration->name, diagnostic.message));
         }
     }
+    machine->ast_bodies = 0;
     c_parse_validate_array_object_sizes(machine, result, preprocess, array_object_size_type_count);
     c_parse_validate_array_strides(machine, result, preprocess);
     c_parse_validate_alignment_redeclarations(machine, result, preprocess);
@@ -33649,6 +33767,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         .frame_capacity = type_frame_capacity,
         .mutation_capacity = type_mutation_capacity,
         .expression_task_capacity = expression_task_capacity,
+        .syntax_tree = syntax.ast,
+        .ast_type_statistics = syntax.ast_type_statistics,
     };
     result.declaration_capacity = semicolon_count + open_brace_count + declarator_list_comma_count + 1;
     result.type_capacity = token_count * 2 + 1;

@@ -20,6 +20,76 @@ BUSTER_F_DECL CTypeId c_test_aggregate_lookup_add(CParseResult* result, CType ty
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKind kind, String8 tag, CScopeId scope);
 BUSTER_F_DECL void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpoint);
 
+// The tree expression typer (c_ast_types.c). c_test_ast_type_probe answers one
+// range of an analyzed function body on a private machine. `status` is a
+// C_TEST_AST_TYPE_PROBE_* value: the function has no body, the body was not
+// typed, or the typer's INACTIVE, MISS, DECLINE or ANSWER (in that order, from
+// C_TEST_AST_TYPE_PROBE_INACTIVE).
+enum
+{
+    C_TEST_AST_TYPE_PROBE_NO_BODY = 100,
+    C_TEST_AST_TYPE_PROBE_UNTYPED = 101,
+    C_TEST_AST_TYPE_PROBE_INACTIVE = 0,
+    C_TEST_AST_TYPE_PROBE_MISS = 1,
+    C_TEST_AST_TYPE_PROBE_DECLINE = 2,
+    C_TEST_AST_TYPE_PROBE_ANSWER = 3,
+};
+typedef struct CTestAstTypeProbe CTestAstTypeProbe;
+struct CTestAstTypeProbe
+{
+    CTypeId type;
+    CTypeKind kind;
+    u64 nodes_typed;
+    u64 nodes_accepted;
+    u32 status;
+    // The CAstKind of the node the range mapped to.
+    u32 node_kind;
+    bool nonplace_projection;
+};
+BUSTER_F_DECL CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CAst const* ast, String8 function,
+                                                      u32 start, u32 end, bool checked);
+// Verify mode (c_test_ast_type_verify_set): every tree answer is also computed
+// by the type machine and compared; the tree answer is still what the caller
+// gets. The mode and its counts are per thread. A mismatch is a tree answer the
+// machine would not have given: reasons are C_TEST_AST_TYPE_MISMATCH_* bits,
+// and the first few are kept in full.
+enum
+{
+    C_TEST_AST_TYPE_MISMATCH_VALIDITY = 1u << 0,
+    C_TEST_AST_TYPE_MISMATCH_TYPE = 1u << 1,
+    C_TEST_AST_TYPE_MISMATCH_CONSTRAINT = 1u << 2,
+    C_TEST_AST_TYPE_MISMATCH_NONPLACE = 1u << 3,
+    C_TEST_AST_TYPE_MISMATCH_DIAGNOSTIC = 1u << 4,
+    C_TEST_AST_TYPE_MISMATCH_TABLES = 1u << 5,
+    C_TEST_AST_TYPE_MISMATCH_REASONS = 6,
+    C_TEST_AST_TYPE_MISMATCH_KEPT = 8,
+};
+typedef struct CTestAstTypeMismatch CTestAstTypeMismatch;
+struct CTestAstTypeMismatch
+{
+    u32 start;
+    u32 end;
+    u32 node_kind;
+    u32 reasons;
+    // CTypeKind of each answer, C_TYPE_COUNT when there is none.
+    u32 tree_type_kind;
+    u32 machine_type_kind;
+    bool machine_valid;
+    bool checked;
+};
+typedef struct CTestAstTypeVerify CTestAstTypeVerify;
+struct CTestAstTypeVerify
+{
+    u64 compared;
+    u64 mismatches;
+    u64 reason_counts[C_TEST_AST_TYPE_MISMATCH_REASONS];
+    CTestAstTypeMismatch first[C_TEST_AST_TYPE_MISMATCH_KEPT];
+    u32 first_count;
+};
+BUSTER_F_DECL void c_test_ast_type_verify_set(bool enabled);
+// The counts since the last take, which resets them.
+BUSTER_F_DECL CTestAstTypeVerify c_test_ast_type_verify_take(void);
+
 BUSTER_F_DECL CDiagnostic c_test_check_named_call_arities(Arena* arena, CAnalysisResult* analysis, CPreprocessResult preprocess,
                                                         u32 start, u32 end);
 

@@ -9,7 +9,9 @@
 // diagnostic and no partial tree. c_ast_test_corpus (see "corpus
 // differential" below) builds every tests/**/*.c file and the compiler's own
 // frontend sources and holds the tree to c_parse_ast's top-level declaration
-// split.
+// split, and the tree expression typer (c_ast_types.c) to the type machine
+// (c_ast_corpus_types). c_ast_test_types probes the typer's accepted kinds,
+// declines and misses one range at a time.
 //
 // Case helpers (macros: they add into the caller's `result`):
 //   c_ast_test_expect(arguments, source, expected_dump)
@@ -22,6 +24,7 @@
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/frontend/c/c_ast.h>
+#include <buster/lib/compiler/frontend/c/c_parse_internal.h>
 #include <buster/lib/string.h>
 #include <buster/lib/file.h>
 #include <buster/lib/os.h>
@@ -1770,6 +1773,11 @@ enum
     // Records compared against c_parse_ast, so a comparison that silently
     // sees nothing cannot pass.
     C_AST_CORPUS_RECORD_FLOOR = 6000,
+    // Tree expression-typer answers checked against the type machine
+    // (c_ast_corpus_types): about 44,500 from the fixtures, and about 237,700
+    // in all with the frontend's own sources where the host headers exist.
+    C_AST_CORPUS_TYPE_ANSWER_FLOOR = 40000,
+    C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR = 210000,
 };
 
 BUSTER_GLOBAL_LOCAL bool c_ast_corpus_in(String8 const* paths, u32 count, String8 path)
@@ -1802,7 +1810,102 @@ struct CAstCorpusTally
     u64 records;
     u64 nodes;
     u64 tokens;
+    // The tree expression typer over the same inputs (c_ast_corpus_types).
+    u64 type_answers;
+    u64 type_compared;
 };
+
+// The first difference between two analyses: the sizes of the type tables,
+// then the diagnostics (count, then each message, kind, severity and
+// location). Empty when there is none.
+BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_analyses_differ(Arena* arena, CAnalysisResult const* left, CAnalysisResult const* right)
+{
+    String8 difference = {0};
+    if (left->type_count != right->type_count || left->array_bound_count != right->array_bound_count || left->member_count != right->member_count ||
+        left->entity_count != right->entity_count)
+    {
+        difference = string_format(arena, S8("tables differ: {u32} types, {u32} bounds, {u32} members, {u32} entities without the tree; "
+                                             "{u32}, {u32}, {u32}, {u32} with it"),
+                                   left->type_count, left->array_bound_count, left->member_count, left->entity_count, right->type_count,
+                                   right->array_bound_count, right->member_count, right->entity_count);
+    }
+    else if (left->diagnostic_count != right->diagnostic_count || left->analysis_complete != right->analysis_complete)
+    {
+        difference = string_format(arena, S8("{u32} diagnostics (complete {u32}) without the tree, {u32} (complete {u32}) with it"), left->diagnostic_count,
+                                   (u32)left->analysis_complete, right->diagnostic_count, (u32)right->analysis_complete);
+    }
+    for (u32 index = 0; index < left->diagnostic_count && !difference.length; index += 1)
+    {
+        CDiagnostic const* a = left->diagnostics + index;
+        CDiagnostic const* b = right->diagnostics + index;
+        if (!string_equal(a->message, b->message) || a->kind != b->kind || a->severity != b->severity || a->location.offset != b->location.offset ||
+            a->location.line != b->location.line || a->location.column != b->location.column || a->location.file != b->location.file)
+        {
+            difference = string_format(arena, S8("diagnostic {u32} differs: '{S8}' without the tree, '{S8}' with it"), index, a->message, b->message);
+        }
+    }
+    return difference;
+}
+
+// The tree expression typer (c_ast_types.c, #3102) on one input whose tree is
+// complete and whose declarations c_parse_ast accepted. Semantic analysis runs
+// three times on fresh declaration splits: without the tree, with it, and with
+// it in verify mode, where the type machine also answers every query the tree
+// answered. The tree may not change a diagnostic or the size of a type table,
+// and the machine must agree with every tree answer.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* arguments, String8 label, CPreprocessResult preprocess, CAst const* ast,
+                                                      CAstCorpusTally* tally)
+{
+    UnitTestResult result = {0};
+    // Analysis of a frontend source with its headers outgrows a test scratch
+    // arena, so each pair of analyses gets an arena of its own.
+    ArenaCreation creation = {.reserved_size = BUSTER_GB(16), .flags = {.no_pool = true}};
+    Arena* arena = arena_create(creation);
+    if (BUSTER_REQUIRE(arguments, arena != 0))
+    {
+        CAnalysisResult plain = c_analyze_semantics_only(arena, preprocess, c_parse_ast(arena, preprocess));
+        CAstTypeStatistics statistics = {0};
+        CParserResult typed_syntax = c_parse_ast(arena, preprocess);
+        typed_syntax.ast = ast;
+        typed_syntax.ast_type_statistics = &statistics;
+        CAnalysisResult typed = c_analyze_semantics_only(arena, preprocess, typed_syntax);
+        String8 difference = c_ast_corpus_analyses_differ(arguments->arena, &plain, &typed);
+        BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(arguments->arena, S8("{S8}: {S8}"), label, difference));
+        arena_destroy(arena, 1);
+        arena = arena_create(creation);
+        if (BUSTER_REQUIRE(arguments, arena != 0))
+        {
+            CParserResult verified_syntax = c_parse_ast(arena, preprocess);
+            verified_syntax.ast = ast;
+            c_test_ast_type_verify_take();
+            c_test_ast_type_verify_set(true);
+            c_analyze_semantics_only(arena, preprocess, verified_syntax);
+            c_test_ast_type_verify_set(false);
+            CTestAstTypeVerify verify = c_test_ast_type_verify_take();
+            BUSTER_TEST_RAW(arguments, verify.compared == statistics.answers,
+                            string_format(arguments->arena, S8("{S8}: {u64} tree answers, {u64} verified"), label, statistics.answers, verify.compared));
+            for (u32 index = 0; index < verify.first_count; index += 1)
+            {
+                CTestAstTypeMismatch const* mismatch = verify.first + index;
+                String8 first = mismatch->start < preprocess.token_count ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[mismatch->start])
+                                                                         : S8("?");
+                BUSTER_TEST_RAW(arguments, false,
+                                string_format(arguments->arena,
+                                              S8("{S8}: tree answer for tokens [{u32}, {u32}) at '{S8}' ({S8}) disagrees with the machine: reasons {u32}, "
+                                                 "tree kind {u32}, machine kind {u32}, machine valid {u32}, checked {u32}"),
+                                              label, mismatch->start, mismatch->end, first, c_ast_kind_name((CAstKind)mismatch->node_kind),
+                                              mismatch->reasons, mismatch->tree_type_kind, mismatch->machine_type_kind, (u32)mismatch->machine_valid,
+                                              (u32)mismatch->checked));
+            }
+            BUSTER_TEST_RAW(arguments, verify.mismatches == verify.first_count,
+                            string_format(arguments->arena, S8("{S8}: {u64} tree answers disagree with the machine"), label, verify.mismatches));
+            tally->type_answers += statistics.answers;
+            tally->type_compared += verify.compared;
+            arena_destroy(arena, 1);
+        }
+    }
+    return result;
+}
 
 // One input: preprocess, run the earlier syntax pass and the tree builder, and
 // hold the tree to the claims above. `label` names the input in failures (a
@@ -1845,6 +1948,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_unit(UnitTestArguments* argument
                 String8 mismatch = c_ast_corpus_compare(temporary.arena, &syntax, records, record_count, &built.ast);
                 BUSTER_TEST_RAW(arguments, mismatch.length == 0, string_format(temporary.arena, S8("{S8}: {S8}"), label, mismatch));
                 tally->records += record_count;
+                c_ast_test_merge(&result, c_ast_corpus_types(arguments, label, preprocess, &built.ast, tally));
             }
             tally->built += 1;
             tally->nodes += built.ast.node_count;
@@ -2109,6 +2213,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_sources(UnitTestArguments* argum
         scratch_end(temporary);
     }
     BUSTER_TEST(arguments, !hosted || tally->built == built_before + BUSTER_ARRAY_LENGTH(paths));
+    BUSTER_TEST(arguments, !hosted || tally->type_answers >= C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR);
     return result;
 }
 #endif
@@ -2141,6 +2246,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
     BUSTER_TEST(arguments, tally.skipped <= C_AST_CORPUS_SKIPPED_CEILING);
     BUSTER_TEST(arguments, tally.records >= C_AST_CORPUS_RECORD_FLOOR);
     BUSTER_TEST(arguments, tally.pinned == BUSTER_ARRAY_LENGTH(c_ast_corpus_pins));
+    BUSTER_TEST(arguments, tally.type_answers >= C_AST_CORPUS_TYPE_ANSWER_FLOOR && tally.type_compared == tally.type_answers);
 #if BUSTER_LINUX && !BUSTER_ANDROID
     c_ast_test_merge(&result, c_ast_corpus_sources(arguments, &tally));
 #endif
@@ -3079,6 +3185,120 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_oracle(UnitTestArguments* argument
 }
 #undef c_ast_oracle_expect_dialect
 
+// The tree expression typer (c_ast_types.c): one range of a function body per
+// case, answered on a private machine from a tree built over the source. Each
+// stage-1 kind answers with the type the machine gives; every other kind
+// declines; a range that is no expression node misses. The corpus half of the
+// contract (every tree answer equals the machine's, and no diagnostic changes)
+// is c_ast_corpus_types.
+typedef struct CAstTypeCase CAstTypeCase;
+struct CAstTypeCase
+{
+    String8 source;
+    // The range: `count` tokens from the `occurrence`th (0-based) token spelled
+    // `first`.
+    String8 first;
+    u32 occurrence;
+    u32 count;
+    u32 status;
+    CTypeKind kind;
+};
+
+BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
+    {S8_INITIALIZER("int g; int f(void) { return g; }"), S8_INITIALIZER("g"), 1, 1, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("int g; int f(void) { return ((g)); }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("int x; long f(void) { long x = 1; return x; }"), S8_INITIALIZER("x"), 2, 1, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    {S8_INITIALIZER("long f(void) { return 7L; }"), S8_INITIALIZER("7L"), 0, 1, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    {S8_INITIALIZER("double f(void) { return 1.5; }"), S8_INITIALIZER("1.5"), 0, 1, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_DOUBLE},
+    {S8_INITIALIZER("int f(void) { return 'a'; }"), S8_INITIALIZER("'a'"), 0, 1, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("enum E { RED, GREEN }; int f(void) { return GREEN; }"), S8_INITIALIZER("GREEN"), 1, 1, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("struct S { short member; }; short f(struct S value) { return value.member; }"), S8_INITIALIZER("value"), 1, 3,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_SHORT},
+    {S8_INITIALIZER("struct S { char* name; }; char* f(struct S* pointer) { return pointer->name; }"), S8_INITIALIZER("pointer"), 1, 3,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("struct S { struct { int inner; }; }; int f(struct S* pointer) { return pointer->inner; }"), S8_INITIALIZER("pointer"), 1, 3,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("int f(int* items) { return items[2]; }"), S8_INITIALIZER("items"), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("unsigned char table[4]; unsigned char f(int i) { return table[i]; }"), S8_INITIALIZER("table"), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_UNSIGNED_CHAR},
+    {S8_INITIALIZER("double f(double* slot) { return *slot; }"), S8_INITIALIZER("*"), 1, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_DOUBLE},
+    {S8_INITIALIZER("float h(int); float f(void) { return h(1); }"), S8_INITIALIZER("h"), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_FLOAT},
+    {S8_INITIALIZER("float (*hp)(int); float f(void) { return hp(1); }"), S8_INITIALIZER("hp"), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_FLOAT},
+    {S8_INITIALIZER("struct S { int a; }; int f(struct S* p) { return p->a + 1; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    // Stage 1 declines whatever would make the machine append a type row, and
+    // every operator that computes a type.
+    {S8_INITIALIZER("struct S { int a; }; int f(struct S const* p) { return p->a; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_DECLINE,
+     C_TYPE_INVALID},
+    {S8_INITIALIZER("char const* f(void) { return \"text\"; }"), S8_INITIALIZER("\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("int f(int a, int b) { return a + b; }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("int* f(int a) { return &a; }"), S8_INITIALIZER("&"), 0, 2, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("long f(int a) { return (long)a; }"), S8_INITIALIZER("("), 1, 4, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("long f(void) { return __builtin_expect(1, 1); }"), S8_INITIALIZER("__builtin_expect"), 0, 6, C_TEST_AST_TYPE_PROBE_DECLINE,
+     C_TYPE_INVALID},
+    {S8_INITIALIZER("int g(int); int f(void) { return (g)(1); }"), S8_INITIALIZER("("), 2, 6, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    // A designator is not member access, and a declaration is not an
+    // expression.
+    {S8_INITIALIZER("struct S { int field; }; void f(void) { struct S s = {.field = 1}; }"), S8_INITIALIZER("."), 0, 2, C_TEST_AST_TYPE_PROBE_MISS,
+     C_TYPE_INVALID},
+    {S8_INITIALIZER("void f(void) { int local = 1; }"), S8_INITIALIZER("int"), 0, 2, C_TEST_AST_TYPE_PROBE_MISS, C_TYPE_INVALID},
+};
+
+BUSTER_GLOBAL_LOCAL u32 c_ast_test_token_index(CPreprocessResult preprocess, String8 spelling, u32 occurrence)
+{
+    u32 found = UINT32_MAX;
+    u32 seen = 0;
+    for (u32 index = 0; index < preprocess.token_count && found == UINT32_MAX; index += 1)
+    {
+        bool match = preprocess.tokens[index].kind != C_TOKEN_END_OF_FILE &&
+                     string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), spelling);
+        found = match && seen == occurrence ? index : UINT32_MAX;
+        seen += match;
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ast_type_cases); index += 1)
+    {
+        CAstTypeCase const* type_case = c_ast_type_cases + index;
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, type_case->source, C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+        u32 start = c_ast_test_token_index(preprocess, type_case->first, type_case->occurrence);
+        if (BUSTER_REQUIRE(arguments, built.complete && !analysis.diagnostic_count && analysis.analysis_complete && start != UINT32_MAX))
+        {
+            for (u32 checked = 0; checked < 2; checked += 1)
+            {
+                CTestAstTypeProbe probe = c_test_ast_type_probe(temporary.arena, preprocess, &analysis, &built.ast, S8("f"), start,
+                                                                start + type_case->count, checked != 0);
+                BUSTER_TEST_RAW(arguments, probe.status == type_case->status && probe.kind == type_case->kind && probe.nodes_typed > 0,
+                                string_format(temporary.arena, S8("{S8}: status {u32} kind {u32}, expected status {u32} kind {u32}"), type_case->source,
+                                              probe.status, (u32)probe.kind, type_case->status, (u32)type_case->kind));
+                BUSTER_TEST(arguments, !probe.nonplace_projection);
+            }
+        }
+        scratch_end(temporary);
+    }
+    // A function without a body, and a source without that function.
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, S8("int f(void); int g(void) { return f(); }"), C_PREPROCESS_DIALECT_GNU17);
+    CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+    CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+    if (BUSTER_REQUIRE(arguments, built.complete && !analysis.diagnostic_count))
+    {
+        u32 start = c_ast_test_token_index(preprocess, S8("f"), 1);
+        BUSTER_TEST(arguments, c_test_ast_type_probe(temporary.arena, preprocess, &analysis, &built.ast, S8("f"), start, start + 3, false).status ==
+                                   C_TEST_AST_TYPE_PROBE_NO_BODY);
+        CTestAstTypeProbe probe = c_test_ast_type_probe(temporary.arena, preprocess, &analysis, &built.ast, S8("g"), start, start + 3, false);
+        BUSTER_TEST(arguments, probe.status == C_TEST_AST_TYPE_PROBE_ANSWER && probe.kind == C_TYPE_INT);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult c_ast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3093,6 +3313,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_options_and_statistics);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_oracle);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_uninterned);
+    BUSTER_TEST_FIXTURE(arguments, c_ast_test_types);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_fixture_sweep);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_corpus);
