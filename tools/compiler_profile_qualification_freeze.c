@@ -1,0 +1,583 @@
+// Identity freeze for disabled sampling research; included after the ledger.
+// Ownership: trusted build driver. Entry: compiler_sampling_freeze_parse and
+// compiler_sampling_freeze_matches_family. Map: *_decimal validates exact
+// calibration bounds; *_self_test exercises parser and actual-family binding.
+// Parsed String8 fields borrow the input buffer; keep it alive through use.
+// Successful parsing never authenticates, admits or qualifies a campaign.
+
+typedef struct CompilerSamplingFreeze CompilerSamplingFreeze;
+struct CompilerSamplingFreeze
+{
+    String8 schema;
+    String8 phase;
+    String8 campaign_parent;
+    String8 campaign_parent_revision;
+    String8 base;
+    String8 base_tree;
+    String8 request_head;
+    String8 trusted_revision;
+    String8 baseline_revision;
+    String8 aa_candidate_revision;
+    String8 ab1_revision;
+    String8 ab2_revision;
+    String8 protocol_sha256;
+    String8 lab_sha256;
+    String8 python_sha256;
+    String8 driver_sha256;
+    String8 closure_sha256;
+    String8 prepared_sha256;
+    String8 baseline_sha256;
+    String8 aa_candidate_sha256;
+    String8 ab1_candidate_sha256;
+    String8 ab2_candidate_sha256;
+    String8 baseline_bytes;
+    String8 ab1_candidate_bytes;
+    String8 ab2_candidate_bytes;
+    String8 candidate_pairs;
+    String8 selected_candidate;
+    String8 calibration_ab1_low_percent;
+    String8 calibration_ab1_high_percent;
+    String8 calibration_ab2_low_percent;
+    String8 calibration_ab2_high_percent;
+    u64 calibration_micropercent[4];
+    bool valid;
+};
+
+typedef struct CompilerSamplingFreezeActual CompilerSamplingFreezeActual;
+struct CompilerSamplingFreezeActual
+{
+    String8 phase;
+    String8 campaign_parent;
+    String8 campaign_parent_revision;
+    String8 base;
+    String8 base_tree;
+    String8 request_head;
+    String8 trusted_revision;
+    String8 baseline_revision;
+    String8 candidate_revision;
+    String8 protocol_sha256;
+    String8 lab_sha256;
+    String8 python_sha256;
+    String8 driver_sha256;
+    String8 closure_sha256;
+    String8 prepared_sha256;
+    String8 baseline_sha256;
+    String8 candidate_sha256;
+    String8 baseline_bytes;
+    String8 candidate_bytes;
+};
+
+#define BUSTER_SAMPLING_FREEZE_MAX_BYTES (16u * 1024u)
+#define BUSTER_SAMPLING_CALIBRATION_MIN 2000000u
+#define BUSTER_SAMPLING_CALIBRATION_MAX 2500000u
+
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_decimal(String8 text, u64* output)
+{
+    bool result = text.length >= 1 && text.length <= 8 && text.pointer && text.pointer[0] == '2';
+    u64 value = BUSTER_SAMPLING_CALIBRATION_MIN;
+    if (result && text.length > 1)
+    {
+        result = text.length >= 3 && text.pointer[1] == '.';
+        u64 place = 100000;
+        for (u64 i = 2; result && i < text.length; i += 1)
+        {
+            u8 byte = text.pointer[i];
+            result = byte >= '0' && byte <= '9' && place;
+            if (result)
+            {
+                value += (u64)(byte - '0') * place;
+                place /= 10;
+            }
+        }
+    }
+    result = result && value >= BUSTER_SAMPLING_CALIBRATION_MIN && value <= BUSTER_SAMPLING_CALIBRATION_MAX;
+    if (result) *output = value;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_bytes(String8 text)
+{
+    bool result = text.pointer && text.length >= 1 && text.length <= 9 && text.pointer[0] >= '1' && text.pointer[0] <= '9';
+    u64 value = 0;
+    for (u64 i = 0; result && i < text.length; i += 1)
+    {
+        u8 byte = text.pointer[i];
+        result = byte >= '0' && byte <= '9';
+        if (result) value = value * 10 + (u64)(byte - '0');
+    }
+    result = result && value <= 536870912ull;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerSamplingFreeze compiler_sampling_freeze_parse(String8 text)
+{
+    CompilerSamplingFreeze result = {0};
+    String8 names[] = {S8("schema"), S8("phase"), S8("campaign_parent"), S8("campaign_parent_revision"), S8("base"), S8("base_tree"), S8("request_head"), S8("trusted_revision"),
+        S8("baseline_revision"), S8("aa_candidate_revision"), S8("ab1_revision"), S8("ab2_revision"),
+        S8("protocol_sha256"), S8("lab_sha256"), S8("python_sha256"), S8("driver_sha256"), S8("closure_sha256"), S8("prepared_sha256"),
+        S8("baseline_sha256"), S8("aa_candidate_sha256"), S8("ab1_candidate_sha256"), S8("ab2_candidate_sha256"),
+        S8("baseline_bytes"), S8("ab1_candidate_bytes"), S8("ab2_candidate_bytes"),
+        S8("candidate_pairs"), S8("selected_candidate"), S8("calibration_ab1_low_percent"),
+        S8("calibration_ab1_high_percent"), S8("calibration_ab2_low_percent"), S8("calibration_ab2_high_percent")};
+    String8* values[] = {&result.schema, &result.phase, &result.campaign_parent, &result.campaign_parent_revision, &result.base, &result.base_tree,
+        &result.request_head, &result.trusted_revision, &result.baseline_revision, &result.aa_candidate_revision, &result.ab1_revision,
+        &result.ab2_revision, &result.protocol_sha256, &result.lab_sha256, &result.python_sha256, &result.driver_sha256,
+        &result.closure_sha256, &result.prepared_sha256, &result.baseline_sha256, &result.aa_candidate_sha256, &result.ab1_candidate_sha256,
+        &result.ab2_candidate_sha256, &result.baseline_bytes, &result.ab1_candidate_bytes, &result.ab2_candidate_bytes, &result.candidate_pairs, &result.selected_candidate,
+        &result.calibration_ab1_low_percent, &result.calibration_ab1_high_percent,
+        &result.calibration_ab2_low_percent, &result.calibration_ab2_high_percent};
+    bool valid = text.pointer && text.length && text.length <= BUSTER_SAMPLING_FREEZE_MAX_BYTES;
+    u64 seen = 0;
+    for (u64 begin = 0; valid && begin < text.length;)
+    {
+        u64 end = begin, tab = text.length;
+        while (valid && end < text.length && text.pointer[end] != '\n')
+        {
+            u8 byte = text.pointer[end];
+            if (byte == '\t')
+            {
+                valid = tab == text.length;
+                tab = end;
+            }
+            else valid = byte >= 32 && byte <= 126;
+            end += 1;
+        }
+        valid = valid && end < text.length && tab > begin && tab < end && end - tab <= 257 && tab - begin <= 64;
+        bool matched = false;
+        if (valid)
+        {
+            String8 name = string_slice(text, begin, tab);
+            String8 value = string_slice(text, tab + 1, end);
+            for (u64 i = 0; !matched && i < BUSTER_ARRAY_LENGTH(names); i += 1)
+            {
+                if (string_equal(name, names[i]))
+                {
+                    matched = true;
+                    valid = value.length && !(seen & (1ull << i));
+                    if (valid)
+                    {
+                        *values[i] = value;
+                        seen |= 1ull << i;
+                    }
+                }
+            }
+        }
+        valid = valid && matched;
+        begin = end + 1;
+    }
+    valid = valid && seen == (1ull << BUSTER_ARRAY_LENGTH(names)) - 1 &&
+        string_equal(result.schema, S8("buster-main-sampling-freeze-v1"));
+    bool pilot = string_equal(result.phase, S8("pilot"));
+    bool confirm = string_equal(result.phase, S8("confirm"));
+    valid = valid && (pilot || confirm) &&
+        compiler_sampling_hex(result.campaign_parent, 64) && compiler_sampling_hex(result.campaign_parent_revision, 40);
+    String8 revisions[] = {result.base, result.base_tree, result.request_head, result.trusted_revision, result.baseline_revision,
+        result.aa_candidate_revision, result.ab1_revision, result.ab2_revision};
+    for (u64 i = 0; valid && i < BUSTER_ARRAY_LENGTH(revisions); i += 1)
+    {
+        valid = compiler_sampling_hex(revisions[i], 40);
+    }
+    String8 digests[] = {result.protocol_sha256, result.lab_sha256, result.python_sha256, result.driver_sha256,
+        result.closure_sha256, result.prepared_sha256, result.baseline_sha256, result.aa_candidate_sha256,
+        result.ab1_candidate_sha256, result.ab2_candidate_sha256};
+    for (u64 i = 0; valid && i < BUSTER_ARRAY_LENGTH(digests); i += 1)
+    {
+        valid = compiler_sampling_hex(digests[i], 64);
+    }
+    valid = valid && compiler_sampling_freeze_bytes(result.baseline_bytes) &&
+        compiler_sampling_freeze_bytes(result.ab1_candidate_bytes) && compiler_sampling_freeze_bytes(result.ab2_candidate_bytes) &&
+        string_equal(result.baseline_revision, result.base) &&
+        string_equal(result.aa_candidate_revision, result.base) &&
+        string_equal(result.aa_candidate_sha256, result.baseline_sha256) &&
+        !string_equal(result.ab1_revision, result.base) && !string_equal(result.ab2_revision, result.base) &&
+        !string_equal(result.ab1_revision, result.ab2_revision) &&
+        !string_equal(result.ab1_candidate_sha256, result.baseline_sha256) &&
+        !string_equal(result.ab2_candidate_sha256, result.baseline_sha256) &&
+        !string_equal(result.ab1_candidate_sha256, result.ab2_candidate_sha256) &&
+        (pilot ? string_equal(result.candidate_pairs, S8("0")) && string_equal(result.selected_candidate, S8("exploratory")) :
+            string_equal(result.candidate_pairs, S8("40")) && string_equal(result.selected_candidate, S8("compiler-main-40pairs-candidate-v1")));
+    String8 calibration[] = {result.calibration_ab1_low_percent, result.calibration_ab1_high_percent,
+        result.calibration_ab2_low_percent, result.calibration_ab2_high_percent};
+    for (u64 i = 0; valid && i < BUSTER_ARRAY_LENGTH(calibration); i += 1)
+    {
+        valid = pilot ? string_equal(calibration[i], S8("-")) :
+            compiler_sampling_freeze_decimal(calibration[i], &result.calibration_micropercent[i]);
+    }
+    valid = valid && (pilot || (result.calibration_micropercent[0] <= result.calibration_micropercent[1] &&
+        result.calibration_micropercent[2] <= result.calibration_micropercent[3]));
+    result.valid = valid;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_matches_family(CompilerSamplingFreeze freeze,
+    CompilerSamplingFreezeActual actual, String8 family)
+{
+    String8 frozen[] = {freeze.phase, freeze.campaign_parent, freeze.campaign_parent_revision, freeze.base, freeze.base_tree, freeze.request_head, freeze.trusted_revision,
+        freeze.baseline_revision, freeze.protocol_sha256, freeze.lab_sha256, freeze.python_sha256,
+        freeze.driver_sha256, freeze.closure_sha256, freeze.prepared_sha256, freeze.baseline_sha256, freeze.baseline_bytes};
+    String8 observed[] = {actual.phase, actual.campaign_parent, actual.campaign_parent_revision, actual.base, actual.base_tree, actual.request_head, actual.trusted_revision,
+        actual.baseline_revision, actual.protocol_sha256, actual.lab_sha256, actual.python_sha256,
+        actual.driver_sha256, actual.closure_sha256, actual.prepared_sha256, actual.baseline_sha256, actual.baseline_bytes};
+    bool result = freeze.valid;
+    for (u64 i = 0; result && i < BUSTER_ARRAY_LENGTH(frozen); i += 1)
+    {
+        result = string_equal(frozen[i], observed[i]);
+    }
+    String8 candidate_revision = {0}, candidate_digest = {0}, candidate_bytes = {0};
+    if (string_equal(family, S8("aa")))
+    {
+        candidate_revision = freeze.aa_candidate_revision;
+        candidate_digest = freeze.aa_candidate_sha256;
+        candidate_bytes = freeze.baseline_bytes;
+    }
+    else if (string_equal(family, S8("ab1")))
+    {
+        candidate_revision = freeze.ab1_revision;
+        candidate_digest = freeze.ab1_candidate_sha256;
+        candidate_bytes = freeze.ab1_candidate_bytes;
+    }
+    else if (string_equal(family, S8("ab2")))
+    {
+        candidate_revision = freeze.ab2_revision;
+        candidate_digest = freeze.ab2_candidate_sha256;
+        candidate_bytes = freeze.ab2_candidate_bytes;
+    }
+    result = result && candidate_revision.length && candidate_digest.length &&
+        string_equal(actual.candidate_revision, candidate_revision) &&
+        string_equal(actual.candidate_sha256, candidate_digest) && string_equal(actual.candidate_bytes, candidate_bytes);
+    return result;
+}
+
+// Pure fixture serialization; actual evidence is hashed.
+BUSTER_GLOBAL_LOCAL String8 compiler_sampling_freeze_fixture(Arena* arena, CompilerSamplingFreeze fixture)
+{
+    String8 names[] = {S8("schema"), S8("phase"), S8("campaign_parent"), S8("campaign_parent_revision"), S8("base"), S8("base_tree"), S8("request_head"), S8("trusted_revision"),
+        S8("baseline_revision"), S8("aa_candidate_revision"), S8("ab1_revision"), S8("ab2_revision"),
+        S8("protocol_sha256"), S8("lab_sha256"), S8("python_sha256"), S8("driver_sha256"), S8("closure_sha256"), S8("prepared_sha256"),
+        S8("baseline_sha256"), S8("aa_candidate_sha256"), S8("ab1_candidate_sha256"), S8("ab2_candidate_sha256"),
+        S8("baseline_bytes"), S8("ab1_candidate_bytes"), S8("ab2_candidate_bytes"),
+        S8("candidate_pairs"), S8("selected_candidate"), S8("calibration_ab1_low_percent"),
+        S8("calibration_ab1_high_percent"), S8("calibration_ab2_low_percent"), S8("calibration_ab2_high_percent")};
+    String8 values[] = {fixture.schema, fixture.phase, fixture.campaign_parent, fixture.campaign_parent_revision, fixture.base, fixture.base_tree,
+        fixture.request_head, fixture.trusted_revision, fixture.baseline_revision, fixture.aa_candidate_revision, fixture.ab1_revision,
+        fixture.ab2_revision, fixture.protocol_sha256, fixture.lab_sha256, fixture.python_sha256, fixture.driver_sha256,
+        fixture.closure_sha256, fixture.prepared_sha256, fixture.baseline_sha256, fixture.aa_candidate_sha256, fixture.ab1_candidate_sha256,
+        fixture.ab2_candidate_sha256, fixture.baseline_bytes, fixture.ab1_candidate_bytes, fixture.ab2_candidate_bytes, fixture.candidate_pairs, fixture.selected_candidate,
+        fixture.calibration_ab1_low_percent, fixture.calibration_ab1_high_percent,
+        fixture.calibration_ab2_low_percent, fixture.calibration_ab2_high_percent};
+    String8List rows = {0};
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
+    {
+        string8_list_push(arena, &rows, string_format(arena, S8("{S8}\t{S8}\n"), names[i], values[i]));
+    }
+    String8 result = string_join_arena(arena, string8_list_to_slice(arena, rows), false);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_self_test(Arena* arena)
+{
+    String8 a = S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    String8 b = S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    String8 c = S8("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+    String8 a40 = string_slice(a, 0, 40), b40 = string_slice(b, 0, 40), c40 = string_slice(c, 0, 40);
+    CompilerSamplingFreeze fixture = {.schema = S8("buster-main-sampling-freeze-v1"), .phase = S8("pilot"),
+        .campaign_parent = a, .campaign_parent_revision = b40, .base = a40, .base_tree = b40, .request_head = c40, .trusted_revision = b40,
+        .baseline_revision = a40, .aa_candidate_revision = a40, .ab1_revision = b40, .ab2_revision = c40,
+        .protocol_sha256 = a, .lab_sha256 = a, .python_sha256 = a, .driver_sha256 = a, .closure_sha256 = a, .prepared_sha256 = a,
+        .baseline_sha256 = a, .aa_candidate_sha256 = a, .ab1_candidate_sha256 = b, .ab2_candidate_sha256 = c, .baseline_bytes = S8("10000000"),
+        .ab1_candidate_bytes = S8("10001000"), .ab2_candidate_bytes = S8("10002000"),
+        .candidate_pairs = S8("0"), .selected_candidate = S8("exploratory"),
+        .calibration_ab1_low_percent = S8("-"), .calibration_ab1_high_percent = S8("-"),
+        .calibration_ab2_low_percent = S8("-"), .calibration_ab2_high_percent = S8("-")};
+    String8 pilot_text = compiler_sampling_freeze_fixture(arena, fixture);
+    CompilerSamplingFreeze pilot = compiler_sampling_freeze_parse(pilot_text);
+    bool result = pilot.valid;
+    fixture.phase = S8("confirm");
+    fixture.campaign_parent = a;
+    fixture.candidate_pairs = S8("40");
+    fixture.selected_candidate = S8("compiler-main-40pairs-candidate-v1");
+    fixture.calibration_ab1_low_percent = S8("2.000001");
+    fixture.calibration_ab1_high_percent = S8("2.5");
+    fixture.calibration_ab2_low_percent = S8("2.1");
+    fixture.calibration_ab2_high_percent = S8("2.500000");
+    String8 confirm_text = compiler_sampling_freeze_fixture(arena, fixture);
+    CompilerSamplingFreeze confirm = compiler_sampling_freeze_parse(confirm_text);
+    CompilerSamplingFreezeActual actual = {.phase = fixture.phase, .campaign_parent = fixture.campaign_parent,
+        .campaign_parent_revision = fixture.campaign_parent_revision,
+        .base = fixture.base, .base_tree = fixture.base_tree, .request_head = fixture.request_head, .trusted_revision = fixture.trusted_revision,
+        .baseline_revision = fixture.baseline_revision, .candidate_revision = fixture.ab1_revision,
+        .protocol_sha256 = fixture.protocol_sha256, .lab_sha256 = fixture.lab_sha256, .python_sha256 = fixture.python_sha256,
+        .driver_sha256 = fixture.driver_sha256, .closure_sha256 = fixture.closure_sha256,
+        .prepared_sha256 = fixture.prepared_sha256, .baseline_bytes = fixture.baseline_bytes, .candidate_bytes = fixture.ab1_candidate_bytes,
+        .baseline_sha256 = fixture.baseline_sha256, .candidate_sha256 = fixture.ab1_candidate_sha256};
+    result = result && confirm.valid && confirm.calibration_micropercent[0] == 2000001 &&
+        compiler_sampling_freeze_matches_family(confirm, actual, S8("ab1")) &&
+        !compiler_sampling_freeze_matches_family(confirm, actual, S8("aa")) &&
+        !compiler_sampling_freeze_matches_family(confirm, actual, S8("ab2")) &&
+        !compiler_sampling_freeze_matches_family(confirm, actual, S8("unknown"));
+    actual.candidate_revision = fixture.ab2_revision;
+    actual.candidate_sha256 = fixture.ab2_candidate_sha256;
+    actual.candidate_bytes = fixture.ab2_candidate_bytes;
+    result = result && compiler_sampling_freeze_matches_family(confirm, actual, S8("ab2"));
+    actual.candidate_revision = fixture.aa_candidate_revision;
+    actual.candidate_sha256 = fixture.aa_candidate_sha256;
+    actual.candidate_bytes = fixture.baseline_bytes;
+    result = result && compiler_sampling_freeze_matches_family(confirm, actual, S8("aa"));
+    String8* actual_fields[] = {&actual.phase, &actual.campaign_parent, &actual.campaign_parent_revision, &actual.base, &actual.base_tree, &actual.request_head, &actual.trusted_revision,
+        &actual.baseline_revision, &actual.protocol_sha256, &actual.lab_sha256, &actual.python_sha256,
+        &actual.driver_sha256, &actual.closure_sha256, &actual.prepared_sha256, &actual.baseline_sha256, &actual.baseline_bytes,
+        &actual.candidate_revision, &actual.candidate_sha256, &actual.candidate_bytes};
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(actual_fields); i += 1)
+    {
+        String8 saved = *actual_fields[i];
+        *actual_fields[i] = S8("tampered");
+        result = result && !compiler_sampling_freeze_matches_family(confirm, actual, S8("aa"));
+        *actual_fields[i] = saved;
+    }
+    result = result && !compiler_sampling_freeze_parse(string_slice(confirm_text, 0, confirm_text.length - 1)).valid &&
+        !compiler_sampling_freeze_parse(string_format(arena, S8("{S8}unknown\tvalue\n"), confirm_text)).valid &&
+        !compiler_sampling_freeze_parse(string_format(arena, S8("{S8}phase\tconfirm\n"), confirm_text)).valid &&
+        !compiler_sampling_freeze_parse(S8("schema\tbuster-main-sampling-freeze-v1\n")).valid &&
+        !compiler_sampling_freeze_parse(S8("schema\tbuster-main-sampling-freeze-v1\textra\n")).valid &&
+        !compiler_sampling_freeze_parse(S8("schema\tbuster-main-sampling-freeze-v1\r\n")).valid &&
+        !compiler_sampling_freeze_parse((String8){0}).valid;
+    String8 invalid_bytes[] = {S8("0"), S8("01"), S8("-"), S8("+1"), S8("1.0"), S8("536870913"), S8("1000000000")};
+    String8* sizes[] = {&fixture.baseline_bytes, &fixture.ab1_candidate_bytes, &fixture.ab2_candidate_bytes};
+    for (u64 field = 0; field < BUSTER_ARRAY_LENGTH(sizes); field += 1)
+    {
+        String8 saved = *sizes[field];
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(invalid_bytes); i += 1)
+        {
+            *sizes[field] = invalid_bytes[i];
+            result = result && !compiler_sampling_freeze_parse(compiler_sampling_freeze_fixture(arena, fixture)).valid;
+        }
+        *sizes[field] = saved;
+    }
+    result = result && compiler_sampling_freeze_bytes(S8("1")) && compiler_sampling_freeze_bytes(S8("536870912"));
+    String8 invalid_calibration[] = {S8("1.999999"), S8("2.500001"), S8("2."), S8("+2.1"), S8("2e0"),
+        S8("nan"), S8(" 2.1"), S8("2.0000001"), S8("-"), S8("2.1\t")};
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(invalid_calibration); i += 1)
+    {
+        u64 value = 0;
+        result = result && !compiler_sampling_freeze_decimal(invalid_calibration[i], &value);
+    }
+    CompilerSamplingFreeze changed = fixture;
+    String8* changed_fields[] = {&changed.phase, &changed.campaign_parent, &changed.base, &changed.baseline_revision,
+        &changed.aa_candidate_revision, &changed.aa_candidate_sha256, &changed.ab1_revision, &changed.ab2_revision,
+        &changed.ab1_candidate_sha256, &changed.ab2_candidate_sha256, &changed.candidate_pairs, &changed.selected_candidate,
+        &changed.calibration_ab1_low_percent, &changed.calibration_ab1_high_percent};
+    String8 changes[] = {S8("pilot"), S8("-"), S8("bad"), b40, b40, b, a40, b40, a, b, S8("80"),
+        S8("exploratory"), S8("2.4"), S8("2.1")};
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(changed_fields); i += 1)
+    {
+        String8 saved = *changed_fields[i];
+        *changed_fields[i] = changes[i];
+        // Raising only the lower bound to 2.4 remains valid against 2.5;
+        // force the accompanying high below it to exercise reversal.
+        String8 saved_high = changed.calibration_ab1_high_percent;
+        if (i == 12) changed.calibration_ab1_high_percent = S8("2.1");
+        if (i == 13) changed.calibration_ab1_low_percent = S8("2.4");
+        result = result && !compiler_sampling_freeze_parse(compiler_sampling_freeze_fixture(arena, changed)).valid;
+        changed.calibration_ab1_low_percent = fixture.calibration_ab1_low_percent;
+        changed.calibration_ab1_high_percent = saved_high;
+        *changed_fields[i] = saved;
+    }
+    return result;
+}
+
+// Acquisition declares sources/toolchains before outcomes. A trusted caller
+// must also bind its actual
+// job cleanup root with *_store_outside before creating durable evidence.
+typedef struct CompilerSamplingAcquisitionPlan CompilerSamplingAcquisitionPlan;
+struct CompilerSamplingAcquisitionPlan
+{
+    String8 schema;
+    String8 phase;
+    String8 base;
+    String8 base_tree;
+    String8 request_head;
+    String8 trusted_revision;
+    String8 baseline_revision;
+    String8 ab1_revision;
+    String8 ab2_revision;
+    String8 protocol_sha256;
+    String8 source_root;
+    String8 store_root;
+    String8 closure_policy;
+    String8 toolchain_policy;
+    String8 measurement;
+    String8 physical_budget_seconds;
+    bool valid;
+};
+
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_acquisition_path(String8 path)
+{
+    bool result = path.pointer && path.length > 1 && path.length <= 256 && path.pointer[0] == '/' &&
+        path.pointer[path.length - 1] != '/';
+    u64 begin = 1;
+    for (u64 i = 1; result && i <= path.length; i += 1)
+    {
+        bool end = i == path.length || path.pointer[i] == '/';
+        if (end)
+        {
+            String8 component = string_slice(path, begin, i);
+            result = component.length && !string_equal(component, S8(".")) && !string_equal(component, S8(".."));
+            begin = i + 1;
+        }
+        else result = path.pointer[i] >= 33 && path.pointer[i] <= 126 && path.pointer[i] != '\\';
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_acquisition_path_within(String8 child, String8 parent)
+{
+    bool result = string_equal(child, parent);
+    if (!result && child.length > parent.length && parent.length)
+    {
+        result = string_equal(string_slice(child, 0, parent.length), parent) && child.pointer[parent.length] == '/';
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_acquisition_plan_store_outside(CompilerSamplingAcquisitionPlan plan, String8 cleanup_root)
+{
+    bool result = plan.valid && compiler_sampling_acquisition_path(cleanup_root) &&
+        !compiler_sampling_acquisition_path_within(plan.store_root, cleanup_root);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerSamplingAcquisitionPlan compiler_sampling_acquisition_plan_parse(String8 text)
+{
+    CompilerSamplingAcquisitionPlan result = {0};
+    String8 names[] = {S8("schema"), S8("phase"), S8("base"), S8("base_tree"), S8("request_head"),
+        S8("trusted_revision"), S8("baseline_revision"), S8("ab1_revision"), S8("ab2_revision"),
+        S8("protocol_sha256"), S8("source_root"), S8("store_root"), S8("closure_policy"),
+        S8("toolchain_policy"), S8("measurement"), S8("physical_budget_seconds")};
+    String8* values[] = {&result.schema, &result.phase, &result.base, &result.base_tree, &result.request_head,
+        &result.trusted_revision, &result.baseline_revision, &result.ab1_revision, &result.ab2_revision,
+        &result.protocol_sha256, &result.source_root, &result.store_root, &result.closure_policy,
+        &result.toolchain_policy, &result.measurement, &result.physical_budget_seconds};
+    bool valid = text.pointer && text.length && text.length <= BUSTER_SAMPLING_FREEZE_MAX_BYTES;
+    u64 seen = 0;
+    for (u64 begin = 0; valid && begin < text.length;)
+    {
+        u64 end = begin, tab = text.length;
+        while (valid && end < text.length && text.pointer[end] != '\n')
+        {
+            u8 byte = text.pointer[end];
+            if (byte == '\t')
+            {
+                valid = tab == text.length;
+                tab = end;
+            }
+            else valid = byte >= 32 && byte <= 126;
+            end += 1;
+        }
+        valid = valid && end < text.length && tab > begin && tab < end && end - tab <= 257 && tab - begin <= 64;
+        bool matched = false;
+        if (valid)
+        {
+            String8 name = string_slice(text, begin, tab);
+            String8 value = string_slice(text, tab + 1, end);
+            for (u64 i = 0; !matched && i < BUSTER_ARRAY_LENGTH(names); i += 1)
+            {
+                if (string_equal(name, names[i]))
+                {
+                    matched = true;
+                    valid = value.length && !(seen & (1ull << i));
+                    if (valid)
+                    {
+                        *values[i] = value;
+                        seen |= 1ull << i;
+                    }
+                }
+            }
+        }
+        valid = valid && matched;
+        begin = end + 1;
+    }
+    valid = valid && seen == (1ull << BUSTER_ARRAY_LENGTH(names)) - 1 &&
+        string_equal(result.schema, S8("buster-main-sampling-acquisition-v1")) &&
+        string_equal(result.phase, S8("acquire"));
+    String8 revisions[] = {result.base, result.base_tree, result.request_head, result.trusted_revision,
+        result.baseline_revision, result.ab1_revision, result.ab2_revision};
+    for (u64 i = 0; valid && i < BUSTER_ARRAY_LENGTH(revisions); i += 1)
+    {
+        valid = compiler_sampling_hex(revisions[i], 40);
+    }
+    valid = valid && compiler_sampling_hex(result.protocol_sha256, 64) &&
+        string_equal(result.baseline_revision, result.base) &&
+        !string_equal(result.ab1_revision, result.base) && !string_equal(result.ab2_revision, result.base) &&
+        !string_equal(result.ab1_revision, result.ab2_revision) &&
+        compiler_sampling_acquisition_path(result.source_root) && compiler_sampling_acquisition_path(result.store_root) &&
+        !compiler_sampling_acquisition_path_within(result.store_root, result.source_root) &&
+        !compiler_sampling_acquisition_path_within(result.source_root, result.store_root) &&
+        string_equal(result.closure_policy, S8("snapshot-v1")) &&
+        string_equal(result.toolchain_policy, S8("clang-release-tests-off-native-v1")) &&
+        string_equal(result.measurement, S8("false")) && string_equal(result.physical_budget_seconds, S8("1800"));
+    result.valid = valid;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_sampling_acquisition_plan_fixture(Arena* arena, CompilerSamplingAcquisitionPlan fixture)
+{
+    String8 names[] = {S8("schema"), S8("phase"), S8("base"), S8("base_tree"), S8("request_head"),
+        S8("trusted_revision"), S8("baseline_revision"), S8("ab1_revision"), S8("ab2_revision"),
+        S8("protocol_sha256"), S8("source_root"), S8("store_root"), S8("closure_policy"),
+        S8("toolchain_policy"), S8("measurement"), S8("physical_budget_seconds")};
+    String8 values[] = {fixture.schema, fixture.phase, fixture.base, fixture.base_tree, fixture.request_head,
+        fixture.trusted_revision, fixture.baseline_revision, fixture.ab1_revision, fixture.ab2_revision,
+        fixture.protocol_sha256, fixture.source_root, fixture.store_root, fixture.closure_policy,
+        fixture.toolchain_policy, fixture.measurement, fixture.physical_budget_seconds};
+    String8List rows = {0};
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
+    {
+        string8_list_push(arena, &rows, string_format(arena, S8("{S8}\t{S8}\n"), names[i], values[i]));
+    }
+    String8 result = string_join_arena(arena, string8_list_to_slice(arena, rows), false);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_acquisition_plan_self_test(Arena* arena)
+{
+    String8 a = S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    String8 b = S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    String8 c = S8("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+    String8 a40 = string_slice(a, 0, 40), b40 = string_slice(b, 0, 40), c40 = string_slice(c, 0, 40);
+    CompilerSamplingAcquisitionPlan fixture = {.schema = S8("buster-main-sampling-acquisition-v1"),
+        .phase = S8("acquire"), .base = a40, .base_tree = b40, .request_head = c40, .trusted_revision = b40,
+        .baseline_revision = a40, .ab1_revision = b40, .ab2_revision = c40, .protocol_sha256 = a,
+        .source_root = S8("/srv/buster/source"), .store_root = S8("/srv/buster/evidence"),
+        .closure_policy = S8("snapshot-v1"), .toolchain_policy = S8("clang-release-tests-off-native-v1"),
+        .measurement = S8("false"), .physical_budget_seconds = S8("1800")};
+    String8 text = compiler_sampling_acquisition_plan_fixture(arena, fixture);
+    CompilerSamplingAcquisitionPlan parsed = compiler_sampling_acquisition_plan_parse(text);
+    bool result = parsed.valid && compiler_sampling_acquisition_plan_store_outside(parsed, S8("/home/runner/work")) &&
+        !compiler_sampling_acquisition_plan_store_outside(parsed, S8("/srv/buster")) &&
+        !compiler_sampling_acquisition_plan_store_outside(parsed, S8("/")) &&
+        !compiler_sampling_acquisition_plan_parse(string_slice(text, 0, text.length - 1)).valid &&
+        !compiler_sampling_acquisition_plan_parse(string_format(arena, S8("{S8}measurement\tfalse\n"), text)).valid &&
+        !compiler_sampling_acquisition_plan_parse(string_format(arena, S8("{S8}baseline_sha256\t-\n"), text)).valid &&
+        !compiler_sampling_acquisition_plan_parse(S8("schema\tbuster-main-sampling-acquisition-v1\n")).valid &&
+        !compiler_sampling_acquisition_plan_parse((String8){0}).valid;
+    String8* changed[] = {&fixture.phase, &fixture.base, &fixture.trusted_revision, &fixture.baseline_revision,
+        &fixture.ab1_revision, &fixture.ab2_revision, &fixture.protocol_sha256, &fixture.source_root,
+        &fixture.store_root, &fixture.closure_policy, &fixture.toolchain_policy, &fixture.measurement,
+        &fixture.physical_budget_seconds};
+    String8 bad[] = {S8("pilot"), S8("bad"), S8("-"), b40, a40, b40, S8("-"), S8("relative/path"),
+        S8("/srv/buster/source/evidence"), S8("dynamic"), S8("clang"), S8("true"), S8("1801")};
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(changed); i += 1)
+    {
+        String8 saved = *changed[i];
+        *changed[i] = bad[i];
+        result = result && !compiler_sampling_acquisition_plan_parse(compiler_sampling_acquisition_plan_fixture(arena, fixture)).valid;
+        *changed[i] = saved;
+    }
+    String8 malformed_paths[] = {S8("/"), S8("/srv//buster"), S8("/srv/./buster"), S8("/srv/../buster"),
+        S8("/srv/buster/"), S8("/srv/buster space"), S8("/srv/buster\\escape")};
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(malformed_paths); i += 1)
+    {
+        result = result && !compiler_sampling_acquisition_path(malformed_paths[i]);
+    }
+    return result;
+}

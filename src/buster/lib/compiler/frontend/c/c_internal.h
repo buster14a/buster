@@ -596,7 +596,11 @@ struct CRecordLayoutCursor
     // Set when a bit-field's natural storage unit may not cover its bits or
     // may overhang the record, so the IR layout has to fit a unit for it.
     bool needs_unit_fitting;
-    u8 reserved[4];
+    // Set when a size, offset or bit position no longer fits the u64 bit
+    // arithmetic; the positions saturate and c_record_layout_size answers
+    // UINT64_MAX, which is above every object-size limit.
+    bool overflowed;
+    u8 reserved[3];
 };
 
 typedef struct CRecordLayoutPlacement CRecordLayoutPlacement;
@@ -724,10 +728,12 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_RETURN_ADDRESS,
     C_SYMBOL_BUILTIN_ALLOCA,
     C_SYMBOL_BUILTIN_COMPLEX,
+    C_SYMBOL_BUILTIN_ABSOLUTE_VALUE,
     C_SYMBOL_BUILTIN_COUNT,
 } CSymbolBuiltin;
 BUSTER_C_EXTERN CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String8 spelling);
+BUSTER_C_EXTERN CTypeKind c_semantic_absolute_value_kind(CSymbolBuiltin builtin, String8 spelling);
 BUSTER_C_EXTERN bool c_semantic_builtin_returns_void(CSymbolBuiltin builtin);
 
 typedef enum CIntegerTransformOperation

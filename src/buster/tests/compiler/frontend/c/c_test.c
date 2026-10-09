@@ -867,6 +867,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_conditional_sizeof_mem
     return result;
 }
 
+// A 300-label switch whose labels are a permutation of 0..299, so no label is
+// adjacent to its neighbor in value. With `duplicate_position` below the label
+// count, that label repeats the value at position 40: the overlap is injected
+// late in source order and must be reported against that label alone, by the
+// parser's switch validation (c_parse_ast + c_analyze) and, because c_parse
+// alone does not run it, by the lowering's own check as well.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_switch_late_overlap(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 label_count = 300;
+    u32 duplicate_positions[] = {UINT32_MAX, 250, 299};
+    for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(duplicate_positions); variant += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u64 source_capacity = 128 + (u64)label_count * 32;
+        char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+        u64 source_length = 0;
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("int f(int x){ switch (x) {\n"));
+        for (u32 position = 0; position < label_count; position += 1)
+        {
+            u32 value_position = position == duplicate_positions[variant] ? 40 : position;
+            c_test_append_source(source_bytes, source_capacity, &source_length, S8("case "));
+            c_test_append_u32(source_bytes, source_capacity, &source_length, (value_position * 7) % label_count);
+            c_test_append_source(source_bytes, source_capacity, &source_length, S8(": return 1;\n"));
+        }
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("} return -1; }\n"));
+        String8 source = {.pointer = source_bytes, .length = source_length};
+        bool invalid = duplicate_positions[variant] != UINT32_MAX;
+        String8 message = S8("in function 'f': case label overlaps another case label");
+
+        CPreprocessResult lowering_preprocess = {0};
+        CParseResult lowering_parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("late-overlap.c"), target_native, &lowering_preprocess, &lowering_parse);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                                                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CIRLowerResult analyzed = c_analyze(temporary.arena, S8("late-overlap.c"), tokens, syntax, target_native);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+        if (invalid)
+        {
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 1 && !lowered.canonical_ir_certified);
+            BUSTER_TEST(arguments, analyzed.diagnostic_count == 1 && !analyzed.canonical_ir_certified);
+            if (lowered.diagnostic_count == 1)
+            {
+                BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message, message);
+            }
+            if (analyzed.diagnostic_count == 1)
+            {
+                BUSTER_STRING_TEST(arguments, analyzed.diagnostics[0].message, message);
+            }
+            if (lowered.diagnostic_count == 1 && analyzed.diagnostic_count == 1)
+            {
+                // Both checks name the same label: the late duplicate.
+                BUSTER_TEST(arguments, lowered.diagnostics[0].location.line == analyzed.diagnostics[0].location.line);
+                BUSTER_TEST(arguments, lowered.diagnostics[0].location.line == duplicate_positions[variant] + 2);
+            }
+        }
+        else
+        {
+            BUSTER_TEST(arguments, lowered.canonical_ir_certified && lowered.diagnostic_count == 0);
+            BUSTER_TEST(arguments, analyzed.canonical_ir_certified && analyzed.diagnostic_count == 0);
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_calls_and_wide_switch(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9763,6 +9830,101 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_object_size_limits(UnitTestArgum
                         }
                         BUSTER_TEST_RAW(arguments, direct_diagnostic && !direct.canonical_ir_certified, source);
                     }
+                    c_test_scratch_end(temporary);
+                }
+            }
+        }
+        // Record sizes obey the same limit as arrays and may not wrap u64 (#1479).
+        // Each member is a valid array on its own; only the record is too large.
+        {
+            bool narrow = target.cpu_arch == CPU_ARCH_WASM32;
+            String8 members = narrow ? S8("char a[1ULL<<31]; char b[1ULL<<31];") : S8("char a[1ULL<<60]; char b[1ULL<<60];");
+            String8 wrapped_members = narrow ? S8("char a[1ULL<<31]; char b[1ULL<<31]; char c[1ULL<<31];")
+                : S8("char a[1ULL<<60]; char b[1ULL<<60]; char c[1ULL<<60]; char d[1ULL<<60]; char e[1ULL<<60]; char f[1ULL<<60]; char g[1ULL<<60]; char h[1ULL<<60]; char i[1ULL<<60];");
+            String8 record_templates[] = {
+                S8("int keep = 7;\nstruct S {{ {S8} }}; unsigned long long n = sizeof(struct S);"),
+                S8("int keep = 7;\nstruct S {{ {S8} }}; struct S object;"),
+                S8("int keep = 7;\nstruct S {{ {S8} }}; int f(void) {{ struct S local; return 0; }}"),
+                S8("int keep = 7;\nstruct S {{ {S8} }}; struct T {{ char head; struct S s; }}; unsigned long long n = sizeof(struct T);"),
+            };
+            String8 member_sets[] = {members, wrapped_members};
+            for (u32 set = 0; set < BUSTER_ARRAY_LENGTH(member_sets); set += 1)
+            {
+                for (u32 template_index = 0; template_index < BUSTER_ARRAY_LENGTH(record_templates); template_index += 1)
+                {
+                    for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+                    {
+                        for (u32 form = 0; form < 2; form += 1)
+                        {
+                            TemporalArena temporary = scratch_begin(0, 0);
+                            String8 source = record_templates[template_index];
+                            source = string_format(temporary.arena, source, member_sets[set]);
+                            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                                (CPreprocessOptions){.target = target, .data_layout = layout, .dialect = dialects[dialect_index]});
+                            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, source);
+                            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("oversized-record.c"), tokens, syntax, target,
+                                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                            BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified, source);
+                            bool lowered_source = false;
+                            for (u32 index = 0; index < lowered.diagnostic_count; index += 1)
+                            {
+                                CDiagnostic diagnostic = lowered.diagnostics[index];
+                                lowered_source |= diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS && diagnostic.location.line == 2 &&
+                                    string_first_sequence(diagnostic.message, S8("is too large for target object-size limit")) != BUSTER_STRING_NO_MATCH;
+                            }
+                            BUSTER_TEST_RAW(arguments, lowered_source, source);
+                            // A folded sizeof must not be a wrapped, small size.
+                            bool semantic_source = false;
+                            for (u32 index = 0; index < semantic.diagnostic_count; index += 1)
+                            {
+                                CDiagnostic diagnostic = semantic.diagnostics[index];
+                                semantic_source |= diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS && diagnostic.location.line == 2 &&
+                                    string_first_sequence(diagnostic.message, S8("is too large for target object-size limit")) != BUSTER_STRING_NO_MATCH;
+                            }
+                            BUSTER_TEST_RAW(arguments, semantic_source || template_index == 1 || template_index == 2, source);
+                            c_test_scratch_end(temporary);
+                        }
+                    }
+                }
+            }
+        }
+        // A global initializer's sizeof of a too-large array of arrays points
+        // at the written bound (#1479).
+        {
+            struct
+            {
+                String8 source;
+                u32 column;
+            } located[] = {
+                {S8("int keep = 7;\nunsigned long long n = sizeof(char[2305843009213693951ULL][2]);"), 36},
+                {S8("int keep = 7;\nunsigned long long n = sizeof(char[2][2305843009213693951ULL]);"), 36},
+                // The element count times the element size leaves u64: the
+                // product must not wrap or leave the sizeof unfoldable.
+                {S8("int keep = 7;\nunsigned long long n = sizeof(char[1ULL<<63][2]);"), 36},
+                {S8("int keep = 7;\nunsigned long long n = sizeof(char[2][1ULL<<63]);"), 39},
+                {S8("int keep = 7;\nunsigned long long n = sizeof(char[1ULL<<40][1ULL<<40]);"), 36},
+            };
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(located) && target.cpu_arch != CPU_ARCH_WASM32; case_index += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(0, 0);
+                    String8 source = located[case_index].source;
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                        (CPreprocessOptions){.target = target, .data_layout = layout, .dialect = C_PREPROCESS_DIALECT_GNU17});
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("oversized-sizeof.c"), tokens, syntax, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    bool located_diagnostic = false;
+                    for (u32 index = 0; index < lowered.diagnostic_count; index += 1)
+                    {
+                        CDiagnostic diagnostic = lowered.diagnostics[index];
+                        located_diagnostic |= string_first_sequence(diagnostic.message, S8("array is too large")) != BUSTER_STRING_NO_MATCH &&
+                            diagnostic.location.line == 2 && diagnostic.location.column == located[case_index].column;
+                    }
+                    BUSTER_TEST_RAW(arguments, located_diagnostic && !lowered.canonical_ir_certified, source);
                     c_test_scratch_end(temporary);
                 }
             }
@@ -21690,6 +21852,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__builtin_choose_expr"), all_targets},
         {S8("__builtin_expect"), all_targets},
         {S8("__builtin_memcpy"), all_targets},
+        {S8("__builtin_abs"), all_targets},
+        {S8("__builtin_labs"), all_targets},
+        {S8("__builtin_llabs"), all_targets},
         {S8("__builtin_ffs"), all_targets},
         {S8("__builtin_ffsl"), all_targets},
         {S8("__builtin_ffsll"), all_targets},
@@ -21879,6 +22044,61 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         }
     }
 
+    // #1394: abs/labs/llabs are signed T(T) builtins. Their result is the
+    // operand's type (not int), constants fold, and runtime calls lower to
+    // integer operations with no call on both frontend SSA paths.
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            String8 source = S8(
+                "#if !__has_builtin(__builtin_abs) || !__has_builtin(__builtin_labs) || !__has_builtin(__builtin_llabs)\n"
+                "#error hidden abs\n"
+                "#endif\n"
+                "_Static_assert(sizeof(__builtin_abs(1)) == sizeof(int), \"abs result\");\n"
+                "_Static_assert(sizeof(__builtin_labs(1)) == sizeof(long), \"labs result\");\n"
+                "_Static_assert(sizeof(__builtin_llabs(1)) == sizeof(long long), \"llabs result\");\n"
+                "_Static_assert(_Generic(__builtin_llabs(1), long long: 1, default: 0), \"llabs type\");\n"
+                "_Static_assert(_Generic(__builtin_labs(1), long: 1, default: 0), \"labs type\");\n"
+                "_Static_assert(__builtin_abs(-5) == 5 && __builtin_abs(5) == 5 && __builtin_abs(0) == 0, \"abs fold\");\n"
+                "_Static_assert(__builtin_abs(-2147483647) == 2147483647, \"abs fold max\");\n"
+                "_Static_assert(__builtin_abs((short)-4) == 4, \"abs promoted operand\");\n"
+                "_Static_assert(__builtin_labs(-7L) == 7L, \"labs fold\");\n"
+                "_Static_assert(__builtin_llabs(-9LL) == 9LL, \"llabs fold\");\n"
+                "_Static_assert(__builtin_llabs(-2147483647 - 1) == 2147483648LL, \"llabs wide fold\");\n"
+                "int bound[__builtin_abs(-3)];\n"
+                "int query_abs(int a, long b, long long c) { return __builtin_abs(a) + (int)__builtin_labs(b) + (int)__builtin_llabs(c); }\n");
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target});
+            CParseResult parse = c_parse(temporary.arena, preprocess);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("has-builtin-abs.c"), preprocess, parse, target,
+                    (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count == 1))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    IrFunction* function = c_test_find_ir_function(module, S8("query_abs"));
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        u32 subtractions = 0;
+                        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                        {
+                            IrInstruction* instruction = function->instructions + instruction_index;
+                            subtractions += instruction->opcode == IR_OPCODE_BINARY && instruction->binary_operation == IR_BINARY_INTEGER_SUBTRACT;
+                        }
+                        BUSTER_TEST(arguments, subtractions == 3);
+                        BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
+                    }
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+
     // __builtin_return_address(0) lowers to one canonical RETURN_ADDRESS row
     // (not a stack save) on both frontend forms; other levels are refused.
     for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
@@ -21925,6 +22145,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count != 0, invalid_return_address_sources[index]);
         scratch_end(temporary);
+    }
+
+    String8 invalid_abs_sources[] = {
+        S8("int f(void) { return __builtin_abs(); }"),
+        S8("int f(void) { return __builtin_abs(1, 2); }"),
+        S8("long f(void) { return __builtin_labs(); }"),
+        S8("long long f(void) { return __builtin_llabs(1, 2); }"),
+        S8("int f(void) { return __builtin_abs((int*)0); }"),
+        S8("long f(void) { return __builtin_labs((struct Bad { int x; }){0}); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_abs_sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid_abs_sources[index], (CPreprocessOptions){.target = targets[0]});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count != 0, invalid_abs_sources[index]);
+        c_test_scratch_end(temporary);
     }
 
     String8 invalid_ffs_sources[] = {
@@ -28579,6 +28817,202 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
         }
         scratch_end(volatile_temporary);
     }
+    {
+        // Incomplete tags, static functions and function-scope statics in the
+        // debug model (#2719): only never-completed tags are declarations,
+        // static functions are internal, and a static local is named by its
+        // source spelling while the symbol keeps the unique .L link name.
+        TemporalArena declaration_temporary = scratch_begin(0, 0);
+        CPreprocessResult declaration_tokens = {0};
+        CParseResult declaration_parse = {0};
+        CIRLowerResult declaration_ir = c_test_lower_source(
+            declaration_temporary.arena,
+            S8("struct Never; union NeverUnion; struct Later; struct Empty { };"
+               " struct Never *never_pointer; union NeverUnion *never_union_pointer; struct Later *later_pointer;"
+               " struct Later { int field; };"
+               " struct Later later_value; struct Empty empty_value;"
+               " static int counter_a(int value) { static int calls = 1; calls += value; return calls; }"
+               " static int counter_b(int value) { static int calls = 2; calls += value; return calls; }"
+               " int api(int value) { return counter_a(value) + counter_b(value) + later_value.field; }"),
+            S8("debug-declarations.c"), target_native, &declaration_tokens, &declaration_parse);
+        BUSTER_TEST(arguments, declaration_tokens.diagnostic_count == 0 && declaration_parse.diagnostic_count == 0 &&
+                                   declaration_ir.diagnostic_count == 0 && declaration_ir.program);
+        if (declaration_ir.program)
+        {
+            IrModule* declaration_module = &declaration_ir.program->modules[0];
+            DebugFunctionSeed* seeds = arena_allocate(declaration_temporary.arena, DebugFunctionSeed, declaration_module->function_count);
+            for (u32 index = 0; index < declaration_module->function_count; index += 1)
+            {
+                IrFunction* function = declaration_module->functions + index;
+                seeds[index] = (DebugFunctionSeed){.name = function->name, .symbol = function->symbol, .code_offset = index * 16, .code_size = 16};
+            }
+            DebugModel debug = debug_model_build(declaration_temporary.arena, (DebugModelInput){.program = declaration_ir.program,
+                .module = declaration_module, .functions = seeds, .function_count = declaration_module->function_count});
+            BUSTER_TEST(arguments, debug.valid);
+            if (debug.valid)
+            {
+                bool never = false;
+                bool never_union = false;
+                bool later = false;
+                bool empty = false;
+                for (u32 index = 0; index < debug.type_count; index += 1)
+                {
+                    DebugType* type = debug.types + index;
+                    never |= type->kind == DEBUG_TYPE_STRUCT && string_equal(type->name, S8("Never")) && type->is_declaration && !type->field_count;
+                    never_union |= type->kind == DEBUG_TYPE_UNION && string_equal(type->name, S8("NeverUnion")) && type->is_declaration;
+                    later |= type->kind == DEBUG_TYPE_STRUCT && string_equal(type->name, S8("Later")) && !type->is_declaration &&
+                             type->size == 4 && type->field_count == 1;
+                    empty |= type->kind == DEBUG_TYPE_STRUCT && string_equal(type->name, S8("Empty")) && !type->is_declaration && !type->field_count;
+                    BUSTER_TEST(arguments, !type->is_declaration || type->kind == DEBUG_TYPE_STRUCT || type->kind == DEBUG_TYPE_UNION);
+                }
+                BUSTER_TEST(arguments, never && never_union && later && empty);
+                u32 internal_functions = 0;
+                u32 public_functions = 0;
+                for (u32 index = 0; index < debug.function_count; index += 1)
+                {
+                    DebugFunction* function = debug.functions + index;
+                    bool is_counter = string_equal(function->name, S8("counter_a")) || string_equal(function->name, S8("counter_b"));
+                    internal_functions += function->is_internal && is_counter;
+                    public_functions += !function->is_internal && string_equal(function->name, S8("api"));
+                }
+                BUSTER_TEST(arguments, debug.function_count == 3 && internal_functions == 2 && public_functions == 1);
+                u32 static_locals = 0;
+                for (u32 index = 0; index < debug.variable_count; index += 1)
+                {
+                    DebugVariable* variable = debug.variables + index;
+                    IrSymbol* symbol = ir_symbol_from_id(&declaration_ir.program->symbols, variable->symbol);
+                    bool first = symbol && symbol->link_name.length > 19 && memcmp(symbol->link_name.pointer, ".L.counter_a.calls.", 19) == 0;
+                    bool second = symbol && symbol->link_name.length > 19 && memcmp(symbol->link_name.pointer, ".L.counter_b.calls.", 19) == 0;
+                    if (variable->kind == DEBUG_VARIABLE_GLOBAL && (first || second))
+                    {
+                        static_locals += string_equal(variable->name, S8("calls")) && string_equal(symbol->name, S8("calls")) &&
+                                         string_equal(variable->linkage_name, symbol->link_name) && variable->is_internal &&
+                                         symbol->linkage == IR_LINKAGE_INTERNAL;
+                    }
+                }
+                BUSTER_TEST(arguments, static_locals == 2);
+                // Each static is owned by the function that declares it (a
+                // contiguous run of function-scope statics); api owns none.
+                u32 owned_statics = 0;
+                u32 marked_statics = 0;
+                for (u32 index = 0; index < debug.function_count; index += 1)
+                {
+                    DebugFunction* function = debug.functions + index;
+                    bool valid_run = function->static_start <= debug.variable_count && function->static_count <= debug.variable_count - function->static_start;
+                    for (u32 offset = 0; valid_run && offset < function->static_count; offset += 1)
+                    {
+                        DebugVariable* variable = debug.variables + function->static_start + offset;
+                        IrSymbol* symbol = ir_symbol_from_id(&declaration_ir.program->symbols, variable->symbol);
+                        owned_statics += symbol && variable->kind == DEBUG_VARIABLE_GLOBAL && variable->is_static_local && symbol->has_owner_function &&
+                                         symbol->owner_function.value == function->symbol.value && string_equal(variable->name, S8("calls"));
+                    }
+                    BUSTER_TEST(arguments, valid_run && function->static_count == (string_equal(function->name, S8("api")) ? 0u : 1u));
+                }
+                for (u32 index = 0; index < debug.variable_count; index += 1)
+                {
+                    marked_statics += debug.variables[index].is_static_local;
+                }
+                BUSTER_TEST(arguments, owned_statics == 2 && marked_statics == 2);
+                // The two same-named statics stay distinct link symbols.
+                String8 link_a = {0};
+                String8 link_b = {0};
+                for (u32 index = 0; index < declaration_ir.program->symbols.count; index += 1)
+                {
+                    IrSymbol* symbol = declaration_ir.program->symbols.symbols + index;
+                    bool named = string_equal(symbol->name, S8("calls")) && symbol->link_name.length > 19;
+                    link_a = named && memcmp(symbol->link_name.pointer, ".L.counter_a.calls.", 19) == 0 ? symbol->link_name : link_a;
+                    link_b = named && memcmp(symbol->link_name.pointer, ".L.counter_b.calls.", 19) == 0 ? symbol->link_name : link_b;
+                }
+                u32 distinct_links = link_a.length && link_b.length && !string_equal(link_a, link_b);
+                BUSTER_TEST(arguments, distinct_links == 1);
+            }
+        }
+        scratch_end(declaration_temporary);
+    }
+    {
+        // A function-scope static is nested at subprogram level, so one that
+        // shadows a parameter, a local, a sibling static or a file-scope object
+        // keeps its unique link spelling as the debug name; otherwise a debugger
+        // would resolve the outer entity to the static (#2719).
+        TemporalArena shadow_temporary = scratch_begin(0, 0);
+        CPreprocessResult shadow_static_tokens = {0};
+        CParseResult shadow_static_parse = {0};
+        CIRLowerResult shadow_static_ir = c_test_lower_source(
+            shadow_temporary.arena,
+            S8("int shared = 3;"
+               " static int by_parameter(int x) { { static int x = 7; x += 1; } return x; }"
+               " static int by_sibling(void) { static int calls = 2; { static int calls = 30; calls += 1; } return calls; }"
+               " static int by_local(void) { int mark = 1; { static int mark = 5; mark += 1; } return mark; }"
+               " static int by_global(void) { { static int shared = 4; shared += 1; } return shared; }"
+               " static int plain(void) { static int solo = 1; return solo; }"
+               " int api(void) { return by_parameter(1) + by_sibling() + by_local() + by_global() + plain(); }"),
+            S8("debug-static-shadow.c"), target_native, &shadow_static_tokens, &shadow_static_parse);
+        BUSTER_TEST(arguments, shadow_static_tokens.diagnostic_count == 0 && shadow_static_parse.diagnostic_count == 0 &&
+                                   shadow_static_ir.diagnostic_count == 0 && shadow_static_ir.program);
+        if (shadow_static_ir.program)
+        {
+            IrModule* shadow_module = &shadow_static_ir.program->modules[0];
+            DebugFunctionSeed* seeds = arena_allocate(shadow_temporary.arena, DebugFunctionSeed, shadow_module->function_count);
+            for (u32 index = 0; index < shadow_module->function_count; index += 1)
+            {
+                IrFunction* function = shadow_module->functions + index;
+                seeds[index] = (DebugFunctionSeed){.name = function->name, .symbol = function->symbol, .code_offset = index * 16, .code_size = 16};
+            }
+            DebugModel debug = debug_model_build(shadow_temporary.arena, (DebugModelInput){.program = shadow_static_ir.program,
+                .module = shadow_module, .functions = seeds, .function_count = shadow_module->function_count});
+            BUSTER_TEST(arguments, debug.valid);
+            // Per owning function: the statics it nests, how many keep the
+            // unique ".L.<function>.<name>." spelling, and which source name
+            // each one shadows.
+            struct {String8 function; String8 source_name; u32 statics; u32 unique;} expected[] = {
+                {S8("by_parameter"), S8("x"), 1, 1}, {S8("by_sibling"), S8("calls"), 2, 2}, {S8("by_local"), S8("mark"), 1, 1},
+                {S8("by_global"), S8("shared"), 1, 1}, {S8("plain"), S8("solo"), 1, 0}, {S8("api"), S8("api"), 0, 0},
+            };
+            u32 matched_functions = 0;
+            u32 file_scope_shared = 0;
+            for (u32 index = 0; debug.valid && index < debug.function_count; index += 1)
+            {
+                DebugFunction* function = debug.functions + index;
+                for (u32 entry = 0; entry < BUSTER_ARRAY_LENGTH(expected); entry += 1)
+                {
+                    if (string_equal(function->name, expected[entry].function))
+                    {
+                        u32 statics = 0;
+                        u32 unique = 0;
+                        u32 source_named = 0;
+                        for (u32 offset = 0; function->static_start + offset < debug.variable_count && offset < function->static_count; offset += 1)
+                        {
+                            DebugVariable* variable = debug.variables + function->static_start + offset;
+                            IrSymbol* symbol = ir_symbol_from_id(&shadow_static_ir.program->symbols, variable->symbol);
+                            statics += symbol != 0;
+                            if (symbol)
+                            {
+                                u64 prefix_length = 4 + function->name.length + expected[entry].source_name.length;
+                                bool spelled = string_equal(symbol->name, expected[entry].source_name) && symbol->link_name.length > prefix_length &&
+                                               memcmp(symbol->link_name.pointer, ".L.", 3) == 0 &&
+                                               memcmp(symbol->link_name.pointer + 3, function->name.pointer, function->name.length) == 0 &&
+                                               symbol->link_name.pointer[3 + function->name.length] == '.' &&
+                                               memcmp(symbol->link_name.pointer + 4 + function->name.length, expected[entry].source_name.pointer,
+                                                      expected[entry].source_name.length) == 0;
+                                unique += spelled && string_equal(variable->name, symbol->link_name);
+                                source_named += string_equal(variable->name, expected[entry].source_name);
+                            }
+                        }
+                        matched_functions += statics == expected[entry].statics && unique == expected[entry].unique &&
+                                             source_named == expected[entry].statics - expected[entry].unique;
+                    }
+                }
+            }
+            for (u32 index = 0; debug.valid && index < debug.variable_count; index += 1)
+            {
+                DebugVariable* variable = debug.variables + index;
+                file_scope_shared += variable->kind == DEBUG_VARIABLE_GLOBAL && !variable->is_static_local && string_equal(variable->name, S8("shared"));
+            }
+            BUSTER_TEST(arguments, debug.function_count == BUSTER_ARRAY_LENGTH(expected) && matched_functions == BUSTER_ARRAY_LENGTH(expected) &&
+                                       file_scope_shared == 1);
+        }
+        scratch_end(shadow_temporary);
+    }
     CPreprocessResult shadow_tokens = c_preprocess(arguments->arena,
                                                    S8("int main(int value) {\n"
                                                       "    int result = value;\n"
@@ -28816,6 +29250,234 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
 }
 
 // Regression coverage for the 2026-08-08 stage-1 stray-global-write incident:
+// Every lexical block that declares a local is its own debug scope with a
+// parent link (#2241): sibling blocks at one depth stay apart, and a block
+// that follows a nested one hangs off its own enclosing block, not off the
+// block that was last entered.
+BUSTER_GLOBAL_LOCAL IrDebugLocal* c_test_find_debug_local(IrFunction* function, String8 name, u32 occurrence)
+{
+    IrDebugLocal* result = 0;
+    for (u32 index = 0; !result && index < function->debug_local_count; index += 1)
+    {
+        IrDebugLocal* candidate = function->debug_locals + index;
+        if (string_equal(candidate->name, name))
+        {
+            if (!occurrence)
+            {
+                result = candidate;
+            }
+            else
+            {
+                occurrence -= 1;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL DebugVariable* c_test_find_debug_variable(DebugModel* model, String8 name, u32 occurrence)
+{
+    DebugVariable* result = 0;
+    for (u32 index = 0; !result && index < model->variable_count; index += 1)
+    {
+        DebugVariable* candidate = model->variables + index;
+        if (candidate->kind != DEBUG_VARIABLE_GLOBAL && string_equal(candidate->name, name))
+        {
+            if (!occurrence)
+            {
+                result = candidate;
+            }
+            else
+            {
+                occurrence -= 1;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_debug_lexical_scopes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    // Line numbers matter: the line rows below name positions in this text.
+    String8 source = S8("volatile int sink;\n"                       // 1
+                        "int shadow(int n)\n"                         // 2
+                        "{\n"                                         // 3
+                        "    int x = 100;\n"                          // 4
+                        "    {\n"                                     // 5
+                        "        int x = 1;\n"                        // 6
+                        "        {\n"                                 // 7
+                        "            int x = 11;\n"                   // 8
+                        "            sink = x;\n"                     // 9
+                        "        }\n"                                 // 10
+                        "        sink = x;\n"                         // 11
+                        "    }\n"                                     // 12
+                        "    {\n"                                     // 13
+                        "        int x = 2;\n"                        // 14
+                        "        sink = x;\n"                         // 15
+                        "    }\n"                                     // 16
+                        "    for (int i = 0; i < n; i++)\n"           // 17
+                        "    {\n"                                     // 18
+                        "        int w = i;\n"                        // 19
+                        "        sink = w;\n"                         // 20
+                        "    }\n"                                     // 21
+                        "    { int unused; }\n"                       // 22
+                        "    return x + n;\n"                         // 23
+                        "}\n");                                       // 24
+    CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("scopes.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program);
+    if (lowered.program)
+    {
+        IrModule* module = &lowered.program->modules[0];
+        IrFunction* function = module->functions;
+        IrDebugLocal* outer_x = c_test_find_debug_local(function, S8("x"), 0);
+        IrDebugLocal* block_x = c_test_find_debug_local(function, S8("x"), 1);
+        IrDebugLocal* nested_x = c_test_find_debug_local(function, S8("x"), 2);
+        IrDebugLocal* sibling_x = c_test_find_debug_local(function, S8("x"), 3);
+        IrDebugLocal* counter = c_test_find_debug_local(function, S8("i"), 0);
+        IrDebugLocal* body = c_test_find_debug_local(function, S8("w"), 0);
+        IrDebugLocal* unused = c_test_find_debug_local(function, S8("unused"), 0);
+        IrDebugLocal* parameter = c_test_find_debug_local(function, S8("n"), 0);
+        BUSTER_TEST(arguments, outer_x && block_x && nested_x && sibling_x && counter && body && unused && parameter);
+        // Ordinals ascend in source order; the function scope is ordinal 0.
+        BUSTER_TEST(arguments, function->debug_scope_count == 6 && function->debug_scopes);
+        if (outer_x && block_x && nested_x && sibling_x && counter && body && unused && parameter && function->debug_scope_count == 6)
+        {
+            BUSTER_TEST(arguments, parameter->scope == 0 && outer_x->scope == 0);
+            BUSTER_TEST(arguments, block_x->scope == 1 && nested_x->scope == 2 && sibling_x->scope == 3);
+            BUSTER_TEST(arguments, counter->scope == 4 && body->scope == 5 && unused->scope == 6);
+            BUSTER_TEST(arguments, function->debug_scopes[0].parent == 0 && function->debug_scopes[1].parent == 1);
+            // The sibling after a nested block returns to the function, and
+            // the loop body's parent is the loop's own header scope.
+            BUSTER_TEST(arguments, function->debug_scopes[2].parent == 0 && function->debug_scopes[3].parent == 0);
+            BUSTER_TEST(arguments, function->debug_scopes[4].parent == 4 && function->debug_scopes[5].parent == 0);
+            for (u32 index = 0; index < function->debug_scope_count; index += 1)
+            {
+                IrDebugScope* scope = function->debug_scopes + index;
+                BUSTER_TEST(arguments, scope->parent <= index && scope->extent.length != 0);
+            }
+        }
+        IrValidationResult validation = ir_validate_canonical_module(lowered.program, module);
+        BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE);
+
+        // Without a line table a block covers its whole function, but the
+        // tree is the lexical one.
+        DebugFunctionSeed seed = {.name = S8("shadow"), .symbol = function->symbol, .code_offset = 0x100, .code_size = 0x80};
+        DebugModel model = debug_model_build(temporary.arena, (DebugModelInput){
+                                                                  .program = lowered.program,
+                                                                  .module = module,
+                                                                  .functions = &seed,
+                                                                  .function_count = 1,
+                                                              });
+        BUSTER_TEST(arguments, model.valid && model.function_count == 1);
+        DebugVariable* model_outer = c_test_find_debug_variable(&model, S8("x"), 0);
+        DebugVariable* model_block = c_test_find_debug_variable(&model, S8("x"), 1);
+        DebugVariable* model_nested = c_test_find_debug_variable(&model, S8("x"), 2);
+        DebugVariable* model_sibling = c_test_find_debug_variable(&model, S8("x"), 3);
+        DebugVariable* model_counter = c_test_find_debug_variable(&model, S8("i"), 0);
+        DebugVariable* model_body = c_test_find_debug_variable(&model, S8("w"), 0);
+        BUSTER_TEST(arguments, model_outer && model_block && model_nested && model_sibling && model_counter && model_body);
+        if (model.valid && model_outer && model_block && model_nested && model_sibling && model_counter && model_body)
+        {
+            DebugScopeId function_scope = model.functions[0].scope;
+            // Blocks have no code range of their own yet, so the blocks that
+            // share a parent are one model scope (sibling blocks with the
+            // same range would overlap); the nesting below is exact.
+            BUSTER_TEST(arguments, model_outer->scope == function_scope);
+            BUSTER_TEST(arguments, model_block->scope != function_scope && model.scopes[model_block->scope].parent == function_scope);
+            BUSTER_TEST(arguments, model_sibling->scope == model_block->scope && model_counter->scope == model_block->scope);
+            BUSTER_TEST(arguments, model_nested->scope != model_block->scope && model.scopes[model_nested->scope].parent == model_block->scope);
+            BUSTER_TEST(arguments, model_body->scope == model_nested->scope);
+            BUSTER_TEST(arguments, model.scopes[model_block->scope].kind == DEBUG_SCOPE_LEXICAL && model.scopes[model_block->scope].declaration.line == 6);
+            BUSTER_TEST(arguments, model.scopes[model_block->scope].start == 0x100 && model.scopes[model_block->scope].end == 0x180);
+        }
+
+        // A block with no instruction, such as the empty one, keeps its locals.
+        DebugVariable* model_unused = c_test_find_debug_variable(&model, S8("unused"), 0);
+        BUSTER_TEST(arguments, model_unused && model.scopes[model_unused->scope].parent == model.functions[0].scope);
+
+        // A scope table with more blocks than the model has room for (the
+        // model reserves one scope per local): the surplus blocks' locals fall
+        // back to the function scope and every local is still described.
+        enum { CROWDED_SCOPES = 40 };
+        IrDebugScope* crowded_table = arena_allocate(temporary.arena, IrDebugScope, CROWDED_SCOPES);
+        memset(crowded_table, 0, sizeof(*crowded_table) * CROWDED_SCOPES);
+        IrDebugScope* original_table = function->debug_scopes;
+        u32 original_count = function->debug_scope_count;
+        function->debug_scopes = crowded_table;
+        function->debug_scope_count = CROWDED_SCOPES;
+        DebugModel crowded = debug_model_build(temporary.arena, (DebugModelInput){
+                                                                    .program = lowered.program,
+                                                                    .module = module,
+                                                                    .functions = &seed,
+                                                                    .function_count = 1,
+                                                                });
+        function->debug_scopes = original_table;
+        function->debug_scope_count = original_count;
+        BUSTER_TEST(arguments, crowded.valid && crowded.variable_count == function->debug_local_count + 1);
+        // One function, plus the model's variable capacity (one global, one spare,
+        // one per local), plus the root.
+        BUSTER_TEST(arguments, crowded.scope_count <= 1 + (1 + 1 + function->debug_local_count) + 1);
+    }
+
+    // Blocks written by macro expansion have no usable source extent, but
+    // their locals and nesting still reach the model.
+    String8 macro_source = S8("volatile int sink;\n"
+                              "#define BLK(name) { int name = 1; sink = name; }\n"
+                              "#define LOOP(name) for (int name = 0; name < 2; name++) { int q = name; sink = q; }\n"
+                              "int macros(void)\n"
+                              "{\n"
+                              "    BLK(v)\n"
+                              "    BLK(v)\n"
+                              "    LOOP(i)\n"
+                              "    LOOP(i)\n"
+                              "    return 0;\n"
+                              "}\n");
+    CPreprocessResult macro_tokens = c_preprocess(temporary.arena, macro_source, (CPreprocessOptions){0});
+    CParseResult macro_parse = c_parse(temporary.arena, macro_tokens);
+    CIRLowerResult macro_lowered = c_lower_to_ir(temporary.arena, S8("macros.c"), macro_tokens, macro_parse, target_native);
+    BUSTER_TEST(arguments, macro_tokens.diagnostic_count == 0 && macro_parse.diagnostic_count == 0 && macro_lowered.diagnostic_count == 0 &&
+                           macro_lowered.program);
+    if (macro_lowered.program)
+    {
+        IrModule* macro_module = &macro_lowered.program->modules[0];
+        IrFunction* macro_function = macro_module->functions;
+        DebugFunctionSeed macro_seed = {.name = S8("macros"), .symbol = macro_function->symbol, .code_offset = 0x100, .code_size = 0x80};
+        DebugModel macro_model = debug_model_build(temporary.arena, (DebugModelInput){
+                                                                        .program = macro_lowered.program,
+                                                                        .module = macro_module,
+                                                                        .functions = &macro_seed,
+                                                                        .function_count = 1,
+                                                                    });
+        BUSTER_TEST(arguments, macro_model.valid);
+        // Every declared local is described: two v, two i, two q.
+        BUSTER_TEST(arguments, c_test_find_debug_variable(&macro_model, S8("v"), 1) && !c_test_find_debug_variable(&macro_model, S8("v"), 2));
+        BUSTER_TEST(arguments, c_test_find_debug_variable(&macro_model, S8("i"), 1) && !c_test_find_debug_variable(&macro_model, S8("i"), 2));
+        BUSTER_TEST(arguments, c_test_find_debug_variable(&macro_model, S8("q"), 1) && !c_test_find_debug_variable(&macro_model, S8("q"), 2));
+        DebugVariable* second_q = c_test_find_debug_variable(&macro_model, S8("q"), 1);
+        DebugVariable* second_i = c_test_find_debug_variable(&macro_model, S8("i"), 1);
+        if (second_q && second_i)
+        {
+            BUSTER_TEST(arguments, macro_model.scopes[second_q->scope].parent == second_i->scope);
+        }
+    }
+
+    // Without debug information the lowering builds no scope table.
+    CIRLowerResult plain = c_lower_to_ir_with_options(temporary.arena, S8("scopes.c"), tokens, parse, target_native,
+                                                      (CIRLowerOptions){.omit_debug_locals = true});
+    BUSTER_TEST(arguments, plain.program != 0);
+    if (plain.program)
+    {
+        IrFunction* function = plain.program->modules[0].functions;
+        BUSTER_TEST(arguments, !function->debug_local_count && !function->debug_scope_count && !function->debug_scopes);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // a file-scope array bound of the form sizeof(table)/sizeof(table[0]) + 1,
 // where table's element is a struct, folded through the type-prediction
 // query's int guess to 2 before table's type mapped, so the next global was
@@ -44905,11 +45567,18 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_gnu_library_builtins_sources[] = {
         "        failed |= (__builtin_clrsb((int)v) != clrsb_reference((int)v, 32)) << 1;\n"
         "        failed |= (__builtin_clrsbl((long)v) != clrsb_reference((long)v, (int)sizeof(long) * 8)) << 1;\n"
         "        failed |= (__builtin_clrsbll(v) != clrsb_reference(v, 64)) << 1;\n"
+        "        int narrow = (int)v;\n"
+        "        if (narrow != -2147483647 - 1) failed |= (__builtin_abs(narrow) != (narrow < 0 ? -narrow : narrow)) << 1;\n"
+        "        if ((long)v != -__LONG_MAX__ - 1) failed |= (__builtin_labs((long)v) != ((long)v < 0 ? -(long)v : (long)v)) << 1;\n"
+        "        if (v != -__LONG_LONG_MAX__ - 1) failed |= (__builtin_llabs(v) != (v < 0 ? -v : v)) << 1;\n"
         "    }\n"
         "    int r = 0;\n"
         "    evaluations = 0;\n"
         "    failed |= (__builtin_smul_overflow(next(6), next(7), &r) || r != 42 || evaluations != 2 || __builtin_clrsb(next(-1)) != 31 || evaluations != 3) << 2;\n"
         "    failed |= (sizeof(__builtin_sadd_overflow(1, 2, &r)) != sizeof(_Bool) || sizeof(__builtin_clrsbll(1)) != sizeof(int)) << 2;\n"
+        "    evaluations = 0;\n"
+        "    failed |= (__builtin_abs(next(-6)) != 6 || __builtin_labs(next(-7)) != 7 || __builtin_llabs(next(-8)) != 8 || evaluations != 3) << 2;\n"
+        "    failed |= (sizeof(__builtin_abs(1)) != sizeof(int) || sizeof(__builtin_labs(1)) != sizeof(long) || sizeof(__builtin_llabs(1)) != sizeof(long long)) << 2;\n"
         "    return failed;\n"
         "}\n"),
     S8_INITIALIZER(
@@ -49986,13 +50655,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa(UnitTestArguments* argument
                     }
                     BUSTER_TEST(arguments, function->local_count == reference_function->local_count);
                     BUSTER_TEST(arguments, function->debug_local_count == reference_function->debug_local_count);
+                    BUSTER_TEST(arguments, function->debug_scope_count == reference_function->debug_scope_count);
+                    for (u32 index = 0; index < function->debug_scope_count; index += 1)
+                    {
+                        BUSTER_TEST(arguments, function->debug_scopes[index].parent == reference_function->debug_scopes[index].parent);
+                    }
                     for (u32 index = 0; index < function->debug_local_count; index += 1)
                     {
                         IrDebugLocal* local = function->debug_locals + index;
                         IrDebugLocal* old = reference_function->debug_locals + index;
                         BUSTER_STRING_TEST(arguments, local->name, old->name);
                         BUSTER_TEST(arguments, local->type.value == old->type.value && local->id.value == old->id.value &&
-                                               local->scope_depth == old->scope_depth && local->is_parameter == old->is_parameter);
+                                               local->scope == old->scope && local->is_parameter == old->is_parameter);
                     }
                     direct.program->disable_target_local_promotion = true;
                     reference.program->disable_target_local_promotion = true;
@@ -57368,6 +58042,93 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_work_and_scratch(UnitTestArgum
     return result;
 }
 
+// One function holding many issue-style selections (#1256). The function's
+// retained arena growth must not scale with its selection count beyond a plain
+// expression control, and type-identity probes must not scan retained rows.
+// Ratios against the control and counted rows, not time or absolute bytes.
+// Observed at 500 and 1000 selections: about 400 bytes per final token, for
+// the generic function and the plain control alike.
+enum { C_TEST_GENERIC_LARGE_BYTES_PER_TOKEN = 512 };
+
+BUSTER_GLOBAL_LOCAL String8 c_test_generic_large_source(Arena* arena, u32 count, bool generic)
+{
+    String8 head = S8("static int x = 3;\nint sink;\n"
+        "#define CLS(v) _Generic((v), char: 1, signed char: 2, unsigned char: 3, short: 4, unsigned short: 5, int: 6, "
+        "unsigned: 7, long: 8, unsigned long: 9, long long: 10, unsigned long long: 11, float: 12, double: 13, "
+        "long double: 14, default: 0)\n"
+        "#define PLAIN(v) (v)\n"
+        "int run(void) {\n");
+    String8* parts = arena_allocate(arena, String8, count + 2);
+    parts[0] = head;
+    for (u32 index = 0; index < count; index += 1)
+        parts[index + 1] = string_format(arena, generic ? S8("  sink += CLS(x + {u32});\n") : S8("  sink += PLAIN(6) + 0 * (x + {u32});\n"), index);
+    parts[count + 1] = string_format(arena, S8("  return sink != 6 * {u32};\n}}\n"), count);
+    return string_join_arena(arena, (SliceString8){.pointer = parts, .length = count + 2}, false);
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_large_function(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 counts[] = {500, 1000};
+    // [count][control]: retained bytes of the parse and of the lowering.
+    u64 parse_bytes[2][2] = {{0}};
+    u64 lowered_bytes[2][2] = {{0}};
+    for (u32 test = 0; test < BUSTER_ARRAY_LENGTH(counts); test += 1)
+    {
+        for (u32 control = 0; control < 2; control += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                u64 start = temporary.arena->position;
+                String8 source = c_test_generic_large_source(temporary.arena, counts[test], control == 0);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+                CParseResult parsed = c_parse(temporary.arena, tokens);
+                u64 before = temporary.arena->position;
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("generic-large.c"), tokens, parsed, target_native,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                u64 grown = temporary.arena->position - before;
+                BUSTER_TEST(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count);
+                if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count))
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                CTokenPositionIndex const* index = parsed.position_index;
+                u64 lookups = index ? index->type_identity_lookups : 0;
+                u64 rows = index ? index->type_identity_rows_examined : 0;
+                if (control == 0)
+                {
+                    // Every probe resolves through the site index: no retained row is scanned.
+                    BUSTER_TEST(arguments, rows == 0);
+                    BUSTER_TEST(arguments, lookups != 0 && lookups <= (u64)counts[test] * 16);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, lookups == 0 && rows == 0);
+                }
+                if (os_get_environment_variable(S8("BUSTER_GENERIC_LARGE_CENSUS")).length)
+                    arguments->show(arguments, S8("GENERIC_LARGE n={u32} control={u32} form={u32} tokens={u64} lowered_bytes={u64} parse_bytes={u64} lookups={u64} rows={u64}\n"),
+                        counts[test], control, form, (u64)tokens.token_count, grown, before - start, lookups, rows);
+                // Bytes per final token bound what a selection may retain; the
+                // selection's own scratch is released when it resolves.
+                BUSTER_TEST(arguments, (before - start) <= (u64)tokens.token_count * C_TEST_GENERIC_LARGE_BYTES_PER_TOKEN);
+                BUSTER_TEST(arguments, grown <= (u64)tokens.token_count * C_TEST_GENERIC_LARGE_BYTES_PER_TOKEN);
+                if (form == 0)
+                {
+                    parse_bytes[test][control] = before - start;
+                    lowered_bytes[test][control] = grown;
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    // Doubling the selections at most doubles the retained bytes (plus slack).
+    for (u32 control = 0; control < 2; control += 1)
+    {
+        BUSTER_TEST(arguments, parse_bytes[1][control] <= parse_bytes[0][control] * 2 + parse_bytes[0][control] / 8);
+        BUSTER_TEST(arguments, lowered_bytes[1][control] <= lowered_bytes[0][control] * 2 + lowered_bytes[0][control] / 8);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_identity_authority(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -57917,6 +58678,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, c_test_generic_work_and_scratch);
+    BUSTER_TEST_FIXTURE(arguments, c_test_generic_large_function);
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
 #if BUSTER_BENCH_ALLOCATIONS
     C_TEST_FIXTURE(arguments, c_test_source_fact_census);
@@ -58075,6 +58837,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_generic_string_subscripts);
     C_TEST_FIXTURE(arguments, c_test_elifdef_and_wide_character_constants);
     C_TEST_FIXTURE(arguments, c_test_abstract_declarator_and_pointer_typing);
+    C_TEST_FIXTURE(arguments, c_test_debug_lexical_scopes);
     C_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
     C_TEST_FIXTURE(arguments, c_test_string_literal_sizeof_array_bound);
     C_TEST_FIXTURE(arguments, c_test_global_identifier_updates);
@@ -58133,6 +58896,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_local_typedef_for_declaration);
     C_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
     C_TEST_FIXTURE(arguments, c_test_lowering_nested_calls_and_wide_switch);
+    C_TEST_FIXTURE(arguments, c_test_switch_late_overlap);
     C_TEST_FIXTURE(arguments, c_test_lowering_flat_call_arguments);
     C_TEST_FIXTURE(arguments, c_test_lowering_nested_call_arguments);
     C_TEST_FIXTURE(arguments, c_test_lowering_nested_conditional_sizeof_memo);

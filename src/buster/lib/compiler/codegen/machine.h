@@ -1564,6 +1564,7 @@ typedef enum MachineSymbolReference
     MACHINE_SYMBOL_REFERENCE_GOT,
     MACHINE_SYMBOL_REFERENCE_PLT,
     MACHINE_SYMBOL_REFERENCE_MACH_PAGE,
+    MACHINE_SYMBOL_REFERENCE_ELF_PAGE,
     MACHINE_SYMBOL_REFERENCE_COUNT,
 } MachineSymbolReference;
 
@@ -1938,7 +1939,9 @@ BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena
 // can then accumulate its compact value facts inside an existing row walk.
 // `position_independent` is -fPIC resolved for this target: it picks the
 // thread-local model and selects the GOT and PLT forms for the symbols
-// another object could interpose. The unqualified entry point above passes
+// another object could interpose. On AArch64 ELF it selects the page-pair
+// address forms and refuses thread-local access, whose TLSDESC model does not
+// exist yet. The unqualified entry point above passes
 // false, which is every caller that is not module code generation.
 // `module` is the context machine_select_module_prepare built once for the
 // module before its functions select; a null one makes the x86-64 selector
@@ -1953,7 +1956,8 @@ BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_x86_64(Arena
                                                                             bool position_independent, bool assume_validated,
                                                                             bool preserve_debug_values, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                            bool assume_validated, bool preserve_debug_values);
+                                                                            bool position_independent, bool assume_validated,
+                                                                            bool preserve_debug_values);
 BUSTER_F_DECL MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function);
 

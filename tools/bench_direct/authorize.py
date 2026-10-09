@@ -18,12 +18,16 @@ GitHub's records, so the host job and the publisher bind the same identities.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import sys
 import urllib.parse
 import urllib.request
+import urllib.error
+from datetime import datetime
+from pathlib import Path
 
 from workload_selection import api_changes, select
 
@@ -245,6 +249,356 @@ def fetch(path: str, token: str) -> object:
         return json.load(response)
 
 
+# Data transport for the native qualification admission command. This adapter
+# performs no campaign selection, budget decision, retry or physical work.
+SAMPLING_PREFIX = "profile: compiler-main-sampling-"
+SAMPLING_FREEZE = "docs/compiler-main-sampling-freeze-v1.tsv"
+SAMPLING_ALLOWLIST = "docs/compiler-main-sampling-admission-v1.tsv"
+SAMPLING_CHECK = "9700X compiler sampling research"
+PREPARATION_PREFIX = "profile: compiler-baseline-closure-qualification-"
+PREPARATION_PLAN = "docs/compiler-preparation-plan-v1.tsv"
+PREPARATION_ALLOWLIST = "docs/compiler-preparation-admission-v1.tsv"
+PREPARATION_CHECK = "9700X compiler preparation research"
+PREPARATION_MARKER = re.compile(r"profile: compiler-baseline-closure-qualification-v1 packet: 0 freeze: ([0-9a-f]{40})")
+SAMPLING_MARKER = re.compile(
+    r"profile: compiler-main-sampling-(acquire|pilot|confirm)-v1 packet: (0|[1-9][0-9]*) freeze: ([0-9a-f]{40})")
+SAMPLING_HISTORY_HEADER = (
+    "phase", "packet", "request_run_id", "request_run_attempt", "executor_run_id", "executor_run_attempt",
+    "state", "physical_wall_us", "campaign", "freeze_revision", "actor_login", "actor_id",
+    "triggering_login", "triggering_id", "pull_author_login", "pull_author_id")
+
+
+def sampling_content(repository: str, path: str, revision: str, token: str) -> str:
+    """A bounded UTF-8 GitHub contents record, consumed only as data."""
+    row = fetch(f"/repos/{repository}/contents/{path}?ref={urllib.parse.quote(revision)}", token)
+    if not isinstance(row, dict) or row.get("type") != "file" or row.get("encoding") != "base64" \
+            or type(row.get("size")) is not int or not 0 <= row["size"] <= 128 * 1024:
+        raise ValueError("sampling input is missing or exceeds the data bound")
+    text = base64.b64decode(row.get("content", ""), validate=False).decode("utf-8")
+    if len(text.encode("utf-8")) != row["size"]:
+        raise ValueError("sampling content size differs from GitHub's record")
+    return text
+
+
+def sampling_selector(text: str) -> tuple[str, str, str, str] | None:
+    """Extract data fields only; the native command independently validates it."""
+    lines = [line for line in text.splitlines() if line.startswith(SAMPLING_PREFIX)]
+    if not lines:
+        return None
+    if len(lines) != 1 or not (match := SAMPLING_MARKER.fullmatch(lines[0])):
+        raise ValueError("sampling selector is malformed or repeated")
+    return lines[0], match[1], match[2], match[3]
+
+
+def preparation_selector(text: str) -> tuple[str, str, str, str] | None:
+    """Read the separately versioned preparation selector as data."""
+    lines = [line for line in text.splitlines() if line.startswith(PREPARATION_PREFIX)]
+    if not lines:
+        return None
+    if len(lines) != 1 or not (match := PREPARATION_MARKER.fullmatch(lines[0])):
+        raise ValueError("preparation selector is malformed or repeated")
+    return lines[0], "qualify", "0", match[1]
+
+
+def preparation_fresh_selector(text: str, compared_parents: list) -> tuple[str, str, str, str] | None:
+    lines = [line for line in text.splitlines() if line.startswith(PREPARATION_PREFIX)]
+    fresh = [line for line in lines if compared_parents and all(sampling_added(row, line) == line for row in compared_parents)]
+    if not fresh:
+        return None
+    if any(line.startswith(SAMPLING_PREFIX) for line in text.splitlines()):
+        raise ValueError("replace the historical sampling selector before requesting preparation")
+    return preparation_selector(text)
+
+
+def sampling_added(compared: object, selector: str) -> str:
+    """The exact selector if GitHub's parent patch adds, rather than moves, it."""
+    rows = compared.get("files") if isinstance(compared, dict) else None
+    row = next((row for row in rows if isinstance(row, dict) and row.get("filename") == COMPARE_REQUEST), {}) \
+        if isinstance(rows, list) else {}
+    patch = row.get("patch")
+    lines = patch.splitlines() if isinstance(patch, str) else []
+    added = {line[1:] for line in lines if line.startswith("+") and not line.startswith("+++")}
+    removed = {line[1:] for line in lines if line.startswith("-") and not line.startswith("---")}
+    return selector if selector in added - removed else "-"
+
+
+def preparation_data(repository: str, token: str, run: dict, pull: dict, head: str, attempt: str,
+                     marker: str, compared_parents: list, directory: Path) -> bool:
+    """Observe five bounded records for the distinct native preparation policy."""
+    selected = preparation_fresh_selector(marker, compared_parents)
+    if selected is None:
+        return False
+    directory.mkdir(parents=True, exist_ok=False)
+    line, _, _, revision = selected
+    policy_revision = os.environ.get("GITHUB_SHA", "")
+    if not COMMIT.fullmatch(policy_revision):
+        raise ValueError("preparation policy lacks the current trusted workflow revision")
+    allowlist_text = sampling_content(repository, PREPARATION_ALLOWLIST, policy_revision, token)
+    plan_text = sampling_content(repository, PREPARATION_PLAN, revision, token)
+    allowlist = dict(row.split("\t") for row in allowlist_text.splitlines() if "\t" in row)
+    history = sampling_attempt_history(repository, token, str(run["id"]), allowlist.get("history_since", "-"),
+                                      revision, allowlist.get("freeze_sha256", "-"), "-", "-", preparation=True)
+    facts = qualification_facts(repository, run, pull, head, attempt, line, compared_parents)
+    for name, text in (("request.txt", line + "\n"), ("plan.tsv", plan_text), ("allowlist.tsv", allowlist_text),
+                       ("facts.tsv", "".join(f"{key}\t{value}\n" for key, value in facts.items())),
+                       ("history.tsv", "\t".join(SAMPLING_HISTORY_HEADER) + "\n" +
+                        "".join("\t".join(row) + "\n" for row in history))):
+        (directory / name).write_text(text, encoding="utf-8")
+    return True
+
+
+def sampling_attempt_history(repository: str, token: str, current: str, since: str,
+                             freeze_revision: str, campaign: str, parent_revision: str,
+                             parent_campaign: str, ancestor_revision: str = "-", ancestor_campaign: str = "-",
+                             preparation: bool = False) -> list[list[str]]:
+    """Complete bounded GitHub request/executor records, including hostless attempts."""
+    if since == "-":  # Disabled configuration supplies no admission history window.
+        return []
+    rows = []
+    total = None
+    requests = []
+    query = urllib.parse.urlencode({"event": "pull_request", "created": ">=" + since, "per_page": 100})
+    for page in range(1, 11):
+        listed = fetch(f"/repos/{repository}/actions/workflows/9700x-direct-request.yml/runs?{query}&page={page}", token)
+        values = listed.get("workflow_runs") if isinstance(listed, dict) else None
+        if not isinstance(values, list) or type(listed.get("total_count")) is not int:
+            raise ValueError("sampling request history is unavailable")
+        if total is None:
+            total = listed["total_count"]
+        if listed["total_count"] != total or total > 1000:
+            raise ValueError("sampling request history is oversized or changed during reading")
+        requests.extend(values)
+        if len(requests) >= total:
+            break
+        if len(values) != 100:
+            raise ValueError("sampling request history is incomplete")
+    if len(requests) != total or len({row.get("id") for row in requests if isinstance(row, dict)}) != total:
+        raise ValueError("sampling request history is incomplete or duplicated")
+    for request in sorted(requests, key=lambda row: (row.get("created_at", ""), row.get("id", 0))):
+        if str(request.get("id")) == current:
+            continue
+        sha = request.get("head_sha")
+        if not isinstance(sha, str) or not COMMIT.fullmatch(sha):
+            raise ValueError("sampling history request has no exact commit")
+        # A missing marker on an unrelated request is ordinary history.
+        try:
+            marker_text = sampling_content(repository, COMPARE_REQUEST, sha, token)
+            marker = preparation_selector(marker_text) if preparation else sampling_selector(marker_text)
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                continue
+            raise
+        if marker is None or marker[3] not in (freeze_revision, parent_revision, ancestor_revision):
+            continue
+        # A later ordinary synchronize can inherit the old selector. Only the
+        # immutable every-parent delta establishes a new declared attempt.
+        source_commit = fetch(f"/repos/{repository}/commits/{sha}", token)
+        parents = source_commit.get("parents") if isinstance(source_commit, dict) else None
+        parents = [row.get("sha") for row in parents if isinstance(row, dict)] if isinstance(parents, list) else []
+        parent_deltas = [fetch(f"/repos/{repository}/compare/{parent}...{sha}", token)
+                         for parent in parents[:2] if isinstance(parent, str) and COMMIT.fullmatch(parent)]
+        _, delta_problems = request_delta(sha, source_commit, parent_deltas)
+        if delta_problems:
+            raise ValueError("sampling historical every-parent delta is incomplete: " + "; ".join(delta_problems))
+        marker = preparation_fresh_selector(marker_text, parent_deltas) if preparation else sampling_fresh_selector(marker_text, parent_deltas)
+        if marker is None:
+            continue
+        selector, phase, packet, revision = marker
+        history_campaign = campaign if revision == freeze_revision else parent_campaign if revision == parent_revision else ancestor_campaign
+        associated = fetch(f"/repos/{repository}/commits/{sha}/pulls?per_page=100", token)
+        # The associated-commit endpoint proves historical membership. A PR's
+        # live head advances between packets; it is not the old request's head.
+        snapshot = request.get("pull_requests", [])
+        if not isinstance(snapshot, list) or len(snapshot) > 1:
+            raise ValueError("sampling history request has ambiguous pull provenance")
+        number = snapshot[0].get("number") if snapshot and isinstance(snapshot[0], dict) else None
+        if snapshot and (type(number) is not int or number <= 0):
+            raise ValueError("sampling history request has no canonical pull number")
+        matches = [pull for pull in associated if isinstance(pull, dict) and
+                   (number is None or pull.get("number") == number)] if isinstance(associated, list) else []
+        if len(matches) != 1:
+            raise ValueError("sampling history request has no unique owning pull")
+        pull = matches[0]
+        head_record = pull.get("head") if isinstance(pull.get("head"), dict) else {}
+        base_record = pull.get("base") if isinstance(pull.get("base"), dict) else {}
+        if type(request.get("id")) is not int or request["id"] <= 0 or request.get("run_attempt") != 1 or \
+                request.get("path") != REQUEST_WORKFLOW or request.get("event") != "pull_request" or \
+                full_name(request.get("repository")) != repository or full_name(request.get("head_repository")) != repository or \
+                identity(request.get("actor")) != MAINTAINER or identity(request.get("triggering_actor")) != MAINTAINER or \
+                identity(pull.get("user")) != MAINTAINER or type(pull.get("number")) is not int or pull["number"] <= 0 or \
+                full_name(head_record.get("repo")) != repository or full_name(base_record.get("repo")) != repository or \
+                not isinstance(head_record.get("sha"), str) or not COMMIT.fullmatch(head_record["sha"]):
+            raise ValueError("sampling history owner/request provenance is invalid")
+        user = pull.get("user") if isinstance(pull.get("user"), dict) else {}
+        actor = request.get("actor") if isinstance(request.get("actor"), dict) else {}
+        triggering = request.get("triggering_actor") if isinstance(request.get("triggering_actor"), dict) else {}
+        external = re.compile((r"buster-compiler-preparation-v1:" if preparation else r"buster-main-sampling-v1:") + re.escape(history_campaign) + ":" +
+                              re.escape(phase) + ":" + re.escape(packet) + ":" +
+                              str(request["id"]) + r":([1-9][0-9]*):1\Z")
+        wanted_check = PREPARATION_CHECK if preparation else SAMPLING_CHECK
+        checks = fetch(f"/repos/{repository}/commits/{sha}/check-runs?check_name={urllib.parse.quote(wanted_check)}&filter=all&per_page=100", token)
+        checks = checks.get("check_runs") if isinstance(checks, dict) else None
+        if not isinstance(checks, list) or len(checks) >= 100:
+            raise ValueError("sampling executor check history is unavailable or capped")
+        matching = [check for check in checks if isinstance(check, dict) and
+                    check.get("name") == wanted_check and check.get("head_sha") == sha and
+                    isinstance(check.get("app"), dict) and check["app"].get("id") == 15368 and
+                    isinstance(check.get("external_id"), str) and external.fullmatch(check["external_id"])]
+        request_state = request.get("conclusion")
+        executor_id, executor_attempt, state, physical = "-", "-", request_state if request_state in ("failed", "failure", "cancelled") else "not_run", "-"
+        if state == "failure":
+            state = "failed"
+        if len(matching) > 1:
+            raise ValueError("sampling request has duplicate executor checks")
+        if matching:
+            check = matching[0]
+            executor_id = external.fullmatch(check["external_id"])[1]
+            execution = fetch(f"/repos/{repository}/actions/runs/{executor_id}", token)
+            jobs = fetch(f"/repos/{repository}/actions/runs/{executor_id}/attempts/1/jobs?per_page=100", token)
+            jobs = jobs.get("jobs") if isinstance(jobs, dict) else None
+            if not isinstance(execution, dict) or execution.get("id") != int(executor_id) or \
+                    execution.get("path") != ".github/workflows/9700x-direct-bench.yml" or \
+                    execution.get("event") != "workflow_run" or execution.get("head_branch") != "main" or execution.get("run_attempt") != 1 or \
+                    execution.get("display_title") != f"9700X request {request['id']}.1 head {sha}" or \
+                    full_name(execution.get("repository")) != repository or full_name(execution.get("head_repository")) != repository or \
+                    identity(execution.get("actor")) != MAINTAINER or identity(execution.get("triggering_actor")) != MAINTAINER or \
+                    not isinstance(execution.get("head_sha"), str) or not COMMIT.fullmatch(execution["head_sha"]) or \
+                    not isinstance(jobs, list) or len(jobs) >= 100:
+                raise ValueError("sampling executor provenance is unavailable")
+            executor_attempt = str(execution.get("run_attempt"))
+            host_name = "Compiler preparation qualification" if preparation else "Sampling qualification packet"
+            published_name = "Validate compiler preparation evidence" if preparation else "Validate sampling packet evidence"
+            host = [job for job in jobs if isinstance(job, dict) and job.get("name") == host_name]
+            published = [job for job in jobs if isinstance(job, dict) and job.get("name") == published_name]
+            state = "cancelled" if execution.get("conclusion") == "cancelled" else "failed" if execution.get("conclusion") == "failure" else "incomplete"
+            if len(host) == 1:
+                start, end = host[0].get("started_at"), host[0].get("completed_at")
+                if isinstance(start, str) and isinstance(end, str):
+                    started = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                    completed = datetime.fromisoformat(end.replace("Z", "+00:00"))
+                    if started.tzinfo is None or completed.tzinfo is None or \
+                            started.utcoffset() is None or completed.utcoffset() is None:
+                        raise ValueError("sampling physical occupancy timezone is unavailable")
+                    duration = (completed - started).total_seconds()
+                    if duration <= 0:
+                        raise ValueError("sampling physical occupancy timestamps are invalid")
+                    physical = str(round(duration * 1000000) + 2000000)
+            if check.get("status") == "completed" and execution.get("status") == "completed" and execution.get("conclusion") == "success":
+                state = "complete" if check.get("conclusion") == "success" and \
+                    isinstance(check.get("output"), dict) and check["output"].get("title") == ("Valid unqualified preparation packet" if preparation else "Valid unqualified sampling packet") and \
+                    physical != "-" and len(host) == len(published) == 1 and host[0].get("conclusion") == published[0].get("conclusion") == "success" \
+                    else "invalid"
+        rows.append([phase, packet, str(request["id"]), str(request.get("run_attempt")), executor_id,
+                     executor_attempt, state, physical, history_campaign, revision,
+                     str(actor.get("login", "-")), str(actor.get("id", "-")),
+                     str(triggering.get("login", "-")), str(triggering.get("id", "-")),
+                     str(user.get("login", "-")), str(user.get("id", "-"))])
+    return rows
+
+
+def sampling_fresh_selector(text: str, compared_parents: list) -> tuple[str, str, str, str] | None:
+    lines = [line for line in text.splitlines() if line.startswith(SAMPLING_PREFIX)]
+    fresh = [line for line in lines if compared_parents and all(sampling_added(row, line) == line for row in compared_parents)]
+    if not fresh:
+        return None
+    if any(line.startswith(PREPARATION_PREFIX) for line in text.splitlines()):
+        raise ValueError("replace the historical preparation selector before requesting sampling")
+    return sampling_selector(text)
+
+
+def sampling_patch_requested(compared_parents: list, prefix: str = SAMPLING_PREFIX) -> bool:
+    common = None
+    for compared in compared_parents:
+        rows = compared.get("files") if isinstance(compared, dict) else []
+        row = next((row for row in rows if isinstance(row, dict) and row.get("filename") == COMPARE_REQUEST), {})
+        patch = row.get("patch")
+        lines = patch.splitlines() if isinstance(patch, str) else []
+        added = {line[1:] for line in lines if line.startswith("+") and not line.startswith("+++")}
+        removed = {line[1:] for line in lines if line.startswith("-") and not line.startswith("---")}
+        added = {line for line in added - removed if line.startswith(prefix)}
+        common = added if common is None else common & added
+    return bool(common)
+
+
+def qualification_facts(repository: str, run: dict, pull: dict, head: str, attempt: str,
+                        line: str, compared_parents: list) -> dict:
+    """Observe shared exact-request facts; native policies decide admission."""
+    actor, triggering = run.get("actor", {}), run.get("triggering_actor", {})
+    return {
+        "schema": "buster-main-sampling-github-facts-v1", "repository": repository,
+        "request_run_id": str(run["id"]), "request_run_attempt": str(run.get("run_attempt")),
+        "executor_run_id": os.environ.get("GITHUB_RUN_ID", "-"), "executor_run_attempt": attempt,
+        "request_head": head, "trusted_revision": os.environ.get("GITHUB_SHA", "-"),
+        "owner_login": MAINTAINER["login"], "owner_id": str(MAINTAINER["id"]),
+        "actor_login": str(actor.get("login")), "actor_id": str(actor.get("id")),
+        "triggering_login": str(triggering.get("login")), "triggering_id": str(triggering.get("id")),
+        "pull_author_login": str(pull.get("user", {}).get("login")), "pull_author_id": str(pull.get("user", {}).get("id")),
+        "request_repository": str(full_name(run.get("repository"))),
+        "request_head_repository": str(full_name(run.get("head_repository"))),
+        "pull_repository": str(full_name(pull.get("head", {}).get("repo"))), "pull_state": str(pull.get("state")),
+        "parent_count": str(len(compared_parents)),
+        "fresh_parent_0": sampling_added(compared_parents[0], line) if compared_parents else "-",
+        "fresh_parent_1": sampling_added(compared_parents[1], line) if len(compared_parents) == 2 else "-",
+    }
+
+
+def sampling_data(repository: str, token: str, run: dict, pull: dict, head: str, attempt: str,
+                  marker: str, compared_parents: list, directory: Path) -> bool:
+    """Write API records for native admission; no emitted fact authorizes host work."""
+    selected = sampling_selector(marker)
+    if selected is None:
+        return False
+    directory.mkdir(parents=True, exist_ok=False)
+    line, phase, packet, revision = selected
+    policy_revision = os.environ.get("GITHUB_SHA", "")
+    if not COMMIT.fullmatch(policy_revision):
+        raise ValueError("sampling policy lacks the current trusted workflow revision")
+    allowlist_text = sampling_content(repository, SAMPLING_ALLOWLIST, policy_revision, token)
+    allowlist = dict(row.split("\t") for row in allowlist_text.splitlines() if "\t" in row)
+    freeze_text = sampling_content(repository, SAMPLING_FREEZE, revision, token)
+    parent_revision = allowlist.get("parent_freeze_revision", "-")
+    parent_text = "" if parent_revision == "-" else sampling_content(repository, SAMPLING_FREEZE, parent_revision, token)
+    # Transport lineage values only. The native policy parses the exact bounded
+    # parent bytes, checks all identities and authenticates each hash.
+    parent_fields = dict(row.split("\t") for row in parent_text.splitlines() if "\t" in row)
+    ancestor_revision = parent_fields.get("campaign_parent_revision", "-") if phase == "confirm" else "-"
+    ancestor_campaign = parent_fields.get("campaign_parent", "-") if phase == "confirm" else "-"
+    acquisition_text = freeze_text if phase == "acquire" else parent_text if phase == "pilot" else (
+        sampling_content(repository, SAMPLING_FREEZE, ancestor_revision, token)
+        if COMMIT.fullmatch(ancestor_revision) else "")
+    history = sampling_attempt_history(
+        repository, token, str(run["id"]), allowlist.get("history_since", "-"), revision,
+        allowlist.get("freeze_sha256", "-"), allowlist.get("parent_freeze_revision", "-"),
+        allowlist.get("campaign_parent", "-"), ancestor_revision, ancestor_campaign)
+    facts = qualification_facts(repository, run, pull, head, attempt, line, compared_parents)
+    for name, text in (("request.txt", line + "\n"), ("freeze.tsv", freeze_text), ("parent-freeze.tsv", parent_text),
+                       ("acquisition-plan.tsv", acquisition_text), ("allowlist.tsv", allowlist_text),
+                       ("facts.tsv", "".join(f"{key}\t{value}\n" for key, value in facts.items())),
+                       ("history.tsv", "\t".join(SAMPLING_HISTORY_HEADER) + "\n" +
+                        "".join("\t".join(row) + "\n" for row in history))):
+        (directory / name).write_text(text, encoding="utf-8")
+    return True
+
+
+def sampling_transport(directory: Path, preparation: bool = False) -> dict[str, str]:
+    """Bounded data-only output for a tokenless native physical executor."""
+    fields = {"request": "request.txt", "freeze": "freeze.tsv", "parent_freeze": "parent-freeze.tsv",
+              "acquisition_plan": "acquisition-plan.tsv", "allowlist": "allowlist.tsv",
+              "facts": "facts.tsv", "history": "history.tsv"}
+    if preparation:
+        fields = {"request": "request.txt", "plan": "plan.tsv", "allowlist": "allowlist.tsv", "facts": "facts.tsv", "history": "history.tsv"}
+    values = {}
+    total = 0
+    for key, name in fields.items():
+        payload = (directory / name).read_bytes()
+        encoded = base64.b64encode(payload).decode("ascii")
+        total += len(encoded)
+        if len(encoded) > 65536 or total > 262144:
+            raise ValueError("sampling transport exceeds its native data bound")
+        values[f"{'preparation' if preparation else 'sampling'}_{key}_data"] = encoded
+    return values
+
+
 def main() -> int:
     environment = os.environ
     repository = environment.get("BQ_REPOSITORY", "")
@@ -278,6 +632,10 @@ def main() -> int:
     workloads, compare, problems = plan(files if not failures else [])
     failures.extend(problems)
     request_files: list[dict] = []
+    compared_parents: list = []
+    sampling_requested = False
+    preparation_requested = False
+    transported = {}
     if not failures and (workloads or compare):
         request_commit = fetch(f"/repos/{repository}/commits/{head}", token)
         parents = request_commit.get("parents", []) if isinstance(request_commit, dict) else []
@@ -297,6 +655,26 @@ def main() -> int:
         compared = fetch(f"/repos/{repository}/compare/{urllib.parse.quote(base)}...{head}", token)
         problems, extra = comparison(head, compared, fetch(f"/repos/{repository}/commits/{head}", token))
         failures.extend(problems)
+    if not failures and compare and sampling_patch_requested(compared_parents, PREPARATION_PREFIX):
+        marker = sampling_content(repository, COMPARE_REQUEST, head, token)
+        selected = preparation_fresh_selector(marker, compared_parents)
+        if selected is not None:
+            pull = next(row for row in pulls if row.get("number") == number)
+            directory = Path(environment["RUNNER_TEMP"]) / "compiler-preparation-admission"
+            preparation_requested = preparation_data(repository, token, run, pull, head, attempt, marker, compared_parents, directory)
+            transported = sampling_transport(directory, preparation=True)
+            compare = False
+            workloads = False
+    if not failures and compare and sampling_patch_requested(compared_parents):
+        marker = sampling_content(repository, COMPARE_REQUEST, head, token)
+        selected = sampling_fresh_selector(marker, compared_parents)
+        if selected is not None:
+            pull = next(row for row in pulls if row.get("number") == number)
+            sampling_requested = sampling_data(repository, token, run, pull, head, attempt, marker, compared_parents,
+                                                Path(environment["RUNNER_TEMP"]) / "compiler-sampling-admission")
+            transported = sampling_transport(Path(environment["RUNNER_TEMP"]) / "compiler-sampling-admission")
+            compare = False
+            workloads = False
     if failures:
         print("BENCH_DIRECT_UNAUTHORIZED " + ", ".join(failures), file=sys.stderr)
     else:
@@ -307,8 +685,10 @@ def main() -> int:
               f"workloads={str(workloads).lower()} compare={str(compare).lower()}")
         with open(output, "a", encoding="utf-8") as stream:
             stream.write(f"attempt={attempt}\nbase={base}\npull={number}\nworkloads={str(workloads).lower()}\n"
-                         f"request_head={head}\ncompare={str(compare).lower()}\nmerge_base={extra['merge_base']}\n"
+                         f"request_head={head}\ncompare={str(compare).lower()}\nsampling_requested={str(sampling_requested).lower()}\npreparation_requested={str(preparation_requested).lower()}\nmerge_base={extra['merge_base']}\n"
                          f"merge_base_tree={extra['merge_base_tree']}\nhead_tree={extra['head_tree']}\n")
+            for key, value in transported.items():
+                stream.write(f"{key}={value}\n")
     return 1 if failures else 0
 
 
