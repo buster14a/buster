@@ -1520,6 +1520,8 @@ def review_terminal_authority(api, repository: str, original_request_attempt: di
             datetime.fromisoformat(since.replace("Z", "+00:00")) > datetime.fromisoformat(created.replace("Z", "+00:00")):
         raise ValueError("historical terminal inventory window truncates the original request")
     executors = sampling_executor_inventory(repository, "", since, api=observed_api)
+    if any(not isinstance(row.get("display_title"), str) or not row["display_title"] for row in executors):
+        raise ValueError("historical terminal executor inventory cannot prove canonical title absence")
     candidates = [row for row in executors if isinstance(row.get("display_title"), str) and
                   row["display_title"].startswith(f"9700X request {request_id}.1 ")]
     if len(candidates) != (1 if execution is not None else 0) or \
@@ -1599,7 +1601,7 @@ def review_terminal_authority(api, repository: str, original_request_attempt: di
             if len(members) != 100:
                 raise ValueError("historical terminal artifact inventory is incomplete")
         if len(artifact_inventory) != artifact_total or any(not isinstance(row, dict) or
-                type(row.get("id")) is not int or row["id"] <= 0 for row in artifact_inventory) or \
+                type(row.get("id")) is not int or row["id"] <= 0 or not isinstance(row.get("name"), str) or not row["name"] for row in artifact_inventory) or \
                 len({row["id"] for row in artifact_inventory}) != artifact_total:
             raise ValueError("historical terminal artifact inventory is incomplete or duplicated")
     selected_artifacts = [row for row in artifact_inventory if row.get("name") == expected_artifact_name]
