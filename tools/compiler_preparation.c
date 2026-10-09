@@ -254,8 +254,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_initialize(CompilerClosure
             string_format(temporary.arena, S8("{S8}^{{commit}}"), base));
         ProductionProfileCommandResult baseline_tree = compiler_closure_git(temporary.arena, root,
             string_format(temporary.arena, S8("{S8}^{{tree}}"), base));
-        String8 ancestor[] = {S8("git"), S8("-C"), root, S8("merge-base"), S8("--is-ancestor"), base, head};
-        String8 clean[] = {S8("git"), S8("-C"), root, S8("diff"), S8("--quiet"), S8("--exit-code"), S8("HEAD"), S8("--")};
+        String8 ancestor[] = {S8("git"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("-c"), S8("core.hooksPath=/dev/null"), S8("-C"), root, S8("merge-base"), S8("--is-ancestor"), base, head};
+        String8 clean[] = {S8("git"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("-c"), S8("core.hooksPath=/dev/null"), S8("-C"), root, S8("diff"), S8("--quiet"), S8("--exit-code"), S8("HEAD"), S8("--")};
         ProductionProfileCommandResult ancestry = compiler_closure_capture(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(ancestor));
         ProductionProfileCommandResult clean_result = compiler_closure_capture(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(clean));
         result = revision.success && current_tree.success && baseline_commit.success && baseline_tree.success && ancestry.success && clean_result.success &&
@@ -295,7 +295,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_secondary_pins(CompilerClo
                 string_format(temporary.arena, S8("{S8}^{{commit}}"), secondary_head));
             ProductionProfileCommandResult tree = compiler_closure_git(temporary.arena, preparation->root,
                 string_format(temporary.arena, S8("{S8}^{{tree}}"), secondary_head));
-            String8 ancestor[] = {S8("git"), S8("-C"), preparation->root, S8("merge-base"), S8("--is-ancestor"),
+            String8 ancestor[] = {S8("git"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("-c"), S8("core.hooksPath=/dev/null"), S8("-C"), preparation->root, S8("merge-base"), S8("--is-ancestor"),
                 preparation->base, secondary_head};
             ProductionProfileCommandResult ancestry = compiler_closure_capture(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(ancestor));
             result = revision.success && tree.success && ancestry.success &&
@@ -315,15 +315,15 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_secondary_pins(CompilerClo
 
 BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_checkout(CompilerClosurePreparation* preparation, String8 phase, String8 commit)
 {
-    String8 arguments[] = {S8("git"), S8("-C"), preparation->root, S8("checkout"), S8("--quiet"), S8("--detach"), commit};
+    String8 arguments[] = {S8("git"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("-c"), S8("core.hooksPath=/dev/null"), S8("-C"), preparation->root, S8("checkout"), S8("--quiet"), S8("--detach"), commit};
     bool result = compiler_closure_preparation_command(preparation, phase, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), false);
     return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_reset(CompilerClosurePreparation* preparation)
 {
-    String8 reset[] = {S8("git"), S8("-C"), preparation->root, S8("reset"), S8("--hard"), S8("--quiet"), preparation->base};
-    String8 clean[] = {S8("git"), S8("-C"), preparation->root, S8("clean"), S8("-fdx")};
+    String8 reset[] = {S8("git"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("-c"), S8("core.hooksPath=/dev/null"), S8("-C"), preparation->root, S8("reset"), S8("--hard"), S8("--quiet"), preparation->base};
+    String8 clean[] = {S8("git"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("-c"), S8("core.hooksPath=/dev/null"), S8("-C"), preparation->root, S8("clean"), S8("-fdx")};
     bool result = compiler_closure_preparation_checkout(preparation, S8("reset-checkout"), preparation->base) &&
         compiler_closure_preparation_command(preparation, S8("reset-tracked-source"), (SliceString8)BUSTER_ARRAY_TO_SLICE(reset), false) &&
         compiler_closure_preparation_command(preparation, S8("reset-build-cache"), (SliceString8)BUSTER_ARRAY_TO_SLICE(clean), false);

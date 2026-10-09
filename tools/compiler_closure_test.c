@@ -109,9 +109,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena, Strin
                 "CMAKE_C_COMPILER:FILEPATH={S8}\nCMAKE_LINKER:FILEPATH={S8}\nCMAKE_MAKE_PROGRAM:FILEPATH={S8}\n"),
                 root, clang, linker, ninja));
     string_print(S8("COMPILER_CLOSURE_FIXTURE setup={u64}\n"), passed ? 1ull : 0ull);
-    String8 init[] = {S8("git"), S8("-C"), root, S8("init"), S8("--quiet")};
-    String8 add[] = {S8("git"), S8("-C"), root, S8("add"), S8(".")};
-    String8 commit[] = {S8("git"), S8("-C"), root, S8("-c"), S8("user.name=Closure fixture"), S8("-c"),
+    String8 init[] = {S8("git"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("-c"), S8("core.hooksPath=/dev/null"), S8("-C"), root, S8("init"), S8("--quiet")};
+    String8 add[] = {S8("git"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("-c"), S8("core.hooksPath=/dev/null"), S8("-C"), root, S8("add"), S8(".")};
+    String8 commit[] = {S8("git"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("-c"), S8("core.hooksPath=/dev/null"), S8("-C"), root, S8("-c"), S8("user.name=Closure fixture"), S8("-c"),
         S8("user.email=closure@example.invalid"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("commit"), S8("--quiet"), S8("-m"), S8("baseline")};
     passed = passed && compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(init)).success &&
         compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(add)).success &&

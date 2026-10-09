@@ -238,7 +238,7 @@ BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult compiler_closure_capture(Aren
 
 BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult compiler_closure_git(Arena* arena, String8 root, String8 argument)
 {
-    String8 arguments[] = {S8("git"), S8("-C"), root, S8("rev-parse"), S8("--verify"), argument};
+    String8 arguments[] = {S8("git"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("-c"), S8("core.hooksPath=/dev/null"), S8("-C"), root, S8("rev-parse"), S8("--verify"), argument};
     return compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments));
 }
 
@@ -479,7 +479,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_closure_inventory(Arena* arena, String8 roo
     CompilerClosureInventory inventory = {.arena = arena, .success = true};
     ProductionProfileCommandResult revision = compiler_closure_git(arena, root, S8("HEAD"));
     ProductionProfileCommandResult source_tree = compiler_closure_git(arena, root, S8("HEAD^{tree}"));
-    String8 clean_arguments[] = {S8("git"), S8("-C"), root, S8("diff"), S8("--quiet"), S8("--exit-code"), S8("HEAD"), S8("--")};
+    String8 clean_arguments[] = {S8("git"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("-c"), S8("core.hooksPath=/dev/null"), S8("-C"), root, S8("diff"), S8("--quiet"), S8("--exit-code"), S8("HEAD"), S8("--")};
     ProductionProfileCommandResult clean = compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(clean_arguments));
     inventory.success = clean.success && revision.success && source_tree.success &&
         string_equal(production_profile_trim(revision.output), base) && string_equal(production_profile_trim(source_tree.output), tree);
