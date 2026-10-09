@@ -673,7 +673,21 @@ without facts for identical bitcode and diagnostics.
   `c_test_gnu_omitted_conditional` checks fixed integer/IEEE/array/address images,
   malformed GNU11/17/23 neighbors, both frontend forms, fast/quality allocation, native O0/O2
   execution and GCC/Clang GNU17 controls (GitHub #1259). The separate complex
-  and x87 static-initializer folders retain their existing conditional limits.
+  static-initializer folder retains its existing conditional limit. The x87
+  static-initializer folder folds GNU omitted-middle and ordinary three-arm
+  arithmetic conditionals with a token-bounded explicit work stack, preserving
+  the common arithmetic type before writing the selected value. Nested arm
+  conditionals, unselected integer division, integer-to-float common-type
+  rounding, deep enclosing parentheses, and right-nested conditional chains
+  are pinned by
+  `c_test_wide_float_global_folding`; complex static conditional initializers
+  remain a separate limitation. The evaluator recognizes a conditional at the
+  root of an initializer subrange (after enclosing parentheses and
+  `__extension__` prefixes); the condition and leaf arms still use the existing
+  arithmetic-only grammar. Relational or logical conditions, such as
+  `(1.0L < 2.0L) ? 3.0L : 4.0L`, remain unsupported. A conditional nested inside
+  an arithmetic operand or cast still reaches the arithmetic-only folder, for
+  example `(1 ? 2.0L : 3.0L) + 1.0L`.
 - Static pointer folding retains casts that precede trailing arithmetic:
   `(char *)&object + 1` scales by `sizeof(char)`, including scalar globals
   and local statics. Only a cast covering the entire operand range may be

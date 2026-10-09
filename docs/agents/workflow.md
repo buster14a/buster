@@ -49,6 +49,26 @@ and update the live state in issue metadata plus a compact comment. See the
 [research lifecycle](research.md) for the vocabulary, transition rules, and
 required evidence/disposition fields.
 
+## Correctness and performance handoffs
+
+Routine compiler fixes, CI repairs, conflict resolution and branch refreshes
+use post-merge main benchmarking by default (#3087); they do not themselves
+authorize edits to `benchmarks/9700x/compiler-compare.request`.
+Keep three independent answers in the handoff: exact-revision correctness CI,
+actual relevant 9700X validation of any performance claim (#2761), and an
+explicit task/issue requirement for evidence before acceptance. Link that
+requirement and preserve its hold even when correctness/policy checks pass.
+An owner-authorized experiment needs no second unrelated approval.
+
+Before requesting another experiment, read the exact-head check and matching
+run/attempt and receipt. A completed result can be reused only for its recorded
+identities; stale "queued" prose is not a retry reason. A changed head makes a
+new performance claim unvalidated, but does not by itself authorize a PR run.
+Record the applicable request reference and remaining cells; do not release
+another issue's hold or rewrite its request history. Use the
+[eight request examples](benchmarking.md#request-decisions-and-examples)
+when deciding which path applies.
+
 ## Parallel sessions on one machine
 
 Each session that builds, tests or measures takes its own source worktree.
