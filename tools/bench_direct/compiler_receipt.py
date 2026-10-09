@@ -2019,6 +2019,114 @@ def is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def validate_closure(receipt: dict, bundle: object, expected_policy: str | None = None) -> list[str]:
+    """Replay native producer/consumer identities as bounded data, including the frozen baseline executable."""
+    closure = receipt.get("closure")
+    declared = receipt.get("preparation_policy", "legacy-rebuild" if closure is None else "snapshot-v1")
+    if expected_policy not in (None, "legacy-rebuild", "snapshot-v1") or declared not in ("legacy-rebuild", "snapshot-v1") or \
+            (expected_policy is not None and declared != expected_policy):
+        return ["frozen baseline preparation policy does not match the trusted route"]
+    if closure is None:
+        if declared == "snapshot-v1" or expected_policy == "snapshot-v1":
+            return ["requested frozen baseline closure receipt is missing"]
+        return []  # historical and default legacy-rebuild receipts
+    if declared != "snapshot-v1" or not isinstance(closure, dict) or closure.get("policy") != "snapshot-v1" or closure.get("fallback") is not None:
+        return ["frozen baseline closure policy/fallback is unsupported"]
+    identity = receipt.get("identity") if isinstance(receipt.get("identity"), dict) else {}
+    binaries = receipt.get("binaries") if isinstance(receipt.get("binaries"), dict) else {}
+    raw = bundle if isinstance(bundle, dict) else {}
+    reasons: list[str] = []
+    manifests: list[bytes] = []
+    for operation in ("snapshot", "restore", "verify"):
+        record = closure.get(operation)
+        manifest = raw.get(operation)
+        if not isinstance(record, dict) or not isinstance(manifest, bytes) or not 0 < len(manifest) <= 8 * 1024 * 1024:
+            reasons.append(f"frozen baseline {operation} receipt/manifest missing or oversized")
+            continue
+        manifests.append(manifest)
+        expected = {"schema": "buster-compiler-closure-v1", "policy": "snapshot-v1", "state": "complete",
+                    "operation": operation, "base": identity.get("base"), "base_tree": identity.get("base_tree")}
+        if any(record.get(key) != value for key, value in expected.items()):
+            reasons.append(f"frozen baseline {operation} source/tree/policy identity mismatch")
+        if record.get("manifest_sha256") != hashlib.sha256(manifest).hexdigest():
+            reasons.append(f"frozen baseline {operation} manifest hash mismatch")
+        if record.get("ownership_schema") != "buster-native-qualification-supervisor-v1" or record.get("cleanup_proven") is not True or \
+                any(type(record.get(key)) is not int or record[key] < 0 for key in ("cleanup_us", "cleanup_waves", "cleanup_signalled", "cleanup_reaped")) or \
+                record.get("cleanup_signalled") != 0 or record.get("cleanup_reaped") != 0:
+            reasons.append(f"frozen baseline {operation} child ownership or clean nominal completion is unproven")
+        if type(record.get("duration_us")) is not int or record["duration_us"] < 0:
+            reasons.append(f"frozen baseline {operation} duration missing or malformed")
+        if type(record.get("harness_preparation_us")) is not int or record["harness_preparation_us"] < 0:
+            reasons.append(f"frozen baseline {operation} harness preparation timing missing or malformed")
+    if len(manifests) == 3 and any(raw != manifests[0] for raw in manifests[1:]):
+        reasons.append("frozen baseline restore differs from the saved source/generated/configuration/toolchain closure")
+    if manifests:
+        try:
+            lines = manifests[0].decode("utf-8").splitlines()
+            if len(lines) < 5 or lines[0] != "BUSTER_COMPILER_CLOSURE_V1" or \
+                    lines[2] != "base\t" + str(identity.get("base")) or lines[3] != "tree\t" + str(identity.get("base_tree")) or \
+                    not lines[1].startswith("root\t/"):
+                raise ValueError("manifest source/tree/root header mismatch")
+            root_hash = hashlib.sha256(lines[1][5:].encode()).hexdigest()
+            if any(not isinstance(closure.get(operation), dict) or closure[operation].get("root_sha256") != root_hash
+                   for operation in ("snapshot", "restore", "verify")):
+                raise ValueError("manifest matched root identity mismatch")
+            rows: dict[tuple[str, str], list[str]] = {}
+            total = 0
+            bindings: dict[str, str] = {}
+            for line in lines[4:-1]:
+                fields = line.split("\t")
+                if fields[0] == "binding":
+                    if len(fields) != 3 or fields[1] in bindings:
+                        raise ValueError("manifest toolchain binding malformed or repeated")
+                    bindings[fields[1]] = fields[2]
+                    continue
+                if len(fields) != 8 or fields[0] not in ("source", "build", "bootstrap", "tool", "resource") or \
+                        fields[1] not in ("F", "D") or not all(value.isdecimal() for value in fields[2:6]) or \
+                        any(part in ("", ".", "..") for part in fields[7].split("/")):
+                    raise ValueError("manifest record is malformed or unsafe")
+                key = fields[0], fields[7]
+                if key in rows or (fields[1] == "F" and not SHA256.fullmatch(fields[6])) or \
+                        (fields[1] == "D" and (fields[6] != "-" or any(int(value) for value in fields[3:6]))) or \
+                        int(fields[2]) > 4095 or int(fields[4]) >= 1_000_000_000:
+                    raise ValueError("manifest record duplicate or invalid hash")
+                rows[key] = fields
+                total += int(fields[5])
+            if lines[-1] != f"END\t{len(rows)}\t{total}" or len(rows) > 65536 or total > 8 << 30:
+                raise ValueError("manifest file/byte inventory mismatch")
+            required = (("source", "build.c"), ("source", "build.sh"), ("source", "tools/bootstrap_driver.sh"),
+                        ("build", "CMakeCache.txt"), ("build", "Release/ide"), ("build", "throughput-tools/throughput"))
+            if any(key not in rows for key in required) or not any(key[0] == "bootstrap" and key[1].endswith(".complete") for key in rows):
+                raise ValueError("manifest baseline source/generated/build-driver/harness closure is incomplete")
+            configuration = bindings.get("bootstrap_config", "")
+            marker = bindings.get("bootstrap_marker", "")
+            artifact = bindings.get("bootstrap_artifact", "")
+            if not SHA256.fullmatch(configuration) or not artifact.startswith("posix/" + configuration + "/") or \
+                    artifact.count("/") != 2 or marker != artifact + ".complete" or \
+                    ("bootstrap", marker) not in rows or ("bootstrap", artifact) not in rows or \
+                    rows["bootstrap", marker][1] != "F" or rows["bootstrap", artifact][1] != "F" or \
+                    not int(rows["bootstrap", artifact][2]) & 0o111:
+                raise ValueError("manifest actual baseline bootstrap marker/executable pair is missing")
+            for operation in ("snapshot", "restore", "verify"):
+                if closure[operation].get("harness_sha256") != rows["build", "throughput-tools/throughput"][6] or \
+                        closure[operation].get("bootstrap_marker_sha256") != rows["bootstrap", marker][6] or \
+                        closure[operation].get("bootstrap_artifact_sha256") != rows["bootstrap", artifact][6]:
+                    raise ValueError("manifest actual producer/consumer executable hashes mismatch")
+            baseline = binaries.get("baseline") if isinstance(binaries.get("baseline"), dict) else {}
+            if any(rows[key][1] != "F" or not int(rows[key][2]) & 0o111 for key in (("build", "Release/ide"), ("build", "throughput-tools/throughput"))):
+                raise ValueError("manifest compiler/native corpus executable identity malformed")
+            if not any(key[0] == "resource" for key in rows):
+                raise ValueError("manifest configured Clang resource closure absent")
+            if rows["build", "Release/ide"][6] != baseline.get("sha256"):
+                raise ValueError("manifest baseline compiler binary mismatch")
+            for key in ("CMAKE_C_COMPILER", "CMAKE_LINKER", "CMAKE_MAKE_PROGRAM", "clang", "cmake", "ninja", "tcc", "resource"):
+                if not bindings.get(key, "").startswith("/") or (key != "resource" and ("tool", key) not in rows):
+                    raise ValueError("manifest configured compiler/linker/tool/resource identity missing")
+        except (UnicodeError, ValueError, IndexError, TypeError):
+            reasons.append("frozen baseline manifest source/toolchain/configuration/closure mismatch")
+    return reasons
+
+
 def classify(summary: object, binaries: object) -> list[str]:
     """Reasons the lab summary is not a valid core measurement; empty when valid."""
     reasons: list[str] = []
@@ -2528,10 +2636,17 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
     scaled = ", scaling %s s" % number(timings.get("scaling_seconds"), "%.0f") if "scaling_seconds" in timings else ""
     lines.append("Host time: builds %s s, measurement %s s, corpus %s s%s, total %s s; queue delay before the host "
                  "job %s s." % (
-        " + ".join(number(builds.get(key), "%.0f") for key in ("baseline", "candidate", "closure")),
+        " + ".join(number(builds.get(key), "%.0f") for key in (("baseline", "candidate") if receipt.get("closure") else ("baseline", "candidate", "closure"))),
         number(timings.get("measurement_seconds"), "%.0f"), number(timings.get("throughput_seconds"), "%.0f"),
         scaled, number(timings.get("total_seconds"), "%.0f"),
         number(timings.get("queue_delay_seconds"), "%.0f")))
+    if receipt.get("closure"):
+        lines.append("Frozen baseline closure: snapshot-v1, same matched root, no fallback; snapshot %s s "
+                     "(includes harness preparation %s s), restore/validation %s s, checkout %s s." % (
+            number(timings.get("closure_snapshot_seconds"), "%.3f"),
+            number(timings.get("harness_preparation_seconds"), "%.3f"),
+            number(timings.get("closure_restore_seconds"), "%.3f"),
+            number(timings.get("closure_checkout_seconds"), "%.3f")))
     corpus = receipt.get("throughput") if isinstance(receipt, dict) else None
     if isinstance(corpus, dict):
         cases = corpus.get("cases") if isinstance(corpus.get("cases"), list) else []
