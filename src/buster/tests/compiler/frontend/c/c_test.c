@@ -12564,6 +12564,19 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_pointer_update_operand_program = S8_INI
     "    if (a[1] != 24 || a[0] != 7 || r != 23 || p != a + 1) return 14;\n"
     "    p = a; r = (p++)[0]++;\n"
     "    if (a[0] != 8 || a[1] != 24 || r != 7 || p != a + 1) return 15;\n"
+    "    unsigned char bytes[4] = {10, 20, 30, 40};\n"
+    "    i = 1; r = ++*(unsigned char *)(bytes + i++);\n"
+    "    if (bytes[0] != 10 || bytes[1] != 21 || r != 21 || i != 2) return 16;\n"
+    "    r = (*(unsigned char *)(bytes + i++))--;\n"
+    "    if (bytes[2] != 29 || bytes[3] != 40 || r != 30 || i != 3) return 17;\n"
+    "    unsigned char *bp = bytes;\n"
+    "    r = ++*(unsigned char *)(bp++);\n"
+    "    if (bytes[0] != 11 || r != 11 || bp != bytes + 1) return 18;\n"
+    "    int **pp = &p; p = a; r = (*((*pp)++))++;\n"
+    "    if (a[0] != 9 || r != 8 || p != a + 1) return 19;\n"
+    "    struct P { int *q; } holder = {a + 1};\n"
+    "    r = (*((holder.q++)))++;\n"
+    "    if (a[1] != 25 || r != 24 || holder.q != a + 2) return 20;\n"
     "    return 0;\n"
     "}\n"
     "int main(void) { return check(); }\n");
@@ -29568,6 +29581,9 @@ struct CFunctionParameterCompatibilityCase
     String8 source;
     bool valid_before_c23;
     bool valid_c23;
+    // C23 removed identifier-list definitions: such a row is refused there
+    // for that reason, whatever it declares beside the definition.
+    bool identifier_list;
 };
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility(UnitTestArguments* arguments)
@@ -29635,6 +29651,36 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility(UnitT
         {S8("int compatibility dialect query"), S8("typedef int A(); typedef int B(int);\n#if __STDC_VERSION__ < 202311L\n_Static_assert(__builtin_types_compatible_p(A, B), \"legacy promoted int\");\n#else\n_Static_assert(!__builtin_types_compatible_p(A, B), \"C23 zero parameters\");\n#endif\n"), true, true},
         {S8("nested callback with aggregate sibling"), S8("struct S { int x; };\nint f(struct S, int (*)());\nint f(struct S, int (*)(float));\n"), false, false},
         {S8("inner array bound with aggregate sibling"), S8("struct S { int x; };\nvoid f(struct S, int a[2][3]);\nvoid f(struct S, int a[2][4]);\n"), false, false},
+        // C17 6.7.6.3p15: an empty-list or identifier-list definition has to
+        // agree with a prototype in parameter count, in either order.
+        {S8("empty definition after prototype"), S8("int f(int);\nint f() { return 0; }\n"), false, false},
+        {S8("empty definition before prototype"), S8("int f() { return 0; }\nint f(int);\n"), false, false},
+        {S8("empty definition after two parameters"), S8("int f(int, int);\nint f() { return 0; }\n"), false, false},
+        {S8("empty definition before two parameters"), S8("int f() { return 0; }\nint f(int, int);\n"), false, false},
+        {S8("empty definition after variadic prototype"), S8("int f(int, ...);\nint f() { return 0; }\n"), false, false},
+        {S8("static empty definition after prototype"), S8("static int f(int);\nstatic int f() { return 0; }\n"), false, false},
+        {S8("empty definition after declared empty and prototype"), S8("int f();\nint f() { return 0; }\nint f(int);\n"), false, false},
+        {S8("empty definition and void prototype"), S8("int f(void);\nint f() { return 0; }\n"), true, true},
+        {S8("empty definition before void prototype"), S8("int f() { return 0; }\nint f(void);\n"), true, true},
+        {S8("empty definition and empty declaration"), S8("int f() { return 0; }\nint f();\n"), true, true},
+        {S8("prototype definition keeps declared empty"), S8("int f();\nint f(int x) { return x; }\nint f(int);\n"), true, false},
+        {S8("identifier list after prototype count"), S8("int f(int);\nint f(a, b) int a, b; { return a + b; }\n"), false, false, true},
+        {S8("identifier list before prototype count"), S8("int f(a, b) int a, b; { return a + b; }\nint f(int);\n"), false, false, true},
+        {S8("identifier list after declared empty and prototype"), S8("int f();\nint f(a) int a; { return a; }\nint f(int, int);\n"), false, false, true},
+        {S8("identifier list and variadic prototype"), S8("int f(int, ...);\nint f(a) int a; { return a; }\n"), false, false, true},
+        {S8("identifier list and matching prototype"), S8("int f(int);\nint f(a) int a; { return a; }\n"), true, false, true},
+        {S8("identifier list before matching prototype"), S8("int f(a, b) int a, b; { return a + b; }\nint f(int, int);\n"), true, false, true},
+        {S8("identifier list between matching prototypes"), S8("int f();\nint f(a) int a; { return a; }\nint f(int);\n"), true, false, true},
+        // A prototype that follows an unprototyped declaration is held to the
+        // later definition and to later prototypes: the entity keeps the
+        // first, unprototyped type.
+        {S8("empty definition after unprototyped and prototype"), S8("int f();\nint f(int);\nint f() { return 0; }\n"), false, false},
+        {S8("identifier list after unprototyped and prototype"), S8("int f();\nint f(int);\nint f(a, b) int a, b; { return a + b; }\n"), false, false, true},
+        {S8("matching identifier list after unprototyped and prototype"), S8("int f();\nint f(int);\nint f(a) int a; { return a; }\n"), true, false, true},
+        {S8("prototype definition then different prototype"), S8("int f();\nint f(int x) { return x; }\nint f(int, int);\n"), false, false},
+        {S8("identifier list then different prototype after unprototyped"), S8("int f();\nint f(a) int a; { return a; }\nint f(int, int);\n"), false, false, true},
+        {S8("two different prototypes after unprototyped"), S8("int f();\nint f(int);\nint f(int, int);\n"), false, false},
+        {S8("prototype definition after unprototyped and prototype"), S8("int f();\nint f(int);\nint f(int x) { return x; }\n"), true, false},
     };
     CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17,
                                      C_PREPROCESS_DIALECT_C23, C_PREPROCESS_DIALECT_GNU23};
@@ -29679,6 +29725,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility(UnitT
                         {
                             conflict_found |= report.kind == C_DIAGNOSTIC_CONFLICTING_DECLARATION &&
                                 string_first_sequence(report.message, S8("conflicting declaration")) != BUSTER_STRING_NO_MATCH;
+                            conflict_found |= item.identifier_list && dialect_index >= 2 &&
+                                string_first_sequence(report.message, S8("removed in C23")) != BUSTER_STRING_NO_MATCH;
                         }
                     }
                     BUSTER_TEST_RAW(arguments, conflict_found, label);
