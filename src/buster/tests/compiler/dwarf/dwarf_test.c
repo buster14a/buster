@@ -788,10 +788,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_global_linkage(UnitTestArguments* 
     return result;
 }
 
-// A lexical block whose code is several runs lists every run in its range
-// list, ascending, and a block that lists none keeps the single hull span
-// (#2241): sibling blocks laid out out of source order must not overlap.
-BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_scope_range_lists(UnitTestArguments* arguments)
+// Lexical blocks carry no code range (#2241): the writer emits the function's
+// range list only, so sibling blocks cannot overlap and a debugger reads
+// their variables in the enclosing scope.
+BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_scope_without_ranges(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     String8 path = S8("ranges.c");
@@ -799,11 +799,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_scope_range_lists(UnitTestArgument
         {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4, .is_signed = true},
         {.kind = DEBUG_TYPE_FUNCTION, .return_type = 0},
     };
-    DebugCodeRange runs[] = {{.start = 0x34, .end = 0x3c}, {.start = 0x44, .end = 0x4c}};
     DebugScope scopes[] = {
         {.kind = DEBUG_SCOPE_FUNCTION, .parent = DEBUG_SCOPE_INVALID, .start = 0x30, .end = 0x50},
-        {.kind = DEBUG_SCOPE_LEXICAL, .parent = 0, .start = 0x34, .end = 0x4c, .ranges = runs, .range_count = BUSTER_ARRAY_LENGTH(runs)},
-        {.kind = DEBUG_SCOPE_LEXICAL, .parent = 0, .start = 0x3c, .end = 0x44},
+        {.kind = DEBUG_SCOPE_LEXICAL, .parent = 0, .start = 0x30, .end = 0x50},
+        {.kind = DEBUG_SCOPE_LEXICAL, .parent = 0, .start = 0x30, .end = 0x50},
     };
     DebugFunction function = {.name = S8("run_function"), .type = 1, .scope = 0, .code_offset = 0x30, .code_size = 0x20};
     DebugModel model = {.types = types, .type_count = 2, .functions = &function, .function_count = 1,
@@ -813,25 +812,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_scope_range_lists(UnitTestArgument
     BUSTER_TEST(arguments, built.valid);
     if (built.valid)
     {
-        // The function's list, the two-run block's list, then the hull block's.
-        ByteSlice ranges = built.sections[DWARF_SECTION_RANGES];
-        BUSTER_TEST(arguments, ranges.length == 32 + 48 + 32);
-        if (ranges.length == 32 + 48 + 32)
-        {
-            u64 endpoints[14];
-            memcpy(endpoints, ranges.pointer, sizeof(endpoints));
-            BUSTER_TEST(arguments, endpoints[0] == 0x30 && endpoints[1] == 0x50 && !endpoints[2] && !endpoints[3]);
-            BUSTER_TEST(arguments, endpoints[4] == 0x34 && endpoints[5] == 0x3c && endpoints[6] == 0x44 && endpoints[7] == 0x4c);
-            BUSTER_TEST(arguments, !endpoints[8] && !endpoints[9]);
-            BUSTER_TEST(arguments, endpoints[10] == 0x3c && endpoints[11] == 0x44 && !endpoints[12] && !endpoints[13]);
-        }
-        // Each list is reached through its own relocation.
+        BUSTER_TEST(arguments, built.sections[DWARF_SECTION_RANGES].length == 32);
         u32 range_relocations = 0;
         for (u32 index = 0; index < built.relocation_count; index += 1)
         {
             range_relocations += built.relocations[index].section == DWARF_SECTION_INFO && built.relocations[index].target == DWARF_SECTION_RANGES;
         }
-        BUSTER_TEST(arguments, range_relocations == 3);
+        BUSTER_TEST(arguments, range_relocations == 1);
     }
     return result;
 }
@@ -842,7 +829,7 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
     UnitTestResult linkage = dwarf_test_global_linkage(arguments);
     result.test_count += linkage.test_count;
     result.succeeded_test_count += linkage.succeeded_test_count;
-    UnitTestResult range_lists = dwarf_test_scope_range_lists(arguments);
+    UnitTestResult range_lists = dwarf_test_scope_without_ranges(arguments);
     result.test_count += range_lists.test_count;
     result.succeeded_test_count += range_lists.succeeded_test_count;
     UnitTestResult geometry = dwarf_test_array_and_bit_field_geometry(arguments);

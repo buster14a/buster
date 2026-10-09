@@ -11968,11 +11968,6 @@ BUSTER_CT_CHECK(BUSTER_OFFSET_OF(DwarfLineEntry, line) == BUSTER_OFFSET_OF(Codeg
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(DwarfLineEntry, file) == BUSTER_OFFSET_OF(CodegenLineEntry, source));
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(DwarfLineEntry, column) == BUSTER_OFFSET_OF(CodegenLineEntry, column));
 BUSTER_CT_CHECK(sizeof(((DwarfLineEntry*)0)->file) == sizeof(((CodegenLineEntry*)0)->source));
-BUSTER_CT_CHECK(sizeof(DebugLineSeed) == sizeof(CodegenLineEntry));
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(DebugLineSeed, code_offset) == BUSTER_OFFSET_OF(CodegenLineEntry, code_offset));
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(DebugLineSeed, line) == BUSTER_OFFSET_OF(CodegenLineEntry, line));
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(DebugLineSeed, source) == BUSTER_OFFSET_OF(CodegenLineEntry, source));
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(DebugLineSeed, column) == BUSTER_OFFSET_OF(CodegenLineEntry, column));
 BUSTER_CT_CHECK(sizeof(((DwarfLineEntry*)0)->line) == sizeof(((CodegenLineEntry*)0)->line));
 
 // A section a `section` attribute names (issue 1276). Codegen lays every
@@ -12460,8 +12455,6 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                                                    .comp_dir = S8("."),
                                                                    .functions = debug_functions,
                                                                    .locations = debug_locations,
-                                                                   .lines = (DebugLineSeed const*)lines,
-                                                                   .line_count = line_count,
                                                                    .function_count = debug_entry_count,
                                                                    .location_count = debug_location_count,
                                                                });
@@ -12490,8 +12483,6 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                                                    .comp_dir = S8("."),
                                                                    .functions = debug_functions,
                                                                    .locations = debug_locations,
-                                                                   .lines = (DebugLineSeed const*)lines,
-                                                                   .line_count = line_count,
                                                                    .function_count = debug_entry_count,
                                                                    .location_count = debug_location_count,
                                                                });

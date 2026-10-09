@@ -7552,7 +7552,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_scalar_local_locat
 // for a block is not one contiguous run, and a nested block lies inside its
 // parent. DIEs are emitted in tree order, which is the order the range lists
 // are appended in: the function, block A, A's nested block, then block B.
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_lexical_block_ranges(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_lexical_blocks_without_ranges(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -7591,80 +7591,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_lexical_block_rang
         {
             continue;
         }
-        enum
-        {
-            LIST_LIMIT = 8,
-            RUN_LIMIT = 8,
-        };
-        typedef struct DebugRangeList DebugRangeList;
-        struct DebugRangeList
-        {
-            u64 start[RUN_LIMIT];
-            u64 end[RUN_LIMIT];
-            u32 count;
-        };
-        DebugRangeList lists[LIST_LIMIT] = {0};
-        u32 list_count = 0;
+        // Blocks carry no code range (#2241): the only range list is the
+        // function's, so sibling and nested blocks cannot overlap.
         ByteSlice ranges = built.object.sections[OBJECT_SECTION_DEBUG_RANGES].data;
-        u64 cursor = 0;
-        bool well_formed = true;
-        while (well_formed && cursor + 16 <= ranges.length && list_count < LIST_LIMIT)
+        BUSTER_TEST_RAW(arguments, ranges.length == 32, label);
+        if (ranges.length == 32)
         {
-            u64 begin = 0;
-            u64 end = 0;
-            memcpy(&begin, ranges.pointer + cursor, sizeof(begin));
-            memcpy(&end, ranges.pointer + cursor + sizeof(begin), sizeof(end));
-            cursor += 16;
-            if (!begin && !end)
-            {
-                list_count += 1;
-            }
-            else if (lists[list_count].count < RUN_LIMIT && begin < end)
-            {
-                lists[list_count].start[lists[list_count].count] = begin;
-                lists[list_count].end[lists[list_count].count] = end;
-                lists[list_count].count += 1;
-            }
-            else
-            {
-                well_formed = false;
-            }
+            u64 function_range[2] = {0};
+            memcpy(function_range, ranges.pointer, sizeof(function_range));
+            BUSTER_TEST_RAW(arguments, function_range[0] == symbol->value && function_range[1] == symbol->value + symbol->size, label);
         }
-        BUSTER_TEST_RAW(arguments, well_formed && cursor == ranges.length && list_count == 4, label);
-        if (!well_formed || list_count != 4)
-        {
-            continue;
-        }
-        DebugRangeList* function_list = lists;
-        DebugRangeList* block_a = lists + 1;
-        DebugRangeList* nested = lists + 2;
-        DebugRangeList* block_b = lists + 3;
-        BUSTER_TEST_RAW(arguments, function_list->count == 1 && function_list->start[0] == symbol->value &&
-                                       function_list->end[0] == symbol->value + symbol->size, label);
-        BUSTER_TEST_RAW(arguments, block_a->count && nested->count && block_b->count, label);
-        // Containment: every run of a nested list lies inside a run of its parent.
-        for (u32 child = 1; child < 4; child += 1)
-        {
-            DebugRangeList* parent = child == 2 ? block_a : function_list;
-            for (u32 run = 0; run < lists[child].count; run += 1)
-            {
-                bool contained = false;
-                for (u32 parent_run = 0; parent_run < parent->count; parent_run += 1)
-                {
-                    contained |= lists[child].start[run] >= parent->start[parent_run] && lists[child].end[run] <= parent->end[parent_run];
-                }
-                BUSTER_TEST_RAW(arguments, contained, label);
-            }
-        }
-        // Siblings are disjoint, and the blocks are narrower than the function.
-        for (u32 run_a = 0; run_a < block_a->count; run_a += 1)
-        {
-            for (u32 run_b = 0; run_b < block_b->count; run_b += 1)
-            {
-                BUSTER_TEST_RAW(arguments, block_a->end[run_a] <= block_b->start[run_b] || block_b->end[run_b] <= block_a->start[run_a], label);
-            }
-        }
-        BUSTER_TEST_RAW(arguments, block_a->start[0] > function_list->start[0] && block_b->end[block_b->count - 1] < function_list->end[0], label);
     }
     scratch_end(temporary);
     return result;
@@ -28063,7 +27999,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_codeview_limit);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_global_relocations);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_scalar_local_locations);
-    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_lexical_block_ranges);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_lexical_blocks_without_ranges);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_data_scaling);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_link_boundaries);
