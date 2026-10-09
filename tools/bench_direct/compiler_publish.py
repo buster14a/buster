@@ -3265,7 +3265,10 @@ def utility_observed_costs(api: Api, authority: dict, files: dict[str, bytes]) -
         try:
             row = sampling_tsv(files.get(name))
             for source, target in keys.items():
-                result[target] = sampling_integer(row.get(source), target != "owner_publication_us")
+                try:
+                    result[target] = sampling_integer(row.get(source), target != "owner_publication_us")
+                except (ValueError, TypeError):
+                    pass
         except (ValueError, UnicodeError, TypeError):
             pass
     try:
