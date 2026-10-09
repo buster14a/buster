@@ -27,6 +27,8 @@ import compiler_owned_plan as plan_contract
 import compiler_receipt as receipt_contract
 
 NATIVE_DRIVER = None
+EXPORT_ROOT = None
+EXPORTED_CASES = []
 DIAGNOSTIC = {"schema": "buster-compiler-ordinary-diagnostic-fixture-v1",
               "diagnostic_only": True, "performance_qualified": False, "activation_allowed": False}
 
@@ -82,11 +84,20 @@ def emit(argv: list[str], *, corpus: bool) -> int:
         if any(not re.fullmatch(r"[a-f0-9]{40}", value) for value in (arguments.baseline_id, arguments.candidate_id)):
             raise ValueError("diagnostic corpus source pins malformed")
         # A complete detected regression remains complete scientific raw data.
-        documents = corpus_data("regression")
+        case = os.environ.get("BUSTER_ORDINARY_DIAGNOSTIC_CORPUS_CASE", "regression")
+        if case not in ("regression", "invalid", "missing", "bad-exit"):
+            raise ValueError("private diagnostic corpus case is unsupported")
+        documents = corpus_data("regression" if case in ("regression", "invalid") else "no substantial regression detected")
         documents["metadata"]["compiler_provenance"] = [{"sha256": a}, {"sha256": b}]
         documents["metadata"].update(baseline_id=arguments.baseline_id, candidate_id=arguments.candidate_id,
                                      diagnostic_fixture=copy.deepcopy(DIAGNOSTIC))
         documents["summary"]["diagnostic_fixture"] = copy.deepcopy(DIAGNOSTIC)
+        documents["summary"]["diagnostic_case"] = case
+        documents["metadata"]["diagnostic_case"] = case
+        if case == "invalid":
+            documents["summary"]["valid"] = False
+        if case == "missing":
+            documents = {}
     else:
         if (arguments.target_minutes, arguments.warmups) !=                 (receipt_contract.PROFILE["target_minutes"], receipt_contract.PROFILE["warmups"]):
             raise ValueError("diagnostic caller changed the historical lab recipe")
@@ -99,8 +110,87 @@ def emit(argv: list[str], *, corpus: bool) -> int:
         write(arguments.output / (name + ".json"), document)
     (arguments.output / "DIAGNOSTIC-UNQUALIFIED").write_text(
         "Synthetic contract data only. No timed samples or performance qualification.\n", encoding="utf-8")
-    print("COMPILER_ORDINARY_DIAGNOSTIC_DATA complete=1 qualified=0 activation=0")
-    return 0
+    complete_data = not corpus or case in ("regression", "bad-exit")
+    print("COMPILER_ORDINARY_DIAGNOSTIC_DATA data_complete=" + str(int(complete_data)) +
+          " case=" + (case if corpus else "lab") + " qualified=0 activation=0")
+    return 1 if corpus else 0
+
+
+def prepare_export(requested: Path) -> Path:
+    guard()
+    if not requested.is_absolute() or requested != requested.resolve() or requested.parent != requested.parent.resolve(strict=True) or \
+            requested.exists() or requested.is_symlink() or requested == requested.parent or \
+            (compare.overlaps(requested, compare.TRUSTED_ROOT) or requested == Path.home().resolve() or requested in Path.home().resolve().parents):
+        raise ValueError("diagnostic export requires a fresh canonical absolute root outside trusted tools and home ancestors")
+    requested.mkdir(mode=0o700)
+    (requested / "DIAGNOSTIC-UNQUALIFIED").write_text(
+        "Private hosted functional producer/reader data only. Synthetic statistics; no physical qualification or activation.\n")
+    write(requested / "index.json", dict(DIAGNOSTIC, state="pending", cases=[]))
+    return requested
+
+
+def retain_case(case) -> None:
+    """Export available success/failure bytes before temporary cleanup; never execute artifacts."""
+    if EXPORT_ROOT is None:
+        return
+    result = case._outcome.result
+    failed = any(test is case for test, _ in result.failures + result.errors)
+    errors = []
+    initialization_context = getattr(case, "initialization_context", None)
+    initialization_receipt = getattr(case, "initialization_receipt", None)
+    if initialization_context is not None and isinstance(initialization_receipt, dict):
+        initialization_context.finish()
+        initialization_receipt["state"] = "failed" if initialization_context.stopped else "complete"
+        initialization_receipt["diagnostic_fixture"] = copy.deepcopy(DIAGNOSTIC)
+        problem = compare.write_receipt(initialization_receipt, case.directory / "initialize-evidence")
+        if problem:
+            errors.append(problem)
+    current = getattr(case, "current", None)
+    context = getattr(case, "context", None)
+    if context is not None:
+        context.finish()
+    if isinstance(current, dict):
+        current["diagnostic_fixture"] = copy.deepcopy(DIAGNOSTIC)
+        if failed:
+            current["state"] = "failed"
+            current["reasons"].append("private diagnostic integration test failed; no qualification")
+        problem = compare.write_receipt(current, case.evidence)
+        if problem:
+            errors.append(problem)
+    destination = EXPORT_ROOT / case._testMethodName
+    destination.mkdir()
+    roots = {"fixture": case.export,
+             "initialization-evidence": case.directory / "initialize-evidence",
+             "ordinary-evidence": case.evidence,
+             "raw-lab": case.work / "lab", "raw-throughput": case.work / "throughput",
+             "public-evidence": case.directory / "public-evidence"}
+    paths, omissions = {}, {}
+    for name, source in roots.items():
+        if source.is_dir():
+            required = ("fixture-plan.json",) if name == "fixture" else ()
+            if name == "ordinary-evidence" and isinstance(current, dict):
+                required = ("receipt.json",)
+            if name == "public-evidence":
+                required = ("receipt.json",)
+            problems, omitted = compare.export_tree(
+                source, destination / name, EXPORT_ROOT, compare.EVIDENCE_IGNORE, required)
+            paths[name] = name
+            errors.extend(problems)
+            if omitted:
+                omissions[name] = omitted
+                errors.append("private diagnostic export omitted raw members: " + name)
+    fixture = getattr(case, "fixture", {})
+    metadata = dict(DIAGNOSTIC, state="failed" if failed or errors else "passed",
+                    test=case._testMethodName, native_fixture=fixture, paths=paths,
+                    ordinary_state=current.get("state") if isinstance(current, dict) else None,
+                    identity=current.get("identity") if isinstance(current, dict) else None,
+                    phase_count=current.get("phase_ownership", {}).get("count") if isinstance(current, dict) else None,
+                    errors=errors, omissions=omissions)
+    write(destination / "diagnostic-attempt.json", metadata)
+    EXPORTED_CASES.append({"path": destination.name, "state": metadata["state"]})
+    write(EXPORT_ROOT / "index.json", dict(DIAGNOSTIC, state="pending", cases=EXPORTED_CASES))
+    if errors:
+        raise AssertionError("; ".join(errors))
 
 
 def raw_bundle(current: dict, evidence: Path) -> dict:
@@ -115,6 +205,8 @@ def raw_bundle(current: dict, evidence: Path) -> dict:
                                "stderr": Path(str(path) + ".stderr").read_bytes(),
                                "bootstrap": Path(str(path) + ".bootstrap.complete").read_bytes()}
     raw["owned_phases"] = members
+    raw["owned_throughput"] = {"summary": (evidence / "throughput/summary.json").read_bytes(),
+                              "metadata": (evidence / "throughput/metadata.json").read_bytes()}
     return raw
 
 
@@ -144,6 +236,7 @@ class ActualOrdinaryMeasure(unittest.TestCase):
         self.prior = compare.OWNED_PHASE_CONTEXT
         self.addCleanup(self.temp.cleanup)
         self.addCleanup(setattr, compare, "OWNED_PHASE_CONTEXT", self.prior)
+        self.addCleanup(retain_case, self)
         initialization_work = self.directory / "initialize-work"
         initialization_evidence = self.directory / "initialize-evidence"
         initialization_work.mkdir()
@@ -151,6 +244,8 @@ class ActualOrdinaryMeasure(unittest.TestCase):
         initialization_receipt = {"state": "failed", "reasons": [], "phase": "diagnostic-initialize"}
         initialization_context = compare.NativePhaseContext(
             NATIVE_DRIVER, initialization_work, initialization_evidence, initialization_receipt)
+        self.initialization_context = initialization_context
+        self.initialization_receipt = initialization_receipt
         compare.OWNED_PHASE_CONTEXT = initialization_context
         try:
             result = initialization_context.execute(
@@ -189,7 +284,7 @@ class ActualOrdinaryMeasure(unittest.TestCase):
 
     def tearDown(self):
         compare.OWNED_PHASE_CONTEXT = self.prior
-        self.temp.cleanup()
+        # addCleanup exports data before removing the private temporary roots.
 
     def identity(self, mode="pull"):
         return {"mode": mode, "repository": "buster14a/buster", "ref": "refs/pull/1/head" if mode == "pull" else "refs/heads/main",
@@ -198,7 +293,7 @@ class ActualOrdinaryMeasure(unittest.TestCase):
                 "head_tree": self.fixture["head_tree"], "trusted_revision": self.trusted_revision,
                 "request_run_id": "1", "run_id": "1", "run_attempt": "1"}
 
-    def test_actual_full_ordinary_measure_writer_then_strict_reader(self):
+    def measurement(self):
         identity = self.identity()
         arguments = argparse.Namespace(**identity, candidate=self.candidate, lab=Path(__file__).resolve(),
                                        work=self.work, evidence=self.evidence, closure_policy="snapshot-v1",
@@ -209,8 +304,14 @@ class ActualOrdinaryMeasure(unittest.TestCase):
                    "host": {"cpu_model": compare.cpu_model()}, "binaries": {}, "lab": {},
                    "timings": {"build_seconds": {}}, "diagnostic_fixture": copy.deepcopy(DIAGNOSTIC)}
         summaries = []
+        self.current = current
         context = compare.NativePhaseContext(NATIVE_DRIVER, self.work, self.evidence, current)
+        self.context = context
         compare.OWNED_PHASE_CONTEXT = context
+        return arguments, current, context, summaries
+
+    def test_actual_full_ordinary_measure_writer_then_strict_reader(self):
+        arguments, current, context, summaries = self.measurement()
         compare.measure(arguments, self.candidate, self.work, self.evidence, self.bins,
                         self.evidence / "build.log", current, summaries)
         context.finish()
@@ -219,6 +320,10 @@ class ActualOrdinaryMeasure(unittest.TestCase):
         self.assertEqual(current["state"], "measured")  # Structural state only; diagnostic marker remains mandatory.
         self.assertFalse(context.stopped)
         self.assertEqual(current["phase_ownership"]["state"], "complete")
+        current.pop("phase", None)
+        self.assertEqual(compare.write_receipt(current, self.evidence), "")
+        persisted = json.loads((self.evidence / "receipt.json").read_bytes())
+        self.assertEqual(persisted, current)
         rows = current["phase_ownership"]["phases"]
         core = [row for row in rows if row["kind"] == "run"]
         captured = [row for row in rows if row["kind"] == "capture"]
@@ -226,11 +331,9 @@ class ActualOrdinaryMeasure(unittest.TestCase):
         self.assertEqual(len(captured), 2)  # Real diff plus expected missing scaling selector probe.
         self.assertEqual([row["ordinal"] for row in rows], list(range(1, 15)))
         raw = raw_bundle(current, self.evidence)
-        self.assertEqual(receipt_contract.validate_closure(current, raw, expected_policy="snapshot-v1",
+        self.assertEqual(receipt_contract.validate_closure(persisted, raw, expected_policy="snapshot-v1",
             expected_phase_driver_sha256=context.driver_hash, expected_trusted_revision=self.trusted_revision,
             require_owned_phases=True), [])
-        self.assertEqual(owned.validate_population(current, raw["owned_phases"],
-                                                  context.driver_hash, self.trusted_revision), [])
         self.assertEqual(plan_contract.validate_plan(current, current["phase_ownership"], core), [])
         self.assertEqual(receipt_contract.classify(summaries[0], current["binaries"]), [])
         self.assertEqual(summaries[0]["verdict"]["outcome"], "slower")
@@ -239,6 +342,14 @@ class ActualOrdinaryMeasure(unittest.TestCase):
         metadata = json.loads((self.evidence / "throughput/metadata.json").read_bytes())
         self.assertEqual(receipt_contract.classify_throughput(corpus, metadata, current["binaries"]), [])
         self.assertGreater(corpus["confirmed_regressions"], 0)
+        self.assertEqual(current["throughput"]["exit"], 1)
+        self.assertEqual(receipt_contract.classify_throughput_exit(1, corpus, metadata, current["binaries"]), [])
+        throughput_row = next(row for row in core if row["phase"] == "throughput")
+        self.assertEqual(throughput_row["exit_policy"], "corpus-report-only-v1")
+        self.assertEqual(throughput_row["corpus_summary_sha256"], owned.sha(raw["owned_throughput"]["summary"]))
+        self.assertEqual(throughput_row["corpus_metadata_sha256"], owned.sha(raw["owned_throughput"]["metadata"]))
+        self.assertEqual(owned.read_record(raw["owned_phases"][throughput_row["file"]]["receipt"])["exit_status"], 256)
+        self.assertEqual(owned.read_record(raw["owned_phases"][throughput_row["file"]]["receipt"])["state"], "failed")
         self.assertEqual(corpus["diagnostic_fixture"], DIAGNOSTIC)
         self.assertEqual(metadata["diagnostic_fixture"], DIAGNOSTIC)
         self.assertNotEqual(current["binaries"]["baseline"]["sha256"], current["binaries"]["candidate"]["sha256"])
@@ -252,7 +363,7 @@ class ActualOrdinaryMeasure(unittest.TestCase):
         self.assertTrue(any(owned.read_record(raw["owned_phases"][row["file"]]["receipt"])["exit_status"]
                             for row in captured))
         self.assertTrue(all(owned.read_record(raw["owned_phases"][row["file"]]["receipt"])["exit_status"] == 0
-                            for row in core))
+                            for row in core if row["phase"] != "throughput"))
         self.assertEqual(compare.git(self.candidate, "rev-parse", "HEAD"), self.fixture["base"])
         # Replay must reject missing proof and a self-consistent replacement of the actual lab command.
         missing = copy.deepcopy(raw)
@@ -276,6 +387,58 @@ class ActualOrdinaryMeasure(unittest.TestCase):
             "Actual ordinary native phase writer/reader integration; synthetic slow data only; no physical qualification.\n")
         write(self.evidence / "diagnostic-receipt.json", current)
         print("COMPILER_ORDINARY_FULL_DIAGNOSTIC core=12 capture=2 strict_replay=1 qualified=0 activation=0")
+
+    def rejected_corpus(self, case):
+        arguments, current, context, summaries = self.measurement()
+        try:
+            with mock.patch.dict(os.environ, {"BUSTER_ORDINARY_DIAGNOSTIC_CORPUS_CASE": case}):
+                with self.assertRaises(compare.OwnedPhaseFailed) as caught:
+                    compare.measure(arguments, self.candidate, self.work, self.evidence, self.bins,
+                                    self.evidence / "build.log", current, summaries)
+            context.finish()
+            current["state"] = "failed"
+            current["reasons"].append("private diagnostic corpus rejection: " + str(caught.exception)[:200])
+            self.assertTrue(context.stopped)
+            self.assertEqual(current["phase_ownership"]["state"], "failed")
+            self.assertEqual(current["work_retained"], str(self.work))
+            rows = current["phase_ownership"]["phases"]
+            self.assertEqual(len(rows), 11)
+            self.assertTrue(all(row["kind"] == "run" for row in rows))
+            self.assertEqual(rows[-1]["phase"], "throughput")
+            self.assertEqual(rows[-1]["exit_policy"], "corpus-report-only-v1")
+            self.assertNotIn("verify", current["closure"])
+            self.assertFalse((self.evidence / "closure-verify.json").exists())
+            path = self.evidence / "owned-phases" / rows[-1]["file"]
+            native = owned.read_record(path.read_bytes())
+            self.assertEqual(native["exit_status"], 256)
+            self.assertEqual(native["state"], "failed")
+            self.assertTrue(native["cleanup_proven"])
+            for key in ("cleanup_signalled", "cleanup_reaped", "reservation_retained", "ownership_lost",
+                        "timed_out", "cancelled", "capture_failed", "output_truncated", "tree_cleanup_failed"):
+                self.assertEqual(native[key], 0)
+            marker = self.work / "no-next-child"
+            with mock.patch.object(compare.subprocess, "Popen") as spawn:
+                with self.assertRaises(compare.OwnedPhaseFailed):
+                    context.execute(["/bin/sh", "-c", "touch " + str(marker)], self.work,
+                                    self.evidence / "no-next.log", 5)
+                spawn.assert_not_called()
+            self.assertFalse(marker.exists())
+            print("COMPILER_ORDINARY_CORPUS_REJECTION case=" + case +
+                  " raw_exit=256 cleanup_proven=1 no_next_phase=1 qualified=0 activation=0")
+        finally:
+            context.finish()
+            compare.OWNED_PHASE_CONTEXT = self.prior
+            current["diagnostic_fixture"] = copy.deepcopy(DIAGNOSTIC)
+            compare.write_receipt(current, self.evidence)
+
+    def test_full_ordinary_invalid_corpus_exit1_stops_before_next_phase(self):
+        self.rejected_corpus("invalid")
+
+    def test_full_ordinary_missing_corpus_exit1_stops_before_next_phase(self):
+        self.rejected_corpus("missing")
+
+    def test_full_ordinary_unexplained_corpus_exit1_stops_before_next_phase(self):
+        self.rejected_corpus("bad-exit")
 
     def test_public_main_observed_host_gate_still_refuses_before_build(self):
         # No host override or profile override: exercise the actual public host gate on the hosted CPU.
@@ -306,10 +469,13 @@ class ActualOrdinaryMeasure(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(candidate.exists())
         self.assertFalse(output.exists())
+        write(self.evidence / "native-request-refusal.json", dict(DIAGNOSTIC,
+            state="complete", returncode=result.returncode, stdout=result.stdout, stderr=result.stderr,
+            candidate=str(candidate), output=str(output), candidate_exists=False, output_exists=False))
 
 
 def main(argv=None):
-    global NATIVE_DRIVER
+    global NATIVE_DRIVER, EXPORT_ROOT
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments[:1] == ["compare"]:
         return emit(arguments, corpus=False)
@@ -317,14 +483,28 @@ def main(argv=None):
         return emit(arguments[1:], corpus=True)
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--native-driver", type=Path)
+    parser.add_argument("--export", type=Path)
     options = parser.parse_args(arguments)
     guard()
     NATIVE_DRIVER = options.native_driver.resolve(strict=True) if options.native_driver else None
+    if options.export:
+        if NATIVE_DRIVER is None or not sys.platform.startswith("linux"):
+            raise ValueError("diagnostic export requires an actual hosted native-driver run")
+        EXPORT_ROOT = prepare_export(options.export)
     if NATIVE_DRIVER is not None and sys.platform.startswith("linux"):
         # The class decorator runs before argv parsing.
         ActualOrdinaryMeasure.__unittest_skip__ = False
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)
+    if EXPORT_ROOT is not None:
+        expected_cases = set(unittest.defaultTestLoader.getTestCaseNames(ActualOrdinaryMeasure))
+        complete = result.wasSuccessful() and len(EXPORTED_CASES) == len(expected_cases) and \
+            {case["path"] for case in EXPORTED_CASES} == expected_cases and \
+            all(case["state"] == "passed" for case in EXPORTED_CASES)
+        write(EXPORT_ROOT / "index.json", dict(DIAGNOSTIC, state="complete" if complete else "failed",
+              cases=EXPORTED_CASES, tests_run=result.testsRun, failures=len(result.failures), errors=len(result.errors)))
+        if not complete:
+            return 1
     return 0 if result.wasSuccessful() else 1
 
 

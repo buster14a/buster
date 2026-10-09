@@ -43,6 +43,12 @@ def record(argv, cwd="/checkout", timeout=5, stdout=b"", stderr=b"", ordinal=1):
     return value
 
 
+def corpus_bundle():
+    from compiler_test import corpus
+    documents = corpus("regression")
+    return {name: encoded(document) for name, document in documents.items()}
+
+
 def population():
     from compiler_owned_plan_test import fixture
     current, ownership, planned = fixture("main")
@@ -56,12 +62,21 @@ def population():
         if argv[0].startswith("/trusted/.cache/"):
             argv[0] = ownership["driver_path"]
         native = record(argv, cwd=recipe["cwd"], timeout=recipe["timeout"], ordinal=ordinal)
+        if recipe["phase"] == "throughput":
+            native.update(state="failed", exit_status=256)
         receipt = encoded(native)
         name = f"{ordinal:04d}.json"
         rows.append(dict(recipe, ordinal=ordinal, file=name, argv=argv,
                          bridge_wall_us=150, receipt_sha256=contract.sha(receipt)))
         raw[name] = {"receipt": receipt, "command": contract.command_bytes(argv),
                      "stdout": b"", "stderr": b"", "bootstrap": marker()}
+    corpus = corpus_bundle()
+    row = next(row for row in rows if row["phase"] == "throughput")
+    row.update(corpus_summary_sha256=contract.sha(corpus["summary"]), corpus_metadata_sha256=contract.sha(corpus["metadata"]))
+    from compiler_test import BINARIES
+    from compiler_receipt import throughput_digest
+    current["binaries"] = copy.deepcopy(BINARIES)
+    current["throughput"] = dict(throughput_digest(json.loads(corpus["summary"])), exit=1, exit_policy="corpus-report-only-v1")
     ownership.update(count=len(rows), phases=rows)
     current["phase_ownership"] = ownership
     return current, raw
@@ -70,7 +85,7 @@ def population():
 class DataContract(unittest.TestCase):
     def test_full_core_population_and_identity_are_required(self):
         current, raw = population()
-        self.assertEqual(contract.validate_population(current, raw, "d" * 64, "e" * 40), [])
+        self.assertEqual(contract.validate_population(current, raw, "d" * 64, "e" * 40, corpus_bundle()), [])
         for case in ("stripped", "omitted", "extra", "duplicate", "order", "driver", "source", "command", "marker", "path", "scope"):
             changed, members = copy.deepcopy(current), copy.deepcopy(raw)
             rows = changed["phase_ownership"]["phases"]
@@ -100,8 +115,43 @@ class DataContract(unittest.TestCase):
                 members["0001.json"]["receipt"] = encoded(native)
                 rows[0]["receipt_sha256"] = contract.sha(members["0001.json"]["receipt"])
             with self.subTest(case=case):
-                self.assertTrue(contract.validate_population(changed, members, "d" * 64, "e" * 40))
+                self.assertTrue(contract.validate_population(changed, members, "d" * 64, "e" * 40, corpus_bundle()))
 
+
+    def test_corpus_exit_one_requires_exact_complete_raw_reports_and_fixed_command(self):
+        current, raw = population()
+        corpus = corpus_bundle()
+        self.assertEqual(contract.validate_population(current, raw, "d" * 64, "e" * 40, corpus), [])
+        for case in ("missing", "tamper", "zero-count", "status2", "signal", "probe-policy", "other-run-policy", "command", "top-status"):
+            changed, members, reports = copy.deepcopy(current), copy.deepcopy(raw), copy.deepcopy(corpus)
+            row = next(item for item in changed["phase_ownership"]["phases"] if item["phase"] == "throughput")
+            native = json.loads(members[row["file"]]["receipt"])
+            if case == "missing":
+                reports.pop("metadata")
+            elif case == "tamper":
+                reports["summary"] += b" "
+            elif case == "zero-count":
+                from compiler_test import corpus as fixture
+                reports = {key: encoded(value) for key, value in fixture().items()}
+                row.update(corpus_summary_sha256=contract.sha(reports["summary"]), corpus_metadata_sha256=contract.sha(reports["metadata"]))
+            elif case == "status2":
+                native["exit_status"] = 512
+            elif case == "signal":
+                native["exit_status"] = 11
+            elif case == "probe-policy":
+                row["kind"] = "capture"
+            elif case == "other-run-policy":
+                changed["phase_ownership"]["phases"][0]["exit_policy"] = "corpus-report-only-v1"
+            elif case == "command":
+                row["argv"] = ["/bin/false"]
+                native["command_sha256"] = contract.sha(contract.command_bytes(row["argv"]))
+                members[row["file"]]["command"] = contract.command_bytes(row["argv"])
+            else:
+                changed["throughput"]["exit"] = 0
+            members[row["file"]]["receipt"] = encoded(native)
+            row["receipt_sha256"] = contract.sha(members[row["file"]]["receipt"])
+            with self.subTest(case=case):
+                self.assertTrue(contract.validate_population(changed, members, "d" * 64, "e" * 40, reports))
 
     def test_exit_status_encoding_and_bounds_are_bound(self):
         argv = ["/bin/true"]
@@ -142,6 +192,24 @@ class ActualNativeOwner(unittest.TestCase):
         path = self.context.directory / "0001.json"
         native = contract.read_record(path.read_bytes())
         return native, path
+
+    def test_probe_cannot_select_report_only_corpus_policy(self):
+        self.receipt["phase"] = "throughput"
+        with mock.patch.object(compare.subprocess, "Popen") as spawn:
+            with self.assertRaises(compare.OwnedPhaseFailed):
+                self.context.execute(["/bin/false"], self.work, None, 5, kind="capture",
+                                     exit_policy="corpus-report-only-v1")
+            spawn.assert_not_called()
+        self.assert_latched_without_next_child()
+
+    def test_arbitrary_run_cannot_select_report_only_corpus_policy(self):
+        self.receipt["phase"] = "throughput"
+        with mock.patch.object(compare.subprocess, "Popen") as spawn:
+            with self.assertRaises(compare.OwnedPhaseFailed):
+                self.context.execute(["/bin/false"], self.work, None, 5,
+                                     exit_policy="corpus-report-only-v1")
+            spawn.assert_not_called()
+        self.assert_latched_without_next_child()
 
     def test_actual_nominal_producer_reader_and_expected_probe_failure(self):
         self.assertEqual(compare.run(["/bin/sh", "-c", "printf owned"], self.work, self.evidence / "run.log", 5), 0)

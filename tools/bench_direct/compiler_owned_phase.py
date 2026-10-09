@@ -112,7 +112,7 @@ def validate_bootstrap(record: dict, marker: bytes, ownership: dict) -> list[str
 
 
 def validate_population(receipt: dict, bundle: object, expected_driver_sha256: str | None = None,
-                        expected_trusted_revision: str | None = None) -> list[str]:
+                        expected_trusted_revision: str | None = None, throughput_bundle: object = None) -> list[str]:
     """Require every ordinary core/extension run's persisted ordinal and native proof."""
     ownership = receipt.get("phase_ownership")
     if not isinstance(ownership, dict) or ownership.get("schema") != POPULATION_SCHEMA or ownership.get("state") != "complete":
@@ -139,7 +139,9 @@ def validate_population(receipt: dict, bundle: object, expected_driver_sha256: s
         if not isinstance(row, dict) or row.get("ordinal") != index or type(row.get("ordinal")) is not int or \
                 row.get("file") != f"{index:04d}.json" or not isinstance(row.get("phase"), str) or \
                 row.get("kind") not in ("run", "capture") or type(row.get("allow_exit_failure")) is not bool or \
-                (row.get("kind") == "run" and row.get("allow_exit_failure")) or not isinstance(row.get("cwd"), str) or \
+                (row.get("kind") == "run" and row.get("allow_exit_failure")) or \
+                (row.get("exit_policy", "zero") != "zero" and
+                    (row.get("exit_policy") != "corpus-report-only-v1" or row.get("phase") != "throughput" or row.get("kind") != "run")) or not isinstance(row.get("cwd"), str) or \
                 not row["cwd"].startswith("/") or not isinstance(row.get("argv"), list) or not row["argv"] or \
                 any(not isinstance(item, str) or not item or "\x00" in item or "\n" in item or "\r" in item or "\t" in item
                     for item in row["argv"]) or type(row.get("timeout")) is not int or not 0 < row["timeout"] <= 10800 or \
@@ -159,14 +161,35 @@ def validate_population(receipt: dict, bundle: object, expected_driver_sha256: s
             continue
         reasons.extend(prefix + item for item in validate_record(record, row["argv"], row["cwd"], row["timeout"],
                                                                   driver, member["stdout"], member["stderr"],
-                                                                  nominal=not row.get("allow_exit_failure", False),
+                                                                  nominal=not (row.get("allow_exit_failure", False) or row.get("exit_policy") == "corpus-report-only-v1"),
                                                                   receipt_path=directory + "/" + row["file"]))
-        if row.get("kind") == "capture" and row.get("allow_exit_failure") is True:
+        if (row.get("kind") == "capture" and row.get("allow_exit_failure") is True) or row.get("exit_policy") == "corpus-report-only-v1":
             status = record.get("exit_status")
             if type(status) is not int or not 0 <= status <= 65535 or not os.WIFEXITED(status) or \
                     record.get("state") != ("complete" if status == 0 else "failed") or any(record.get(key) != 0 for key in
                     ("timed_out", "cancelled", "capture_failed", "output_truncated", "cleanup_signalled", "cleanup_reaped", "tree_cleanup_failed")):
                 reasons.append(prefix + "read-only probe did not reach a clean terminal exit")
+        if row.get("exit_policy") == "corpus-report-only-v1":
+            try:
+                corpus = throughput_bundle if isinstance(throughput_bundle, dict) else {}
+                if set(corpus) != {"summary", "metadata"} or \
+                        any(not isinstance(value, bytes) for value in corpus.values()) or \
+                        row.get("corpus_summary_sha256") != sha(corpus["summary"]) or \
+                        row.get("corpus_metadata_sha256") != sha(corpus["metadata"]):
+                    raise ValueError("ordinary corpus raw report population/hash mismatch")
+                summary, metadata = read_record(corpus["summary"]), read_record(corpus["metadata"])
+                status = record["exit_status"]
+                if not os.WIFEXITED(status):
+                    raise ValueError("ordinary corpus did not exit normally")
+                exit_code = os.waitstatus_to_exitcode(status)
+                from compiler_receipt import classify_throughput_exit, throughput_digest
+                reasons.extend(prefix + item for item in classify_throughput_exit(
+                    exit_code, summary, metadata, receipt.get("binaries")))
+                expected_corpus = dict(throughput_digest(summary), exit=exit_code, exit_policy="corpus-report-only-v1")
+                if receipt.get("throughput") != expected_corpus:
+                    reasons.append(prefix + "ordinary corpus receipt classification differs from the exact raw reports/status")
+            except (ValueError, KeyError, TypeError, UnicodeError):
+                reasons.append(prefix + "ordinary corpus raw reports/status missing or malformed")
         reasons.extend(prefix + item for item in validate_bootstrap(record, member["bootstrap"], ownership))
         if type(record.get("duration_us")) is int and record["duration_us"] > row["bridge_wall_us"]:
             reasons.append(prefix + "native partial span exceeds the actual bridge wall")

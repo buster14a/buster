@@ -2129,7 +2129,7 @@ def validate_closure(receipt: dict, bundle: object, expected_policy: str | None 
     if require_owned_phases or "phase_ownership" in receipt:
         from compiler_owned_phase import validate_population
         reasons.extend(validate_population(receipt, raw.get("owned_phases"), expected_phase_driver_sha256,
-                                           expected_trusted_revision))
+                                           expected_trusted_revision, raw.get("owned_throughput")))
     return reasons
 
 
@@ -2241,6 +2241,17 @@ def classify_throughput(summary: object, metadata: object, binaries: object) -> 
                 reasons.append(f"throughput summary has no integer {key}")
             elif value != actual:
                 reasons.append(f"throughput summary {key} {value} does not match its {actual} {decision!r} cases")
+    return reasons
+
+
+def classify_throughput_exit(status: object, summary: object, metadata: object, binaries: object) -> list[str]:
+    """Exit 1 is report-only only for a complete corpus with counted regressions."""
+    reasons = classify_throughput(summary, metadata, binaries)
+    if type(status) is not int or status not in (0, 1):
+        reasons.append(f"bench_throughput run exited {status} (see throughput.log)")
+    elif status == 1 and (not isinstance(summary, dict) or
+            type(summary.get("confirmed_regressions")) is not int or summary["confirmed_regressions"] <= 0):
+        reasons.append("bench_throughput exit 1 has no counted confirmed corpus regression")
     return reasons
 
 

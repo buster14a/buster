@@ -59,7 +59,7 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               ANALYZER_REQUEST_LINES,
                               ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, RECEIPT_SCHEMA, SCALING_PROFILE,
                               SCALING_REQUEST, SHA, THROUGHPUT_PROFILE, classify, classify_scaling,
-                              classify_throughput, dumps, host_problem, inline_acceptance_requested,
+                              classify_throughput, classify_throughput_exit, dumps, host_problem, inline_acceptance_requested,
                               render, scaling_digest, throughput_digest, validate_inline_acceptance,
                               analyzer_bootstrap_provenance, analyzer_profile_summary)
 from compiler_receipt import observed_cpu_model as cpu_model
@@ -181,11 +181,13 @@ class NativePhaseContext:
                                           "python_path": sys.executable, "count": 0, "phases": []}
 
     def execute(self, argv: list[str], cwd: Path, log: Path | None, timeout: int,
-                *, kind: str = "run", allow_exit_failure: bool = False) -> subprocess.CompletedProcess:
+                *, kind: str = "run", allow_exit_failure: bool = False,
+                exit_policy: str = "zero") -> subprocess.CompletedProcess:
         # Prelaunch and proof/log publication failures latch just like native
         # failure: even callers that catch OSError cannot admit another child.
         try:
-            result = self._execute(argv, cwd, log, timeout, kind=kind, allow_exit_failure=allow_exit_failure)
+            result = self._execute(argv, cwd, log, timeout, kind=kind, allow_exit_failure=allow_exit_failure,
+                                   exit_policy=exit_policy)
         except BaseException:
             self.stopped = True
             self.receipt["phase_ownership"]["state"] = "failed"
@@ -194,10 +196,15 @@ class NativePhaseContext:
         return result
 
     def _execute(self, argv: list[str], cwd: Path, log: Path | None, timeout: int,
-                 *, kind: str = "run", allow_exit_failure: bool = False) -> subprocess.CompletedProcess:
+                 *, kind: str = "run", allow_exit_failure: bool = False,
+                 exit_policy: str = "zero") -> subprocess.CompletedProcess:
         from compiler_owned_phase import PHASE_LIMIT, read_record, sha, validate_record, validate_bootstrap
         if self.stopped:
             raise OwnedPhaseFailed("snapshot native owner already stopped; no later child is admitted")
+        corpus = exit_policy == "corpus-report-only-v1"
+        if exit_policy not in ("zero", "corpus-report-only-v1") or (corpus and
+                (kind != "run" or allow_exit_failure or self.receipt.get("phase") != "throughput")):
+            raise OwnedPhaseFailed("snapshot nonzero run policy is restricted to the ordinary corpus")
         if type(timeout) is not int or not 0 < timeout <= 10800 or not argv or \
                 any(not isinstance(item, str) or not item or any(byte in item for byte in ("\0", "\n", "\r", "\t"))
                     for item in argv):
@@ -214,10 +221,23 @@ class NativePhaseContext:
             self.stopped = True
             raise OwnedPhaseFailed("snapshot native phase count exceeds its fixed bound")
         root = cwd.resolve(strict=True)
+        if corpus:
+            candidate = population.get("candidate_root")
+            bins = population.get("binaries_root")
+            work = population.get("work_root")
+            identity = self.receipt.get("identity", {})
+            expected = [str(candidate) + "/build/throughput-tools/throughput", "run",
+                "--baseline", str(bins) + "/ide-base", "--candidate", str(bins) + "/ide-cand",
+                "--output", str(work) + "/throughput", "--baseline-id", identity.get("base"),
+                "--candidate-id", identity.get("head"), *THROUGHPUT_PROFILE["arguments"]]
+            if argv != expected or str(root) != candidate or timeout != THROUGHPUT_TIMEOUT_SECONDS:
+                raise OwnedPhaseFailed("ordinary corpus exit policy command/root/profile differs from the fixed route")
         path = self.directory / f"{ordinal:04d}.json"
         row = {"ordinal": ordinal, "file": path.name, "phase": self.receipt.get("phase", "preflight"),
                "kind": kind, "argv": list(argv), "cwd": str(root), "timeout": timeout,
                "allow_exit_failure": allow_exit_failure, "bridge_wall_us": 0, "receipt_sha256": ""}
+        if corpus:
+            row["exit_policy"] = exit_policy
         population["phases"].append(row)
         population["count"] = ordinal
         checkpoint_problem = checkpoint(self.receipt, self.evidence, row["phase"])
@@ -259,10 +279,13 @@ class NativePhaseContext:
             if command != command_bytes(argv):
                 raise ValueError("native phase saved argv differs from the trusted call")
             issues = validate_record(native, argv, str(root), timeout, self.driver_hash, stdout, stderr,
-                                     nominal=not allow_exit_failure, receipt_path=str(path))
+                                     nominal=not (allow_exit_failure or corpus), receipt_path=str(path))
             issues.extend(validate_bootstrap(native, marker, population))
-            if allow_exit_failure:
+            if allow_exit_failure or corpus:
                 issues.extend(validate_owned_capture(native))
+            if corpus and (not os.WIFEXITED(native.get("exit_status", 0)) or
+                    os.waitstatus_to_exitcode(native["exit_status"]) not in (0, 1)):
+                issues.append("ordinary corpus did not reach exit 0 or report-only exit 1")
             problem = "; ".join(issues)
         except (OSError, ValueError, UnicodeError) as error:
             problem = str(error)
@@ -285,7 +308,7 @@ class NativePhaseContext:
             checkpoint(self.receipt, self.evidence, row["phase"])
             raise ClosureCleanupUncertain("snapshot native phase cleanup missing or uncertain: " + problem)
         if interrupted is not None or problem or wrapper_status not in (0, 1) or \
-                (not allow_exit_failure and wrapper_status != 0):
+                (not (allow_exit_failure or corpus) and wrapper_status != 0):
             self.stopped = True
             population["state"] = "failed"
             checkpoint(self.receipt, self.evidence, row["phase"])
@@ -605,22 +628,43 @@ def collect_evidence(lab: Path, evidence: Path, omissions: dict) -> list[str]:
 
 def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, base: str, head: str,
                        binaries: dict, omissions: dict, harness: Path | None = None) -> tuple[list[str], dict]:
-    """Run the corpus on both binaries from the checked-out base; (reasons, receipt section)."""
+    """Run and validate the exported corpus before admitting a later snapshot child."""
     output = work / "throughput"
-    status = run([*([str(harness)] if harness else ["./build.sh", "bench_throughput"]), "run", "--baseline", str(bins / "ide-base"),
-                  "--candidate", str(bins / "ide-cand"), "--output", str(output), "--baseline-id", base,
-                  "--candidate-id", head, *THROUGHPUT_PROFILE["arguments"]],
-                 candidate, evidence / "throughput.log", THROUGHPUT_TIMEOUT_SECONDS)
-    reasons = [] if status == 0 else [f"bench_throughput run exited {status} (see throughput.log)"]
-    if output.is_dir():
-        problems, found = export_tree(output, evidence / "throughput", evidence, EVIDENCE_IGNORE, THROUGHPUT_REQUIRED)
-        reasons.extend(problems)
-        note_omissions(omissions, "throughput", found)
-    # Classify the exported bytes the publisher will read, not the measurement tree (#2929).
-    documents, unreadable = read_exported_pair(evidence / "throughput", THROUGHPUT_REQUIRED, "throughput")
-    reasons.extend(unreadable)
-    reasons.extend(classify_throughput(documents[0], documents[1], binaries))
-    return reasons, dict(throughput_digest(documents[0]), exit=status)
+    argv = [*([str(harness)] if harness else ["./build.sh", "bench_throughput"]), "run",
+            "--baseline", str(bins / "ide-base"), "--candidate", str(bins / "ide-cand"),
+            "--output", str(output), "--baseline-id", base, "--candidate-id", head,
+            *THROUGHPUT_PROFILE["arguments"]]
+    context = OWNED_PHASE_CONTEXT
+    try:
+        if context is None:
+            status = run(argv, candidate, evidence / "throughput.log", THROUGHPUT_TIMEOUT_SECONDS)
+        else:
+            status = context.execute(argv, candidate, evidence / "throughput.log", THROUGHPUT_TIMEOUT_SECONDS,
+                                     exit_policy="corpus-report-only-v1").returncode
+        reasons = []
+        if output.is_dir():
+            problems, found = export_tree(output, evidence / "throughput", evidence, EVIDENCE_IGNORE, THROUGHPUT_REQUIRED)
+            reasons.extend(problems)
+            note_omissions(omissions, "throughput", found)
+        # Classify the exact exported bytes the hosted publisher will read.
+        documents, unreadable = read_exported_pair(evidence / "throughput", THROUGHPUT_REQUIRED, "throughput")
+        reasons.extend(unreadable)
+        reasons.extend(classify_throughput_exit(status, documents[0], documents[1], binaries))
+        section = dict(throughput_digest(documents[0]), exit=status, exit_policy="corpus-report-only-v1")
+        if context is not None:
+            context.receipt["throughput"] = section
+            if reasons:
+                raise OwnedPhaseFailed("ordinary corpus incomplete: " + "; ".join(reasons))
+            row = context.receipt["phase_ownership"]["phases"][-1]
+            row["corpus_summary_sha256"] = hashlib.sha256(bounded_owned_member(evidence / "throughput/summary.json")).hexdigest()
+            row["corpus_metadata_sha256"] = hashlib.sha256(bounded_owned_member(evidence / "throughput/metadata.json")).hexdigest()
+    except BaseException:
+        if context is not None:
+            context.stopped = True
+            context.receipt["phase_ownership"]["state"] = "failed"
+            context.receipt["work_retained"] = str(context.work)
+        raise
+    return reasons, section
 
 
 SCRATCH_MARKER = ".buster-compiler-compare-scratch"
@@ -1340,6 +1384,11 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                     except (OSError, ValueError):
                         pass
                 raw_closure["owned_phases"] = owned_raw
+            try:
+                raw_closure["owned_throughput"] = {"summary": bounded_owned_member(evidence / "throughput/summary.json"),
+                    "metadata": bounded_owned_member(evidence / "throughput/metadata.json")}
+            except (OSError, ValueError):
+                pass
             reasons.extend(validate_closure(receipt, raw_closure, expected_policy="snapshot-v1", require_owned_phases=True))
         for role, name in (("baseline", "ide-base"), ("candidate", "ide-cand")):
             if sha256(bins / name) != receipt["binaries"][role]["sha256"]:

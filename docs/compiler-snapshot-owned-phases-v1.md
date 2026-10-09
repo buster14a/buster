@@ -75,3 +75,29 @@ actual native receipts, and verify no subsequent child or late marker.
 They are functional diagnostics. Performance qualification still needs the
 approved9700X before/after and all predeclared A/A/corpus controls; failed
 controls preserve the legacy default.
+
+The ordinary corpus phase has one explicit `corpus-report-only-v1` exit
+policy. Its immutable native command, full frozen corpus arguments and matched
+root are checked before launch. A clean normal exit 1 remains a native failed
+record and is accepted as complete report-only data only after the exported
+summary and metadata pass the complete cell, count, profile and binary identity
+rules and contain positive counted confirmed regressions. Both exported raw
+hashes are bound to the phase row and replayed by the data reader. Missing or
+invalid reports, other statuses, a captured probe or a different command stop
+the snapshot context before any later child. Legacy producers make the same
+complete-data distinction; historical failed receipts stay failed.
+
+Physical native owners acquire the shared durable ACTIVE cleanup lease before
+children. Exact manager cleanup and adopted-child quiescence are required by
+the shared supervisor before it releases that lease. Hard kills or unknown
+ownership leave ACTIVE or UNKNOWN evidence for the shared admission guard;
+ordinary bridge work retention alone does not authorize another physical job.
+Foreign hosted diagnostics do not inspect or mutate the physical guard paths.
+The shared workflow gate and physical cleanup proof remain prerequisites to
+activation.
+
+Hosted CI retains the full ordinary diagnostic receipt, all native phase
+proofs, closure manifests and exported lab/corpus data for 90 days. The fixture
+also exercises a complete corpus regression with real exit 1 and three
+incomplete exit-1 cases, each proving no later child and retained failed data.
+These are functional diagnostics and never performance qualification.

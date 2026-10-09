@@ -91,7 +91,8 @@ BUSTER_GLOBAL_LOCAL CompilerClosurePhaseResult compiler_closure_phase_run_bounde
         }
         bool released = !result.wait.process_group_reservation_retained && !result.wait.process_group_ownership_lost;
         u64 cleanup_start = os_now_microseconds();
-        result.cleanup_proven = released && compiler_experiment_supervisor_end(arena, &supervisor);
+        bool manager_clean = released && !result.wait.process_tree_cleanup_failed;
+        result.cleanup_proven = released && compiler_experiment_supervisor_end_known(arena, &supervisor, manager_clean) && manager_clean;
         result.cleanup_us = os_now_microseconds() - cleanup_start;
         result.waves = supervisor.waves;
         result.signalled = supervisor.signalled;

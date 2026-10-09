@@ -78,7 +78,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_owned_phase(Arena* arena, Sli
         SliceString8 child = {.pointer = arguments.pointer + 7, .length = arguments.length - 7};
         command = production_profile_argv_text(arena, child);
         struct stat driver_status = {0};
-        bool safe = compiler_closure_admitting() && receipt_path.length && cwd.length && driver.length &&
+        bool safe = compiler_closure_admitting() && compiler_experiment_cleanup_guard(arena) && receipt_path.length && cwd.length && driver.length &&
             compiler_closure_path_safe(receipt_path) && compiler_closure_path_safe(cwd) &&
             string_equal(path_parent(arena, receipt_path), os_path_absolute(arena, path_parent(arena, receipt_path), true)) &&
             !path_exists(arena, receipt_path) && command.length && command.length <= BUSTER_COMPILER_OWNED_PHASE_COMMAND_LIMIT &&
@@ -107,6 +107,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_owned_phase(Arena* arena, Sli
             {
                 phase = compiler_closure_phase_run_bounded(arena, child, cwd, timeout_seconds * 1000000ull,
                     false, BUSTER_COMPILER_OWNED_PHASE_LOG_LIMIT);
+            }
+            if (recorded && !phase.cleanup_proven)
+            {
+                compiler_experiment_cleanup_latch(arena, S8("ordinary-snapshot-owned-phase-cleanup-unproven"));
             }
             bool logs = file_publish(string_format(arena, S8("{S8}.stdout"), receipt_path),
                 phase.wait.streams[STANDARD_STREAM_OUTPUT]);

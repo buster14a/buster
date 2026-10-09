@@ -2147,18 +2147,20 @@ behavior = os.environ.get("FAKE_THROUGHPUT", "")
 workloads = ["tiny_startup", "large_function", "many_functions", "symbol_table", "control_flow", "backend_pressure"]
 output = value("--output")
 os.makedirs(output)
-covered = workloads[:1] if behavior == "partial" else workloads
+covered = workloads[:1] if behavior in ("partial", "partial-exit1") else workloads
+regression = behavior in ("regression", "partial-exit1")
 tests = [{"metric": metric, "round": number} for metric in ("wall_seconds", "peak_rss_bytes") for number in range(2)]
-cases = [{"name": name + "/" + mode, "medians": {}, "tests": tests, "decision": "no substantial regression detected"}
+cases = [{"name": name + "/" + mode, "medians": {}, "tests": tests, "decision": "regression" if regression else "no substantial regression detected"}
          for name in covered for mode in ("fast", "quality")]
-summary = {"schema": 2, "guard_enabled": True, "comparisons": cases, "confirmed_regressions": 0,
+summary = {"schema": 2, "guard_enabled": True, "comparisons": cases, "confirmed_regressions": len(cases) if regression else 0,
            "inconclusive_cases": 0, "valid": True}
 metadata = {"schema": 2, "profile": value("--profile"), "pairs_per_round": int(value("--pairs")), "rounds": 2,
             "warmups": int(value("--warmups")), "cpu": int(value("--cpu")), "workloads": workloads,
             "compiler_provenance": [{"sha256": digest(value("--baseline"))}, {"sha256": digest(value("--candidate"))}]}
 open(os.path.join(output, "summary.json"), "w").write(json.dumps(summary))
 open(os.path.join(output, "metadata.json"), "w").write(json.dumps(metadata))
-sys.exit(3 if behavior == "fail" else 0)
+if behavior == "missing-exit1": os.unlink(os.path.join(output, "metadata.json"))
+sys.exit(3 if behavior == "fail" else 1 if behavior in ("regression", "partial-exit1", "missing-exit1", "badexit") else 0)
 """
 # Stands in for `./build.sh bench_throughput scale`; FAKE_SCALING=fail makes
 # the bundle invalid and the command exit 2.
@@ -2643,8 +2645,17 @@ class HarnessTest(unittest.TestCase):
                          [result["binaries"][role]["sha256"] for role in ("baseline", "candidate")])
         self.assertIn("throughput_seconds", result["timings"])
 
+    def test_complete_corpus_exit_one_regression_is_report_only(self) -> None:
+        code, result, evidence = self.run_harness(self.head, corpus_behavior="regression")
+        self.assertEqual((code, result["state"], result["throughput"]["exit"]), (0, "measured", 1), result["reasons"])
+        self.assertEqual(result["throughput"]["confirmed_regressions"], 12)
+        raw = retained(evidence)
+        self.assertEqual(compiler_receipt.classify_throughput_exit(1, raw["summary"], raw["metadata"], result["binaries"]), [])
+
     def test_failed_or_partial_corpus_fails_the_receipt(self) -> None:
-        for behavior, expected in (("fail", "bench_throughput run exited 3"), ("partial", "workload/mode cells")):
+        for behavior, expected in (("fail", "bench_throughput run exited 3"), ("partial", "workload/mode cells"),
+                                   ("partial-exit1", "workload/mode cells"), ("missing-exit1", "metadata.json"),
+                                   ("badexit", "no counted confirmed corpus regression")):
             with self.subTest(behavior=behavior):
                 # Each run leaves the frozen base checked out.
                 subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)

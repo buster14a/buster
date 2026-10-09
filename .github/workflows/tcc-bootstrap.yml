@@ -87,8 +87,17 @@ jobs:
           markers=(.cache/bootstrap-driver/posix/*/*.complete)
           driver="${markers[0]%.complete}"
           python3 -B tools/bench_direct/compiler_owned_phase_test.py --native-driver "$driver"
-          python3 -B tools/bench_direct/compiler_ordinary_fixture_test.py --native-driver "$driver"
+          python3 -B tools/bench_direct/compiler_ordinary_fixture_test.py --native-driver "$driver" --export "$RUNNER_TEMP/ordinary-bridge-diagnostic"
           python3 -B tools/uarch_lab_test.py
+
+      - name: Retain full ordinary snapshot diagnostic proof
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ordinary-snapshot-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ordinary-bridge-diagnostic
+          if-no-files-found: warn
+          retention-days: 90
 
       - name: Reject deleted cached dependencies without a fatal diagnostic
         shell: bash

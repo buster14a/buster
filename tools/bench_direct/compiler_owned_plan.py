@@ -88,6 +88,7 @@ def _commands(receipt: dict, ownership: dict) -> list[dict]:
     add("throughput", [native_harness, "run", "--baseline", bins + "/ide-base", "--candidate", bins + "/ide-cand",
         "--output", work + "/throughput", "--baseline-id", base, "--candidate-id", head,
         *THROUGHPUT_PROFILE["arguments"]], CORPUS_TIMEOUT)
+    rows[-1]["exit_policy"] = "corpus-report-only-v1"
     if receipt.get("scaling_profile") is not None:
         for name, arguments in SCALING_PROFILE["series"].items():
             add("scaling", [native_harness, "scale", "--compiler", bins + "/ide-cand",
