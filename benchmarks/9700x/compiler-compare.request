@@ -64,3 +64,4 @@ request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compile
 # request: PR #3051 main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e exact-candidate throughput-corpus-v2 qualification
 # request: PR #3051 main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8 repeat exact-candidate throughput-corpus-v2 qualification
 request: PR #3051 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d; preserved parent source and request history; fresh exact-head throughput-corpus-v2 qualification
+request: PR #3135 issue #3128 BFC alias exact-head throughput-corpus-v2 compiler comparison after PR-manager source review
