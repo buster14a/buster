@@ -85,6 +85,7 @@ jobs:
       sampling_freeze_revision: ${{ steps.native.outputs.sampling_freeze_revision }}
       sampling_freeze_sha256: ${{ steps.native.outputs.sampling_freeze_sha256 }}
       sampling_campaign_parent: ${{ steps.native.outputs.sampling_campaign_parent }}
+      sampling_parent_freeze_revision: ${{ steps.native.outputs.sampling_parent_freeze_revision }}
       sampling_protocol_sha256: ${{ steps.native.outputs.sampling_protocol_sha256 }}
       sampling_base: ${{ steps.native.outputs.sampling_base }}
       sampling_base_tree: ${{ steps.native.outputs.sampling_base_tree }}
@@ -136,7 +137,8 @@ jobs:
             --request "$RUNNER_TEMP/compiler-sampling-admission/request.txt" \
             --facts "$RUNNER_TEMP/compiler-sampling-admission/facts.tsv" \
             --history "$RUNNER_TEMP/compiler-sampling-admission/history.tsv" \
-            --freeze "$RUNNER_TEMP/compiler-sampling-admission/freeze.tsv" --output "$GITHUB_OUTPUT"
+            --freeze "$RUNNER_TEMP/compiler-sampling-admission/freeze.tsv" \
+            --parent-freeze "$RUNNER_TEMP/compiler-sampling-admission/parent-freeze.tsv" --output "$GITHUB_OUTPUT"
 
   # "Re-run failed jobs" reuses the outputs of jobs that succeeded in an
   # earlier attempt, so bench requires authorize to have passed in this same

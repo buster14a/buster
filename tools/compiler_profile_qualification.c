@@ -27,6 +27,7 @@ struct CompilerSamplingOptions
     String8 packet_text;
     String8 ledger_root;
     String8 freeze;
+    String8 parent_freeze;
     String8 freeze_sha256;
     String8 python;
     String8 lab;
@@ -40,6 +41,7 @@ struct CompilerSamplingOptions
     String8 candidate_revision;
     String8 trusted_revision;
     String8 campaign_parent;
+    String8 campaign_parent_revision;
     String8 allowlist;
     String8 facts;
     String8 history;
@@ -108,11 +110,11 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingOptions compiler_sampling_parse(SliceString8
     String8 names[] = {S8("--phase"), S8("--packet"), S8("--ledger-root"), S8("--freeze"), S8("--freeze-sha256"),
         S8("--python"), S8("--lab"), S8("--baseline"), S8("--candidate"), S8("--repo-root"), S8("--output"),
         S8("--base"), S8("--base-tree"), S8("--head"), S8("--protocol"), S8("--driver"), S8("--closure"),
-        S8("--closure-sha256"), S8("--prep-us"), S8("--candidate-revision"), S8("--campaign-parent"), S8("--trusted-revision"), S8("--allowlist"), S8("--facts"), S8("--history"), S8("--request")};
+        S8("--closure-sha256"), S8("--prep-us"), S8("--candidate-revision"), S8("--campaign-parent"), S8("--trusted-revision"), S8("--allowlist"), S8("--facts"), S8("--history"), S8("--request"), S8("--parent-freeze"), S8("--campaign-parent-revision")};
     String8* values[] = {&result.phase, &result.packet_text, &result.ledger_root, &result.freeze, &result.freeze_sha256,
         &result.python, &result.lab, &result.baseline, &result.candidate, &result.source, &result.output,
         &result.base, &result.base_tree, &result.head, &result.protocol, &result.driver, &result.closure,
-        &result.closure_sha256, &result.prep_text, &result.candidate_revision, &result.campaign_parent, &result.trusted_revision, &result.allowlist, &result.facts, &result.history, &result.request};
+        &result.closure_sha256, &result.prep_text, &result.candidate_revision, &result.campaign_parent, &result.trusted_revision, &result.allowlist, &result.facts, &result.history, &result.request, &result.parent_freeze, &result.campaign_parent_revision};
     for (u64 i = 0; result.valid && i < arguments.length; i += 1)
     {
         String8 argument = arguments.pointer[i];
@@ -141,8 +143,8 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingOptions compiler_sampling_parse(SliceString8
     }
     else if (result.admit)
     {
-        result.valid = result.valid && !result.claim && !result.owned_worker && arguments.length == 13 &&
-            result.allowlist.length && result.request.length && result.facts.length && result.history.length && result.freeze.length && result.output.length;
+        result.valid = result.valid && !result.claim && !result.owned_worker && arguments.length == 15 &&
+            result.parent_freeze.length && result.allowlist.length && result.request.length && result.facts.length && result.history.length && result.freeze.length && result.output.length;
     }
     else
     {
@@ -156,7 +158,7 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingOptions compiler_sampling_parse(SliceString8
                 result.closure.length && compiler_sampling_hex(result.closure_sha256, 64) &&
                 compiler_sampling_revision_valid(result.base) && compiler_sampling_revision_valid(result.base_tree) &&
                 compiler_sampling_revision_valid(result.head) && compiler_sampling_revision_valid(result.candidate_revision) && compiler_sampling_revision_valid(result.trusted_revision) &&
-                (string_equal(result.campaign_parent, S8("-")) || compiler_sampling_hex(result.campaign_parent, 64)) && compiler_sampling_unsigned(result.prep_text, &result.prep_us);
+                compiler_sampling_hex(result.campaign_parent, 64) && compiler_sampling_hex(result.campaign_parent_revision, 40) && compiler_sampling_unsigned(result.prep_text, &result.prep_us);
         }
     }
     return result;
@@ -216,21 +218,25 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_admit(Arena* arena, Compiler
     String8 facts = BYTE_SLICE_TO_STRING(8, file_read(arena, options.facts, (FileReadOptions){.map_required = 0}));
     String8 history = BYTE_SLICE_TO_STRING(8, file_read(arena, options.history, (FileReadOptions){.map_required = 0}));
     String8 freeze = BYTE_SLICE_TO_STRING(8, file_read(arena, options.freeze, (FileReadOptions){.map_required = 0}));
-    CompilerSamplingAdmission admitted = compiler_sampling_admission_validate(arena, allowlist, request, facts, history, freeze);
+    String8 parent_freeze = BYTE_SLICE_TO_STRING(8, file_read(arena, options.parent_freeze, (FileReadOptions){.map_required = 0}));
+    CompilerSamplingAdmission admitted = compiler_sampling_admission_validate(arena, allowlist, request, facts, history, freeze, parent_freeze);
     ProcessResult result = PROCESS_RESULT_FAILED;
     if (admitted.valid)
     {
         CompilerSamplingFreeze frozen = compiler_sampling_freeze_parse(freeze);
-        String8 candidate_revision = string_equal(admitted.family, S8("aa")) ? frozen.base :
+        CompilerSamplingAcquisitionPlan acquisition = compiler_sampling_acquisition_plan_parse(freeze);
+        String8 base = acquisition.valid ? acquisition.base : frozen.base;
+        String8 base_tree = acquisition.valid ? acquisition.base_tree : frozen.base_tree;
+        String8 candidate_revision = acquisition.valid ? acquisition.ab1_revision : string_equal(admitted.family, S8("aa")) ? frozen.base :
             string_equal(admitted.family, S8("ab1")) ? frozen.ab1_revision : frozen.ab2_revision;
         String8 output = string_format(arena,
             S8("sampling_admitted=true\nsampling_phase={S8}\nsampling_packet={u64}\nsampling_family={S8}\n"
                "sampling_reservation_seconds={u64}\nsampling_timeout_minutes={u64}\nsampling_freeze_revision={S8}\n"
-               "sampling_freeze_sha256={S8}\nsampling_campaign_parent={S8}\nsampling_protocol_sha256={S8}\n"
+               "sampling_freeze_sha256={S8}\nsampling_campaign_parent={S8}\nsampling_parent_freeze_revision={S8}\nsampling_protocol_sha256={S8}\n"
                "sampling_base={S8}\nsampling_base_tree={S8}\nsampling_candidate_revision={S8}\nsampling_trusted_revision={S8}\n"),
             admitted.phase, admitted.packet, admitted.family, admitted.reservation_seconds,
             admitted.reservation_seconds / 60, admitted.freeze_revision, admitted.freeze_sha256,
-            admitted.campaign_parent, admitted.protocol_sha256, frozen.base, frozen.base_tree, candidate_revision, admitted.trusted_revision);
+            admitted.campaign_parent, admitted.parent_freeze_revision, admitted.protocol_sha256, base, base_tree, candidate_revision, admitted.trusted_revision);
         if (file_write(options.output, BUSTER_SLICE_TO_BYTE_SLICE(output))) result = PROCESS_RESULT_SUCCESS;
     }
     string_print(S8("COMPILER_SAMPLING_ADMISSION state={S8} reason={S8} qualification=unqualified routine_enabled=false\n"),
@@ -441,6 +447,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
         stage_object_sha256_file(arena, driver, &driver_digest) && stage_object_sha256_file(arena, freeze, &freeze_digest) &&
         string_equal(freeze_digest, options.freeze_sha256);
     CompilerSamplingFreezeActual actual = {.phase = options.phase, .campaign_parent = options.campaign_parent,
+        .campaign_parent_revision = options.campaign_parent_revision,
         .base = options.base, .base_tree = options.base_tree, .request_head = frozen.request_head,
         .trusted_revision = options.trusted_revision, .baseline_revision = options.base, .candidate_revision = aa ? options.base : options.candidate_revision,
         .protocol_sha256 = protocol_digest, .lab_sha256 = lab_digest, .python_sha256 = python_digest,
@@ -681,10 +688,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* are
     else if (options.valid && options.plan)
     {
         string_print(S8("COMPILER_SAMPLING_PLAN protocol=buster-compiler-main-sampling-qualification-v1 routine_enabled=false\n"));
-        String8 phases[] = {S8("pilot"), S8("confirm")};
+        String8 phases[] = {S8("acquire"), S8("pilot"), S8("confirm")};
         for (u64 phase = 0; phase < BUSTER_ARRAY_LENGTH(phases); phase += 1)
         {
-            u64 count = phase ? 40 : 3;
+            u64 count = phase == 0 ? 1 : phase == 1 ? 3 : 40;
             for (u64 packet = 0; packet < count; packet += 1)
             {
                 CompilerSamplingPacket schedule = compiler_sampling_schedule(phases[phase], packet);

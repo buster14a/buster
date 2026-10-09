@@ -145,7 +145,7 @@ class SamplingQualificationTests(unittest.TestCase):
         self.assertEqual(receipt.schedule("confirm", 40), {})
         self.assertEqual(receipt.schedule("pilot", 3), {})
         self.assertEqual(receipt.schedule("confirm", True), {})
-        self.assertEqual(sum(receipt.schedule("pilot", packet)["reservation_seconds"] for packet in range(3)), 10800)
+        self.assertEqual(sum(receipt.schedule("pilot", packet)["reservation_seconds"] for packet in range(3)), 9000)
 
     def test_complete_raw_packets_remain_unqualified(self):
         for original in (self.confirm, self.pilot, self.ab):

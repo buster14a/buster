@@ -23,7 +23,13 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingPacket compiler_sampling_schedule(String8 ph
 {
     CompilerSamplingPacket result = {0};
     String8 families[] = {S8("aa"), S8("ab1"), S8("ab2")};
-    if (string_equal(phase, S8("pilot")) && packet < 3)
+    if (string_equal(phase, S8("acquire")) && packet == 0)
+    {
+        result.family = S8("acquire");
+        result.reservation_seconds = 1800;
+        result.valid = true;
+    }
+    else if (string_equal(phase, S8("pilot")) && packet < 3)
     {
         result.family = families[packet];
         result.slots[0] = (CompilerSamplingSlot){.profile = S8("compiler-compare-v1")};
@@ -31,7 +37,7 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingPacket compiler_sampling_schedule(String8 ph
         result.slots[2] = (CompilerSamplingSlot){.profile = S8("compiler-main-80pairs-candidate-v1")};
         result.count = 3;
         result.short_trials = 2;
-        result.reservation_seconds = 3600;
+        result.reservation_seconds = 3000;
         result.valid = true;
     }
     else if (string_equal(phase, S8("confirm")) && packet < 40)
@@ -194,10 +200,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_ledger_claim(Arena* arena, String8 ro
     for (u64 entry = 0; result && entry < entry_count; entry += 1)
     {
         bool known = string_equal(entries[entry].name, S8("campaign.tsv")) && !entries[entry].is_directory;
-        String8 phases[] = {S8("pilot"), S8("confirm")};
+        String8 phases[] = {S8("acquire"), S8("pilot"), S8("confirm")};
         for (u64 phase_i = 0; !known && phase_i < BUSTER_ARRAY_LENGTH(phases); phase_i += 1)
         {
-            u64 count = phase_i ? 40 : 3;
+            u64 count = phase_i == 0 ? 1 : phase_i == 1 ? 3 : 40;
             for (u64 previous = 0; !known && previous < count; previous += 1)
             {
                 String8 name = string_format(arena, S8("{S8}-{u64}"), phases[phase_i], previous);
@@ -207,8 +213,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_ledger_claim(Arena* arena, String8 ro
         result = known;
     }
     u64 reserved = 0;
-    u64 packet_count = string_equal(phase, S8("pilot")) ? 3 : 40;
-    u64 budget = string_equal(phase, S8("pilot")) ? 10800 : 43200;
+    u64 packet_count = string_equal(phase, S8("acquire")) ? 1 : string_equal(phase, S8("pilot")) ? 3 : 40;
+    u64 budget = string_equal(phase, S8("acquire")) ? 1800 : string_equal(phase, S8("pilot")) ? 9000 : 43200;
     for (u64 i = 0; result && i < packet_count; i += 1)
     {
         String8 previous = path_join(arena, directory, string_format(arena, S8("{S8}-{u64}"), phase, i));
@@ -274,6 +280,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_schedule_self_test(Arena* ar
     }
     bool good = counts[0] == 80 && counts[1] == 39 && counts[2] == 39 &&
         comparators[0] == 3 && comparators[1] == 3 && comparators[2] == 3 && first == 5 && reserve == 42720 &&
+        compiler_sampling_schedule(S8("acquire"), 0).valid && compiler_sampling_schedule(S8("acquire"), 0).reservation_seconds == 1800 &&
+        !compiler_sampling_schedule(S8("acquire"), 1).valid && compiler_sampling_schedule(S8("pilot"), 0).reservation_seconds == 3000 &&
         !compiler_sampling_schedule(S8("confirm"), 40).valid && !compiler_sampling_schedule(S8("pilot"), 3).valid;
     String8 directory = {0};
     bool owned = summary_self_test_claim_directory(arena, S8("sampling-ledger"), &directory);

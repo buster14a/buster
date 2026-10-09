@@ -45,7 +45,7 @@ _spec.loader.exec_module(_lab)
 def schedule(phase: str, packet: int) -> dict:
     result = {}
     if type(packet) is int and phase == "pilot" and 0 <= packet < 3:
-        result = {"family": ("aa", "ab1", "ab2")[packet], "reservation_seconds": 3600,
+        result = {"family": ("aa", "ab1", "ab2")[packet], "reservation_seconds": 3000,
                   "slots": [(LONG, 0, 0), (SHORT, 0, 40), (LARGE, 0, 80)]}
     elif type(packet) is int and phase == "confirm" and 0 <= packet < 40:
         family = 1 if packet % 4 == 1 else 2 if packet % 4 == 3 else 0

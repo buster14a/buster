@@ -25,6 +25,7 @@ import re
 import sys
 import urllib.parse
 import urllib.request
+import urllib.error
 from datetime import datetime
 from pathlib import Path
 
@@ -255,7 +256,7 @@ SAMPLING_FREEZE = "docs/compiler-main-sampling-freeze-v1.tsv"
 SAMPLING_ALLOWLIST = "docs/compiler-main-sampling-admission-v1.tsv"
 SAMPLING_CHECK = "9700X compiler sampling research"
 SAMPLING_MARKER = re.compile(
-    r"profile: compiler-main-sampling-(pilot|confirm)-v1 packet: (0|[1-9][0-9]*) freeze: ([0-9a-f]{40})")
+    r"profile: compiler-main-sampling-(acquire|pilot|confirm)-v1 packet: (0|[1-9][0-9]*) freeze: ([0-9a-f]{40})")
 SAMPLING_HISTORY_HEADER = (
     "phase", "packet", "request_run_id", "request_run_attempt", "executor_run_id", "executor_run_attempt",
     "state", "physical_wall_us", "campaign", "freeze_revision", "actor_login", "actor_id",
@@ -298,7 +299,7 @@ def sampling_added(compared: object, selector: str) -> str:
 
 def sampling_attempt_history(repository: str, token: str, current: str, since: str,
                              freeze_revision: str, campaign: str, parent_revision: str,
-                             parent_campaign: str) -> list[list[str]]:
+                             parent_campaign: str, ancestor_revision: str = "-", ancestor_campaign: str = "-") -> list[list[str]]:
     """Complete bounded GitHub request/executor records, including hostless attempts."""
     if since == "-":  # Disabled configuration supplies no admission history window.
         return []
@@ -335,10 +336,10 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
             if error.code == 404:
                 continue
             raise
-        if marker is None or marker[3] not in (freeze_revision, parent_revision):
+        if marker is None or marker[3] not in (freeze_revision, parent_revision, ancestor_revision):
             continue
         selector, phase, packet, revision = marker
-        history_campaign = campaign if revision == freeze_revision else parent_campaign
+        history_campaign = campaign if revision == freeze_revision else parent_campaign if revision == parent_revision else ancestor_campaign
         associated = fetch(f"/repos/{repository}/commits/{sha}/pulls?per_page=100", token)
         matches = [pull for pull in associated if isinstance(pull, dict) and
                    isinstance(pull.get("head"), dict) and pull["head"].get("sha") == sha] \
@@ -381,7 +382,9 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
                 if isinstance(start, str) and isinstance(end, str):
                     duration = (datetime.fromisoformat(end.replace("Z", "+00:00")) -
                                 datetime.fromisoformat(start.replace("Z", "+00:00"))).total_seconds()
-                    physical = str(max(0, round(duration * 1000000)))
+                    if duration <= 0:
+                        raise ValueError("sampling physical occupancy timestamps are invalid")
+                    physical = str(round(duration * 1000000) + 2000000)
             if check.get("status") == "completed":
                 state = "complete" if check.get("conclusion") == "success" and \
                     isinstance(check.get("output"), dict) and check["output"].get("title") == "Valid unqualified sampling packet" and \
@@ -428,10 +431,17 @@ def sampling_data(repository: str, token: str, run: dict, pull: dict, head: str,
     allowlist_text = Path(SAMPLING_ALLOWLIST).read_text(encoding="utf-8")
     allowlist = dict(row.split("\t") for row in allowlist_text.splitlines() if "\t" in row)
     freeze_text = sampling_content(repository, SAMPLING_FREEZE, revision, token)
+    parent_revision = allowlist.get("parent_freeze_revision", "-")
+    parent_text = "" if parent_revision == "-" else sampling_content(repository, SAMPLING_FREEZE, parent_revision, token)
+    # Transport lineage values only. The native policy parses the exact bounded
+    # parent bytes, checks all identities and authenticates each hash.
+    parent_fields = dict(row.split("\t") for row in parent_text.splitlines() if "\t" in row)
+    ancestor_revision = parent_fields.get("campaign_parent_revision", "-") if phase == "confirm" else "-"
+    ancestor_campaign = parent_fields.get("campaign_parent", "-") if phase == "confirm" else "-"
     history = sampling_attempt_history(
         repository, token, str(run["id"]), allowlist.get("history_since", "-"), revision,
         allowlist.get("freeze_sha256", "-"), allowlist.get("parent_freeze_revision", "-"),
-        allowlist.get("campaign_parent", "-"))
+        allowlist.get("campaign_parent", "-"), ancestor_revision, ancestor_campaign)
     actor, triggering = run.get("actor", {}), run.get("triggering_actor", {})
     facts = {
         "schema": "buster-main-sampling-github-facts-v1", "repository": repository,
@@ -449,7 +459,7 @@ def sampling_data(repository: str, token: str, run: dict, pull: dict, head: str,
         "fresh_parent_0": sampling_added(compared_parents[0], line) if compared_parents else "-",
         "fresh_parent_1": sampling_added(compared_parents[1], line) if len(compared_parents) == 2 else "-",
     }
-    for name, text in (("request.txt", line + "\n"), ("freeze.tsv", freeze_text),
+    for name, text in (("request.txt", line + "\n"), ("freeze.tsv", freeze_text), ("parent-freeze.tsv", parent_text),
                        ("facts.tsv", "".join(f"{key}\t{value}\n" for key, value in facts.items())),
                        ("history.tsv", "\t".join(SAMPLING_HISTORY_HEADER) + "\n" +
                         "".join("\t".join(row) + "\n" for row in history))):
