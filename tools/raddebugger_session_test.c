@@ -139,6 +139,7 @@ struct Session
     HANDLE output_files[2];
     char output_paths[2][PATH_MAX];
     int winsock_initialized;
+    SOCKET ipc_socket;
 #else
     Display *display;
     int gui_output_fd;
@@ -860,6 +861,24 @@ drain_gui_output(Session *session)
     int ok = !session->failed;
     for(unsigned i = 0; i < 2 && ok; i += 1)
     {
+        if(session->output_files[i] == NULL && session->output_paths[i][0] != 0)
+        {
+            wchar_t path[PATH_MAX];
+            if(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, session->output_paths[i], -1, path, PATH_MAX) <= 0) ok = 0;
+            else
+            {
+                HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                          NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                if(file != INVALID_HANDLE_VALUE) session->output_files[i] = file;
+                else
+                {
+                    DWORD error = GetLastError();
+                    if(error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND && error != ERROR_SHARING_VIOLATION)
+                        ok = 0;
+                }
+            }
+            if(!ok) log_text("RADDBG_ORACLE_ERROR cannot open target output file", NULL);
+        }
         int reading = session->output_files[i] != NULL;
         while(reading && ok)
         {
@@ -1038,7 +1057,17 @@ run_ipc(Session *session, const char *command_text, Buffer *output)
     SOCKET client = INVALID_SOCKET;
     uint64_t end = monotonic_ms() + 10000u;
     if(end > session->deadline_ms) end = session->deadline_ms;
-    if(process_owns_ipc_listener(session)) client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    int fresh_connection = 0;
+    if(!session->failed && process_owns_ipc_listener(session))
+    {
+        client = session->ipc_socket;
+        if(client == INVALID_SOCKET)
+        {
+            client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            session->ipc_socket = client;
+            fresh_connection = 1;
+        }
+    }
     if(client != INVALID_SOCKET)
     {
         u_long nonblocking = 1;
@@ -1047,8 +1076,8 @@ run_ipc(Session *session, const char *command_text, Buffer *output)
         address.sin_family = AF_INET;
         address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         address.sin_port = htons(session->args.port);
-        int connected = 0;
-        if(ioctlsocket(client, FIONBIO, &nonblocking) == 0)
+        int connected = !fresh_connection;
+        if(fresh_connection && ioctlsocket(client, FIONBIO, &nonblocking) == 0)
         {
             int status = connect(client, (const struct sockaddr *)&address, sizeof(address));
             int error = status == SOCKET_ERROR ? WSAGetLastError() : 0;
@@ -1115,9 +1144,12 @@ run_ipc(Session *session, const char *command_text, Buffer *output)
                 break;
             }
         }
-        closesocket(client);
     }
-    if(!ok) log_text("RADDBG_ORACLE_ERROR native IPC failed, incomplete, or timed out", NULL);
+    if(!ok)
+    {
+        session->failed = 1;
+        log_text("RADDBG_ORACLE_ERROR native IPC failed, incomplete, or timed out", NULL);
+    }
     return ok;
 }
 
@@ -2077,18 +2109,6 @@ prepare_session(Session *session)
         snprintf(session->port_arg, sizeof(session->port_arg), "--ipc_port:%u", session->args.port);
         if(paths_ok && _mkdir(session->logs_path) == 0 && write_project(session))
         {
-            for(unsigned i = 0; i < 2 && paths_ok; i += 1)
-            {
-                wchar_t path[PATH_MAX];
-                if(!utf8_to_wide(session->output_paths[i], path, PATH_MAX)) paths_ok = 0;
-                else
-                {
-                    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                              NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-                    if(file == INVALID_HANDLE_VALUE) paths_ok = 0;
-                    else session->output_files[i] = file;
-                }
-            }
             if(paths_ok)
             {
                 session->job = CreateJobObjectW(NULL, NULL);
@@ -2490,6 +2510,14 @@ cleanup_session(Session *session)
             session->output_files[i] = NULL;
         }
     }
+    /* Keep the connection alive until the owned GUI and descendants are dead.
+     * The pinned listener requeues zero-byte TCP receives rather than removing
+     * closed connections, so short-lived clients could flood its receive ring. */
+    if(session->ipc_socket != INVALID_SOCKET)
+    {
+        if(closesocket(session->ipc_socket) != 0) ok = 0;
+        session->ipc_socket = INVALID_SOCKET;
+    }
     if(session->winsock_initialized)
     {
         if(WSACleanup() != 0) ok = 0;
@@ -2752,7 +2780,9 @@ session_test(const Args *args)
     Session session = {0};
     SourceLines lines = {0};
     session.args = *args;
-#if !defined(_WIN32)
+#if defined(_WIN32)
+    session.ipc_socket = INVALID_SOCKET;
+#else
     session.gui_output_fd = -1;
 #endif
     session.deadline_ms = monotonic_ms() + args->timeout_ms;
