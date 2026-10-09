@@ -18,12 +18,15 @@ GitHub's records, so the host job and the publisher bind the same identities.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import sys
 import urllib.parse
 import urllib.request
+from datetime import datetime
+from pathlib import Path
 
 from workload_selection import api_changes, select
 
@@ -245,6 +248,193 @@ def fetch(path: str, token: str) -> object:
         return json.load(response)
 
 
+# Data transport for the native qualification admission command. This adapter
+# performs no campaign selection, budget decision, retry or physical work.
+SAMPLING_PREFIX = "profile: compiler-main-sampling-"
+SAMPLING_FREEZE = "docs/compiler-main-sampling-freeze-v1.tsv"
+SAMPLING_ALLOWLIST = "docs/compiler-main-sampling-admission-v1.tsv"
+SAMPLING_CHECK = "9700X compiler sampling research"
+SAMPLING_MARKER = re.compile(
+    r"profile: compiler-main-sampling-(pilot|confirm)-v1 packet: (0|[1-9][0-9]*) freeze: ([0-9a-f]{40})")
+SAMPLING_HISTORY_HEADER = (
+    "phase", "packet", "request_run_id", "request_run_attempt", "executor_run_id", "executor_run_attempt",
+    "state", "physical_wall_us", "campaign", "freeze_revision", "actor_login", "actor_id",
+    "triggering_login", "triggering_id", "pull_author_login", "pull_author_id")
+
+
+def sampling_content(repository: str, path: str, revision: str, token: str) -> str:
+    """A bounded UTF-8 GitHub contents record, consumed only as data."""
+    row = fetch(f"/repos/{repository}/contents/{path}?ref={urllib.parse.quote(revision)}", token)
+    if not isinstance(row, dict) or row.get("type") != "file" or row.get("encoding") != "base64" \
+            or type(row.get("size")) is not int or not 0 <= row["size"] <= 128 * 1024:
+        raise ValueError("sampling input is missing or exceeds the data bound")
+    text = base64.b64decode(row.get("content", ""), validate=False).decode("utf-8")
+    if len(text.encode("utf-8")) != row["size"]:
+        raise ValueError("sampling content size differs from GitHub's record")
+    return text
+
+
+def sampling_selector(text: str) -> tuple[str, str, str, str] | None:
+    """Extract data fields only; the native command independently validates it."""
+    lines = [line for line in text.splitlines() if line.startswith(SAMPLING_PREFIX)]
+    if not lines:
+        return None
+    if len(lines) != 1 or not (match := SAMPLING_MARKER.fullmatch(lines[0])):
+        raise ValueError("sampling selector is malformed or repeated")
+    return lines[0], match[1], match[2], match[3]
+
+
+def sampling_added(compared: object, selector: str) -> str:
+    """The exact selector if GitHub's parent patch adds, rather than moves, it."""
+    rows = compared.get("files") if isinstance(compared, dict) else None
+    row = next((row for row in rows if isinstance(row, dict) and row.get("filename") == COMPARE_REQUEST), {}) \
+        if isinstance(rows, list) else {}
+    patch = row.get("patch")
+    lines = patch.splitlines() if isinstance(patch, str) else []
+    added = {line[1:] for line in lines if line.startswith("+") and not line.startswith("+++")}
+    removed = {line[1:] for line in lines if line.startswith("-") and not line.startswith("---")}
+    return selector if selector in added - removed else "-"
+
+
+def sampling_attempt_history(repository: str, token: str, current: str, since: str,
+                             freeze_revision: str, campaign: str, parent_revision: str,
+                             parent_campaign: str) -> list[list[str]]:
+    """Complete bounded GitHub request/executor records, including hostless attempts."""
+    if since == "-":  # Disabled configuration supplies no admission history window.
+        return []
+    rows = []
+    total = None
+    requests = []
+    query = urllib.parse.urlencode({"event": "pull_request", "created": ">=" + since, "per_page": 100})
+    for page in range(1, 11):
+        listed = fetch(f"/repos/{repository}/actions/workflows/9700x-direct-request.yml/runs?{query}&page={page}", token)
+        values = listed.get("workflow_runs") if isinstance(listed, dict) else None
+        if not isinstance(values, list) or type(listed.get("total_count")) is not int:
+            raise ValueError("sampling request history is unavailable")
+        if total is None:
+            total = listed["total_count"]
+        if listed["total_count"] != total or total > 1000:
+            raise ValueError("sampling request history is oversized or changed during reading")
+        requests.extend(values)
+        if len(requests) >= total:
+            break
+        if len(values) != 100:
+            raise ValueError("sampling request history is incomplete")
+    if len(requests) != total or len({row.get("id") for row in requests if isinstance(row, dict)}) != total:
+        raise ValueError("sampling request history is incomplete or duplicated")
+    for request in sorted(requests, key=lambda row: (row.get("created_at", ""), row.get("id", 0))):
+        if str(request.get("id")) == current:
+            continue
+        sha = request.get("head_sha")
+        if not isinstance(sha, str) or not COMMIT.fullmatch(sha):
+            raise ValueError("sampling history request has no exact commit")
+        # A missing marker on an unrelated request is ordinary history.
+        try:
+            marker = sampling_selector(sampling_content(repository, COMPARE_REQUEST, sha, token))
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                continue
+            raise
+        if marker is None or marker[3] not in (freeze_revision, parent_revision):
+            continue
+        selector, phase, packet, revision = marker
+        history_campaign = campaign if revision == freeze_revision else parent_campaign
+        associated = fetch(f"/repos/{repository}/commits/{sha}/pulls?per_page=100", token)
+        matches = [pull for pull in associated if isinstance(pull, dict) and
+                   isinstance(pull.get("head"), dict) and pull["head"].get("sha") == sha] \
+            if isinstance(associated, list) else []
+        if len(matches) != 1:
+            raise ValueError("sampling history request has no unique owning pull")
+        pull = matches[0]
+        user = pull.get("user") if isinstance(pull.get("user"), dict) else {}
+        actor = request.get("actor") if isinstance(request.get("actor"), dict) else {}
+        triggering = request.get("triggering_actor") if isinstance(request.get("triggering_actor"), dict) else {}
+        external = re.compile(r"buster-main-sampling-v1:" + re.escape(history_campaign) + ":" +
+                              re.escape(phase) + ":" + re.escape(packet) + ":" +
+                              str(request["id"]) + r":([1-9][0-9]*):1\Z")
+        checks = fetch(f"/repos/{repository}/commits/{sha}/check-runs?check_name={urllib.parse.quote(SAMPLING_CHECK)}&filter=all&per_page=100", token)
+        checks = checks.get("check_runs") if isinstance(checks, dict) else None
+        if not isinstance(checks, list) or len(checks) >= 100:
+            raise ValueError("sampling executor check history is unavailable or capped")
+        matching = [check for check in checks if isinstance(check, dict) and
+                    check.get("name") == SAMPLING_CHECK and
+                    isinstance(check.get("app"), dict) and check["app"].get("id") == 15368 and
+                    isinstance(check.get("external_id"), str) and external.fullmatch(check["external_id"])]
+        executor_id, executor_attempt, state, physical = "-", "-", "not_run", "-"
+        if len(matching) > 1:
+            raise ValueError("sampling request has duplicate executor checks")
+        if matching:
+            check = matching[0]
+            executor_id = external.fullmatch(check["external_id"])[1]
+            execution = fetch(f"/repos/{repository}/actions/runs/{executor_id}", token)
+            jobs = fetch(f"/repos/{repository}/actions/runs/{executor_id}/attempts/1/jobs?per_page=100", token)
+            jobs = jobs.get("jobs") if isinstance(jobs, dict) else None
+            if not isinstance(execution, dict) or execution.get("path") != ".github/workflows/9700x-direct-bench.yml" \
+                    or execution.get("event") != "workflow_run" or not isinstance(jobs, list) or len(jobs) >= 100:
+                raise ValueError("sampling executor provenance is unavailable")
+            executor_attempt = str(execution.get("run_attempt"))
+            host = [job for job in jobs if isinstance(job, dict) and job.get("name") == "Sampling qualification packet"]
+            published = [job for job in jobs if isinstance(job, dict) and job.get("name") == "Validate sampling packet evidence"]
+            state = "cancelled" if execution.get("conclusion") == "cancelled" else "incomplete"
+            if len(host) == 1:
+                start, end = host[0].get("started_at"), host[0].get("completed_at")
+                if isinstance(start, str) and isinstance(end, str):
+                    duration = (datetime.fromisoformat(end.replace("Z", "+00:00")) -
+                                datetime.fromisoformat(start.replace("Z", "+00:00"))).total_seconds()
+                    physical = str(max(0, round(duration * 1000000)))
+            if check.get("status") == "completed":
+                state = "complete" if check.get("conclusion") == "success" and \
+                    isinstance(check.get("output"), dict) and check["output"].get("title") == "Valid unqualified sampling packet" and \
+                    len(host) == len(published) == 1 and host[0].get("conclusion") == published[0].get("conclusion") == "success" \
+                    else "invalid"
+        rows.append([phase, packet, str(request["id"]), str(request.get("run_attempt")), executor_id,
+                     executor_attempt, state, physical, history_campaign, revision,
+                     str(actor.get("login", "-")), str(actor.get("id", "-")),
+                     str(triggering.get("login", "-")), str(triggering.get("id", "-")),
+                     str(user.get("login", "-")), str(user.get("id", "-"))])
+    return rows
+
+
+def sampling_data(repository: str, token: str, run: dict, pull: dict, head: str, attempt: str,
+                  marker: str, compared_parents: list, directory: Path) -> bool:
+    """Write API records for native admission; no emitted fact authorizes host work."""
+    selected = sampling_selector(marker)
+    if selected is None:
+        return False
+    directory.mkdir(parents=True, exist_ok=False)
+    line, phase, packet, revision = selected
+    allowlist_text = Path(SAMPLING_ALLOWLIST).read_text(encoding="utf-8")
+    allowlist = dict(row.split("\t") for row in allowlist_text.splitlines() if "\t" in row)
+    freeze_text = sampling_content(repository, SAMPLING_FREEZE, revision, token)
+    history = sampling_attempt_history(
+        repository, token, str(run["id"]), allowlist.get("history_since", "-"), revision,
+        allowlist.get("freeze_sha256", "-"), allowlist.get("parent_freeze_revision", "-"),
+        allowlist.get("campaign_parent", "-"))
+    actor, triggering = run.get("actor", {}), run.get("triggering_actor", {})
+    facts = {
+        "schema": "buster-main-sampling-github-facts-v1", "repository": repository,
+        "request_run_id": str(run["id"]), "request_run_attempt": str(run.get("run_attempt")),
+        "executor_run_id": os.environ.get("GITHUB_RUN_ID", "-"), "executor_run_attempt": attempt,
+        "request_head": head, "trusted_revision": os.environ.get("GITHUB_SHA", "-"),
+        "owner_login": MAINTAINER["login"], "owner_id": str(MAINTAINER["id"]),
+        "actor_login": str(actor.get("login")), "actor_id": str(actor.get("id")),
+        "triggering_login": str(triggering.get("login")), "triggering_id": str(triggering.get("id")),
+        "pull_author_login": str(pull.get("user", {}).get("login")), "pull_author_id": str(pull.get("user", {}).get("id")),
+        "request_repository": str(full_name(run.get("repository"))),
+        "request_head_repository": str(full_name(run.get("head_repository"))),
+        "pull_repository": str(full_name(pull.get("head", {}).get("repo"))), "pull_state": str(pull.get("state")),
+        "parent_count": str(len(compared_parents)),
+        "fresh_parent_0": sampling_added(compared_parents[0], line) if compared_parents else "-",
+        "fresh_parent_1": sampling_added(compared_parents[1], line) if len(compared_parents) == 2 else "-",
+    }
+    for name, text in (("request.txt", line + "\n"), ("freeze.tsv", freeze_text),
+                       ("facts.tsv", "".join(f"{key}\t{value}\n" for key, value in facts.items())),
+                       ("history.tsv", "\t".join(SAMPLING_HISTORY_HEADER) + "\n" +
+                        "".join("\t".join(row) + "\n" for row in history))):
+        (directory / name).write_text(text, encoding="utf-8")
+    return True
+
+
 def main() -> int:
     environment = os.environ
     repository = environment.get("BQ_REPOSITORY", "")
@@ -278,6 +468,8 @@ def main() -> int:
     workloads, compare, problems = plan(files if not failures else [])
     failures.extend(problems)
     request_files: list[dict] = []
+    compared_parents: list = []
+    sampling_requested = False
     if not failures and (workloads or compare):
         request_commit = fetch(f"/repos/{repository}/commits/{head}", token)
         parents = request_commit.get("parents", []) if isinstance(request_commit, dict) else []
@@ -297,6 +489,15 @@ def main() -> int:
         compared = fetch(f"/repos/{repository}/compare/{urllib.parse.quote(base)}...{head}", token)
         problems, extra = comparison(head, compared, fetch(f"/repos/{repository}/commits/{head}", token))
         failures.extend(problems)
+    if not failures and compare:
+        marker = sampling_content(repository, COMPARE_REQUEST, head, token)
+        selected = sampling_selector(marker)
+        if selected is not None:
+            pull = next(row for row in pulls if row.get("number") == number)
+            sampling_requested = sampling_data(repository, token, run, pull, head, attempt, marker, compared_parents,
+                                                Path(environment["RUNNER_TEMP"]) / "compiler-sampling-admission")
+            compare = False
+            workloads = False
     if failures:
         print("BENCH_DIRECT_UNAUTHORIZED " + ", ".join(failures), file=sys.stderr)
     else:
@@ -307,7 +508,7 @@ def main() -> int:
               f"workloads={str(workloads).lower()} compare={str(compare).lower()}")
         with open(output, "a", encoding="utf-8") as stream:
             stream.write(f"attempt={attempt}\nbase={base}\npull={number}\nworkloads={str(workloads).lower()}\n"
-                         f"request_head={head}\ncompare={str(compare).lower()}\nmerge_base={extra['merge_base']}\n"
+                         f"request_head={head}\ncompare={str(compare).lower()}\nsampling_requested={str(sampling_requested).lower()}\nmerge_base={extra['merge_base']}\n"
                          f"merge_base_tree={extra['merge_base_tree']}\nhead_tree={extra['head_tree']}\n")
     return 1 if failures else 0
 

@@ -76,12 +76,24 @@ jobs:
       merge_base: ${{ steps.verify.outputs.merge_base }}
       merge_base_tree: ${{ steps.verify.outputs.merge_base_tree }}
       head_tree: ${{ steps.verify.outputs.head_tree }}
+      sampling_admitted: ${{ steps.native.outputs.sampling_admitted }}
+      sampling_phase: ${{ steps.native.outputs.sampling_phase }}
+      sampling_packet: ${{ steps.native.outputs.sampling_packet }}
+      sampling_family: ${{ steps.native.outputs.sampling_family }}
+      sampling_reservation_seconds: ${{ steps.native.outputs.sampling_reservation_seconds }}
+      sampling_timeout_minutes: ${{ steps.native.outputs.sampling_timeout_minutes }}
+      sampling_freeze_revision: ${{ steps.native.outputs.sampling_freeze_revision }}
+      sampling_freeze_sha256: ${{ steps.native.outputs.sampling_freeze_sha256 }}
+      sampling_campaign_parent: ${{ steps.native.outputs.sampling_campaign_parent }}
+      sampling_protocol_sha256: ${{ steps.native.outputs.sampling_protocol_sha256 }}
+      sampling_base: ${{ steps.native.outputs.sampling_base }}
+      sampling_base_tree: ${{ steps.native.outputs.sampling_base_tree }}
+      sampling_candidate_revision: ${{ steps.native.outputs.sampling_candidate_revision }}
     steps:
       - name: Check out the trusted authorization rules
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
-          sparse-checkout: tools/bench_direct
           persist-credentials: false
       - name: Verify the request run and its pull request
         id: verify
@@ -93,6 +105,37 @@ jobs:
           BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
           BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: python3 -B tools/bench_direct/authorize.py
+
+      - name: Fetch the pinned admission bootstrap compiler
+        if: ${{ steps.verify.outputs.sampling_requested == 'true' }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+      - name: Install the pinned admission bootstrap compiler
+        if: ${{ steps.verify.outputs.sampling_requested == 'true' }}
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --prefix="$RUNNER_TEMP/sampling-tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/sampling-tcc/bin" >> "$GITHUB_PATH"
+      - name: Admit only the frozen bounded sampling packet
+        if: ${{ steps.verify.outputs.sampling_requested == 'true' }}
+        id: native
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh compiler_profile_qualification --admit \
+            --allowlist docs/compiler-main-sampling-admission-v1.tsv \
+            --request "$RUNNER_TEMP/compiler-sampling-admission/request.txt" \
+            --facts "$RUNNER_TEMP/compiler-sampling-admission/facts.tsv" \
+            --history "$RUNNER_TEMP/compiler-sampling-admission/history.tsv" \
+            --freeze "$RUNNER_TEMP/compiler-sampling-admission/freeze.tsv" --output "$GITHUB_OUTPUT"
 
   # "Re-run failed jobs" reuses the outputs of jobs that succeeded in an
   # earlier attempt, so bench requires authorize to have passed in this same
