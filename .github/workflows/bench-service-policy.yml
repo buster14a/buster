@@ -59,6 +59,7 @@ jobs:
           python3 -B tools/bench_direct/authorize_test.py
           python3 -B tools/bench_direct/authorize_compiler_test.py
           python3 -B tools/bench_direct/sampling_qualification_test.py
+          python3 -B tools/bench_direct/sampling_publish_test.py
           python3 -B tools/bench_direct/compiler_test.py
           python3 -B tools/bench_direct/compiler_visibility_test.py
           python3 -B tools/bench_direct/performance_inventory_test.py

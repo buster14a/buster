@@ -77,6 +77,13 @@ jobs:
       merge_base: ${{ steps.verify.outputs.merge_base }}
       merge_base_tree: ${{ steps.verify.outputs.merge_base_tree }}
       head_tree: ${{ steps.verify.outputs.head_tree }}
+      sampling_request_data: ${{ steps.verify.outputs.sampling_request_data }}
+      sampling_freeze_data: ${{ steps.verify.outputs.sampling_freeze_data }}
+      sampling_parent_freeze_data: ${{ steps.verify.outputs.sampling_parent_freeze_data }}
+      sampling_acquisition_plan_data: ${{ steps.verify.outputs.sampling_acquisition_plan_data }}
+      sampling_allowlist_data: ${{ steps.verify.outputs.sampling_allowlist_data }}
+      sampling_facts_data: ${{ steps.verify.outputs.sampling_facts_data }}
+      sampling_history_data: ${{ steps.verify.outputs.sampling_history_data }}
       sampling_admitted: ${{ steps.native.outputs.sampling_admitted }}
       sampling_phase: ${{ steps.native.outputs.sampling_phase }}
       sampling_packet: ${{ steps.native.outputs.sampling_packet }}
@@ -134,7 +141,7 @@ jobs:
         run: |
           set -euo pipefail
           ./build.sh compiler_profile_qualification --admit \
-            --allowlist docs/compiler-main-sampling-admission-v1.tsv \
+            --allowlist "$RUNNER_TEMP/compiler-sampling-admission/allowlist.tsv" \
             --request "$RUNNER_TEMP/compiler-sampling-admission/request.txt" \
             --facts "$RUNNER_TEMP/compiler-sampling-admission/facts.tsv" \
             --history "$RUNNER_TEMP/compiler-sampling-admission/history.tsv" \

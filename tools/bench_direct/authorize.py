@@ -428,7 +428,10 @@ def sampling_data(repository: str, token: str, run: dict, pull: dict, head: str,
         return False
     directory.mkdir(parents=True, exist_ok=False)
     line, phase, packet, revision = selected
-    allowlist_text = Path(SAMPLING_ALLOWLIST).read_text(encoding="utf-8")
+    policy_revision = os.environ.get("GITHUB_SHA", "")
+    if not COMMIT.fullmatch(policy_revision):
+        raise ValueError("sampling policy lacks the current trusted workflow revision")
+    allowlist_text = sampling_content(repository, SAMPLING_ALLOWLIST, policy_revision, token)
     allowlist = dict(row.split("\t") for row in allowlist_text.splitlines() if "\t" in row)
     freeze_text = sampling_content(repository, SAMPLING_FREEZE, revision, token)
     parent_revision = allowlist.get("parent_freeze_revision", "-")
@@ -438,6 +441,9 @@ def sampling_data(repository: str, token: str, run: dict, pull: dict, head: str,
     parent_fields = dict(row.split("\t") for row in parent_text.splitlines() if "\t" in row)
     ancestor_revision = parent_fields.get("campaign_parent_revision", "-") if phase == "confirm" else "-"
     ancestor_campaign = parent_fields.get("campaign_parent", "-") if phase == "confirm" else "-"
+    acquisition_text = freeze_text if phase == "acquire" else parent_text if phase == "pilot" else (
+        sampling_content(repository, SAMPLING_FREEZE, ancestor_revision, token)
+        if COMMIT.fullmatch(ancestor_revision) else "")
     history = sampling_attempt_history(
         repository, token, str(run["id"]), allowlist.get("history_since", "-"), revision,
         allowlist.get("freeze_sha256", "-"), allowlist.get("parent_freeze_revision", "-"),
@@ -460,11 +466,29 @@ def sampling_data(repository: str, token: str, run: dict, pull: dict, head: str,
         "fresh_parent_1": sampling_added(compared_parents[1], line) if len(compared_parents) == 2 else "-",
     }
     for name, text in (("request.txt", line + "\n"), ("freeze.tsv", freeze_text), ("parent-freeze.tsv", parent_text),
+                       ("acquisition-plan.tsv", acquisition_text), ("allowlist.tsv", allowlist_text),
                        ("facts.tsv", "".join(f"{key}\t{value}\n" for key, value in facts.items())),
                        ("history.tsv", "\t".join(SAMPLING_HISTORY_HEADER) + "\n" +
                         "".join("\t".join(row) + "\n" for row in history))):
         (directory / name).write_text(text, encoding="utf-8")
     return True
+
+
+def sampling_transport(directory: Path) -> dict[str, str]:
+    """Bounded data-only output for a tokenless native physical executor."""
+    fields = {"request": "request.txt", "freeze": "freeze.tsv", "parent_freeze": "parent-freeze.tsv",
+              "acquisition_plan": "acquisition-plan.tsv", "allowlist": "allowlist.tsv",
+              "facts": "facts.tsv", "history": "history.tsv"}
+    values = {}
+    total = 0
+    for key, name in fields.items():
+        payload = (directory / name).read_bytes()
+        encoded = base64.b64encode(payload).decode("ascii")
+        total += len(encoded)
+        if len(encoded) > 65536 or total > 262144:
+            raise ValueError("sampling transport exceeds its native data bound")
+        values[f"sampling_{key}_data"] = encoded
+    return values
 
 
 def main() -> int:
@@ -502,6 +526,7 @@ def main() -> int:
     request_files: list[dict] = []
     compared_parents: list = []
     sampling_requested = False
+    transported = {}
     if not failures and (workloads or compare):
         request_commit = fetch(f"/repos/{repository}/commits/{head}", token)
         parents = request_commit.get("parents", []) if isinstance(request_commit, dict) else []
@@ -528,6 +553,7 @@ def main() -> int:
             pull = next(row for row in pulls if row.get("number") == number)
             sampling_requested = sampling_data(repository, token, run, pull, head, attempt, marker, compared_parents,
                                                 Path(environment["RUNNER_TEMP"]) / "compiler-sampling-admission")
+            transported = sampling_transport(Path(environment["RUNNER_TEMP"]) / "compiler-sampling-admission")
             compare = False
             workloads = False
     if failures:
@@ -542,6 +568,8 @@ def main() -> int:
             stream.write(f"attempt={attempt}\nbase={base}\npull={number}\nworkloads={str(workloads).lower()}\n"
                          f"request_head={head}\ncompare={str(compare).lower()}\nsampling_requested={str(sampling_requested).lower()}\nmerge_base={extra['merge_base']}\n"
                          f"merge_base_tree={extra['merge_base_tree']}\nhead_tree={extra['head_tree']}\n")
+            for key, value in transported.items():
+                stream.write(f"{key}={value}\n")
     return 1 if failures else 0
 
 
