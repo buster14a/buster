@@ -638,7 +638,8 @@ class SamplingPublicationOutcomes(unittest.TestCase):
 
 
     def test_acquisition_runtime_path_is_required_and_canonical(self):
-        for path in (None, "", "python3", "/", "/usr/bin/../python3", "/usr//bin/python3"):
+        for path in (None, "", "python3", "/", "/usr/bin/../python3", "/usr//bin/python3",
+                     "/usr/bin/python name", "/usr/bin/python\\name", "/" + "a" * 256):
             api, authority, files = publication_fixture("acquire", 0)
             row = publisher.sampling_tsv(files["acquisition.tsv"])
             if path is None:
