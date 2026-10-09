@@ -24444,9 +24444,26 @@ BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* mac
     u64 parameter_parentheses = 0;
     u64 group_parentheses = 0;
     u32 group_close = UINT32_MAX;
+    // A parenthesis that follows a declarator name (`typedef int F(...)`)
+    // opens a parameter list too, but only before the declaration's own
+    // initializer and never after an operator keyword such as `sizeof`.
+    u32 brace_depth = 0;
+    bool initializer_seen = false;
     for (u32 index = start; index + 2 < body_end; index += 1)
     {
         bool is_open = c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        if (is_file_scope && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE))
+        {
+            brace_depth += 1;
+        }
+        else if (is_file_scope && brace_depth && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            brace_depth -= 1;
+        }
+        else if (is_file_scope && !brace_depth && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_ASSIGN))
+        {
+            initializer_seen = true;
+        }
         if (is_file_scope && !is_open && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
         {
             group_close = (group_parentheses & 1) ? index : UINT32_MAX;
@@ -24459,7 +24476,18 @@ BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* mac
         }
         if (is_file_scope)
         {
-            parameter_parentheses = (parameter_parentheses << 1) | (u64)(index > start && group_close == index - 1);
+            bool after_name = false;
+            if (index > start && !initializer_seen && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER)
+            {
+                String8 previous = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]);
+                after_name = !string_equal(previous, S8("sizeof")) && !string_equal(previous, S8("_Alignof")) && !string_equal(previous, S8("alignof")) &&
+                             !string_equal(previous, S8("typeof")) && !string_equal(previous, S8("typeof_unqual")) && !string_equal(previous, S8("__typeof__")) &&
+                             !string_equal(previous, S8("__typeof")) && !string_equal(previous, S8("_Atomic")) && !string_equal(previous, S8("_Alignas")) &&
+                             !string_equal(previous, S8("alignas")) && !string_equal(previous, S8("_Static_assert")) && !string_equal(previous, S8("static_assert")) &&
+                             !string_equal(previous, S8("_Generic")) && !string_equal(previous, S8("__attribute__")) && !string_equal(previous, S8("__builtin_offsetof")) &&
+                             !string_equal(previous, S8("__declspec")) && !string_equal(previous, S8("__asm__")) && !string_equal(previous, S8("asm"));
+            }
+            parameter_parentheses = (parameter_parentheses << 1) | (u64)((index > start && group_close == index - 1) || after_name);
             group_parentheses = (group_parentheses << 1) | (u64)(c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR) ||
                                                                  c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_CARET));
         }

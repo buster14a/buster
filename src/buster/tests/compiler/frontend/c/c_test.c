@@ -8826,6 +8826,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_expression_enum_scope(UnitT
         S8("enum{R=1};unsigned long n=sizeof(void(*)(int[sizeof(enum{R=2})]));int main(void){return R-1;}"),
         S8("enum{R=1};struct S{char c[sizeof(int(*)(int a[sizeof(enum{R=2})]))];};int main(void){return R-1;}"),
         S8("enum{R=1};typedef int (*F)(int [sizeof(enum{R=2})]);enum{S=R+1};int main(void){return S-2;}"),
+        S8("enum{R=1};typedef int F(int a[sizeof(enum{R=2})]);int main(void){return R-1;}"),
+        S8("enum{R=1};int g(int a[sizeof(enum{R=2})]);int main(void){return R-1;}"),
         // Source order: a later enumerator's value, in this declaration or a
         // following one, reads the one the type name defined.
         S8("_Static_assert(sizeof(enum{R=2})==4,\"x\");enum{S=R+1};int main(void){return S-3;}"),
@@ -8873,6 +8875,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_expression_enum_scope(UnitT
             }
         }
     }
+    // Many expression enums in one file: every enumerator is published once,
+    // so the entity table is never asked for a second slot per name.
+    TemporalArena stress_scratch = scratch_begin(0, 0);
+    u32 stress_count = 256;
+    u64 stress_capacity = BUSTER_KB(32);
+    char8* stress_buffer = arena_allocate(stress_scratch.arena, char8, stress_capacity);
+    u64 stress_length = 0;
+    for (u32 index = 0; index < stress_count; index += 1)
+    {
+        c_test_append_source(stress_buffer, stress_capacity, &stress_length,
+                             string_format(stress_scratch.arena, S8("unsigned long x{u32}=sizeof(enum{{E{u32}={u32},F{u32}=E{u32}+1}});\n"), index, index, index, index, index));
+    }
+    c_test_append_source(stress_buffer, stress_capacity, &stress_length, S8("int main(void){return E255+F255-511;}\n"));
+    c_test_enum_scope_case(arguments, &result, (String8){.pointer = stress_buffer, .length = stress_length}, C_PREPROCESS_DIALECT_C17, target_native, false, true,
+                           C_DIAGNOSTIC_REDEFINITION);
+    scratch_end(stress_scratch);
     return result;
 }
 
