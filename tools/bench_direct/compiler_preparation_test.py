@@ -150,7 +150,9 @@ def fixture(qualification=True, count=2, policy="snapshot-v1"):
             common = {"schema": "buster-compiler-closure-v1", "policy": "snapshot-v1", "state": "complete",
                       "base": expected["base"], "base_tree": expected["base_tree"], "root_sha256": digest(b"/checkout"),
                       "manifest_sha256": digest(raw), "harness_sha256": H256, "bootstrap_marker_sha256": T256,
-                      "bootstrap_artifact_sha256": G256, "duration_us": 10, "harness_preparation_us": 1}
+                      "bootstrap_artifact_sha256": G256, "duration_us": 10, "harness_preparation_us": 1,
+                      "ownership_schema": contract.OWNERSHIP_SCHEMA, "cleanup_proven": True,
+                      "cleanup_us": 1, "cleanup_waves": 1, "cleanup_signalled": 0, "cleanup_reaped": 0}
             data["closure"] = {}
             data["closure_manifests"] = {}
             for operation in ("snapshot", "restore", "verify"):
