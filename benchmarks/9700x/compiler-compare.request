@@ -79,3 +79,4 @@ request: issue #2717 candidate default -g complete-entry-store scalar pinning; c
 request: PR #3157 issue #2717 final default -g scalar location candidate after dense-scan review; compare exact head
 # request: PR #3157 issue #2717 remove analyzer dead store; compare the final exact PR head
 request: PR #3157 issue #2717 guard optional published CFG; compare the final exact PR head
+request: PR #3157 issue #2717 ready-head Apple/macOS/iOS CI and fresh compiler-compare-v1 after marker-only push from ee52b190; source-identical code
