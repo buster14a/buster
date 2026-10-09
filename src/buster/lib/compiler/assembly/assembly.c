@@ -12428,7 +12428,6 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ComplexSIMDLaneParseResult assembly_aarch64_c
                 assembly_aarch64_complex_simd_lane_row(row, form);
             if (row_valid)
             {
-                recognized = true;
                 if (tokens_valid)
                 {
                     u32 candidate_word = 0;
