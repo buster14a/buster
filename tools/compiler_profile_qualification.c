@@ -1035,8 +1035,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* are
     }
     if (physical_entry && adopted)
     {
-        bool manager_scopes_quiet = compiler_experiment_supervisor_scopes_quiet() &&
+        bool manager_scopes_quiet = false;
+#if BUSTER_LINUX && !BUSTER_ANDROID
+        manager_scopes_quiet = compiler_experiment_supervisor_scopes_quiet() &&
             !compiler_closure_cleanup_failed && compiler_experiment_cleanup_guard(arena);
+#endif
         bool released = compiler_experiment_cleanup_finish(arena, &adopted_lease, manager_scopes_quiet);
         if (!released) result = PROCESS_RESULT_FAILED;
     }

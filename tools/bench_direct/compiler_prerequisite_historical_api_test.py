@@ -504,8 +504,40 @@ class HistoricalPrerequisiteApiTest(unittest.TestCase):
                                 api.records[f"/actions/runs/{api.executor}{endpoint}"]["conclusion"] = (
                                     "success" if negative else "failure")
                             api.executor_inventory[0]["conclusion"] = "success" if negative else "failure"
-                        with self.assertRaises(ValueError):
-                            self.review(api, [])
+                        if mutation == "executor":
+                            # A later workflow failure does not erase a valid
+                            # owned scientific packet. Preserve the actual E
+                            # conclusion separately from the exact check pair;
+                            # neither conclusion grants execution or qualification.
+                            authority = self.review(api, [])
+                            self.assert_authority(api, authority)
+                            expected = "success" if negative else "failure"
+                            self.assertEqual(authority["native_api_proof"]["executor_conclusion"], expected)
+                            self.assertEqual(authority["executor"]["conclusion"], expected)
+                            self.assertEqual(authority["admitted"][api.prefix + "_historical_executor_conclusion"], expected)
+                            self.assertEqual(authority["admitted"][api.prefix + "_historical_check_conclusion"],
+                                             "failure" if negative else "success")
+                            self.assertEqual(authority["admitted"][api.prefix + "_historical_check_title"],
+                                             check["output"]["title"])
+                            self.assertEqual(len(self.native_records), 1)
+                            # Immutable identity relabeling remains a refusal,
+                            # even when the observed E conclusion is permitted.
+                            for field, value in (("head_sha", HARNESS), ("display_title", "Relabelled executor")):
+                                changed = copy.deepcopy(api)
+                                execution, request = changed.originals()
+                                execution[field] = value
+                                self.rejects_before_native(changed, (execution, request))
+                            changed = copy.deepcopy(api)
+                            changed.executor_inventory[0]["display_title"] = (
+                                f"9700X request {changed.current}.1 head {ADVANCED_HEAD}")
+                            self.rejects_before_native(changed)
+                            changed = copy.deepcopy(api)
+                            changed.records[f"/actions/runs/{changed.executor}/attempts/1"]["status"] = "in_progress"
+                            with self.assertRaises(ValueError):
+                                self.review(changed, [])
+                        else:
+                            with self.assertRaises(ValueError):
+                                self.review(api, [])
 
     def test_current_raw_and_record_map_drift_is_rejected_before_either_native_call(self):
         for utility in (False, True):
