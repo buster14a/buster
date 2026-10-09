@@ -28435,7 +28435,7 @@ BUSTER_C_INTERNAL bool c_parse_type_constant_vector_argument_supported(CPreproce
     return supported;
 }
 
-BUSTER_C_INTERNAL bool c_parse_type_constant_vector_arguments_supported(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end,
+BUSTER_C_INTERNAL bool c_parse_type_constant_vector_arguments_supported(CPreprocessResult preprocess, u32 start, u32 end,
                                                                          bool sizeof_expression_query)
 {
     bool supported = true;
@@ -28599,7 +28599,7 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
             query.expression_scalar_types = scalar_types;
             CTypeLayoutStatistics statistics = {0};
             query.type_layout_statistics = &statistics;
-            bool supported = c_parse_type_constant_vector_arguments_supported(&query, preprocess, start, end, sizeof_expression_query);
+            bool supported = c_parse_type_constant_vector_arguments_supported(preprocess, start, end, sizeof_expression_query);
             bool single = end == start + 1;
             u32 capacity = single || !supported ? 0 : end - start + 16;
             CTypeParseMachine query_machine = {
