@@ -9137,6 +9137,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_expression_enum_scope(UnitT
         // enumerator, and a use after the definition still binds it.
         S8("struct S{int a,R;};unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
         S8("int f(void){int R=5;return R;}unsigned long x=sizeof(enum{R=2});int main(void){return f()-5+R-2;}"),
+        // A declarator after an operator group, a member in a parenthesised
+        // record body and a prototype parameter are not uses either.
+        S8("struct S{_Atomic(int) R;};unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
+        S8("struct S{int __attribute__((aligned(4))) R;};unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
+        S8("void f(int R,int a[R]);unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
+        S8("typedef __typeof__(sizeof(struct{int a,R;})) T;unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
     };
     String8 rejected[] = {
         S8("enum{R=9};unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
@@ -9500,6 +9506,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_scope(UnitTestArgumen
             String8 refused_sources[] = {
                 S8("enum{A=100};int main(void){for(int i=(int)sizeof(struct{enum{A=3}e;char c[A];});i<0;i++);return 0;}"),
                 S8("int main(void){for(int i=(int)sizeof(enum{K=4});i<0;i++);return 0;}"),
+                // An array bound is part of the declarator too.
+                S8("int main(void){for(int a[sizeof(enum{K=4})],i=0;i<0;i++);return 0;}"),
             };
             for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(refused_sources); fixture += 1)
             {

@@ -22886,12 +22886,14 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             }
         }
         // A pre-C23 `for` declaration (C17 6.8.5p3, DR277) cannot declare an
-        // enumerator, and a C23 `constexpr` initializer does not publish its
+        // enumerator anywhere in its declarator (an array bound included),
+        // and a C23 `constexpr` initializer does not publish its
         // definitions yet, so its name would read an outer enumerator of the
         // same spelling. Refuse the definition instead (#3252).
         u32 initializer_enum_token = 0;
-        if ((restricted_for_declaration || is_constexpr) && suffix_end < segment_end &&
-            c_parse_range_defines_enumerator(preprocess, suffix_end + 1, segment_end, &initializer_enum_token))
+        u32 enum_range_start = restricted_for_declaration ? segment_start : suffix_end + 1;
+        if ((restricted_for_declaration || (is_constexpr && suffix_end < segment_end)) && enum_range_start < segment_end &&
+            c_parse_range_defines_enumerator(preprocess, enum_range_start, segment_end, &initializer_enum_token))
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[initializer_enum_token]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
                                restricted_for_declaration ? S8("pre-C23 for declaration may only declare automatic or register objects")
@@ -25438,9 +25440,15 @@ BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* mac
 // Scan the file-scope declarations that are not function definitions (a
 // body's own binding already refuses it) for an identifier that resolves to
 // such an enumerator at a later token, and diagnose it as undeclared, as GCC
-// and Clang do. A token is read as a use by what precedes it: a member
-// selection, a declarator after a type word or `*`, a list separator outside
-// parentheses, brackets and initializers, and a closing bracket are not.
+// and Clang do. A token is read as a use by what precedes it. These are not
+// uses: a member selection; a declarator after a type word or `*`; a name
+// after the `)` that closes an operator group such as `_Atomic(int)` or
+// `__attribute__((...))`; and a name after a list separator at depth 0 or in
+// a record body, which is a declarator. A declarator inside a parenthesised
+// list before the initializer is a parameter, so it shadows the enumerator
+// for the rest of that list (`void f(int R, int a[R]);`). The open
+// delimiters and the shadows are stacks bounded by the declaration's token
+// count, so nesting has no limit and the scan stays linear.
 BUSTER_GLOBAL_LOCAL void c_parse_diagnose_early_expression_enum_uses(CParseResult* result, Arena* arena, CPreprocessResult const* preprocess)
 {
     bool any_expression_enum = false;
@@ -25448,6 +25456,16 @@ BUSTER_GLOBAL_LOCAL void c_parse_diagnose_early_expression_enum_uses(CParseResul
     {
         any_expression_enum = result->enum_members[member_index].is_expression_defined && result->enum_members[member_index].is_published;
     }
+    u32 stack_capacity = 1;
+    for (u32 declaration_index = 0; any_expression_enum && declaration_index < result->declaration_count; declaration_index += 1)
+    {
+        u32 token_count = result->declarations[declaration_index].token_count;
+        stack_capacity = token_count >= stack_capacity ? token_count + 1 : stack_capacity;
+    }
+    TemporalArena temporary = scratch_begin(&arena, 1);
+    u32* open_tokens = any_expression_enum ? arena_allocate(temporary.arena, u32, stack_capacity) : 0;
+    u32* shadow_entities = any_expression_enum ? arena_allocate(temporary.arena, u32, stack_capacity) : 0;
+    u32* shadow_depths = any_expression_enum ? arena_allocate(temporary.arena, u32, stack_capacity) : 0;
     for (u32 declaration_index = 0; any_expression_enum && declaration_index < result->declaration_count; declaration_index += 1)
     {
         CDeclaration const* declaration = result->declarations + declaration_index;
@@ -25457,38 +25475,44 @@ BUSTER_GLOBAL_LOCAL void c_parse_diagnose_early_expression_enum_uses(CParseResul
         }
         u32 end = declaration->token_start + declaration->token_count;
         u32 depth = 0;
-        u32 group_depth = 0;
+        u32 shadow_count = 0;
+        u32 last_closed_open = UINT32_MAX;
         bool initializer_seen = false;
         for (u32 index = declaration->token_start; index < end && index < preprocess->token_count; index += 1)
         {
             CToken token = preprocess->tokens[index];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+                c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
             {
-                group_depth += 1;
-                depth += 1;
+                open_tokens[depth] = index;
+                depth += depth + 1 < stack_capacity;
             }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-            {
-                depth += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
-            {
-                group_depth -= group_depth != 0;
-                depth -= depth != 0;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                     c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
             {
                 depth -= depth != 0;
+                last_closed_open = open_tokens[depth];
+                while (shadow_count && shadow_depths[shadow_count - 1] > depth)
+                {
+                    shadow_count -= 1;
+                }
             }
             else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
             {
                 initializer_seen = true;
+            }
+            else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+            {
+                initializer_seen = false;
             }
             if (token.kind != C_TOKEN_IDENTIFIER || index == declaration->token_start)
             {
                 continue;
             }
             CToken previous = preprocess->tokens[index - 1];
+            CToken const* innermost = depth ? &preprocess->tokens[open_tokens[depth - 1]] : 0;
+            bool in_record_body = innermost && c_token_is_punctuator(innermost, C_PUNCTUATOR_LEFT_BRACE) && !initializer_seen;
+            bool in_parameter_list = innermost && c_token_is_punctuator(innermost, C_PUNCTUATOR_LEFT_PARENTHESIS) && !initializer_seen;
             bool use = false;
             if (previous.kind == C_TOKEN_IDENTIFIER)
             {
@@ -25496,7 +25520,13 @@ BUSTER_GLOBAL_LOCAL void c_parse_diagnose_early_expression_enum_uses(CParseResul
             }
             else if (c_token_is_punctuator(&previous, C_PUNCTUATOR_COMMA))
             {
-                use = group_depth || initializer_seen;
+                use = depth && !in_record_body;
+            }
+            else if (c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            {
+                use = !(last_closed_open > declaration->token_start && last_closed_open < end &&
+                        preprocess->tokens[last_closed_open - 1].kind == C_TOKEN_IDENTIFIER &&
+                        c_parse_operator_group_word(c_token_spelling(preprocess->spelling_base, preprocess->tokens[last_closed_open - 1])));
             }
             else
             {
@@ -25505,7 +25535,9 @@ BUSTER_GLOBAL_LOCAL void c_parse_diagnose_early_expression_enum_uses(CParseResul
                       !c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_BRACKET) && !c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_BRACE) &&
                       !c_token_is_punctuator(&previous, C_PUNCTUATOR_SEMICOLON);
             }
-            if (!use)
+            bool declares_parameter = !use && in_parameter_list && !c_token_is_punctuator(&previous, C_PUNCTUATOR_DOT) &&
+                                      !c_token_is_punctuator(&previous, C_PUNCTUATOR_ARROW);
+            if (!use && !declares_parameter)
             {
                 continue;
             }
@@ -25514,19 +25546,33 @@ BUSTER_GLOBAL_LOCAL void c_parse_diagnose_early_expression_enum_uses(CParseResul
                                                                .value = 0,
                                                            },
                                                            &token);
+            CEnumMember const* member = 0;
             if (entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_ENUMERATOR &&
                 result->entities[entity.value].enum_member_plus_one)
             {
-                CEnumMember const* member = result->enum_members + result->entities[entity.value].enum_member_plus_one - 1;
-                if (member->is_expression_defined && member->token_index > index)
-                {
-                    c_parse_diagnostic(result, c_preprocess_token_location(preprocess, token), C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
-                                       string_format(arena, S8("use of undeclared identifier '{S8}' (its enumerator is defined later)"),
-                                                     c_token_spelling(preprocess->spelling_base, token)));
-                }
+                member = result->enum_members + result->entities[entity.value].enum_member_plus_one - 1;
+            }
+            bool later_definition = member && member->is_expression_defined && member->token_index > index;
+            bool shadowed = false;
+            for (u32 shadow_index = 0; later_definition && use && !shadowed && shadow_index < shadow_count; shadow_index += 1)
+            {
+                shadowed = shadow_entities[shadow_index] == entity.value;
+            }
+            if (later_definition && declares_parameter && shadow_count + 1 < stack_capacity)
+            {
+                shadow_entities[shadow_count] = entity.value;
+                shadow_depths[shadow_count] = depth;
+                shadow_count += 1;
+            }
+            if (later_definition && use && !shadowed)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(preprocess, token), C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+                                   string_format(arena, S8("use of undeclared identifier '{S8}' (its enumerator is defined later)"),
+                                                 c_token_spelling(preprocess->spelling_base, token)));
             }
         }
     }
+    scratch_end(temporary);
 }
 
 BUSTER_C_INTERNAL void c_parse_bind_function_static_asserts(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
