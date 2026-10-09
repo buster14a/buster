@@ -193,6 +193,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_fixture_context(Arena* arena, 
         valid=string_equal(os_path_absolute(arena,paths[i],true),paths[i]) &&
             compiler_sampling_controller_hash(arena,paths[i],hashes[i],&status);
     }
+    resolved.admitted.protocol_sha256=plan->protocol_sha256;
     plan->valid=valid;
     valid=valid && compiler_closure_utility_controller_tools(arena,&resolved,true);
     resolved.claim_record=string_format(arena,S8("schema\tbuster-compiler-closure-utility-diagnostic-claim-v1\n"

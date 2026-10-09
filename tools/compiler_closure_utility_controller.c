@@ -810,44 +810,44 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_leg(CompilerSamplin
     bool ready=compiler_closure_utility_controller_ready(controller,resolved);
     if (ready)
     {
-    Arena* arena = controller->arena;
-    CompilerClosureUtilityPlan plan = resolved->admitted.plan;
-    // Includes ALL reset, actual trusted bootstrap, ordinary main measurement,
-    // native final inventory, complete raw copying and finalized raw hashes.
-    u64 started = os_now_microseconds();
-    String8 checkout[] = {S8("-C"), plan.source_root, S8("checkout"), S8("--quiet"), S8("--detach"), plan.candidate_revision};
-    compiler_closure_utility_controller_phase(controller, resolved, string_format(arena, S8("{S8}-reset-checkout"), leg),
-        compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(checkout)), 120000000ull);
-    String8 reset[] = {S8("-C"), plan.source_root, S8("reset"), S8("--hard"), S8("--quiet"), plan.candidate_revision};
-    compiler_closure_utility_controller_phase(controller, resolved, string_format(arena, S8("{S8}-reset-tracked-source"), leg),
-        compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(reset)), 120000000ull);
-    String8 clean[] = {S8("-C"), plan.source_root, S8("clean"), S8("-fdx")};
-    compiler_closure_utility_controller_phase(controller, resolved, string_format(arena, S8("{S8}-reset-build-cache"), leg),
-        compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(clean)), 120000000ull);
-    String8 bootstrap[] = {path_join(arena, resolved->options.trusted_root, S8("build.sh")),
-        S8("compiler_profile_qualification"), S8("--plan")};
-    compiler_closure_utility_controller_phase(controller, resolved, string_format(arena, S8("{S8}-trusted-bootstrap"), leg),
-        (SliceString8)BUSTER_ARRAY_TO_SLICE(bootstrap), 300000000ull);
-    SliceString8 compare = compiler_closure_utility_controller_compare(arena, *resolved, leg, snapshot);
-    compiler_closure_utility_controller_phase(controller, resolved, string_format(arena, S8("{S8}-ordinary-compare"), leg),
-        compare, BUSTER_CLOSURE_UTILITY_WORKER_SECONDS * 1000000ull);
-    String8 inventory_sha = {0}, export_sha = {0}, receipt_sha = {0};
-    if (controller->success) compiler_closure_utility_controller_inventory(controller, resolved, leg, inventory, &inventory_sha);
-    bool intact = compiler_closure_utility_controller_tools(arena, resolved, false);
-    // After failure only stable data copies remain permitted. Every child and
-    // destructive reset above requires a proved, unstopped ownership state.
-    bool exported = os_now_microseconds() < controller->deadline &&
-        compiler_closure_utility_controller_export(arena, *resolved, leg, totals, &export_sha, &receipt_sha);
-    controller->success = controller->success && intact && exported &&
-        !compiler_closure_utility_controller_unknown(arena, *resolved) && compiler_closure_admitting() &&
-        !compiler_sampling_controller_cancelled();
-    u64 finished = os_now_microseconds();
-    controller->success = controller->success && finished <= controller->deadline;
-    string8_list_push(arena, legs, string_format(arena,
-        S8("{S8}\t{S8}\t{u64}\t{u64}\t{u64}\tbootstrap-through-export-hashfinalization\t{S8}\t{S8}\t{S8}\t{S8}\t{S8}\n"),
-        leg, snapshot ? S8("snapshot-v1") : S8("legacy-rebuild"), started, finished, finished-started,
-        export_sha, receipt_sha, resolved->admitted.plan.native_driver_sha256, inventory_sha,
-        controller->success ? S8("complete") : S8("failed")));
+        Arena* arena = controller->arena;
+        CompilerClosureUtilityPlan plan = resolved->admitted.plan;
+        // Includes ALL reset, actual trusted bootstrap, ordinary main measurement,
+        // native final inventory, complete raw copying and finalized raw hashes.
+        u64 started = os_now_microseconds();
+        String8 checkout[] = {S8("-C"), plan.source_root, S8("checkout"), S8("--quiet"), S8("--detach"), plan.candidate_revision};
+        compiler_closure_utility_controller_phase(controller, resolved, string_format(arena, S8("{S8}-reset-checkout"), leg),
+            compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(checkout)), 120000000ull);
+        String8 reset[] = {S8("-C"), plan.source_root, S8("reset"), S8("--hard"), S8("--quiet"), plan.candidate_revision};
+        compiler_closure_utility_controller_phase(controller, resolved, string_format(arena, S8("{S8}-reset-tracked-source"), leg),
+            compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(reset)), 120000000ull);
+        String8 clean[] = {S8("-C"), plan.source_root, S8("clean"), S8("-fdx")};
+        compiler_closure_utility_controller_phase(controller, resolved, string_format(arena, S8("{S8}-reset-build-cache"), leg),
+            compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(clean)), 120000000ull);
+        String8 bootstrap[] = {path_join(arena, resolved->options.trusted_root, S8("build.sh")),
+            S8("compiler_profile_qualification"), S8("--plan")};
+        compiler_closure_utility_controller_phase(controller, resolved, string_format(arena, S8("{S8}-trusted-bootstrap"), leg),
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(bootstrap), 300000000ull);
+        SliceString8 compare = compiler_closure_utility_controller_compare(arena, *resolved, leg, snapshot);
+        compiler_closure_utility_controller_phase(controller, resolved, string_format(arena, S8("{S8}-ordinary-compare"), leg),
+            compare, BUSTER_CLOSURE_UTILITY_WORKER_SECONDS * 1000000ull);
+        String8 inventory_sha = {0}, export_sha = {0}, receipt_sha = {0};
+        if (controller->success) compiler_closure_utility_controller_inventory(controller, resolved, leg, inventory, &inventory_sha);
+        bool intact = compiler_closure_utility_controller_tools(arena, resolved, false);
+        // After failure only stable data copies remain permitted. Every child and
+        // destructive reset above requires a proved, unstopped ownership state.
+        bool exported = os_now_microseconds() < controller->deadline &&
+            compiler_closure_utility_controller_export(arena, *resolved, leg, totals, &export_sha, &receipt_sha);
+        controller->success = controller->success && intact && exported &&
+            !compiler_closure_utility_controller_unknown(arena, *resolved) && compiler_closure_admitting() &&
+            !compiler_sampling_controller_cancelled();
+        u64 finished = os_now_microseconds();
+        controller->success = controller->success && finished <= controller->deadline;
+        string8_list_push(arena, legs, string_format(arena,
+            S8("{S8}\t{S8}\t{u64}\t{u64}\t{u64}\tbootstrap-through-export-hashfinalization\t{S8}\t{S8}\t{S8}\t{S8}\t{S8}\n"),
+            leg, snapshot ? S8("snapshot-v1") : S8("legacy-rebuild"), started, finished, finished-started,
+            export_sha, receipt_sha, resolved->admitted.plan.native_driver_sha256, inventory_sha,
+            controller->success ? S8("complete") : S8("failed")));
     }
     return ready && controller->success;
 }

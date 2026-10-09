@@ -681,6 +681,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_worker_once_fixture(Are
         _exit(sent ? 0 : 7);
     }
     bool parent_won = false;
+    bool direct_child_quiet = child < 0;
     u8 ready = 0, child_won = 2;
     if (child > 1)
     {
@@ -693,6 +694,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_worker_once_fixture(Are
         parent_won = released && compiler_preparation_controller_claim_worker(arena, raced);
         bool got = released && poll(&event, 1, 5000) > 0 && read(report[0], &child_won, 1) == 1 && child_won <= 1;
         bool reaped = compiler_experiment_supervisor_fixture_reap(child, os_now_microseconds() + 5000000ull);
+        direct_child_quiet = reaped;
         result = result && got && reaped && ((parent_won ? 1u : 0u) + child_won == 1) &&
             !compiler_preparation_controller_claim_worker(arena, raced) &&
             string_equal(compiler_sampling_controller_read(arena,
@@ -704,8 +706,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_worker_once_fixture(Are
         if (report[i] >= 0) close(report[i]);
         if (release[i] >= 0) close(release[i]);
     }
-    bool quiet = began && compiler_experiment_supervisor_end_known(arena, &supervisor,
-        !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost) &&
+    bool quiet = began && compiler_experiment_supervisor_end_known(arena, &supervisor, direct_child_quiet) &&
         !supervisor.signalled && !supervisor.reaped;
     return result && quiet;
 }
