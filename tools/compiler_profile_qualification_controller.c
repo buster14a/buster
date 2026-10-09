@@ -251,6 +251,124 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_materialize(Arena* arena, 
     return result;
 }
 
+typedef struct CompilerSamplingControllerHost CompilerSamplingControllerHost;
+struct CompilerSamplingControllerHost { String8 model; u64 records; bool valid; };
+
+BUSTER_GLOBAL_LOCAL CompilerSamplingControllerHost compiler_sampling_controller_cpu_parse(String8 text)
+{
+    CompilerSamplingControllerHost result = {0};
+    bool valid = text.pointer && text.length && text.length <= 65536;
+    u64 processors[4096] = {0}, processor = 0;
+    bool have_processor = false, have_model = false, have_record = false;
+    for (u64 begin = 0; valid && begin <= text.length;)
+    {
+        u64 end = begin;
+        while (valid && end < text.length && text.pointer[end] != '\n')
+        {
+            u8 byte = text.pointer[end];
+            valid = byte == '\t' || (byte >= 32 && byte <= 126);
+            end += 1;
+        }
+        String8 line = string_slice(text, begin, end);
+        if (!line.length || begin == text.length)
+        {
+            if (have_record)
+            {
+                valid = valid && have_processor && have_model && result.records < BUSTER_ARRAY_LENGTH(processors);
+                for (u64 i = 0; valid && i < result.records; i += 1) valid = processors[i] != processor;
+                if (valid) processors[result.records++] = processor;
+            }
+            have_processor = false; have_model = false; have_record = false;
+        }
+        else if (valid)
+        {
+            have_record = true;
+            u64 colon = 0;
+            while (colon < line.length && line.pointer[colon] != ':') colon += 1;
+            valid = colon < line.length;
+            if (valid)
+            {
+                String8 key = production_profile_trim(string_slice(line, 0, colon));
+                String8 value = production_profile_trim(string_slice(line, colon + 1, line.length));
+                if (string_equal(key, S8("processor")))
+                {
+                    valid = !have_processor && compiler_sampling_admission_decimal(value, &processor) && processor <= 65535;
+                    have_processor = true;
+                }
+                else if (string_equal(key, S8("model name")))
+                {
+                    valid = !have_model && value.length && value.length <= 128;
+                    for (u64 i = 0; valid && i < value.length; i += 1)
+                    {
+                        valid = value.pointer[i] >= 32 && value.pointer[i] <= 126 && value.pointer[i] != '"' && value.pointer[i] != '\\';
+                    }
+                    valid = valid && string_equal(value, S8("AMD Ryzen 7 9700X 8-Core Processor")) &&
+                        (!result.model.length || string_equal(result.model, value));
+                    if (valid) result.model = value;
+                    have_model = true;
+                }
+            }
+        }
+        if (end == text.length)
+        {
+            if (have_record)
+            {
+                valid = valid && have_processor && have_model && result.records < BUSTER_ARRAY_LENGTH(processors);
+                for (u64 i = 0; valid && i < result.records; i += 1) valid = processors[i] != processor;
+                if (valid) processors[result.records++] = processor;
+            }
+            begin = text.length + 1;
+        }
+        else begin = end + 1;
+    }
+    result.valid = valid && result.records && result.model.length;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerSamplingControllerHost compiler_sampling_controller_observed_host(Arena* arena)
+{
+    CompilerSamplingControllerHost result = {0};
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    int descriptor = open("/proc/cpuinfo", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    char8* bytes = arena_allocate(arena, char8, 65537);
+    u64 used = 0;
+    bool valid = descriptor >= 0, eof = false;
+    while (valid && !eof)
+    {
+        ssize_t count = read(descriptor, bytes + used, 65537 - used);
+        if (count > 0)
+        {
+            used += (u64)count;
+            valid = used <= 65536;
+        }
+        else if (!count) eof = true;
+        else valid = errno == EINTR;
+    }
+    if (descriptor >= 0) valid = close(descriptor) == 0 && valid;
+    if (valid && eof) result = compiler_sampling_controller_cpu_parse((String8){bytes, used});
+#else
+    BUSTER_UNUSED(arena);
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_host_receipt(Arena* arena, String8 evidence,
+    CompilerSamplingControllerHost host, CompilerSamplingControllerOptions resolved)
+{
+    String8 text = string_format(arena,
+        S8("{{\"schema\":\"buster-main-sampling-host-v1\",\"state\":\"complete\",\"cpu_model\":\"{S8}\","
+           "\"logical_processor_records\":{u64},\"observed_from\":\"/proc/cpuinfo\",\"request_head\":\"{S8}\","
+           "\"run_id\":\"{S8}\",\"run_attempt\":\"1\",\"request_run_id\":\"{S8}\","
+           "\"measurement_trusted_revision\":\"{S8}\",\"policy_trusted_revision\":\"{S8}\","
+           "\"freeze_sha256\":\"{S8}\",\"acquisition_campaign\":\"{S8}\",\"protocol_sha256\":\"{S8}\"\n}\n"),
+        host.model, host.records, resolved.packet.head, compiler_sampling_controller_fact(resolved.facts_text, S8("executor_run_id")),
+        compiler_sampling_controller_fact(resolved.facts_text, S8("request_run_id")), resolved.admitted.trusted_revision,
+        compiler_sampling_controller_fact(resolved.facts_text, S8("trusted_revision")),
+        resolved.admitted.freeze_sha256, resolved.acquisition_sha256, resolved.admitted.protocol_sha256);
+    bool result = host.valid && file_write(path_join(arena, evidence, S8("host.json")), BUSTER_SLICE_TO_BYTE_SLICE(text));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_flush(CompilerSamplingController* controller)
 {
     String8 text = string_join_arena(controller->arena, string8_list_to_slice(controller->arena, controller->phases), false);
@@ -512,6 +630,11 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_resolve(Arena* arena, Comp
         !compiler_sampling_path_overlap(store, trusted) && !compiler_sampling_path_overlap(result.plan.source_root, trusted) &&
         compiler_sampling_acquisition_path_within(evidence, cleanup) &&
         generate_path_kind(arena, evidence) == GENERATE_PATH_MISSING &&
+        string_equal(os_path_absolute(arena, path_parent(arena, evidence), true), path_parent(arena, evidence)) &&
+        (generate_path_kind(arena, ledger) == GENERATE_PATH_MISSING || string_equal(os_path_absolute(arena, ledger, true), ledger)) &&
+        (acquire || (string_equal(os_path_absolute(arena, result.plan.source_root, true), result.plan.source_root) &&
+            string_equal(os_path_absolute(arena, path_join(arena, path_join(arena, store, result.acquisition_sha256), S8("prepared")), true),
+                path_join(arena, path_join(arena, store, result.acquisition_sha256), S8("prepared"))))) &&
         (!transport.present || generate_path_kind(arena, admission_directory) == GENERATE_PATH_MISSING) &&
         (!options.phase.length || string_equal(options.phase, result.admitted.phase)) &&
         (!options.packet_text.length || string_equal(options.packet_text, string_format(arena, S8("{u64}"), result.admitted.packet)));
@@ -565,7 +688,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_controller_execute(Arena* ar
     String8 plan_sha = resolved.acquisition_sha256;
     String8 admission_directory = string_format(arena, S8("{S8}.admission"), evidence);
     SliceString8 child_keys = {0}, child_values = {0};
-    valid = valid && compiler_sampling_owned_environment(arena, &child_keys, &child_values) && compiler_sampling_observed_host(arena);
+    CompilerSamplingControllerHost observed = compiler_sampling_controller_observed_host(arena);
+    valid = valid && compiler_sampling_owned_environment(arena, &child_keys, &child_values) && observed.valid;
     controller.evidence = evidence;
     controller.acquisition_sha256 = plan_sha;
     controller.prepared = path_join(arena, path_join(arena, store, plan_sha), S8("prepared"));
@@ -580,7 +704,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_controller_execute(Arena* ar
         OsDirectoryCreateResult created = valid ? os_make_directory_exclusive(evidence) : (OsDirectoryCreateResult){0};
         valid = valid && created.created && !created.error.v;
         String8 claim = compiler_sampling_claim_record(arena, controller.packet);
-        valid = valid && file_write(path_join(arena, evidence, S8("claim.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(claim));
+        valid = valid && file_write(path_join(arena, evidence, S8("claim.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(claim)) &&
+            compiler_sampling_controller_host_receipt(arena, evidence, observed, resolved);
     }
     controller.success = valid;
     if (controller.claimed)
@@ -689,6 +814,22 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_self_test(Arena* arena)
     bool result = arguments.length == 11 && string_equal(arguments.pointer[0], S8("git")) &&
         string_equal(arguments.pointer[2], S8("gc.auto=0")) && string_equal(arguments.pointer[4], S8("maintenance.auto=false")) &&
         string_equal(arguments.pointer[6], S8("core.hooksPath=/dev/null")) && string_equal(arguments.pointer[10], S8("HEAD"));
+    String8 cpu = S8("processor\t: 0\nmodel name\t: AMD Ryzen 7 9700X 8-Core Processor\n\n"
+        "processor\t: 1\nmodel name\t: AMD Ryzen 7 9700X 8-Core Processor\n\n");
+    CompilerSamplingControllerHost host = compiler_sampling_controller_cpu_parse(cpu);
+    result = result && host.valid && host.records == 2 &&
+        string_equal(host.model, S8("AMD Ryzen 7 9700X 8-Core Processor"));
+    String8 bad_cpu[] = {S8("processor: 0\n\n"),
+        S8("model name: AMD Ryzen 7 9700X 8-Core Processor\n\n"),
+        S8("processor: 0\nmodel name: AMD Ryzen 7 9700X 8-Core Processor\n\nprocessor: 1\nmodel name: other CPU\n\n"),
+        S8("processor: 0\nmodel name: AMD Ryzen 7 9700X 8-Core Processor\"\n\n"),
+        S8("processor: 0\nmodel name: AMD Ryzen 7 9700X 8-Core Processor\\\n\n"),
+        S8("processor: 0\nmodel name: AMD Ryzen 7 9700X 8-Core Processor\r\n\n"),
+        S8("processor: 0\nmodel name: AMD Ryzen 7 9700X 8-Core Processor\n\nprocessor: 0\nmodel name: AMD Ryzen 7 9700X 8-Core Processor\n\n")};
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(bad_cpu); i += 1)
+    {
+        result = result && !compiler_sampling_controller_cpu_parse(bad_cpu[i]).valid;
+    }
     String8 decoded = {0};
     result = result && compiler_sampling_controller_base64(arena, S8("eAo="), false, &decoded) &&
         string_equal(decoded, S8("x\n")) && compiler_sampling_controller_base64(arena, S8(""), true, &decoded) &&
