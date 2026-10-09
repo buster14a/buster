@@ -937,6 +937,177 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_calls_and_wide_switch(
     return result;
 }
 
+// Nested parenthesized logical chains (issue #2522). Each parenthesis level
+// used to re-enter the logical-value, condition, leaf and expression-core
+// lowerings, and every re-entry kept range-sized scratch for the whole
+// statement, so a chain about 1,670 levels deep exhausted the temporary arena
+// and aborted. The condition walk now unwraps a group whose root operator is
+// && or ||, and the chain becomes tasks of one frame.
+typedef enum CTestLogicalChainShape
+{
+    C_TEST_LOGICAL_CHAIN_RIGHT_OR,
+    C_TEST_LOGICAL_CHAIN_RIGHT_AND,
+    C_TEST_LOGICAL_CHAIN_LEFT_OR,
+    C_TEST_LOGICAL_CHAIN_LEFT_AND,
+    C_TEST_LOGICAL_CHAIN_RIGHT_ALTERNATING,
+    // !(f || !(f || ... !(f || f))): every level negates the chain inside it.
+    C_TEST_LOGICAL_CHAIN_RIGHT_NEGATED,
+    C_TEST_LOGICAL_CHAIN_SHAPE_COUNT,
+} CTestLogicalChainShape;
+
+// Whether level `level` of a chain joins its operands with ||. Alternating
+// chains use || on even levels and && on odd ones.
+BUSTER_GLOBAL_LOCAL bool c_test_logical_chain_level_is_or(CTestLogicalChainShape shape, u32 level)
+{
+    return shape == C_TEST_LOGICAL_CHAIN_RIGHT_OR || shape == C_TEST_LOGICAL_CHAIN_LEFT_OR || shape == C_TEST_LOGICAL_CHAIN_RIGHT_NEGATED ||
+           (shape == C_TEST_LOGICAL_CHAIN_RIGHT_ALTERNATING && (level & 1) == 0);
+}
+
+// Every operand of a chain built by c_test_append_logical_chain but the last
+// lets the chain continue, so each of the depth + 1 operands runs exactly once
+// and the last one decides the value. It is true except for an && chain.
+BUSTER_GLOBAL_LOCAL bool c_test_logical_chain_last_is_true(CTestLogicalChainShape shape)
+{
+    return shape != C_TEST_LOGICAL_CHAIN_RIGHT_AND && shape != C_TEST_LOGICAL_CHAIN_LEFT_AND;
+}
+
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL u32 c_test_logical_chain_value(CTestLogicalChainShape shape, u32 depth)
+{
+    return c_test_logical_chain_last_is_true(shape) != (shape == C_TEST_LOGICAL_CHAIN_RIGHT_NEGATED && (depth & 1) != 0);
+}
+#endif
+
+// Append a `depth`-level parenthesized chain whose operands are calls of f0
+// (false) and f1 (true). Right-nested: (f OP (f OP (... f))). Left-nested:
+// ((((f OP f) OP f) ...) OP f).
+BUSTER_GLOBAL_LOCAL void c_test_append_logical_chain(char8* destination, u64 capacity, u64* length, CTestLogicalChainShape shape, u32 depth)
+{
+    bool left = shape == C_TEST_LOGICAL_CHAIN_LEFT_OR || shape == C_TEST_LOGICAL_CHAIN_LEFT_AND;
+    bool or_chain = c_test_logical_chain_level_is_or(shape, 0);
+    // The operand that keeps the chain going, and the one that ends it.
+    String8 continue_operand = or_chain ? S8("f0()") : S8("f1()");
+    String8 last_operand = c_test_logical_chain_last_is_true(shape) ? S8("f1()") : S8("f0()");
+    if (left)
+    {
+        for (u32 level = 0; level < depth; level += 1)
+        {
+            c_test_append_source(destination, capacity, length, S8("("));
+        }
+        c_test_append_source(destination, capacity, length, continue_operand);
+        for (u32 level = 0; level < depth; level += 1)
+        {
+            c_test_append_source(destination, capacity, length, or_chain ? S8(" || ") : S8(" && "));
+            c_test_append_source(destination, capacity, length, level + 1 == depth ? last_operand : continue_operand);
+            c_test_append_source(destination, capacity, length, S8(")"));
+        }
+    }
+    else
+    {
+        for (u32 level = 0; level < depth; level += 1)
+        {
+            bool level_is_or = c_test_logical_chain_level_is_or(shape, level);
+            c_test_append_source(destination, capacity, length, shape == C_TEST_LOGICAL_CHAIN_RIGHT_NEGATED ? S8("!(") : S8("("));
+            c_test_append_source(destination, capacity, length, level_is_or ? S8("f0() || ") : S8("f1() && "));
+        }
+        c_test_append_source(destination, capacity, length, last_operand);
+        for (u32 level = 0; level < depth; level += 1)
+        {
+            c_test_append_source(destination, capacity, length, S8(")"));
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_parenthesized_logical_chains(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // 1,700 is just past the depth at which the pre-fix scratch growth aborted
+    // (1,670); 4,096 matches the nested-call fixture.
+    u32 depths[] = {1700, 4096};
+    String8 prefix = S8("int f0(void);\nint f1(void);\nint tall(int i)\n{\n    int x = ");
+    String8 middle = S8(";\n    if (");
+    String8 last = S8(") x += i;\n    return !");
+    String8 suffix = S8(";\n}\n");
+    for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+    {
+        for (u32 shape = 0; shape < C_TEST_LOGICAL_CHAIN_SHAPE_COUNT; shape += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u32 depth = depths[depth_index];
+            // Three chains of at most 13 bytes per level, plus the wrapper.
+            u64 source_capacity = prefix.length + middle.length + last.length + suffix.length + 3 * (u64)(depth + 1) * 13 + 16;
+            char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+            u64 source_length = 0;
+            c_test_append_source(source_bytes, source_capacity, &source_length, prefix);
+            c_test_append_logical_chain(source_bytes, source_capacity, &source_length, (CTestLogicalChainShape)shape, depth);
+            c_test_append_source(source_bytes, source_capacity, &source_length, middle);
+            c_test_append_logical_chain(source_bytes, source_capacity, &source_length, (CTestLogicalChainShape)shape, depth);
+            c_test_append_source(source_bytes, source_capacity, &source_length, last);
+            c_test_append_logical_chain(source_bytes, source_capacity, &source_length, (CTestLogicalChainShape)shape, depth);
+            c_test_append_source(source_bytes, source_capacity, &source_length, suffix);
+            CPreprocessResult preprocess = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, (String8){.pointer = source_bytes, .length = source_length},
+                                                         S8("parenthesized-logical-chain.c"), target_native, &preprocess, &parse);
+            BUSTER_TEST_RAW(arguments, lowered.canonical_ir_certified,
+                            string_format(temporary.arena, S8("shape {u32} depth {u32} not certified"), shape, depth));
+            BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0,
+                            string_format(temporary.arena, S8("shape {u32} depth {u32} reported diagnostics"), shape, depth));
+            if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                BUSTER_TEST(arguments, lowered.program->rejected_function_count == 0);
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+// Logical operands nested under another operator -- `c + (c || (c + ...))`, a
+// cast, a comma, a doubled `!` -- still nest one expression lowering per level
+// and keep its stacks until the statement ends. Whether such a source lowers
+// or is refused, the compiler must answer with a result and a positioned
+// diagnostic, never with an internal arena validation abort (#2522).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_logical_operands_never_abort(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 openings[] = {S8("c + (c || "), S8("c + (c && "), S8("(int)(c || "), S8("(c, (c || "), S8("!!(c || "), S8("-(c || "), S8("(x = (c || ")};
+    String8 closings[] = {S8(")"), S8(")"), S8(")"), S8("))"), S8(")"), S8(")"), S8("))")};
+    u32 depths[] = {1700, 4096};
+    String8 prefix = S8("int tall(int c)\n{\n    int x = 0;\n    return ");
+    String8 suffix = S8(";\n}\n");
+    for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+    {
+        for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(openings); shape += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u32 depth = depths[depth_index];
+            u64 source_capacity = prefix.length + suffix.length + (u64)depth * (openings[shape].length + closings[shape].length) + 2;
+            char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+            u64 source_length = 0;
+            c_test_append_source(source_bytes, source_capacity, &source_length, prefix);
+            for (u32 level = 0; level < depth; level += 1)
+            {
+                c_test_append_source(source_bytes, source_capacity, &source_length, openings[shape]);
+            }
+            c_test_append_source(source_bytes, source_capacity, &source_length, S8("c"));
+            for (u32 level = 0; level < depth; level += 1)
+            {
+                c_test_append_source(source_bytes, source_capacity, &source_length, closings[shape]);
+            }
+            c_test_append_source(source_bytes, source_capacity, &source_length, suffix);
+            CPreprocessResult preprocess = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, (String8){.pointer = source_bytes, .length = source_length},
+                                                         S8("nested-logical-operands.c"), target_native, &preprocess, &parse);
+            BUSTER_TEST_RAW(arguments, lowered.canonical_ir_certified || lowered.diagnostic_count > 0,
+                            string_format(temporary.arena, S8("shape {u32} depth {u32} neither lowered nor diagnosed"), shape, depth));
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // A flat call lowers its arguments one re-entry at a time. Each re-entry used
 // to re-split the whole argument list and re-resolve the callee, so an
 // N-argument call cost N^2 token visits and, before its scratch was released,
@@ -12540,6 +12711,137 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program(UnitTestArgument
     BUSTER_UNUSED(arguments);
     BUSTER_UNUSED(label);
     BUSTER_UNUSED(program);
+#endif
+    return result;
+}
+
+// Short-circuit order and exactly-once evaluation through parenthesized
+// logical groups. Every operand records its id in `sig`, one decimal digit per
+// evaluation, so a skipped, repeated or reordered operand changes the number.
+// The groups that must stay groups -- a root comma, an assignment, ?: -- sit
+// beside the chains that are unwrapped.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_logical_chain_order_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 order_text = S8(
+        "static long sig;\n"
+        "static int fail;\n"
+        "static int t(int id, int value) { sig = sig * 10 + id; return value; }\n"
+        "static int ident(int value) { return value; }\n"
+        "static void check(int number, long got, long want, long want_sig)\n"
+        "{\n"
+        "    if (!fail && (got != want || sig != want_sig)) fail = number;\n"
+        "    sig = 0;\n"
+        "}\n"
+        "static int right_or(void) { return (t(1, 0) || (t(2, 0) || (t(3, 1) || t(4, 0)))); }\n"
+        "static int right_and(void) { return (t(1, 1) && (t(2, 1) && (t(3, 0) && t(4, 1)))); }\n"
+        "static int left_or(void) { return (((t(1, 0) || t(2, 0)) || t(3, 1)) || t(4, 1)); }\n"
+        "static int left_and(void) { return (((t(1, 1) && t(2, 1)) && t(3, 0)) && t(4, 1)); }\n"
+        "static int mixed_one(void) { return (t(1, 0) || (t(2, 1) && (t(3, 0) || t(4, 1)))); }\n"
+        "static int mixed_two(void) { return (t(1, 1) && (t(2, 0) || (t(3, 0) && t(4, 1)))); }\n"
+        "static int mixed_three(void) { return ((t(1, 0) && t(2, 1)) || (t(3, 1) && (t(4, 1) || t(5, 1)))); }\n"
+        "static int negated_one(void) { return !(t(1, 0) || (t(2, 1) && t(3, 0))); }\n"
+        "static int negated_two(void) { return !(t(1, 1) || (t(2, 1) && t(3, 0))); }\n"
+        "static int negated_three(void) { return !(t(1, 0) || !(t(2, 1) && (t(3, 0) || t(4, 1)))); }\n"
+        "static int in_if(int which) { if ((t(1, 0) || (t(2, which) && (t(3, 1) || t(4, 1))))) return 10; return 20; }\n"
+        "static int in_while(void)\n"
+        "{\n"
+        "    int n = 0;\n"
+        "    while ((t(1, n < 3) && (t(2, 1) || t(3, 1)))) n += 1;\n"
+        "    return n;\n"
+        "}\n"
+        "static int in_for(void)\n"
+        "{\n"
+        "    int n;\n"
+        "    for (n = 0; (t(1, n < 2) || (t(2, 0) && t(3, 1))); n += 1) {}\n"
+        "    return n;\n"
+        "}\n"
+        "static int in_assign(void)\n"
+        "{\n"
+        "    int x = (t(1, 0) || (t(2, 0) || t(3, 5)));\n"
+        "    int y;\n"
+        "    y = (t(4, 1) && (t(5, 0) && t(6, 1)));\n"
+        "    return x * 10 + y;\n"
+        "}\n"
+        "static int group_assignment(void) { int x = 7; if ((x = t(1, 0) || t(2, 5)) && t(3, 1)) return x; return -1; }\n"
+        "static int group_comma(void) { return (t(1, 0) || (t(2, 1), t(3, 0) || t(4, 0))); }\n"
+        "static int group_conditional(void) { return (t(1, 0) || (t(2, 1) ? t(3, 0) : t(4, 1))); }\n"
+        "static int conditional_first(void) { return ((t(1, 1) ? t(2, 1) : t(3, 0)) && t(4, 1)); }\n"
+        "static int in_call(void) { return (t(1, 0) || (ident(t(2, 1)) && t(3, 1))); }\n"
+        "static int in_hint(void) { if (__builtin_expect((t(1, 0) || (t(2, 1) && t(3, 1))), 1)) return 1; return 0; }\n"
+        "static int in_increment(void)\n"
+        "{\n"
+        "    int k = 0;\n"
+        "    int r = ((k++ ? t(1, 1) : t(2, 0)) || (t(3, 0) || (k++ ? t(4, 1) : t(5, 0))));\n"
+        "    return r * 10 + k;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    check(1, right_or(), 1, 123);\n"
+        "    check(2, right_and(), 0, 123);\n"
+        "    check(3, left_or(), 1, 123);\n"
+        "    check(4, left_and(), 0, 123);\n"
+        "    check(5, mixed_one(), 1, 1234);\n"
+        "    check(6, mixed_two(), 0, 123);\n"
+        "    check(7, mixed_three(), 1, 134);\n"
+        "    check(8, negated_one(), 1, 123);\n"
+        "    check(9, negated_two(), 0, 1);\n"
+        "    check(10, negated_three(), 1, 1234);\n"
+        "    check(11, in_if(1), 10, 123);\n"
+        "    check(12, in_if(0), 20, 12);\n"
+        "    check(13, in_while(), 3, 1212121);\n"
+        "    check(14, in_for(), 2, 1112);\n"
+        "    check(15, in_assign(), 10, 12345);\n"
+        "    check(16, group_assignment(), 1, 123);\n"
+        "    check(17, group_comma(), 0, 1234);\n"
+        "    check(18, group_conditional(), 0, 123);\n"
+        "    check(19, conditional_first(), 1, 124);\n"
+        "    check(20, in_call(), 1, 123);\n"
+        "    check(21, in_hint(), 1, 123);\n"
+        "    check(22, in_increment(), 12, 234);\n"
+        "    return fail;\n"
+        "}\n");
+    UnitTestResult order = c_test_run_exit_zero_program(arguments, S8("logical-chain-order"), order_text);
+    result.test_count += order.test_count;
+    result.succeeded_test_count += order.succeeded_test_count;
+    // A deep chain runs every operand exactly once: f0 and f1 count their
+    // calls, and each chain must finish after depth + 1 of them.
+    u32 depth = 1700;
+    String8 deep_prefix = S8("static long count;\nstatic int f0(void) { count += 1; return 0; }\nstatic int f1(void) { count += 1; return 1; }\n");
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u64 source_capacity = deep_prefix.length + (u64)C_TEST_LOGICAL_CHAIN_SHAPE_COUNT * ((u64)(depth + 1) * 13 + 128) + 1024;
+    char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+    u64 source_length = 0;
+    c_test_append_source(source_bytes, source_capacity, &source_length, deep_prefix);
+    for (u32 shape = 0; shape < C_TEST_LOGICAL_CHAIN_SHAPE_COUNT; shape += 1)
+    {
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("static int chain_"));
+        c_test_append_u32(source_bytes, source_capacity, &source_length, shape);
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("(void) { return "));
+        c_test_append_logical_chain(source_bytes, source_capacity, &source_length, (CTestLogicalChainShape)shape, depth);
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("; }\n"));
+    }
+    c_test_append_source(source_bytes, source_capacity, &source_length, S8("int main(void)\n{\n"));
+    for (u32 shape = 0; shape < C_TEST_LOGICAL_CHAIN_SHAPE_COUNT; shape += 1)
+    {
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("    count = 0;\n    if (chain_"));
+        c_test_append_u32(source_bytes, source_capacity, &source_length, shape);
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("() != "));
+        c_test_append_u32(source_bytes, source_capacity, &source_length, c_test_logical_chain_value((CTestLogicalChainShape)shape, depth));
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8(" || count != "));
+        c_test_append_u32(source_bytes, source_capacity, &source_length, depth + 1);
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8(") return "));
+        c_test_append_u32(source_bytes, source_capacity, &source_length, shape + 1);
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8(";\n"));
+    }
+    c_test_append_source(source_bytes, source_capacity, &source_length, S8("    return 0;\n}\n"));
+    UnitTestResult deep = c_test_run_exit_zero_program(arguments, S8("logical-chain-deep"), (String8){.pointer = source_bytes, .length = source_length});
+    result.test_count += deep.test_count;
+    result.succeeded_test_count += deep.succeeded_test_count;
+    c_test_scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
 #endif
     return result;
 }
@@ -57292,6 +57594,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_lowering_flat_call_arguments);
     C_TEST_FIXTURE(arguments, c_test_lowering_nested_call_arguments);
     C_TEST_FIXTURE(arguments, c_test_lowering_nested_conditional_sizeof_memo);
+    C_TEST_FIXTURE(arguments, c_test_lowering_nested_logical_operands_never_abort);
+    C_TEST_FIXTURE(arguments, c_test_lowering_parenthesized_logical_chains);
     C_TEST_FIXTURE(arguments, c_test_macro_plain_production);
     C_TEST_FIXTURE(arguments, c_test_macro_stringify_backslashes);
     C_TEST_FIXTURE(arguments, c_test_macro_task_batches);
@@ -57340,6 +57644,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_parenthesized_address_place_assignment);
     C_TEST_FIXTURE(arguments, c_test_parenthesized_bit_field_assignment_values);
     C_TEST_FIXTURE(arguments, c_test_parenthesized_function_declarations);
+    C_TEST_FIXTURE(arguments, c_test_parenthesized_logical_chain_order_runtime);
     C_TEST_FIXTURE(arguments, c_test_parenthesized_typedef_parameters);
     C_TEST_FIXTURE(arguments, c_test_parse_storage_growth);
     C_TEST_FIXTURE(arguments, c_test_parser_body_frame_storage);
