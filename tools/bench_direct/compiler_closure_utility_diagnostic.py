@@ -92,62 +92,69 @@ def compare(args, cpuinfo, cpu_model):
     check_root(root)
     output_directory(output, True)
     baseline, candidate = binary(pathlib.Path(args.baseline)), binary(pathlib.Path(args.candidate))
-    base_receipt = {"commit": (root / ".git/HEAD").read_text().strip()}
-    if len(base_receipt["commit"]) != 40:
+    revision = (root / ".git/HEAD").read_text().strip()
+    if len(revision) != 40 or any(character not in "0123456789abcdef" for character in revision):
         raise ValueError("diagnostic ordinary source must be detached")
-    config = {"command": preparation.WORKLOAD_COMMAND, "repo_root": str(root), "cpu": 2, "perf": "perf",
-              "pairs": None, "target_minutes": 10.0, "warmups": 1, "seed": 20261003,
-              "profile_steps": [], "sudo": False, "require_identical_output": args.require_identical_output,
-              "extra": [], "canonical_inline_pair": False, "extra_by_variant": {"a": [], "b": []},
+    config = {"command": _lab.shell_join(["IDE"] + _lab.DEFAULT_COMPILE + ["-o", "OUT"]),
+              "repo_root": str(root), "cpu": 2, "perf": "perf", "pairs": None, "target_minutes": 10.0,
+              "warmups": 1, "seed": 20261003, "profile_steps": [], "sudo": False,
+              "require_identical_output": args.require_identical_output, "extra": [],
+              "canonical_inline_pair": False, "extra_by_variant": {"a": [], "b": []},
               "fresh_copy": True, "min_effect_percent": 0.5}
-    reason = ("--target-minutes 10: 0.000000040 s per pair (median of 2 pilot pairs), 0.0 min elapsed, "
-              "profile steps about 0 compile-equivalents (0.0 min) -> 16 pairs "
-              "(clamped to 10..1000, whole ABBA blocks)")
+    reason = ("--target-minutes 10: fixed hosted diagnostic population of 16 pairs; "
+              "no hardware measurement or adaptive performance qualification")
     plan = {"pairs": PAIRS, "order": "ABBA", "fresh_copy": True, "reason": reason}
     variants = {side: {"role": role, "ide": item["path"], "sha256": item["sha256"], "size_bytes": item["bytes"]}
                 for side, role, item in zip(("a", "b"), ("baseline", "candidate"), (baseline, candidate))}
-    raw = {"version": 1, "mode": "compare", "config": config, "plan": plan,
-           "variants": variants, "steps": {name: {"status": "ok"} for name in ("env", "prepare", "timed")}}
-    pairs, grouped = [], []
+    unavailable = "fixed diagnostic provider did not collect hardware counters or compiler phase metrics"
+    phase_metrics = {"enabled": False, "reason": unavailable}
+    raw = {"version": 1, "mode": "compare", "config": config, "plan": plan, "variants": variants,
+           "phase_metrics": phase_metrics, "outputs_identical": True,
+           "steps": {name: {"status": "ok", "note": "fixed diagnostic data", "elapsed_s": 0.0}
+                     for name in ("env", "prepare", "timed")}}
+    (output / "pairs").mkdir()
+    pairs = []
     ratio = 1.0 if args.require_identical_output else 1.021
     for index in range(1, PAIRS + 1):
-        order = "AB" if index % 2 else "BA"
-        spans = {"a": 2e-8, "b": 2e-8 * ratio}
+        order = _lab.abba_order(index)
         for side in order.lower():
-            pairs.append(dict(pair=index, order=order, variant=side, exit=0, identical=True,
-                              span_s=spans[side], **DIAGNOSTIC))
-        grouped.append({"pair": index, "order": order,
-                        "metrics_a": {"wall": spans["a"]}, "metrics_b": {"wall": spans["b"]}})
-    wall = _lab.compare_series([(item["metrics_a"]["wall"], item["metrics_b"]["wall"]) for item in grouped],
-                               "s", "lower", 20261003, time_metric=True, floor=0.005)
-    summary = {"schema": compiler_receipt.LAB_SCHEMA, "command": preparation.WORKLOAD_COMMAND, "repo_root": str(root),
-               "cpu": 2, "host": {"cpu_model": cpu_model, "git_revision": base_receipt["commit"], **DIAGNOSTIC},
-               "steps": {"env": "ok", "prepare": "ok", "timed": "ok"},
-               "plan": dict(plan, seed=20261003, confidence=0.95, bootstrap_resamples=2000, complete_pairs=PAIRS),
-               "verdict": dict(wall, metric="wall", min_effect_percent=0.5), "metrics": {"wall": wall},
-               "checks": _lab.compare_checks(grouped), "warnings": [], "outputs_identical": True}
-    for role, identity in zip(("baseline", "candidate"), (baseline, candidate)):
-        summary[role] = {"sha256": identity["sha256"], "runs": PAIRS, "failed": 0,
-                         "deterministic": True, "identical_runs": PAIRS}
-    write_json(output / "compare.json", raw)
-    write_json(output / "summary.json", summary)
-    (output / "pairs.json").write_bytes(encode(pairs))
-    (output / "pairs").mkdir()
-    for item in pairs:
-        stem = output / "pairs" / f"{item['pair']:04}-{item['variant']}"
-        stem.with_suffix(".csv").write_text("metric,value\nwall," + str(item["span_s"]) + "\n")
-        stem.with_suffix(".ccmetrics").write_text("diagnostic_fixture=1\nwall=" + str(item["span_s"]) + "\n")
-        stem.with_suffix(".log").write_text("fixed diagnostic data; no compiler measurement\n")
-        stem.with_suffix(".err").write_bytes(b"")
+            span = 2e-8 * (ratio if side == "b" else 1.0)
+            pairs.append({"pair": index, "order": order, "variant": side, "exit": 0, "identical": True,
+                          "span_s": span, "maxrss_bytes": None, "harness_rss_bytes": None,
+                          "wrapper_rss_bytes": None, "cpu_s": None, "counters": False, **DIAGNOSTIC})
+            stem = output / "pairs" / f"{index:04d}-{side}"
+            # Genuine absence is NA in the production parser, not an invented
+            # counter/phase zero. The fixed span is explicitly diagnostic.
+            stem.with_suffix(".csv").write_bytes(b"")
+            stem.with_suffix(".ccmetrics").write_bytes(b"")
+            stem.with_suffix(".log").write_text("fixed diagnostic data; no compiler measurement\n")
+            stem.with_suffix(".err").write_bytes(b"")
     for side in ("a", "b"):
         directory = output / side
         directory.mkdir()
         (directory / "env").mkdir()
+        write_json(directory / "env" / "env.json", {"cpu_model": cpu_model, "git_revision": revision,
+                                                     "git_dirty_files": []})
+        # This is retained data only; no lscpu subprocess is launched.
+        (directory / "env" / "lscpu.txt").write_text("diagnostic CPU source: /proc/cpuinfo\n" + cpuinfo)
         (directory / "env" / "cpuinfo.txt").write_text(cpuinfo)
-        write_json(directory / "env" / "env.json", {"host": {"cpu_model": cpu_model}, "diagnostic_fixture": True})
-        write_json(directory / "lab.json", {"version": 1, "role": variants[side]["role"], "variant": variants[side]})
-        (directory / "stdout.log").write_text("fixed diagnostic data; no compiler measurement\n")
-        (directory / "stderr.log").write_bytes(b"")
+        variant = variants[side]
+        own_config = {"command": _lab.shell_join([variant["ide"]] + _lab.DEFAULT_COMPILE + ["-o", "OUT"]),
+                      "cpu": 2, "perf": "perf", "repo_root": str(root), "ide": variant["ide"],
+                      "role": variant["role"], "extra": [], "fresh_copy": True}
+        write_json(directory / "lab.json", {"version": 1, "config": own_config,
+            "capabilities": {"perf_stat": {"usable": False, "reason": unavailable},
+                             "metrics_out": False, "metrics_out_measured": False, "source_metrics": False,
+                             "wrapper_rss_bytes": None},
+            "collection": {"metrics_out": False}})
+        for name in ("commands.log", "wrapper-rss.log", "source-run.log", "metrics-probe.log", "warmup-0.log"):
+            (directory / name).write_text("fixed diagnostic data; no measurement command was launched\n")
+    write_json(output / "compare.json", raw)
+    (output / "pairs.json").write_bytes(encode(pairs))
+    # This trusted production formatter reads data only here: no references or
+    # profile captures exist, so it launches no process. It computes every
+    # metric, availability fact, label, warning and inference from the raw data.
+    write_json(output / "summary.json", _lab.compare_summary(str(output)))
 
 
 def corpus(args, cpuinfo, cpu_model):
@@ -157,46 +164,139 @@ def corpus(args, cpuinfo, cpu_model):
     baseline, candidate = binary(pathlib.Path(args.baseline)), binary(pathlib.Path(args.candidate))
     profile = compiler_receipt.THROUGHPUT_PROFILE
     jobs = [(name, mode) for name in profile["workloads"] for mode in profile["modes"]]
-    comparisons = [{"name": name + "/" + mode, "medians": {},
-                    "tests": [{"metric": metric, "round": number, "median_ratio": 1.0, "regression": False}
-                              for metric in ("wall_seconds", "peak_rss_bytes") for number in range(2)],
-                    "decision": "no substantial regression detected"} for name, mode in jobs]
-    summary = {"schema": 2, "guard_enabled": True, "comparisons": comparisons, "confirmed_regressions": 0,
-               "inconclusive_cases": 0, "valid": True}
-    metadata = {"schema": 2, "profile": "ci", "pairs_per_round": 20, "rounds": 2, "warmups": 2, "cpu": 2,
-                "workloads": list(profile["workloads"]), "host": {"cpu_model": cpu_model, **DIAGNOSTIC},
-                "compiler_provenance": [dict(item, revision_label=revision)
-                    for item, revision in zip((baseline, candidate), (args.baseline_id, args.candidate_id))]}
-    write_json(output / "summary.json", summary)
-    write_json(output / "metadata.json", metadata)
+    if len(jobs) != 12:
+        raise ValueError("diagnostic historical corpus cell population changed")
     (output / "inputs").mkdir()
     (output / "artifacts").mkdir()
+    source = b"/* fixed diagnostic fixture; no measured compilation */\nint main(void) { return 0; }\n"
+    source_lines, source_functions = source.count(b"\n"), 1
+    job_metadata = []
+    for job, (name, mode) in enumerate(jobs):
+        path = output / "inputs" / (name + ".c")
+        path.write_bytes(source)
+        job_metadata.append({"job": job, "name": name, "mode": mode, "artifact": "object", "source": str(path),
+                             "sha256": hashlib.sha256(source).hexdigest(), "bytes": len(source),
+                             "physical_lines": source_lines, "defined_functions": source_functions})
+    wall_a, wall_b = 2e-8, 2e-8 * 1.21
+    rss = 4096
+    alpha = 0.01 / (len(jobs) * 2)
+    # The fixed 1.21 ratio exceeds the relative margin but its tiny absolute
+    # difference does not exceed the original 2ms margin. No regression is
+    # detected by the exact paired sign test; the synthetic sum stays bounded
+    # below the real provider phase duration without invented measurement time.
+    wall_ratio = wall_b / wall_a
+    metric_names = ("wall_seconds", "cpu_seconds", "peak_rss_bytes", "cycles", "instructions", "branches",
+                    "branch_misses", "cache_references", "cache_misses", "arena_calls", "arena_bytes",
+                    "output_bytes", "lines_per_second", "functions_per_second", "bytes_per_second",
+                    "minor_faults", "major_faults", "voluntary_context_switches", "involuntary_context_switches")
+    output_bytes = b"fixed diagnostic output\n"
+    digest = hashlib.sha256(output_bytes).hexdigest()
+    medians = {name: [None, None] for name in metric_names}
+    medians.update(wall_seconds=[wall_a, wall_b], cpu_seconds=[0.0, 0.0], peak_rss_bytes=[rss, rss],
+                   output_bytes=[len(output_bytes), len(output_bytes)],
+                   lines_per_second=[source_lines / wall_a, source_lines / wall_b],
+                   functions_per_second=[source_functions / wall_a, source_functions / wall_b],
+                   bytes_per_second=[len(source) / wall_a, len(source) / wall_b])
+    comparisons = []
+    for name, mode in jobs:
+        tests = []
+        for metric in ("wall_seconds", "peak_rss_bytes"):
+            regression = False
+            ratio = wall_ratio if metric == "wall_seconds" else 1.0
+            for number in range(2):
+                tests.append({"metric": metric, "round": number, "median_ratio": ratio,
+                              "ci_low": ratio, "ci_high": ratio, "baseline_relative_mad": 0.0,
+                              "candidate_relative_mad": 0.0, "margin_exceedances": 20 if regression else 0,
+                              "pairs": 20, "p_value": 2.0 ** -20 if regression else 1.0,
+                              "regression": regression})
+        comparisons.append({"name": name + "/" + mode, "medians": dict(medians), "tests": tests,
+                            "decision": "inconclusive"})
+    summary = {"schema": 2, "guard_enabled": True, "family_alpha": 0.01, "per_test_alpha": alpha,
+               "comparisons": comparisons, "telemetry": [], "confirmed_regressions": 0,
+               "inconclusive_cases": len(jobs), "valid": True}
+    metadata = {"schema": 2, "profile": "ci", "seed": 20260907, "scale": 1, "input_schema": 1,
+                "pairs_per_round": 20, "rounds": 2, "warmups": 2, "cpu": 2,
+                "workloads": list(profile["workloads"]), "host": {"cpu_model": cpu_model, **DIAGNOSTIC},
+                "cache_policy": "warm-filesystem-new-process", "clock": "monotonic", "flags": [],
+                "allocation_compilers": [], "environment": {},
+                "wall_scope": "process launch through wait completion; no PMU or allocation instrumentation",
+                "cpu_scope": "OS child user plus system CPU time",
+                "rss_scope": "OS per-child peak; not concurrent tree sum",
+                "pmu_scope": "separate diagnostic replay; user-space inherited hardware events; >=90% running required",
+                "allocation_scope": "separate explicitly instrumented compiler replay; arena calls and requested bytes",
+                "process_diagnostics_scope": "Linux wait4 child usage; faults and context switches, not PMU events; copied after timing; other platforms unavailable; diagnostic only",
+                "compiler_provenance": [dict(item, revision_label=revision)
+                    for item, revision in zip((baseline, candidate), (args.baseline_id, args.candidate_id))],
+                "jobs": job_metadata}
+    write_json(output / "summary.json", summary)
+    write_json(output / "metadata.json", metadata)
+    (output / "cpuinfo.txt").write_text(cpuinfo)
     sample_stream, telemetry_stream = io.StringIO(), io.StringIO()
-    sample_writer, telemetry_writer = csv.writer(sample_stream, lineterminator="\n"), csv.writer(telemetry_stream, lineterminator="\n")
+    sample_writer = csv.writer(sample_stream, lineterminator="\n")
+    telemetry_writer = csv.writer(telemetry_stream, lineterminator="\n")
     sample_writer.writerow(RAW_HEADER)
     telemetry_writer.writerow(RAW_HEADER)
     commands, capabilities = [], []
-    for job, (name, mode) in enumerate(jobs):
-        source = "/* fixed diagnostic fixture */\nint main(void) { return 0; }\n"
-        (output / "inputs" / (name + "-" + mode + ".c")).write_text(source)
-        digest = hashlib.sha256(b"fixed diagnostic output\n").hexdigest()
-        for number in range(2):
-            for pair in range(20):
-                for variant in range(2):
-                    row = [number, pair, pair % 2, variant, job, 2e-8, 0, 0, 4096,
-                           *["NA"] * 8, 24, len(source), 2, 1, digest, *["NA"] * 4]
+
+    def data_command(job, variant, identity):
+        name, mode = jobs[job]
+        path = job_metadata[job]["source"]
+        metrics = output / "artifacts" / (identity + ".metrics")
+        artifact = output / "artifacts" / (name + "-" + mode + "-" + str(variant) + ".o")
+        compiler = (baseline, candidate)[variant]["path"]
+        argv = [compiler, "cc", "-g0", "-O0", "-fsource-metrics=" + str(metrics), "-c",
+                "-fregister-allocator=" + mode, path, "-o", str(artifact)]
+        commands.append({"sample": identity, "cwd": str(root), "argv": argv, **DIAGNOSTIC})
+        capabilities.append({"sample": identity, "exit_code": 0, "signal": 0, "timeout": 0, "launch_error": 0,
+            "pmu": {name: {"errno": 0, "running_fraction": None} for name in
+                    ("cycles", "instructions", "branches", "branch_misses", "cache_references", "cache_misses")},
+            **DIAGNOSTIC})
+        (output / "artifacts" / (identity + ".log")).write_text("fixed diagnostic data; command was not executed\n")
+        (output / "artifacts" / (identity + ".err")).write_bytes(b"")
+        metrics.write_text(f"lexed.translated_bytes={len(source)}\nlexed.translated_lines={source_lines}\n")
+
+    for job in range(len(jobs)):
+        for warmup in range(2):
+            for variant in range(2):
+                data_command(job, variant, f"warmup-j{job}-w{warmup}-v{variant}")
+    # Reconstruct the native fixed PRNG ordering as data only. This does not
+    # execute or schedule a process: POSITION records each synthetic paired
+    # row's native 0/1 position and the seeded AB/BA block layout.
+    random_state = metadata["seed"]
+
+    def data_random():
+        nonlocal random_state
+        random_state ^= (random_state << 13) & 0xffffffff
+        random_state ^= random_state >> 17
+        random_state ^= (random_state << 5) & 0xffffffff
+        random_state &= 0xffffffff
+        return random_state
+
+    block_first = [0] * len(jobs)
+    for number in range(2):
+        for pair in range(20):
+            order = list(range(len(jobs)))
+            for job in range(len(jobs)):
+                if not pair % 2:
+                    block_first[job] = data_random() & 1
+            for remaining in range(len(jobs), 1, -1):
+                swap = data_random() % remaining
+                order[remaining - 1], order[swap] = order[swap], order[remaining - 1]
+            for job in order:
+                first = block_first[job] ^ (pair % 2)
+                for position in range(2):
+                    variant = first ^ position
+                    wall = (wall_a, wall_b)[variant]
+                    row = [number, pair, position, variant, job, wall, 0.0, 0.0, rss,
+                           *["NA"] * 8, len(output_bytes), len(source), source_lines, source_functions,
+                           digest, *["NA"] * 4]
                     if len(row) != len(RAW_HEADER):
                         raise ValueError("diagnostic corpus raw row shape changed")
                     sample_writer.writerow(row)
-                    identity = f"r{number}-p{pair}-v{variant}-j{job}"
-                    commands.append({"sample": identity, "command": ["diagnostic-provider", name, mode],
-                                     "exit": 0, **DIAGNOSTIC})
-                    capabilities.append({"sample": identity, "pmu": "diagnostic-unavailable", **DIAGNOSTIC})
-                    (output / "artifacts" / (identity + ".log")).write_text("fixed diagnostic data\n")
-                    (output / "artifacts" / (identity + ".err")).write_bytes(b"")
-                    (output / "artifacts" / (identity + ".metrics")).write_text("wall_seconds=0.00000002\n")
-        # No PMU telemetry is available in this fixed diagnostic provider.
-        # Keep the canonical header and truthful zero auxiliary rows.
+                    data_command(job, variant, f"timing-r{number}-p{pair}-j{job}-v{variant}")
+    if len(commands) != 1008 or len(capabilities) != 1008:
+        raise ValueError("diagnostic complete timing/warmup command population changed")
+    # No PMU/allocation replay is claimed: retain canonical header-only CSV.
     (output / "samples.csv").write_text(sample_stream.getvalue())
     (output / "telemetry.csv").write_text(telemetry_stream.getvalue())
     (output / "jobs.tsv").write_text("".join(f"{job}\t{name}/{mode}\n" for job, (name, mode) in enumerate(jobs)))
@@ -206,6 +306,7 @@ def corpus(args, cpuinfo, cpu_model):
     completion = f"schema=2 jobs={len(jobs)} pairs=20 rounds=2 guard=1\n"
     completion += "".join(hashlib.sha256((output / name).read_bytes()).hexdigest() + " " + name + "\n" for name in names)
     (output / "complete.txt").write_text(completion)
+    return 0
 
 
 def provider_main():
@@ -235,7 +336,7 @@ def provider_main():
         if args.warmups != "2" or args.profile != "ci" or args.mode != "all" or args.pairs != "20" or \
                 args.timeout != "120" or not args.baseline_id or not args.candidate_id or args.repo_root or args.target_minutes:
             raise ValueError("diagnostic corpus fixed production argv changed")
-        corpus(args, cpuinfo, cpu_model)
+        return corpus(args, cpuinfo, cpu_model)
     return 0
 
 

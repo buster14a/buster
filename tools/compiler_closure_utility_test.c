@@ -174,53 +174,70 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_self_test(
     bool allowed=compiler_closure_utility_fixture_allowed(arena);
     if (allowed)
     {
-    String8 exact[] = {S8("--execute-utility"), S8("--trusted-root"), S8("/fixture/trusted"),
-        S8("--cleanup-root"), S8("/fixture/temp"), S8("--evidence"), S8("/fixture/temp/evidence")};
-    CompilerClosureUtilityControllerOptions parsed = compiler_closure_utility_controller_parse((SliceString8)BUSTER_ARRAY_TO_SLICE(exact));
-    SliceString8 args = compiler_closure_utility_controller_owner_arguments(arena, S8("/fixture/driver"),
-        (SliceString8)BUSTER_ARRAY_TO_SLICE(exact));
-    result = parsed.valid && !parsed.owned_worker && args.length == 10 &&
-        string_equal(args.pointer[9], S8("--owned-utility-worker")) &&
-        BUSTER_CLOSURE_UTILITY_PHYSICAL_SECONDS == 5400 && BUSTER_CLOSURE_UTILITY_WORKER_SECONDS == 5280 &&
-        BUSTER_CLOSURE_UTILITY_TAIL_SECONDS == 120;
-    CompilerClosureUtilityControllerResolved rejected = {0};
-    // Public physical resolution does not accept this hosted environment.
-    bool public_refused = !compiler_closure_utility_controller_resolve(arena, parsed, &rejected);
-    String8 directory = {0};
-    bool owned = result && public_refused && summary_self_test_claim_directory(arena, S8("closure-utility"), &directory);
-    if (owned)
-    {
-        CompilerClosureUtilityControllerResolved fixture = {0};
-        fixture.valid = true;
-        fixture.diagnostic = true;
-        fixture.claim = path_join(arena, directory, S8("claim"));
-        fixture.options.evidence = path_join(arena, directory, S8("evidence"));
-        fixture.claim_record = S8("schema\tbuster-compiler-closure-utility-diagnostic-claim-v1\ndiagnostic_fixture\ttrue\nqualification_state\tunqualified\n");
-        for (u64 i = 0; i < 5; i += 1) fixture.transport.bytes[i] = S8("diagnostic-unqualified\n");
-        bool once = compiler_closure_utility_controller_claim(arena, fixture) &&
-            !compiler_closure_utility_controller_claim(arena, fixture) &&
-            compiler_closure_utility_controller_worker_once_fixture(arena, fixture);
-        bool raw = compiler_closure_utility_fixture_raw(arena, directory);
-        CompilerSamplingController phase = {.arena=arena,.evidence=directory,.started=os_now_microseconds(),
-            .deadline=os_now_microseconds()+5000000ull,.success=true};
-        string8_list_push(arena, &phase.phases, S8("stage\tphase\twall_us\texit_status\ttimed_out\tcleanup_failed\tcancelled\tstate\n"));
-        String8 okay[] = {S8("/bin/sh"), S8("-c"), S8("printf native-utility-diagnostic")};
-        String8 failure[] = {S8("/bin/sh"), S8("-c"), S8("exit 7")};
-        bool first = compiler_preparation_controller_phase(&phase, S8("utility-diagnostic"),
-            (SliceString8)BUSTER_ARRAY_TO_SLICE(okay), 2000000ull);
-        bool failed = !compiler_preparation_controller_phase(&phase, S8("utility-diagnostic-failure"),
-            (SliceString8)BUSTER_ARRAY_TO_SLICE(failure), 2000000ull);
-        bool stopped = !compiler_preparation_controller_phase(&phase, S8("utility-diagnostic-no-next"),
-            (SliceString8)BUSTER_ARRAY_TO_SLICE(okay), 2000000ull) && !phase.cleanup_failed;
-        bool signals = compiler_closure_utility_fixture_signals(arena, S8("timeout")) &&
-            compiler_closure_utility_fixture_signals(arena, S8("SIGINT")) &&
-            compiler_closure_utility_fixture_signals(arena, S8("SIGTERM"));
-        result = once && raw && first && failed && stopped && signals;
-        String8 status = S8("{\"schema\":\"buster-compiler-closure-utility-diagnostic-v1\",\"diagnostic_fixture\":true,"
-            "\"qualification_state\":\"unqualified\",\"physical_qualification\":false}\n");
-        result = file_write(path_join(arena, directory, S8("fixture-status.json")), BUSTER_SLICE_TO_BYTE_SLICE(status)) && result;
-    }
-    else result = false;
+        u64 real=0;
+        bool observed=compiler_experiment_job_clock_now(&real);
+        CompilerExperimentJobClock clock={.valid=observed,.entry_realtime_us=real,
+            .entry_monotonic_us=os_now_microseconds(),.entry_elapsed_us=60000000ull};
+        u64 remaining=compiler_experiment_job_clock_remaining_us(clock,5400000000ull,5280000000ull);
+        bool clock_math=observed && remaining<=5220000000ull && remaining>5219000000ull &&
+            compiler_experiment_job_clock_utc(S8("2020-01-01T00:00:00Z"))==1577836800000000ull &&
+            compiler_experiment_job_clock_utc(S8("2024-02-29T00:00:00Z"))==1709164800000000ull &&
+            !compiler_experiment_job_clock_utc(S8("2023-02-29T00:00:00Z"));
+        clock.entry_elapsed_us=5280000000ull;
+        clock_math=clock_math && !compiler_experiment_job_clock_remaining_us(clock,5400000000ull,5280000000ull);
+        clock.entry_elapsed_us=0;
+        clock.entry_realtime_us=real+5000000ull;
+        clock_math=clock_math && !compiler_experiment_job_clock_remaining_us(clock,5400000000ull,5280000000ull);
+        CompilerExperimentJobClock denied={0};
+        clock_math=clock_math && !compiler_experiment_job_clock_parse(arena,S8("schema\tinvalid\n"),S8("utility"),
+            S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),&denied);
+        String8 exact[] = {S8("--execute-utility"), S8("--trusted-root"), S8("/fixture/trusted"),
+            S8("--cleanup-root"), S8("/fixture/temp"), S8("--evidence"), S8("/fixture/temp/evidence")};
+        CompilerClosureUtilityControllerOptions parsed = compiler_closure_utility_controller_parse((SliceString8)BUSTER_ARRAY_TO_SLICE(exact));
+        SliceString8 args = compiler_closure_utility_controller_owner_arguments(arena, S8("/fixture/driver"),
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(exact));
+        result = clock_math && parsed.valid && !parsed.owned_worker && args.length == 10 &&
+            string_equal(args.pointer[9], S8("--owned-utility-worker")) &&
+            BUSTER_CLOSURE_UTILITY_PHYSICAL_SECONDS == 5400 && BUSTER_CLOSURE_UTILITY_WORKER_SECONDS == 5280 &&
+            BUSTER_CLOSURE_UTILITY_TAIL_SECONDS == 120;
+        CompilerClosureUtilityControllerResolved rejected = {0};
+        // Public physical resolution does not accept this hosted environment.
+        bool public_refused = !compiler_closure_utility_controller_resolve(arena, parsed, &rejected);
+        String8 directory = {0};
+        bool owned = result && public_refused && summary_self_test_claim_directory(arena, S8("closure-utility"), &directory);
+        if (owned)
+        {
+            CompilerClosureUtilityControllerResolved fixture = {0};
+            fixture.valid = true;
+            fixture.diagnostic = true;
+            fixture.claim = path_join(arena, directory, S8("claim"));
+            fixture.options.evidence = path_join(arena, directory, S8("evidence"));
+            fixture.claim_record = S8("schema\tbuster-compiler-closure-utility-diagnostic-claim-v1\ndiagnostic_fixture\ttrue\nqualification_state\tunqualified\n");
+            for (u64 i = 0; i < 5; i += 1) fixture.transport.bytes[i] = S8("diagnostic-unqualified\n");
+            bool once = compiler_closure_utility_controller_claim(arena, fixture) &&
+                !compiler_closure_utility_controller_claim(arena, fixture) &&
+                compiler_closure_utility_controller_worker_once_fixture(arena, fixture);
+            bool raw = compiler_closure_utility_fixture_raw(arena, directory);
+            CompilerSamplingController phase = {.arena=arena,.evidence=directory,.started=os_now_microseconds(),
+                .deadline=os_now_microseconds()+5000000ull,.success=true};
+            string8_list_push(arena, &phase.phases, S8("stage\tphase\twall_us\texit_status\ttimed_out\tcleanup_failed\tcancelled\tstate\n"));
+            String8 okay[] = {S8("/bin/sh"), S8("-c"), S8("printf native-utility-diagnostic")};
+            String8 failure[] = {S8("/bin/sh"), S8("-c"), S8("exit 7")};
+            bool first = compiler_preparation_controller_phase(&phase, S8("utility-diagnostic"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(okay), 2000000ull);
+            bool failed = !compiler_preparation_controller_phase(&phase, S8("utility-diagnostic-failure"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(failure), 2000000ull);
+            bool stopped = !compiler_preparation_controller_phase(&phase, S8("utility-diagnostic-no-next"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(okay), 2000000ull) && !phase.cleanup_failed;
+            bool signals = compiler_closure_utility_fixture_signals(arena, S8("timeout")) &&
+                compiler_closure_utility_fixture_signals(arena, S8("SIGINT")) &&
+                compiler_closure_utility_fixture_signals(arena, S8("SIGTERM"));
+            result = once && raw && first && failed && stopped && signals;
+            String8 status = S8("{\"schema\":\"buster-compiler-closure-utility-diagnostic-v1\",\"diagnostic_fixture\":true,"
+                "\"qualification_state\":\"unqualified\",\"physical_qualification\":false}\n");
+            result = file_write(path_join(arena, directory, S8("fixture-status.json")), BUSTER_SLICE_TO_BYTE_SLICE(status)) && result;
+        }
+        else result = false;
     }
 #else
     BUSTER_UNUSED(arena);

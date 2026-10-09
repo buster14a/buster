@@ -296,6 +296,21 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_guard_test_unknown(Arena* a
         dangling = made && !compiler_experiment_cleanup_guard_test_guard(arena, links[i]) &&
             !compiler_experiment_cleanup_guard_test_begin(arena, links[i], &lease) && dangling;
     }
+    CompilerExperimentCleanupGuardTestPaths irregular[2] = {
+        compiler_experiment_cleanup_guard_test_paths(arena, root, S8("fifo-record")),
+        compiler_experiment_cleanup_guard_test_paths(arena, root, S8("directory-record"))};
+    bool nonregular = true;
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(irregular); i += 1)
+    {
+        String8 owner_file = string_format_z(arena, S8("{S8}/owner.tsv"), irregular[i].active);
+        bool active = mkdir((char const*)irregular[i].active.pointer, 0700) == 0;
+        bool made = i ? mkdir((char const*)owner_file.pointer, 0600) == 0 :
+            mkfifo((char const*)owner_file.pointer, 0600) == 0;
+        CompilerExperimentCleanupLease lease = {0};
+        nonregular = active && made && !compiler_experiment_cleanup_guard_test_guard(arena, irregular[i]) &&
+            !compiler_experiment_cleanup_guard_test_begin(arena, irregular[i], &lease) &&
+            !compiler_experiment_cleanup_missing((char const*)irregular[i].active.pointer) && nonregular;
+    }
     CompilerExperimentCleanupGuardTestPaths failed = compiler_experiment_cleanup_guard_test_paths(arena, root, S8("failed-terminal"));
     CompilerExperimentCleanupLease owner = {0};
     bool retained = compiler_experiment_cleanup_guard_test_begin(arena, failed, &owner) && owner.owned &&
@@ -306,7 +321,22 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_guard_test_unknown(Arena* a
         !compiler_experiment_cleanup_missing((char const*)failed.active.pointer) &&
         !compiler_experiment_cleanup_missing((char const*)failed.unknown.pointer) &&
         !compiler_experiment_cleanup_guard_test_guard(arena, failed);
-    return unknown && dangling && retained;
+    CompilerExperimentCleanupGuardTestPaths changed = compiler_experiment_cleanup_guard_test_paths(arena, root, S8("changed-borrowed-context"));
+    CompilerExperimentCleanupLease outer = {0}, borrowed = {0};
+    bool borrowed_claim = compiler_experiment_cleanup_guard_test_begin(arena, changed, &outer) && outer.owned &&
+        compiler_experiment_cleanup_guard_test_begin(arena, changed, &borrowed) && borrowed.enabled && !borrowed.owned;
+    bool changed_context = setenv("GITHUB_JOB", "sampling", 1) == 0;
+    bool borrowed_denied = borrowed_claim && changed_context &&
+        !compiler_experiment_cleanup_guard_test_guard(arena, changed) &&
+        !compiler_experiment_cleanup_guard_test_finish(arena, changed, &borrowed, true) &&
+        !compiler_experiment_cleanup_missing((char const*)changed.active.pointer) &&
+        !compiler_experiment_cleanup_missing((char const*)changed.unknown.pointer);
+    bool context_restored = setenv("GITHUB_JOB", "utility", 1) == 0;
+    bool still_retained = borrowed_denied && context_restored &&
+        !compiler_experiment_cleanup_guard_test_finish(arena, changed, &outer, true) &&
+        !compiler_experiment_cleanup_missing((char const*)changed.active.pointer) &&
+        !compiler_experiment_cleanup_missing((char const*)changed.unknown.pointer);
+    return unknown && dangling && nonregular && retained && still_retained;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_guard_test_killed(Arena* arena, String8 root)
