@@ -3,8 +3,9 @@
 The implementation for [#40](https://github.com/buster14a/buster/issues/40)
 lives in `ir_fast.c`, included by the existing `compiler_ir` module immediately
 after `ir_promote.c`. It adds no second IR and widens neither instruction row.
-The transforms are enabled by default after passing paired total-compile-time
-and peak-RSS acceptance on the dedicated qualified host. The complete pipeline
+The no-flag throughput recipe enables these transforms after their paired
+total-compile-time and peak-RSS acceptance on the dedicated qualified host.
+Explicit optimization levels select the policy below. The complete pipeline
 and every pass remain independently selectable. Register allocator FAST remains
 the ordinary default independently.
 
@@ -18,6 +19,51 @@ on/off comparison. Its mixed, inconclusive results did not establish acceptance;
 it includes a correction to the earlier optimization-level label. The final
 dedicated-host A/A, on/off, and leave-one-pass-out acceptance is retained in
 [the final integration audit](performance-audits/2026-09-12T001148Z.md).
+
+## Native optimization-level policy
+
+The driver selects existing pass bits, not a second pass manager. Native
+compilation carries that mask into `IrProgram.fast_passes`; canonical preparation
+runs it once in the fixed order below, within the existing work/storage limits.
+The last `-O` option selects the level. Unsupported spellings, including
+`-O4` and `-Og`, produce an argument diagnostic before source compilation.
+
+| Spelling | Optional canonical FAST selection | Native allocator default |
+| --- | --- | --- |
+| No `-O` option | `fold,address,dce,parameters` (retained throughput recipe) | FAST |
+| `-O`, `-O0` | None | FAST |
+| `-O1`, `-O2` | `fold,address,dce,parameters` | FAST |
+| `-O3` | Same bounded recipe; no replay, reordering or larger budget | FAST |
+| `-Os`, `-Oz`, `-Ofast` | Level-2 aliases, with the same bounded recipe | FAST |
+
+These aliases do not promise a size-specific recipe or relaxed floating-point
+semantics. Positive levels deliberately share the accepted local optimizer;
+they do not claim Clang/GCC-equivalent optimization effort. Extra transforms
+need their own implementation and evidence before enablement.
+
+Explicit `-fcanonical-fast` / `-fno-canonical-fast` override all pass bits;
+per-pass controls override only their named bit. For each bit the last explicit
+control wins, independently of whether it precedes or follows `-O`. An explicit
+`-fregister-allocator=fast|quality` is likewise independent of `-O`; the last
+allocator option wins. Timing requests never enable a pass.
+
+Direct SSA, shared local promotion and target placement remain independent
+throughput mechanisms at every level. `-O0` skips optional cleanup and its
+scratch/validation work. Debug information remains opt-in with `-g`;
+`-fpinned-debug-locals` retains readable named scalar locals as documented in
+[the driver guide](agents/driver.md#source-debug-information).
+
+[#48 / PR #3111](https://github.com/buster14a/buster/pull/3111) owns inlining
+before shared promotion and FAST cleanup. Its integration contract enables
+bounded tiny inlining at positive levels, preserves mandatory source directives
+at every level, and keeps explicit inliner controls independent. That PR's
+implementation and qualified acceptance are prerequisites for claiming the
+inliner part of #47 complete; this policy change introduces no inliner body.
+
+`ide cc -v` reports each `IR_FAST_PASS` in execution order, including
+`enabled=0` at `-O0`. Work/change counters distinguish selected passes from
+actual rewrites or budget/validation skips. `-ftime-canonical-fast -v` adds
+pass timings for diagnostic use.
 
 ## Order and ownership
 
@@ -79,7 +125,7 @@ this contract explicitly classifies and tests them.
 # Independently disable one default pass (last flag wins).
 build/Release/ide cc source.c -fno-canonical-fast-dce -o output
 # Select only folding; do not collect timing during throughput observations.
-build/Release/ide cc source.c -fcanonical-fast-fold -o output
+build/Release/ide cc source.c -O0 -fcanonical-fast-fold -o output
 # Diagnostic replay only: clocks and per-pass work counts, plus compaction.
 build/Release/ide cc source.c -fcanonical-fast -ftime-canonical-fast -v -o output
 ```
@@ -138,9 +184,12 @@ gates independently of performance acceptance.
 retained calls/memory effects, existing trivial parameters, repeat preparation,
 classification exclusions and budget refusal before value-storage access.
 `driver_fast_test.c` executes the fixed-result C fixture for all 16 subsets in
-NONE/MIR_STACK/FAST/QUALITY with zero fallback on desktop hosts. Android/iOS
-retain all 64 native object-generation checks; their application process cannot
-launch generated executables. Each subset also compiles to
+FAST/QUALITY with zero fallback on desktop hosts. Android/iOS retain all 32
+native object-generation checks; their application process cannot launch
+generated executables. The registered native-level regression checks all
+accepted spellings, explicit override ordering, invalid levels, all four
+numeric levels under both allocators, skipped pass work at `-O0`, distinct
+native text sections, and fixed-result execution on desktop hosts. Each subset also compiles to
 Wasm64, eBPF and LLVM bitcode. The bounded existing eBPF VM executes four inputs
 including unsigned wraparound. Wasm and bitcode magic checks establish artifact
 production, not engine execution; stronger engine/external-compiler checks are

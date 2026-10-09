@@ -314,7 +314,8 @@ vendor meaning. An excess component retains precedence over that refusal.
 Native x86-64 and AArch64 compilation uses the FAST register allocator at
 every optimization level, including the default and `-O0`. Callers may select
 `fast` or `quality`; both run canonical IR -> MIR -> placement ->
-metadata-backed native emission, and the last allocator-affecting option wins.
+metadata-backed native emission. Explicit allocator selection is independent
+of `-O`; the last allocator option wins.
 The stack-only mode is removed: `-fregister-allocator=none`,
 `-fregister-allocator=mir-stack` and `-fno-register-allocator` are argument errors.
 The allocators run on x86-64 under both System V and Win64, and on AArch64
@@ -371,10 +372,14 @@ than DX's fixed 16-bit width.
 spellings, including immediate boundaries, word prefixes and invalid register,
 memory, suffix-width and 64-bit neighbours. It never executes port I/O.
 
-The default `-fcanonical-fast` shared pipeline and independent
-`-fcanonical-fast-{fold,address,dce,parameters}` controls are described in
-[the FAST pipeline contract](../canonical-fast-pipeline.md). Timing is separate
-(`-ftime-canonical-fast -v`); register allocation selection is unchanged.
+Explicit `-O`/`-O0` skips optional canonical FAST cleanup; positive levels
+select the existing bounded `fold,address,dce,parameters` pipeline. Omission
+retains the adopted throughput recipe. Explicit whole-pipeline and per-pass
+controls override level defaults independently of option order; the last
+explicit control of each bit wins. Level/alias policy, fixed pass order and
+budgets are in [the FAST pipeline contract](../canonical-fast-pipeline.md#native-optimization-level-policy).
+Verbose output reports disabled as well as enabled passes. Timing is separate
+(`-ftime-canonical-fast -v`); register allocation selection is independent.
 
 `-fno-frontend-ssa` selects the original memory-form C lowering;
 `-ffrontend-ssa` restores direct SSA for the bounded supported subset. The last
