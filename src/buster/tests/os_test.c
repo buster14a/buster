@@ -2737,6 +2737,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
             .use_process_environment = 1,
             .new_process_group = 1,
+            .observe_resources = 1,
         };
         ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
                                                      (SliceString8){0}, (SliceString8){0}, options);
@@ -2777,6 +2778,10 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, tree.waited.result == PROCESS_RESULT_FAILED && tree.waited.timed_out);
                 BUSTER_TEST(arguments, tree.waited.termination_requested && tree.waited.forcibly_terminated);
                 BUSTER_TEST(arguments, !tree.waited.process_tree_cleanup_failed);
+#if BUSTER_LINUX
+                BUSTER_TEST(arguments, tree.waited.resources.cpu_status == PROCESS_RESOURCE_OBSERVED);
+                BUSTER_TEST(arguments, tree.waited.resources.memory_status == PROCESS_RESOURCE_OBSERVED);
+#endif
             }
         }
         if (!readiness_proven)

@@ -971,8 +971,10 @@ struct CMember
     // and the IR layout in c_gen.c -- asks bit_width_resolved and reads this
     // number; none re-evaluates [bit_width_token_start, +count), which remain
     // only for diagnostics. An unresolved width holds a layout unresolved
-    // rather than reading as zero. An unresolved width of UINT32_MAX was
-    // already diagnosed where it was declared.
+    // rather than reading as zero. When the width was a valid negative or
+    // unrepresentably large declaration-point constant, UINT32_MAX marks it
+    // invalid and the sparse CParseResult side table retains its exact value
+    // until member constraints emit the diagnostic.
     u32 bit_width;
     u32 bit_width_token_start;
     u32 bit_width_token_count;
@@ -1082,6 +1084,25 @@ struct CIntegerConstant
     u8 reserved[3];
 };
 BUSTER_CT_CHECK(sizeof(CIntegerConstant) == 32);
+
+// A bit-field width can be a valid integer constant expression that is
+// negative or too wide for CMember.bit_width. Keep its declaration-point
+// value until the shared member-constraint pass so an early width failure
+// cannot suppress unrelated diagnostics in the translation unit.
+typedef struct CDeferredBitFieldWidthDiagnostic CDeferredBitFieldWidthDiagnostic;
+struct CDeferredBitFieldWidthDiagnostic
+{
+    // Member rows retain a declaration-point value. Query rows carry no member
+    // or type ID; their copied message and source location survive private models.
+    u32 member_index;
+    u32 bit_width_token_start;
+    CIntegerConstant width;
+    CSourceLocation query_location;
+    String8 query_message;
+    bool is_query_diagnostic;
+    // Copy-on-append table growth preserves this row-local exact-once state.
+    bool diagnostic_published;
+};
 
 typedef struct CEnumMember CEnumMember;
 struct CEnumMember
@@ -1642,6 +1663,9 @@ struct CParseResult
     u32* declarations_by_entity;
     CDiagnostic* diagnostics;
     CDeferredStaticAssert* deferred_static_asserts;
+    // Sparse declaration-point widths and owned diagnostics from private type
+    // queries. Snapshots roll these rows back with their parsed members.
+    CDeferredBitFieldWidthDiagnostic* deferred_bit_field_width_diagnostics;
     // The function types a declarator spelled `noreturn` on: the attribute
     // written on a function pointer or a typedef rather than on a function
     // declaration. It lives beside the type table instead of as a bit inside
@@ -1666,6 +1690,7 @@ struct CParseResult
     u32 identifier_use_count;
     u32 diagnostic_count;
     u32 deferred_static_assert_count;
+    u32 deferred_bit_field_width_diagnostic_count;
     u32 declaration_capacity;
     u32 type_capacity;
     u32 parameter_capacity;
@@ -1695,6 +1720,7 @@ struct CParseResult
     u32 identifier_use_by_token_capacity;
     u32 diagnostic_capacity;
     u32 deferred_static_assert_capacity;
+    u32 deferred_bit_field_width_diagnostic_capacity;
     u32 noreturn_function_type_count;
     u32 noreturn_function_type_capacity;
     u32 type_alignment_count;

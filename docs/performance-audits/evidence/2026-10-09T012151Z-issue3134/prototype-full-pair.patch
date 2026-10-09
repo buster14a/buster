@@ -1,0 +1,983 @@
+commit 7c9f3082d885993291893c52e0de7334ac2178cb
+Author:     Codex <codex@openai.com>
+AuthorDate: Fri Oct 9 09:45:01 2026 +0900
+Commit:     Codex <codex@openai.com>
+CommitDate: Fri Oct 9 09:45:04 2026 +0900
+
+    ci(analyzer): add shadow-only cross-run observations
+
+diff --git a/build.c b/build.c
+index 8251191..1ec9851 100644
+--- a/build.c
++++ b/build.c
+@@ -109,6 +109,7 @@ typedef enum BuildCommand
+     BUILD_COMMAND_GENERATE,
+     BUILD_COMMAND_BUILD,
+     BUILD_COMMAND_CLANG_ANALYZE,
++    BUILD_COMMAND_CLANG_ANALYZE_SHADOW,
+     BUILD_COMMAND_OPTNONE_AUDIT,
+     BUILD_COMMAND_CMAKE_PROFILE_SUMMARY,
+     BUILD_COMMAND_NINJA_LOG_SUMMARY,
+@@ -6907,6 +6908,7 @@ BUSTER_GLOBAL_LOCAL String8 clang_analyze_compile_commands_path(Arena* arena, St
+ }
+ 
+ #include "tools/clang_analyze.c"
++#include "tools/clang_analyze_shadow.c"
+ #include "tools/optnone_audit.c"
+ 
+ BUSTER_GLOBAL_LOCAL void clang_analyze_command_add(Arena* arena, String8 build_directory, CmakeBuildOptions options)
+@@ -25381,6 +25383,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
+         case BUILD_COMMAND_PRODUCTION_PROFILE:
+         case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
+         case BUILD_COMMAND_CLANG_ANALYZE:
++        case BUILD_COMMAND_CLANG_ANALYZE_SHADOW:
+         case BUILD_COMMAND_OPTNONE_AUDIT:
+         case BUILD_COMMAND_TEST_DIFFERENTIAL:
+         case BUILD_COMMAND_TEST_CLANG_SUITE:
+@@ -25414,6 +25417,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
+     BuildCommandArgumentOwnershipTest tests[] = {
+         {.command = BUILD_COMMAND_TEST_UEFI, .owns_arguments = true},
+         {.command = BUILD_COMMAND_CLANG_ANALYZE, .owns_arguments = true},
++        {.command = BUILD_COMMAND_CLANG_ANALYZE_SHADOW, .owns_arguments = true},
+         {.command = BUILD_COMMAND_TEST_CLANG_SUITE, .owns_arguments = true},
+         {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
+         {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
+@@ -39356,6 +39360,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
+         [BUILD_COMMAND_GENERATE] = S8_INITIALIZER("generate"),
+         [BUILD_COMMAND_BUILD] = S8_INITIALIZER("build"),
+         [BUILD_COMMAND_CLANG_ANALYZE] = S8_INITIALIZER("clang_analyze"),
++        [BUILD_COMMAND_CLANG_ANALYZE_SHADOW] = S8_INITIALIZER("clang_analyze_shadow"),
+         [BUILD_COMMAND_OPTNONE_AUDIT] = S8_INITIALIZER("optnone_audit"),
+         [BUILD_COMMAND_CMAKE_PROFILE_SUMMARY] = S8_INITIALIZER("cmake_profile_summary"),
+         [BUILD_COMMAND_NINJA_LOG_SUMMARY] = S8_INITIALIZER("ninja_log_summary"),
+@@ -39495,6 +39500,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
+             case BUILD_COMMAND_PRODUCTION_PROFILE: result = production_profile_main(arena, owned_arguments, arguments.pointer[0]); break;
+             case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST: result = production_profile_self_test(arena); break;
+             case BUILD_COMMAND_CLANG_ANALYZE: result = clang_analyze_main(arena, owned_arguments); break;
++            case BUILD_COMMAND_CLANG_ANALYZE_SHADOW: result = clang_analyze_shadow_main(arena, owned_arguments); break;
+             case BUILD_COMMAND_OPTNONE_AUDIT: result = optnone_audit_main(arena, owned_arguments); break;
+             case BUILD_COMMAND_TEST_DIFFERENTIAL: result = differential_main(arena, owned_arguments); break;
+             case BUILD_COMMAND_TEST_CLANG_SUITE: result = clang_suite_main(arena, owned_arguments); break;
+@@ -40503,6 +40509,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
+         }
+         break;
+         case BUILD_COMMAND_CLANG_ANALYZE:
++        case BUILD_COMMAND_CLANG_ANALYZE_SHADOW:
+         case BUILD_COMMAND_OPTNONE_AUDIT:
+         {
+             // Already executed by the command-specific argument parser.
+diff --git a/tools/clang_analyze_shadow.c b/tools/clang_analyze_shadow.c
+new file mode 100644
+index 0000000..d15e292
+--- /dev/null
++++ b/tools/clang_analyze_shadow.c
+@@ -0,0 +1,909 @@
++// Shadow-only observations for repeated Clang analyzer runs. This file never
++// changes analyzer scheduling or accepts prior evidence as a verdict.
++// clang_analyze_shadow_main always invokes clang_analyze_main for a complete
++// fresh run, then writes a separate observation record and optional state.
++// Linux tree snapshots are iterative, bounded, and include directory entries
++// so additions/removals that affect negative include lookup change the digest.
++#if BUSTER_LINUX
++#include <errno.h>
++#endif
++
++#define BUSTER_ANALYZE_SHADOW_MAX_ENTRIES 20000
++#define BUSTER_ANALYZE_SHADOW_MAX_BYTES (128ull * 1024ull * 1024ull)
++#define BUSTER_ANALYZE_SHADOW_MAX_STATE_BYTES 256
++#define BUSTER_ANALYZE_SHADOW_STATE_VERSION "BUSTER_CLANG_ANALYZE_SHADOW_STATE_V1\n"
++#define BUSTER_ANALYZE_SHADOW_RECORD_VERSION "BUSTER_CLANG_ANALYZE_SHADOW_V1\n"
++
++typedef struct ClangAnalyzeShadowSnapshot ClangAnalyzeShadowSnapshot;
++struct ClangAnalyzeShadowSnapshot
++{
++    String8 digest;
++    String8 reason;
++    String8 environment_digest;
++    String8 tree_digest;
++    u64 entries;
++    u64 bytes;
++    bool complete;
++};
++
++typedef struct ClangAnalyzeShadowState ClangAnalyzeShadowState;
++struct ClangAnalyzeShadowState
++{
++    String8 digest;
++    String8 status;
++    u64 elapsed_us;
++    bool valid;
++    bool complete;
++};
++
++BUSTER_GLOBAL_LOCAL void clang_analyze_shadow_hash_string(Sha256* hash, String8 value)
++{
++    u8 separator = 0;
++    if (value.length) sha256_add(hash, (u8*)value.pointer, value.length);
++    sha256_add(hash, &separator, sizeof(separator));
++}
++
++BUSTER_GLOBAL_LOCAL bool clang_analyze_shadow_string_less(String8 left, String8 right)
++{
++    u64 count = BUSTER_MIN(left.length, right.length);
++    bool less = false;
++    bool decided = false;
++    for (u64 index = 0; !decided && index < count; index += 1)
++    {
++        u8 a = (u8)left.pointer[index];
++        u8 b = (u8)right.pointer[index];
++        if (a != b)
++        {
++            less = a < b;
++            decided = true;
++        }
++    }
++    if (!decided) less = left.length < right.length;
++    return less;
++}
++
++BUSTER_GLOBAL_LOCAL void clang_analyze_shadow_heap_down(String8* values, u64 root, u64 count)
++{
++    bool done = false;
++    while (!done && root < count / 2)
++    {
++        u64 child = root * 2 + 1;
++        if (child + 1 < count && clang_analyze_shadow_string_less(values[child], values[child + 1])) child += 1;
++        if (clang_analyze_shadow_string_less(values[root], values[child]))
++        {
++            String8 temporary = values[root];
++            values[root] = values[child];
++            values[child] = temporary;
++            root = child;
++        }
++        else done = true;
++    }
++}
++
++BUSTER_GLOBAL_LOCAL void clang_analyze_shadow_sort(String8* values, u64 count)
++{
++    for (u64 index = count / 2; index > 0; index -= 1) clang_analyze_shadow_heap_down(values, index - 1, count);
++    for (u64 end = count; end > 1; end -= 1)
++    {
++        String8 temporary = values[0];
++        values[0] = values[end - 1];
++        values[end - 1] = temporary;
++        clang_analyze_shadow_heap_down(values, 0, end - 1);
++    }
++}
++
++BUSTER_GLOBAL_LOCAL bool clang_analyze_shadow_environment_key(String8 key)
++{
++    String8 relevant[] = {S8("PATH"), S8("CPATH"), S8("C_INCLUDE_PATH"), S8("CPLUS_INCLUDE_PATH"), S8("OBJC_INCLUDE_PATH"),
++                          S8("OBJCPLUS_INCLUDE_PATH"), S8("COMPILER_PATH"), S8("GCC_EXEC_PREFIX"), S8("LIBRARY_PATH"), S8("SDKROOT"),
++                          S8("DEVELOPER_DIR"), S8("MACOSX_DEPLOYMENT_TARGET"), S8("SOURCE_DATE_EPOCH"), S8("CCC_OVERRIDE_OPTIONS"),
++                          S8("LANG"), S8("LC_ALL"), S8("LC_CTYPE"), S8("LC_MESSAGES"), S8("HOME"), S8("TMPDIR"), S8("TMP"),
++                          S8("TEMP"), S8("TZ"), S8("LD_LIBRARY_PATH"), S8("LD_PRELOAD"), S8("DYLD_LIBRARY_PATH"),
++                          S8("DYLD_INSERT_LIBRARIES"), S8("CLANG_CONFIG_FILE_SYSTEM_DIR"), S8("CLANG_CONFIG_FILE_USER_DIR"),
++                          S8("CLANG_MODULE_CACHE_PATH"), S8("CLANG_RESOURCE_DIR")};
++    bool result = false;
++    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(relevant); index += 1) result = result || string_equal(key, relevant[index]);
++    result = result || string_starts_with_sequence(key, S8("CLANG_")) || string_starts_with_sequence(key, S8("LLVM_")) ||
++             string_starts_with_sequence(key, S8("GCC_")) || string_starts_with_sequence(key, S8("LD_")) ||
++             string_starts_with_sequence(key, S8("DYLD_"));
++    return result;
++}
++
++BUSTER_GLOBAL_LOCAL void clang_analyze_shadow_root_add(Arena* arena, String8List* roots, String8 directory)
++{
++    if (directory.length)
++    {
++        String8 absolute = os_path_absolute_lexical(arena, directory, true);
++        bool found = false;
++        for (String8Node* node = roots->first; node; node = node->next)
++        {
++            found = found || string_equal(node->string, absolute);
++        }
++        if (!found) string8_list_push(arena, roots, absolute);
++    }
++}
++
++BUSTER_GLOBAL_LOCAL void clang_analyze_shadow_option_root(Arena* arena, String8List* roots, String8 directory, String8 value)
++{
++    String8 path = path_is_absolute(value) ? value : path_join(arena, directory, value);
++    clang_analyze_shadow_root_add(arena, roots, path);
++}
++
++BUSTER_GLOBAL_LOCAL bool clang_analyze_shadow_command_roots(Arena* arena, ClangAnalyzePlan plan, String8 results, String8 state,
++                                                             String8List* roots, bool* system_context_complete, String8List* reasons)
++{
++    bool valid = true;
++    *system_context_complete = true;
++    for (u64 unit_index = 0; valid && unit_index < plan.count; unit_index += 1)
++    {
++        ClangAnalyzeUnit unit = plan.units[unit_index];
++        String8 directory = os_path_absolute_lexical(arena, unit.entry.directory, true);
++        String8 source = path_is_absolute(unit.entry.file) ? unit.entry.file : path_join(arena, directory, unit.entry.file);
++        source = os_path_absolute_lexical(arena, source, true);
++        clang_analyze_shadow_root_add(arena, roots, directory);
++        clang_analyze_shadow_root_add(arena, roots, path_parent(arena, source));
++        bool nostdinc = false;
++        bool resource_directory_set = false;
++        for (u64 argument_index = 0; argument_index < unit.command.length; argument_index += 1)
++        {
++            String8 argument = unit.command.pointer[argument_index];
++            String8 next = argument_index + 1 < unit.command.length ? unit.command.pointer[argument_index + 1] : (String8){0};
++            String8 prefixes[] = {S8("-I"), S8("-isystem"), S8("-iquote"), S8("-idirafter"), S8("-F"), S8("-iframework"), S8("-include"),
++                                  S8("-imacros"), S8("-resource-dir"), S8("-isysroot"), S8("--sysroot"), S8("--sysroot="),
++                                  S8("-resource-dir="), S8("-fmodule-map-file="), S8("-ivfsoverlay"), S8("-fplugin="), S8("-fplugin")};
++            bool matched = false;
++            for (u64 prefix_index = 0; prefix_index < BUSTER_ARRAY_LENGTH(prefixes); prefix_index += 1)
++            {
++                String8 prefix = prefixes[prefix_index];
++                if (string_equal(argument, prefix) && next.length)
++                {
++                    resource_directory_set = resource_directory_set || string_equal(prefix, S8("-resource-dir"));
++                    String8 root = next;
++                    if (string_equal(prefix, S8("-include")) || string_equal(prefix, S8("-imacros")) ||
++                        string_equal(prefix, S8("-ivfsoverlay")) || string_equal(prefix, S8("-fplugin")))
++                    {
++                        String8 file = path_is_absolute(next) ? next : path_join(arena, directory, next);
++                        root = path_parent(arena, file);
++                    }
++                    clang_analyze_shadow_option_root(arena, roots, directory, root);
++                    argument_index += 1;
++                    matched = true;
++                    break;
++                }
++                if (argument.length > prefix.length && string_starts_with_sequence(argument, prefix) &&
++                    !string_equal(prefix, S8("-include")) && !string_equal(prefix, S8("-imacros")) && !string_equal(prefix, S8("-resource-dir")) &&
++                    !string_equal(prefix, S8("-isysroot")) && !string_equal(prefix, S8("--sysroot")) &&
++                    !string_equal(prefix, S8("-ivfsoverlay")) && !string_equal(prefix, S8("-fplugin")))
++                {
++                    resource_directory_set = resource_directory_set || string_equal(prefix, S8("-resource-dir="));
++                    String8 value = {.pointer = argument.pointer + prefix.length, .length = argument.length - prefix.length};
++                    String8 root = value;
++                    if (string_equal(prefix, S8("-fmodule-map-file=")) || string_equal(prefix, S8("-fplugin=")))
++                    {
++                        String8 file = path_is_absolute(value) ? value : path_join(arena, directory, value);
++                        root = path_parent(arena, file);
++                    }
++                    clang_analyze_shadow_option_root(arena, roots, directory, root);
++                    matched = true;
++                    break;
++                }
++            }
++            if (!matched)
++            {
++                nostdinc = nostdinc || string_equal(argument, S8("-nostdinc"));
++                bool dynamic_builtin = string_contains(argument, S8("__DATE__")) || string_contains(argument, S8("__TIME__")) ||
++                    string_contains(argument, S8("__TIMESTAMP__"));
++                if (dynamic_builtin)
++                {
++                    string8_list_push(arena, reasons, S8("dynamic-time-builtin-option"));
++                    *system_context_complete = false;
++                }
++            }
++            bool virtual_or_plugin = string_equal(argument, S8("-ivfsoverlay")) || string_equal(argument, S8("-fplugin")) ||
++                string_starts_with_sequence(argument, S8("-fplugin=")) || string_starts_with_sequence(argument, S8("-fmodule")) ||
++                string_starts_with_sequence(argument, S8("-fmodules")) || string_starts_with_sequence(argument, S8("-load")) ||
++                string_equal(argument, S8("-Xclang"));
++            if (virtual_or_plugin)
++            {
++                string8_list_push(arena, reasons, S8("unsupported-vfs-plugin-module-or-xclang-option"));
++                *system_context_complete = false;
++            }
++        }
++        if (!resource_directory_set)
++        {
++            string8_list_push(arena, reasons, S8("implicit-compiler-resource-directory-unbounded"));
++            *system_context_complete = false;
++        }
++        if (!nostdinc)
++        {
++            string8_list_push(arena, reasons, S8("implicit-system-include-search-unbounded"));
++            *system_context_complete = false;
++        }
++        // The sidecar does not scan the compiler's dynamic loader/runtime
++        // closure. A compiler checksum records integrity, not provenance.
++        string8_list_push(arena, reasons, S8("compiler-runtime-closure-unavailable"));
++        *system_context_complete = false;
++    }
++    // The result and state artifacts are observations, never inputs. Exclude
++    // only these exact paths when a caller places them under an input root.
++    (void)results;
++    (void)state;
++    return valid;
++}
++
++#if BUSTER_LINUX
++BUSTER_GLOBAL_LOCAL bool clang_analyze_shadow_skip_path(String8 path, String8 results, String8 state)
++{
++    bool result = (results.length && string_equal(path, results)) || (state.length && string_equal(path, state));
++    return result;
++}
++
++BUSTER_GLOBAL_LOCAL void clang_analyze_shadow_reason(Arena* arena, ClangAnalyzeShadowSnapshot* snapshot, String8 reason)
++{
++    if (!snapshot->reason.length) snapshot->reason = string_duplicate_arena(arena, reason, true);
++    snapshot->complete = false;
++}
++
++BUSTER_GLOBAL_LOCAL bool clang_analyze_shadow_path_components(Arena* arena, String8 path, Sha256* hash, ClangAnalyzeShadowSnapshot* snapshot)
++{
++    bool valid = true;
++    for (u64 end = 1; valid && end <= path.length; end += 1)
++    {
++        bool at_end = end == path.length;
++        bool at_separator = !at_end && path_is_separator(path.pointer[end]);
++        if (at_end || at_separator)
++        {
++            String8 prefix = string_slice(path, 0, end);
++            char8* zprefix = string_duplicate_arena(arena, prefix, true).pointer;
++            struct stat status = {0};
++            int stat_result = lstat(zprefix, &status);
++            int stat_error = errno;
++            if (stat_result == 0 && S_ISLNK(status.st_mode))
++            {
++                clang_analyze_shadow_hash_string(hash, S8("symlink-path-component"));
++                clang_analyze_shadow_hash_string(hash, prefix);
++                clang_analyze_shadow_reason(arena, snapshot, S8("symlink-in-input-path"));
++            }
++            else if (stat_result != 0 && stat_error != ENOENT && stat_error != ENOTDIR)
++            {
++                clang_analyze_shadow_reason(arena, snapshot, S8("input-path-component-stat-failed"));
++                valid = false;
++            }
++        }
++    }
++    return valid;
++}
++
++BUSTER_GLOBAL_LOCAL bool clang_analyze_shadow_snapshot_root(Arena* arena, String8 root, String8 results, String8 state,
++                                                             Sha256* hash, ClangAnalyzeShadowSnapshot* snapshot)
++{
++    String8* pending = arena_allocate(arena, String8, BUSTER_ANALYZE_SHADOW_MAX_ENTRIES);
++    String8* children = arena_allocate(arena, String8, BUSTER_ANALYZE_SHADOW_MAX_ENTRIES);
++    u64 pending_count = 1;
++    pending[0] = root;
++    bool valid = clang_analyze_shadow_path_components(arena, root, hash, snapshot);
++    while (valid && pending_count)
++    {
++        String8 directory = pending[--pending_count];
++        if (clang_analyze_shadow_skip_path(directory, results, state)) continue;
++        char8* zpath = string_duplicate_arena(arena, directory, true).pointer;
++        struct stat status = {0};
++        if (lstat(zpath, &status) != 0)
++        {
++            int stat_error = errno;
++            clang_analyze_shadow_hash_string(hash, S8("missing-path"));
++            clang_analyze_shadow_hash_string(hash, directory);
++            if (stat_error != ENOENT && stat_error != ENOTDIR)
++            {
++                clang_analyze_shadow_reason(arena, snapshot, S8("input-path-stat-failed"));
++                valid = false;
++            }
++        }
++        else if (S_ISLNK(status.st_mode))
++        {
++            clang_analyze_shadow_hash_string(hash, S8("symlink"));
++            clang_analyze_shadow_reason(arena, snapshot, S8("symlink-in-input-tree"));
++            char8 target[4096] = {0};
++            ssize_t target_length = readlink(zpath, target, sizeof(target));
++            if (target_length >= 0 && (u64)target_length < sizeof(target))
++            {
++                clang_analyze_shadow_hash_string(hash, (String8){.pointer = target, .length = (u64)target_length});
++            }
++            else
++            {
++                clang_analyze_shadow_reason(arena, snapshot, S8("symlink-target-unavailable"));
++                valid = false;
++            }
++        }
++        else if (S_ISDIR(status.st_mode))
++        {
++            clang_analyze_shadow_hash_string(hash, directory);
++            clang_analyze_shadow_hash_string(hash, S8("directory"));
++            if (snapshot->entries >= BUSTER_ANALYZE_SHADOW_MAX_ENTRIES || pending_count >= BUSTER_ANALYZE_SHADOW_MAX_ENTRIES)
++            {
++                clang_analyze_shadow_reason(arena, snapshot, S8("input-tree-entry-limit"));
++                valid = false;
++                break;
++            }
++            DIR* stream = opendir(zpath);
++            if (!stream)
++            {
++                clang_analyze_shadow_reason(arena, snapshot, S8("input-tree-directory-unreadable"));
++                valid = false;
++                break;
++            }
++            struct dirent* entry = 0;
++            u64 child_count = 0;
++            while (valid && (entry = readdir(stream)))
++            {
++                String8 name = string_duplicate_arena(arena, string_from_pointer(entry->d_name), true);
++                if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
++                {
++                    String8 child = path_join(arena, directory, name);
++                    if (!clang_analyze_shadow_skip_path(child, results, state))
++                    {
++                        if (snapshot->entries + child_count >= BUSTER_ANALYZE_SHADOW_MAX_ENTRIES || child_count >= BUSTER_ANALYZE_SHADOW_MAX_ENTRIES)
++                        {
++                            clang_analyze_shadow_reason(arena, snapshot, S8("input-tree-entry-limit"));
++                            valid = false;
++                        }
++                        else
++                        {
++                            children[child_count++] = name;
++                        }
++                    }
++                }
++            }
++            bool close_success = closedir(stream) == 0;
++            valid = valid && close_success;
++            if (!close_success) clang_analyze_shadow_reason(arena, snapshot, S8("input-tree-directory-close-failed"));
++            clang_analyze_shadow_sort(children, child_count);
++            clang_analyze_shadow_hash_string(hash, string_format(arena, S8("directory-entry-count={u64}"), child_count));
++            for (u64 child_index = 0; valid && child_index < child_count; child_index += 1)
++            {
++                String8 name = children[child_index];
++                String8 child = path_join(arena, directory, name);
++                clang_analyze_shadow_hash_string(hash, S8("entry-name"));
++                clang_analyze_shadow_hash_string(hash, name);
++                pending[pending_count++] = child;
++                snapshot->entries += 1;
++            }
++        }
++        else if (S_ISREG(status.st_mode))
++        {
++            clang_analyze_shadow_hash_string(hash, S8("file"));
++            clang_analyze_shadow_hash_string(hash, directory);
++            if (status.st_size < 0 || (u64)status.st_size > BUSTER_ANALYZE_SHADOW_MAX_BYTES - snapshot->bytes)
++            {
++                clang_analyze_shadow_reason(arena, snapshot, S8("input-tree-byte-limit"));
++                valid = false;
++                break;
++            }
++            clang_analyze_shadow_hash_string(hash, string_format(arena, S8("size={u64};mode={u64}"), (u64)status.st_size, (u64)(status.st_mode & 0777)));
++            int descriptor = open(zpath, O_RDONLY | O_CLOEXEC);
++            if (descriptor < 0)
++            {
++                clang_analyze_shadow_reason(arena, snapshot, S8("input-file-unreadable"));
++                valid = false;
++                break;
++            }
++            u8 buffer[16384];
++            u8 overlap[32] = {0};
++            u64 overlap_count = 0;
++            Sha256 content_hash = {0};
++            sha256_init(&content_hash);
++            ssize_t read_count = 0;
++            u64 file_bytes = 0;
++            while (valid && (read_count = read(descriptor, buffer, sizeof(buffer))) > 0)
++            {
++                sha256_add(&content_hash, buffer, (u64)read_count);
++                file_bytes += (u64)read_count;
++                snapshot->bytes += (u64)read_count;
++                u8 combined[16384 + sizeof(overlap)] = {0};
++                memcpy(combined, overlap, overlap_count);
++                memcpy(combined + overlap_count, buffer, (u64)read_count);
++                u64 combined_count = overlap_count + (u64)read_count;
++                String8 file_span = {.pointer = (char8*)combined, .length = combined_count};
++                bool dynamic = string_contains(file_span, S8("__DATE__")) || string_contains(file_span, S8("__TIME__")) ||
++                    string_contains(file_span, S8("__TIMESTAMP__")) || string_contains(file_span, S8("##")) ||
++                    string_contains(file_span, S8("\\\n")) || string_contains(file_span, S8("\\\r"));
++                if (dynamic) clang_analyze_shadow_reason(arena, snapshot, S8("dynamic-or-token-spliced-input"));
++                overlap_count = BUSTER_MIN((u64)sizeof(overlap), combined_count);
++                memcpy(overlap, combined + combined_count - overlap_count, overlap_count);
++                if (snapshot->bytes > BUSTER_ANALYZE_SHADOW_MAX_BYTES)
++                {
++                    clang_analyze_shadow_reason(arena, snapshot, S8("input-tree-byte-limit"));
++                    valid = false;
++                }
++            }
++            bool close_success = close(descriptor) == 0;
++            valid = valid && read_count == 0 && close_success && file_bytes == (u64)status.st_size;
++            if (!valid) clang_analyze_shadow_reason(arena, snapshot, S8("input-file-read-or-size-race"));
++            if (valid)
++            {
++                char8 digest[SHA256_HEX_CAPACITY] = {0};
++                sha256_finish_hex(&content_hash, digest);
++                clang_analyze_shadow_hash_string(hash, S8("content-sha256"));
++                clang_analyze_shadow_hash_string(hash, string_from_pointer(digest));
++            }
++        }
++        else
++        {
++            clang_analyze_shadow_hash_string(hash, S8("special-file"));
++            clang_analyze_shadow_reason(arena, snapshot, S8("special-file-in-input-tree"));
++        }
++    }
++    return valid;
++}
++#endif
++
++BUSTER_GLOBAL_LOCAL ClangAnalyzeShadowSnapshot clang_analyze_shadow_snapshot(Arena* arena, ClangAnalyzePlan plan, ClangAnalyzeOptions options,
++                                                                              String8 results, String8 state)
++{
++    ClangAnalyzeShadowSnapshot snapshot = {.complete = true};
++    Sha256 hash = {0};
++    sha256_init(&hash);
++    clang_analyze_shadow_hash_string(&hash, S8("BUSTER_CLANG_ANALYZE_INPUTS_V1"));
++    String8List roots = {0};
++    String8List reasons = {0};
++    bool system_context_complete = false;
++    bool valid = clang_analyze_shadow_command_roots(arena, plan, results, state, &roots, &system_context_complete, &reasons);
++    snapshot.complete = valid && system_context_complete;
++    clang_analyze_shadow_hash_string(&hash, options.database);
++    clang_analyze_shadow_hash_string(&hash, options.config);
++    clang_analyze_shadow_hash_string(&hash, options.clang);
++    clang_analyze_shadow_hash_string(&hash, string_format(arena, S8("shards={u64};jobs={u64};timeout={u64};quiet={u64}"),
++                                                           options.shards, options.jobs, options.timeout, (u64)options.quiet));
++    for (u64 unit_index = 0; unit_index < plan.count; unit_index += 1)
++    {
++        ClangAnalyzeUnit unit = plan.units[unit_index];
++        String8 directory = os_path_absolute_lexical(arena, unit.entry.directory, true);
++        clang_analyze_shadow_hash_string(&hash, directory);
++        clang_analyze_shadow_hash_string(&hash, unit.entry.file);
++        clang_analyze_shadow_hash_string(&hash, unit.entry.output);
++        clang_analyze_shadow_hash_string(&hash, unit.entry.command);
++        clang_analyze_shadow_hash_string(&hash, S8("original-argv"));
++        for (u64 argument_index = 0; argument_index < unit.entry.arguments.length; argument_index += 1)
++            clang_analyze_shadow_hash_string(&hash, unit.entry.arguments.pointer[argument_index]);
++        clang_analyze_shadow_hash_string(&hash, S8("projected-analyzer-argv"));
++        for (u64 argument_index = 0; argument_index < unit.command.length; argument_index += 1)
++        {
++            clang_analyze_shadow_hash_string(&hash, unit.command.pointer[argument_index]);
++        }
++        String8 compiler = unit.command.length ? unit.command.pointer[0] : (String8){0};
++        String8 compiler_path = path_is_absolute(compiler) ? compiler :
++            (string_contains(compiler, S8("/")) ? path_join(arena, directory, compiler) : compiler);
++        String8 compiler_digest = {0};
++        bool compiler_path_supported = compiler_path.length && path_is_absolute(compiler_path);
++#if BUSTER_LINUX
++        if (compiler_path_supported) compiler_path_supported = clang_analyze_shadow_path_components(arena, compiler_path, &hash, &snapshot);
++#endif
++        if (compiler_path_supported && stage_object_sha256_file(arena, compiler_path, &compiler_digest))
++        {
++            clang_analyze_shadow_hash_string(&hash, S8("compiler-binary-sha256"));
++            clang_analyze_shadow_hash_string(&hash, compiler_digest);
++        }
++        else
++        {
++            clang_analyze_shadow_hash_string(&hash, S8("compiler-binary-unresolved"));
++            string8_list_push(arena, &reasons, S8("compiler-binary-unresolved"));
++            snapshot.complete = false;
++        }
++    }
++    // Hash a sorted compiler/runtime-relevant environment projection. The
++    // omitted process environment remains an explicit completeness miss.
++    Sha256 environment_hash = {0};
++    sha256_init(&environment_hash);
++    String8* environment_items = arena_allocate(arena, String8, program_state->input.environment_keys.length);
++    u64 environment_item_count = 0;
++    for (u64 environment_index = 0; environment_index < program_state->input.environment_keys.length; environment_index += 1)
++    {
++        String8 key = program_state->input.environment_keys.pointer[environment_index];
++        if (clang_analyze_shadow_environment_key(key))
++        {
++            if (environment_index < program_state->input.environment_values.length)
++                environment_items[environment_item_count++] = string_format(arena, S8("{S8}={S8}"), key,
++                                                                              program_state->input.environment_values.pointer[environment_index]);
++            else
++            {
++                environment_items[environment_item_count++] = string_format(arena, S8("{S8}=<missing>"), key);
++                snapshot.complete = false;
++            }
++        }
++    }
++    clang_analyze_shadow_sort(environment_items, environment_item_count);
++    clang_analyze_shadow_hash_string(&environment_hash, S8("clang-relevant-environment-v1"));
++    clang_analyze_shadow_hash_string(&environment_hash, string_format(arena, S8("count={u64}"), environment_item_count));
++    for (u64 index = 0; index < environment_item_count; index += 1) clang_analyze_shadow_hash_string(&environment_hash, environment_items[index]);
++    char8 environment_digest[SHA256_HEX_CAPACITY] = {0};
++    sha256_finish_hex(&environment_hash, environment_digest);
++    snapshot.environment_digest = string_duplicate_arena(arena, string_from_pointer(environment_digest), true);
++    clang_analyze_shadow_hash_string(&hash, S8("environment-sha256"));
++    clang_analyze_shadow_hash_string(&hash, snapshot.environment_digest);
++    string8_list_push(arena, &reasons, S8("environment-identity-is-an-explicit-allowlist"));
++    snapshot.complete = false;
++    String8 driver = program_state->input.arguments.length ? program_state->input.arguments.pointer[0] : (String8){0};
++    driver = path_is_absolute(driver) ? driver : os_path_absolute_lexical(arena, driver, true);
++    String8 driver_digest = {0};
++    bool driver_path_supported = driver.length && path_is_absolute(driver);
++#if BUSTER_LINUX
++    if (driver_path_supported) driver_path_supported = clang_analyze_shadow_path_components(arena, driver, &hash, &snapshot);
++#endif
++    if (driver_path_supported && stage_object_sha256_file(arena, driver, &driver_digest))
++    {
++        clang_analyze_shadow_hash_string(&hash, S8("analyzer-policy-driver-sha256"));
++        clang_analyze_shadow_hash_string(&hash, driver_digest);
++    }
++    else
++    {
++        string8_list_push(arena, &reasons, S8("analyzer-policy-driver-unresolved"));
++        snapshot.complete = false;
++    }
++    clang_analyze_shadow_hash_string(&hash, string_format(arena, S8("policy=clang-analyze-shadow-v1;result-format=owned-by-fresh-analyzer;plan-count={u64}"), plan.count));
++#if BUSTER_LINUX
++    SliceString8 root_slice = string8_list_to_slice(arena, roots);
++    Sha256 tree_hash = {0};
++    sha256_init(&tree_hash);
++    for (u64 root_index = 0; valid && root_index < root_slice.length; root_index += 1)
++    {
++        clang_analyze_shadow_hash_string(&tree_hash, S8("tree-root"));
++        valid = clang_analyze_shadow_snapshot_root(arena, root_slice.pointer[root_index], results, state, &tree_hash, &snapshot);
++    }
++    char8 tree_digest[SHA256_HEX_CAPACITY] = {0};
++    sha256_finish_hex(&tree_hash, tree_digest);
++    snapshot.tree_digest = string_duplicate_arena(arena, string_from_pointer(tree_digest), true);
++    clang_analyze_shadow_hash_string(&hash, S8("tree-sha256"));
++    clang_analyze_shadow_hash_string(&hash, snapshot.tree_digest);
++#else
++    valid = false;
++    snapshot.reason = S8("tree-snapshot-supported-on-linux-only");
++#endif
++    for (String8Node* node = reasons.first; node; node = node->next)
++    {
++        clang_analyze_shadow_hash_string(&hash, node->string);
++        if (!snapshot.reason.length) snapshot.reason = node->string;
++        else if (!string_contains(snapshot.reason, node->string))
++            snapshot.reason = string_format(arena, S8("{S8},{S8}"), snapshot.reason, node->string);
++    }
++    snapshot.complete = snapshot.complete && valid;
++    char8 digest[SHA256_HEX_CAPACITY] = {0};
++    sha256_finish_hex(&hash, digest);
++    snapshot.digest = string_duplicate_arena(arena, string_from_pointer(digest), true);
++    return snapshot;
++}
++
++BUSTER_GLOBAL_LOCAL ClangAnalyzeShadowState clang_analyze_shadow_state_read(Arena* arena, String8 path)
++{
++    ClangAnalyzeShadowState state = {.status = S8("missing")};
++    String8 text = {0};
++#if BUSTER_LINUX
++    char8* zpath = string_duplicate_arena(arena, path, true).pointer;
++    int descriptor = open(zpath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
++    if (descriptor >= 0)
++    {
++        struct stat status = {0};
++        bool safe = fstat(descriptor, &status) == 0 && S_ISREG(status.st_mode) && status.st_nlink == 1 && status.st_size >= 0 &&
++                    (u64)status.st_size <= BUSTER_ANALYZE_SHADOW_MAX_STATE_BYTES;
++        u8 buffer[BUSTER_ANALYZE_SHADOW_MAX_STATE_BYTES + 1] = {0};
++        u64 count = 0;
++        ssize_t read_count = 0;
++        while (safe && count < sizeof(buffer) && (read_count = read(descriptor, buffer + count, sizeof(buffer) - count)) > 0)
++            count += (u64)read_count;
++        struct stat after = {0};
++        bool unchanged_size = fstat(descriptor, &after) == 0 && after.st_size == (s64)count;
++        bool closed = close(descriptor) == 0;
++        if (safe && read_count == 0 && unchanged_size && closed && count <= BUSTER_ANALYZE_SHADOW_MAX_STATE_BYTES)
++        {
++            text = string_duplicate_arena(arena, (String8){.pointer = (char8*)buffer, .length = count}, true);
++            state.status = S8("invalid");
++        }
++        else state.status = S8("unsafe-or-unreadable");
++    }
++    else state.status = errno == ENOENT ? S8("missing") : S8("unsafe-or-unreadable");
++#else
++    state.status = S8("unsupported-platform");
++#endif
++    if (text.length && string_starts_with_sequence(text, S8(BUSTER_ANALYZE_SHADOW_STATE_VERSION)))
++    {
++        u64 first = BUSTER_COMPILE_TIME_STRING_LENGTH(BUSTER_ANALYZE_SHADOW_STATE_VERSION);
++        u64 end = first;
++        while (end < text.length && text.pointer[end] != '\n') end += 1;
++        String8 digest = {.pointer = text.pointer + first, .length = end - first};
++        bool digest_terminated = end < text.length;
++        u64 elapsed_start = digest_terminated ? end + 1 : text.length;
++        u64 elapsed_end = elapsed_start;
++        while (elapsed_end < text.length && text.pointer[elapsed_end] != '\n') elapsed_end += 1;
++        String8 elapsed = {.pointer = text.pointer + elapsed_start, .length = elapsed_end - elapsed_start};
++        bool elapsed_terminated = elapsed_end < text.length;
++        u64 complete_start = elapsed_terminated ? elapsed_end + 1 : text.length;
++        u64 complete_end = complete_start;
++        while (complete_end < text.length && text.pointer[complete_end] != '\n') complete_end += 1;
++        String8 complete = {.pointer = text.pointer + complete_start, .length = complete_end - complete_start};
++        u64 parsed_value = 0;
++        bool parsed = text_parse_u64(elapsed, &parsed_value);
++        bool terminated = complete_end + 1 == text.length && text.pointer[complete_end] == '\n';
++        state.valid = digest_terminated && elapsed_terminated && stage_object_sha256_valid(digest) && parsed && terminated &&
++                      (string_equal(complete, S8("0")) || string_equal(complete, S8("1")));
++        if (state.valid)
++        {
++            state.digest = digest;
++            state.elapsed_us = parsed_value;
++            state.complete = string_equal(complete, S8("1"));
++            state.status = S8("valid");
++        }
++    }
++    return state;
++}
++
++BUSTER_GLOBAL_LOCAL bool clang_analyze_shadow_write_state(String8 path, String8 digest, u64 elapsed_us, bool complete)
++{
++    String8 text = string_format(program_state->arena, S8("{S8}{S8}\n{u64}\n{u64}\n"), S8(BUSTER_ANALYZE_SHADOW_STATE_VERSION), digest, elapsed_us, (u64)complete);
++#if BUSTER_LINUX
++    char8* zpath = string_duplicate_arena(program_state->arena, path, true).pointer;
++    int descriptor = open(zpath, O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
++    bool result = descriptor >= 0;
++    if (result)
++    {
++        struct stat status = {0};
++        result = fstat(descriptor, &status) == 0 && S_ISREG(status.st_mode) && status.st_nlink == 1 && status.st_size >= 0 &&
++                 (u64)status.st_size <= BUSTER_ANALYZE_SHADOW_MAX_STATE_BYTES && ftruncate(descriptor, 0) == 0;
++        u64 written = 0;
++        while (result && written < text.length)
++        {
++            ssize_t count = write(descriptor, text.pointer + written, text.length - written);
++            result = count > 0;
++            if (result) written += (u64)count;
++        }
++        bool closed = close(descriptor) == 0;
++        result = result && closed && written == text.length;
++    }
++#else
++    bool result = false;
++#endif
++    ClangAnalyzeShadowState read_back = result ? clang_analyze_shadow_state_read(program_state->arena, path) : (ClangAnalyzeShadowState){0};
++    result = result && read_back.valid && read_back.elapsed_us == elapsed_us && read_back.complete == complete && string_equal(read_back.digest, digest);
++    return result;
++}
++
++BUSTER_GLOBAL_LOCAL bool clang_analyze_shadow_write_observation(Arena* arena, String8 results, ClangAnalyzeShadowSnapshot before,
++                                                                 ClangAnalyzeShadowSnapshot after, ClangAnalyzeShadowState previous,
++                                                                 u64 discovery_us, u64 full_run_us, ProcessResult fresh_result)
++{
++    bool stable = string_equal(before.digest, after.digest);
++    bool digest_match = previous.valid && string_equal(previous.digest, after.digest);
++    bool partial_match = previous.valid && stable && digest_match;
++    bool complete_match = partial_match && previous.complete && before.complete && after.complete;
++    String8 reason = after.reason.length ? after.reason : before.reason;
++    if (!reason.length && !before.complete) reason = S8("input-identity-incomplete");
++    String8 record = string_format(arena,
++        S8("{S8}fresh_analysis_invoked=1\nbefore_fingerprint={S8}\nafter_fingerprint={S8}\nenvironment_sha256={S8}\ntree_sha256={S8}\nprevious_state_status={S8}\nsnapshot_stable={u64}\nprevious_digest_match={u64}\npartial_fingerprint_match={u64}\ncontent_fingerprint_match={u64}\ninput_snapshot_complete={u64}\nanalysis_completion={S8}\nproducer_authentication=unavailable\nauthoritative_eligible=0\nqualified_reuse_us=0\nrun_result={S8}\ntiming_granularity=whole-run-only\ntime_weighted_eligibility=unavailable\nfull_run_us={u64}\ndiscovery_us={u64}\nprevious_candidate_run_us={u64}\ninput_entries={u64}\ninput_bytes={u64}\ninvalidation_reason={S8}\n"),
++        S8(BUSTER_ANALYZE_SHADOW_RECORD_VERSION), before.digest, after.digest, after.environment_digest, after.tree_digest,
++        previous.status.length ? previous.status : S8("unavailable"), (u64)stable, (u64)digest_match, (u64)partial_match,
++        (u64)complete_match, (u64)(before.complete && after.complete && stable),
++        fresh_result == PROCESS_RESULT_SUCCESS ? S8("confirmed-success") : S8("incomplete-or-failed"),
++        fresh_result == PROCESS_RESULT_SUCCESS ? S8("success") : S8("failure"), full_run_us, discovery_us, partial_match ? previous.elapsed_us : 0,
++        after.entries, after.bytes, reason.length ? reason : S8("none"));
++    bool result = clang_analyze_write(arena, path_join(arena, results, S8("shadow-observation.txt")), record);
++    return result;
++}
++
++BUSTER_GLOBAL_LOCAL ClangAnalyzeShadowSnapshot clang_analyze_shadow_test_snapshot(Arena* arena, String8 root)
++{
++    ClangAnalyzeShadowSnapshot snapshot = {.complete = true};
++    Sha256 hash = {0};
++    sha256_init(&hash);
++#if BUSTER_LINUX
++    bool valid = clang_analyze_shadow_snapshot_root(arena, root, (String8){0}, (String8){0}, &hash, &snapshot);
++#else
++    bool valid = false;
++    snapshot.reason = S8("tree-snapshot-supported-on-linux-only");
++#endif
++    snapshot.complete = snapshot.complete && valid;
++    char8 digest[SHA256_HEX_CAPACITY] = {0};
++    sha256_finish_hex(&hash, digest);
++    snapshot.digest = string_duplicate_arena(arena, string_from_pointer(digest), true);
++    return snapshot;
++}
++
++BUSTER_GLOBAL_LOCAL void clang_analyze_shadow_test_check(bool condition, String8 name, u64* checks, u64* failures)
++{
++    string_print(S8("SHADOW_SELF_TEST name={S8} status={S8}\n"), name, condition ? S8("pass") : S8("fail"));
++    *checks += 1;
++    *failures += !condition;
++}
++
++BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_shadow_self_test(Arena* arena)
++{
++    u64 checks = 0;
++    u64 failures = 0;
++    String8 root = os_path_absolute_lexical(arena, string_format(arena, S8("build/clang-analyze-shadow-self-test-{u64}"), os_now_microseconds()), true);
++    String8 first = path_join(arena, root, S8("first"));
++    String8 second = path_join(arena, root, S8("second"));
++    String8 results = path_join(arena, root, S8("observations"));
++    bool created = clang_analyze_new_directory(arena, root);
++#if BUSTER_LINUX
++    created = created && mkdir(string_duplicate_arena(arena, first, true).pointer, 0700) == 0 &&
++              mkdir(string_duplicate_arena(arena, second, true).pointer, 0700) == 0 &&
++              mkdir(string_duplicate_arena(arena, results, true).pointer, 0700) == 0;
++#endif
++    String8 later_header = path_join(arena, second, S8("pick.h"));
++    String8 early_header = path_join(arena, first, S8("pick.h"));
++    bool wrote = created && file_write(later_header, BUSTER_SLICE_TO_BYTE_SLICE(S8("int picked(void) { return 1; }\n"))) &&
++                 true;
++    String8 sorted_a[] = {S8("z"), S8("a"), S8("m")};
++    String8 sorted_b[] = {S8("m"), S8("z"), S8("a")};
++    clang_analyze_shadow_sort(sorted_a, BUSTER_ARRAY_LENGTH(sorted_a));
++    clang_analyze_shadow_sort(sorted_b, BUSTER_ARRAY_LENGTH(sorted_b));
++    bool sorted_equal = true;
++    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sorted_a); index += 1)
++        sorted_equal = sorted_equal && string_equal(sorted_a[index], sorted_b[index]);
++    clang_analyze_shadow_test_check(wrote && sorted_equal, S8("directory-entry-sort-canonical"), &checks, &failures);
++    ClangAnalyzeShadowSnapshot original = clang_analyze_shadow_test_snapshot(arena, root);
++    ClangAnalyzeShadowSnapshot repeat = clang_analyze_shadow_test_snapshot(arena, root);
++    clang_analyze_shadow_test_check(wrote && original.complete && repeat.complete && string_equal(original.digest, repeat.digest),
++                                    S8("unchanged-whole-tree-positive"), &checks, &failures);
++    wrote = file_write(early_header, BUSTER_SLICE_TO_BYTE_SLICE(S8("int picked(void) { return 2; }\n")));
++    ClangAnalyzeShadowSnapshot added = clang_analyze_shadow_test_snapshot(arena, root);
++    clang_analyze_shadow_test_check(wrote && added.complete && !string_equal(original.digest, added.digest),
++                                    S8("higher-priority-negative-lookup-addition-invalidates"), &checks, &failures);
++    wrote = file_write(early_header, BUSTER_SLICE_TO_BYTE_SLICE(S8("int picked(void) { return 3; }\n")));
++    ClangAnalyzeShadowSnapshot changed = clang_analyze_shadow_test_snapshot(arena, root);
++    clang_analyze_shadow_test_check(wrote && changed.complete && !string_equal(added.digest, changed.digest),
++                                    S8("included-file-content-change-invalidates"), &checks, &failures);
++    String8 state_path = path_join(arena, root, S8("corrupt-state.txt"));
++    bool state_written = clang_analyze_shadow_write_state(state_path, original.digest, 41, false);
++    ClangAnalyzeShadowState roundtrip = clang_analyze_shadow_state_read(arena, state_path);
++    clang_analyze_shadow_test_check(state_written && roundtrip.valid && !roundtrip.complete && roundtrip.elapsed_us == 41 &&
++                                    string_equal(roundtrip.digest, original.digest), S8("state-roundtrip"), &checks, &failures);
++    bool corrupt_written = file_write(state_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("not a shadow state\n")));
++    ClangAnalyzeShadowState corrupt = clang_analyze_shadow_state_read(arena, state_path);
++    clang_analyze_shadow_test_check(corrupt_written && !corrupt.valid, S8("corrupt-state-is-a-miss"), &checks, &failures);
++    String8 valid_state_target = path_join(arena, root, S8("valid-state-target.txt"));
++    String8 linked_state = path_join(arena, root, S8("linked-state.txt"));
++    bool target_written = clang_analyze_shadow_write_state(valid_state_target, original.digest, 41, false);
++    bool state_link_created = false;
++#if BUSTER_LINUX
++    state_link_created = symlink(string_duplicate_arena(arena, valid_state_target, true).pointer,
++                                 string_duplicate_arena(arena, linked_state, true).pointer) == 0;
++#endif
++    ClangAnalyzeShadowState state_symlink = clang_analyze_shadow_state_read(arena, linked_state);
++    bool state_link_write = clang_analyze_shadow_write_state(linked_state, original.digest, 42, false);
++    ClangAnalyzeShadowState target_after_link = clang_analyze_shadow_state_read(arena, valid_state_target);
++    clang_analyze_shadow_test_check(target_written && state_link_created && !state_symlink.valid && !state_link_write &&
++                                    target_after_link.valid && target_after_link.elapsed_us == 41,
++                                    S8("state-symlink-is-not-read-or-written"), &checks, &failures);
++    String8 oversized_path = path_join(arena, root, S8("oversized-state.txt"));
++    char8 oversized_bytes[BUSTER_ANALYZE_SHADOW_MAX_STATE_BYTES + 1] = {0};
++    memset(oversized_bytes, 'x', sizeof(oversized_bytes));
++    String8 oversized_text = {.pointer = oversized_bytes, .length = sizeof(oversized_bytes)};
++    bool oversized_written = file_write(oversized_path, BUSTER_SLICE_TO_BYTE_SLICE(oversized_text));
++    ClangAnalyzeShadowState oversized = clang_analyze_shadow_state_read(arena, oversized_path);
++    clang_analyze_shadow_test_check(oversized_written && !oversized.valid && string_equal(oversized.status, S8("unsafe-or-unreadable")),
++                                    S8("oversized-state-is-not-read"), &checks, &failures);
++    String8 link_path = path_join(arena, root, S8("first/link.h"));
++    bool link_created = false;
++#if BUSTER_LINUX
++    link_created = symlink(string_duplicate_arena(arena, early_header, true).pointer, string_duplicate_arena(arena, link_path, true).pointer) == 0;
++#endif
++    ClangAnalyzeShadowSnapshot linked = clang_analyze_shadow_test_snapshot(arena, root);
++    clang_analyze_shadow_test_check(link_created && !linked.complete && linked.reason.length,
++                                    S8("symlink-input-is-ineligible"), &checks, &failures);
++    ClangAnalyzeShadowState matching = {.digest = linked.digest, .elapsed_us = 987, .valid = true, .complete = false};
++    bool record_written = clang_analyze_shadow_write_observation(arena, results, linked, linked, matching, 41, 321, PROCESS_RESULT_SUCCESS);
++    String8 record = clang_analyze_read(arena, path_join(arena, results, S8("shadow-observation.txt")));
++    clang_analyze_shadow_test_check(record_written && string_contains(record, S8("partial_fingerprint_match=1")) &&
++                                    string_contains(record, S8("content_fingerprint_match=0")) &&
++                                    string_contains(record, S8("producer_authentication=unavailable")) &&
++                                    string_contains(record, S8("authoritative_eligible=0")) && string_contains(record, S8("qualified_reuse_us=0")),
++                                    S8("content-match-never-authorizes-reuse"), &checks, &failures);
++    bool removed = remove_path_recursive(arena, root);
++    string_print(S8("SHADOW_SELF_TEST checks={u64} failures={u64} cleanup={S8}\n"), checks, failures, removed ? S8("pass") : S8("fail"));
++    failures += !removed;
++    return failures ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
++}
++
++BUSTER_GLOBAL_LOCAL ProcessResult clang_analyze_shadow_main(Arena* arena, SliceString8 arguments)
++{
++    ClangAnalyzeOptions options = {.database = S8("build"), .shards = BUSTER_ANALYZE_DEFAULT_SHARDS,
++        .jobs = BUSTER_ANALYZE_DEFAULT_JOBS, .timeout = BUSTER_ANALYZE_TIMEOUT_SECONDS};
++    String8 state_path = {0};
++    String8* forwarded = arena_allocate(arena, String8, arguments.length);
++    u64 forwarded_count = 0;
++    bool valid = true;
++    bool database_set = false;
++    bool self_test = arguments.length == 1 && string_equal(arguments.pointer[0], S8("--self-test"));
++    for (u64 index = 0; valid && !self_test && index < arguments.length; index += 1)
++    {
++        String8 argument = arguments.pointer[index];
++        String8 inline_value = {0};
++        String8 option = argument;
++        bool has_value = build_argument_split_value(argument, &option, &inline_value);
++        if (string_equal(option, S8("--shadow-state")) && (has_value || index + 1 < arguments.length))
++        {
++            state_path = has_value ? inline_value : arguments.pointer[++index];
++        }
++        else
++        {
++            forwarded[forwarded_count++] = argument;
++            if (string_equal(argument, S8("--quiet")) && !has_value) options.quiet = true;
++            else if (!string_starts_with_sequence(argument, S8("--")) && !database_set)
++            {
++                options.database = argument;
++                database_set = true;
++            }
++            else if (has_value || index + 1 < arguments.length)
++            {
++                String8 value = has_value ? inline_value : arguments.pointer[index + 1];
++                if (!has_value) forwarded[forwarded_count++] = arguments.pointer[++index];
++                if (string_equal(option, S8("--config"))) options.config = value;
++                else if (string_equal(option, S8("--clang"))) options.clang = value;
++                else if (string_equal(option, S8("--results"))) options.results = value;
++                else if (string_equal(option, S8("--build-directory"))) options.database = value;
++                else if (string_equal(option, S8("--shards")) || string_equal(option, S8("--jobs")) || string_equal(option, S8("--timeout")))
++                {
++                    u64 number = 0;
++                    valid = text_parse_u64(value, &number);
++                    if (string_equal(option, S8("--shards"))) options.shards = number;
++                    if (string_equal(option, S8("--jobs"))) options.jobs = number;
++                    if (string_equal(option, S8("--timeout"))) options.timeout = number;
++                }
++                else if (string_equal(option, S8("--prepare")) || string_equal(option, S8("--aggregate")) || string_equal(option, S8("--shard")) ||
++                         string_equal(option, S8("--qualify-workers")) || string_equal(option, S8("--expect-rejection")) ||
++                         string_equal(option, S8("--self-test")))
++                {
++                    valid = false;
++                }
++                else valid = false;
++            }
++            else if (string_equal(argument, S8("--prepare")) || string_equal(argument, S8("--aggregate")) || string_equal(argument, S8("--shard")) ||
++                     string_equal(argument, S8("--qualify-workers")) || string_equal(argument, S8("--expect-rejection")) ||
++                     string_equal(argument, S8("--self-test"))) valid = false;
++        }
++    }
++    valid = valid && options.results.length && options.shards && options.shards <= BUSTER_ANALYZE_MAX_SHARDS && options.jobs &&
++        options.jobs <= BUSTER_ANALYZE_MAX_SHARDS && options.timeout && options.timeout <= 86400;
++    ProcessResult result = PROCESS_RESULT_FAILED;
++    if (self_test)
++    {
++        result = clang_analyze_shadow_self_test(arena);
++    }
++    else if (valid)
++    {
++        options.database = os_path_absolute(arena, clang_analyze_compile_commands_path(arena, options.database), true);
++        options.results = os_path_absolute_lexical(arena, options.results, true);
++        if (state_path.length) state_path = os_path_absolute_lexical(arena, state_path, true);
++        u64 discovery_start = os_now_microseconds();
++        ClangAnalyzePlan plan_before = {0};
++        bool planned_before = clang_analyze_plan(arena, options, &plan_before) && plan_before.count;
++        ClangAnalyzeShadowSnapshot before = {0};
++        ClangAnalyzeShadowState previous = {0};
++        if (planned_before)
++        {
++            before = clang_analyze_shadow_snapshot(arena, plan_before, options, options.results, state_path);
++            if (state_path.length) previous = clang_analyze_shadow_state_read(arena, state_path);
++        }
++        u64 discovery_us = os_now_microseconds() - discovery_start;
++        u64 run_start = os_now_microseconds();
++        // Even a shadow planning or state miss cannot suppress the required
++        // analyzer execution. The normal parser remains the verdict authority.
++        ProcessResult fresh_result = clang_analyze_main(arena, (SliceString8){.pointer = forwarded, .length = forwarded_count});
++        u64 full_run_us = os_now_microseconds() - run_start;
++        ClangAnalyzePlan plan_after = {0};
++        ClangAnalyzeShadowSnapshot after = {0};
++        u64 post_start = os_now_microseconds();
++        bool planned_after = clang_analyze_plan(arena, options, &plan_after) && plan_after.count == plan_before.count;
++        if (planned_before && planned_after) after = clang_analyze_shadow_snapshot(arena, plan_after, options, options.results, state_path);
++        discovery_us += os_now_microseconds() - post_start;
++        bool planned = planned_before && planned_after;
++        bool written = planned && clang_analyze_shadow_write_observation(arena, options.results, before, after, previous, discovery_us, full_run_us, fresh_result);
++        bool stable = planned && string_equal(before.digest, after.digest);
++        if (written && state_path.length && stable && fresh_result == PROCESS_RESULT_SUCCESS)
++            written = clang_analyze_shadow_write_state(state_path, after.digest, full_run_us, before.complete && after.complete);
++        result = planned ? (written ? fresh_result : PROCESS_RESULT_FAILED) : PROCESS_RESULT_FAILED;
++    }
++    else
++    {
++        string_print(S8("error: clang_analyze_shadow requires a full fresh run with --results DIR [--shadow-state FILE]; prepare, shard-worker, aggregate and qualify-workers modes are unsupported\n"));
++    }
++    return result;
++}
