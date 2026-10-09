@@ -105,7 +105,18 @@ static void mir_trace_table(MirTraceReader* reader, unsigned int width, int prin
 int main(int argc, char** argv)
 {
     int result = 2;
-    FILE* file = argc == 2 ? fopen(argv[1], "rb") : 0;
+    FILE* file = 0;
+    if (argc == 2)
+    {
+#if defined(_MSC_VER)
+        if (fopen_s(&file, argv[1], "rb") != 0)
+        {
+            file = 0;
+        }
+#else
+        file = fopen(argv[1], "rb");
+#endif
+    }
     if (file)
     {
         int sized = fseek(file, 0, SEEK_END) == 0;
