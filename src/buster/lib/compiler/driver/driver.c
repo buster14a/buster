@@ -7012,6 +7012,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                     .section_count = unit.object.section_count,
                     .symbol_count = unit.object.symbol_count,
                     .relocation_count = unit.object.relocation_count,
+                    .comdat_count = unit.object.comdat_count,
                     .debug_module_count = unit.object.debug_module_count,
                 };
                 object.sections = arena_allocate(arena, ObjectSection, object.section_count);
@@ -7032,6 +7033,14 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 {
                     object.symbols[symbol_index] = unit.object.symbols[symbol_index];
                     object.symbols[symbol_index].name = string_duplicate_arena(arena, unit.object.symbols[symbol_index].name, false);
+                }
+                // Group coordinates and owned keys must live as long as the
+                // copied symbols/relocations that retain their group IDs.
+                object.comdats = arena_allocate(arena, ObjectComdat, object.comdat_count);
+                for (u32 comdat_index = 0; comdat_index < object.comdat_count; comdat_index += 1)
+                {
+                    object.comdats[comdat_index] = unit.object.comdats[comdat_index];
+                    object.comdats[comdat_index].key = string_duplicate_arena(arena, unit.object.comdats[comdat_index].key, false);
                 }
                 object.relocations = arena_allocate(arena, ObjectRelocation, object.relocation_count);
                 if (object.relocation_count)

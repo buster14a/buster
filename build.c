@@ -16361,6 +16361,190 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_link_diagnostic(Arena* arena, Strin
     return result;
 }
 
+// Ask LLVM's independent native PDB reader to resolve the recursive class definition.
+// The scan stops after a bounded class block, and the caller deliberately ignores this
+// diagnostic result when deciding whether the Windows debuggee check passed.
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_native_pdb_class_report(String8 pdb, String8 text)
+{
+    String8 marker_text = S8("struct RaddebuggerRecursiveNode [sizeof = 16] {");
+    u64 marker = raddebugger_windows_text_find(text, marker_text, 0);
+    u64 section_end = text.length;
+    bool balanced = false;
+    if (marker < text.length)
+    {
+        u64 open = marker + marker_text.length - 1;
+        u64 scan_end = text.length;
+        if (open < text.length && text.length - open > 32768)
+        {
+            scan_end = open + 32768;
+        }
+        if (open < text.length && text.pointer[open] == '{')
+        {
+            u64 depth = 0;
+            bool scanning = true;
+            for (u64 index = open; index < scan_end && scanning; index += 1)
+            {
+                if (text.pointer[index] == '{')
+                {
+                    depth += 1;
+                }
+                else if (text.pointer[index] == '}')
+                {
+                    if (depth)
+                    {
+                        depth -= 1;
+                    }
+                    if (!depth)
+                    {
+                        section_end = index + 1;
+                        balanced = true;
+                        scanning = false;
+                    }
+                }
+            }
+        }
+    }
+    bool has_recursive_pointer = false;
+    bool has_next = false;
+    bool has_value = false;
+    String8 section = {0};
+    if (balanced)
+    {
+        section = string_slice(text, marker, section_end);
+        has_recursive_pointer = raddebugger_windows_text_has(section, S8("RaddebuggerRecursiveNode *"));
+        has_next = raddebugger_windows_text_has(section, S8("next"));
+        has_value = raddebugger_windows_text_has(section, S8("int value"));
+        u64 shown_bytes = section.length > 16384 ? 16384 : section.length;
+        String8 excerpt = string_slice(section, 0, shown_bytes);
+        string_print(S8("RADDEBUGGER_NATIVE_PDB_CLASS pdb={S8} status={S8} recursive_pointer={u32} next={u32} value={u32} section_bytes={u64} shown_bytes={u64}\n{S8}\n"),
+                     pdb, has_recursive_pointer && has_next && has_value ? S8("pass") : S8("field-shape-mismatch"),
+                     (u32)has_recursive_pointer, (u32)has_next, (u32)has_value, section.length, excerpt.length, excerpt);
+    }
+    else
+    {
+        string_print(S8("RADDEBUGGER_NATIVE_PDB_CLASS pdb={S8} status=missing-or-unbalanced bytes_scanned_limit=32768\n"), pdb);
+    }
+    bool result = balanced && has_recursive_pointer && has_next && has_value;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_native_pdb_consumer_diagnostic(Arena* arena, String8 ide, String8 recursive_source,
+                                                                            bool source_written, String8 output_directory,
+                                                                            String8 debugger_directory, bool* stopped)
+{
+    bool result = false;
+    bool stopped_before = *stopped;
+    bool compile_ran = false;
+    bool compile_link_passed = false;
+    bool pdb_found = false;
+    bool raw_ran = false;
+    bool raw_passed = false;
+    bool pretty_ran = false;
+    bool pretty_passed = false;
+    String8 llvm_pdbutil = executable_resolve_in_path(arena, S8("llvm-pdbutil"));
+    String8 native_binary = path_join(arena, debugger_directory, S8("recursive-native.exe"));
+    String8 native_pdb = path_join(arena, debugger_directory, S8("recursive-native.pdb"));
+    String8 compile_prefix = path_join(arena, debugger_directory, S8("recursive-native-driver"));
+    String8 raw_prefix = path_join(arena, debugger_directory, S8("recursive-native-pdb-types"));
+    String8 pretty_prefix = path_join(arena, debugger_directory, S8("recursive-native-pdb-pretty"));
+    String8 cc = S8("cc");
+    String8 debug_flag = S8("-g");
+    String8 optimize_flag = S8("-O0");
+    String8 target_flag = S8("-target");
+    String8 target = S8("x86_64-pc-windows-msvc");
+    String8 output_flag = S8("-o");
+    if (source_written && !*stopped)
+    {
+        compile_ran = true;
+        OsArgumentBuilder builder = os_argument_builder_start(arena);
+        os_argument_builder_append(&builder, ide);
+        os_argument_builder_append(&builder, cc);
+        os_argument_builder_append(&builder, debug_flag);
+        os_argument_builder_append(&builder, optimize_flag);
+        os_argument_builder_append(&builder, target_flag);
+        os_argument_builder_append(&builder, target);
+        os_argument_builder_append(&builder, recursive_source);
+        os_argument_builder_append(&builder, output_flag);
+        os_argument_builder_append(&builder, native_binary);
+        RaddebuggerCommandResult compile = raddebugger_command(arena, os_argument_builder_flush(&builder), output_directory,
+                                                               compile_prefix, RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+        compile_link_passed = raddebugger_command_ok(compile) && path_exists(arena, native_binary);
+        pdb_found = path_exists(arena, native_pdb);
+    }
+    else
+    {
+        pdb_found = path_exists(arena, native_pdb);
+    }
+    bool can_probe = compile_link_passed && pdb_found && llvm_pdbutil.length && !*stopped;
+    if (can_probe)
+    {
+        String8 raw_arguments[] = {llvm_pdbutil, S8("dump"), S8("-types"), S8("-type-extras"), native_pdb};
+        RaddebuggerCommandResult raw = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(raw_arguments),
+                                                            output_directory, raw_prefix,
+                                                            RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+        raw_ran = true;
+        bool raw_has_type = raddebugger_windows_text_has(raw.output, S8("RaddebuggerRecursiveNode"));
+        bool raw_has_hash_stream = raddebugger_windows_text_has(raw.output, S8("Hash Stream Index:"));
+        bool raw_has_offsets = raddebugger_windows_text_has(raw.output, S8("Type Index Offsets:"));
+        bool raw_has_hash = raddebugger_windows_text_has(raw.output, S8(", hash = 0x"));
+        raw_passed = raddebugger_command_ok(raw) && raw_has_type && raw_has_hash_stream && raw_has_offsets && raw_has_hash;
+        u64 shown_bytes = raw.output.length > 16384 ? 16384 : raw.output.length;
+        String8 excerpt = string_slice(raw.output, raw.output.length - shown_bytes, raw.output.length);
+        string_print(S8("RADDEBUGGER_NATIVE_PDB_TPI pdb={S8} status={S8} type={u32} hash_stream={u32} offsets={u32} hash={u32} output_bytes={u64} shown_tail_bytes={u64}\n{S8}\n"),
+                     native_pdb, raw_passed ? S8("pass") : S8("content-or-command-failure"), (u32)raw_has_type,
+                     (u32)raw_has_hash_stream, (u32)raw_has_offsets, (u32)raw_has_hash,
+                     raw.output.length, excerpt.length, excerpt);
+        if (!*stopped)
+        {
+            String8 pretty_arguments[] = {llvm_pdbutil, S8("pretty"), S8("-native"), S8("-classes"), S8("-pointers"),
+                                          S8("-class-definitions=all"), S8("-class-recurse-depth=2"), native_pdb};
+            RaddebuggerCommandResult pretty = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pretty_arguments),
+                                                                  output_directory, pretty_prefix,
+                                                                  RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+            pretty_ran = true;
+            pretty_passed = raddebugger_command_ok(pretty) &&
+                            raddebugger_windows_native_pdb_class_report(native_pdb, pretty.output);
+        }
+    }
+    String8 reason = S8("none");
+    if (!source_written)
+    {
+        reason = S8("recursive-source-not-written");
+    }
+    else if (stopped_before)
+    {
+        reason = S8("diagnostics-already-stopped");
+    }
+    else if (*stopped)
+    {
+        reason = S8("process-tree-cleanup-failed");
+    }
+    else if (!compile_ran || !compile_link_passed)
+    {
+        reason = S8("native-compile-link-failed");
+    }
+    else if (!pdb_found)
+    {
+        reason = S8("native-pdb-not-created");
+    }
+    else if (!llvm_pdbutil.length)
+    {
+        reason = S8("llvm-pdbutil-not-in-PATH");
+    }
+    else if (!raw_passed || !pretty_passed)
+    {
+        reason = S8("consumer-command-or-content-check-failed");
+    }
+    string_print(S8("RADDEBUGGER_WINDOWS_NATIVE_PDB_CONSUMER compile_link={S8} pdb_file={S8} pdbutil={S8} raw_tpi={S8} pretty_recursive_class={S8} reason={S8} compile_logs={S8} raw_logs={S8} pretty_logs={S8} acceptance=unchanged\n"),
+                 compile_ran ? (compile_link_passed ? S8("pass") : S8("fail")) : S8("not-run"),
+                 pdb_found ? S8("present") : S8("missing"), llvm_pdbutil.length ? llvm_pdbutil : S8("not-found"),
+                 raw_ran ? (raw_passed ? S8("pass") : S8("fail")) : S8("not-run"),
+                 pretty_ran ? (pretty_passed ? S8("pass") : S8("fail")) : S8("not-run"),
+                 reason, compile_prefix, raw_prefix, pretty_prefix);
+    result = compile_link_passed && pdb_found && raw_passed && pretty_passed;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debuggee_diagnostics(Arena* arena, String8 ide, String8 clang, String8 llvm_readobj,
                                                                   String8 source_directory, String8 output_directory,
                                                                   String8 resource_include, String8 debuggee_object,
@@ -16494,6 +16678,9 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debuggee_diagnostics(Arena* arena, 
                      compiler_name, compiled ? S8("pass") : S8("fail"), type_info ? S8("pass") : S8("fail"),
                      linked ? S8("pass") : S8("fail"), recursive_source, object, binary, compile_prefix, codeview_prefix, link_prefix);
     }
+    bool native_pdb_diagnostic_passed = raddebugger_windows_native_pdb_consumer_diagnostic(
+        arena, ide, recursive_source, recursive_written, output_directory, debugger_directory, stopped);
+    BUSTER_UNUSED(native_pdb_diagnostic_passed);
     string_print(S8("RADDEBUGGER_WINDOWS_LINK_DIAGNOSTICS object={S8} codeview={S8} no_debug={S8} clang_trace={S8} direct_lld={S8} recursive_tpi={S8} acceptance=unchanged\n"),
                  debuggee_object, codeview_ran ? (codeview_passed ? S8("pass") : S8("fail")) : S8("not-run"),
                  no_debug_ran ? (no_debug_passed ? S8("pass") : S8("fail")) : S8("not-run"),

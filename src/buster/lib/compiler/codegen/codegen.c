@@ -6932,7 +6932,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         result.failed_opcode = IR_OPCODE_COUNT;
         if (function->state != IR_FUNCTION_LOWERED)
         {
-            continue;
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, function->symbol);
+            if (symbol && symbol->is_link_once)
+            {
+                buffer.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                result.failure_reason = S8("link-once function definition is not lowered for native code generation");
+            }
+            if (buffer.error == CODEGEN_ERROR_NONE)
+            {
+                continue;
+            }
         }
         // Share the target-derived executable padding policy with source
         // alignment. x86 remains one bulk memset, not one encoding per byte.

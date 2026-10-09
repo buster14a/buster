@@ -59,6 +59,65 @@ BUSTER_GLOBAL_LOCAL u64 codegen_test_entry_expected(u32 fixture, u64 first, u64 
 BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        String8 source = S8("int link_once_probe(void) { return 42; }");
+        Target target = {
+            .cpu_arch = CPU_ARCH_X86_64,
+            .cpu_model = CPU_MODEL_BASELINE,
+            .os = OPERATING_SYSTEM_WINDOWS,
+        };
+        CPreprocessResult tokens =
+            c_preprocess(arguments->arena, source, (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+        CParseResult parse = c_parse(arguments->arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir(arguments->arena, S8("link-once-not-lowered.c"), tokens, parse, target);
+        BUSTER_TEST(arguments, !tokens.error_count && !parse.diagnostic_count && lowered.program && !lowered.diagnostic_count);
+        if (lowered.program && !lowered.diagnostic_count)
+        {
+            IrProgram* program = lowered.program;
+            IrModule* module = program->modules;
+            IrFunction* function = codegen_test_c_function_find(module, S8("link_once_probe"));
+            IrSymbol* symbol = function ? ir_symbol_from_id(&program->symbols, function->symbol) : 0;
+            BUSTER_TEST(arguments, function && symbol && function->state == IR_FUNCTION_LOWERED);
+            BUSTER_TEST(arguments, symbol && symbol->kind == IR_SYMBOL_FUNCTION && symbol->linkage == IR_LINKAGE_EXTERNAL &&
+                                      symbol->is_definition && !symbol->is_weak && !symbol->section_name.length);
+            if (function && symbol)
+            {
+                function->state = IR_FUNCTION_NOT_LOWERED;
+                function->entry = IR_BLOCK_ID_INVALID;
+                function->blocks = 0;
+                function->block_count = 0;
+                function->instructions = 0;
+                function->instruction_count = 0;
+                function->values = 0;
+                function->value_count = 0;
+                module->lowered_function_count = 0;
+                program->lowered_function_count = 0;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+
+                CodegenModule ordinary = codegen_generate_canonical_module(
+                    arguments->arena, program, module, target,
+                    (CodegenModuleOptions){.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST});
+                BUSTER_TEST(arguments, ordinary.error == CODEGEN_ERROR_NONE && !ordinary.code.length && !ordinary.function_count &&
+                                          !ordinary.entry_count);
+
+                symbol->is_link_once = true;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                CodegenModule rejected = codegen_generate_canonical_module(
+                    arguments->arena, program, module, target,
+                    (CodegenModuleOptions){.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST});
+                BUSTER_TEST(arguments, rejected.error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION);
+                BUSTER_TEST(arguments, rejected.failed_phase == CODEGEN_PHASE_FUNCTION_ENTRY &&
+                                          rejected.failed_function.value == function->id.value);
+                BUSTER_TEST(arguments,
+                            string_equal(rejected.failure_reason,
+                                         S8("link-once function definition is not lowered for native code generation")));
+                BUSTER_TEST(arguments, !rejected.code.length && !rejected.code.pointer && !rejected.functions &&
+                                          !rejected.function_count && !rejected.entries && !rejected.entry_count);
+            }
+        }
+        scratch_end(temporary);
+    }
     String8 sources[] = {
         S8("unsigned long long probe(void) { goto target; dead: return 7; target: return 42; }"),
         S8("unsigned long long probe(unsigned long long a, unsigned long long b) { unsigned long long v; if(a>b)v=a+11;else v=b+29;return v; }"),

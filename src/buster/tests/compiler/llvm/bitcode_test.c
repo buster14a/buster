@@ -5067,7 +5067,7 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     not_lowered_function.instruction_count = 0;
     not_lowered_function.values = 0;
     not_lowered_function.value_count = 0;
-    IrModule not_lowered_module = module;
+    IrModule not_lowered_module = modules[0];
     not_lowered_module.functions = &not_lowered_function;
     not_lowered_module.lowered_function_count = 0;
     IrProgram not_lowered_program = program;
