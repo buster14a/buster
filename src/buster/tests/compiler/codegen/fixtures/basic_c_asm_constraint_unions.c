@@ -194,13 +194,14 @@ typedef struct
 } constraint_fpu_environment;
 
 // A memory operand passes only its address, so an aggregate larger than a
-// register pair is accepted; the x87 control word of a fresh process is 0x37f.
+// register pair is accepted; a fresh process masks every x87 exception (low control byte 0x7f;
+// the precision byte differs between Windows and the other systems).
 int constraint_m_wide_environment(void)
 {
     constraint_fpu_environment saved = {{0}};
     __asm__ volatile("fnstenv %0" : "=m"(saved));
     __asm__ volatile("fldenv %0" : : "m"(saved));
-    return saved.bytes[0] == 0x7f && saved.bytes[1] == 0x03;
+    return saved.bytes[0] == 0x7f;
 }
 
 int main(void)
