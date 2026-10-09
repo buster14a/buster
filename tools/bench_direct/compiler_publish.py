@@ -2617,7 +2617,8 @@ def utility_phase_proofs(authority: dict, files: dict[str, bytes], host: dict) -
     wanted = {"schema": "buster-compiler-closure-utility-owner-v1", "phase": "utility", "packet": "0", "plan_sha256": plan_sha,
               "wall_scope": "public-platform-job-start-lower-through-child-cleanup-before-terminal-publication", "process_state": "complete",
               "timed_out": "0", "cleanup_failed": "0", "within_reservation": "true", "cancelled": "0",
-              "qualification_state": "unvalidated", "default_activated": "false"}
+              "qualification_state": "unvalidated", "default_activated": "false",
+              "manager_launch_attempted": "1", "manager_wait_observed": "1", "manager_cleanup_proven": "1"}
     if set(owner) != set(wanted) | {"physical_packet_wall_us", "native_entry_wall_us", "job_elapsed_at_native_entry_us", "physical_job_clock_sha256"} or any(owner.get(key) != value for key, value in wanted.items()):
         raise ValueError("utility owned worker is failed, cancelled, exhausted or incomplete")
     owner_wall = sampling_integer(owner["physical_packet_wall_us"], True)
