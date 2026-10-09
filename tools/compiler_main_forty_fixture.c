@@ -233,7 +233,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_main_forty_worker(Arena* arena,
             path_join(arena,plan.output_root,S8("main40-work/lab")),
             path_join(arena,plan.output_root,S8("main40-work/throughput"))};
         String8 names[]={S8("ordinary"),S8("lab"),S8("throughput")};
-        bool exported=exported_root.created && !exported_root.error.v;
+        String8 exported_path=string_duplicate_arena(arena,main,true);
+        struct stat exported_status={0};
+        bool exported=exported_root.created && !exported_root.error.v &&
+            lstat((char*)exported_path.pointer,&exported_status)==0 && S_ISDIR(exported_status.st_mode);
+        if (exported) string8_list_push(arena,&manifest,string_format(arena,S8("D\tmain40\t-\t0\t{u64}\n"),
+            (u64)(exported_status.st_mode & 07777)));
         for (u64 i=0;i<BUSTER_ARRAY_LENGTH(sources);i+=1)
         {
             String8List component={0};
