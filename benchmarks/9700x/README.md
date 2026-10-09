@@ -77,6 +77,95 @@ group is unavailable. Report either instead of working around it.
   (#2761). On any CPU other than the AMD Ryzen 7 9700X nothing is compiled
   or run and the run fails, whatever runner label selected the job.
 
+## Troubleshooting
+
+Where the results are (#2902): the job log and the step summary hold the same
+report, written one piece at a time as each workload finishes, so an earlier
+workload's section survives a later failure. The job log's standard error also
+carries `progress:` lines, and the runner's work directory
+(`$RUNNER_TEMP/direct-bench`) holds `progress.log` with the same lines. Each
+line is written before the next operation: the plan, the start of every stage
+of every workload, and every finished run with its exit state and wall time.
+Stage starts and the closing lines are `fsync`ed; the per-run lines are not, so
+no disk flush overlaps the next timed run (a killed runner loses nothing it
+wrote, only a power failure can). The file is created when the first stage starts, truncated at the
+start of each run, capped at 64 KiB (it ends with a marker line when the cap is
+hit, after which only standard error continues), and each line is cut at 300
+bytes. If it cannot be written the run still measures, then fails with
+`cannot write progress.log`.
+
+Read the run top to bottom: the last `**FAILED:**` lines at the end of the
+report summarize every problem. The exit status is 0 only when every run of
+every workload was valid, 1 for any reported failure, and 128 plus the signal
+number when the runner was stopped (below).
+
+### Refused before anything is compiled
+
+These end the run with a `**FAILED:**` line and no section for any workload:
+an observed CPU other than the AMD Ryzen 7 9700X, a base or head that is not a
+full lowercase commit ID, a missing compiler, candidate checkout or summary
+directory, a pinned CPU the runner process cannot use, an unsupported
+workload file name or more than four changed workloads (see
+[Contract](#contract)), and a pull request that changes no workload. A source
+over 256 KiB, an input over 8 MiB, or either not being a regular file fails
+that workload alone, with its reason, before it is compiled.
+
+### A workload that did not finish
+
+A workload that fails, including with an unexpected exception, or is
+interrupted gets an **INCOMPLETE** section naming
+the stage it was in, the kind (`failed`, `timed out` or `interrupted`), the
+exception and how many of the 11 planned runs completed. Completed runs are
+listed as exit/timed out/wall milliseconds; no latency summary is given, and
+every workload after it is listed as `NOT RUN`. The stages are:
+
+| stage | what a failure there usually means |
+|---|---|
+| preparing the run directory | the work directory is not writable or already holds this workload's directory |
+| staging the source | the source could not be read from the candidate checkout or copied |
+| compilation | the compiler could not be started, or ran for more than 120 seconds (`timed out`); a compile *error* is reported separately as `Compilation failed:` with the diagnostics, because the source is compiled alone and only system headers resolve |
+| reading the input data | `<name>.data` could not be read |
+| hashing the executable | normally never fails; a program that cannot be read is hashed as `missing` |
+| measurement | a run could not be started or waited for, or the runner was stopped during it |
+| reporting | the section could not be written; a source that cannot be re-read is hashed as `missing`, which marks the runs invalid |
+
+### Runs that finished but are not valid
+
+A report headed **INVALID, NOT A COMPLETE MEASUREMENT** completed its runs
+but cannot be compared. Its table keeps every run. Causes: a nonzero exit, a
+signal or a timeout (ten seconds per run, the whole process group is killed),
+a program that modified or removed `input.data`, a file over 16 MiB (SIGXFSZ)
+or run files totalling over 64 MiB, an executable whose sha256 changed after
+the first run (the series stops there), and a source file that changed after
+compilation. Failed runs never enter the statistics.
+
+### A cancelled or timed-out job
+
+A cancelled job or the 15-minute job timeout makes the Actions runner signal
+the step, typically SIGINT, then SIGTERM, then SIGKILL if it is still running;
+a closed terminal sends SIGHUP. SIGINT, SIGTERM and SIGHUP take the path of a
+failing stage: the section of the workload in progress is published as
+INCOMPLETE with the stage and the runs that completed, the workloads that had
+not started are listed as `NOT RUN`, and the closing lines are written before
+the runner exits with 130, 143 or 129. A report piece that is being written
+when the signal arrives is finished first; if that was a workload's last
+section, no INCOMPLETE section is added for it, only a `**FAILED:**` line. If
+standard output cannot be written (the terminal that sent SIGHUP is gone, or
+the log reader exited), that is reported as `**FAILED:** cannot write standard
+output` and the rest of the report goes to the step summary and `progress.log`
+alone, with the same exit status. The compiler or workload process
+group that was running is killed and reaped on every exit path, so nothing
+started by the runner outlives it. A signal that was ignored when the runner
+started stays ignored, and any signal after the first stop is only recorded,
+so the closing report is always completed.
+
+SIGKILL cannot be handled, so it leaves no INCOMPLETE section and no `NOT RUN`
+list, and a workload that was running (it is in its own session) continues
+until it exits on its own. The job log and `progress.log` still show the plan,
+the last stage started and every run that finished before it; the summary
+holds the sections published before it. Treat such a run as not measured and
+rerun it.
+
 ## Compiler comparison of a pull request
 
 To measure a compiler change before merging (#2769), add or change any line
