@@ -83,11 +83,11 @@ jobs:
         if: always() && steps.compiler.outcome == 'success'
         run: |
           "$RUNNER_TEMP/raddebugger-driver" test_raddebugger --self-test
-      - name: Qualify pristine graphical RAD Debugger and independent reference
+      - name: Qualify pristine RAD Debugger builds and independent runtime controls
         if: always() && steps.compiler.outcome == 'success'
         run: |
           set -o pipefail
-          xvfb-run -a -s "-screen 0 1280x800x24" "$RUNNER_TEMP/raddebugger-driver" test_raddebugger --config Release --debugger "$GITHUB_WORKSPACE/external/raddebugger" 2>&1 | tee build/raddebugger-harness.log
+          "$RUNNER_TEMP/raddebugger-driver" test_raddebugger --config Release "$GITHUB_WORKSPACE/external/raddebugger" 2>&1 | tee build/raddebugger-harness.log
       - name: Retain machine specifications
         if: always()
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768

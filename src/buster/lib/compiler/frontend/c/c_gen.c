@@ -2540,6 +2540,7 @@ struct CIrPreparedCall
     bool builtin_types_compatible_p;
     bool builtin_object_size;
     bool builtin_assume_aligned;
+    bool builtin_assume;
     bool builtin_debugtrap;
     bool builtin_spin_pause;
     bool builtin_unreachable;
@@ -22155,17 +22156,24 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
             c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             CSymbolBuiltin builtin = c_ir_token_builtin_kind(builder, builder->preprocess.tokens[index]);
-            if (builtin == C_SYMBOL_BUILTIN_GENERIC || builtin == C_SYMBOL_BUILTIN_CHOOSE_EXPR)
+            bool assume_member = index &&
+                (c_token_is_punctuator(&builder->preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
+                 c_token_is_punctuator(&builder->preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
+            bool assume = builtin == C_SYMBOL_BUILTIN_ASSUME && !assume_member;
+            bool selection = builtin == C_SYMBOL_BUILTIN_GENERIC || builtin == C_SYMBOL_BUILTIN_CHOOSE_EXPR;
+            if (assume || selection)
             {
-                // The selection owns preparation of its chosen expression.
-                // Preparing a group here would execute a discarded arm.
-                u32 close = c_ir_matching_delimiter_cached(builder, index + 1, frame->as.prepare_control.end, C_PUNCTUATOR_LEFT_PARENTHESIS,
-                                                           C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                // __assume owns an unevaluated operand; generic selection and
+                // choose_expr own their selected expression. Preparing a group
+                // here would evaluate or hoist a discarded expression.
+                u32 close = c_ir_matching_delimiter_cached(builder, index + 1, frame->as.prepare_control.end,
+                                                           C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
                 if (close == UINT32_MAX)
                 {
                     builder->failure_token_index = index;
-                    builder->failure_message = builtin == C_SYMBOL_BUILTIN_GENERIC ? S8("unterminated _Generic selection") :
-                                                                                     S8("unterminated __builtin_choose_expr selection");
+                    builder->failure_message = assume ? S8("unterminated __assume operand") :
+                        (builtin == C_SYMBOL_BUILTIN_GENERIC ? S8("unterminated _Generic selection") :
+                                                               S8("unterminated __builtin_choose_expr selection"));
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
@@ -23045,10 +23053,11 @@ BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* buil
     // Target-owned builtin spellings are lowered as compiler operations only
     // where __has_builtin reports true. Elsewhere preserve ordinary fallback definitions.
     bool target_owned_builtin = result == C_SYMBOL_BUILTIN_VENDOR_TARGET;
-    if (!target_owned_builtin && result == C_SYMBOL_BUILTIN_PREFETCH)
+    if (!target_owned_builtin && (result == C_SYMBOL_BUILTIN_PREFETCH || result == C_SYMBOL_BUILTIN_ASSUME))
     {
         String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
-        target_owned_builtin = string_equal(spelling, S8("_mm_prefetch"));
+        target_owned_builtin = (result == C_SYMBOL_BUILTIN_PREFETCH && string_equal(spelling, S8("_mm_prefetch"))) ||
+                               (result == C_SYMBOL_BUILTIN_ASSUME && string_equal(spelling, S8("__assume")));
     }
     if (target_owned_builtin)
     {
@@ -23127,6 +23136,13 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         {
             active_call_count -= 1;
         }
+        if (active_call_count && builder->prepared_calls[active_calls[active_call_count - 1]].builtin_assume)
+        {
+            // The assumption's operand is type-checked by the parser but is
+            // never evaluated, including calls nested inside the operand.
+            index = builder->prepared_calls[active_calls[active_call_count - 1]].close_index;
+            continue;
+        }
         CToken token = builder->preprocess.tokens[index];
         // A sizeof or _Alignof operand is unevaluated: skip it whole, so no
         // call inside is prepared here. The skipped region is delimiter-
@@ -23169,12 +23185,21 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // Atomic and math names resolve their exact operation by spelling
         // below, but only after c_ir_token_builtin_kind says they are one.
         CSymbolBuiltin builtin_kind = c_ir_token_builtin_kind(builder, token);
+        // Member names matching these two target-owned spellings are ordinary
+        // function or function-pointer calls.
+        if ((builtin_kind == C_SYMBOL_BUILTIN_ASSUME || builtin_kind == C_SYMBOL_BUILTIN_PREFETCH) && index &&
+            (c_token_is_punctuator(&builder->preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
+             c_token_is_punctuator(&builder->preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW)))
+        {
+            builtin_kind = C_SYMBOL_BUILTIN_NONE;
+        }
         bool builtin_identity = builtin_kind == C_SYMBOL_BUILTIN_EXPECT;
         bool builtin_constant_p = builtin_kind == C_SYMBOL_BUILTIN_CONSTANT_P;
         bool builtin_choose_expr = builtin_kind == C_SYMBOL_BUILTIN_CHOOSE_EXPR;
         bool builtin_types_compatible_p = builtin_kind == C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P;
         bool builtin_object_size = builtin_kind == C_SYMBOL_BUILTIN_OBJECT_SIZE;
         bool builtin_assume_aligned = builtin_kind == C_SYMBOL_BUILTIN_ASSUME_ALIGNED;
+        bool builtin_assume = builtin_kind == C_SYMBOL_BUILTIN_ASSUME;
         bool builtin_debugtrap = builtin_kind == C_SYMBOL_BUILTIN_DEBUGTRAP;
         bool builtin_spin_pause = builtin_kind == C_SYMBOL_BUILTIN_SPIN_PAUSE;
         bool builtin_unreachable = builtin_kind == C_SYMBOL_BUILTIN_UNREACHABLE;
@@ -23410,7 +23435,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         indirect |= callee_start != index || indexed_callee || parenthesized_callee;
         if ((!indexed_callee && !parenthesized_callee && token.kind != C_TOKEN_IDENTIFIER) ||
             (!builtin_identity && !builtin_constant_p && !builtin_choose_expr && !builtin_types_compatible_p && !builtin_object_size &&
-             !builtin_assume_aligned && !builtin_debugtrap && !builtin_spin_pause && !builtin_unreachable && !builtin_frame_address && !builtin_return_address && !builtin_alloca && !builtin_complex && !builtin_integer_transform && !builtin_vendor_target && !builtin_vendor_generic && !builtin_strlen && !builtin_clear_cache && !builtin_prefetch &&
+             !builtin_assume_aligned && !builtin_assume && !builtin_debugtrap && !builtin_spin_pause && !builtin_unreachable && !builtin_frame_address && !builtin_return_address && !builtin_alloca && !builtin_complex && !builtin_integer_transform && !builtin_vendor_target && !builtin_vendor_generic && !builtin_strlen && !builtin_clear_cache && !builtin_prefetch &&
              !builtin_va_start && !builtin_va_copy && !builtin_va_end && !builtin_va_arg && !builtin_generic && builtin_atomic == C_IR_ATOMIC_BUILTIN_COUNT &&
              !builtin_math_link_name.length && builtin_memory == C_IR_MEMORY_BUILTIN_COUNT && builtin_overflow == C_IR_OVERFLOW_BUILTIN_NONE &&
              builtin_unary == IR_UNARY_COUNT &&
@@ -23483,6 +23508,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             .builtin_strlen = builtin_strlen,
             .builtin_clear_cache = builtin_clear_cache,
             .builtin_prefetch = builtin_prefetch,
+            .builtin_assume = builtin_assume,
             .builtin_va_start = builtin_va_start,
             .builtin_va_copy = builtin_va_copy,
             .builtin_va_end = builtin_va_end,
@@ -25925,6 +25951,17 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             selected->result = c_ir_emit_integer_value(builder, 0, false, token);
             selected->argument_count = 2;
+            selected->emitted = true;
+            remaining -= 1;
+            continue;
+        }
+        if (selected->builtin_assume)
+        {
+            // __assume is a compile-time hint with a non-evaluated operand.
+            // Buster drops the hint instead of adding an IR operation, while
+            // preserving the parser's one-argument type checks.
+            selected->result = c_ir_emit_integer_value(builder, 0, false, token);
+            selected->argument_count = 1;
             selected->emitted = true;
             remaining -= 1;
             continue;

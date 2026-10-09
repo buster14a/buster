@@ -166,6 +166,8 @@ int main(int argc, char** argv)
         int outer_seen = 0;
         int found_end = 0;
         int first_record_seen = 0;
+        uint64_t attempt_count = 0;
+        uint64_t next_capacity_scale = 1;
         while (reader.valid && reader.remaining)
         {
             uint64_t name_length = mir_trace_u64(&reader);
@@ -176,7 +178,7 @@ int main(int argc, char** argv)
                     printf("RAD_SDK_MIR_FIRST_RECORD end=1\n");
                 }
                 found_end = 1;
-                reader.valid = reader.valid && reader.remaining == 0;
+                reader.valid = reader.valid && attempt_count != 0 && reader.remaining == 0;
                 break;
             }
             mir_trace_string(&reader, name_length, text, sizeof(text));
@@ -186,6 +188,31 @@ int main(int argc, char** argv)
                 mir_trace_diagnostic_hex("name", text, name_length);
                 printf("\n");
                 first_record_seen = 1;
+            }
+            if (reader.valid && strcmp(text, "codegen attempt") == 0)
+            {
+                uint64_t capacity_scale = mir_trace_u64(&reader);
+                if (!reader.valid || capacity_scale != next_capacity_scale ||
+                    next_capacity_scale > UINT64_MAX / 2u)
+                {
+                    reader.valid = 0;
+                    break;
+                }
+                printf("RAD_SDK_MIR_ATTEMPT index=%llu capacity_scale=%llu\n",
+                       (unsigned long long)attempt_count, (unsigned long long)capacity_scale);
+                attempt_count += 1u;
+                next_capacity_scale *= 2u;
+                // A capacity retry starts a new complete trace attempt. Only
+                // the final attempt can satisfy the required function rows.
+                selected_count = 0;
+                inner_seen = 0;
+                outer_seen = 0;
+                continue;
+            }
+            if (!reader.valid || !attempt_count)
+            {
+                reader.valid = 0;
+                break;
             }
             int selected = strcmp(text, "debuggee_inner") == 0 || strcmp(text, "debuggee_outer") == 0;
             uint64_t function = mir_trace_u64(&reader);
@@ -242,7 +269,7 @@ int main(int argc, char** argv)
                 }
             }
         }
-        result = reader.valid && found_end && inner_seen && outer_seen ? 0 : 2;
+        result = reader.valid && found_end && attempt_count && inner_seen && outer_seen ? 0 : 2;
         printf("RAD_SDK_MIR_RESULT valid=%d ended=%d selected=%u inner=%d outer=%d\n",
                reader.valid, found_end, selected_count, inner_seen, outer_seen);
         if (fclose(file) != 0)

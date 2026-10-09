@@ -4240,6 +4240,8 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_types_compatible_p"), C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P },
     { S8_INITIALIZER("__builtin_object_size"), C_SYMBOL_BUILTIN_OBJECT_SIZE },
     { S8_INITIALIZER("__builtin_assume_aligned"), C_SYMBOL_BUILTIN_ASSUME_ALIGNED },
+    // Microsoft's language-level assumption is a target-owned no-call builtin.
+    { S8_INITIALIZER("__assume"), C_SYMBOL_BUILTIN_ASSUME },
     { S8_INITIALIZER("__builtin_debugtrap"), C_SYMBOL_BUILTIN_DEBUGTRAP },
     { S8_INITIALIZER("__builtin_trap"), C_SYMBOL_BUILTIN_DEBUGTRAP },
     // Clang's emmintrin.h carries only `void _mm_pause(void);` -- the
@@ -4513,7 +4515,7 @@ BUSTER_C_SHARED bool c_semantic_builtin_returns_void(CSymbolBuiltin builtin)
 {
     bool result = builtin == C_SYMBOL_BUILTIN_DEBUGTRAP || builtin == C_SYMBOL_BUILTIN_SPIN_PAUSE ||
                   builtin == C_SYMBOL_BUILTIN_UNREACHABLE || builtin == C_SYMBOL_BUILTIN_CLEAR_CACHE ||
-                  builtin == C_SYMBOL_BUILTIN_PREFETCH || builtin == C_SYMBOL_BUILTIN_VA_START ||
+                  builtin == C_SYMBOL_BUILTIN_PREFETCH || builtin == C_SYMBOL_BUILTIN_ASSUME || builtin == C_SYMBOL_BUILTIN_VA_START ||
                   builtin == C_SYMBOL_BUILTIN_VA_START_C23 || builtin == C_SYMBOL_BUILTIN_VA_COPY ||
                   builtin == C_SYMBOL_BUILTIN_VA_END;
     return result;
@@ -8087,19 +8089,21 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
     };
     bool microsoft_vendor_builtin = c_vendor_builtin_microsoft_operation(name) != C_VENDOR_BUILTIN_MICROSOFT_NONE;
     bool microsoft_prefetch_builtin = string_equal(name, S8("_mm_prefetch"));
+    bool microsoft_assume_builtin = string_equal(name, S8("__assume"));
     bool prefetch_supported = microsoft_prefetch_builtin &&
         c_semantic_builtin_kind_for_target((Target){.cpu_arch = cpu_arch, .os = os}, name, C_SYMBOL_BUILTIN_PREFETCH) ==
             C_SYMBOL_BUILTIN_PREFETCH;
+    bool assume_supported = microsoft_assume_builtin && cpu_arch == CPU_ARCH_X86_64 && os == OPERATING_SYSTEM_WINDOWS;
     bool result = microsoft_vendor_builtin && cpu_arch == CPU_ARCH_X86_64 && os == OPERATING_SYSTEM_WINDOWS;
-    result |= prefetch_supported;
-    for (u32 index = 0; !microsoft_vendor_builtin && !microsoft_prefetch_builtin &&
+    result |= prefetch_supported || assume_supported;
+    for (u32 index = 0; !microsoft_vendor_builtin && !microsoft_prefetch_builtin && !microsoft_assume_builtin &&
          index < BUSTER_ARRAY_LENGTH(supported) && !result; index += 1)
     {
         u64 length = strlen(supported[index]);
         result = name.length == length && memcmp(name.pointer, supported[index], length) == 0;
     }
 
-    if (!result && !microsoft_vendor_builtin && !microsoft_prefetch_builtin)
+    if (!result && !microsoft_vendor_builtin && !microsoft_prefetch_builtin && !microsoft_assume_builtin)
     {
         // These exact-name classes match the implemented complex constructor
         // and c_ir_atomic_builtin_spelling, not arbitrary __atomic_* prefixes.

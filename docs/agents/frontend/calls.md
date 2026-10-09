@@ -705,4 +705,24 @@ marked `_Exit`; a continuation that executes instead fails the runtime oracle.
 
 On `x86_64-windows`, the frontend recognizes the Microsoft `_mm_prefetch(const char *, int)` spelling as the existing no-call prefetch hint builtin and answers `__has_builtin(_mm_prefetch)` truthfully. Its selector must be an integer constant expression in `[0, 7]`; this bound follows the pinned LLVM 23.1.3 declaration and `BI_mm_prefetch` Sema check in [BuiltinsX86.td](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.3/clang/include/clang/Basic/BuiltinsX86.td) and [SemaX86.cpp](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.3/clang/lib/Sema/SemaX86.cpp). On other targets, the builtin query is false and an explicitly defined `_mm_prefetch` remains an ordinary C function name.
 
-The hint call itself is erased through the existing prefetch path while its address expression is still evaluated once. The Windows runtime control covers all eight selectors and checks address-expression effects only; it makes no hardware-prefetch or performance claim.
+The hint call itself is erased through the existing prefetch path while its address expression is still evaluated once. A member named `_mm_prefetch` remains an ordinary function or function-pointer call even on Windows x64. The Windows runtime control covers all eight selectors and checks address-expression effects only; it makes no hardware-prefetch or performance claim.
+
+## Microsoft x64 `__assume`
+
+On `x86_64-windows`, Buster recognizes Microsoft's `__assume` language builtin and reports
+`__has_builtin(__assume)` true. The pinned LLVM 23.1.3 builtin definition gives it the prototype
+`void(bool)`. LLVM's Language Extensions documentation states that the argument is never evaluated;
+the pinned Clang Sema and CodeGen paths implement the side-effect-discarding, no-runtime behavior.
+Buster validates one scalar argument convertible to `_Bool`, returns void, and drops the hint and its
+operand without evaluating it. This deliberately preserves no-evaluation semantics while leaving
+optimization facts unused.
+
+The exact LLVM source is
+[`Builtins.td`](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.3/clang/include/clang/Basic/Builtins.td),
+[`SemaChecking.cpp`](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.3/clang/lib/Sema/SemaChecking.cpp),
+[`CGBuiltin.cpp`](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.3/clang/lib/CodeGen/CGBuiltin.cpp),
+and the [LLVM 23.1 Language Extensions documentation](https://releases.llvm.org/23.1.0/tools/clang/docs/LanguageExtensions.html#__builtin_assume).
+Microsoft's [`__assume` documentation](https://learn.microsoft.com/en-us/cpp/intrinsics/assume?view=msvc-170)
+describes it as a hint that produces no runtime code. Other Buster targets report the builtin
+unavailable and retain an explicitly declared `__assume` as an ordinary C function. A member such as
+`object.__assume` is also an ordinary call.

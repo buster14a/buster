@@ -24495,6 +24495,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_microsoft_intrin_fallbac
     String8 windows_x64 = S8("x86_64-windows");
     String8 supported_source = S8(
         "#if __has_builtin(__cpuidex) != 1\n#error missing __cpuidex support\n#endif\n"
+        "#if __has_builtin(__assume) != 1\n#error missing Microsoft assumption support\n#endif\n"
+        "typedef __typeof__(__assume(1)) AssumeResult;\n"
+        "_Static_assert(__builtin_types_compatible_p(AssumeResult, void), \"assume result type\");\n"
+        "static inline void assume_target_control(int condition) { __assume(condition); return; }\n"
+        "static inline void assume_scalar_controls(int condition, float floating, void *pointer) "
+        "{ __assume(condition); __assume(floating); __assume(pointer); return; }\n"
         "#if !__has_builtin(_mm_prefetch)\n#error missing _mm_prefetch support\n#endif\n"
         "typedef __typeof__(_mm_prefetch((const char *)0, 0)) PrefetchResult;\n"
         "_Static_assert(__builtin_types_compatible_p(PrefetchResult, void), \"prefetch result type\");\n"
@@ -24607,6 +24613,43 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_microsoft_intrin_fallbac
         scratch_end(temporary);
     }
 
+    // Off Windows x64, __assume is an ordinary function spelling. Its
+    // declaration, argument side effect, and call must survive CGen.
+    String8 assume_fallback_source = S8(
+        "#if __has_builtin(__assume)\n#error unsupported __assume builtin advertised\n#endif\n"
+        "extern int __assume(int condition);\n"
+        "int ordinary_assume_fallback(int value) { int returned = __assume(value++); return returned + value; }\n");
+    String8 assume_fallback_targets[] = {S8("x86_64-linux"), S8("aarch64-windows")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(assume_fallback_targets); target_index += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-assume-fallback"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-assume-fallback"), S8(".s"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(assume_fallback_source))))
+            {
+                String8 command[] = {S8("-S"), S8("-g0"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"),
+                                     assume_fallback_targets[target_index], forms[form], S8("-fno-machine-fallback"),
+                                     S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                    arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                String8 assembly = BYTE_SLICE_TO_STRING(8, file_read(arena, output, (FileReadOptions){0}));
+                String8 expected_call = target_index == 0 ? S8("call \"__assume\"") : S8("bl __assume");
+                bool ordinary_call_retained = string_first_sequence(assembly, expected_call) != BUSTER_STRING_NO_MATCH;
+                String8 description = string_format(arena, S8("off-target ordinary __assume call {S8} {S8}: {S8}"),
+                                                    assume_fallback_targets[target_index], forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && ordinary_call_retained, description);
+            }
+            os_file_delete(output);
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+
     struct
     {
         String8 source;
@@ -24655,7 +24698,107 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_microsoft_intrin_fallbac
         }
     }
 
+    struct
+    {
+        String8 source;
+        String8 diagnostic;
+    } invalid_assume_calls[] = {
+        {S8("void bad(void) { __assume(); return; }\n"),
+         S8("too few arguments in the call to '__assume'")},
+        {S8("void bad(void) { __assume(1, 2); return; }\n"),
+         S8("too many arguments in the call to '__assume'")},
+        {S8("struct AssumeAggregate { int value; }; void bad(struct AssumeAggregate value) { __assume(value); return; }\n"),
+         S8("argument 1 of __assume has an incompatible type")},
+        {S8("int bad(void) { return __assume(1); }\n"),
+         S8("void value not ignored as it ought to be")},
+        {S8("void bad(void) { __assume(missing_assume_operand()); return; }\n"),
+         S8("undeclared identifier 'missing_assume_operand'")},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid_assume_calls); case_index += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-assume-invalid"), S8(".c"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(invalid_assume_calls[case_index].source))))
+            {
+                String8 command[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"),
+                                     windows_x64, forms[form], input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                String8 expected = invalid_assume_calls[case_index].diagnostic;
+                bool diagnostic_matches = false;
+                for (u64 offset = 0; offset + expected.length <= compiled.diagnostic.length; offset += 1)
+                {
+                    diagnostic_matches |= memcmp(compiled.diagnostic.pointer + offset, expected.pointer,
+                                                 expected.length) == 0;
+                }
+                String8 description = string_format(arena, S8("Windows x64 invalid __assume call {S8}: {S8}"),
+                                                    forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_ANALYSIS && diagnostic_matches,
+                                description);
+            }
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+
 #if BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64
+    // Microsoft __assume is a no-runtime hint: even calls, updates,
+    // assignments, and volatile accesses in its operand are not evaluated.
+    // The similarly named struct member below remains an ordinary call.
+    String8 assume_runtime_source = S8(
+        "#if __has_builtin(__assume) != 1\n#error missing Microsoft assumption support\n#endif\n"
+        "static int assume_function_evaluations;\n"
+        "static int assume_side_effect(void) { assume_function_evaluations += 1; return 1; }\n"
+        "static int member_calls, member_value;\n"
+        "static void receive_member(int value) { member_calls += 1; member_value = value; return; }\n"
+        "static int prefetch_member_calls;\n"
+        "static int receive_prefetch_member(int value) { prefetch_member_calls += 1; return value + 5; }\n"
+        "struct AssumeCallback { void (*__assume)(int); int (*_mm_prefetch)(int); };\n"
+        "int main(void) { int post = 1, assigned = 3, taken = 0, member_argument = 0, prefetch_argument = 0; "
+        "volatile int volatile_value = 4; "
+        "struct AssumeCallback callback = {receive_member, receive_prefetch_member}; "
+        "__assume(assume_side_effect()); __assume(post++); __assume(assigned = 7); __assume(++volatile_value); "
+        "__assume(1 ? (assigned = assume_side_effect()) : post++); "
+        "__assume(1 && (assigned = assume_side_effect())); __assume(0 || (assigned = assume_side_effect())); "
+        "1 ? (__assume(assume_side_effect()), taken++) : post++; "
+        "1 && (__assume(assume_side_effect()), taken++); "
+        "0 || (__assume(assume_side_effect()), taken++); "
+        "0 && (__assume(assume_side_effect()), post++); "
+        "1 || (__assume(assume_side_effect()), post++); "
+        "callback.__assume(++member_argument); "
+        "int prefetch_result = callback._mm_prefetch(++prefetch_argument); "
+        "return assume_function_evaluations != 0 || post != 1 || assigned != 3 || taken != 3 || volatile_value != 4 || "
+        "member_calls != 1 || member_value != 1 || member_argument != 1 || prefetch_member_calls != 1 || "
+        "prefetch_argument != 1 || prefetch_result != 6; }\n");
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-assume-runtime"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-assume-runtime"), S8(".exe"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(assume_runtime_source))))
+        {
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), S8("-fregister-allocator=fast"), forms[form],
+                                 S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, input};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+            String8 description = string_format(arena, S8("Windows x64 __assume no-evaluation runtime {S8}: {S8}"),
+                                                forms[form], compiled.diagnostic);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(arena, output), description);
+            }
+        }
+        os_file_delete(output);
+        os_file_delete(input);
+        scratch_end(temporary);
+    }
     // Execute all eight legal selectors while checking only the C hint's
     // address-expression effects; this makes no hardware-prefetch claim.
     String8 prefetch_runtime_source = S8(

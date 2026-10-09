@@ -5646,9 +5646,12 @@ BUSTER_C_SHARED CSymbolBuiltin c_semantic_builtin_kind_for_target(Target target,
     bool microsoft_vendor_builtin = builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET &&
                                     c_vendor_builtin_microsoft_operation(name) != C_VENDOR_BUILTIN_MICROSOFT_NONE;
     bool microsoft_prefetch_builtin = builtin == C_SYMBOL_BUILTIN_PREFETCH && string_equal(name, S8("_mm_prefetch"));
+    bool microsoft_assume_builtin = builtin == C_SYMBOL_BUILTIN_ASSUME && string_equal(name, S8("__assume"));
     bool supported = !microsoft_vendor_builtin || c_semantic_vendor_builtin_supported(target, name);
     bool prefetch_supported = target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_WINDOWS;
-    if ((microsoft_vendor_builtin && !supported) || (microsoft_prefetch_builtin && !prefetch_supported))
+    bool assume_supported = target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_WINDOWS;
+    if ((microsoft_vendor_builtin && !supported) || (microsoft_prefetch_builtin && !prefetch_supported) ||
+        (microsoft_assume_builtin && !assume_supported))
     {
         builtin = C_SYMBOL_BUILTIN_NONE;
     }
@@ -20503,9 +20506,20 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
         predefined_function_name |= builtin_called && c_vendor_builtin_spelling(spelling) &&
                                     c_semantic_builtin_kind_for_target(preprocess.target, spelling, C_SYMBOL_BUILTIN_VENDOR_TARGET) !=
                                         C_SYMBOL_BUILTIN_NONE;
-        predefined_function_name |= builtin_called && string_equal(spelling, S8("_mm_prefetch")) &&
+        predefined_function_name |= builtin_called &&
+                                    (!token_index ||
+                                     (!c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_DOT) &&
+                                      !c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_ARROW))) &&
+                                    string_equal(spelling, S8("_mm_prefetch")) &&
                                     c_semantic_builtin_kind_for_target(preprocess.target, spelling,
                                         c_symbol_builtin_from_spelling(spelling)) == C_SYMBOL_BUILTIN_PREFETCH;
+        predefined_function_name |= builtin_called &&
+                                    (!token_index ||
+                                     (!c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_DOT) &&
+                                      !c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_ARROW))) &&
+                                    string_equal(spelling, S8("__assume")) &&
+                                    c_semantic_builtin_kind_for_target(preprocess.target, spelling,
+                                        c_symbol_builtin_from_spelling(spelling)) == C_SYMBOL_BUILTIN_ASSUME;
         bool storage_type_member = token_index >= 3 &&
             (c_token_is_punctuator(&preprocess.tokens[token_index - 3], C_PUNCTUATOR_DOT) ||
              c_token_is_punctuator(&preprocess.tokens[token_index - 3], C_PUNCTUATOR_ARROW));
@@ -31444,8 +31458,9 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
             (string_equal(name, S8("__builtin_inf")) || string_equal(name, S8("__builtin_inff")) ||
              string_equal(name, S8("__builtin_huge_val")));
         bool microsoft_prefetch = kind == C_SYMBOL_BUILTIN_PREFETCH && string_equal(name, S8("_mm_prefetch"));
+        bool microsoft_assume = kind == C_SYMBOL_BUILTIN_ASSUME && string_equal(name, S8("__assume"));
         if (member || (kind != C_SYMBOL_BUILTIN_VENDOR_TARGET && kind != C_SYMBOL_BUILTIN_VENDOR_GENERIC &&
-                       kind != C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT && !infinity && !microsoft_prefetch) ||
+                       kind != C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT && !infinity && !microsoft_prefetch && !microsoft_assume) ||
             !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
         CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, index);
         CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
@@ -31498,7 +31513,14 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
             signature.types[1] = (CVendorBuiltinType){.kind = C_TYPE_CHAR, .pointer_depth = 1, .is_const = true};
             signature.types[2] = (CVendorBuiltinType){.kind = C_TYPE_INT};
         }
-        bool found = !fixed || microsoft_prefetch || c_semantic_vendor_builtin_signature(preprocess.target, name, &signature);
+        if (microsoft_assume)
+        {
+            signature.parameter_count = 1;
+            signature.types[0] = (CVendorBuiltinType){.kind = C_TYPE_VOID};
+            signature.types[1] = (CVendorBuiltinType){.kind = C_TYPE_BOOL};
+        }
+        bool found = !fixed || microsoft_prefetch || microsoft_assume ||
+                     c_semantic_vendor_builtin_signature(preprocess.target, name, &signature);
         u32 minimum = fixed ? signature.parameter_count : generic.minimum_arguments;
         u32 maximum = fixed ? minimum : generic.maximum_arguments == UINT8_MAX ? UINT32_MAX : generic.maximum_arguments;
         if (!found)
