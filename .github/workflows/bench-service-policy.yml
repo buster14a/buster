@@ -52,14 +52,14 @@ jobs:
       - name: Prove the direct 9700X workflow gate
         if: ${{ steps.reuse.outputs.reused != 'true' }}
         run: |
+          clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/lifecycle.c -lm -o "$RUNNER_TEMP/9700x-lifecycle"
+          "$RUNNER_TEMP/9700x-lifecycle" --self-test > "$RUNNER_TEMP/9700x-lifecycle-fixtures.jsonl"
           python3 -B tools/bench_direct/workflow_policy_test.py
           python3 -B tools/bench_direct/run_workloads_test.py
           python3 -B tools/bench_direct/authorize_test.py
           python3 -B tools/bench_direct/authorize_compiler_test.py
           python3 -B tools/bench_direct/compiler_test.py
           python3 -B tools/bench_direct/compiler_visibility_test.py
-          clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/lifecycle.c -lm -o "$RUNNER_TEMP/9700x-lifecycle"
-          "$RUNNER_TEMP/9700x-lifecycle" --self-test > "$RUNNER_TEMP/9700x-lifecycle-fixtures.jsonl"
           python3 -B tools/bench_direct/performance_inventory_test.py
       - name: Replay micro-architecture lab formats
         if: ${{ steps.reuse.outputs.reused != 'true' }}

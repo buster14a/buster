@@ -76,6 +76,7 @@ class Api:
         self.repository = repository
         self.prefix = f"{API}/repos/{repository}"
         self.token = token
+        self.requests = 0
 
     def request(self, path: str, data: dict | None = None, method: str = "") -> object:
         """One API call. Only GET retries; writes are made idempotent by their callers' lookups."""
@@ -90,6 +91,7 @@ class Api:
                     "X-GitHub-Api-Version": "2022-11-28",
                 })
             try:
+                self.requests += 1
                 with urllib.request.urlopen(request, timeout=30) as response:
                     payload = response.read()
                 result = json.loads(payload) if payload else None
@@ -359,13 +361,16 @@ def start(api: Api, environment: dict) -> list[dict]:
         f"Authorized at {stamp()}; awaiting validated terminal evidence. Native Actions job state at {here} "
         "is authoritative for runner queueing and live execution; this short setup does not claim measurement.",
     ]
-    queued = {"status": "queued", "details_url": here, "output": queued_output(mode, head, lines)}
+    output = queued_output(mode, head, lines)
+    output["title"] = "Awaiting validated terminal evidence; see live Actions progress"
+    queued = {"status": "queued", "details_url": here, "output": output}
     rows = advance(api, ensure_check(api, head, mode, marker, queued), queued)
     return rows
 
 
 def main() -> int:
     """Display only: a failure is reported and never fails the request or the measurement."""
+    control_started = time.monotonic()
     environment = dict(os.environ)
     command = sys.argv[1] if len(sys.argv) == 2 else ""
     repository, head, token = (environment.get(key, "") for key in ("BQ_REPOSITORY", "BQ_HEAD_COMMIT", "GH_TOKEN"))
@@ -378,7 +383,8 @@ def main() -> int:
             raise ValueError("invalid workflow inputs")
         api = Api(repository, token)
         rows = announce(api, environment) if command == "announce" else start(api, environment)
-        print(f"BENCH_COMPILER_CHECK {command} " + ", ".join(f"{row.get('id')}:{row.get('status')}" for row in rows))
+        print(f"BENCH_COMPILER_CHECK {command} " + ", ".join(f"{row.get('id')}:{row.get('status')}" for row in rows)
+              + f" api_requests={api.requests} control_execution_seconds={time.monotonic() - control_started:.6f}")
     except Exception as error:  # noqa: BLE001 - display only: report every failure, never fail the run
         print(f"::warning::9700X compiler benchmark check {command or 'command'} failed: {error!r}")
     return 0

@@ -22,6 +22,7 @@ DIRECT = WORKFLOWS / "9700x-direct-bench.yml"
 DIRECT_REQUEST = WORKFLOWS / "9700x-direct-request.yml"
 COMPILER_REQUEST = WORKFLOWS / "9700x-compiler-request.yml"
 COMPILER_REPORT = WORKFLOWS / "9700x-compiler-report.yml"
+LIFECYCLE = WORKFLOWS / "9700x-lifecycle.yml"
 ACTIONLINT = ROOT / ".github" / "actionlint.yaml"
 BENCHMARKING = ROOT / "docs" / "agents" / "benchmarking.md"
 ADMISSION_GUIDE = ROOT / "benchmarks" / "9700x" / "ADMISSION.md"
@@ -426,6 +427,53 @@ DOCUMENTATION_REQUIREMENTS = {
 }
 
 
+LIFECYCLE_EXPECTED = """name: 9700X terminal lifecycle recovery
+on:
+  workflow_run:
+    workflows: [9700X direct workload benchmark, 9700X compiler benchmark request]
+    types: [completed]
+permissions: {}
+concurrency:
+  group: buster-9700x-terminal-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  cancel-in-progress: false
+jobs:
+  reconcile:
+    name: Reconcile the exact completed benchmark attempt
+    if: ${{ github.repository == 'buster14a/buster' && github.event.workflow_run.head_repository.full_name == github.repository && (github.event.workflow_run.path == '.github/workflows/9700x-direct-bench.yml' || (github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion != 'success')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: ubuntu-24.04
+      - name: Check out the trusted lifecycle controller
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Compile the trusted native controller
+        run: clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/lifecycle.c -lm -o "$RUNNER_TEMP/9700x-lifecycle"
+      - name: Reconcile terminal checks and record separate Actions costs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LC_RUN_ID: ${{ github.event.workflow_run.id }}
+          LC_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: '"$RUNNER_TEMP/9700x-lifecycle" recover "$LC_RUN_ID" "$LC_ATTEMPT" > "$RUNNER_TEMP/9700x-lifecycle.jsonl"'
+      - name: Retain bounded lifecycle observations
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: 9700x-lifecycle-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: ${{ runner.temp }}/9700x-lifecycle.jsonl
+          if-no-files-found: warn
+          retention-days: 90"""
+
+
 def main() -> int:
     errors: list[str] = []
     for path, markers in DOCUMENTATION_REQUIREMENTS.items():
@@ -443,6 +491,10 @@ def main() -> int:
     texts.update({path: path.read_text(encoding="utf-8")
                   for path in (*actions.rglob("*.yml"), *actions.rglob("*.yaml"))})
     check_runner_routes(errors, texts)
+    lifecycle = texts.get(LIFECYCLE, "")
+    active_lifecycle = "\n".join(line for line in lifecycle.splitlines() if line.strip() and not line.lstrip().startswith("#"))
+    if active_lifecycle != LIFECYCLE_EXPECTED:
+        errors.append("terminal lifecycle recovery must match the exact reviewed completion-only hosted workflow")
     check_postmerge_diagnostics(errors)
     check_premerge_checks(errors)
     check_direct_workflow(errors)
@@ -474,10 +526,10 @@ def check_runner_routes(errors: list[str], texts: dict[Path, str]) -> None:
             for marker in ("buster-zen5", "ryzen-9700x", "buster-9700x-service-dispatch", "self-hosted"):
                 if marker in active:
                     errors.append(f"unreviewed benchmark runner route {marker}: {path.name}")
-            if ".github/workflows/9700x-direct-bench.yml" in active:
+            if path != LIFECYCLE and ".github/workflows/9700x-direct-bench.yml" in active:
                 errors.append(f"direct benchmark cannot be called or dispatched indirectly: {path.name}")
         for name in ("9700X direct workload request", "9700X compiler benchmark request"):
-            if path not in (DIRECT, DIRECT_REQUEST, COMPILER_REQUEST) and name in active:
+            if path not in (DIRECT, DIRECT_REQUEST, COMPILER_REQUEST, LIFECYCLE) and name in active:
                 errors.append(f"only the direct workflow may follow the request workflow: {path.name}")
         if "pull_request_target" in active:
             errors.append(f"pull_request_target is forbidden repository-wide: {path.name}")
