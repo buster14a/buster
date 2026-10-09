@@ -262,7 +262,7 @@ clock. Readers take the fields they know; later versions only append fields.
 The Clang-like `ide cc` driver accepts `-march=<model>` and
 `-mcpu=<model>` (or their separated forms), ordered target-feature overrides
 through `-mattr=+feature,-feature`, and x86 assembly dialect selection through
-`-masm=att|intel`. CPU and feature options also accept separated values. CPU names use the canonical
+`-masm=att|intel` (x86-64 `-S` listings are Intel syntax only, so `-S -masm=att` of a C input is refused). CPU and feature options also accept separated values. CPU names use the canonical
 spellings printed by `cpu_model_to_string_os`, such as `baseline`, `native`,
 `haswell`, `znver5`, and `apple-m4`; incompatible target/model pairs are
 diagnosed. x86-64 CPU selection requires AMD64 long mode: the historical
@@ -582,8 +582,28 @@ priority (the unsuffixed section last), and an external call prints
 `call f@PLT`. A `@init_array`/`@fini_array` section keeps its ELF section type
 in this assembler, so priority names reach the linker. A call to a symbol the
 unit defines is `R_X86_64_PC32` in `-c` but an assembler always makes it
-`R_X86_64_PLT32`; hidden binding, TLS, `-g`/`-fPIC` and `-masm=att` are not yet
-preserved.
+`R_X86_64_PLT32`.
+
+The same listing keeps the rest of what an assembler cannot infer (#1281):
+`.hidden name` after the binding directive of a hidden definition and after
+the `.extern`/`.weak` line of a hidden undefined reference, and no label,
+`.type` or `.size` for a section symbol (a private zero-value, zero-size
+symbol named for its own section: `.text`, `.debug_*`), because GNU as and
+llvm-mc already define it and refuse "symbol .text is already defined". A
+general-dynamic TLS access keeps its padding as data (`.byte 0x66` before
+`lea rdi, [rip + "x"@TLSGD]`, `.byte 0x66, 0x66, 0x48` before
+`call "__tls_get_addr"@PLT`), since the linker relaxes the 16-byte sequence by
+matching those bytes. `-g` and `-fPIC` listings therefore assemble with GNU as
+and Clang to the same section contents, symbol bindings and visibilities, and
+relocations as `-c`; the one difference is that a section symbol an assembler
+supplies replaces `ctor`-style local references to offset 0. Buster's own
+assembler accepts the `-g` listing but still has no `@TLSGD`. The listing is
+always Intel syntax: `-S` with `-masm=att` on a C input is refused ("-masm=att
+is not supported with -S"), while `-masm=att` with `-c` or with an assembly
+input (where it names the dialect the input is read in) is unchanged.
+`compiler_driver_test_assembly_x86_64_object_semantics`,
+`compiler_driver_test_assembly_x86_64_tls_general_dynamic_padding` and
+`object_test_x86_64_elf_listing_metadata` cover this.
 
 ELF `.section .note.GNU-stack,"",@progbits` is an empty nonallocated stack
 declaration; `"x"` explicitly requests an executable stack. `@progbits` and

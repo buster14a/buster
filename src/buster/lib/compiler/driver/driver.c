@@ -674,6 +674,20 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_reject_gpu_native_options(Arena* arena,
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_c_input(CompilerDriverLanguage language, String8 path);
+
+// -masm picks the dialect an assembly input is read in too, so only a request
+// that prints a C unit's listing meets the Intel-only x86-64 printer.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_invocation_has_c_input(CompilerDriverInvocation const* invocation)
+{
+    bool result = false;
+    for (u32 input_index = 0; input_index < invocation->input_count && invocation->input_paths && !result; input_index += 1)
+    {
+        result = compiler_driver_c_input(compiler_driver_input_language(*invocation, input_index), invocation->input_paths[input_index]);
+    }
+    return result;
+}
+
 // Native code-generation policies need the native code generator, so the
 // pipeline a resolved invocation selects must be able to honor each one.
 // argv_request enables the rules over state only argv fills in:
@@ -718,6 +732,12 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_codegen_request(CompilerDriver
         {
             invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
             invocation->diagnostic = S8("-fno-machine-fallback requires native x86-64 or AArch64 code generation");
+        }
+        else if (invocation->action == COMPILER_DRIVER_ACTION_ASSEMBLY && native_machine && invocation->target.cpu_arch == CPU_ARCH_X86_64 &&
+                 invocation->assembly_syntax == ASSEMBLY_SYNTAX_ATT && compiler_driver_invocation_has_c_input(invocation))
+        {
+            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation->diagnostic = S8("-masm=att is not supported with -S: x86-64 assembly listings are Intel syntax");
         }
     }
 }
