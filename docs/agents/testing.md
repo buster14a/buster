@@ -784,11 +784,14 @@ failure bundles. Cross-target compilation is not a behavioral pass.
 ## Executed DWARF lifetimes
 
 `tools/debug_info_lifetime_oracle.py` executes a Linux x86-64 DWARF fixture
-through GDB with Python support. It checks exact source breakpoints, live
-`x`/`y`, three loop/callee transitions, the caller frame, callee lexical scope,
-and a correct-value-to-unavailable transition under FAST and QUALITY. The loop
-index may be explicitly unavailable before its first certified use; the callee
-parameter is required after its use. Arbitrary lookup errors are failures.
+through GDB with Python support. It checks exact source breakpoints and exact
+live `x`/`y` values, three loop/callee transitions, the caller frame, and
+callee lexical scope under FAST and QUALITY. At later loop and caller stops,
+`x` may be explicitly unavailable or retain its correct value after its final
+source-level use; no unavailable `x` sample is required. Any available `x`
+value must be exact, and the callee must not expose `x`. The loop index may be
+explicitly unavailable before its first certified use; the callee parameter is
+required after its use. Arbitrary lookup errors are failures.
 
 On an authorized correctness host, run:
 

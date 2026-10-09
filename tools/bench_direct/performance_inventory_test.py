@@ -37,8 +37,8 @@ INVENTORY = ROOT / "docs" / "performance-validation-v1.json"
 BENCH_WORKFLOW = ROOT / ".github" / "workflows" / "9700x-direct-bench.yml"
 ROUTE_JOBS = {"main-compare": "  compare:", "pull-compare": "  compare-pull:", "direct-workload": "  bench:"}
 VALIDATIONS = ("performance", "diagnostic", "policy")
-BUILD_COMMAND = re.compile(r"bench|throughput|^production_profile$")
-TOOL = re.compile(r"bench|benchmark|scaling|survey|performance")
+BUILD_COMMAND = re.compile(r"bench|throughput|^production_profile$|^compiler_profile_qualification$")
+TOOL = re.compile(r"bench|benchmark|scaling|survey|performance|^compiler_profile_qualification\.c$")
 HOST_CHECK = re.compile(r"\b(?:APPROVED_HOST|host_problem)\b")
 WORKFLOW = re.compile(r"bench|throughput|profile|lab\b|perf|708", re.IGNORECASE)
 

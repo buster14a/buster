@@ -987,8 +987,8 @@ struct IrProgram
     bool disable_target_local_promotion;
     // With -g a named scalar local stays SSA only when debug info can describe it
     // by one defining instruction; every other one keeps a frame slot of its own
-    // the debugger reads for the whole function. Costs code, so it is opt-in
-    // (-fpinned-debug-locals); plain -g code is identical to -g0 code.
+    // that the debugger reads for the whole function. The driver enables this by
+    // default for -g and accepts -fno-pinned-debug-locals as an explicit opt-out.
     bool pin_debug_locals;
     u32 fast_passes;
     bool measure_fast_passes;

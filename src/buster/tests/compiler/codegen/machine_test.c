@@ -9279,6 +9279,44 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_capacity(UnitTestArg
     bool built = machine_test_debug_values_build(temporary.arena, &program, &function, &machine_function, 0, 0);
     u64 retained = temporary.arena->position - position;
     BUSTER_TEST(arguments, built && machine_function.debug_value_count == LOCAL_COUNT && retained < BUSTER_KB(8));
+
+    IrInstruction unresolved_instruction = {
+        .opcode = IR_OPCODE_CONSTANT_INTEGER,
+        .result = {.value = 0},
+        .canonical_local = IR_LOCAL_ID_INVALID,
+    };
+    IrValue unresolved_value = {.definition = {.value = 0}, .canonical_type = IR_TYPE_ID_INVALID};
+    IrBlock unresolved_block = {.first_instruction = {.value = 0}, .id = {.value = 0}};
+    IrDebugLocal unresolved_local = {.id = {.value = 0}};
+    IrFunction unresolved_function = {
+        .instructions = &unresolved_instruction,
+        .values = &unresolved_value,
+        .blocks = &unresolved_block,
+        .debug_locals = &unresolved_local,
+        .instruction_count = 1,
+        .value_count = 1,
+        .block_count = 1,
+        .local_count = 1,
+        .debug_local_count = 1,
+    };
+    MachineFunction unresolved_indexed = {0};
+    MachineFunction unresolved_dense = {0};
+    bool unresolved_indexed_built = machine_test_debug_values_build(temporary.arena, &program, &unresolved_function,
+                                                                    &unresolved_indexed, 0, 0);
+    bool unresolved_dense_built = machine_test_debug_values_build_dense(temporary.arena, &program, &unresolved_function,
+                                                                        &unresolved_dense, 0, 0);
+    BUSTER_TEST(arguments, unresolved_indexed_built && unresolved_dense_built && unresolved_indexed.debug_value_count == 1 &&
+                               unresolved_dense.debug_value_count == 1);
+    if (unresolved_indexed_built && unresolved_dense_built && unresolved_indexed.debug_value_count == 1 &&
+        unresolved_dense.debug_value_count == 1)
+    {
+        MachineDebugValue indexed_value = unresolved_indexed.debug_values[0];
+        MachineDebugValue dense_value = unresolved_dense.debug_values[0];
+        BUSTER_TEST(arguments, indexed_value.local.value == 0 && indexed_value.kind == MACHINE_DEBUG_VALUE_UNAVAILABLE &&
+                                   indexed_value.first_instruction == UINT32_MAX && dense_value.local.value == indexed_value.local.value &&
+                                   dense_value.kind == indexed_value.kind && dense_value.first_instruction == indexed_value.first_instruction &&
+                                   dense_value.instruction_count == indexed_value.instruction_count);
+    }
     scratch_end(temporary);
     return result;
 }

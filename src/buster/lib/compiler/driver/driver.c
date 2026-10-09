@@ -2320,6 +2320,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (string_equal(argument, S8("-fno-pinned-debug-locals")) || string_equal(argument, S8("-fpinned-debug-locals")))
         {
             invocation.enable_pinned_debug_locals = string_equal(argument, S8("-fpinned-debug-locals"));
+            invocation.pinned_debug_locals_explicit = true;
             continue;
         }
         if (string_equal(argument, S8("-fcommon")) || string_equal(argument, S8("-fno-common")))
@@ -5530,7 +5531,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     // A GPU target has no symbol visibility to restrict.
                                                                     .default_visibility = invocation.has_gpu_target ? C_SYMBOL_VISIBILITY_UNSPECIFIED : invocation.default_visibility,
                                                                     .omit_debug_locals = !invocation.debug_info,
-                                                                    .pin_debug_locals = invocation.debug_info && invocation.enable_pinned_debug_locals});
+                                                                    .pin_debug_locals = invocation.debug_info &&
+                                                                                        (!invocation.pinned_debug_locals_explicit ||
+                                                                                         invocation.enable_pinned_debug_locals)});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     result.type_layout = lowered.type_layout;
@@ -5551,7 +5554,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_IR);
     IrModule* module = &lowered.program->modules[0];
     lowered.program->disable_local_promotion = invocation.disable_local_promotion;
-    lowered.program->pin_debug_locals = invocation.debug_info && invocation.enable_pinned_debug_locals;
+    lowered.program->pin_debug_locals = invocation.debug_info &&
+                                        (!invocation.pinned_debug_locals_explicit || invocation.enable_pinned_debug_locals);
     // A register cell written in place has no frame copy the debugger can follow
     // between allocator moves, so pinned locals are not promoted into registers.
     lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion || lowered.program->pin_debug_locals;

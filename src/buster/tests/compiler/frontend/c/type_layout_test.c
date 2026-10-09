@@ -195,6 +195,217 @@ BUSTER_GLOBAL_LOCAL bool c_type_layout_test_agenda_work(CTypeLayoutStatistics st
            statistics.agenda_notifications == notifications && statistics.agenda_pushes == pushes;
 }
 
+// Independently fixed offsets cover the placement inputs that cached member
+// replays must still read, across LP64 and LLP64 target layouts.
+// An aligned aggregate typedef resolves size/alignment through its base, but
+// offsetof still needs that base's member placement. Qualifiers and promotion
+// must retain the same offsets in cached and live enum queries.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_offset_aliases(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const targets[] = {S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu"), S8("x86_64-pc-windows-msvc"),
+                              S8("aarch64-pc-windows-msvc"), S8("x86_64-apple-darwin"), S8("aarch64-apple-darwin")};
+    String8 const sources[] = {
+        S8("struct Q { char head; long long tail; }; typedef struct Q Aligned __attribute__((aligned(32)));\n"),
+        S8("struct __attribute__((packed)) Q { char head; long long tail; }; typedef struct Q Aligned __attribute__((aligned(32)));\n"),
+        S8("union Q { char head; long long tail; }; typedef union Q Aligned __attribute__((aligned(32)));\n"),
+        S8("struct __attribute__((packed)) Q { char head; struct { long long tail; }; }; typedef struct Q Aligned __attribute__((aligned(32)));\n"),
+    };
+    u64 const offsets[] = {8, 1, 0, 1};
+    u64 const sizes[] = {16, 9, 8, 9};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            TargetParseResult target = target_parse_triple(targets[target_index]);
+            CPreprocessOptions options = {.target = target.target, .data_layout = target_data_layout(target.target)};
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, sources[source], options);
+            CParseResult parse = c_parse(temporary.arena, preprocess);
+            if (BUSTER_REQUIRE(arguments, parse.diagnostic_count == 0 && parse.type_alignment_count == 1))
+            {
+                CTypeId alias = {.value = parse.type_alignments[0].type_index};
+                CTypeLayoutStatistics statistics = {0};
+                BUSTER_TEST(arguments, c_test_type_layout_offset_queries(temporary.arena, preprocess, &parse, &alias, 1, 1, offsets[source], 3, &statistics));
+                BUSTER_TEST(arguments, statistics.pass_solves == 1 && statistics.agenda_solves == 2 && statistics.agenda_attempts == 2 && statistics.agenda_fallbacks == 0);
+                u64 size = 0;
+                u64 offset = UINT64_MAX;
+                u32 alignment = 0;
+                BUSTER_TEST(arguments, c_test_type_layout(temporary.arena, preprocess, &parse, alias, true,
+                    parse.types[alias.value].member_start + 1, &statistics, &size, &alignment, &offset));
+                BUSTER_TEST(arguments, size == sizes[source] && alignment == 32 && offset == offsets[source]);
+            }
+            String8 consumer = string_format(temporary.arena,
+                S8("{S8}enum {{ E = __builtin_offsetof(Aligned, tail) }};\n"
+                   "_Static_assert(E == {u64}, \"enum offset\");\n"
+                   "_Static_assert(__builtin_offsetof(Aligned, tail) == {u64}, \"alias offset\");\n"
+                   "_Static_assert(__builtin_offsetof(const Aligned, tail) == {u64}, \"qualified offset\");\n"
+                   "unsigned long offset = __builtin_offsetof(Aligned, tail);\n"), sources[source], offsets[source], offsets[source], offsets[source]);
+            CPreprocessResult semantic_preprocess = c_preprocess(temporary.arena, consumer, options);
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, semantic_preprocess, c_parse_ast(temporary.arena, semantic_preprocess));
+            BUSTER_TEST(arguments, semantic_preprocess.diagnostic_count == 0 && analysis.diagnostic_count == 0);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_offset_layouts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const targets[] = {S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu"), S8("x86_64-pc-windows-msvc"),
+                              S8("aarch64-pc-windows-msvc"), S8("x86_64-apple-darwin"), S8("aarch64-apple-darwin")};
+    String8 const sources[] = {
+        S8("struct Q { char head; long long tail; };"),
+        S8("struct __attribute__((packed)) Q { char head; long long tail; };"),
+        S8("#pragma pack(push, 2)\nstruct Q { char head; long long tail; };\n#pragma pack(pop)\n"),
+        S8("struct Q { char head; _Alignas(16) long long tail; };"),
+        S8("struct Q { int head; char tail[]; };"),
+        S8("union Q { char head; long long tail; };"),
+        S8("struct Q { char head; unsigned bits : 3; long long tail; };"),
+        S8("typedef long long Aligned __attribute__((aligned(16))); struct Q { char head; Aligned tail; };"),
+    };
+    u32 const members[] = {1, 1, 1, 1, 1, 1, 2, 1};
+    u64 const offsets[] = {8, 1, 2, 16, 4, 0, 8, 16};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            TargetParseResult target = target_parse_triple(targets[target_index]);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, sources[source],
+                (CPreprocessOptions){.target = target.target, .data_layout = target_data_layout(target.target)});
+            CParseResult parse = c_parse(temporary.arena, preprocess);
+            CTypeId type = c_type_layout_test_tag(&parse, source == 5 ? C_TYPE_UNION : C_TYPE_STRUCT, S8("Q"));
+            if (BUSTER_REQUIRE(arguments, parse.diagnostic_count == 0 && type.value < parse.type_count))
+            {
+                CTypeLayoutStatistics statistics = {0};
+                BUSTER_TEST(arguments, c_test_type_layout_offset_queries(temporary.arena, preprocess, &parse, &type, 1, members[source], offsets[source], 3, &statistics));
+                BUSTER_TEST(arguments, statistics.pass_solves == 1 && statistics.agenda_solves == 2 && statistics.agenda_fallbacks == 0);
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+// Exercise production semantic consumers, including their repeated evaluations,
+// rather than only the direct private seam above.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_offset_validation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 const counts[] = {16, 256};
+    u64 solves = 0;
+    for (u32 sample = 0; sample < BUSTER_ARRAY_LENGTH(counts); sample += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CTypeLayoutTestText text = {.arena = temporary.arena};
+        for (u32 index = 0; index < counts[sample]; index += 1)
+            c_type_layout_test_append(&text, string_format(temporary.arena, S8("struct Q{u32} {{ char head; long tail; }};\n"), index));
+        for (u32 index = 0; index < counts[sample]; index += 1)
+            c_type_layout_test_append(&text, string_format(temporary.arena,
+                S8("_Static_assert(__builtin_offsetof(struct Q{u32}, tail) == 8, \"offset\");\n"
+                   "unsigned long offset{u32} = __builtin_offsetof(struct Q{u32}, tail);\n"), index, index, index));
+        TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, c_type_layout_test_string(&text),
+            (CPreprocessOptions){.target = target.target, .data_layout = target_data_layout(target.target)});
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+        if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && analysis.diagnostic_count == 0 && analysis.type_layout_statistics))
+        {
+            CTypeLayoutStatistics statistics = *analysis.type_layout_statistics;
+            if (sample == 0) solves = statistics.pass_solves;
+            BUSTER_TEST(arguments, solves && statistics.pass_solves == solves);
+            BUSTER_TEST(arguments, statistics.agenda_solves >= counts[sample] * 2 && statistics.agenda_fallbacks == 0);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// Vary unrelated table rows independently of the number of member queries.
+// One cold query fills the cache; each later query attempts its own aggregate
+// once and creates no whole-table state.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_offset_queries(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 const regions[] = {0, 256, 1024};
+    u32 const queries[] = {1, 16, 256};
+    for (u32 region = 0; region < BUSTER_ARRAY_LENGTH(regions); region += 1)
+    {
+        for (u32 query = 0; query < BUSTER_ARRAY_LENGTH(queries); query += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CTypeLayoutTestText text = {.arena = temporary.arena};
+            for (u32 index = 0; index < regions[region]; index += 1)
+                c_type_layout_test_append(&text, string_format(temporary.arena, S8("typedef char Padding{u32}[{u32}];\n"), index, index + 1));
+            for (u32 index = 0; index < queries[query]; index += 1)
+                c_type_layout_test_append(&text, string_format(temporary.arena, S8("struct Q{u32} {{ char head; long tail; }};\n"), index));
+            CTypeLayoutTestUnit unit = c_type_layout_test_parse(temporary.arena, c_type_layout_test_string(&text));
+            if (BUSTER_REQUIRE(arguments, unit.parse.diagnostic_count == 0))
+            {
+                CTypeId* types = arena_allocate(temporary.arena, CTypeId, queries[query]);
+                for (u32 index = 0; index < queries[query]; index += 1)
+                    types[index] = c_type_layout_test_tag(&unit.parse, C_TYPE_STRUCT, string_format(temporary.arena, S8("Q{u32}"), index));
+                CTypeLayoutStatistics statistics = {0};
+                BUSTER_TEST(arguments, c_test_type_layout_offset_queries(temporary.arena, unit.preprocess, &unit.parse, types, queries[query], 1, 8, 2, &statistics));
+                BUSTER_TEST(arguments, statistics.pass_solves == 1);
+                BUSTER_TEST(arguments, statistics.pass_state_types == unit.parse.type_count);
+                BUSTER_TEST(arguments, statistics.agenda_solves == (u64)queries[query] * 2 - 1);
+                BUSTER_TEST(arguments, statistics.agenda_attempts == statistics.agenda_solves);
+                BUSTER_TEST(arguments, statistics.agenda_types == statistics.agenda_solves);
+                BUSTER_TEST(arguments, statistics.agenda_fallbacks == 0);
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+// Both the small-stack and grown-table promoted-search paths must depend on
+// reached aggregates, even when thousands of unrelated array types precede them.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_offset_search_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 const regions[] = {0, 1024};
+    u32 const widths[] = {2, 100};
+    u64 scratch[2] = {0};
+    for (u32 region = 0; region < BUSTER_ARRAY_LENGTH(regions); region += 1)
+    {
+        for (u32 width = 0; width < BUSTER_ARRAY_LENGTH(widths); width += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CTypeLayoutTestText text = {.arena = temporary.arena};
+            for (u32 index = 0; index < regions[region]; index += 1)
+                c_type_layout_test_append(&text, string_format(temporary.arena, S8("typedef char Padding{u32}[{u32}];\n"), index, index + 1));
+            c_type_layout_test_append(&text, S8("struct Q {\n"));
+            for (u32 index = 0; index < widths[width]; index += 1)
+                c_type_layout_test_append(&text, string_format(temporary.arena, S8("struct {{ int m{u32}; }};\n"), index));
+            c_type_layout_test_append(&text, S8("};\n"));
+            CTypeLayoutTestUnit unit = c_type_layout_test_parse(temporary.arena, c_type_layout_test_string(&text));
+            CTypeId type = c_type_layout_test_tag(&unit.parse, C_TYPE_STRUCT, S8("Q"));
+            if (BUSTER_REQUIRE(arguments, unit.parse.diagnostic_count == 0 && type.value < unit.parse.type_count))
+            {
+                u64 before_types = 0, before_members = 0, before_bytes = 0;
+                u64 after_types = 0, after_members = 0, after_bytes = 0;
+                c_test_member_offset_counts(&before_types, &before_members, &before_bytes);
+                u64 offset = UINT64_MAX;
+                BUSTER_TEST(arguments, c_test_member_offset(temporary.arena, unit.preprocess, &unit.parse, type,
+                    string_format(temporary.arena, S8("m{u32}"), widths[width] - 1), &offset));
+                c_test_member_offset_counts(&after_types, &after_members, &after_bytes);
+                BUSTER_TEST(arguments, offset == (u64)(widths[width] - 1) * 4);
+                BUSTER_TEST(arguments, after_types - before_types == widths[width] + 1);
+                BUSTER_TEST(arguments, after_members - before_members == (u64)widths[width] * 2);
+                if (region == 0) scratch[width] = after_bytes - before_bytes;
+                BUSTER_TEST(arguments, after_bytes - before_bytes == scratch[width]);
+                BUSTER_TEST(arguments, width == 0 ? scratch[width] == 0 : scratch[width] > 0);
+                BUSTER_TEST(arguments, !c_test_member_offset(temporary.arena, unit.preprocess, &unit.parse, type, S8("missing"), &offset));
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // A large stable region and one small question about a type outside it. The
 // agenda reaches the requested struct and its two seeded members whatever the
 // region's size; the ordered passes build per-query state for, and attempt,
@@ -789,6 +1000,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_validation_scaling(UnitTes
 UnitTestResult c_type_layout_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_offset_aliases);
+    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_offset_layouts);
+    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_offset_validation);
+    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_offset_queries);
+    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_offset_search_work);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_stable_region);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_chain);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_fan_out);
