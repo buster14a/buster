@@ -256,6 +256,33 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(lab.phase_ns_series([good, record(total_ns=1, parse_ns=3)], "parse"), [2000000, 3])
         self.assertIsNone(lab.phase_ns_series([], "parse"))
 
+    def test_missing_counter_telemetry_prints_unavailable(self):
+        def run(header="", **fields):
+            text = "CC_METRICS %s\nCC_METRICS_INPUT measured=1 start_ns=1 total_ns=100 %s\n" % (
+                header, " ".join("%s=%s" % item for item in fields.items()))
+            return {"metrics": lab.parse_cc_metrics(text)}
+
+        def counters(runs):
+            lines = lab.timed_phase_lines("unused", runs, [])
+            return next(line for line in lines if line.startswith("- arena peak median"))
+        # Complete telemetry: ordinary medians.
+        self.assertEqual(counters([run("peak_rss_bytes=30", arena_peak_bytes=10, arena_retained_bytes=5),
+                                   run("peak_rss_bytes=50", arena_peak_bytes=20, arena_retained_bytes=7)]),
+                         "- arena peak median 15 bytes; arena retained median 6; peak RSS median 40 bytes")
+        # Declared zeros are real zeros.
+        self.assertEqual(counters([run("peak_rss_bytes=0", arena_peak_bytes=0, arena_retained_bytes=0)]),
+                         "- arena peak median 0 bytes; arena retained median 0; peak RSS median 0 bytes")
+        # Absent fields are NA, never 0.
+        self.assertEqual(counters([run()]),
+                         "- arena peak median NA (0 of 1 records) bytes; arena retained median NA (0 of 1 records); peak RSS median NA (0 of 1 runs) bytes")
+        # A partial population is NA with its coverage, not a zero-padded median.
+        self.assertEqual(counters([run("peak_rss_bytes=1000", arena_peak_bytes=1000, arena_retained_bytes=800), run()]),
+                         "- arena peak median NA (1 of 2 records) bytes; arena retained median NA (1 of 2 records); peak RSS median NA (1 of 2 runs) bytes")
+        # Malformed, negative and boolean-like values are invalid, not a ValueError.
+        self.assertEqual(counters([run("peak_rss_bytes=abc", arena_peak_bytes="abc", arena_retained_bytes=-1)]),
+                         "- arena peak median NA (0 of 1 records) bytes; arena retained median NA (0 of 1 records); peak RSS median NA (0 of 1 runs) bytes")
+        self.assertEqual(lab.counter_median_text([], "arena_peak_bytes", "records"), "NA (0 of 0 records)")
+
     def test_report_self_strips_ipc_columns(self):
         sections = lab.parse_report(REPORT_SELF)
         self.assertEqual(list(sections), ["cycles:u"])
