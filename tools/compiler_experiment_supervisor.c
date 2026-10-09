@@ -182,7 +182,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_begin(Arena* arena, Comp
         state->child_pids = arena_allocate(arena, u64, BUSTER_EXPERIMENT_SUPERVISOR_MAX_CHILDREN);
         state->children_path = string_format_z(arena, S8("/proc/self/task/{u64}/children"), state->owner_pid);
         u64 deadline = os_now_microseconds() + BUSTER_EXPERIMENT_SUPERVISOR_CLEANUP_US;
-        result = compiler_experiment_supervisor_single_thread(state->owner_pid) &&
+        sigset_t blocked = {0}, prior_mask = {0};
+        bool masked = sigfillset(&blocked) == 0 && sigprocmask(SIG_BLOCK, &blocked, &prior_mask) == 0;
+        result = masked && compiler_experiment_supervisor_single_thread(state->owner_pid) &&
             compiler_experiment_supervisor_children(state, deadline) && !state->child_count &&
             compiler_experiment_supervisor_no_children(deadline) &&
             prctl(PR_GET_CHILD_SUBREAPER, &state->prior_subreaper, 0, 0, 0) == 0 &&
@@ -198,6 +200,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_begin(Arena* arena, Comp
                     compiler_experiment_supervisor_no_children(deadline);
             }
         }
+        if (masked) result = sigprocmask(SIG_SETMASK, &prior_mask, 0) == 0 && result;
         // Never silently restore after uncertainty; retain active ownership.
         if (!result) state->cleanup_failed = true;
     }
@@ -257,7 +260,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_end(Arena* arena, Compil
             }
             if (result && !clear) poll(0, 0, 1);
         }
-        result = result && clear && compiler_experiment_supervisor_single_thread(state->owner_pid) &&
+        sigset_t blocked = {0}, prior_mask = {0};
+        bool masked = sigfillset(&blocked) == 0 && sigprocmask(SIG_BLOCK, &blocked, &prior_mask) == 0;
+        result = masked && result && clear && compiler_experiment_supervisor_single_thread(state->owner_pid) &&
             compiler_experiment_supervisor_children(state, deadline) && !state->child_count &&
             compiler_experiment_supervisor_no_children(deadline);
         if (result)
@@ -265,6 +270,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_end(Arena* arena, Compil
             result = prctl(PR_SET_CHILD_SUBREAPER, state->prior_subreaper, 0, 0, 0) == 0;
             if (result) state->active = false;
         }
+        if (masked) result = sigprocmask(SIG_SETMASK, &prior_mask, 0) == 0 && result;
         if (!result) state->cleanup_failed = true;
     }
 #endif
@@ -324,7 +330,9 @@ BUSTER_GLOBAL_LOCAL void compiler_experiment_supervisor_fixture_manager(int desc
 
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_fixture_reap(pid_t manager, u64 deadline)
 {
-    bool result = manager > 1 && manager != getpid();
+    sigset_t blocked = {0}, prior_mask = {0};
+    bool masked = sigfillset(&blocked) == 0 && sigprocmask(SIG_BLOCK, &blocked, &prior_mask) == 0;
+    bool result = masked && manager > 1 && manager != getpid();
     bool exited = false;
     result = result && compiler_experiment_supervisor_owned((u64)manager, deadline, &exited);
     if (result && !exited) result = kill(manager, SIGKILL) == 0;
@@ -338,6 +346,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_fixture_reap(pid_t manag
         if (result && !reaped) poll(0, 0, 1);
     }
     result = result && reaped;
+    if (masked) result = sigprocmask(SIG_SETMASK, &prior_mask, 0) == 0 && result;
     return result;
 }
 #endif
