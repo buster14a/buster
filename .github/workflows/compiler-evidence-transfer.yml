@@ -1,0 +1,35 @@
+name: Read-only compiler evidence transfer
+on:
+  push:
+    branches: [codex/3204-evidence-transfer]
+permissions:
+  actions: read
+jobs:
+  transfer:
+    name: Raw evidence chunk ${{ matrix.chunk }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk: [0, 1, 2, 3, 4]
+    steps:
+      - name: Read and verify the immutable artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHUNK: ${{ matrix.chunk }}
+        run: |
+          set -euo pipefail
+          [[ "$CHUNK" =~ ^[0-4]$ ]]
+          curl --fail --location --silent --show-error --max-time 120 \
+            -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            https://api.github.com/repos/buster14a/buster/actions/artifacts/11632500896/zip \
+            -o "$RUNNER_TEMP/immutable-evidence.zip"
+          [[ "$(stat --format='%s' "$RUNNER_TEMP/immutable-evidence.zip")" == 8597974 ]]
+          echo '6cc2b684a708abcb221dfea620e2faf05800348705ebf25104d11ffdb262245f  '"$RUNNER_TEMP/immutable-evidence.zip" | sha256sum --check --status
+          dd if="$RUNNER_TEMP/immutable-evidence.zip" of="$RUNNER_TEMP/chunk.bin" \
+            bs=2097152 skip="$CHUNK" count=1 status=none
+          echo "BUSTER_EVIDENCE_CHUNK_BEGIN artifact=11632500896 chunk=$CHUNK"
+          base64 --wrap=76 "$RUNNER_TEMP/chunk.bin"
+          echo "BUSTER_EVIDENCE_CHUNK_END artifact=11632500896 chunk=$CHUNK"
