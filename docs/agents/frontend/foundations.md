@@ -1764,7 +1764,7 @@ through `c_parse_pending_enum_member` (`_Static_assert(sizeof(enum { R = 2 }) ==
 ""); enum { S = R + 1 };`). A definition inside a function declarator's parameter
 list (`int (*p)(int [sizeof(enum { R = 2 })])`) is in that prototype's scope
 (C17 6.2.1p4): the walk marks its members `is_prototype_scope`, a `(` that
-follows a `(*...)` declarator group opening the list, and neither publication
+follows a `(*...)` declarator group or a declarator name (`typedef int F(int a[...])`, before any initializer, and not after an operator keyword such as `sizeof`) opening the list, and neither publication
 nor pending lookup sees them, so they neither clash with nor reach the file.
 File-scope enumerators are still published together after the declarations, so a
 use before the definition is accepted, as for any file-scope enumerator
