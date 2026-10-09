@@ -88,7 +88,9 @@
 //   c_parse_pointer_chain, c_parse_array_suffixes arrays, parameters
 //   c_parse_parameter_list_names_validate        one namespace per parameter list
 //   c_parse_validate_constexpr_declaration,       constexpr, type
-//   c_parse_types_compatible                      compatibility
+//   c_parse_types_compatible,                     compatibility
+//   c_parse_definition_parameter_count_*,         pre-C23 definition counts
+//   c_parse_prototype_parameter_count_record
 //   c_parse_type_identity_prepare                 retained C identity answers
 //   c_parse_validate_cleanup_attribute            __attribute__((cleanup))
 //   c_parse_name_symbol .. c_parse_lookup_*       symbol interning, scopes,
@@ -3381,6 +3383,24 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                                 operand_resolved = operand_resolved &&
                                                    c_parse_layout_alignment_specifiers(context, agenda, run_start, run_count, &operand_alignment, 0,
                                                                                        &array_provisional);
+                            }
+                        }
+                        // `sizeof("text")` sizes the literal as an array of its
+                        // code units plus the terminator, never a type or an
+                        // object. The enclosing parentheses are already
+                        // stripped, so the token kind gates the counting helper,
+                        // which also owns concatenation, prefixes and wchar_t.
+                        if (!operand_resolved && bound_word_is_sizeof && object_end > object_start &&
+                            preprocess.tokens[object_start].kind == C_TOKEN_STRING_LITERAL)
+                        {
+                            CIrDecodedString decoded = {0};
+                            if (c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, object_start, object_end,
+                                                                            result->string_literals, &decoded) &&
+                                decoded.element_width && decoded.element_count < UINT64_MAX / decoded.element_width - 1)
+                            {
+                                operand_size = (decoded.element_count + 1) * decoded.element_width;
+                                operand_alignment = decoded.element_width;
+                                operand_resolved = true;
                             }
                         }
                         bool invalid_operand_width = c_parse_forward_type_query_bit_field_width_diagnostics(
@@ -19288,6 +19308,78 @@ BUSTER_C_SHARED bool c_parse_types_compatible(Arena* arena, CParseResult* result
     return c_parse_types_compatible_core(arena, result, preprocess, left, right);
 }
 
+// C17 6.7.6.3p15: an empty-list or identifier-list function definition and a
+// prototype of the same function have to agree in parameter count. The shared
+// compatibility walk cannot see this: an unprototyped declaration also has zero
+// rows, and only a definition fixes the count. The file-scope redeclaration
+// loop therefore asks, per candidate, whether the definition side disagrees.
+// C23 reads `()` as `(void)`, so the ordinary prototype walk already counts.
+// The result is the definition's parameter count plus one, or zero when the
+// declaration is not an unprototyped definition.
+BUSTER_C_INTERNAL u32 c_parse_definition_parameter_count_plus_one(CParseResult* result, CPreprocessResult preprocess, CTypeId type, bool is_definition)
+{
+    u32 count_plus_one = 0;
+    if (is_definition && type.value < result->type_count && !c_preprocess_dialect_is_c23(preprocess.dialect))
+    {
+        CType function = result->types[type.value];
+        if (function.kind == C_TYPE_FUNCTION && function.is_unprototyped)
+        {
+            count_plus_one = function.parameter_count + 1;
+        }
+    }
+    return count_plus_one;
+}
+
+// `declaration_count_plus_one` is the new declaration's own answer from
+// c_parse_definition_parameter_count_plus_one. The entity keeps its first
+// declaration's type, so when that is unprototyped the prototype count the
+// entity has seen (`prototype_parameter_count_plus_one`) stands in for it: a
+// new unprototyped definition is held to it, and a new prototype is held to
+// both it and a recorded definition. Two unprototyped declarations never
+// conflict here; two definitions are a redefinition.
+BUSTER_C_INTERNAL bool c_parse_definition_parameter_count_conflicts(CParseResult* result, CEntity* candidate, CTypeId type,
+                                                                      u32 declaration_count_plus_one)
+{
+    bool conflicts = false;
+    if (candidate->kind == C_ENTITY_FUNCTION && candidate->type.value < result->type_count && type.value < result->type_count)
+    {
+        CType prior = result->types[candidate->type.value];
+        CType added = result->types[type.value];
+        if (prior.kind == C_TYPE_FUNCTION && added.kind == C_TYPE_FUNCTION)
+        {
+            if (declaration_count_plus_one)
+            {
+                u32 known = prior.is_unprototyped ? candidate->prototype_parameter_count_plus_one : prior.parameter_count + 1;
+                conflicts = known && known != declaration_count_plus_one;
+            }
+            else if (!added.is_unprototyped)
+            {
+                u32 added_plus_one = added.parameter_count + 1;
+                conflicts = (candidate->definition_parameter_count_plus_one && candidate->definition_parameter_count_plus_one != added_plus_one) ||
+                            (candidate->prototype_parameter_count_plus_one && candidate->prototype_parameter_count_plus_one != added_plus_one);
+            }
+        }
+    }
+    return conflicts;
+}
+
+// Called once a declaration has joined `entity`: the first prototype that
+// follows an unprototyped first declaration is the one later declarations
+// are held to, because the entity's type stays unprototyped.
+BUSTER_C_INTERNAL void c_parse_prototype_parameter_count_record(CParseResult* result, CEntity* entity, CTypeId type)
+{
+    if (entity->kind == C_ENTITY_FUNCTION && !entity->prototype_parameter_count_plus_one && entity->type.value < result->type_count &&
+        type.value < result->type_count)
+    {
+        CType prior = result->types[entity->type.value];
+        CType added = result->types[type.value];
+        if (prior.kind == C_TYPE_FUNCTION && prior.is_unprototyped && added.kind == C_TYPE_FUNCTION && !added.is_unprototyped)
+        {
+            entity->prototype_parameter_count_plus_one = added.parameter_count + 1;
+        }
+    }
+}
+
 BUSTER_C_INTERNAL CSourceLocation c_parse_cleanup_attribute_location(CPreprocessResult preprocess, CCleanupAttributeInfo attribute)
 {
     CSourceLocation result;
@@ -33699,6 +33791,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         }
         CEntityKind entity_kind = kind == C_DECLARATION_FUNCTION ? C_ENTITY_FUNCTION : kind == C_DECLARATION_TYPEDEF ? C_ENTITY_TYPEDEF : C_ENTITY_OBJECT;
         bool declares_function_type = declaration->type.value < result.type_count && result.types[declaration->type.value].kind == C_TYPE_FUNCTION;
+        u32 definition_parameter_count_plus_one = kind == C_DECLARATION_FUNCTION
+            ? c_parse_definition_parameter_count_plus_one(&result, preprocess, declaration->type, declaration->is_definition) : 0;
         // The name chain lists same-named entities newest first; the
         // redeclaration logic below needs ascending entity order, so gather
         // the file-scope candidates and walk them in reverse.
@@ -33755,7 +33849,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                     continue;
                 }
                 if (c_parse_entity_kind_redeclares(candidate->kind, entity_kind, declares_function_type) &&
-                    c_parse_types_compatible(arena, &result, preprocess, candidate->type, declaration->type))
+                    c_parse_types_compatible(arena, &result, preprocess, candidate->type, declaration->type) &&
+                    !c_parse_definition_parameter_count_conflicts(&result, candidate, declaration->type, definition_parameter_count_plus_one))
                 {
                     existing = candidate;
                     existing_index = entity_index;
@@ -33774,7 +33869,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                 u32 entity_index = candidate_ids[position];
                 CEntity* candidate = &result.entities[entity_index];
                 if (c_parse_entity_kind_redeclares(candidate->kind, entity_kind, declares_function_type) &&
-                    c_parse_types_compatible(arena, &result, preprocess, candidate->type, declaration->type))
+                    c_parse_types_compatible(arena, &result, preprocess, candidate->type, declaration->type) &&
+                    !c_parse_definition_parameter_count_conflicts(&result, candidate, declaration->type, definition_parameter_count_plus_one))
                 {
                     existing = candidate;
                     existing_index = entity_index;
@@ -33817,7 +33913,9 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             {
                 existing->is_definition = true;
                 existing->definition_is_gnu_inline_only = declaration->is_gnu_inline_only;
+                existing->definition_parameter_count_plus_one = definition_parameter_count_plus_one;
             }
+            c_parse_prototype_parameter_count_record(&result, existing, declaration->type);
             // The composite of `char pad[]` and `char pad[5]` is the complete
             // array (C11 6.2.7p3): a redeclaration that completes an entity
             // first declared with an unbounded array adopts its type â later
@@ -33892,6 +33990,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                     : kind == C_DECLARATION_TYPEDEF ? C_ENTITY_TYPEDEF
                                                     : C_ENTITY_OBJECT,
             .is_definition = declaration->is_definition,
+            .definition_parameter_count_plus_one = definition_parameter_count_plus_one,
             .is_static_storage = is_static_storage,
             .is_thread_local = is_thread_local,
             .is_constexpr = declaration->is_constexpr,
