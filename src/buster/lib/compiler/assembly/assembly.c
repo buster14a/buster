@@ -12160,7 +12160,7 @@ BUSTER_GLOBAL_LOCAL BusterA64SemanticVMValue assembly_aarch64_complex_simd_lane_
 {
     bool scalar = (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_SCALAR) != 0;
     bool vector = (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0;
-    if (scalar && vector)
+    if (scalar && vector && spelling.has_lane)
     {
         // Some semantic operands permit either kind of SIMD value. In a
         // by-element spelling, Vn.<T>[index] is the vector lane source;
