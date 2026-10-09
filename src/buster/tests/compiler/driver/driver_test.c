@@ -16147,14 +16147,18 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWasmNodeRun compiler_driver_test_wasm_node_run
 #define COMPILER_DRIVER_WASM_NODE_COLD_START_DEADLINE_MICROSECONDS 120000000
 
 // #2027: a Node that cannot even load (for example a missing shared library)
-// would otherwise fail every Wasm oracle separately. The first resolution probes
-// Node once; a dynamic-loader failure is reported as one ENVIRONMENT FAILURE and
-// every later resolution returns an empty path, so the oracles' existing
-// "Node is not installed" guards skip them. The class is deliberately narrow: a
-// timeout, a wrong marker or any other nonzero exit remains a real failure and
-// the oracles still run. Fixtures run serially inside the driver module, so the
-// state needs no synchronization; it is first written by the cold-start fixture,
-// which precedes every oracle and every lane_run that could read it.
+// would otherwise fail every Wasm oracle separately. The cold-start fixture
+// probes Node once; a dynamic-loader failure is reported as one ENVIRONMENT
+// FAILURE and every later resolution returns an empty path, so the oracles'
+// existing "Node is not installed" guards skip them. The class is deliberately
+// narrow: a timeout, a wrong marker or any other nonzero exit is not
+// classified and the oracles still run and fail. compiler_driver_tests is
+// registered PARALLEL_NONE in test.c, so its fixtures run serially and the
+// state needs no synchronization (BUSTER_CHECK_SERIAL_INITIALIZATION does not apply: the
+// watchdog and persistent gang threads are live); the probe is the only writer and publishes
+// the verdict last. A run that skips the cold-start fixture never probes and
+// keeps the previous behavior (every oracle runs). Other modules that run Node
+// (metamorphic_test.c meta_context) do not share this verdict.
 typedef enum CompilerDriverWasmNodeState
 {
     COMPILER_DRIVER_WASM_NODE_STATE_UNPROBED,
@@ -16163,8 +16167,6 @@ typedef enum CompilerDriverWasmNodeState
 } CompilerDriverWasmNodeState;
 
 BUSTER_GLOBAL_LOCAL CompilerDriverWasmNodeState compiler_driver_test_wasm_node_state;
-// The probe's assertion, counted by the cold-start fixture that normally runs it.
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_probe_result;
 
 // True only when the process exited by itself with a failure and its stderr is a
 // dynamic-loader diagnostic (ELF ld.so, macOS dyld).
@@ -16176,7 +16178,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm_node_environment_failure(bool
     return exited_with_failure && loader_message;
 }
 
-BUSTER_GLOBAL_LOCAL void compiler_driver_test_wasm_node_probe(UnitTestArguments* arguments, String8 node)
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_probe(UnitTestArguments* arguments, String8 node)
 {
     UnitTestResult result = {0};
     // Compile and instantiate an empty module so V8's Wasm paths are
@@ -16207,8 +16209,6 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_test_wasm_node_probe(UnitTestArguments*
                     (u32)(spawn.handle != 0), (u32)waited.result, waited.platform_status, (u32)waited.timed_out, elapsed,
                     (u64)COMPILER_DRIVER_WASM_NODE_COLD_START_DEADLINE_MICROSECONDS, standard_output, standard_error);
     bool environment_failure = spawn.handle && compiler_driver_test_wasm_node_environment_failure(waited.timed_out, waited.result, standard_error);
-    compiler_driver_test_wasm_node_state = environment_failure ? COMPILER_DRIVER_WASM_NODE_STATE_ENVIRONMENT_FAILURE
-                                                               : COMPILER_DRIVER_WASM_NODE_STATE_USABLE;
     if (environment_failure)
     {
         arguments->show(arguments,
@@ -16222,18 +16222,17 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_test_wasm_node_probe(UnitTestArguments*
         BUSTER_TEST(arguments, spawn.handle && !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS && standard_error.length == 0 &&
                                    string_equal(standard_output, marker));
     }
-    compiler_driver_test_wasm_node_probe_result = result;
+    compiler_driver_test_wasm_node_state = environment_failure ? COMPILER_DRIVER_WASM_NODE_STATE_ENVIRONMENT_FAILURE
+                                                               : COMPILER_DRIVER_WASM_NODE_STATE_USABLE;
+    return result;
 }
 
-// Returns the Node path, or an empty string when Node is not installed or was
-// classified as an environment failure. Probes at most once.
+// Returns the Node path, or an empty string when Node is not installed or the
+// cold-start probe classified it as an environment failure. Never probes.
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_wasm_node_resolve(UnitTestArguments* arguments, Arena* arena)
 {
+    BUSTER_UNUSED(arguments);
     String8 result = executable_resolve_in_path(arena, S8("node"));
-    if (result.length && compiler_driver_test_wasm_node_state == COMPILER_DRIVER_WASM_NODE_STATE_UNPROBED)
-    {
-        compiler_driver_test_wasm_node_probe(arguments, result);
-    }
     if (compiler_driver_test_wasm_node_state == COMPILER_DRIVER_WASM_NODE_STATE_ENVIRONMENT_FAILURE)
     {
         result = (String8){0};
@@ -16244,9 +16243,12 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_wasm_node_resolve(UnitTestArgum
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_cold_start(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 node = compiler_driver_test_wasm_node_resolve(arguments, arguments->arena);
-    result = compiler_driver_test_wasm_node_probe_result;
-    if (!node.length && compiler_driver_test_wasm_node_state != COMPILER_DRIVER_WASM_NODE_STATE_ENVIRONMENT_FAILURE)
+    String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+    if (node.length)
+    {
+        result = compiler_driver_test_wasm_node_probe(arguments, node);
+    }
+    else
     {
         arguments->show(arguments, S8("Wasm Node cold start skipped: Node is not installed\n"));
     }
