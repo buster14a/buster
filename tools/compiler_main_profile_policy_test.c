@@ -6,6 +6,7 @@ struct CompilerMainPolicyFixture
     String8 policy[22], facts[16], certificate[43], reviews[17], criteria[16];
     String8 campaign, archive;
     bool no_sampling;
+    u64 terminal_case;
 };
 
 BUSTER_GLOBAL_LOCAL String8 compiler_main_policy_test_fields(Arena* arena, String8* names, String8* values, u64 count)
@@ -54,11 +55,27 @@ BUSTER_GLOBAL_LOCAL void compiler_main_policy_test_tables(Arena* arena, Compiler
             index > 1 && index < 4 ? S8("21000") : S8("-"), index > 1 && index < 4 ? S8("24000") : S8("-"),
             index > 0 && index < 4 ? S8("5000") : S8("-"),
             S8("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"), S8("-"), S8("0")};
-        bool not_run = fixture->no_sampling && index < 44;
+        bool not_run = fixture->no_sampling && index < 44 && !(fixture->terminal_case && index == 0);
         if (not_run)
         {
             for (u64 i = 3; i < BUSTER_ARRAY_LENGTH(row); i += 1) row[i] = S8("-");
             row[14] = S8("0"); row[17] = S8("not_run"); row[20] = S8("0"); row[26] = S8("0");
+        }
+        if (fixture->terminal_case && index == 0)
+        {
+            bool known_executor = fixture->terminal_case >= 4;
+            for (u64 i = 3; i < BUSTER_ARRAY_LENGTH(row); i += 1) row[i] = S8("-");
+            row[3] = S8("1000"); row[4] = S8("1");
+            row[5] = known_executor ? S8("2000") : S8("-");
+            row[6] = known_executor ? S8("1") : S8("-");
+            row[7] = known_executor && fixture->terminal_case != 5 ? S8("cccccccccccccccccccccccccccccccccccccccc") : S8("-");
+            row[8] = fixture->certificate[3]; row[9] = fixture->certificate[11]; row[10] = fixture->certificate[12];
+            row[14] = S8("0"); row[17] = fixture->terminal_case == 3 ? S8("failed") :
+                known_executor ? S8("cancelled") : S8("hostless");
+            row[20] = S8("0"); row[24] = S8("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
+            row[25] = fixture->terminal_case == 2 ? S8("-") :
+                S8("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+            row[26] = fixture->terminal_case == 2 ? S8("0") : S8("100");
         }
         if (!change_archive && index == changed_row && changed_column < BUSTER_ARRAY_LENGTH(row))
             row[changed_column] = changed_value;
@@ -71,6 +88,15 @@ BUSTER_GLOBAL_LOCAL void compiler_main_policy_test_tables(Arena* arena, Compiler
             string_format(arena, S8("libfile_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa{S8}{S8}"),
                 string_slice(hex,index/16,index/16+1),string_slice(hex,index%16,index%16+1)),S8("0"),row[13],row[14],
             S8("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")};
+        if (fixture->terminal_case && index == 0)
+        {
+            saved[10] = row[25]; saved[11] = row[26];
+            if (fixture->terminal_case == 2)
+            {
+                for (u64 i = 7; i < BUSTER_ARRAY_LENGTH(saved); i += 1) saved[i] = S8("-");
+                saved[11] = S8("0");
+            }
+        }
         if (not_run)
         {
             for (u64 i = 7; i < BUSTER_ARRAY_LENGTH(saved); i += 1) saved[i] = S8("-");
@@ -196,6 +222,18 @@ BUSTER_GLOBAL_LOCAL bool compiler_main_route_self_test(Arena* arena)
     compiler_main_policy_test_tables(arena,&no_sampling,46,27,(String8){0},false);
     observed=compiler_main_policy_test_validate(arena,no_sampling);
     cases+=1;failures+=!(observed.valid&&!observed.sampling_eligible&&observed.snapshot_eligible);
+    for (u64 terminal_case = 1; terminal_case <= 5; terminal_case += 1)
+    {
+        CompilerMainPolicyFixture terminal=no_sampling;
+        terminal.terminal_case=terminal_case;
+        terminal.certificate[11]=initial.certificate[11];terminal.certificate[12]=initial.certificate[12];
+        terminal.certificate[31]=initial.certificate[31];
+        compiler_main_policy_test_tables(arena,&terminal,46,27,(String8){0},false);
+        observed=compiler_main_policy_test_validate(arena,terminal);
+        bool valid_terminal=terminal_case==1||terminal_case==4;
+        cases+=1;failures+=valid_terminal?
+            !(observed.valid&&!observed.sampling_eligible&&observed.snapshot_eligible):observed.valid;
+    }
     String8 disabled[22]={0};
     for(u64 i=0;i<22;i+=1)disabled[i]=S8("-");
     disabled[0]=initial.policy[0];disabled[1]=initial.policy[1];disabled[2]=S8("disabled");
@@ -219,6 +257,6 @@ BUSTER_GLOBAL_LOCAL bool compiler_main_route_self_test(Arena* arena)
         facts,(String8){0},(String8){0},(String8){0},(String8){0},(String8){0},previous);
     cases+=1;failures+=observed.valid;
     string_print(S8("COMPILER_MAIN_ROUTE_SELF_TEST cases={u64} failures={u64} physical_execution=none\n"),cases,failures);
-    bool result=cases==52&&failures==0;
+    bool result=cases==57&&failures==0;
     return result;
 }

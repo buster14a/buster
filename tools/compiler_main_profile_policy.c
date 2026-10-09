@@ -207,9 +207,15 @@ BUSTER_GLOBAL_LOCAL CompilerMainCampaign compiler_main_campaign(String8 text, St
             result.attempted += 1;
             result.sampling_attempted = result.sampling_attempted || index < 44;
             if (index < 44) result.sampling_phase_attempted[index == 0 ? 0 : index < 4 ? 1 : 2] = true;
+            u64 original_api_bytes = 0;
+            bool original_api_available = compiler_sampling_hex(row[25], 64) &&
+                compiler_main_decimal(row[26], &original_api_bytes, true) && original_api_bytes <= (8ull << 20);
+            bool hostless = string_equal(row[17], S8("hostless")) && string_equal(row[5], S8("-"));
             valid = valid && compiler_main_decimal(row[3], &request, true) && string_equal(row[4], S8("1")) &&
-                (compiler_main_decimal(row[5], &executor, true) || (!complete && string_equal(row[5], S8("-")))) &&
-                string_equal(row[6], S8("1")) && compiler_sampling_hex(row[7], 40) &&
+                (hostless ? original_api_available && string_equal(row[6], S8("-")) && string_equal(row[7], S8("-")) :
+                    compiler_main_decimal(row[5], &executor, true) && string_equal(row[6], S8("1")) &&
+                        compiler_sampling_hex(row[7], 40)) &&
+                (!string_equal(row[17], S8("hostless")) || hostless) &&
                 string_equal(row[8], certificate[3]) && compiler_sampling_hex(row[9], 40) &&
                 compiler_sampling_hex(row[10], 64) && compiler_sampling_hex(row[24], 64);
             valid = valid && request != executor && (index >= 44 || request > last_request);

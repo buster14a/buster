@@ -225,8 +225,11 @@ def retain_case(case) -> None:
 
 
 def raw_bundle(current: dict, evidence: Path) -> dict:
+    policy = current.get("preparation_policy")
+    if policy not in ("legacy-rebuild", "snapshot-v1") or (policy == "legacy-rebuild" and current.get("closure") is not None):
+        raise ValueError("diagnostic raw bundle requires the actual supported preparation policy")
     raw = {operation: (evidence / f"closure-{operation}.json.manifest.tsv").read_bytes()
-           for operation in ("snapshot", "restore", "verify")}
+           for operation in ("snapshot", "restore", "verify")} if policy == "snapshot-v1" else {}
     members = {}
     for row in current["phase_ownership"]["phases"]:
         path = evidence / "owned-phases" / row["file"]
@@ -373,6 +376,8 @@ class ActualOrdinaryMeasure(unittest.TestCase):
             expected_phase_schema=owned.MAIN_POPULATION_SCHEMA, require_owned_phases=True, require_owned_preflight=True,
             expected_phase_driver_sha256=digest(NATIVE_DRIVER), expected_trusted_revision=self.trusted_revision)
         bundle = raw_bundle(self.current, self.evidence)
+        self.assertEqual(set(bundle), {"owned_phases", "owned_throughput"} if policy == "legacy-rebuild" else
+                         {"snapshot", "restore", "verify", "owned_phases", "owned_throughput"})
         self.assertEqual(receipt_contract.validate_closure(self.current, bundle, **expected), [])
         summary = json.loads((self.evidence / "lab/summary.json").read_bytes())
         self.assertEqual(receipt_contract.classify(summary, self.current["binaries"], expected_profile=profile), [])

@@ -303,11 +303,14 @@ def publication_fixture(phase="pilot", packet=0):
         "parent_freeze": {} if phase == "acquire" else plan if phase == "pilot" else
             dict(freeze, phase="pilot", campaign_parent=plan_sha, campaign_parent_revision="1" * 40),
         "facts": {"actor_login": "davidgmbb", "owner_login": "davidgmbb"},
-        "history": [], "executor": {"head_sha": "6" * 40}, "request": {}}
+        "history": [], "executor": {"id": 201, "run_attempt": 1, "head_sha": "6" * 40},
+        "request": {"id": 200, "run_attempt": 1, "head_sha": "7" * 40}}
     context = publisher.sampling_plan(authority)
     prepared_context = {"record": producer["prepared"], "files": producer["files"], "bytes": producer["files"]["prepared.json"],
         "sha256": prepared_sha, "expected": expected, "bundle": producer}
-    old = dict(authority, head="0" * 40, request_id="100", run_id="101", executor={"head_sha": "3" * 40},
+    old = dict(authority, head="0" * 40, request_id="100", run_id="101",
+        executor={"id": 101, "run_attempt": 1, "head_sha": "3" * 40},
+        request={"id": 100, "run_attempt": 1, "head_sha": "0" * 40},
         admitted=dict(authority["admitted"], sampling_phase="acquire", sampling_packet="0", sampling_family="acquire",
                       sampling_freeze_sha256=plan_sha, sampling_freeze_revision="1" * 40, sampling_reservation_seconds="1800"))
     old_context = dict(context, phase="acquire", packet=0, schedule=sampling.schedule("acquire", 0))
@@ -373,7 +376,8 @@ def publication_fixture(phase="pilot", packet=0):
             for previous_packet in range(total):
                 number = str(110 + len(preceding) * 2)
                 prior = dict(authority, request_id=number, run_id=str(int(number) + 1), head=("%040x" % int(number)),
-                             executor={"head_sha": "3" * 40})
+                             executor={"id": int(number) + 1, "run_attempt": 1, "head_sha": "3" * 40},
+                             request={"id": int(number), "run_attempt": 1, "head_sha": ("%040x" % int(number))})
                 preceding.append((previous_phase, previous_packet, prior))
                 old_records.append((prior, {}))
         for previous_phase, previous_packet, prior in preceding:
@@ -754,7 +758,9 @@ def preparation_publication_fixture():
            "facts.tsv": b"fixture\ttrusted-api-facts\n",
            "history.tsv": b"phase\tpacket\trequest_run_id\trequest_run_attempt\texecutor_run_id\texecutor_run_attempt\tstate\tphysical_wall_us\tcampaign\tfreeze_revision\tactor_login\tactor_id\ttriggering_login\ttriggering_id\tpull_author_login\tpull_author_id\n"}
     authority = {"repository": "buster14a/buster", "head": "7" * 40, "request_id": "200", "run_id": "201",
-                 "executor": {"head_sha": "6" * 40}, "request": {}, "admitted": admitted, "plan": plan, "raw": raw, "history": []}
+                 "executor": {"id": 201, "run_attempt": 1, "head_sha": "6" * 40},
+                 "request": {"id": 200, "run_attempt": 1, "head_sha": "7" * 40},
+                 "admitted": admitted, "plan": plan, "raw": raw, "history": []}
     files = dict(raw)
     # The contract's synthetic preparation producer supplies actual inventory,
     # closure, child argv/cleanup and costs. Use the existing trusted paired

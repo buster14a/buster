@@ -764,6 +764,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
 #include "compiler_main_profile_policy_test.c"
 #include "compiler_sampling_historical_validation.c"
 #include "compiler_sampling_historical_validation_test.c"
+#include "compiler_prerequisite_historical_validation.c"
+#include "compiler_prerequisite_historical_validation_test.c"
 #include "compiler_main_comparison_controller.c"
 #include "compiler_main_forty_fixture.c"
 
@@ -846,7 +848,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* are
 {
     CompilerSamplingOptions options = compiler_sampling_parse(arguments);
     ProcessResult result = PROCESS_RESULT_FAILED;
-    if (arguments.length && string_equal(arguments.pointer[0], S8("--validate-historical-sampling")))
+    if (arguments.length && (string_equal(arguments.pointer[0], S8("--validate-historical-preparation")) ||
+        string_equal(arguments.pointer[0], S8("--validate-historical-utility"))))
+    {
+        result = compiler_prerequisite_historical_main(arena, arguments);
+    }
+    else if (arguments.length == 1 && string_equal(arguments.pointer[0], S8("--self-test-historical-prerequisites")))
+    {
+        result = compiler_prerequisite_historical_self_test(arena) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    }
+    else if (arguments.length && string_equal(arguments.pointer[0], S8("--validate-historical-sampling")))
     {
         result = compiler_sampling_historical_main(arena, arguments);
     }
