@@ -58,6 +58,7 @@
 #include <buster/tests/compiler/codegen/codegen_test.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/hash.h>
+#include <buster/lib/os_internal.h>
 #include <buster/lib/time.h>
 #include <buster/lib/system_headers.h>
 #if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -1308,9 +1309,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_response_file_arguments(
             BUSTER_STRING_TEST(arguments, executed.diagnostics[0].message, unreadable.diagnostic);
         }
         String8 directory[] = {string_format_z(arena, S8("@{S8}"), root)};
+        // A directory is refused by kind, without opening it: the scripted OPEN
+        // step on its path must stay unconsumed. Reverting to open-then-fail
+        // consumes it, which is what Windows logs as an open error.
+        OsFileTestStep directory_open = {OS_FILE_TEST_OPEN, OS_FILE_TEST_ERROR, 5};
+        os_file_test_begin(root, &directory_open, 1);
         CompilerDriverInvocation not_a_file = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(directory));
+        BUSTER_TEST(arguments, os_file_test_end() == 0);
         BUSTER_TEST(arguments, not_a_file.error == COMPILER_DRIVER_ERROR_FILE_READ);
-        // A directory is refused by kind, without opening it.
         BUSTER_STRING_TEST(arguments, not_a_file.diagnostic, string_format(arena, S8("could not read response file {S8}"), root));
         String8 bare[] = {S8("-c"), S8("@")};
         CompilerDriverInvocation unnamed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(bare));
