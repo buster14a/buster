@@ -87,6 +87,7 @@ jobs:
           markers=(.cache/bootstrap-driver/posix/*/*.complete)
           driver="${markers[0]%.complete}"
           python3 -B tools/bench_direct/compiler_owned_phase_test.py --native-driver "$driver"
+          python3 -B tools/bench_direct/compiler_ordinary_fixture_test.py --native-driver "$driver"
           python3 -B tools/uarch_lab_test.py
 
       - name: Reject deleted cached dependencies without a fatal diagnostic
