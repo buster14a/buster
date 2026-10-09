@@ -89,3 +89,5 @@ profile: clang-analyze-full-v1
 profile: clang-analyze-full-v1
 # request: issue #3130 PR #3167 third full matched comparison after #3168 VA_COPY guard, #3170 artifact cleanup and #3129/#3172 main integration (main f2188669c5174f71879e9b682eded8f7004d8988); the second attempt failed all four arms at row 97, so its timings do not qualify.
 profile: clang-analyze-full-v1
+# request: issue #3130 PR #3167 third physical matched analyzer comparison; H3 was blocked before any actions and was not an attempt. Run after merging main 35c43d1877620ef9a57b9ffc98ae022b688a7c9d (#3108/#3164), with the #3168 VA_COPY guard and #3170 fixture cleanup; the prior completed comparison failed all arms at row 97 and gives no performance verdict.
+profile: clang-analyze-full-v1
