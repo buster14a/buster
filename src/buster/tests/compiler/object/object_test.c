@@ -8009,7 +8009,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             .exception_scope_begin = 8, .exception_entry_offset = 24,
         };
         CodegenModule seh_module = windows_unwind_module;
-        seh_module.code = BUSTER_ARRAY_TO_SLICE(seh_code);
+        seh_module.code = (ByteSlice)BUSTER_ARRAY_TO_SLICE(seh_code);
         seh_module.functions = &seh_function;
         ByteSlice raw = object_test_windows_x64_unwind(arguments->arena, &seh_function, 1);
         u8 raw_prefix[] = {0x19, 8, 2, 0, 8, 0x32, 1, 0x50};
