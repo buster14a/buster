@@ -109,6 +109,55 @@ gate applies, and these jobs follow `authorize`:
   missing, partial or invalid corpus run, or one whose compiler hashes are
   not the measured binaries, fails the check like a failed self-host run.
 
+The same trusted `compare-pull` route also supports a fixed full Clang
+analyzer profile when the request file contains a fresh added occurrence of
+the exact line `profile: clang-analyze-full-v1` in the exact head commit.
+Append that same selector line once for each explicit analyzer request;
+historical occurrences do not replay the profile. The publisher rechecks the
+line-count increase against every GitHub parent and the retained request bytes
+against the exact head. This opts into an analyzer-only run in place
+of the compiler timing/corpus profiles; `scaling.request` and the separate
+inline-acceptance selector cannot be combined with it. The trusted merge-base
+driver generates one Release split-source compile database from candidate
+HEAD, and both separately built native drivers analyze those same 182 selected
+rows. Candidate alias proof reduces its inventory to 135 executions and 47
+aliases. The profile runs two fresh preflights outside the matched timings,
+then baseline, candidate, candidate, baseline, with eight shards, two jobs and
+the normal ten-minute per-TU bound. Each full run is followed by an independent
+fresh aggregate verification. Raw plans, terminal shard results, logs,
+process observations and the exact request are retained and independently
+revalidated by `compiler_publish.py`.
+
+The report shows run planning and context-proof time, every worker's planning
+and context-proof counters, per-shard elapsed and preflight/postflight context
+checks, and the independent aggregate's planning and context-proof time. Shards
+run concurrently, so their counters are reported per shard and are not summed
+as serial wall or critical-path time. Shard elapsed starts after context
+preflight and includes execution plus context postflight; preflight is outside
+elapsed and postflight is already inside it, so neither should be added again
+to derive wall time. Baseline PLAN_V1 has no internal planning or context-proof
+counters; those fields are explicitly unavailable, not zero. Outer analysis and
+aggregate wait4 CPU and largest individual RSS are reported separately from the
+sampled process-tree RSS lower bound.
+
+Failed or incomplete arms retain their raw phase and sampler records, every
+present terminal shard/result record, and partial per-TU and individually
+plan-bound cost/counter observations with explicit failed, partial, malformed,
+unbound or missing states. Acceptance still requires complete passing arms,
+plan-matched full coverage, matching independent aggregates, and complete
+process-tree sampling with positive samples, live-process counts and sampled
+RSS. Invalid comparisons produce no timing ratios or per-TU median summaries.
+
+This profile is report-only and has no speedup or regression verdict. Its
+native campaign is capped at 75 minutes inside the existing 90-minute
+`compare-pull` job; setup and report export remain inside that same job budget.
+Wait4 CPU and RSS describe the waited process's kernel accounting, with RSS
+the largest individual high-water rather than a simultaneous process-tree sum.
+Sampled whole-tree RSS remains a lower bound; every full run must explicitly
+report a complete process-tree sample before its evidence is accepted. The
+exact request still uses the owner-only authorization above and always
+requires real execution on the approved Ryzen 7 9700X.
+
 ### Multi-TU scaling of a pull request
 
 To measure how the pull request's compiler scales across cores (#424), add

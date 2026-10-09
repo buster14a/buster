@@ -35,7 +35,14 @@ class WorkerBudgetTest(unittest.TestCase):
         result = cls.run_campaign(cls.evidence / "campaign")
         if result.returncode:
             raise RuntimeError(result.stdout)
-        cls.clean = budget.verify(cls.evidence)
+        cls.clean = None
+        cls.verification_error = None
+        try:
+            cls.clean = budget.verify(cls.evidence)
+        except ValueError as error:
+            cls.verification_error = str(error)
+            if "process-tree sampling is" not in cls.verification_error:
+                raise
 
     @classmethod
     def tearDownClass(cls):
@@ -61,34 +68,83 @@ class WorkerBudgetTest(unittest.TestCase):
         shutil.copytree(self.evidence, self.copy)
 
     def test_counterbalanced_complete_inventory(self):
+        if self.clean is None:
+            self.skipTest("host process-tree sampling is not complete")
         samples = self.clean["samples"]
         self.assertEqual([s["jobs"] for s in samples], [2, 4, 4, 2])
         self.assertEqual([s["eligible"] for s in samples], [4] * 4)
         self.assertEqual(len({s["inventory_sha256"] for s in samples}), 1)
 
     def test_relocated_artifact_replays(self):
+        if self.clean is None:
+            self.skipTest("host process-tree sampling is not complete")
         self.assertEqual(budget.verify(self.copy)["diagnostic_sha256"], self.clean["diagnostic_sha256"])
 
     def test_missing_sample_fails(self):
+        if self.clean is None:
+            self.skipTest("host process-tree sampling is not complete")
         shutil.rmtree(self.copy / "campaign/sample-2-jobs-4")
         with self.assertRaises(ValueError):
             budget.verify(self.copy)
 
     def test_changed_diagnostic_fails(self):
+        if self.clean is None:
+            self.skipTest("host process-tree sampling is not complete")
         log = next((self.copy / "campaign/sample-1-jobs-4").glob("shard-*/unit-*.log"))
         log.write_bytes(b"altered diagnostic\n")
         with self.assertRaises(ValueError):
             budget.verify(self.copy)
 
     def test_missing_terminal_result_fails(self):
+        if self.clean is None:
+            self.skipTest("host process-tree sampling is not complete")
         next((self.copy / "campaign/sample-1-jobs-4").glob("shard-*/result.txt")).unlink()
         with self.assertRaises(ValueError):
             budget.verify(self.copy)
 
     def test_wrong_worker_metrics_fail(self):
+        if self.clean is None:
+            self.skipTest("host process-tree sampling is not complete")
         path = self.copy / "campaign/sample-1-jobs-4/run.txt"
         path.write_text(path.read_text().replace("jobs=4", "jobs=2"))
         with self.assertRaises(ValueError):
+            budget.verify(self.copy)
+
+    def test_process_tree_status_is_explicit_and_fail_closed(self):
+        run_paths = sorted((self.copy / "campaign").glob("sample-*/run.txt"))
+        self.assertEqual(len(run_paths), 4)
+        statuses = []
+        for path in run_paths:
+            run = budget.fields(path.read_text().strip(), "ANALYZE_RUN")
+            tree_status = run.get("process_tree_status")
+            self.assertIn(tree_status, ("complete", "incomplete", "unavailable"))
+            self.assertRegex(run.get("process_tree_reason", ""), r"^[a-z0-9-]+$")
+            if tree_status != "unavailable":
+                self.assertGreater(int(run["samples"]), 0)
+                self.assertGreater(int(run["sampled_peak_tree_rss_bytes"]), 0)
+            statuses.append(run["process_tree_status"])
+        if self.clean is None:
+            self.assertTrue(any(status != "complete" for status in statuses), self.verification_error)
+            with self.assertRaisesRegex(ValueError, "process-tree sampling"):
+                budget.verify(self.copy)
+        else:
+            self.assertEqual(statuses, ["complete"] * 4)
+            self.assertTrue(all(budget.fields(path.read_text().strip(), "ANALYZE_RUN")["process_tree_reason"] == "none"
+                                for path in run_paths))
+            path = run_paths[0]
+            text = path.read_text()
+            text = re.sub(r"process_tree_status=complete process_tree_reason=none",
+                          "process_tree_status=incomplete process_tree_reason=children-unavailable", text, count=1)
+            path.write_text(text)
+            with self.assertRaisesRegex(ValueError, "process-tree sampling is incomplete"):
+                budget.verify(self.copy)
+
+    def test_missing_process_tree_status_fails(self):
+        path = self.copy / "campaign/sample-0-jobs-2/run.txt"
+        text = path.read_text()
+        text = re.sub(r" process_tree_status=[a-z]+ process_tree_reason=[a-z0-9-]+", "", text, count=1)
+        path.write_text(text)
+        with self.assertRaisesRegex(ValueError, "missing/invalid process-tree sampling status"):
             budget.verify(self.copy)
 
     def test_failed_native_arm_keeps_all_four_samples(self):

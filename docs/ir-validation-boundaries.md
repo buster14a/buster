@@ -87,6 +87,23 @@ Uncertified preparation must reject these controls at `CANONICAL_INPUT`,
 before CFG or completion publication and without mutating the source rows.
 Valid neighboring modules prepare, publish zero edges and revalidate.
 
+## ARRAY construction categories
+
+`ARRAY` constructs immutable array and vector values. Its result and each
+operand must be `IR_VALUE_VALUE`; every operand must also have the array or
+vector's canonical element type. A storage `PLACE` is not the loaded element:
+producers must emit an explicit `LOAD` before construction. These checks
+apply when the element count is zero too, so an empty array still produces a
+`VALUE`, although it has no element operands. Invalid categories are rejected
+with `IR_VALIDATION_OPERATION` at the ARRAY row.
+
+Registered `ir_test_canonical_array_categories` checks valid one-element
+`ARRAY` and two-element `VECTOR` constructors, plus an empty `ARRAY`.
+Independent malformed neighbors use a `PLACE` operand or result for both
+nonempty kinds, and a `PLACE` result for the empty row. Canonical validation
+and uncertified preparation must report the ARRAY row; preparation must stop at
+`CANONICAL_INPUT` before CFG publication or completion markers.
+
 ## Scalar binary operation families
 
 Scalar arithmetic and numeric comparisons require the operation's family to
