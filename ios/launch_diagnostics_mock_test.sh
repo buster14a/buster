@@ -530,7 +530,7 @@ run_case() {
     local label=$1 outcome=$2 expected=$3 interrupt=$4 bundles=$5
     local diagnostic_mode=${6:-success}
     local state="$test_root/$label" status=0 role token registration runner_timeout probe status_log output_log expected_probe expected_progress owner_deadline owner_wait_status
-    local producer_result signal_result bridge_result producer_token
+    local producer_result signal_result bridge_result producer_token stream_dir stream_dirs capture_receipt
     local producer_count reader_count diagnostic_count expected_diagnostic_count=0
     mkdir -p "$state/Debug/ide.app" "$state/Release/ide.app" "$state/control"
     mkfifo "$state/acknowledgments"
@@ -743,8 +743,37 @@ PY
         mock_report_owner_state "$state"
         exit 1
     fi
-    if find "$state" -name 'buster-ios-stream.*' | grep -q .; then
-        echo "$label leaked its FIFO directory" >&2
+    # Reuse the same bounded lifetime deadline for the launcher's cleanup.
+    # Owner EOF can precede the shell's EXIT-trap removal of its private stream FIFO.
+    stream_dir=
+    while (( SECONDS < owner_deadline )); do
+        stream_dir=$(find "$state" -name 'buster-ios-stream.*' -print -quit)
+        if [[ -z $stream_dir ]]; then
+            break
+        fi
+        sleep 0.05
+    done
+    stream_dirs=$(find "$state" -name 'buster-ios-stream.*' -print)
+    if [[ -n $stream_dirs ]]; then
+        printf '%s leaked its FIFO path by the shared lifetime deadline:\n%s\n' "$label" "$stream_dirs" >&2
+        mock_report_owner_state "$state"
+        if [[ $interrupt == 1 ]]; then
+            for capture_receipt in \
+                "$state/interrupted-run.caller-status.log" \
+                "$state/interrupted-run.caller-fields.log" \
+                "$state/interrupted-run.caller-private-directory.log" \
+                "$state/interrupted-run.supervisor-fields.log" \
+                "$state/interrupted-run.supervisor-status.log" \
+                "$state/interrupted-run.log"; do
+                if [[ -f $capture_receipt && ! -L $capture_receipt ]]; then
+                    printf 'mock capture receipt: %s\n' "$capture_receipt" >&2
+                    head -c 4096 "$capture_receipt" >&2 || true
+                    printf '\n' >&2
+                else
+                    printf 'mock capture receipt: missing %s\n' "$capture_receipt" >&2
+                fi
+            done
+        fi
         exit 1
     fi
     if [[ $expected == 1 ]]; then
