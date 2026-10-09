@@ -18172,7 +18172,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bootstrap_trace(UnitTest
             String8 path = string_format_z(arena, S8("{S8}{S8}"), prefixes[repetition], suffixes[phase]);
             ByteSlice evidence = file_read(arena, path, (FileReadOptions){0});
             observations[repetition][phase] = evidence;
-            BUSTER_TEST(arguments, evidence.length > 40 && memory_compare(evidence.pointer + evidence.length - 8, "BSTREND1", 8));
+            BUSTER_TEST(arguments, evidence.length > 40 && memory_compare(evidence.pointer + evidence.length - 8, "BSTREND2", 8));
             if (repetition)
             {
                 ByteSlice first = observations[0][phase];
@@ -18211,7 +18211,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bootstrap_trace(UnitTest
         narrow_observations[variant] = bytes;
         if (BUSTER_REQUIRE(arguments, bytes.pointer != 0 && bytes.length > 40))
         {
-            BUSTER_TEST(arguments, memory_compare(bytes.pointer + bytes.length - 8, "BSTREND1", 8));
+            BUSTER_TEST(arguments, memory_compare(bytes.pointer + bytes.length - 8, "BSTREND2", 8));
             if (variant && BUSTER_REQUIRE(arguments, narrow_observations[0].pointer != 0))
             {
                 ByteSlice first = narrow_observations[0];
