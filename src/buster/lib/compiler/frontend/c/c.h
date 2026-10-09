@@ -1512,6 +1512,14 @@ struct CTokenPositionIndex
     u32* type_identity_positions;
     u32 type_identity_count;
     u32 type_identity_capacity;
+    // Parallel to type_identity_positions: the retained identity row recorded
+    // at that site, plus one (zero: none). A hint only; c_parse_type_identity_find
+    // validates the row against the live table, so rollbacks and private query
+    // copies that share this index stay correct.
+    u32* type_identity_rows_plus_one;
+    // Diagnostics for tests: lookups, and rows read by the validating scan.
+    u64 type_identity_lookups;
+    u64 type_identity_rows_examined;
     u32* alignas_positions;
     // Ascending positions of every identifier token directly followed by a
     // ':' punctuator — the necessary condition c_ir_named_label_at tests
