@@ -898,6 +898,10 @@ class PreparationPublicationOutcomes(unittest.TestCase):
         self.assertIsNone(result["accounting"]["observation_publication_us"])
         self.assertEqual(len(result["series"]), 5)
         self.assertEqual(result["predeclared_controls"]["aa_families"], 3)
+        self.assertEqual(result["preparation_cost_scope"], "native-operation")
+        self.assertTrue(result["predeclared_controls"]["snapshot_native_operation_cost_less_than_legacy"])
+        self.assertNotIn("snapshot_cost_less_than_legacy", result["predeclared_controls"])
+        self.assertFalse(result["whole_job_net_savings_assessed"])
         for name, value in result["series"].items():
             if name.endswith("-aa"):
                 self.assertLessEqual(0.995, value["ci_low"])
@@ -959,6 +963,8 @@ class PreparationPublicationOutcomes(unittest.TestCase):
             self.assertIn("Request run 200 attempt 1: https://github.com/buster14a/buster/actions/runs/200/attempts/1", body["output"]["summary"])
             self.assertIn("Workflow run 201 attempt 1: https://github.com/buster14a/buster/actions/runs/201/attempts/1", body["output"]["summary"])
             self.assertIn('"qualification_state": "unqualified"', body["output"]["text"])
+            self.assertIn('"whole_job_net_savings_assessed": false', body["output"]["text"])
+            self.assertIn("complete ordinary-job net savings is unassessed", body["output"]["summary"])
             if not available:
                 self.assertIn('"native_owner_wall_us": null', body["output"]["text"])
 
@@ -1036,7 +1042,9 @@ class PreparationPublicationOutcomes(unittest.TestCase):
         self.assertEqual(result["packet_state"], "complete-negative-research")
         self.assertEqual(result["problems"], [])
         self.assertEqual(len(result["series"]), 5)
-        self.assertIn("complete snapshot preparation cost is not less than legacy cost", result["control_failures"])
+        self.assertIn("complete snapshot native-operation cost is not less than legacy native-operation cost", result["control_failures"])
+        self.assertFalse(result["whole_job_net_savings_assessed"])
+        self.assertFalse(result["predeclared_controls"]["snapshot_native_operation_cost_less_than_legacy"])
         self.assertEqual(result["preparation_costs"]["snapshot"]["total_us"], receipt["preparation_costs"]["snapshot"]["total_us"])
         with mock.patch.object(publisher, "preparation_authority", return_value=(api, authority)), \
                 mock.patch.object(publisher, "preparation_read_artifact", return_value=(files, {})), \
@@ -1075,7 +1083,12 @@ class PreparationPublicationOutcomes(unittest.TestCase):
                              ("actor", {"login": "davidgmbb", "id": 123}),
                              ("triggering_actor", {"login": "someone-else", "id": 39247043}),
                              ("triggering_actor", {"login": "davidgmbb", "id": 123}),
-                             ("head_repository", {"full_name": "fork/buster"})):
+                             ("head_repository", {"full_name": "fork/buster"}),
+                             ("repository", {"full_name": "fork/buster"}),
+                             ("display_title", "9700X request 199.1 head " + "7" * 40),
+                             ("head_sha", "5" * 40), ("head_branch", "branch"),
+                             ("path", ".github/workflows/other.yml"), ("event", "push"),
+                             ("id", 202), ("run_attempt", 2)):
             for function in (publisher.preparation_authority, publisher.sampling_authority):
                 api = mock.Mock()
                 api.request.return_value = dict(execution, **{field: value})
