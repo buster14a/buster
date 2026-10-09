@@ -33,6 +33,15 @@ RADDEBUGGER = WORKFLOWS / "raddebugger-compatibility.yml"
 ATTEMPT_BINDING = "needs.authorize.outputs.attempt == format('{0}', github.run_attempt)"
 REQUEST_BINDING = "needs.authorize.outputs.request_head == github.event.workflow_run.head_sha"
 
+CLEANUP_GUARD_SCRIPT = (
+    "          set -euo pipefail",
+    "          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||",
+    "                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then",
+    "            echo '::error::Native cleanup ownership is retained; manual review is required before host admission.'",
+    "            exit 1",
+    "          fi",
+)
+
 # The direct workload path (#2704): main's definition, started by the request
 # workflow's completion and run only for the owner's own same-repository pull
 # requests. The gate reads the request run from the workflow_run payload; the
@@ -561,6 +570,12 @@ def check_runner_routes(errors: list[str], texts: dict[Path, str]) -> None:
 
 
 
+PHYSICAL_CLOCK_SCRIPT = (
+    "          set -euo pipefail",
+    "          python3 -B trusted/tools/bench_direct/compiler_publish.py physical-clock",
+)
+
+
 def check_sampling_path(errors: list[str], direct: str | None = None) -> None:
     """Experimental admission precedes physical assignment; no ordinary short route."""
     direct = DIRECT.read_text(encoding="utf-8") if direct is None else direct
@@ -607,8 +622,11 @@ def check_sampling_path(errors: list[str], direct: str | None = None) -> None:
         "            --trusted-root \"$PWD/trusted\" --cleanup-root \"$RUNNER_TEMP\" \\",
         "            --evidence \"$RUNNER_TEMP/compiler-sampling-evidence\"",
     ]
-    if run_scripts(physical) != [expected_script]:
+    if run_scripts(physical) != [list(CLEANUP_GUARD_SCRIPT), list(PHYSICAL_CLOCK_SCRIPT), expected_script]:
         errors.append("sampling must execute only the bounded native controller")
+    if not contains_block(physical, ("      - name: Observe the actual physical job start",
+            "        shell: bash", "        env:", "          BQ_PHYSICAL_CLOCK_KIND: sampling")):
+        errors.append("sampling must bind the public tokenless job-start observation before native entry")
     if "    timeout-minutes: ${{ fromJSON(needs.authorize.outputs.sampling_timeout_minutes) }}" not in physical:
         errors.append("sampling timeout must come from the immutable native reservation")
     if "          ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}" not in physical:
@@ -666,8 +684,11 @@ def check_preparation_path(errors: list[str], direct: str | None = None) -> None
         "            --trusted-root \"$PWD/trusted\" --cleanup-root \"$RUNNER_TEMP\" \\",
         "            --evidence \"$RUNNER_TEMP/compiler-preparation-evidence\"",
     ]
-    if run_scripts(physical) != [expected_script]:
+    if run_scripts(physical) != [list(CLEANUP_GUARD_SCRIPT), list(PHYSICAL_CLOCK_SCRIPT), expected_script]:
         errors.append("preparation must execute only the bounded native controller")
+    if not contains_block(physical, ("      - name: Observe the actual physical job start",
+            "        shell: bash", "        env:", "          BQ_PHYSICAL_CLOCK_KIND: preparation")):
+        errors.append("preparation must bind the public tokenless job-start observation before native entry")
     if "    timeout-minutes: ${{ fromJSON(needs.authorize.outputs.preparation_timeout_minutes) }}" not in physical:
         errors.append("preparation timeout must come from the immutable native reservation")
     if "          ref: ${{ needs.authorize.outputs.preparation_trusted_revision }}" not in physical:
@@ -724,8 +745,11 @@ def check_utility_path(errors: list[str], direct: str | None = None) -> None:
         "            --trusted-root \"$PWD/trusted\" --cleanup-root \"$RUNNER_TEMP\" \\",
         "            --evidence \"$RUNNER_TEMP/compiler-utility-evidence\"",
     ]
-    if run_scripts(physical) != [expected_script]:
+    if run_scripts(physical) != [list(CLEANUP_GUARD_SCRIPT), list(PHYSICAL_CLOCK_SCRIPT), expected_script]:
         errors.append("utility must execute only the bounded native controller")
+    if not contains_block(physical, ("      - name: Observe the actual physical job start",
+            "        shell: bash", "        env:", "          BQ_PHYSICAL_CLOCK_KIND: utility")):
+        errors.append("utility must bind the public tokenless job-start observation before native entry")
     if "    timeout-minutes: ${{ fromJSON(needs.authorize.outputs.utility_timeout_minutes) }}" not in physical:
         errors.append("utility timeout must come from the immutable native reservation")
     if "          ref: ${{ needs.authorize.outputs.utility_trusted_revision }}" not in physical:
@@ -793,6 +817,13 @@ def check_direct_workflow(errors: list[str]) -> None:
     # The trigger block is exact: no other event or workflow may start it.
     if trigger_block("\n".join(lines)) != DIRECT_TRIGGER:
         errors.append("direct workflow trigger must be exactly the reviewed workflow_run block")
+    for name in ("bench", "compare-pull", "compare", "sampling", "preparation", "utility"):
+        job = jobs.get(name, [])
+        scripts = run_scripts(job)
+        first_step = job.index("    steps:") + 1 if "    steps:" in job else -1
+        if not scripts or scripts[0] != list(CLEANUP_GUARD_SCRIPT) or first_step < 0 or \
+                job[first_step] != "      - name: Refuse retained native cleanup uncertainty":
+            errors.append(f"{name} must refuse durable UNKNOWN/ACTIVE before any checkout or work")
     declarations = [line.rstrip() for line in lines if line.lstrip().startswith("permissions:")]
     if declarations != ["permissions: {}"] + ["    permissions:"] * 13:
         errors.append("direct workflow must grant GITHUB_TOKEN permissions only to its hosted authorize, "
@@ -829,7 +860,7 @@ def check_direct_workflow(errors: list[str]) -> None:
     uses = [line for line in run if "uses:" in line]
     if len(uses) != len(DIRECT_CHECKOUTS) or not all(contains_block(run, block) for block in DIRECT_CHECKOUTS):
         errors.append("direct bench job must use exactly the two reviewed credential-free checkouts")
-    if run_scripts(run) != [DIRECT_RUN_SCRIPT]:
+    if run_scripts(run) != [list(CLEANUP_GUARD_SCRIPT), DIRECT_RUN_SCRIPT]:
         errors.append("direct bench job must run only main's harness with validated commit IDs")
 
     for number, line in expression_lines_in_scripts(direct):
@@ -902,7 +933,7 @@ def check_compiler_path(errors: list[str]) -> None:
     uses = [line for line in compare if "uses:" in line]
     if len(uses) != len(COMPILER_CHECKOUTS) or not all(contains_block(compare, block) for block in COMPILER_CHECKOUTS):
         errors.append("compiler compare job must use exactly two credential-free checkouts and the evidence upload")
-    if run_scripts(compare) != [COMPILER_RUN_SCRIPT]:
+    if run_scripts(compare) != [list(CLEANUP_GUARD_SCRIPT), COMPILER_RUN_SCRIPT]:
         errors.append("compiler compare job must run only main's harness with validated identities")
 
     for block in COMPILER_PUBLISH_BLOCKS:
@@ -930,7 +961,7 @@ def check_compiler_path(errors: list[str]) -> None:
     if len([line for line in compare_pull if "uses:" in line]) != len(PULL_CHECKOUTS) or \
             not all(contains_block(compare_pull, block) for block in PULL_CHECKOUTS):
         errors.append("pull compare job must use exactly two credential-free checkouts and the evidence upload")
-    if run_scripts(compare_pull) != [PULL_RUN_SCRIPT]:
+    if run_scripts(compare_pull) != [list(CLEANUP_GUARD_SCRIPT), PULL_RUN_SCRIPT]:
         errors.append("pull compare job must run only main's harness with validated identities")
     for block in PULL_PUBLISH_BLOCKS:
         if not contains_block(publish_pull, block):

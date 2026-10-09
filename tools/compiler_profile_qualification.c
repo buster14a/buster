@@ -426,7 +426,7 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingVerification compiler_sampling_closure_verif
     }
     if (contained)
     {
-        bool ended = compiler_experiment_supervisor_end(arena, &supervisor);
+        bool ended = compiler_experiment_supervisor_end_known(arena, &supervisor, !result.cleanup_failed);
         result.cleanup_failed = result.cleanup_failed || !ended;
         bool recorded = compiler_sampling_supervision_receipt(arena,
             path_join(arena, output, string_format(arena, S8("closure-{u64}-{S8}-supervision.tsv"), trial, after ? S8("after") : S8("before"))),
@@ -583,7 +583,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_internal(Arena* arena, C
                                 .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
                     }
                     if (spawn.handle) wait = os_process_wait_deadline(arena, spawn, timeout);
-                    bool ended = contained && compiler_experiment_supervisor_end(arena, &measured);
+                    bool ended = contained && compiler_experiment_supervisor_end_known(arena, &measured,
+                        !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost);
                     if (contained && !ended) verifier_cleanup_failed = true;
                     bool supervision_recorded = compiler_sampling_supervision_receipt(arena,
                         path_join(arena, output, string_format(arena, S8("trial-{u64}-supervision.tsv"), trial)),
@@ -673,12 +674,20 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
     return compiler_sampling_run_internal(arena, options, false);
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_base64(Arena* arena, String8 encoded, bool empty_allowed, String8* decoded);
+#include "compiler_experiment_job_clock.c"
+
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, CompilerSamplingOptions options, SliceString8 arguments)
 {
     CompilerSamplingPacket planned = compiler_sampling_schedule(options.phase, options.packet);
     u64 started = os_now_microseconds();
     u64 allocation = planned.reservation_seconds * 1000000ull;
-    u64 remaining = allocation > options.prep_us ? allocation - options.prep_us : 0;
+    CompilerExperimentJobClock job_clock = {0};
+    bool policy_present = false;
+    String8 policy = compiler_experiment_job_clock_environment(S8("GITHUB_SHA"), &policy_present);
+    bool clock_valid = policy_present && compiler_experiment_job_clock_resolve(arena, S8("sampling"), policy, &job_clock);
+    u64 remaining = clock_valid && allocation > 120000000ull ?
+        compiler_experiment_job_clock_remaining_us(job_clock, allocation, allocation - 120000000ull) : 0;
     // The wrapper owns a fresh group for the entire worker and all lab compilers.
     // No worker launches into the Actions runner's process group.
     OsArgumentBuilder builder = os_argument_builder_start(arena);
@@ -690,7 +699,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
     ProcessSpawnResult spawn = {0};
     ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
     CompilerExperimentSupervisor supervisor = {0};
-    bool contained = compiler_experiment_supervisor_begin(arena, &supervisor);
+    bool contained = clock_valid && remaining && compiler_experiment_supervisor_begin(arena, &supervisor);
     CompilerSamplingSignalScope signals = {0};
     bool deferred = contained && compiler_sampling_signals_begin(&signals);
     ProcessGroupControlState control = {0};
@@ -698,18 +707,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
     control.cancellation_signal = &compiler_sampling_cancel_signal;
     control.cancellation_escalated = &compiler_sampling_cancel_escalated;
 #endif
-    if (deferred && remaining > 120ull * 1000000ull)
+    if (deferred && remaining)
     {
         spawn = os_process_spawn(worker_command, (SliceString8){0}, (SliceString8){0},
             (ProcessSpawnOptions){.use_process_environment = 1, .new_process_group = 1, .observe_resources = 1});
         if (spawn.handle)
         {
             spawn.process_group_control = &control;
-            wait = os_process_wait_deadline(arena, spawn, remaining - 120ull * 1000000ull);
+            wait = os_process_wait_deadline(arena, spawn, remaining);
         }
     }
-    bool cleanup = contained && compiler_experiment_supervisor_end(arena, &supervisor) &&
-        !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
+    bool cleanup = contained && compiler_experiment_supervisor_end_known(arena, &supervisor,
+        !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost);
     bool cancelled = false;
 #if BUSTER_LINUX && !BUSTER_ANDROID
     cancelled = process_control_atomic_load(&compiler_sampling_cancel_signal) != 0;
@@ -719,29 +728,33 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
     bool restored = deferred && compiler_sampling_signals_end(&signals);
     complete = complete && restored;
     u64 wall = options.prep_us + os_now_microseconds() - started;
+    bool within = clock_valid && compiler_experiment_job_clock_remaining_us(job_clock, allocation, allocation);
     String8 owner = string_format(arena,
         S8("schema\tbuster-main-sampling-owner-v1\nphysical_packet_wall_us\t{u64}\nprocess_state\t{S8}\ntimed_out\t{u64}\n"
            "cleanup_failed\t{u64}\nwithin_reservation\t{S8}\ncancelled\t{u64}\n"),
-        wall, complete ? S8("complete") : S8("failed"), (u64)wait.timed_out, (u64)!cleanup, wall <= allocation ? S8("true") : S8("false"), (u64)cancelled);
+        wall, complete ? S8("complete") : S8("failed"), (u64)wait.timed_out, (u64)!cleanup, within ? S8("true") : S8("false"), (u64)cancelled);
     String8 persistent = path_join(arena, path_join(arena, options.ledger_root, options.freeze_sha256),
         string_format(arena, S8("{S8}-{u64}"), options.phase, options.packet));
     bool supervisor_written = compiler_sampling_supervision_receipt(arena,
         path_join(arena, options.output, S8("owner-supervision.tsv")), supervisor, cleanup, wall);
     bool written = supervisor_written && file_write(path_join(arena, options.output, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(owner)) &&
         file_write(path_join(arena, persistent, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(owner));
-    if (!complete || wall > allocation || !written)
+    if (!complete || !within || !written)
     {
         String8 campaign = path_join(arena, options.ledger_root, options.freeze_sha256);
         file_write(path_join(arena, campaign, S8("exhausted.tsv")),
             BUSTER_SLICE_TO_BYTE_SLICE(S8("state\texhausted\nreason\towned-worker-failed-or-overrun\n")));
     }
-    return complete && wall <= allocation && written && restored ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    bool final_within = clock_valid && compiler_experiment_job_clock_remaining_us(job_clock, allocation, allocation);
+    return complete && within && final_within && written && restored ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
 
 #include "compiler_profile_qualification_controller.c"
 #include "compiler_preparation_qualification_controller.c"
+#include "compiler_closure_utility_controller.c"
 #include "compiler_sampling_packet_fixture.c"
 #include "compiler_preparation_fixture_test.c"
+#include "compiler_experiment_cleanup_guard_test.c"
 
 
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_preparation_admit(Arena* arena, SliceString8 arguments)
@@ -834,6 +847,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* are
     {
         SliceString8 fixture_arguments = {.pointer = arguments.pointer + 1, .length = arguments.length - 1};
         result = compiler_sampling_packet_fixture_main(arena, fixture_arguments);
+    }
+    else if (arguments.length == 1 && string_equal(arguments.pointer[0], S8("--self-test-cleanup-guard")))
+    {
+        result = compiler_experiment_cleanup_guard_self_test(arena) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    }
+    else if (arguments.length && (string_equal(arguments.pointer[0], S8("--execute-utility")) ||
+        string_equal(arguments.pointer[0], S8("--self-test-utility-controller")) ||
+        string_equal(arguments.pointer[0], S8("--self-test-utility-export"))))
+    {
+        result = compiler_closure_utility_main(arena, arguments);
     }
     else if (arguments.length && (string_equal(arguments.pointer[0], S8("--execute-preparation")) ||
         string_equal(arguments.pointer[0], S8("--self-test-preparation-controller"))))

@@ -4,6 +4,8 @@
 from pathlib import Path
 import re
 import unittest
+import subprocess
+import tempfile
 
 from lifecycle_pipeline_test import LifecyclePipelineTests
 
@@ -172,6 +174,38 @@ class StatelessConcurrencyTests(unittest.TestCase):
                 errors = []
                 policy.check_lifecycle(errors, workflow.replace(original, changed, 1))
                 self.assertTrue(errors)
+
+    def test_actual_physical_guard_blocks_unknown_active_and_dangling_aliases(self):
+        physical = policy.job_blocks(policy.DIRECT.read_text())
+        for job in ("bench", "compare-pull", "compare", "sampling", "preparation", "utility"):
+            self.assertEqual(policy.run_scripts(physical[job])[0], list(policy.CLEANUP_GUARD_SCRIPT))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            unknown, active, sentinel = root / "unknown", root / "active", root / "continued"
+            recipe = "\n".join(policy.CLEANUP_GUARD_SCRIPT).replace(
+                "/tmp/buster-9700x-cleanup-unknown-v1", str(unknown)).replace(
+                "/tmp/buster-9700x-cleanup-active-v1", str(active))
+            command = recipe + "\nprintf continued > " + str(sentinel) + "\n"
+            self.assertEqual(subprocess.run(["bash", "-c", command], capture_output=True).returncode, 0)
+            self.assertTrue(sentinel.is_file())
+            sentinel.unlink()
+            for path in (unknown, active):
+                for kind in ("directory", "file", "dangling"):
+                    with self.subTest(path=path.name, kind=kind):
+                        if kind == "directory":
+                            path.mkdir()
+                        elif kind == "file":
+                            path.write_text("retained")
+                        else:
+                            path.symlink_to(root / "absent-target")
+                        result = subprocess.run(["bash", "-c", command], capture_output=True)
+                        self.assertEqual(result.returncode, 1)
+                        self.assertFalse(sentinel.exists())
+                        self.assertTrue(path.exists() or path.is_symlink())
+                        if kind == "directory":
+                            path.rmdir()
+                        else:
+                            path.unlink()
 
     def test_regression_runs_in_benchmark_policy(self):
         text = (ROOT / ".github/workflows/bench-service-policy.yml").read_text(encoding="utf-8")

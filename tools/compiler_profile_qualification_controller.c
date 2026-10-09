@@ -24,6 +24,7 @@ struct CompilerSamplingControllerOptions
     CompilerSamplingControllerTransport transport;
     String8 acquisition_sha256;
     String8 facts_text;
+    CompilerExperimentJobClock job_clock;
 };
 
 typedef struct CompilerSamplingController CompilerSamplingController;
@@ -469,8 +470,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_phase(CompilerSamplingCont
                 wait = os_process_wait_deadline(controller->arena, spawn, remaining);
             }
             bool released = !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
-            cleanup = released && compiler_experiment_supervisor_end(controller->arena, &supervisor) &&
-                !wait.process_tree_cleanup_failed;
+            cleanup = compiler_experiment_supervisor_end_known(controller->arena, &supervisor,
+                released && !wait.process_tree_cleanup_failed);
             complete = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.platform_status && !wait.timed_out &&
                 cleanup && !wait.capture_failed && !wait.capture_limit_exceeded && !wait.output_truncated &&
                 !supervisor.signalled && !supervisor.reaped && !compiler_sampling_controller_cancelled();
@@ -675,6 +676,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_resolve(Arena* arena, Comp
     String8 ledger = path_join(arena, store, S8("ledger"));
     String8 admission_directory = string_format(arena, S8("{S8}.admission"), evidence);
     bool valid = transport.valid && result.admitted.valid && result.plan.valid &&
+        compiler_experiment_job_clock_resolve(arena, S8("sampling"), result.admitted.policy_trusted_revision, &result.job_clock) &&
+        compiler_experiment_job_clock_remaining_us(result.job_clock, result.admitted.reservation_seconds * 1000000ull,
+            (result.admitted.reservation_seconds - 120ull) * 1000000ull) &&
         string_equal(result.acquisition_sha256, expected_plan) &&
         string_equal(result.plan.trusted_revision, result.admitted.trusted_revision) &&
         string_equal(result.plan.protocol_sha256, result.admitted.protocol_sha256) &&
@@ -754,8 +758,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_controller_execute(Arena* ar
     controller.evidence = evidence;
     controller.acquisition_sha256 = plan_sha;
     controller.prepared = path_join(arena, path_join(arena, store, plan_sha), S8("prepared"));
-    controller.deadline = controller.started + admitted.reservation_seconds * 1000000ull;
-    if (admitted.reservation_seconds > 120) controller.deadline -= 120000000ull;
+    u64 job_remaining = valid && admitted.reservation_seconds > 120 ?
+        compiler_experiment_job_clock_remaining_us(resolved.job_clock, admitted.reservation_seconds * 1000000ull,
+            (admitted.reservation_seconds - 120ull) * 1000000ull) : 0;
+    valid = valid && job_remaining;
+    controller.deadline = os_now_microseconds() + job_remaining;
     if (valid)
     {
         valid = compiler_sampling_ledger_claim(arena, ledger, admitted.freeze_sha256, admitted.phase, admitted.packet, &controller.claim);
@@ -766,6 +773,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_controller_execute(Arena* ar
         valid = valid && created.created && !created.error.v;
         String8 claim = compiler_sampling_claim_record(arena, controller.packet);
         valid = valid && file_write(path_join(arena, evidence, S8("claim.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(claim)) &&
+            file_write(path_join(arena, evidence, S8("physical-job-clock.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(resolved.job_clock.record)) &&
             compiler_sampling_controller_host_receipt(arena, evidence, observed, resolved);
     }
     controller.success = valid;

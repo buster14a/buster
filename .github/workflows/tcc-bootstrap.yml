@@ -86,6 +86,8 @@ jobs:
           ./build.sh time_trace_summary_self_test
           ./build.sh compiler_profile_qualification --self-test
           ./build.sh compiler_profile_qualification --self-test-utility-admission
+          ./build.sh compiler_profile_qualification --self-test-cleanup-guard
+          ./build.sh compiler_profile_qualification --self-test-utility-controller
           ./build.sh compiler_profile_qualification --plan
           ./build.sh compiler_profile_qualification --self-test-preparation-controller
           python3 -B tools/tests/compiler_sampling_packet_export_test.py "$PWD/build.sh" "$RUNNER_TEMP/compiler-sampling-packet-proof"

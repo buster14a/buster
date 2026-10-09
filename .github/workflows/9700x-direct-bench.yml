@@ -327,12 +327,28 @@ jobs:
       BQ_UTILITY_FACTS_DATA: ${{ needs.authorize.outputs.utility_facts_data }}
       BQ_UTILITY_HISTORY_DATA: ${{ needs.authorize.outputs.utility_history_data }}
     steps:
+      - name: Refuse retained native cleanup uncertainty
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||
+                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then
+            echo '::error::Native cleanup ownership is retained; manual review is required before host admission.'
+            exit 1
+          fi
       - name: Check out the frozen measurement harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.authorize.outputs.utility_trusted_revision }}
           path: trusted
           persist-credentials: false
+      - name: Observe the actual physical job start
+        shell: bash
+        env:
+          BQ_PHYSICAL_CLOCK_KIND: utility
+        run: |
+          set -euo pipefail
+          python3 -B trusted/tools/bench_direct/compiler_publish.py physical-clock
       - name: Run only the admitted native utility packet
         shell: bash
         run: |
@@ -523,12 +539,28 @@ jobs:
       BQ_PREPARATION_FACTS_DATA: ${{ needs.authorize.outputs.preparation_facts_data }}
       BQ_PREPARATION_HISTORY_DATA: ${{ needs.authorize.outputs.preparation_history_data }}
     steps:
+      - name: Refuse retained native cleanup uncertainty
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||
+                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then
+            echo '::error::Native cleanup ownership is retained; manual review is required before host admission.'
+            exit 1
+          fi
       - name: Check out the frozen measurement harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.authorize.outputs.preparation_trusted_revision }}
           path: trusted
           persist-credentials: false
+      - name: Observe the actual physical job start
+        shell: bash
+        env:
+          BQ_PHYSICAL_CLOCK_KIND: preparation
+        run: |
+          set -euo pipefail
+          python3 -B trusted/tools/bench_direct/compiler_publish.py physical-clock
       - name: Run only the admitted native qualification packet
         shell: bash
         run: |
@@ -720,12 +752,28 @@ jobs:
       BQ_SAMPLING_FACTS_DATA: ${{ needs.authorize.outputs.sampling_facts_data }}
       BQ_SAMPLING_HISTORY_DATA: ${{ needs.authorize.outputs.sampling_history_data }}
     steps:
+      - name: Refuse retained native cleanup uncertainty
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||
+                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then
+            echo '::error::Native cleanup ownership is retained; manual review is required before host admission.'
+            exit 1
+          fi
       - name: Check out the frozen measurement harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}
           path: trusted
           persist-credentials: false
+      - name: Observe the actual physical job start
+        shell: bash
+        env:
+          BQ_PHYSICAL_CLOCK_KIND: sampling
+        run: |
+          set -euo pipefail
+          python3 -B trusted/tools/bench_direct/compiler_publish.py physical-clock
       - name: Run only the admitted native qualification packet
         shell: bash
         run: |
@@ -822,6 +870,15 @@ jobs:
       BQ_BASE_COMMIT: ${{ needs.authorize.outputs.base }}
       BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
     steps:
+      - name: Refuse retained native cleanup uncertainty
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||
+                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then
+            echo '::error::Native cleanup ownership is retained; manual review is required before host admission.'
+            exit 1
+          fi
       # The harness, compile command and sample plan come from main.
       - name: Check out the trusted harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -877,6 +934,15 @@ jobs:
       BQ_RUN_ID: ${{ github.run_id }}
       BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
     steps:
+      - name: Refuse retained native cleanup uncertainty
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||
+                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then
+            echo '::error::Native cleanup ownership is retained; manual review is required before host admission.'
+            exit 1
+          fi
       - name: Check out the trusted harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -1102,6 +1168,15 @@ jobs:
       BQ_RUN_ID: ${{ github.run_id }}
       BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
     steps:
+      - name: Refuse retained native cleanup uncertainty
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||
+                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then
+            echo '::error::Native cleanup ownership is retained; manual review is required before host admission.'
+            exit 1
+          fi
       # The harness, the lab, the build commands and the profile come from main.
       - name: Check out the trusted harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
