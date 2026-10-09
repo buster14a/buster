@@ -212,5 +212,59 @@ class StatelessConcurrencyTests(unittest.TestCase):
         self.assertIn("run: python3 -B tools/bench_direct/workflow_concurrency_test.py -v", text)
 
 
+
+class TccProofAggregateTests(unittest.TestCase):
+    def gate(self):
+        text = (ROOT / ".github/workflows/tcc-bootstrap.yml").read_text(encoding="utf-8")
+        block = re.search(r"(?ms)^  validation:\n(.*?)(?=^  [a-z_]+:\n|\Z)", text)
+        self.assertIsNotNone(block)
+        self.assertIn("name: Canonical TCC bootstrap", block.group(1))
+        self.assertIn("needs: [no_code_plan, bootstrap, utility]", block.group(1))
+        self.assertIn("if: ${{ always() && github.server_url == 'https://github.com' }}", block.group(1))
+        self.assertIn("timeout-minutes: 2", block.group(1))
+        self.assertEqual(text.count("timeout-minutes: 10"), 2)
+        script = block.group(1).split("        run: |\n", 1)[1]
+        return "\n".join(line[10:] for line in script.splitlines())
+
+    def execute(self, **overrides):
+        environment = {"PATH": "/usr/bin:/bin", "EVENT_NAME": "pull_request",
+                       "PLAN_RESULT": "success", "NO_CODE": "false",
+                       "NATIVE_RESULT": "success", "UTILITY_RESULT": "success",
+                       "CI_ENABLED": "true"}
+        environment.update(overrides)
+        return subprocess.run(["bash", "-c", self.gate()], env=environment,
+                              capture_output=True, timeout=5).returncode
+
+    def test_complete_proofs_and_trusted_no_code_are_the_only_successes(self):
+        for event in ("pull_request", "merge_group", "push"):
+            with self.subTest(event=event):
+                self.assertEqual(self.execute(EVENT_NAME=event), 0)
+        self.assertEqual(self.execute(NO_CODE="true", NATIVE_RESULT="skipped",
+                                      UTILITY_RESULT="skipped"), 0)
+        self.assertEqual(self.execute(EVENT_NAME="push", PLAN_RESULT="skipped"), 0)
+
+    def test_each_incomplete_proof_fails_the_required_aggregate(self):
+        for key in ("NATIVE_RESULT", "UTILITY_RESULT"):
+            for result in ("failure", "cancelled", "timed_out", "skipped", ""):
+                with self.subTest(key=key, result=result):
+                    self.assertEqual(self.execute(**{key: result}), 1)
+        self.assertEqual(self.execute(NATIVE_RESULT="cancelled", UTILITY_RESULT="cancelled"), 1)
+        self.assertEqual(self.execute(CI_ENABLED="false"), 1)
+
+    def test_no_code_requires_successful_trusted_classification_and_both_skips(self):
+        for event in ("pull_request", "merge_group"):
+            for plan in ("failure", "cancelled", "skipped", ""):
+                with self.subTest(event=event, plan=plan):
+                    self.assertEqual(self.execute(EVENT_NAME=event, PLAN_RESULT=plan, NO_CODE="true",
+                                                  NATIVE_RESULT="skipped", UTILITY_RESULT="skipped"), 1)
+        for key in ("NATIVE_RESULT", "UTILITY_RESULT"):
+            for result in ("success", "failure", "cancelled", ""):
+                with self.subTest(key=key, result=result):
+                    values = {"NO_CODE": "true", "NATIVE_RESULT": "skipped", "UTILITY_RESULT": "skipped",
+                              key: result}
+                    self.assertEqual(self.execute(**values), 1)
+        self.assertEqual(self.execute(NO_CODE="True", NATIVE_RESULT="skipped", UTILITY_RESULT="skipped"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

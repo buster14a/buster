@@ -26,7 +26,7 @@ jobs:
   bootstrap:
     needs: no_code_plan
     if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com') }}
-    name: Canonical TCC bootstrap
+    name: Hosted TCC native proofs
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -92,21 +92,6 @@ jobs:
           ./build.sh compiler_profile_qualification --self-test-preparation-controller
           python3 -B tools/tests/compiler_sampling_packet_export_test.py "$PWD/build.sh" "$RUNNER_TEMP/compiler-sampling-packet-proof"
 
-      - name: Exercise both full ordinary Utility legs and independent replay
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./build.sh compiler_profile_qualification --self-test-utility-export "$RUNNER_TEMP/utility-diagnostic"
-          PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_closure_utility_publication_test.py --utility-native-export "$RUNNER_TEMP/utility-diagnostic"
-          for diagnostic_lab in legacy snapshot; do
-            output="$RUNNER_TEMP/utility-diagnostic-$diagnostic_lab-lab125"
-            if BUSTER_UTILITY_DIAGNOSTIC_LAB_CASE="$diagnostic_lab" ./build.sh compiler_profile_qualification --self-test-utility-export "$output"; then
-              echo "Expected the guarded $diagnostic_lab lab125 native fixture to refuse completion" >&2
-              exit 1
-            fi
-            PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_closure_utility_publication_test.py --utility-native-negative-export "$output"
-          done
-
       - name: Exercise native frozen baseline producer and consumer
         shell: bash
         run: |
@@ -142,16 +127,13 @@ jobs:
             PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_sampling_publication_test.py --preparation-native-negative-export "$output"
           done
 
-      - name: Retain the hosted ordinary and Utility diagnostics
+      - name: Retain the hosted ordinary diagnostics
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: buster-hosted-closure-utility-proof-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
+          name: buster-hosted-ordinary-phase-proof-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/ordinary-bridge-diagnostic
-            ${{ runner.temp }}/utility-diagnostic/evidence
-            ${{ runner.temp }}/utility-diagnostic-legacy-lab125/evidence
-            ${{ runner.temp }}/utility-diagnostic-snapshot-lab125/evidence
           if-no-files-found: warn
           retention-days: 90
 
@@ -235,3 +217,123 @@ jobs:
             printf '```\n'
           } >>"$GITHUB_STEP_SUMMARY"
           exit "$status"
+
+  # Retain the complete Utility proofs within a separate hosted reservation.
+  utility:
+    needs: no_code_plan
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com') }}
+    name: Hosted compiler closure Utility proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      LC_ALL: C
+      # Hosted Ubuntu supplies a supplementary group; the SGID regression
+      # must cover inheritance from a group other than the primary group.
+      BQ_REQUIRE_DISTINCT_GROUP: '1'
+    steps:
+      - name: Require CI admission to be enabled
+        shell: bash
+        env:
+          PLAN_RESULT: ${{ needs.no_code_plan.result }}
+          EVENT_NAME: ${{ github.event_name }}
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: |
+          if [[ ("${EVENT_NAME:-}" == pull_request || "${EVENT_NAME:-}" == merge_group) &&
+                "${PLAN_RESULT:-skipped}" != success ]]; then
+            echo '::error::Trusted classification failed; refusing no-code admission.'
+            exit 1
+          fi
+          if [[ "$CI_ENABLED" != true ]]; then
+            echo '::error::Required validation is disabled; refusing a skipped admission check.'
+            exit 1
+          fi
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Fetch pinned bootstrap compiler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+
+      - name: Install pinned TCC on the hosted runner
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 0fb54300b56512754221d80adda85ddb9815bceb
+          ./configure --prefix="$RUNNER_TEMP/tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/tcc/bin" >> "$GITHUB_PATH"
+
+      - name: Exercise both full ordinary Utility legs and independent replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh compiler_profile_qualification --self-test-utility-export "$RUNNER_TEMP/utility-diagnostic"
+          PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_closure_utility_publication_test.py --utility-native-export "$RUNNER_TEMP/utility-diagnostic"
+          for diagnostic_lab in legacy snapshot; do
+            output="$RUNNER_TEMP/utility-diagnostic-$diagnostic_lab-lab125"
+            if BUSTER_UTILITY_DIAGNOSTIC_LAB_CASE="$diagnostic_lab" ./build.sh compiler_profile_qualification --self-test-utility-export "$output"; then
+              echo "Expected the guarded $diagnostic_lab lab125 native fixture to refuse completion" >&2
+              exit 1
+            fi
+            PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_closure_utility_publication_test.py --utility-native-negative-export "$output"
+          done
+
+      - name: Retain the hosted Utility diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-hosted-closure-utility-proof-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/utility-diagnostic/evidence
+            ${{ runner.temp }}/utility-diagnostic-legacy-lab125/evidence
+            ${{ runner.temp }}/utility-diagnostic-snapshot-lab125/evidence
+          if-no-files-found: warn
+          retention-days: 90
+
+  validation:
+    name: Canonical TCC bootstrap
+    needs: [no_code_plan, bootstrap, utility]
+    if: ${{ always() && github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every applicable hosted proof
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PLAN_RESULT: ${{ needs.no_code_plan.result }}
+          NO_CODE: ${{ needs.no_code_plan.outputs.no_code }}
+          NATIVE_RESULT: ${{ needs.bootstrap.result }}
+          UTILITY_RESULT: ${{ needs.utility.result }}
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: |
+          set -euo pipefail
+          if [[ "$CI_ENABLED" != true ]]; then
+            echo '::error::Required validation is disabled; refusing a skipped admission check.'
+            exit 1
+          fi
+          if [[ "$EVENT_NAME" == pull_request || "$EVENT_NAME" == merge_group ]]; then
+            if [[ "$PLAN_RESULT" != success ]]; then
+              echo '::error::Trusted classification failed; refusing no-code admission.'
+              exit 1
+            fi
+            if [[ "$NO_CODE" == true ]]; then
+              if [[ "$NATIVE_RESULT" != skipped || "$UTILITY_RESULT" != skipped ]]; then
+                echo '::error::Trusted no-code admission has contradictory hosted proof results.'
+                exit 1
+              fi
+              exit 0
+            fi
+          fi
+          if [[ "$NATIVE_RESULT" != success || "$UTILITY_RESULT" != success ]]; then
+            echo '::error::Required hosted native or Utility proof failed, cancelled, timed out or was skipped.'
+            exit 1
+          fi
