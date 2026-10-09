@@ -372,7 +372,7 @@ def read_evidence(api: Api, run_id: str, name: str) -> tuple[object, object, str
                                       for index, name in enumerate(SCALING_PROFILE["series"])}}
             if isinstance(receipt, dict) and receipt.get("closure") is not None:
                 closure_files: dict = {}
-                for operation in ("snapshot", "restore"):
+                for operation in ("snapshot", "restore", "verify"):
                     member = f"closure-{operation}.json.manifest.tsv"
                     info = members.get(member)
                     if info is None or info.file_size > MEMBER_LIMIT:

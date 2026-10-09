@@ -1702,7 +1702,7 @@ def validate_closure(receipt: dict, bundle: object) -> list[str]:
     raw = bundle if isinstance(bundle, dict) else {}
     reasons: list[str] = []
     manifests: list[bytes] = []
-    for operation in ("snapshot", "restore"):
+    for operation in ("snapshot", "restore", "verify"):
         record = closure.get(operation)
         manifest = raw.get(operation)
         if not isinstance(record, dict) or not isinstance(manifest, bytes) or not 0 < len(manifest) <= 8 * 1024 * 1024:
@@ -1717,7 +1717,7 @@ def validate_closure(receipt: dict, bundle: object) -> list[str]:
             reasons.append(f"frozen baseline {operation} manifest hash mismatch")
         if type(record.get("duration_us")) is not int or record["duration_us"] < 0:
             reasons.append(f"frozen baseline {operation} duration missing or malformed")
-    if len(manifests) == 2 and manifests[0] != manifests[1]:
+    if len(manifests) == 3 and any(raw != manifests[0] for raw in manifests[1:]):
         reasons.append("frozen baseline restore differs from the saved source/generated/configuration/toolchain closure")
     if manifests:
         try:
@@ -1728,7 +1728,7 @@ def validate_closure(receipt: dict, bundle: object) -> list[str]:
                 raise ValueError("manifest source/tree/root header mismatch")
             root_hash = hashlib.sha256(lines[1][5:].encode()).hexdigest()
             if any(not isinstance(closure.get(operation), dict) or closure[operation].get("root_sha256") != root_hash
-                   for operation in ("snapshot", "restore")):
+                   for operation in ("snapshot", "restore", "verify")):
                 raise ValueError("manifest matched root identity mismatch")
             rows: dict[tuple[str, str], list[str]] = {}
             total = 0
@@ -1757,7 +1757,25 @@ def validate_closure(receipt: dict, bundle: object) -> list[str]:
                         ("build", "CMakeCache.txt"), ("build", "Release/ide"), ("build", "throughput-tools/throughput"))
             if any(key not in rows for key in required) or not any(key[0] == "bootstrap" and key[1].endswith(".complete") for key in rows):
                 raise ValueError("manifest baseline source/generated/build-driver/harness closure is incomplete")
+            configuration = bindings.get("bootstrap_config", "")
+            marker = bindings.get("bootstrap_marker", "")
+            artifact = bindings.get("bootstrap_artifact", "")
+            if not SHA256.fullmatch(configuration) or not artifact.startswith("posix/" + configuration + "/") or \
+                    artifact.count("/") != 2 or marker != artifact + ".complete" or \
+                    ("bootstrap", marker) not in rows or ("bootstrap", artifact) not in rows or \
+                    rows["bootstrap", marker][1] != "F" or rows["bootstrap", artifact][1] != "F" or \
+                    not int(rows["bootstrap", artifact][2]) & 0o111:
+                raise ValueError("manifest actual baseline bootstrap marker/executable pair is missing")
+            for operation in ("snapshot", "restore", "verify"):
+                if closure[operation].get("harness_sha256") != rows["build", "throughput-tools/throughput"][6] or \
+                        closure[operation].get("bootstrap_marker_sha256") != rows["bootstrap", marker][6] or \
+                        closure[operation].get("bootstrap_artifact_sha256") != rows["bootstrap", artifact][6]:
+                    raise ValueError("manifest actual producer/consumer executable hashes mismatch")
             baseline = binaries.get("baseline") if isinstance(binaries.get("baseline"), dict) else {}
+            if any(rows[key][1] != "F" or not int(rows[key][2]) & 0o111 for key in (("build", "Release/ide"), ("build", "throughput-tools/throughput"))):
+                raise ValueError("manifest compiler/native corpus executable identity malformed")
+            if not any(key[0] == "resource" for key in rows):
+                raise ValueError("manifest configured Clang resource closure absent")
             if rows["build", "Release/ide"][6] != baseline.get("sha256"):
                 raise ValueError("manifest baseline compiler binary mismatch")
             for key in ("CMAKE_C_COMPILER", "CMAKE_LINKER", "CMAKE_MAKE_PROGRAM", "clang", "cmake", "ninja", "tcc", "resource"):

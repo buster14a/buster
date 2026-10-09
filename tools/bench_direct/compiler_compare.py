@@ -54,7 +54,7 @@ import time
 from pathlib import Path
 
 from compiler_github import ARTIFACT_LIMIT, RECONCILE_DEPTH
-from compiler_receipt import (IDENTITY_KEYS, INLINE_ACCEPTANCE_PROFILE, INLINE_ACCEPTANCE_REQUEST_LINE,
+from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE_PROFILE, INLINE_ACCEPTANCE_REQUEST_LINE,
                               INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE, ANALYZER_REQUEST_LINE,
                               ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, RECEIPT_SCHEMA, SCALING_PROFILE,
                               SCALING_REQUEST, SHA, THROUGHPUT_PROFILE, classify, classify_scaling,
@@ -1070,6 +1070,19 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             receipt["timings"]["scaling_seconds"] = round(time.monotonic() - measured, 3)
             reasons.extend(scaled)
         mark(receipt, evidence, "validate")
+        if snapshot_closure:
+            problem = closure_phase(arguments, candidate, work, evidence, receipt, "verify")
+            if problem:
+                reasons.append(problem)
+            raw_closure = {}
+            for operation in ("snapshot", "restore", "verify"):
+                try:
+                    with os.fdopen(os.open(evidence / f"closure-{operation}.json.manifest.tsv",
+                                           os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as reader:
+                        raw_closure[operation] = reader.read(EVIDENCE_MEMBER_LIMIT + 1)
+                except OSError:
+                    pass
+            reasons.extend(validate_closure(receipt, raw_closure))
         for role, name in (("baseline", "ide-base"), ("candidate", "ide-cand")):
             if sha256(bins / name) != receipt["binaries"][role]["sha256"]:
                 reasons.append(f"{role} binary changed during measurement")

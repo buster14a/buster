@@ -90,7 +90,9 @@ BUSTER_GLOBAL_LOCAL void compiler_closure_record(CompilerClosureInventory* inven
     if (inventory->success)
     {
         directory = S_ISDIR(status.st_mode);
-        inventory->success = directory || compiler_closure_hash(inventory->arena, path, &digest, &status);
+        inventory->success = directory || (S_ISREG(status.st_mode) && status.st_size >= 0 &&
+            (u64)status.st_size <= BUSTER_COMPILER_CLOSURE_BYTE_LIMIT - inventory->bytes &&
+            compiler_closure_hash(inventory->arena, path, &digest, &status));
     }
     if (inventory->success && !directory)
     {
@@ -109,6 +111,79 @@ BUSTER_GLOBAL_LOCAL void compiler_closure_record(CompilerClosureInventory* inven
     }
 }
 
+// Bounded, nofollow enumeration. Do not use the general musl inventory:
+// its allocations precede the caller's cap and a hostile directory could
+// exhaust memory before this closure rejected it.
+BUSTER_GLOBAL_LOCAL bool compiler_closure_list(Arena* arena, String8 directory, u64 limit, MuslDirectoryEntry** output, u64* count_out)
+{
+    String8 terminated = string_duplicate_arena(arena, directory, true);
+    DIR* handle = opendir((char*)terminated.pointer);
+    u64 capacity = BUSTER_MIN(limit, 32ull);
+    MuslDirectoryEntry* entries = capacity ? arena_allocate(arena, MuslDirectoryEntry, capacity) : 0;
+    u64 count = 0;
+    bool success = handle != 0;
+    while (success)
+    {
+        errno = 0;
+        struct dirent* entry = readdir(handle);
+        if (!entry) { success = errno == 0; break; }
+        String8 name = string_from_pointer((char8*)entry->d_name);
+        if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
+        {
+            success = count < limit;
+            if (success && count == capacity)
+            {
+                u64 grown_capacity = BUSTER_MIN(capacity * 2, limit);
+                MuslDirectoryEntry* grown = arena_allocate(arena, MuslDirectoryEntry, grown_capacity);
+                memcpy(grown, entries, count * sizeof(*entries));
+                entries = grown;
+                capacity = grown_capacity;
+            }
+            if (success)
+            {
+                String8 path = path_join(arena, directory, name);
+                struct stat status = {0};
+                success = lstat((char*)path.pointer, &status) == 0 && (S_ISREG(status.st_mode) || S_ISDIR(status.st_mode));
+                if (success)
+                {
+                    entries[count++] = (MuslDirectoryEntry){.name = string_duplicate_arena(arena, name, true),
+                        .is_directory = S_ISDIR(status.st_mode)};
+                }
+            }
+        }
+    }
+    if (handle && closedir(handle) != 0) { success = false; }
+    *output = success ? entries : 0;
+    *count_out = success ? count : 0;
+    return success;
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_closure_sift(MuslDirectoryEntry* entries, u64 root, u64 count)
+{
+    while (root < count / 2)
+    {
+        u64 child = root * 2 + 1;
+        if (child + 1 < count && assembly_import_string_compare(&entries[child].name, &entries[child + 1].name) < 0) { child += 1; }
+        if (assembly_import_string_compare(&entries[root].name, &entries[child].name) >= 0) { break; }
+        MuslDirectoryEntry swap = entries[root];
+        entries[root] = entries[child];
+        entries[child] = swap;
+        root = child;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_closure_sort(MuslDirectoryEntry* entries, u64 count)
+{
+    for (u64 start = count / 2; start; start -= 1) { compiler_closure_sift(entries, start - 1, count); }
+    for (u64 end = count; end > 1; end -= 1)
+    {
+        MuslDirectoryEntry swap = entries[0];
+        entries[0] = entries[end - 1];
+        entries[end - 1] = swap;
+        compiler_closure_sift(entries, 0, end - 1);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void compiler_closure_walk(CompilerClosureInventory* inventory, String8 scope, String8 root, bool source)
 {
     String8List pending = {0};
@@ -118,21 +193,9 @@ BUSTER_GLOBAL_LOCAL void compiler_closure_walk(CompilerClosureInventory* invento
         String8 directory = path_join(inventory->arena, root, node->string);
         MuslDirectoryEntry* entries = 0;
         u64 count = 0;
-        inventory->success = musl_list_directory(inventory->arena, directory, &entries, &count) &&
-            count <= BUSTER_COMPILER_CLOSURE_RECORD_LIMIT - inventory->records;
-        // Deterministic insertion sort; individual directory inventories are
-        // small and this avoids callback dispatch in the build driver.
-        for (u64 index = 1; inventory->success && index < count; index += 1)
-        {
-            MuslDirectoryEntry entry = entries[index];
-            u64 at = index;
-            while (at && assembly_import_string_compare(&entry.name, &entries[at - 1].name) < 0)
-            {
-                entries[at] = entries[at - 1];
-                at -= 1;
-            }
-            entries[at] = entry;
-        }
+        inventory->success = compiler_closure_list(inventory->arena, directory,
+            BUSTER_COMPILER_CLOSURE_RECORD_LIMIT - inventory->records, &entries, &count);
+        if (inventory->success) { compiler_closure_sort(entries, count); }
         for (u64 index = 0; inventory->success && index < count; index += 1)
         {
             String8 name = entries[index].name;
@@ -175,10 +238,35 @@ BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult compiler_closure_git(Arena* a
     return compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments));
 }
 
+BUSTER_GLOBAL_LOCAL String8 compiler_closure_read(Arena* arena, String8 path, u64 limit)
+{
+    String8 result = {0};
+    String8 terminated = string_duplicate_arena(arena, path, true);
+    int descriptor = open((char*)terminated.pointer, O_RDONLY | O_NOFOLLOW);
+    struct stat status = {0};
+    bool success = descriptor >= 0 && fstat(descriptor, &status) == 0 && S_ISREG(status.st_mode) &&
+        status.st_size > 0 && (u64)status.st_size <= limit;
+    u64 used = 0;
+    char8* bytes = success ? arena_allocate(arena, char8, (u64)status.st_size + 1) : 0;
+    while (success && used < (u64)status.st_size)
+    {
+        ssize_t count = read(descriptor, bytes + used, (size_t)((u64)status.st_size - used));
+        if (count > 0) { used += (u64)count; }
+        else if (count == 0 || errno != EINTR) { success = false; }
+    }
+    if (success)
+    {
+        char extra = 0;
+        success = read(descriptor, &extra, 1) == 0;
+    }
+    if (descriptor >= 0 && close(descriptor) != 0) { success = false; }
+    if (success) { result = (String8){.pointer = bytes, .length = used}; }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 compiler_closure_cache_path(Arena* arena, String8 build, String8 key)
 {
-    ByteSlice bytes = file_read(arena, path_join(arena, build, S8("CMakeCache.txt")), (FileReadOptions){0});
-    String8 text = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
+    String8 text = compiler_closure_read(arena, path_join(arena, build, S8("CMakeCache.txt")), BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
     String8 prefix = string_format(arena, S8("{S8}:FILEPATH="), key);
     String8 result = {0};
     u64 start = 0;
@@ -198,6 +286,186 @@ BUSTER_GLOBAL_LOCAL String8 compiler_closure_cache_path(Arena* arena, String8 bu
     return result;
 }
 
+
+typedef struct CompilerClosureBootstrapIdentity CompilerClosureBootstrapIdentity;
+struct CompilerClosureBootstrapIdentity
+{
+    String8 configuration;
+    String8 marker;
+    String8 marker_sha256;
+    String8 artifact;
+    String8 artifact_sha256;
+    u64 dependency_count;
+};
+
+BUSTER_GLOBAL_LOCAL bool compiler_closure_marker_fields(String8 line, String8 fields[4], u64* count)
+{
+    bool result = true;
+    u64 start = 0;
+    *count = 0;
+    for (u64 index = 0; result && index <= line.length; index += 1)
+    {
+        if (index == line.length || line.pointer[index] == '\t')
+        {
+            result = *count < 4;
+            if (result)
+            {
+                fields[*count] = (String8){.pointer = line.pointer + start, .length = index - start};
+                *count += 1;
+                start = index + 1;
+            }
+        }
+    }
+    return result;
+}
+
+// Validate the exact current wrapper's marker/artifact/dependency closure.
+// source and cache may be parked copies; identity paths remain logical ROOT
+// paths. A valid marker in an unrelated historical configuration is ignored.
+BUSTER_GLOBAL_LOCAL bool compiler_closure_bootstrap_marker(Arena* arena, String8 root, String8 source,
+    String8 cache, String8 entry, String8 marker, String8 configuration, CompilerClosureBootstrapIdentity* identity)
+{
+    CompilerClosureBootstrapIdentity parsed = {.configuration = configuration};
+    String8 marker_path = path_join(arena, cache, marker);
+    String8 entry_path = path_join(arena, cache, entry);
+    String8 text = compiler_closure_read(arena, marker_path, BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
+    String8 checked_marker_sha256 = {0};
+    struct stat marker_status = {0};
+    bool result = compiler_closure_path_safe(entry) && compiler_closure_path_safe(marker) &&
+        production_profile_path_components_safe(entry) && production_profile_path_components_safe(marker) &&
+        entry.pointer[0] != '/' && marker.pointer[0] != '/' &&
+        stage_object_sha256_valid(configuration) && text.length &&
+        compiler_closure_hash(arena, marker_path, &checked_marker_sha256, &marker_status) &&
+        string_equal(checked_marker_sha256, production_profile_sha256_text(arena, text));
+    u64 state = 0;
+    bool saw_build_c = false;
+    String8 previous_dependency = {0};
+    String8 remaining = text;
+    String8 line = {0};
+    while (result && text_next_line(&remaining, &line))
+    {
+        String8 fields[4] = {0};
+        u64 count = 0;
+        result = compiler_closure_marker_fields(line, fields, &count);
+        if (result && state == 0)
+        {
+            result = count == 1 && string_equal(fields[0], S8("BUSTER_BOOTSTRAP_CACHE_V1"));
+            if (result) { state = 1; }
+        }
+        else if (result && state == 1)
+        {
+            result = count == 2 && string_equal(fields[0], S8("config")) && string_equal(fields[1], configuration);
+            if (result) { state = 2; }
+        }
+        else if (result && state == 2)
+        {
+            result = count == 3 && string_equal(fields[0], S8("artifact")) &&
+                compiler_closure_path_safe(fields[1]) && production_profile_path_components_safe(fields[1]) &&
+                string_first_code_unit(fields[1], '/') == BUSTER_STRING_NO_MATCH &&
+                string_first_code_unit(fields[1], '\\') == BUSTER_STRING_NO_MATCH && stage_object_sha256_valid(fields[2]);
+            if (result)
+            {
+                String8 artifact = path_join(arena, entry_path, fields[1]);
+                String8 artifact_sha256 = {0};
+                struct stat status = {0};
+                result = string_equal(marker_path, string_format(arena, S8("{S8}.complete"), artifact)) &&
+                    compiler_closure_hash(arena, artifact, &artifact_sha256, &status) && status.st_size > 0 &&
+                    (status.st_mode & 0111) && string_equal(artifact_sha256, fields[2]);
+                if (result)
+                {
+                    parsed.artifact = path_join(arena, entry, fields[1]);
+                    parsed.artifact_sha256 = artifact_sha256;
+                    state = 3;
+                }
+            }
+        }
+        else if (result && state == 3)
+        {
+            if (count == 1 && string_equal(fields[0], S8("END")))
+            {
+                result = parsed.dependency_count != 0 && saw_build_c;
+                if (result) { state = 4; }
+            }
+            else
+            {
+                result = count == 3 && string_equal(fields[0], S8("dependency")) &&
+                    compiler_closure_path_safe(fields[1]) && stage_object_sha256_valid(fields[2]) &&
+                    parsed.dependency_count < BUSTER_COMPILER_CLOSURE_RECORD_LIMIT &&
+                    (!previous_dependency.length || assembly_import_string_compare(&previous_dependency, &fields[1]) < 0);
+                if (result)
+                {
+                    bool absolute = fields[1].pointer[0] == '/';
+                    result = production_profile_path_components_safe(fields[1]);
+                    String8 dependency = fields[1];
+                    if (!absolute) { dependency = path_join(arena, source, fields[1]); }
+                    else if (production_profile_path_is_child(root, fields[1]))
+                    {
+                        String8 relative = {.pointer = fields[1].pointer + root.length + 1,
+                            .length = fields[1].length - root.length - 1};
+                        dependency = path_join(arena, source, relative);
+                    }
+                    String8 resolved = result ? os_path_absolute(arena, dependency, true) : (String8){0};
+                    result = result && resolved.length && (absolute || production_profile_path_is_child(source, resolved));
+                    String8 actual_sha256 = {0};
+                    struct stat status = {0};
+                    if (result)
+                    {
+                        result = compiler_closure_hash(arena, resolved, &actual_sha256, &status) &&
+                            string_equal(actual_sha256, fields[2]);
+                    }
+                    if (result)
+                    {
+                        saw_build_c |= string_equal(resolved, path_join(arena, source, S8("build.c")));
+                        previous_dependency = fields[1];
+                        parsed.dependency_count += 1;
+                    }
+                }
+            }
+        }
+        else { result = false; }
+    }
+    result = result && state == 4 && saw_build_c;
+    if (result)
+    {
+        parsed.marker = marker;
+        parsed.marker_sha256 = checked_marker_sha256;
+        *identity = parsed;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_closure_bootstrap_identity(Arena* arena, String8 root, String8 source,
+    String8 cache, CompilerClosureBootstrapIdentity* identity)
+{
+    String8 compiler = os_path_absolute_lexical(arena, executable_resolve_in_path(arena, S8("tcc")), true);
+    String8 compiler_hash = {0};
+    String8 helper_hash = {0};
+    struct stat status = {0};
+    bool result = compiler.length && compiler_closure_hash(arena, os_path_absolute(arena, compiler, true), &compiler_hash, &status) &&
+        compiler_closure_hash(arena, path_join(arena, source, S8("tools/bootstrap_driver.sh")), &helper_hash, &status);
+    String8 payload = result ? string_format(arena, S8("BUSTER_BOOTSTRAP_CONFIG_V1\ncompiler\t{S8}\ncompiler-sha256\t{S8}\n"
+        "flag\t-Isrc\nflag\t-Wall\nflag\t-Werror\nflag\t-Wno-unused-function\nflag\t-g\nflag\t-MD\nhelper-sha256\t{S8}\n"),
+        compiler, compiler_hash, helper_hash) : (String8){0};
+    String8 configuration = production_profile_sha256_text(arena, payload);
+    String8 entry = path_join(arena, S8("posix"), configuration);
+    MuslDirectoryEntry* entries = 0;
+    u64 count = 0;
+    result = result && compiler_closure_list(arena, path_join(arena, cache, entry),
+        BUSTER_COMPILER_CLOSURE_RECORD_LIMIT, &entries, &count);
+    if (result) { compiler_closure_sort(entries, count); }
+    bool selected = false;
+    for (u64 index = 0; result && !selected && index < count; index += 1)
+    {
+        if (!entries[index].is_directory && string_ends_with_sequence(entries[index].name, S8(".complete")))
+        {
+            selected = compiler_closure_bootstrap_marker(arena, root, source, cache, entry,
+                path_join(arena, entry, entries[index].name), configuration, identity);
+        }
+    }
+    result = result && selected;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 compiler_closure_inventory(Arena* arena, String8 root, String8 source, String8 build, String8 bootstrap, String8 base, String8 tree)
 {
     CompilerClosureInventory inventory = {.arena = arena, .success = true};
@@ -212,6 +480,14 @@ BUSTER_GLOBAL_LOCAL String8 compiler_closure_inventory(Arena* arena, String8 roo
     compiler_closure_walk(&inventory, S8("source"), source, true);
     compiler_closure_walk(&inventory, S8("build"), build, false);
     compiler_closure_walk(&inventory, S8("bootstrap"), bootstrap, false);
+    CompilerClosureBootstrapIdentity producer = {0};
+    inventory.success = inventory.success && compiler_closure_bootstrap_identity(arena, root, source, bootstrap, &producer);
+    if (inventory.success)
+    {
+        string8_list_push(arena, &inventory.lines, string_format(arena, S8("binding\tbootstrap_config\t{S8}\n"
+            "binding\tbootstrap_marker\t{S8}\n" "binding\tbootstrap_artifact\t{S8}\n"),
+            producer.configuration, producer.marker, producer.artifact));
+    }
     String8 cache_keys[] = {S8("CMAKE_C_COMPILER"), S8("CMAKE_LINKER"), S8("CMAKE_MAKE_PROGRAM")};
     String8 configured_clang = {0};
     for (u64 index = 0; inventory.success && index < BUSTER_ARRAY_LENGTH(cache_keys); index += 1)
@@ -363,7 +639,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_clear_source(Arena* arena, String8 roo
 {
     MuslDirectoryEntry* entries = 0;
     u64 count = 0;
-    bool result = musl_list_directory(arena, root, &entries, &count);
+    bool result = compiler_closure_list(arena, root, BUSTER_COMPILER_CLOSURE_RECORD_LIMIT, &entries, &count);
     for (u64 index = 0; result && index < count; index += 1)
     {
         String8 name = entries[index].name;
@@ -376,40 +652,13 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_clear_source(Arena* arena, String8 roo
 BUSTER_GLOBAL_LOCAL bool compiler_closure_cache_valid(Arena* arena, String8 root)
 {
     String8 cache = path_join(arena, root, S8("build/CMakeCache.txt"));
-    ByteSlice bytes = file_read(arena, cache, (FileReadOptions){0});
-    String8 text = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
+    String8 text = compiler_closure_read(arena, cache, BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
     String8 home = string_format(arena, S8("CMAKE_HOME_DIRECTORY:INTERNAL={S8}\n"), root);
     String8 ide = path_join(arena, root, S8("build/Release/ide"));
     String8 digest = {0};
     struct stat status = {0};
     bool result = text.length && production_profile_contains(text, S8("BUSTER_INCLUDE_TESTS:BOOL=OFF\n")) &&
         production_profile_contains(text, home) && compiler_closure_hash(arena, ide, &digest, &status) && (status.st_mode & 0111);
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL String8 compiler_closure_read(Arena* arena, String8 path, u64 limit)
-{
-    String8 result = {0};
-    String8 terminated = string_duplicate_arena(arena, path, true);
-    int descriptor = open((char*)terminated.pointer, O_RDONLY | O_NOFOLLOW);
-    struct stat status = {0};
-    bool success = descriptor >= 0 && fstat(descriptor, &status) == 0 && S_ISREG(status.st_mode) &&
-        status.st_size > 0 && (u64)status.st_size <= limit;
-    u64 used = 0;
-    char8* bytes = success ? arena_allocate(arena, char8, (u64)status.st_size + 1) : 0;
-    while (success && used < (u64)status.st_size)
-    {
-        ssize_t count = read(descriptor, bytes + used, (size_t)((u64)status.st_size - used));
-        if (count > 0) { used += (u64)count; }
-        else if (count == 0 || errno != EINTR) { success = false; }
-    }
-    if (success)
-    {
-        char extra = 0;
-        success = read(descriptor, &extra, 1) == 0;
-    }
-    if (descriptor >= 0 && close(descriptor) != 0) { success = false; }
-    if (success) { result = (String8){.pointer = bytes, .length = used}; }
     return result;
 }
 
@@ -430,6 +679,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operati
     String8 digest = {0};
     u64 start = os_now_microseconds();
     u64 harness_preparation_us = 0;
+    String8 harness_hash = {0};
+    CompilerClosureBootstrapIdentity producer = {0};
     bool success = snapshot_operation || restore || verify;
     if (success && snapshot_operation)
     {
@@ -440,7 +691,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operati
                     String8 prepare[] = {path_join(arena, root, S8("build.sh")), S8("bench_throughput"), S8("help")};
             ProductionProfileCommandResult prepared = compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(prepare));
             harness_preparation_us = os_now_microseconds() - preparation_start;
-            success = prepared.success && path_exists(arena, path_join(arena, build, S8("throughput-tools/throughput")));
+            struct stat harness_status = {0};
+            success = prepared.success && compiler_closure_hash(arena, path_join(arena, build, S8("throughput-tools/throughput")),
+                &harness_hash, &harness_status) && (harness_status.st_mode & 0111);
         }
         if (success) { manifest = compiler_closure_inventory(arena, root, root, build, bootstrap, base, tree); }
         success = success && manifest.length && os_make_directory_exclusive(snapshot).created;
@@ -480,11 +733,22 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operati
                 string_equal(manifest, compiler_closure_inventory(arena, root, root, build, bootstrap, base, tree));
         }
     }
+    if (success && !snapshot_operation)
+    {
+        struct stat status = {0};
+        success = compiler_closure_hash(arena, path_join(arena, build, S8("throughput-tools/throughput")), &harness_hash, &status);
+    }
+    if (success)
+    {
+        success = compiler_closure_bootstrap_identity(arena, root, snapshot_operation ? saved_source : root,
+            snapshot_operation ? saved_bootstrap : bootstrap, &producer);
+    }
     {
         String8 receipt = string_format(arena, S8("{{\"schema\":\"" BUSTER_COMPILER_CLOSURE_SCHEMA "\",\"policy\":\"snapshot-v1\","
             "\"state\":\"{S8}\",\"operation\":\"{S8}\",\"base\":\"{S8}\",\"base_tree\":\"{S8}\",\"root_sha256\":\"{S8}\","
-            "\"manifest_sha256\":\"{S8}\",\"duration_us\":{u64},\"harness_preparation_us\":{u64}\n}\n"),
-            success ? S8("complete") : S8("failed"), operation, base, tree, production_profile_sha256_text(arena, root), digest,
+            "\"manifest_sha256\":\"{S8}\",\"harness_sha256\":\"{S8}\",\"bootstrap_marker_sha256\":\"{S8}\","
+            "\"bootstrap_artifact_sha256\":\"{S8}\",\"duration_us\":{u64},\"harness_preparation_us\":{u64}\n}\n"),
+            success ? S8("complete") : S8("failed"), operation, base, tree, production_profile_sha256_text(arena, root), digest, harness_hash, producer.marker_sha256, producer.artifact_sha256,
             os_now_microseconds() - start, harness_preparation_us);
         bool written = (!manifest.length || production_profile_write(string_format(arena, S8("{S8}.manifest.tsv"), receipt_path), manifest)) &&
             production_profile_write(receipt_path, receipt);

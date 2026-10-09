@@ -1330,14 +1330,17 @@ class FrozenClosureTest(unittest.TestCase):
         base, tree = current["identity"]["base"], current["identity"]["base_tree"]
         rows = []
         def row(scope, path, digest=A256):
-            rows.append(f"{scope}\tF\t420\t123\t0\t1\t{digest}\t{path}")
+            rows.append(f"{scope}\tF\t493\t123\t0\t1\t{digest}\t{path}")
         for path in ("build.c", "build.sh", "tools/bootstrap_driver.sh"):
             row("source", path)
         for path in ("CMakeCache.txt", "Release/ide", "throughput-tools/throughput"):
             row("build", path)
-        row("bootstrap", "posix/driver")
-        row("bootstrap", "posix/driver.complete")
-        bindings = []
+        configuration = "c" * 64
+        artifact = f"posix/{configuration}/driver"
+        row("bootstrap", artifact)
+        row("bootstrap", artifact + ".complete")
+        bindings = [f"binding\tbootstrap_config\t{configuration}", f"binding\tbootstrap_artifact\t{artifact}",
+                    f"binding\tbootstrap_marker\t{artifact}.complete"]
         for key in ("CMAKE_C_COMPILER", "CMAKE_LINKER", "CMAKE_MAKE_PROGRAM", "clang", "cmake", "ninja", "tcc"):
             row("tool", key)
             bindings.append(f"binding\t{key}\t/usr/bin/{key}")
@@ -1347,10 +1350,12 @@ class FrozenClosureTest(unittest.TestCase):
                                *rows, *bindings, f"END\t{len(rows)}\t{len(rows)}"]) + "\n").encode()
         record = {"schema": "buster-compiler-closure-v1", "policy": "snapshot-v1", "state": "complete",
                   "base": base, "base_tree": tree, "root_sha256": hashlib.sha256(b"/checkout").hexdigest(),
-                  "manifest_sha256": hashlib.sha256(manifest).hexdigest(), "duration_us": 123}
+                  "manifest_sha256": hashlib.sha256(manifest).hexdigest(), "duration_us": 123, "harness_sha256": A256,
+                  "bootstrap_artifact_sha256": A256, "bootstrap_marker_sha256": A256}
         current["closure"] = {"policy": "snapshot-v1", "fallback": None,
-                              "snapshot": dict(record, operation="snapshot"), "restore": dict(record, operation="restore")}
-        return current, {"snapshot": manifest, "restore": manifest}
+                              "snapshot": dict(record, operation="snapshot"), "restore": dict(record, operation="restore"),
+                              "verify": dict(record, operation="verify")}
+        return current, {"snapshot": manifest, "restore": manifest, "verify": manifest}
 
     def test_native_producer_and_consumer_manifest_identity_is_replayed(self):
         current, bundle = self.fixture()
@@ -1364,9 +1369,11 @@ class FrozenClosureTest(unittest.TestCase):
     def test_missing_tampered_source_root_toolchain_configuration_and_fallback_fail(self):
         current, bundle = self.fixture()
         cases = []
-        for operation in ("snapshot", "restore"):
+        for operation in ("snapshot", "restore", "verify"):
             for key, value in (("base", "0" * 40), ("base_tree", "0" * 40), ("root_sha256", B256),
-                               ("state", "failed"), ("manifest_sha256", B256), ("duration_us", -1)):
+                               ("state", "failed"), ("manifest_sha256", B256), ("duration_us", -1),
+                               ("harness_sha256", B256), ("bootstrap_marker_sha256", B256),
+                               ("bootstrap_artifact_sha256", B256)):
                 altered = copy.deepcopy(current)
                 altered["closure"][operation][key] = value
                 cases.append((altered, bundle))
@@ -1377,9 +1384,9 @@ class FrozenClosureTest(unittest.TestCase):
         cases.append((fallback, bundle))
         invalid = bundle["snapshot"].replace(b"CMAKE_LINKER", b"missing_linker")
         adjusted = copy.deepcopy(current)
-        for operation in ("snapshot", "restore"):
+        for operation in ("snapshot", "restore", "verify"):
             adjusted["closure"][operation]["manifest_sha256"] = hashlib.sha256(invalid).hexdigest()
-        cases.append((adjusted, dict(snapshot=invalid, restore=invalid)))
+        cases.append((adjusted, dict(snapshot=invalid, restore=invalid, verify=invalid)))
         binary = copy.deepcopy(current)
         binary["binaries"]["baseline"]["sha256"] = B256
         cases.append((binary, bundle))
