@@ -128,6 +128,7 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingPacketFixture compiler_sampling_packet_fixtu
         compiler_sampling_packet_fixture_directory(path_join(arena, input, S8("bin"))) &&
         compiler_sampling_packet_fixture_directory(o->output) &&
         compiler_sampling_packet_fixture_directory(o->ledger_root);
+    u64 completed_stage = valid ? 1 : 0;
     String8 source_metadata = string_format(arena,
         S8("{{\"diagnostic_fixture\":true,\"actual_approved_host\":false,\"base\":\"{S8}\",\"base_tree\":\"{S8}\","
            "\"request_head\":\"{S8}\",\"trusted_revision\":\"{S8}\",\"freeze_revision\":\"{S8}\"}}\n"),
@@ -146,13 +147,16 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingPacketFixture compiler_sampling_packet_fixtu
         file_write(o->closure, BUSTER_SLICE_TO_BYTE_SLICE(source_metadata)) &&
         file_write(o->prepared, BUSTER_SLICE_TO_BYTE_SLICE(S8("{\"diagnostic_fixture\":true,\"actual_approved_host\":false,\"binaries_executed\":false}\n"))) &&
         file_write(acquisition, BUSTER_SLICE_TO_BYTE_SLICE(S8("{\"diagnostic_fixture\":true,\"physical_acquisition\":false,\"synthetic_lineage\":\"acquire-0\"}\n")));
+    if (valid) completed_stage = 2;
     String8 digests[10] = {0};
     String8 paths[] = {o->baseline, ab1, ab2, o->lab, o->python, o->driver, o->protocol, o->closure, o->prepared, acquisition};
     for (u64 i = 0; valid && i < BUSTER_ARRAY_LENGTH(paths); i += 1)
         valid = stage_object_sha256_file(arena, paths[i], &digests[i]);
+    if (valid) completed_stage = 3;
     FileStats sizes[] = {os_path_followed_stats(o->baseline), os_path_followed_stats(ab1), os_path_followed_stats(ab2)};
     for (u64 i = 0; valid && i < BUSTER_ARRAY_LENGTH(sizes); i += 1)
         valid = sizes[i].valid && sizes[i].kind == OS_FILE_KIND_REGULAR && sizes[i].size;
+    if (valid) completed_stage = 4;
     CompilerSamplingFreeze frozen = {.schema = S8("buster-main-sampling-freeze-v1"), .phase = S8("pilot"),
         .campaign_parent = digests[9], .campaign_parent_revision = o->campaign_parent_revision,
         .base = o->base, .base_tree = o->base_tree, .request_head = o->head, .trusted_revision = o->trusted_revision,
@@ -173,6 +177,7 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingPacketFixture compiler_sampling_packet_fixtu
     valid = valid && compiler_sampling_freeze_parse(freeze_text).valid &&
         file_write(o->freeze, BUSTER_SLICE_TO_BYTE_SLICE(freeze_text)) &&
         stage_object_sha256_file(arena, o->freeze, &o->freeze_sha256);
+    if (valid) completed_stage = 5;
     o->campaign_parent = frozen.campaign_parent;
     o->closure_sha256 = frozen.closure_sha256;
     String8 campaign = path_join(arena, o->ledger_root, o->freeze_sha256);
@@ -183,6 +188,9 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingPacketFixture compiler_sampling_packet_fixtu
         file_write(path_join(arena, persistent, S8("reservation.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(claim)) &&
         file_write(path_join(arena, o->output, S8("claim.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(claim)) &&
         compiler_sampling_packet_fixture_expected(arena, result, frozen, o->freeze_sha256);
+    if (valid) completed_stage = 6;
+    else string_print(S8("HOSTED_PACKET_FIXTURE_CREATE completed_stage={u64} frozen_valid={S8}\n"),
+        completed_stage, compiler_sampling_freeze_parse(freeze_text).valid ? S8("true") : S8("false"));
     result.valid = valid;
     return result;
 }
@@ -273,7 +281,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_packet_fixture_owner(Arena* 
     ProcessResult result = complete && written && os_now_microseconds() - started <= 60ull * 1000000ull ?
         PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
     if (result != PROCESS_RESULT_SUCCESS)
-        string_print(S8("error: hosted packet diagnostic rejected host, ownership, fresh paths, inputs, execution or cleanup\n"));
+        string_print(S8("HOSTED_PACKET_FIXTURE_OWNER path_valid={S8} fixture_valid={S8} contained={S8} signals={S8} "
+            "spawned={S8} wait_result={u64} timed_out={u64} cleanup={S8} restored={S8} "
+            "adopted_signalled={u64} adopted_reaped={u64} job_wall_us={u64} written={S8}\n"),
+            path_valid ? S8("true") : S8("false"), fixture.valid ? S8("true") : S8("false"),
+            contained ? S8("true") : S8("false"), deferred ? S8("true") : S8("false"),
+            spawn.handle ? S8("true") : S8("false"), (u64)wait.result, (u64)wait.timed_out,
+            cleanup ? S8("true") : S8("false"), restored ? S8("true") : S8("false"),
+            supervisor.signalled, supervisor.reaped, job_wall, written ? S8("true") : S8("false"));
     return result;
 }
 
@@ -291,6 +306,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_packet_fixture_main(Arena* a
         CompilerSamplingPacketFixture fixture = compiler_sampling_packet_fixture_load(arena, root);
         if (owned && fixture.valid)
             result = compiler_sampling_run_internal(arena, fixture.options, true);
+        if (result != PROCESS_RESULT_SUCCESS)
+            string_print(S8("HOSTED_PACKET_FIXTURE_WORKER owned={S8} fixture_valid={S8} result={u64}\n"),
+                owned ? S8("true") : S8("false"), fixture.valid ? S8("true") : S8("false"), (u64)result);
     }
     return result;
 }

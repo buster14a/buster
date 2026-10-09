@@ -207,6 +207,24 @@ def negative_cases(original: dict[str, bytes], trusted: dict) -> int:
     return 5
 
 
+def failure_diagnostics(output: Path) -> None:
+    # Fixed bounded native diagnostics only; no arbitrary caller script or scan.
+    names = ["fixture-manager.tsv", "export/owner.tsv", "export/owner-supervision.tsv",
+             "export/packet.tsv", "export/attempts.tsv"]
+    for index in range(3):
+        names.extend(["export/trial-%d-stdout.log" % index, "export/trial-%d-stderr.log" % index,
+                      "export/closure-%d-before.json" % index, "export/closure-%d-after.json" % index])
+    for name in names:
+        try:
+            path = output / name
+            if path.is_file() and not path.is_symlink():
+                data = read_regular(path, 16384)
+                sys.stderr.write("HOSTED_PACKET_FIXTURE_FILE " + name + "\n")
+                sys.stderr.write(data[:4096].decode("ascii", errors="replace") + "\n")
+        except (OSError, ValueError) as error:
+            sys.stderr.write("HOSTED_PACKET_FIXTURE_FILE " + name + " unavailable: " + str(error) + "\n")
+
+
 def main() -> int:
     result = 1
     try:
@@ -225,6 +243,7 @@ def main() -> int:
         if process.returncode:
             sys.stderr.write(process.stdout.decode("utf-8", errors="replace"))
             sys.stderr.write(process.stderr.decode("utf-8", errors="replace"))
+            failure_diagnostics(output)
         check(process.returncode == 0, "native hosted packet-export fixture failed")
         members = native_members(output / "export")
         expected_sha = hashlib.sha256(members["fixture-expected.json"]).hexdigest()
