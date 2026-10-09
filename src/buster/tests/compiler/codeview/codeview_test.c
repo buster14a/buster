@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/codeview/codeview_test.h>
 #include <buster/lib/compiler/debug/debug.h>
-#include <buster/lib/compiler/frontend/c/c_internal.h>
+#include <buster/lib/compiler/frontend/c/c.h>
+#include <buster/lib/compiler/ir/ir.h>
 #if BUSTER_INCLUDE_TESTS
 
 
@@ -603,9 +604,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_lexical_block_nesting(UnitTestA
                         "    return out + sink;\n"
                         "}\n");
     CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
-    CParseResult parse = c_parse(temporary.arena, tokens);
-    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("blocks.c"), tokens, parse, target_native);
-    BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program);
+    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("blocks.c"), tokens, syntax, target_native, (CIRLowerOptions){0});
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program);
     if (lowered.program)
     {
         IrModule* module = &lowered.program->modules[0];
