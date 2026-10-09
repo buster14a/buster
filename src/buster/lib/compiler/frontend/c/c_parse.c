@@ -2240,7 +2240,7 @@ BUSTER_C_INTERNAL bool c_parse_forward_type_query_bit_field_width_diagnostics(Ar
 BUSTER_C_INTERNAL String8 c_parse_bit_field_width_message(Arena* arena, CPreprocessResult preprocess, CParseResult* result, String8 name, CTypeId type_id,
                                                           CIntegerConstant width);
 BUSTER_C_INTERNAL u32 c_parse_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
-BUSTER_C_INTERNAL bool c_parse_type_constant_vector_argument_supported(CParseResult* result, CPreprocessResult preprocess, u32 index, u32 end);
+BUSTER_C_INTERNAL bool c_parse_type_constant_vector_argument_supported(CPreprocessResult preprocess, u32 index, u32 end);
 
 BUSTER_C_INTERNAL bool c_parse_machineless_sizeof_operand_layout(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                                    u32 start, u32 end, u64* size_out, u32* alignment_out);
@@ -13274,7 +13274,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_apply_vector_attribute(CParseResult* result, C
             {
                 break;
             }
-            if (result->protected_type_constant_query && !c_parse_type_constant_vector_argument_supported(result, preprocess, index, end))
+            if (result->protected_type_constant_query && !c_parse_type_constant_vector_argument_supported(preprocess, index, end))
             {
                 unsupported = true;
                 break;
@@ -13296,7 +13296,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_apply_vector_attribute(CParseResult* result, C
             {
                 continue;
             }
-            if (result->protected_type_constant_query && !c_parse_type_constant_vector_argument_supported(result, preprocess, index, end))
+            if (result->protected_type_constant_query && !c_parse_type_constant_vector_argument_supported(preprocess, index, end))
             {
                 unsupported = true;
                 break;
@@ -28420,13 +28420,17 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_typed_integer_constant(CTypeParseMach
 
 // The legacy vector-size folder can reenter machineless type reading through
 // sizeof/casts in its argument. Protected queries admit only its literal fast
-// path; prepared vector types remain ordinary published rows to read.
-BUSTER_C_INTERNAL bool c_parse_type_constant_vector_argument_supported(CParseResult* result, CPreprocessResult preprocess, u32 index, u32 end)
+// path; prepared vector types remain ordinary published rows to read. The
+// literal form is exactly `( NUMBER )`, and a `)` two tokens after the `(`
+// with a number between them is necessarily its match, so the shape is read
+// from the tokens directly: no position index is needed, which matters on the
+// unindexed path of c_parse_apply_vector_attribute.
+BUSTER_C_INTERNAL bool c_parse_type_constant_vector_argument_supported(CPreprocessResult preprocess, u32 index, u32 end)
 {
-    u32 close = index + 1 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)
-        ? c_parse_matching_delimiter_indexed(result, preprocess, index + 1) : UINT32_MAX;
     u32 value = 0;
-    bool supported = index + 3 < end && close == index + 3 && preprocess.tokens[index + 2].kind == C_TOKEN_PREPROCESSING_NUMBER &&
+    bool supported = index + 3 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        preprocess.tokens[index + 2].kind == C_TOKEN_PREPROCESSING_NUMBER &&
+        c_token_is_punctuator(&preprocess.tokens[index + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
         c_parse_attribute_unsigned(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 2]), &value) && value;
     return supported;
 }
@@ -28459,7 +28463,7 @@ BUSTER_C_INTERNAL bool c_parse_type_constant_vector_arguments_supported(CParseRe
             CToken token = preprocess.tokens[attribute];
             if (token.kind == C_TOKEN_IDENTIFIER && c_parse_vector_size_word(c_token_spelling(preprocess.spelling_base, token)))
             {
-                supported = c_parse_type_constant_vector_argument_supported(result, preprocess, attribute, after);
+                supported = c_parse_type_constant_vector_argument_supported(preprocess, attribute, after);
             }
         }
         index = after;
