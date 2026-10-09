@@ -24608,6 +24608,96 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_microsoft_intrin_fallbac
         scratch_end(temporary);
     }
 
+    // Source-level string-intrinsic asm fallbacks use GNU dialect
+    // alternatives. Selection must reduce these to the exact ATT templates
+    // before the protected-profile check admits them.
+    String8 selected_rep_source = S8(
+        "static void copy_dwords(unsigned long *destination, const unsigned long *source, unsigned long long count)\n"
+        "{ __asm__ volatile (\"rep movs{l|d}\" : \"+D\"(destination), \"+S\"(source), \"+c\"(count) : : \"memory\"); }\n"
+        "static void fill_dwords(unsigned long *destination, unsigned long value, unsigned long long count)\n"
+        "{ __asm__ volatile (\"rep stos{l|d}\" : \"+D\"(destination), \"+c\"(count) : \"a\"(value) : \"memory\"); }\n"
+        "int main(void) { unsigned long source[2] = {1, 2}, destination[2] = {0}; "
+        "copy_dwords(destination, source, 2); fill_dwords(destination, 0x1234ul, 2); return 0; }\n");
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-intrin-rep-source"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-intrin-rep-source"), S8(".obj"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(selected_rep_source))))
+        {
+            String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"),
+                                 windows_x64, forms[form], S8("-fno-machine-fallback"),
+                                 S8("-fverify-codegen"), S8("-o"), output, input};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+            String8 description = string_format(arena, S8("Windows x64 selected REP source fallback {S8}: {S8}"),
+                                                forms[form], compiled.diagnostic);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+        }
+        os_file_delete(output);
+        os_file_delete(input);
+        scratch_end(temporary);
+    }
+
+    // REP is admitted only with the exact fixed-register read/write
+    // profile and memory clobber used by the bounded string intrinsics.
+    // Ordinary asm still rejects bare REP, missing memory effects, wrong
+    // read/write roles, unrelated instructions, and unsupported REP prefixes.
+    String8 unprotected_rep_sources[] = {
+        S8("int main(void) { __asm__ volatile (\"rep movsb\"); return 0; }\n"),
+        S8("int main(void) { unsigned char source_bytes[2] = {1, 2}, destination_bytes[2] = {0}; "
+           "unsigned char *destination = destination_bytes; const unsigned char *source = source_bytes; "
+           "unsigned long long count = 2; "
+           "__asm__ volatile (\"rep movsb\" : \"+D\"(destination), \"+S\"(source), \"+c\"(count)); "
+           "return destination_bytes[0]; }\n"),
+        S8("int main(void) { unsigned char source_bytes[2] = {1, 2}, destination_bytes[2] = {0}; "
+           "unsigned char *destination = destination_bytes; const unsigned char *source = source_bytes; "
+           "unsigned long long count = 2; "
+           "__asm__ volatile (\"rep movsb\" : \"=D\"(destination), \"=S\"(source), \"=c\"(count) "
+           ": : \"memory\"); return destination_bytes[0]; }\n"),
+        S8("int main(void) { __asm__ volatile (\"rep nop\"); return 0; }\n"),
+        S8("int main(void) { __asm__ volatile (\"repne movsb\"); return 0; }\n"),
+    };
+    String8 unprotected_rep_messages[] = {
+        S8("asm template names the instruction 'rep'"),
+        S8("asm template names the instruction 'rep'"),
+        S8("asm template names the instruction 'rep'"),
+        S8("asm template names the instruction 'rep'"),
+        S8("asm template names the instruction 'repne'"),
+    };
+    for (u32 invalid = 0; invalid < BUSTER_ARRAY_LENGTH(unprotected_rep_sources); invalid += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-intrin-rep-rejection"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-intrin-rep-rejection"), S8(".obj"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(unprotected_rep_sources[invalid]))))
+            {
+                String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"),
+                                     windows_x64, forms[form], S8("-fno-machine-fallback"),
+                                     S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                    arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                String8 description = string_format(arena, S8("unprotected Windows x64 REP assembly rejection {u32} {S8}: {S8}"),
+                                                    invalid, forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE &&
+                                                compiler_driver_test_diagnostic_contains(
+                                                    compiled.diagnostic, unprotected_rep_messages[invalid]),
+                                description);
+            }
+            os_file_delete(output);
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+
     // A fallback-only body with the unsupported %w modifier is harmless while
     // unreachable. Calling it must reach Buster's ordinary structured asm error.
     String8 unused_asm_source = S8(

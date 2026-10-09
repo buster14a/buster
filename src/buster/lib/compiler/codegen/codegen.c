@@ -723,8 +723,35 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(Arena* a
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_microsoft_string_mnemonic(String8 mnemonic, bool* copy_out, u32* width_out)
+{
+    String8 move_mnemonics[] = {S8("movsb"), S8("movsw"), S8("movsl"), S8("movsq")};
+    String8 store_mnemonics[] = {S8("stosb"), S8("stosw"), S8("stosl"), S8("stosq")};
+    u32 widths[] = {1, 2, 4, 8};
+    bool copy = false;
+    u32 width = 0;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(move_mnemonics); index += 1)
+    {
+        if (string_equal(mnemonic, move_mnemonics[index]))
+        {
+            copy = true;
+            width = widths[index];
+        }
+        if (string_equal(mnemonic, store_mnemonics[index]))
+        {
+            copy = false;
+            width = widths[index];
+        }
+    }
+    if (copy_out) *copy_out = copy;
+    if (width_out) *width_out = width;
+    bool result = width != 0;
+    return result;
+}
+
 // What the substituted source is allowed to be: one mnemonic from the list per
-// statement, and operands the emitter either produced itself or the template
+// statement, or the exact protected REP string-memory operation. Operands must
+// be registers or references the emitter produced, or syntax the template
 // validator already cleared. The punctuation rules live on the template rather
 // than here, because by this point a memory operand has legitimately become a
 // parenthesized register.
@@ -738,7 +765,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(Arena* a
 // `reason_out`, when the caller asks for one, receives the rule's own words for
 // the refusal instead of leaving the driver to report an opcode number (#831).
 BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(Arena* arena, String8 source, bool balanced_cpuid,
-                                                                      String8* reason_out)
+                                                                      bool protected_microsoft_memory, String8* reason_out)
 {
     u64 index = 0;
     while (index < source.length)
@@ -762,8 +789,29 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(Arena* are
             .pointer = source.pointer + mnemonic_start,
             .length = index - mnemonic_start,
         };
+        bool microsoft_memory_mnemonic = false;
+        if (protected_microsoft_memory && string_equal(mnemonic, S8("rep")))
+        {
+            while (index < source.length && (source.pointer[index] == ' ' || source.pointer[index] == '\t'))
+            {
+                index += 1;
+            }
+            u64 operation_start = index;
+            while (index < source.length && source.pointer[index] != ' ' && source.pointer[index] != '\t' &&
+                   source.pointer[index] != '\r' && source.pointer[index] != '\n' && source.pointer[index] != ';' &&
+                   source.pointer[index] != ',')
+            {
+                index += 1;
+            }
+            String8 operation = {.pointer = source.pointer + operation_start, .length = index - operation_start};
+            microsoft_memory_mnemonic = codegen_inline_assembly_microsoft_string_mnemonic(operation, 0, 0);
+            if (microsoft_memory_mnemonic)
+            {
+                mnemonic = operation;
+            }
+        }
         bool directive = mnemonic.length && mnemonic.pointer[0] == '.';
-        if (!directive && !codegen_inline_assembly_mnemonic_allowed(mnemonic) &&
+        if (!directive && !codegen_inline_assembly_mnemonic_allowed(mnemonic) && !microsoft_memory_mnemonic &&
             !(balanced_cpuid && string_equal(mnemonic, S8("cpuid"))))
         {
             if (reason_out)
@@ -990,6 +1038,94 @@ bool codegen_inline_assembly_protected_cpuid(IrProgram* program, IrFunction* fun
         IrType* type = valid ? ir_type_from_id(&program->types, function->values[value.value].canonical_type) : 0;
         valid = valid && type && type->kind == IR_TYPE_INTEGER && type->layout.resolved && type->layout.size == 4 &&
                 type->bit_width == 32;
+    }
+    return valid;
+}
+
+// Only the fixed-register string-memory transaction may use REP through
+// this path. MOVS uses DI/SI/C read-write operands; STOS uses DI/C
+// read-write operands plus an A input. The memory clobber keeps implicit
+// effects visible to the allocator and IR memory model.
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_protected_microsoft_memory(IrProgram* program, IrFunction* function,
+                                                                            IrInstruction* instruction, IrInstructionExtra extra,
+                                                                            String8 template_source)
+{
+    bool copy = false;
+    u32 width = 0;
+    u64 start = 0, end = template_source.length;
+    bool source_valid = template_source.pointer != 0;
+    while (source_valid && start < end &&
+           (template_source.pointer[start] == ' ' || template_source.pointer[start] == '\t' ||
+            template_source.pointer[start] == '\r' || template_source.pointer[start] == '\n'))
+    {
+        start += 1;
+    }
+    while (source_valid && end > start &&
+           (template_source.pointer[end - 1] == ' ' || template_source.pointer[end - 1] == '\t' ||
+            template_source.pointer[end - 1] == '\r' || template_source.pointer[end - 1] == '\n'))
+    {
+        end -= 1;
+    }
+    String8 selected_source = source_valid
+                                  ? (String8){.pointer = template_source.pointer + start, .length = end - start}
+                                  : (String8){0};
+    String8 mnemonic = {0};
+    bool has_rep_prefix = selected_source.length > 4 && memcmp(selected_source.pointer, "rep ", 4) == 0;
+    if (has_rep_prefix)
+    {
+        mnemonic = (String8){.pointer = selected_source.pointer + 4, .length = selected_source.length - 4};
+    }
+    bool recognized = has_rep_prefix && codegen_inline_assembly_microsoft_string_mnemonic(mnemonic, &copy, &width);
+    bool valid = program && function && instruction && instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY &&
+                 instruction->volatile_access && recognized && width &&
+                 !instruction->target_count && instruction->operand_count == 3 && instruction->operands &&
+                 instruction->immediate_count == 3 && instruction->immediates &&
+                 extra.operand_name_count == 3 && extra.operand_names &&
+                 extra.clobber_count == 1 && extra.clobbers && string_equal(extra.clobbers[0], S8("memory"));
+    u64 rw_output = IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT | IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE;
+    u64 expected[3] = {rw_output | IR_INLINE_ASSEMBLY_CONSTRAINT_DI,
+                       rw_output | (copy ? IR_INLINE_ASSEMBLY_CONSTRAINT_SI : IR_INLINE_ASSEMBLY_CONSTRAINT_C),
+                       copy ? rw_output | IR_INLINE_ASSEMBLY_CONSTRAINT_C : IR_INLINE_ASSEMBLY_CONSTRAINT_A};
+    IrValue* values[3] = {0};
+    IrType* types[3] = {0};
+    for (u32 index = 0; valid && index < 3; index += 1)
+    {
+        valid = instruction->immediates[index] == expected[index] &&
+                instruction->operands[index].value < function->value_count &&
+                extra.operand_names[index].length == 0;
+        if (valid)
+        {
+            values[index] = function->values + instruction->operands[index].value;
+            types[index] = ir_type_from_id(&program->types, values[index]->canonical_type);
+            valid = types[index] != 0;
+        }
+    }
+    IrType* destination_element = types[0] && types[0]->kind == IR_TYPE_POINTER
+                                      ? ir_type_from_id(&program->types, types[0]->element_type)
+                                      : 0;
+    valid = valid && types[0] && types[0]->kind == IR_TYPE_POINTER && types[0]->layout.resolved &&
+            types[0]->layout.size == 8 && destination_element &&
+            destination_element->kind == IR_TYPE_INTEGER && destination_element->bit_width == width * 8 &&
+            destination_element->layout.resolved && destination_element->layout.size == width &&
+            !destination_element->is_signed;
+    u32 count_index = copy ? 2 : 1;
+    IrType* count_type = types[count_index];
+    valid = valid && count_type && count_type->kind == IR_TYPE_INTEGER && count_type->bit_width == 64 &&
+            count_type->layout.resolved && count_type->layout.size == 8 && !count_type->is_signed;
+    if (copy)
+    {
+        IrType* source_element = types[1] && types[1]->kind == IR_TYPE_POINTER
+                                     ? ir_type_from_id(&program->types, types[1]->element_type)
+                                     : 0;
+        valid = valid && types[1] && types[1]->kind == IR_TYPE_POINTER && types[1]->layout.resolved &&
+                types[1]->layout.size == 8 && source_element && source_element->kind == IR_TYPE_INTEGER &&
+                source_element->bit_width == width * 8 && source_element->layout.resolved &&
+                source_element->layout.size == width && !source_element->is_signed;
+    }
+    else
+    {
+        valid = valid && types[2] && types[2]->kind == IR_TYPE_INTEGER && types[2]->bit_width == width * 8 &&
+                types[2]->layout.resolved && types[2]->layout.size == width && !types[2]->is_signed;
     }
     return valid;
 }
@@ -1226,8 +1362,11 @@ bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, 
     // The shape check runs before the prefix is folded in, so LOCK is still a
     // statement of its own there and is checked against the mnemonic list like
     // every other one.
-    if (!codegen_inline_assembly_register_only_source(arena, *source_out,
-                                                     codegen_inline_assembly_balanced_cpuid(program, function, instruction, extra), reason_out))
+    bool balanced_cpuid = codegen_inline_assembly_balanced_cpuid(program, function, instruction, extra);
+    bool protected_microsoft_memory = codegen_inline_assembly_protected_microsoft_memory(
+        program, function, instruction, extra, template_source);
+    if (!codegen_inline_assembly_register_only_source(arena, *source_out, balanced_cpuid,
+                                                       protected_microsoft_memory, reason_out))
     {
         return false;
     }

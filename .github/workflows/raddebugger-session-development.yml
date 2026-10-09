@@ -19,17 +19,33 @@ jobs:
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: "2"
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Record actual Buster checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: EpicGames/raddebugger
           ref: f6b4a38134652886239b91f940cd7a67fedf689d
           path: external/raddebugger
           persist-credentials: false
+      - name: Record actual RAD Debugger checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: external/raddebugger
+          source-repository: EpicGames/raddebugger
       - name: Install upstream platform libraries
         run: |
           sudo apt-get update
@@ -72,6 +88,12 @@ jobs:
         run: |
           set -o pipefail
           xvfb-run -a -s "-screen 0 1280x800x24" "$RUNNER_TEMP/raddebugger-driver" test_raddebugger --config Release --debugger "$GITHUB_WORKSPACE/external/raddebugger" 2>&1 | tee build/raddebugger-harness.log
+      - name: Retain machine specifications
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: build/raddebugger-machine-specifications
       - name: Retain exact-source diagnostics including failures
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -91,11 +113,21 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: windows-2025
       - name: Check out Buster
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Record actual Buster checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Check out pinned RAD Debugger
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -104,6 +136,12 @@ jobs:
           path: external/raddebugger
           lfs: true
           persist-credentials: false
+      - name: Record actual RAD Debugger checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: external/raddebugger
+          source-repository: EpicGames/raddebugger
       - name: Install pinned LLVM
         shell: bash
         env:
@@ -165,6 +203,12 @@ jobs:
           $Qualification = '"' + $Driver + '" test_raddebugger --config Release --debugger "' + $Source + '" 2>&1'
           cmd /d /s /c $Qualification | Tee-Object -FilePath (Join-Path $Logs 'qualification.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain machine specifications
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/raddebugger-windows-job
       - name: Retain Windows qualification evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -185,11 +229,21 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: windows-2025
       - name: Check out Buster
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Record actual Buster checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Install pinned LLVM
         shell: bash
         env:
@@ -232,6 +286,12 @@ jobs:
           $FixedPoint = '"' + $Driver + '" test_self_host --config Release 2>&1'
           cmd /d /s /c $FixedPoint | Tee-Object -FilePath (Join-Path $Logs 'self-host.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain machine specifications
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/raddebugger-windows-candidate
       - name: Retain candidate Windows compiler evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
