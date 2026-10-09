@@ -12159,7 +12159,15 @@ BUSTER_GLOBAL_LOCAL BusterA64SemanticVMValue assembly_aarch64_complex_simd_lane_
     AssemblyAarch64SIMDRegisterSpelling spelling, BusterA64ComplexSIMDArrangement arrangement)
 {
     bool scalar = (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_SCALAR) != 0;
-    bool vector = !scalar && (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0;
+    bool vector = (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0;
+    if (scalar && vector)
+    {
+        // Some semantic operands permit either kind of SIMD value. In a
+        // by-element spelling, Vn.<T>[index] is the vector lane source;
+        // Dn/Hn/Sn spell scalar registers and are not interchangeable.
+        vector = spelling.prefix == 'v';
+        scalar = !vector;
+    }
     if (!scalar && !vector && arrangement >= BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_B &&
         arrangement <= BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_D)
     {
