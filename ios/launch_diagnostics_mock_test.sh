@@ -530,7 +530,7 @@ run_case() {
     local label=$1 outcome=$2 expected=$3 interrupt=$4 bundles=$5
     local diagnostic_mode=${6:-success}
     local state="$test_root/$label" status=0 role token registration runner_timeout probe status_log output_log expected_probe expected_progress owner_deadline owner_wait_status
-    local producer_result signal_result bridge_result producer_token stream_dirs capture_receipt
+    local producer_result cancel_result monitor_result helper_result bridge_result producer_token stream_dirs capture_receipt
     local producer_count reader_count diagnostic_count expected_diagnostic_count=0
     mkdir -p "$state/Debug/ide.app" "$state/Release/ide.app" "$state/control"
     mkfifo "$state/acknowledgments"
@@ -550,17 +550,21 @@ run_case() {
     fi
     runner_timeout=15s
     if [[ $interrupt == 1 ]]; then
-        # The fixed outer cap starts before bridge setup. The controller gets
-        # one bounded producer-registration window and TERM follows ownership
-        # proof immediately; launcher deadlines remain 3s/1s.
+        # This fixture sends an authenticated lifecycle CANCEL after exact
+        # producer registration so the launcher can run its owned TERM cleanup.
+        # Direct bridge-shell SIGTERM is exercised by lifecycle_capture_bridge_test.py.
+        # One absolute controller deadline shares the unchanged 15s outer cap;
+        # launcher and monitor deadlines remain 3s/1s.
         mkfifo "$state/registration"
         export FAKE_REGISTRATION_FIFO="$state/registration"
         "$timeout_bin" --preserve-status --signal=TERM --kill-after=3s "$runner_timeout" \
             python3 - "$timeout_bin" "$repo_root/ios/lifecycle_capture_bridge.sh" \
             "$state/interrupted-run" "$state/registration" "$state/processes" \
-            "$state/interruption-result" 3 14 -- \
+            "$state/interruption-result" 3 14 15 -- \
             /bin/bash "$launcher" "${arguments[@]}" <<'PY' >"$state/output" 2>&1 &
+import errno
 import os
+import re
 import select
 import signal
 import stat
@@ -568,16 +572,65 @@ import subprocess
 import sys
 import time
 
-def wait_bridge(bridge):
-    try:
-        return bridge.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        if bridge.poll() is None:
+def read_regular_line(path):
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        raise ValueError("receipt is not a non-symlink regular file: " + path)
+    with open(path, "rb") as source:
+        data = source.read(4097)
+    if len(data) > 4096 or not data.endswith(b"\n") or data.count(b"\n") != 1:
+        raise ValueError("receipt is missing, oversized, or not one line: " + path)
+    return data[:-1].decode("ascii")
+
+def read_named_receipt(path, header):
+    words = read_regular_line(path).split()
+    if not words or words[0] != header:
+        raise ValueError("receipt header is missing or invalid: " + path)
+    values = {}
+    for word in words[1:]:
+        key, separator, value = word.partition("=")
+        if not separator or not key or key in values:
+            raise ValueError("receipt has an invalid or duplicate field: " + path)
+        values[key] = value
+    return values
+
+def private_lifetime_fifo(prefix):
+    private_dir = read_regular_line(prefix + ".caller-private-directory.log")
+    absolute_prefix = os.path.abspath(prefix)
+    if (not os.path.isabs(private_dir) or os.path.normpath(private_dir) != private_dir
+            or os.path.dirname(private_dir) != os.path.dirname(absolute_prefix)):
+        raise ValueError("caller private directory is outside the expected prefix")
+    base = os.path.basename(absolute_prefix) + ".capture."
+    name = os.path.basename(private_dir)
+    generation = name[len(base):] if name.startswith(base) else ""
+    if re.fullmatch(r"[A-Za-z0-9]{8,64}", generation) is None:
+        raise ValueError("caller private directory has an invalid generation")
+    if not stat.S_ISDIR(os.lstat(private_dir).st_mode):
+        raise ValueError("caller private generation is not a non-symlink directory")
+    lifetime = os.path.join(private_dir, "lifetime")
+    if not stat.S_ISFIFO(os.lstat(lifetime).st_mode):
+        raise ValueError("caller private lifetime endpoint is not a non-symlink FIFO")
+    return generation, lifetime
+
+def send_cancel(lifetime, generation, deadline):
+    frame = ("CANCEL %s 15\n" % generation).encode("ascii")
+    while time.monotonic() < deadline:
+        try:
+            descriptor = os.open(lifetime, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError as error:
+            if error.errno not in (errno.ENXIO, errno.ENOENT):
+                raise
+            time.sleep(min(0.01, deadline - time.monotonic()))
+            continue
+        try:
             try:
-                bridge.send_signal(signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        return bridge.wait(timeout=1)
+                if os.write(descriptor, frame) != len(frame):
+                    raise RuntimeError("private lifecycle cancellation frame was only partly written")
+                return
+            except BlockingIOError:
+                time.sleep(min(0.01, deadline - time.monotonic()))
+        finally:
+            os.close(descriptor)
+    raise TimeoutError("private lifecycle cancellation write exceeded the shared cap")
 
 def replay_capture(prefix):
     path = prefix + ".log"
@@ -589,25 +642,30 @@ def replay_capture(prefix):
 def main():
     separator = sys.argv.index("--", 1)
     options, command = sys.argv[1:separator], sys.argv[separator + 1:]
-    if len(options) != 8 or not command:
+    if len(options) != 9 or not command:
         raise ValueError("interruption controller received incorrect arguments")
-    timeout_bin, bridge_script, prefix, fifo, registry, result, command_seconds, capture_seconds = options
+    timeout_bin, bridge_script, prefix, fifo, registry, result, command_seconds, capture_seconds, outer_seconds = options
+    if (command_seconds, capture_seconds, outer_seconds) != ("3", "14", "15"):
+        raise ValueError("interruption controller received changed deadline policy")
+    controller_started = time.monotonic()
+    outer_deadline = controller_started + int(outer_seconds)
+    registration_deadline = min(outer_deadline, controller_started + 10)
     if not stat.S_ISFIFO(os.lstat(fifo).st_mode):
         raise ValueError("producer registration endpoint is not a FIFO")
     fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
     bridge = None
+    cancel_sent = False
     try:
         bridge = subprocess.Popen([
             "/bin/bash", bridge_script, timeout_bin, prefix,
             command_seconds, capture_seconds, "--", *command,
         ])
-        deadline = time.monotonic() + 10
         pending = bytearray()
         token = None
-        while time.monotonic() < deadline and token is None:
+        while time.monotonic() < registration_deadline and token is None:
             if bridge.poll() is not None:
                 raise RuntimeError("lifecycle bridge exited before producer registration")
-            remaining = deadline - time.monotonic()
+            remaining = registration_deadline - time.monotonic()
             ready, _, _ = select.select([fd], [], [], min(0.05, remaining))
             if not ready:
                 continue
@@ -639,31 +697,90 @@ def main():
                 token = candidate
                 break
         if token is None:
-            raise TimeoutError("producer registration handshake expired")
+            raise TimeoutError("producer registration handshake expired within the shared cap")
         if bridge.poll() is not None:
-            raise RuntimeError("lifecycle bridge exited before TERM")
-        # Popen owns the direct bridge child; its private CANCEL frame reaches the
-        # existing lifecycle_capture.py owner. No PID or process group is signaled.
-        bridge.send_signal(signal.SIGTERM)
-        status = wait_bridge(bridge)
-        if status != 143:
-            raise RuntimeError("lifecycle bridge returned %d after producer registration" % status)
+            raise RuntimeError("lifecycle bridge exited before authenticated producer cancellation")
+        generation, lifetime = private_lifetime_fifo(prefix)
+        send_cancel(lifetime, generation, outer_deadline)
+        cancel_sent = True
+        remaining = outer_deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("no shared outer-cap time remained for helper completion")
+        try:
+            bridge_status = bridge.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as error:
+            raise TimeoutError("authenticated lifecycle completion exceeded the unchanged 15s outer cap") from error
+        if bridge_status != 0:
+            raise RuntimeError("lifecycle bridge did not complete helper receipts (status %d)" % bridge_status)
+        caller = read_regular_line(prefix + ".caller-fields.log").split()
+        caller_receipt = read_named_receipt(prefix + ".caller-status.log", "BUSTER_IOS_CALLER")
+        caller_keys = {"version", "generation", "admission", "helper_status", "invocation_status",
+                       "command_monitor_status", "reason"}
+        if set(caller_receipt) != caller_keys or caller_receipt["version"] != "1":
+            raise RuntimeError("lifecycle caller receipt has an invalid field set or version")
+        if caller_receipt["generation"] != generation:
+            raise RuntimeError("caller receipt generation does not match the private lifetime FIFO")
+        monitor = caller_receipt["command_monitor_status"]
+        expected_caller = ["1", "143", "143", generation, monitor, "complete"]
+        if (caller != expected_caller or caller_receipt["admission"] != "1"
+                or caller_receipt["helper_status"] != "143"
+                or caller_receipt["invocation_status"] != "143"
+                or monitor not in ("0", "124", "137") or caller_receipt["reason"] != "complete"):
+            raise RuntimeError("lifecycle bridge has no matching completed helper receipt: " + repr(caller))
+        supervisor = read_named_receipt(prefix + ".supervisor-status.log", "BUSTER_IOS_SUPERVISOR")
+        # Expiry is monitor evidence, never monitor success. The production
+        # launcher pairs 124/137 with deadline_reached=1 and authentication=0.
+        monitor_authenticated = "1" if monitor == "0" else "0"
+        monitor_deadline = "0" if monitor == "0" else "1"
+        expected_supervisor = {
+            "bridge_generation": generation,
+            "command_monitor_status": monitor,
+            "command_authenticated": monitor_authenticated,
+            "deadline_reached": monitor_deadline,
+            "caller_lost": "0",
+            "command_status": "143",
+            "native_status": "143",
+            "native_launch": "1",
+            "native_reaped": "1",
+            "capture_status": "0",
+            "capture_eof": "1",
+            "cleanup_status": "0",
+            "keeper_reaped": "1",
+            "group_authority_released": "1",
+            "cancellation_signal": "15",
+            "helper_error": "none",
+        }
+        if supervisor.get("version") != "1" or any(
+                supervisor.get(key) != value for key, value in expected_supervisor.items()):
+            raise RuntimeError("lifecycle supervisor cancellation/cleanup receipt is incomplete: "
+                               + repr({key: supervisor.get(key) for key in expected_supervisor}))
+        helper_status = int(caller_receipt["helper_status"])
         with open(result, "x", encoding="ascii", newline="\n") as marker:
-            marker.write("producer=%s signal=TERM bridge_status=%d\n" % (token, status))
-        return status
+            marker.write("producer=%s cancellation_signal=15 command_monitor_status=%s "
+                         "helper_status=%d bridge_status=%d\n" %
+                         (token, monitor, helper_status, bridge_status))
+        return helper_status
     finally:
         os.close(fd)
         if bridge is not None and bridge.poll() is None:
             try:
-                bridge.send_signal(signal.SIGTERM)
+                if not cancel_sent:
+                    bridge.send_signal(signal.SIGTERM)
+                remaining = max(0.0, outer_deadline - time.monotonic())
+                if remaining:
+                    bridge.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                try:
+                    bridge.send_signal(signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
             except ProcessLookupError:
                 pass
-            wait_bridge(bridge)
         replay_capture(prefix)
 
 try:
     sys.exit(main())
-except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+except (OSError, ValueError, RuntimeError, TimeoutError, subprocess.TimeoutExpired) as error:
     print("mock interruption controller failed: %s" % error, file=sys.stderr)
     sys.exit(1)
 PY
@@ -685,14 +802,22 @@ PY
             echo "$label did not record the producer-registered interruption result" >&2
             exit 1
         fi
-        read -r producer_result signal_result bridge_result <"$state/interruption-result"
+        read -r producer_result cancel_result monitor_result helper_result bridge_result <"$state/interruption-result"
         producer_token=${producer_result#producer=}
-        if [[ $producer_token != owner.* || $producer_token == */* \
-            || $signal_result != signal=TERM || $bridge_result != bridge_status=143 \
+        case "$monitor_result" in
+            command_monitor_status=0|command_monitor_status=124|command_monitor_status=137) ;;
+            *)
+                echo "$label reported an invalid lifecycle monitor result: $monitor_result" >&2
+                exit 1
+                ;;
+        esac
+        if [[ $producer_token != owner.* || $producer_token == */* \\
+            || $cancel_result != cancellation_signal=15 \\
+            || $helper_result != helper_status=143 || $bridge_result != bridge_status=0 \\
             || ! -f $state/processes ]] || ! grep -Fxq "producer $producer_token" "$state/processes"; then
             cat "$state/output" >&2
             cat "$state/interruption-result" >&2
-            echo "$label did not TERM the owned lifecycle bridge after producer registration" >&2
+            echo "$label did not complete authenticated native cancellation and helper cleanup after producer registration" >&2
             exit 1
         fi
     fi
