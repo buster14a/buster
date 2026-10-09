@@ -16,6 +16,8 @@ from pathlib import Path
 import compiler_receipt
 import sampling_qualification_receipt as receipt
 
+OWNER_GROUP = 123456
+
 SHA = "a" * 40
 TREE = "b" * 40
 HEAD = "c" * 40
@@ -43,7 +45,9 @@ def bundle(profile: str, pairs: int, binaries: dict, workload: dict, ratio: floa
             "order": "ABBA", "fresh_copy": True}
     raw = {"version": 1, "mode": "compare", "config": dict(workload, cpu=2, pairs=pairs or None,
            target_minutes=10, warmups=1, seed=20261003, profile_steps=[], sudo=False,
-           require_identical_output=False, canonical_inline_pair=False, fresh_copy=True, min_effect_percent=0.5),
+           require_identical_output=False, canonical_inline_pair=False, fresh_copy=True, min_effect_percent=0.5,
+           process_ownership={"schema": "compiler-experiment-owner-group-v1", "group": OWNER_GROUP,
+                              "failure_policy": "abort-owned-group"}),
            "plan": plan, "steps": {key: {"status": "ok", "elapsed_s": 1.0} for key in ("env", "prepare", "timed")},
            "variants": {key: dict(binaries[role], role=role) for key, role in (("a", "baseline"), ("b", "candidate"))}}
     summary = {"schema": receipt.LAB_SCHEMA, "cpu": 2, "command": workload["command"],
@@ -67,7 +71,7 @@ def fixture(phase: str = "confirm", packet: int = 0) -> tuple:
     identity = {"schema": receipt.SCHEMA, "phase": phase, "packet": str(packet), "campaign": DIGEST,
                 "reservation_seconds": str(plan["reservation_seconds"]), "family": family,
                 "trials": str(len(plan["slots"])), "base": SHA, "base_tree": TREE, "request_head": HEAD,
-                "trusted_revision": FREEZE,
+                "trusted_revision": FREEZE, "process_owner_group": str(OWNER_GROUP),
                 "baseline_revision": SHA, "candidate_revision": SHA if family == "aa" else HEAD,
                 "baseline_sha256": DIGEST, "candidate_sha256": DIGEST if family == "aa" else "a" * 64,
                 "lab_sha256": DIGEST, "protocol_sha256": DIGEST, "python_sha256": DIGEST,
@@ -106,9 +110,11 @@ def fixture(phase: str = "confirm", packet: int = 0) -> tuple:
                            "campaign": DIGEST},
                "executor": {"repository": "buster14a/buster", "request_run_id": "998", "run_id": history[-1]["run_id"],
                             "run_attempt": "1", "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor",
-                            "physical_packet_wall_us": occupancy, "queue_delay_seconds": None},
+                            "physical_packet_wall_us": occupancy, "queue_delay_seconds": None,
+                            "process_owner_group": OWNER_GROUP},
                "identity": copy.deepcopy(identity), "binaries": binaries, "workload_config": workload,
                "attempts": history}
+    trusted["identity"].pop("process_owner_group")  # Group belongs to this native execution, outside the freeze.
     return identity, rows, terminal, series, trusted
 
 
@@ -153,6 +159,7 @@ class SamplingQualificationTests(unittest.TestCase):
             self.assertEqual(shown["packet_state"], "complete-valid-research", shown["problems"])
             self.assertEqual(shown["qualification_state"], "unqualified")
             self.assertIs(shown["routine_profile_enabled"], False)
+            self.assertEqual(shown["process_owner_group"], OWNER_GROUP)
             self.assertIsNone(shown["queue_delay_seconds"])
             self.assertTrue(shown["outstanding_qualification"])
 
@@ -290,6 +297,27 @@ class SamplingQualificationTests(unittest.TestCase):
         self.assertEqual(shown["authenticated_attempt_history"][0]["state"], "failed")
         self.assertEqual(shown["qualification_state"], "unqualified")
         self.assertTrue(shown["outstanding_qualification"])
+
+    def test_experimental_owner_group_is_versioned_and_bound_to_native_execution(self):
+        for value in ("", "0", "1", "0123456", "-1", "2147483648", None):
+            with self.subTest(identity_group=value):
+                self._reject(lambda data: data[0].__setitem__("process_owner_group", value))
+        self._reject(lambda data: data[0].pop("process_owner_group"))
+        self._reject(lambda data: data[4]["executor"].__setitem__("process_owner_group", OWNER_GROUP + 1))
+        self._reject(lambda data: data[4]["executor"].__setitem__("process_owner_group", float(OWNER_GROUP)))
+        self._reject(lambda data: data[4]["executor"].pop("process_owner_group"))
+        for index in range(len(self.confirm[1])):  # Includes the historical v1 comparator in this experiment.
+            self._reject(lambda data: data[3][index]["compare"]["config"].pop("process_ownership"))
+            self._reject(lambda data: data[3][index]["compare"]["config"].__setitem__("process_ownership", {"group": OWNER_GROUP}))
+            self._reject(lambda data: data[3][index]["compare"]["config"]["process_ownership"].__setitem__("group", OWNER_GROUP + 1))
+            self._reject(lambda data: data[3][index]["compare"]["config"]["process_ownership"].__setitem__("group", float(OWNER_GROUP)))
+            self._reject(lambda data: data[3][index]["compare"]["config"]["process_ownership"].__setitem__("schema", "unversioned"))
+            self._reject(lambda data: data[3][index]["compare"]["config"]["process_ownership"].__setitem__("failure_policy", "continue"))
+        data = list(copy.deepcopy(self.confirm))
+        data[4]["identity"]["process_owner_group"] = str(OWNER_GROUP)
+        self.assertEqual(receipt.validate_packet(*data)["packet_state"], "complete-valid-research")
+        data[4]["identity"]["process_owner_group"] = str(OWNER_GROUP + 1)
+        self.assertEqual(receipt.validate_packet(*data)["packet_state"], "incomplete")
 
     def test_historical_profile_contract_is_unchanged(self):
         self.assertEqual(compiler_receipt.PROFILE["name"], "compiler-compare-v1")
