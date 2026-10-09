@@ -1377,7 +1377,7 @@ class MainOwnedNativeFortyReplay(unittest.TestCase):
         self.assertEqual(files, members)
         marker = publisher.sampling_json(files, "fixture-plan.json")
         for key, value in (("schema", "buster-compiler-main-forty-fixture-v1"), ("diagnostic_fixture", True),
-                           ("actual_lab", True), ("physical_qualification", False), ("qualification_state", "unqualified"),
+                           ("actual_lab", True), ("diagnostic_perf", "unavailable"), ("physical_qualification", False), ("qualification_state", "unqualified"),
                            ("main_profile", "compiler-main-40pairs-v1"), ("preparation_policy", "snapshot-v1"),
                            ("phase_schema", publisher.MAIN_PHASE_SCHEMA),
                            ("corpus_data", "fixed-diagnostic-full-original-profile")):
@@ -1392,7 +1392,7 @@ class MainOwnedNativeFortyReplay(unittest.TestCase):
         self.assertNotIn("physical-job-clock.tsv", files)
         self.assertFalse(any(name.rsplit("/", 1)[-1] == "cleanup-uncertain" for name in files))
         exported = {name: raw for name, raw in files.items()
-                    if name.startswith("main40/") or name in ("baseline-adapter.c", "candidate-adapter.c", "source-workload.c")}
+                    if name.startswith("main40/") or name in ("baseline-adapter.c", "candidate-adapter.c", "source-workload.c", "diagnostic-tools.tsv")}
         publisher.utility_export_manifest(files["export.manifest.tsv"], exported,
                                           expected_schema="BUSTER_COMPILER_MAIN_FORTY_EXPORT_V1")
         for member, pin in (("baseline-adapter.c", "baseline_adapter_sha256"),
@@ -1401,6 +1401,35 @@ class MainOwnedNativeFortyReplay(unittest.TestCase):
         for path, pin in (("python", "python_sha256"), ("trusted_lab", "trusted_lab_sha256"),
                           ("native_driver", "native_driver_sha256")):
             self.assertEqual(hashlib.sha256(Path(expected[path]).read_bytes()).hexdigest(), expected[pin])
+        diagnostic_tools = files["diagnostic-tools.tsv"].decode("ascii").splitlines()
+        tool_names = ("sh,bash,env,git,clang,clang++,ld,ld.lld,ld.gold,lld,ninja,cmake,python3,tcc,taskset,uname,lscpu,true,cat,mkdir,chmod,cp,mv,rm,readlink,realpath,dirname,basename,sed,grep,cut,tr,cmp,ls,head,tail,stat,tee,sort,awk,date,wc,find,xargs,touch,sleep,make,gcc,cc,g++,c++,ar,ranlib,nm,objdump,readelf,as,ldd,sha256sum,du,pwd,ln,printf,install,getconf,nproc").split(",")
+        tool_root = directory.resolve() / "diagnostic-bin"
+        self.assertEqual(diagnostic_tools[:3], ["BUSTER_MAIN_FORTY_DIAGNOSTIC_TOOLS_V1",
+                                               "perf\tunavailable\t-\t-", "PATH\t" + str(tool_root) + "\t-\t-"])
+        self.assertEqual(len(diagnostic_tools), len(tool_names) + 3)
+        self.assertFalse((tool_root / "perf").exists())
+        self.assertFalse((tool_root / "perf").is_symlink())
+        required_tools = {"sh", "bash", "env", "git", "clang", "ld", "ninja", "cmake", "python3", "taskset", "uname", "lscpu", "true"}
+        for raw, name in zip(diagnostic_tools[3:], tool_names):
+            fields = raw.split("\t")
+            self.assertEqual(len(fields), 4)
+            self.assertEqual(fields[:2], ["tool", name])
+            target, digest = fields[2:]
+            if target == "-":
+                self.assertEqual(digest, "-")
+                self.assertNotIn(name, required_tools)
+                self.assertFalse((tool_root / name).exists())
+                self.assertFalse((tool_root / name).is_symlink())
+            else:
+                self.assertEqual(str(Path(target).resolve(strict=True)), target)
+                self.assertTrue(Path(target).is_file())
+                self.assertTrue((tool_root / name).is_symlink())
+                self.assertEqual((tool_root / name).resolve(strict=True), Path(target))
+                hasher = hashlib.sha256()
+                with Path(target).open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        hasher.update(chunk)
+                self.assertEqual(hasher.hexdigest(), digest)
         ordinary = publisher.sampling_json(files, "main40/ordinary/receipt.json")
         ownership = ordinary["phase_ownership"]
         self.assertEqual(ordinary["state"], "measured")
@@ -1429,6 +1458,8 @@ class MainOwnedNativeFortyReplay(unittest.TestCase):
         self.assertEqual(summary["plan"]["reason"], "--pairs 40")
         records = publisher.sampling_json(files, "main40/lab/pairs.json", False)
         self.assertEqual(len(records), 80)
+        self.assertIs(summary["counters"]["perf_stat"], False)
+        self.assertTrue(all(row.get("counters") is False for row in records))
         self.assertEqual({row["pair"] for row in records}, set(range(1, 41)))
         references = [files["main40/" + role + "-reference.bin"] for role in ("baseline", "candidate")]
         self.assertTrue(all(raw.startswith(b"\x7fELF") for raw in references))
@@ -1468,6 +1499,7 @@ class MainOwnedNativeFortyReplay(unittest.TestCase):
                                            diagnostic=True, expected_cpu_model=actual_cpu)
         print("MAIN_OWNED_NATIVE_DATA_REPLAY actual_lab=1 complete_pairs=40 raw_members=80 owned_core=12 "
               "negative_controls=5 physical_job_cost=unavailable qualification=unqualified")
+
 
 
 if __name__ == "__main__":
