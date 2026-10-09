@@ -19,6 +19,7 @@ struct CompilerPreparationPlan
     String8 candidate_revision;
     String8 candidate_tree;
     String8 trusted_revision;
+    String8 trusted_root;
     String8 protocol_sha256;
     String8 lab_sha256;
     String8 python_sha256;
@@ -89,7 +90,7 @@ BUSTER_GLOBAL_LOCAL CompilerPreparationPlan compiler_preparation_plan_parse(Stri
 {
     CompilerPreparationPlan result = {0};
     String8 names[] = {S8("schema"), S8("phase"), S8("baseline_revision"), S8("baseline_tree"),
-        S8("candidate_revision"), S8("candidate_tree"), S8("trusted_revision"), S8("protocol_sha256"),
+        S8("candidate_revision"), S8("candidate_tree"), S8("trusted_revision"), S8("trusted_root"), S8("protocol_sha256"),
         S8("lab_sha256"), S8("python_sha256"), S8("python_path"), S8("native_driver_sha256"), S8("source_root"), S8("output_root"),
         S8("baseline_treatment"), S8("candidate_treatment"), S8("closure_policy"), S8("toolchain_policy"),
         S8("command"), S8("lab_repetitions"), S8("compiler_repetitions"), S8("aa_families"), S8("aa_primary"),
@@ -98,7 +99,7 @@ BUSTER_GLOBAL_LOCAL CompilerPreparationPlan compiler_preparation_plan_parse(Stri
     String8 values[BUSTER_ARRAY_LENGTH(names)] = {0};
     bool valid = compiler_sampling_admission_fields(text, (SliceString8)BUSTER_ARRAY_TO_SLICE(names), values);
     String8* outputs[] = {&result.schema, &result.phase, &result.baseline_revision, &result.baseline_tree,
-        &result.candidate_revision, &result.candidate_tree, &result.trusted_revision, &result.protocol_sha256,
+        &result.candidate_revision, &result.candidate_tree, &result.trusted_revision, &result.trusted_root, &result.protocol_sha256,
         &result.lab_sha256, &result.python_sha256, &result.python_path, &result.native_driver_sha256, &result.source_root, &result.output_root,
         &result.baseline_treatment, &result.candidate_treatment, &result.closure_policy, &result.toolchain_policy,
         &result.command, &result.lab_repetitions, &result.compiler_repetitions, &result.aa_families, &result.aa_primary,
@@ -119,6 +120,7 @@ BUSTER_GLOBAL_LOCAL CompilerPreparationPlan compiler_preparation_plan_parse(Stri
         compiler_sampling_acquisition_path(result.source_root) &&
         compiler_sampling_acquisition_path(result.output_root) &&
         compiler_sampling_acquisition_path(result.python_path) &&
+        compiler_sampling_acquisition_path(result.trusted_root) &&
         string_equal(result.source_root, S8("/tmp/buster-3211-closure-source")) &&
         string_equal(result.output_root, S8("/tmp/buster-3211-closure-output")) &&
         string_equal(result.baseline_treatment, S8("legacy-rebuild")) &&
@@ -154,6 +156,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_plan_paths_outside(CompilerPrepara
             result = !compiler_sampling_acquisition_path_within(retained[i], cleaned[j]) &&
                 !compiler_sampling_acquisition_path_within(cleaned[j], retained[i]);
     }
+    for (u64 i = 0; result && i < BUSTER_ARRAY_LENGTH(retained); i += 1)
+        result = !compiler_sampling_acquisition_path_within(retained[i], plan.trusted_root) &&
+            !compiler_sampling_acquisition_path_within(plan.trusted_root, retained[i]);
     result = result && !compiler_sampling_acquisition_path_within(plan.source_root, plan.output_root) &&
         !compiler_sampling_acquisition_path_within(plan.output_root, plan.source_root);
     return result;

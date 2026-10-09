@@ -142,6 +142,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_paths(Arena* arena,
     String8 source_parent = path_parent(arena, plan.source_root), output_parent = path_parent(arena, plan.output_root);
     String8 claim = string_format(arena, S8("{S8}.claim"), plan.output_root);
     bool result = plan.valid && cleanup.length && workspace.length && trusted.length && driver.length && evidence.length &&
+        string_equal(trusted, plan.trusted_root) &&
         string_equal(cleanup, os_path_absolute(arena, options.cleanup_root, true)) &&
         compiler_preparation_plan_paths_outside(plan, cleanup, workspace) &&
         compiler_sampling_acquisition_path(evidence) && compiler_sampling_acquisition_path(claim) &&
@@ -545,6 +546,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_worker(Arena* 
     return result;
 }
 
+// Freeze the contiguous builder before any supervisor, signal or other arena
+// operation can be introduced by callers.
+BUSTER_GLOBAL_LOCAL SliceString8 compiler_preparation_controller_owner_arguments(Arena* arena,
+    String8 driver, SliceString8 arguments)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, driver);
+    os_argument_builder_append(&builder, S8("compiler_profile_qualification"));
+    for (u64 i = 0; i < arguments.length; i += 1) os_argument_builder_append(&builder, arguments.pointer[i]);
+    os_argument_builder_append(&builder, S8("--owned-worker"));
+    return os_argument_builder_flush(&builder);
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_owned(Arena* arena,
     CompilerPreparationControllerResolved resolved, SliceString8 arguments, u64 started)
 {
@@ -559,14 +573,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_owned(Arena* a
     ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
     ProcessGroupControlState control = {.cancellation_signal = &compiler_sampling_cancel_signal,
         .cancellation_escalated = &compiler_sampling_cancel_escalated};
-    OsArgumentBuilder builder = os_argument_builder_start(arena);
-    os_argument_builder_append(&builder, resolved.driver);
-    os_argument_builder_append(&builder, S8("compiler_profile_qualification"));
-    for (u64 i = 0; i < arguments.length; i += 1) os_argument_builder_append(&builder, arguments.pointer[i]);
-    os_argument_builder_append(&builder, S8("--owned-worker"));
+    SliceString8 command = compiler_preparation_controller_owner_arguments(arena, resolved.driver, arguments);
     if (deferred && !compiler_sampling_controller_cancelled())
     {
-        spawn = os_process_spawn(os_argument_builder_flush(&builder), (SliceString8){0}, (SliceString8){0},
+        spawn = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
             (ProcessSpawnOptions){.use_process_environment = 1, .new_process_group = 1, .observe_resources = 1});
         if (spawn.handle)
         {
@@ -626,13 +636,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_owned(Arena* a
     result = complete && within && recorded && publication_recorded && within_after_publication ?
         PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 #else
-    BUSTER_UNUSED(arena); BUSTER_UNUSED(resolved); BUSTER_UNUSED(arguments);
+    BUSTER_UNUSED(arena); BUSTER_UNUSED(resolved); BUSTER_UNUSED(arguments); BUSTER_UNUSED(started);
 #endif
     return result;
 }
 
 #if BUSTER_LINUX && !BUSTER_ANDROID
-// Fixed native fixture: two children of the same retained attempt race before
+// Fixed native fixture: two workers of the same retained attempt race before
 // source/output exist. The owned exact PID is reaped before another fixture.
 BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_worker_once_fixture(Arena* arena,
     CompilerPreparationControllerResolved resolved)
@@ -696,7 +706,13 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_self_test(Arena* arena)
     String8 exact[] = {S8("--execute-preparation"), S8("--trusted-root"), S8("/trusted"),
         S8("--cleanup-root"), S8("/cleanup"), S8("--evidence"), S8("/cleanup/evidence")};
     CompilerPreparationControllerOptions parsed = compiler_preparation_controller_parse((SliceString8)BUSTER_ARRAY_TO_SLICE(exact));
-    bool result = parsed.valid && !parsed.owned_worker &&
+    SliceString8 owner_args = compiler_preparation_controller_owner_arguments(arena, S8("/fixture/driver"),
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(exact));
+    bool owner_argv = owner_args.length == 10 && string_equal(owner_args.pointer[0], S8("/fixture/driver")) &&
+        string_equal(owner_args.pointer[1], S8("compiler_profile_qualification")) &&
+        string_equal(owner_args.pointer[2], S8("--execute-preparation")) &&
+        string_equal(owner_args.pointer[9], S8("--owned-worker"));
+    bool result = owner_argv && parsed.valid && !parsed.owned_worker &&
         string_equal(parsed.trusted_root, S8("/trusted")) &&
         BUSTER_PREPARATION_PHYSICAL_SECONDS == 5400 && BUSTER_PREPARATION_WORKER_SECONDS == 5280 &&
         BUSTER_PREPARATION_TAIL_SECONDS == 120;

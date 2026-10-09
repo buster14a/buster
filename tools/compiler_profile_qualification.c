@@ -551,17 +551,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_internal(Arena* arena, C
                     closure_before = before.valid;
                     verifier_cleanup_failed = before.cleanup_failed;
                     String8 trial_path = path_join(arena, output, string_format(arena, S8("trial-{u64}"), trial));
-                    OsArgumentBuilder builder = os_argument_builder_start(arena);
+                    String8 pair_count = profile.pairs ? string_format(arena, S8("{u64}"), profile.pairs) : (String8){0};
                     String8 command[] = {python, S8("-B"), lab, S8("compare"), S8("--baseline"), baseline,
                         S8("--candidate"), candidate, S8("--repo-root"), source, S8("--cpu"), S8("2"),
                         S8("--output"), trial_path, S8("--target-minutes"), S8("10"),
                         S8("--warmups"), S8("1"), S8("--seed"), S8("20261003"), S8("--min-effect"), S8("0.5")};
+                    OsArgumentBuilder builder = os_argument_builder_start(arena);
                     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(command); i += 1) os_argument_builder_append(&builder, command[i]);
                     if (profile.pairs)
                     {
                         os_argument_builder_append(&builder, S8("--pairs"));
-                        os_argument_builder_append(&builder, string_format(arena, S8("{u64}"), profile.pairs));
+                        os_argument_builder_append(&builder, pair_count);
                     }
+                    SliceString8 trial_command = os_argument_builder_flush(&builder);
                     u64 trial_started = os_now_microseconds();
                     u64 left = deadline > trial_started ? deadline - trial_started : 1;
                     u64 timeout = profile.timeout_seconds * 1000000ull;
@@ -572,7 +574,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_internal(Arena* arena, C
                     if (closure_before && !contained) verifier_cleanup_failed = true;
                     if (contained)
                     {
-                        spawn = os_process_spawn(os_argument_builder_flush(&builder), child_keys, child_values,
+                        spawn = os_process_spawn(trial_command, child_keys, child_values,
                             (ProcessSpawnOptions){.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
                                 .search_path = 1, .new_process_group = 1, .observe_resources = 1,
                                 .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_SAMPLING_CAPTURE_BYTES,
@@ -683,6 +685,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
     os_argument_builder_append(&builder, S8("compiler_profile_qualification"));
     for (u64 i = 0; i < arguments.length; i += 1) os_argument_builder_append(&builder, arguments.pointer[i]);
     os_argument_builder_append(&builder, S8("--owned-worker"));
+    SliceString8 worker_command = os_argument_builder_flush(&builder);
     ProcessSpawnResult spawn = {0};
     ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
     CompilerExperimentSupervisor supervisor = {0};
@@ -696,7 +699,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
 #endif
     if (deferred && remaining > 120ull * 1000000ull)
     {
-        spawn = os_process_spawn(os_argument_builder_flush(&builder), (SliceString8){0}, (SliceString8){0},
+        spawn = os_process_spawn(worker_command, (SliceString8){0}, (SliceString8){0},
             (ProcessSpawnOptions){.use_process_environment = 1, .new_process_group = 1, .observe_resources = 1});
         if (spawn.handle)
         {

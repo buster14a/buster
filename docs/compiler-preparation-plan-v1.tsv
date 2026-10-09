@@ -5,6 +5,7 @@ baseline_tree	075022a8dfc83b7cdd200f6bf4eca88d58ddb7bf
 candidate_revision	7d962dff641aa3a340920f3720a5e1fc1d7e259a
 candidate_tree	0ddecece17d892dd6793b30e94e004b20bce639f
 trusted_revision	-
+trusted_root	-
 protocol_sha256	-
 lab_sha256	-
 python_sha256	-
