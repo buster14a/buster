@@ -10,6 +10,7 @@ request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compile
 # request: issue #3030 hosted CI inventory acceptance with benchmark metadata
 # request: issue #1570 constant offsetof semantic validation
 # request: issue #1570 PR #3026 current-main throughput-corpus-v2 fresh qualification
+request: issue #1289 AArch64 ELF PIC address materialization; current main 35c43d1877620ef9a57b9ffc98ae022b688a7c9d
 request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
 # request: PR #3026 fresh qualification after preserving current main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
 # request: PR #3026 fresh qualification after preserving current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8

@@ -1692,15 +1692,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_stack_tests(UnitTestArgum
         String8 allocators[] = {S8("fast"), S8("quality")};
         for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
         {
-            // The native AArch64 ELF emitter refuses -fPIC (see
-            // compiler_driver_validate_native_pic_invocation), so only the
-            // fixed-address model is a valid request there.
-#if BUSTER_CPU_ARCH_AARCH64
-            u32 pic_count = 1;
-#else
-            u32 pic_count = 2;
-#endif
-            for (u32 pic = 0; pic < pic_count; pic += 1)
+            for (u32 pic = 0; pic < 2; pic += 1)
             {
                 String8 mode = string_format_z(arena, S8("-fregister-allocator={S8}"), allocators[allocator]);
                 String8 compile[] = {mode, pic ? S8("-fPIC") : S8("-fno-pic"), S8("-c"), plugin, S8("-o"), object};

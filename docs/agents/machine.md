@@ -776,7 +776,8 @@ fixture as well as compiling both architectures.
   relocation site distinguishes the index, value offset, or descriptor field.
   The thread-local model fixture requires zero fallback for admitted desktop
   targets, allocators, frontend forms and code models, and named refusal with
-  no artifact for effective AArch64 ELF PIC requests. Native hosts execute
+  no artifact for effective AArch64 ELF PIC requests (the TLSDESC model does
+  not exist yet; see the position-independent code bullets). Native hosts execute
   the supported models with separate definitions and live repeated accesses.
 - x86-64 i128 bitwise complement reads both frame-backed limbs and emits
   ordinary three-operand XOR64 rows against one all-ones constant. Each limb
@@ -821,8 +822,8 @@ fixture as well as compiling both architectures.
   both sides of a VLA, packed narrow arguments, split pairs, indirect large
   results, ninth floating arguments and variadics. The registered driver
   matrix retains both original over-aligned stack fixtures, all six AArch64
-  targets, allocator modes and frontend forms, with supported code models
-  and explicit AArch64 ELF PIC refusals. Native AArch64 desktop hosts also
+  targets, allocator modes and frontend forms, with every code model,
+  AArch64 ELF `-fPIC` included. Native AArch64 desktop hosts also
   link the independent host observer in both directions
   for FAST and QUALITY. The archived matrix additionally covered MIR-stack.
   Its direct NONE path stayed an object control: that reference failed
@@ -1000,16 +1001,42 @@ fixture as well as compiling both architectures.
   with the function's own offset, because an FDE naming a preemptible function
   is the same PC-relative reference to an interposable symbol that `ld`
   refuses in the body.
-- On x86-64 ELF, `-fPIE`/`-fpie` request the same implemented PIC model
-  as `-fPIC`/`-fpic`; the last positive spelling wins. `-fno-pic` clears
-  that request, and `-fno-pie` cancels only a PIE spelling. Native AArch64
-  ELF C generation has no PIC reference model and the driver rejects an
-  effective positive request before mapping sources or publishing artifacts.
-  Default/cancelled generation and non-code actions remain supported.
-  Assembly and prebuilt inputs spell their own references. Mach-O/COFF models
-  and Wasm/eBPF compatibility behavior are unchanged; this partial #1289
-  boundary does not certify their PIC policy or the residual LLVM/direct
-  backend model paths.
+- On x86-64 and AArch64 ELF, `-fPIE`/`-fpie` request the same implemented PIC
+  model as `-fPIC`/`-fpic`; the last positive spelling wins. `-fno-pic` clears
+  that request, and `-fno-pie` cancels only a PIE spelling. Assembly and
+  prebuilt inputs spell their own references. Mach-O/COFF models and
+  Wasm/eBPF compatibility behavior are unchanged; the residual LLVM/direct
+  backend model paths stay open under #1289.
+- AArch64 ELF `-fPIC` (`MachineA64Selector.position_independent`, resolved in
+  codegen the way x86-64's is) replaces the canonical inline absolute literal
+  (`LDR literal; B; .quad`, whose `R_AARCH64_ABS64` in `.text` `ld.lld -shared`
+  rejects) in `MACHINE_A64_LEA_SYMBOL`. `machine_a64_symbol_reference` picks
+  the form with the x86-64 rule: `ir_symbol_is_interposable` (external or
+  imported linkage without hidden visibility, weak undefined included) gets
+  `MACHINE_SYMBOL_REFERENCE_GOT`, the ADRP + `LDR Xd, [Xd]` pair that reads
+  the address from the symbol's GOT slot (`R_AARCH64_ADR_GOT_PAGE`,
+  `R_AARCH64_LD64_GOT_LO12_NC`); every other symbol gets
+  `MACHINE_SYMBOL_REFERENCE_ELF_PAGE`, ADRP + ADD (`R_AARCH64_ADR_PREL_PG_HI21`,
+  `R_AARCH64_ADD_ABS_LO12_NC`). The encoder only tells the module layer which
+  half of the pair a call site is; `codegen_aarch64_page_relocation_kind` maps
+  the half and the recorded reference to the four `CODEGEN_MODULE_RELOCATION_AARCH64_ELF_*`
+  kinds and `object_relocation_kind_from_codegen` to the object kinds the
+  assembler and linkers already share. Direct calls keep `R_AARCH64_CALL26`,
+  `.eh_frame` function references are `R_AARCH64_PREL32` against `.text`, and
+  initialized pointers are `R_AARCH64_ABS64` in `.data`: constants with
+  relocations already live in writable data, so no `.data.rel.ro` split exists
+  and none is needed for `ld.lld -shared -z text`. Without `-fPIC` nothing
+  changes (objects are byte-identical). Thread-local access under this model
+  is refused by name -- selection fails with `thread-local access under
+  AArch64 ELF position-independent code (TLSDESC) is not implemented`, which
+  the driver reports as a code-generation refusal and publishes no output --
+  instead of emitting local-exec `TPREL` relocations a shared object cannot
+  hold. TLSDESC itself, Buster's own AArch64 `-shared` writer and hidden-visibility
+  attribute propagation (a hidden definition still uses the GOT form, as on
+  x86-64) remain open. The test hook is
+  `compiler_driver_test_aarch64_pic_outputs`, which reads the relocation kind
+  per symbol class from a Buster object; on a native Linux AArch64 host it
+  also links the object with `ld.lld -shared -z text`.
 - The built-in linker binds every name in its image: `PLT32` patches the same
   rel32 `PC32` does. The ELF reader preserves `GOTPCREL`, `GOTPCRELX`,
   `REX_GOTPCRELX` and `CODE_4_GOTPCRELX` as distinct relocation kinds.

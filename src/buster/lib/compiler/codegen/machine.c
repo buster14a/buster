@@ -5191,7 +5191,7 @@ BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_intern
             switch (target.cpu_arch)
             {
                 break; case CPU_ARCH_X86_64: result = machine_select_canonical_function_x86_64(arena, program, function, target, position_independent, assume_validated, preserve_debug_values, module);
-                break; case CPU_ARCH_AARCH64: result = machine_select_canonical_function_aarch64(arena, program, function, target, assume_validated, preserve_debug_values);
+                break; case CPU_ARCH_AARCH64: result = machine_select_canonical_function_aarch64(arena, program, function, target, position_independent, assume_validated, preserve_debug_values);
                 break; default: BUSTER_TODO();
             }
         }

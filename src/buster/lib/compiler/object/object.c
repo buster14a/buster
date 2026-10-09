@@ -11830,6 +11830,10 @@ BUSTER_GLOBAL_LOCAL bool object_relocation_kind_from_codegen(CodegenModuleReloca
             case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12: *destination = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12; return true;
             case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_MACH_PAGE21; return true;
             case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12: *destination = OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12; return true;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_ELF_PAGE21; return true;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_ADD_LO12: *destination = OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12; return true;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21; return true;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_LD64_LO12: *destination = OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12; return true;
             // The compiler emits MOV r64,[RIP+GOT], whose one-byte REX
             // prefix makes the relaxable spelling unambiguous.  Plain type 9 is
             // reserved for external legacy objects and is never decoded.

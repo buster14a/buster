@@ -1139,14 +1139,17 @@ order and `-no-pie` undoes only `-pie`. Linking either kind compiles the C
 inputs of that invocation with the position-independent code model.
 The last of `-fPIC`, `-fpic`, `-fPIE` and `-fpie` selects the requested
 model; `-fno-pic` clears it, while `-fno-pie` cancels only a PIE spelling.
-On x86-64 ELF the positive spellings select the implemented PIC reference
-model. Native AArch64 ELF C generation rejects a surviving positive request
-by its spelling before source mapping or output publication; direct invocation
-API requests name the unavailable model. Cancellation, preprocessing,
+On x86-64 and AArch64 ELF the positive spellings select the implemented PIC
+reference model (see the position-independent code bullets in
+[machine.md](machine.md)). On AArch64 ELF the model makes `-fPIC` objects
+acceptable to `ld.lld -shared -z text`; Buster's own `-shared` and `-pie`
+writers still exist only for x86-64 Linux. Thread-local access under AArch64
+ELF PIC is refused by a named code-generation diagnostic (TLSDESC is not
+implemented) and publishes no output. Cancellation, preprocessing,
 syntax-only and assembly/prebuilt-only input routes retain their behavior.
 Mach-O and COFF keep their existing target models; Wasm/eBPF compatibility
 behavior is unchanged. LLVM-bitcode and direct backend model requests remain
-an audit residual, so this bounded refusal is only partial issue #1289 support.
+an audit residual of issue #1289.
 On any other target a link that asks for either image is refused as an
 unsupported option, while a compile-only invocation ignores the link option,
 as GCC does.
