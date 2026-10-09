@@ -1255,6 +1255,9 @@ static bool buster_a64_complex_simd_inverse_lane_transform(Target target, u32 ro
         }
     }
 
+    /* The lane transform can match field sets that decode as a reserved
+     * selector alias. Keep the complete requested instruction so each
+     * candidate can be checked by the ordinary row decoder. */
     BusterA64ComplexSIMDInstruction requested = {.row_index = row_index};
     if (form.id == 283u)
     {
@@ -1311,6 +1314,8 @@ static bool buster_a64_complex_simd_inverse_lane_transform(Target target, u32 ro
         }
         if (form.id == 283u)
         {
+            /* Require the full selector, arrangement, register, lane and
+             * rotate operands to round trip before accepting this inverse. */
             u32 candidate_word = 0;
             if (buster_a64_semantic_vm_encode_fields(form.id, &candidate_fields, &candidate_word) !=
                     BUSTER_A64_SEMANTIC_VM_STATUS_OK ||
@@ -1940,6 +1945,9 @@ BusterA64ComplexSIMDStatus buster_a64_complex_simd_encode(Target target, BusterA
     }
     u32 fields[64] = {0};
     u64 assigned = 0;
+    /* Form 283's lane transform shares fields with later selectors and
+     * rotate values. Encode its non-lane operands first so the inverse sees
+     * those fixed bits before testing a lane candidate. */
     u32 encode_pass_count = form.id == 283u ? 2 : 1;
     for (u32 pass = 0; pass < encode_pass_count; pass += 1)
     {

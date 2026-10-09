@@ -12257,7 +12257,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_complex_simd_lane_source_candidate(
             (spelling.prefix == 'v' || spelling.prefix == 'h' || spelling.prefix == 's' || spelling.prefix == 'd');
         bool scalar_prefix = spelling.prefix == 'h' || spelling.prefix == 's' || spelling.prefix == 'd';
         bool group_lane_index = false;
-        bool vector_d_alias_group = false;
         u32 group_lane_registers = 0;
         String8 pattern = template_tokens[group];
         bool fixed_arrangement_present = false;
@@ -12331,26 +12330,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_complex_simd_lane_source_candidate(
                 BusterA64ComplexSIMDArrangement arrangement = BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_INVALID;
                 if (valid && (arrangement_selector || lane_index || register_operand))
                 {
-                    bool vector_d_alias_candidate = spelling.prefix == 'd' && register_operand &&
-                        (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0;
-                    bool scalar_vector_prefix_matches = register_operand &&
-                        (((operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_SCALAR) != 0) || vector_d_alias_candidate);
-                    bool scalar_arrangement_prefix_matches = arrangement_selector && vector_d_alias_group;
                     bool prefix_matches = register_spelling && fixed_prefix_matches &&
                         (prefix_selector ? scalar_prefix :
-                         scalar_prefix ? scalar_vector_prefix_matches || scalar_arrangement_prefix_matches :
+                         scalar_prefix ? register_operand && (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_SCALAR) != 0 :
                          spelling.prefix == 'v');
                     String8 arrangement_text = buster_a64_direct_simd_arrangement_string(spelling.arrangement);
                     valid = prefix_matches &&
                         buster_a64_complex_simd_arrangement_from_string(arrangement_text, &arrangement) &&
                         (!fixed_arrangement_present || (spelling.has_lane && arrangement == fixed_arrangement));
-                    if (valid && arrangement == BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_D && spelling.prefix == 'd' &&
-                        ((register_operand && (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0) ||
-                         (arrangement_selector && vector_d_alias_group)))
-                    {
-                        arrangement = BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_2D;
-                        vector_d_alias_group = vector_d_alias_group || register_operand;
-                    }
                 }
                 if (valid && arrangement_selector)
                 {
@@ -12503,20 +12490,10 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ComplexSIMDLaneParseResult assembly_aarch64_c
                     u32 candidate_word = 0;
                     AssemblyAarch64ComplexSIMDLaneParseResult candidate_feature =
                         ASSEMBLY_AARCH64_COMPLEX_SIMD_LANE_NO_MATCH;
-                    AssemblyAarch64ComplexSIMDLaneTrace local_trace = {0};
                     AssemblyAarch64ComplexSIMDLaneTrace* candidate_trace =
-                        (form.id == 492u || form.id == 283u) ? (trace ? trace : &local_trace) : 0;
-                    bool candidate_ok = assembly_aarch64_complex_simd_lane_source_candidate(target, row, form, source_tokens,
-                        source_count, &candidate_word, &candidate_feature, candidate_trace);
-                    if (candidate_trace)
-                    {
-                        fprintf(stderr, "lane-source form=%u row=%u ok=%u stage=%u group=%u semantic=%u kind=%u flags=%llu value_kind=%u value=%llu encode=%u word=%08x\n",
-                                form.id, row.row_index, candidate_ok, candidate_trace->stage, candidate_trace->group,
-                                candidate_trace->semantic_index, candidate_trace->operand_kind,
-                                (unsigned long long)candidate_trace->operand_flags, candidate_trace->value.kind,
-                                (unsigned long long)candidate_trace->value.payload, candidate_trace->encode_status, candidate_word);
-                    }
-                    if (candidate_ok)
+                        trace && form.id == 492u ? trace : 0;
+                    if (assembly_aarch64_complex_simd_lane_source_candidate(target, row, form, source_tokens,
+                            source_count, &candidate_word, &candidate_feature, candidate_trace))
                     {
                         match_count += 1;
                         match_word = candidate_word;
