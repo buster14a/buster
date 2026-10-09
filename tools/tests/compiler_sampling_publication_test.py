@@ -303,7 +303,7 @@ def publication_fixture(phase="pilot", packet=0):
         "request_head": plan["request_head"], "trusted_revision": plan["trusted_revision"],
         "ab1_revision": plan["ab1_revision"], "ab2_revision": plan["ab2_revision"], "protocol_sha256": plan["protocol_sha256"],
         "lab_sha256": freeze["lab_sha256"], "python_sha256": freeze["python_sha256"], "driver_sha256": freeze["driver_sha256"],
-        "python_path": "/usr/bin/python3.12",
+        "python_path": "/usr/bin/python3.12", "trusted_root": "/physical/trusted",
         "prepared_sha256": prepared_sha, "reservation_seconds": "1800", "process_state": "complete", "qualification_state": "unvalidated"}
     acquired_files["acquisition.tsv"] = tsv_bytes(acquired)
     old_records = [(old, acquired_files)]
@@ -439,6 +439,7 @@ class SamplingPublicationOutcomes(unittest.TestCase):
                 self.assertGreater(result["accounting"]["physical_job_wall_upper_us"], result["physical_packet_wall_us"])
                 self.assertEqual(len(result["acquired_binaries"]), 3)
                 self.assertEqual(result["acquired_runtime"]["python_path"], "/usr/bin/python3.12")
+                self.assertEqual(result["acquired_runtime"]["trusted_root"], "/physical/trusted")
                 self.assertEqual(result["acquired_runtime"]["python_sha256"], "4" * 64)
 
     def test_duplicate_json_and_nonfinite_values_are_rejected(self):
@@ -652,6 +653,19 @@ class SamplingPublicationOutcomes(unittest.TestCase):
 
 
 
+    def test_acquisition_trusted_root_must_be_actual_canonical_path(self):
+        for path in (None, "", "/", "trusted", "/tmp/../trusted", "/tmp//trusted", "/tmp/trusted root", "/tmp/trusted\\root"):
+            api, authority, files = publication_fixture("acquire", 0)
+            row = publisher.sampling_tsv(files["acquisition.tsv"])
+            if path is None:
+                row.pop("trusted_root")
+            else:
+                row["trusted_root"] = path
+            files["acquisition.tsv"] = tsv_bytes(row)
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                publisher.sampling_validate(api, authority, files)
+
+
 class SamplingNativeExportReplay(unittest.TestCase):
     def test_actual_native_export_zip_replays_sampling_preparation_reader(self):
         directory_label = os.environ.get("BUSTER_SAMPLING_NATIVE_EXPORT")
@@ -700,6 +714,373 @@ class SamplingNativeExportReplay(unittest.TestCase):
         with self.assertRaises(ValueError):
             publisher.sampling_prepared(ImmutableFixtureApi(), {}, changed, context)
 
+
+
+def preparation_publication_fixture():
+    expected, receipt, bundles = preparation_fixture.fixture()
+    lab_bytes = Path(sampling._lab.__file__).read_bytes()
+    protocol = b"preparation frozen synthetic protocol\n"
+    expected["trusted_lab_sha256"] = hashlib.sha256(lab_bytes).hexdigest()
+    receipt["trusted_lab_sha256"] = expected["trusted_lab_sha256"]
+    plan = {"schema": "buster-compiler-preparation-plan-v1", "phase": "qualify",
+        "baseline_revision": expected["base"], "baseline_tree": expected["base_tree"],
+        "candidate_revision": expected["head"], "candidate_tree": expected["head_tree"],
+        "trusted_revision": "9" * 40, "trusted_root": "/trusted", "protocol_sha256": hashlib.sha256(protocol).hexdigest(),
+        "lab_sha256": expected["trusted_lab_sha256"], "python_sha256": expected["python_sha256"],
+        "python_path": expected["python"], "native_driver_sha256": "5" * 64,
+        "source_root": expected["root"], "output_root": expected["output"]}
+    plan_bytes = tsv_bytes(plan)
+    sha = hashlib.sha256(plan_bytes).hexdigest()
+    admitted = {"preparation_phase": "qualify", "preparation_packet": "0", "preparation_family": "preparation",
+                "preparation_plan_revision": "e" * 40, "preparation_plan_sha256": sha,
+                "preparation_reservation_seconds": "5400", "preparation_worker_seconds": "5280"}
+    raw = {"request.txt": ("profile: compiler-baseline-closure-qualification-v1 packet: 0 freeze: " + "e" * 40 + "\n").encode(),
+           "plan.tsv": plan_bytes, "allowlist.tsv": b"fixture\ttrusted-native-policy\n",
+           "facts.tsv": b"fixture\ttrusted-api-facts\n",
+           "history.tsv": b"phase\tpacket\trequest_run_id\trequest_run_attempt\texecutor_run_id\texecutor_run_attempt\tstate\tphysical_wall_us\tcampaign\tfreeze_revision\tactor_login\tactor_id\ttriggering_login\ttriggering_id\tpull_author_login\tpull_author_id\n"}
+    authority = {"repository": "buster14a/buster", "head": "7" * 40, "request_id": "200", "run_id": "201",
+                 "executor": {"head_sha": "6" * 40}, "request": {}, "admitted": admitted, "plan": plan, "raw": raw, "history": []}
+    files = dict(raw)
+    # The contract's synthetic preparation producer supplies actual inventory,
+    # closure, child argv/cleanup and costs. Use the existing trusted paired
+    # statistics fixture rather than manufacturing summary confidence fields.
+    for arm, name, same in preparation.SERIES:
+        data = bundles[arm]
+        base_arm = "legacy" if name == "cross-build-aa" else arm
+        baseline = preparation.frozen_binary(bundles[base_arm]["prepared"], base_arm, "baseline", expected)
+        candidate = preparation.frozen_binary(data["prepared"], arm, "baseline" if same else "candidate", expected)
+        binary = {role: {"sha256": item[1], "revision": expected["base" if same or role == "baseline" else "head"],
+                        "size_bytes": item[2]}
+                  for role, item in zip(("baseline", "candidate"), (baseline, candidate))}
+        workload = {"command": preparation.WORKLOAD_COMMAND, "repo_root": expected["root"], "perf": "perf",
+                    "extra": [], "extra_by_variant": {"a": [], "b": []}}
+        actual = packet_fixture.bundle(sampling.LONG, 0, binary, workload, 1.0 if same else 1.021)
+        reason = ("--target-minutes 10: 1.000 s per pair (median of 2 pilot pairs), 0.1 min elapsed, "
+                  "profile steps about 0 compile-equivalents (0.0 min) -> 16 pairs "
+                  "(clamped to 10..1000, whole ABBA blocks)")
+        # Diagnostic clock values fit the synthetic producer's 10us phase;
+        # they never assert real compiler performance.
+        for pair in actual["pairs"]:
+            pair["span_s"] *= 1e-8
+        grouped = []
+        for index in range(0, len(actual["pairs"]), 2):
+            members = {item["variant"]: item for item in actual["pairs"][index:index + 2]}
+            grouped.append({"pair": index // 2 + 1, "order": members["a"]["order"],
+                "metrics_a": {"wall": members["a"]["span_s"]}, "metrics_b": {"wall": members["b"]["span_s"]}})
+        wall = sampling._lab.compare_series([(item["metrics_a"]["wall"], item["metrics_b"]["wall"]) for item in grouped],
+            "s", "lower", 20261003, time_metric=True, floor=0.005)
+        actual["summary"]["metrics"]["wall"] = wall
+        actual["summary"]["verdict"] = dict(wall, metric="wall", min_effect_percent=0.5)
+        actual["summary"]["checks"] = sampling._lab.compare_checks(grouped)
+        actual["compare"]["plan"]["reason"] = reason
+        actual["summary"]["plan"]["reason"] = reason
+        actual["compare"]["config"]["require_identical_output"] = same
+        actual["summary"]["host"]["git_revision"] = expected["base"]
+        for key, item in zip(("a", "b"), (baseline, candidate)):
+            actual["compare"]["variants"][key]["ide"] = item[0]
+        data[name].update(lab=actual["compare"], summary=actual["summary"], pairs=actual["pairs"])
+        for item, binary_value in zip(data[name]["metadata"]["compiler_provenance"], (baseline, candidate)):
+            item.update(path=binary_value[0], sha256=binary_value[1], bytes=binary_value[2])
+        prefix = f"qualification/{arm}/{name}"
+        files[prefix + "-lab/compare.json"] = json_bytes(data[name]["lab"])
+        files[prefix + "-lab/summary.json"] = json_bytes(data[name]["summary"])
+        files[prefix + "-lab/pairs.json"] = json_bytes(data[name]["pairs"])
+        for side in ("a", "b"):
+            files[prefix + "-lab/" + side + "/lab.json"] = json_bytes({"fixture": "saved native lab metadata"})
+        files[prefix + "-throughput/metadata.json"] = json_bytes(data[name]["metadata"])
+        files[prefix + "-throughput/summary.json"] = json_bytes(data[name]["throughput"])
+        for name in ("samples.csv", "telemetry.csv", "jobs.tsv", "commands.jsonl", "capabilities.jsonl", "complete.txt"):
+            files[prefix + "-throughput/" + name] = b"retained complete synthetic raw log\n"
+    # Native complete costs include initialization/execute/finalize and the
+    # externally retained cost-record publication. This is diagnostic data.
+    legacy = json.loads(bundles["legacy"]["files"]["preparation-cost.json"])
+    legacy["finalize_us"] += 50000
+    legacy["total_us"] += 50000
+    bundles["legacy"]["files"]["preparation-cost.json"] = json_bytes(legacy)
+    receipt["preparation_costs"]["legacy"].update(receipt_sha256=hashlib.sha256(json_bytes(legacy)).hexdigest(),
+        total_us=legacy["total_us"] + receipt["preparation_costs"]["legacy"]["receipt_publication_us"])
+    for arm, data in bundles.items():
+        for name, value in data["files"].items():
+            files["qualification/" + arm + "/" + name] = value
+    files["qualification/qualification.json"] = json_bytes(receipt)
+    host = {"schema": "buster-compiler-preparation-host-v1", "state": "complete",
+        "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor", "logical_processor_records": 16, "observed_from": "/proc/cpuinfo",
+        "request_head": authority["head"], "run_id": "201", "run_attempt": "1", "request_run_id": "200",
+        "measurement_trusted_revision": plan["trusted_revision"], "policy_trusted_revision": "6" * 40,
+        "plan_revision": "e" * 40, "plan_sha256": sha, "protocol_sha256": plan["protocol_sha256"],
+        "trusted_lab": expected["trusted_lab"], "trusted_lab_sha256": plan["lab_sha256"],
+        "python": expected["python"], "python_sha256": plan["python_sha256"],
+        "native_driver": "/trusted/build/Debug/build", "native_driver_sha256": plan["native_driver_sha256"]}
+    files["host.json"] = json_bytes(host)
+    owner = {"schema": "buster-compiler-preparation-owner-v1", "phase": "qualify", "packet": "0", "plan_sha256": sha,
+        "physical_packet_wall_us": "10000000", "wall_scope": "entry-through-child-cleanup-before-terminal-publication",
+        "process_state": "complete", "timed_out": "0", "cleanup_failed": "0", "within_reservation": "true",
+        "cancelled": "0", "qualification_state": "unvalidated", "default_activated": "false"}
+    files["owner.tsv"] = tsv_bytes(owner)
+    files["owner-publication.tsv"] = tsv_bytes({"schema": "buster-compiler-preparation-owner-publication-v1",
+        "owner_sha256": hashlib.sha256(files["owner.tsv"]).hexdigest(), "scope": "entry-through-owner-publication",
+        "initial_scope_us": "10000000", "publication_us": "1000", "observed_wall_us": "10001000",
+        "observation_publication_us": "unavailable", "within_reservation": "true"})
+    files["preparation.tsv"] = tsv_bytes({"schema": "buster-compiler-preparation-controller-v1", "phase": "qualify",
+        "packet": "0", "plan_sha256": sha, "process_state": "complete", "qualification_state": "unvalidated",
+        "default_activated": "false", "duration_us": "9000000", "cleanup_proven": "true",
+        "source_root": expected["root"], "output_root": expected["output"], "tools_before": "true", "tools_after": "true", "exported": "true"})
+    files["owner-supervision.tsv"] = complete_supervision()
+    git = ["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null"]
+    commands = [
+        ("trusted-harness-pin", git + ["-C", "/trusted", "rev-parse", "HEAD"]),
+        ("clone-preparation-source", git + ["clone", "--no-checkout", "--no-tags", "https://github.com/buster14a/buster.git", expected["root"]]),
+        ("fetch-preparation-pins", git + ["-C", expected["root"], "fetch", "--no-tags", "origin", expected["base"], expected["head"]]),
+        ("baseline-tree", git + ["-C", expected["root"], "rev-parse", expected["base"] + "^{tree}"]),
+        ("candidate-tree", git + ["-C", expected["root"], "rev-parse", expected["head"] + "^{tree}"]),
+        ("candidate-checkout", git + ["-C", expected["root"], "checkout", "--detach", expected["head"]]),
+        ("legacy-snapshot-five-long-controls", [host["native_driver"], "compiler_closure", "qualify", expected["root"],
+            expected["output"], expected["base"], expected["base_tree"], expected["head"], expected["head_tree"],
+            expected["trusted_lab"], expected["python"]])]
+    phases = []
+    for index, (name, command) in enumerate(commands, 1):
+        phases.append({"stage": str(index), "phase": name, "wall_us": "2000000" if index == 7 else "1000",
+            "exit_status": "0", "timed_out": "0", "cleanup_failed": "0", "cancelled": "0", "state": "complete"})
+        stem = f"controller-{index}-{name}"
+        files[stem + ".argv"] = b"".join(str(len(item.encode())).encode() + b":" + item.encode() + b"\n" for item in command)
+        files[stem + ".stdout.log"] = files[stem + ".stderr.log"] = b""
+        files[stem + "-supervision.tsv"] = complete_supervision()
+    files["controller.tsv"] = table_bytes(phases)
+    claim = {"schema": "buster-compiler-preparation-claim-v1", "profile": "compiler-baseline-closure-qualification-v1",
+        "phase": "qualify", "packet": "0", "plan_revision": "e" * 40, "plan_sha256": sha, "request_run_id": "200",
+        "request_run_attempt": "1", "executor_run_id": "201", "executor_run_attempt": "1", "request_head": authority["head"],
+        "policy_trusted_revision": "6" * 40, "measurement_trusted_revision": plan["trusted_revision"],
+        "source_root": expected["root"], "output_root": expected["output"], "evidence": "/runner-temp/compiler-preparation-evidence",
+        "driver": host["native_driver"], "reservation_seconds": "5400", "worker_seconds": "5280", "tail_seconds": "120", "state": "claimed"}
+    for name, label in (("request.txt", "request_sha256"), ("plan.tsv", "plan_transport_sha256"),
+            ("allowlist.tsv", "allowlist_sha256"), ("facts.tsv", "facts_sha256"), ("history.tsv", "history_sha256")):
+        claim[label] = hashlib.sha256(raw[name]).hexdigest()
+    files["claim.tsv"] = tsv_bytes(claim)
+    class PreparationFixtureApi:
+        prefix = "https://api.github.com/repos/buster14a/buster"
+        token = "synthetic"
+        def __init__(self):
+            start = datetime(2026, 10, 9, tzinfo=timezone.utc)
+            self.job = {"id": 1201, "run_id": 201, "run_attempt": 1, "name": publisher.PREPARATION_HOST_JOB,
+                "status": "completed", "conclusion": "success", "runner_id": 123,
+                "runner_name": "fixture-9700x", "labels": ["self-hosted", "9700x"],
+                "created_at": start.isoformat(), "started_at": (start + timedelta(seconds=10)).isoformat(),
+                "completed_at": (start + timedelta(seconds=40)).isoformat()}
+            self.payload = archive([(name, value, stat.S_IFREG) for name, value in files.items()])
+        def request(self, path):
+            if path.startswith("/git/commits/"):
+                revision = path.rsplit("/", 1)[1]
+                tree = {expected["base"]: expected["base_tree"], expected["head"]: expected["head_tree"]}[revision]
+                return {"sha": revision, "tree": {"sha": tree}}
+            if path.startswith("/contents/"):
+                raw = lab_bytes if "tools/uarch_lab.py" in path else protocol
+                return {"type": "file", "encoding": "base64", "size": len(raw), "content": base64.b64encode(raw).decode()}
+            if "/artifacts?" in path:
+                return {"artifacts": [{"id": 201, "name": "buster-9700x-preparation-" + authority["head"] + "-1",
+                    "expired": False, "size_in_bytes": len(self.payload), "workflow_run": {"id": 201, "head_sha": "6" * 40}}]}
+            raise AssertionError("unexpected API " + path)
+        def pages(self, path, field):
+            return [self.job]
+        def download(self, url, max_bytes=None):
+            if max_bytes != publisher.PREPARATION_ARCHIVE_LIMIT:
+                raise AssertionError("preparation download bound not selected")
+            return self.payload
+    return PreparationFixtureApi(), authority, files
+
+
+class PreparationPublicationOutcomes(unittest.TestCase):
+    def test_complete_replay_is_distinct_and_unqualified(self):
+        api, authority, files = preparation_publication_fixture()
+        result = publisher.preparation_validate(api, authority, publisher.preparation_archive(api.payload))
+        self.assertEqual(result["packet_state"], "complete-valid-research")
+        self.assertEqual(result["qualification_state"], "unqualified")
+        self.assertFalse(result["default_activated"])
+        self.assertIsNone(result["accounting"]["observation_publication_us"])
+        self.assertEqual(len(result["series"]), 5)
+        self.assertEqual(result["predeclared_controls"]["aa_families"], 3)
+        for name, value in result["series"].items():
+            if name.endswith("-aa"):
+                self.assertLessEqual(0.995, value["ci_low"])
+                self.assertGreaterEqual(1.005, value["ci_high"])
+
+    def test_raw_corruption_and_incomplete_costs_reject(self):
+        mutations = [
+            ("owner-publication.tsv", lambda raw: raw.replace(b"observation_publication_us\tunavailable", b"observation_publication_us\t0")),
+            ("owner-publication.tsv", lambda raw: raw.replace(b"observed_wall_us\t10001000", b"observed_wall_us\t10001001")),
+            ("owner.tsv", lambda raw: raw.replace(b"cancelled\t0", b"cancelled\t1")),
+            ("controller-7-legacy-snapshot-five-long-controls.argv", lambda raw: raw + b"5:retry\n"),
+            ("host.json", lambda raw: raw.replace(b"9700X", b"9800X")),
+            ("qualification/snapshot/preparation-cost.json", lambda raw: raw.replace(b'"complete_cost_available":true', b'"complete_cost_available":false')),
+            ("qualification/legacy/immutable-aa-lab/pairs.json", lambda raw: raw.replace(b'"span_s":2e-08', b'"span_s":2.1', 1)),
+            ("qualification/snapshot/cross-build-aa-throughput/metadata.json", lambda raw: raw.replace(b'"bytes":1', b'"bytes":2', 1)),
+            ("qualification/snapshot/immutable-aa-lab/summary.json", lambda raw: raw.replace(b'"bootstrap_resamples":2000', b'"bootstrap_resamples":20')),
+            ("plan.tsv", lambda raw: raw + b"invented\ttrue\n")]
+        for name, mutate in mutations:
+            api, authority, files = preparation_publication_fixture()
+            self.assertNotEqual(files[name], mutate(files[name]), name)
+            files[name] = mutate(files[name])
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                publisher.preparation_validate(api, authority, files)
+        for name in ("owner-publication.tsv", "controller-1-trusted-harness-pin-supervision.tsv",
+                     "qualification/legacy/ab-lab/pairs.json", "qualification/snapshot/immutable-aa-throughput/samples.csv",
+                     "qualification/snapshot/preparation-cost.json"):
+            api, authority, files = preparation_publication_fixture()
+            files.pop(name)
+            with self.subTest(missing=name), self.assertRaises(ValueError):
+                publisher.preparation_validate(api, authority, files)
+
+    def test_prior_attempt_and_platform_failure_cannot_be_replaced(self):
+        for case in ("history", "cancelled", "over-budget"):
+            api, authority, files = preparation_publication_fixture()
+            if case == "history":
+                authority["history"] = [{"state": "cancelled"}]
+            elif case == "cancelled":
+                api.job["conclusion"] = "cancelled"
+            else:
+                start = datetime.fromisoformat(api.job["started_at"])
+                api.job["completed_at"] = (start + timedelta(seconds=5399)).isoformat()
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                publisher.preparation_validate(api, authority, files)
+
+    def test_success_and_missing_artifact_publish_owned_terminal_checks(self):
+        for available in (True, False):
+            api, authority, files = preparation_publication_fixture()
+            with mock.patch.object(publisher, "preparation_authority", return_value=(api, authority)), \
+                    mock.patch.object(publisher, "preparation_read_artifact",
+                        side_effect=None if available else ValueError("missing raw artifact"),
+                        return_value=(files, {})), \
+                    mock.patch.object(publisher, "preparation_write",
+                        side_effect=lambda api, authority, body: dict(body, id=303)) as write:
+                code = publisher.preparation_publish({"BQ_PREPARATION_RESULT": "success"})
+            self.assertEqual(code, 0 if available else 1)
+            body = write.call_args[0][2]
+            self.assertEqual(body["conclusion"], "success" if available else "failure")
+            self.assertIn("Lifecycle protocol: preparation-terminal-native-v1.", body["output"]["summary"])
+            self.assertIn("Request run 200 attempt 1: https://github.com/buster14a/buster/actions/runs/200/attempts/1", body["output"]["summary"])
+            self.assertIn("Workflow run 201 attempt 1: https://github.com/buster14a/buster/actions/runs/201/attempts/1", body["output"]["summary"])
+            self.assertIn('"qualification_state": "unqualified"', body["output"]["text"])
+            if not available:
+                self.assertIn('"native_owner_wall_us": null', body["output"]["text"])
+
+    def test_preparation_check_does_not_share_sampling_authority(self):
+        unused_api, authority, unused_files = preparation_publication_fixture()
+        row = {"id": 303, "name": publisher.PREPARATION_CHECK_NAME, "head_sha": authority["head"],
+               "external_id": publisher.preparation_check_marker(authority), "app": {"id": 15368}, "status": "queued"}
+        self.assertTrue(publisher.preparation_owned(row, authority))
+        self.assertFalse(publisher.sampling_owned(row, dict(authority, admitted={"sampling_freeze_sha256": "f" * 64,
+            "sampling_phase": "pilot", "sampling_packet": "0"})))
+        row["external_id"] = row["external_id"].replace(":201:1", ":202:1")
+        self.assertFalse(publisher.preparation_owned(row, authority))
+
+    def test_archive_preserves_real_pair_population_and_bounds_before_read(self):
+        files = [(f"qualification/legacy/ab-lab/pairs/{index:04}-a.csv", b"", stat.S_IFREG) for index in range(2050)]
+        payload = archive(files)
+        self.assertEqual(len(publisher.preparation_archive(payload)), 2050)
+        with self.assertRaises(ValueError):
+            publisher.sampling_archive(payload)
+        with mock.patch.object(publisher, "PREPARATION_FILE_LIMIT", 2049), self.assertRaises(ValueError):
+            publisher.preparation_archive(payload)
+        with mock.patch.object(publisher, "PREPARATION_MEMBER_LIMIT", 1), self.assertRaises(ValueError):
+            publisher.preparation_archive(archive([("qualification/qualification.json", b"{}", stat.S_IFREG)]))
+        for entries in ([("../raw.csv", b"x", stat.S_IFREG)], [("raw.csv", b"x", stat.S_IFLNK)],
+                        [("raw.csv", b"x", stat.S_IFREG), ("raw.csv", b"y", stat.S_IFREG)]):
+            with self.subTest(entries=entries), self.assertRaises(ValueError):
+                publisher.preparation_archive(archive(entries))
+
+    def test_committed_trusted_root_is_path_authority(self):
+        api, authority, files = preparation_publication_fixture()
+        host = json.loads(files["host.json"])
+        host["trusted_lab"] = "/artifact-selected/tools/uarch_lab.py"
+        host["native_driver"] = "/artifact-selected/build/Debug/build"
+        files["host.json"] = json_bytes(host)
+        with self.assertRaises(ValueError):
+            publisher.preparation_validate(api, authority, files)
+
+
+    def test_predeclared_wide_aa_interval_and_net_cost_fail_with_complete_data(self):
+        api, authority, files = preparation_publication_fixture()
+        receipt, bundles = publisher.preparation_bundles(files)
+        row = bundles["legacy"]["immutable-aa"]
+        for item in row["pairs"]:
+            if item["variant"] == "b":
+                ratio = (1.02, 0.98, 0.98, 1.02)[(item["pair"] - 1) % 4]
+                item["span_s"] = 2e-8 * ratio
+        grouped = []
+        for index in range(0, len(row["pairs"]), 2):
+            members = {item["variant"]: item for item in row["pairs"][index:index + 2]}
+            grouped.append({"pair": index // 2 + 1, "order": members["a"]["order"],
+                "metrics_a": {"wall": members["a"]["span_s"]}, "metrics_b": {"wall": members["b"]["span_s"]}})
+        wall = sampling._lab.compare_series([(item["metrics_a"]["wall"], item["metrics_b"]["wall"]) for item in grouped],
+            "s", "lower", 20261003, time_metric=True, floor=0.005)
+        row["summary"]["metrics"]["wall"] = wall
+        row["summary"]["verdict"] = dict(wall, metric="wall", min_effect_percent=0.5)
+        row["summary"]["checks"] = sampling._lab.compare_checks(grouped)
+        self.assertTrue(wall["ci_low"] < 0.995 or wall["ci_high"] > 1.005)
+        with self.assertRaisesRegex(ValueError, "A/A 95% interval"):
+            publisher.preparation_series_replay(row, {"root": authority["plan"]["source_root"],
+                "base": authority["plan"]["baseline_revision"], "command": preparation.WORKLOAD_COMMAND}, True)
+        api, authority, files = preparation_publication_fixture()
+        cost = json.loads(files["qualification/snapshot/preparation-cost.json"])
+        cost["finalize_us"] += 500000
+        cost["total_us"] += 500000
+        files["qualification/snapshot/preparation-cost.json"] = json_bytes(cost)
+        receipt = json.loads(files["qualification/qualification.json"])
+        receipt["preparation_costs"]["snapshot"].update(
+            receipt_sha256=hashlib.sha256(json_bytes(cost)).hexdigest(),
+            total_us=cost["total_us"] + receipt["preparation_costs"]["snapshot"]["receipt_publication_us"])
+        files["qualification/qualification.json"] = json_bytes(receipt)
+        with self.assertRaisesRegex(ValueError, "snapshot cost"):
+            publisher.preparation_validate(api, authority, files)
+
+    def test_zip64_complete_declared_maximum_is_count_bounded(self):
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_STORED) as zipped:
+            for index in range(65536):
+                zipped.writestr(f"qualification/legacy/ab-lab/pairs/{index:05}.csv", b"")
+        payload = stream.getvalue()
+        self.assertIn(b"PK\x06\x06", payload)
+        self.assertEqual(len(publisher.preparation_archive(payload)), 65536)
+        with mock.patch.object(publisher, "PREPARATION_FILE_LIMIT", 65535), self.assertRaises(ValueError):
+            publisher.preparation_archive(payload)
+
+
+    def test_current_executor_owner_and_head_repository_are_requeried(self):
+        import authorize as direct_authorize
+        environment = {"BQ_REPOSITORY": "buster14a/buster", "BQ_HEAD_COMMIT": "7" * 40,
+            "BQ_REQUEST_RUN_ID": "200", "BQ_RUN_ID": "201", "BQ_RUN_ATTEMPT": "1", "BQ_REQUEST_ATTEMPT": "1",
+            "GITHUB_RUN_ID": "201", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_REPOSITORY": "buster14a/buster",
+            "GITHUB_SHA": "6" * 40, "GH_TOKEN": "fixture"}
+        execution = {"id": 201, "run_attempt": 1, "path": publisher.BENCH_WORKFLOW, "event": "workflow_run",
+            "head_branch": "main", "head_sha": "6" * 40,
+            "repository": {"full_name": "buster14a/buster"}, "head_repository": {"full_name": "buster14a/buster"},
+            "actor": dict(direct_authorize.MAINTAINER), "triggering_actor": dict(direct_authorize.MAINTAINER),
+            "display_title": "9700X request 200.1 head " + "7" * 40}
+        for field, value in (("actor", {"login": "someone-else", "id": 39247043}),
+                             ("actor", {"login": "davidgmbb", "id": 123}),
+                             ("triggering_actor", {"login": "someone-else", "id": 39247043}),
+                             ("triggering_actor", {"login": "davidgmbb", "id": 123}),
+                             ("head_repository", {"full_name": "fork/buster"})):
+            for function in (publisher.preparation_authority, publisher.sampling_authority):
+                api = mock.Mock()
+                api.request.return_value = dict(execution, **{field: value})
+                with self.subTest(field=field, value=value, route=function.__name__), \
+                        mock.patch.object(publisher, "Api", return_value=api), \
+                        mock.patch.object(direct_authorize, "verify", side_effect=AssertionError("request cannot replace executor proof")):
+                    with self.assertRaisesRegex(ValueError, "executor workflow provenance"):
+                        function(environment)
+                self.assertEqual(api.request.call_args_list, [mock.call("/actions/runs/201")])
+
+    def test_native_supervision_uint64_overflow_is_incomplete(self):
+        for key in ("wall_us", "adoption_waves"):
+            raw = publisher.sampling_tsv(complete_supervision())
+            raw[key] = str(1 << 64)
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                publisher.sampling_supervision(tsv_bytes(raw))
+
+    def test_preparation_native_admission_refuses_unbound_input_before_api(self):
+        with mock.patch.object(publisher, "Api", side_effect=AssertionError("API must not run")):
+            with self.assertRaises(ValueError):
+                publisher.preparation_authority({"BQ_REPOSITORY": "buster14a/buster"})
 
 
 if __name__ == "__main__":

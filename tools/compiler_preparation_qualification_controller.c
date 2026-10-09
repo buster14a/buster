@@ -458,88 +458,88 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_worker(Arena* 
 {
     ProcessResult result = PROCESS_RESULT_FAILED;
 #if BUSTER_LINUX && !BUSTER_ANDROID
-    if (!compiler_preparation_controller_claim_worker(arena, resolved))
+    bool claimed = compiler_preparation_controller_claim_worker(arena, resolved);
+    if (claimed)
     {
-        string_print(S8("error: preparation private worker claim already consumed or publication failed; retained attempt cannot retry\n"));
-        return PROCESS_RESULT_FAILED;
+        CompilerSamplingController controller = {.arena = arena, .evidence = resolved.options.evidence,
+            .started = os_now_microseconds(), .success = resolved.valid};
+        controller.plan.source_root = resolved.admitted.plan.source_root;
+        controller.deadline = controller.started + BUSTER_PREPARATION_WORKER_SECONDS * 1000000ull;
+        string8_list_push(arena, &controller.phases, S8("stage\tphase\twall_us\texit_status\ttimed_out\tcleanup_failed\tcancelled\tstate\n"));
+        CompilerSamplingSignalScope signals = {0};
+        bool deferred = compiler_sampling_signals_begin(&signals);
+        controller.success = controller.success && deferred && compiler_preparation_controller_host_receipt(arena, resolved);
+        String8 trusted_pin[] = {S8("-C"), resolved.options.trusted_root, S8("rev-parse"), S8("HEAD")};
+        compiler_preparation_controller_phase(&controller, S8("trusted-harness-pin"),
+            compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(trusted_pin)), 120000000ull);
+        controller.success = controller.success &&
+            string_equal(production_profile_trim(controller.last_output), resolved.admitted.trusted_revision);
+        String8 clone[] = {S8("clone"), S8("--no-checkout"), S8("--no-tags"),
+            S8("https://github.com/buster14a/buster.git"), resolved.admitted.plan.source_root};
+        compiler_preparation_controller_phase(&controller, S8("clone-preparation-source"),
+            compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(clone)), 120000000ull);
+        String8 fetch[] = {S8("-C"), resolved.admitted.plan.source_root, S8("fetch"), S8("--no-tags"), S8("origin"),
+            resolved.admitted.plan.baseline_revision, resolved.admitted.plan.candidate_revision};
+        compiler_preparation_controller_phase(&controller, S8("fetch-preparation-pins"),
+            compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fetch)), 120000000ull);
+        String8 base_tree = compiler_preparation_controller_tree(&controller, resolved.admitted.plan.baseline_revision, S8("baseline-tree"));
+        String8 head_tree = compiler_preparation_controller_tree(&controller, resolved.admitted.plan.candidate_revision, S8("candidate-tree"));
+        controller.success = controller.success && string_equal(base_tree, resolved.admitted.plan.baseline_tree) &&
+            string_equal(head_tree, resolved.admitted.plan.candidate_tree);
+        String8 checkout[] = {S8("-C"), resolved.admitted.plan.source_root, S8("checkout"), S8("--detach"),
+            resolved.admitted.plan.candidate_revision};
+        compiler_preparation_controller_phase(&controller, S8("candidate-checkout"),
+            compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(checkout)), 120000000ull);
+        bool tools_before = controller.success && compiler_preparation_controller_tools(arena, resolved);
+        controller.success = controller.success && tools_before;
+        String8 qualify[] = {resolved.driver, S8("compiler_closure"), S8("qualify"),
+            resolved.admitted.plan.source_root, resolved.admitted.plan.output_root,
+            resolved.admitted.plan.baseline_revision, resolved.admitted.plan.baseline_tree,
+            resolved.admitted.plan.candidate_revision, resolved.admitted.plan.candidate_tree, resolved.lab, resolved.python};
+        compiler_preparation_controller_phase(&controller, S8("legacy-snapshot-five-long-controls"),
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(qualify), BUSTER_PREPARATION_WORKER_SECONDS * 1000000ull);
+        bool tools_after = compiler_preparation_controller_tools(arena, resolved);
+        controller.success = controller.success && tools_after;
+        // Export partial proof only after the owned manager lease and all adopted
+        // descendants are quiet. Unknown cleanup retains the persistent output.
+        bool exported = !controller.cleanup_failed &&
+            generate_path_kind(arena, resolved.admitted.plan.output_root) != GENERATE_PATH_MISSING &&
+            compiler_preparation_controller_export(arena, resolved);
+        controller.success = controller.success && exported;
+        bool restored = deferred && compiler_sampling_signals_end(&signals);
+        controller.success = controller.success && restored && !compiler_sampling_controller_cancelled() &&
+            os_now_microseconds() <= controller.deadline;
+        String8 terminal = string_format(arena,
+            S8("schema\tbuster-compiler-preparation-controller-v1\nphase\tqualify\npacket\t0\nplan_sha256\t{S8}\n"
+               "process_state\t{S8}\nqualification_state\tunvalidated\ndefault_activated\tfalse\n"
+               "duration_us\t{u64}\ncleanup_proven\t{S8}\nsource_root\t{S8}\noutput_root\t{S8}\n"
+               "tools_before\t{S8}\ntools_after\t{S8}\nexported\t{S8}\n"),
+            resolved.admitted.freeze_sha256, controller.success ? S8("complete") : S8("failed"),
+            os_now_microseconds() - controller.started, controller.cleanup_failed ? S8("false") : S8("true"),
+            resolved.admitted.plan.source_root, resolved.admitted.plan.output_root,
+            tools_before ? S8("true") : S8("false"), tools_after ? S8("true") : S8("false"), exported ? S8("true") : S8("false"));
+        bool recorded = compiler_sampling_controller_flush(&controller) &&
+            file_write(path_join(arena, resolved.options.evidence, S8("preparation.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(terminal)) &&
+            file_write(path_join(arena, resolved.claim, S8("preparation.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(terminal));
+        // The outer manager also charges this publication, but the worker's own
+        // deadline must not be represented by a pre-publication success check.
+        bool within_after_publication = os_now_microseconds() <= controller.deadline;
+        if (recorded && !within_after_publication)
+        {
+            String8 failed = string_format(arena,
+                S8("schema\tbuster-compiler-preparation-controller-v1\nphase\tqualify\npacket\t0\n"
+                   "plan_sha256\t{S8}\nprocess_state\tfailed\nqualification_state\tunvalidated\n"
+                   "default_activated\tfalse\nreason\tworker-publication-overrun\nduration_us\t{u64}\n"
+                   "cleanup_proven\t{S8}\nsource_root\t{S8}\noutput_root\t{S8}\n"),
+                resolved.admitted.freeze_sha256, os_now_microseconds() - controller.started,
+                controller.cleanup_failed ? S8("false") : S8("true"),
+                resolved.admitted.plan.source_root, resolved.admitted.plan.output_root);
+            file_write(path_join(arena, resolved.options.evidence, S8("preparation.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(failed));
+            file_write(path_join(arena, resolved.claim, S8("preparation.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(failed));
+        }
+        result = controller.success && recorded && within_after_publication ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
     }
-    CompilerSamplingController controller = {.arena = arena, .evidence = resolved.options.evidence,
-        .started = os_now_microseconds(), .success = resolved.valid};
-    controller.plan.source_root = resolved.admitted.plan.source_root;
-    controller.deadline = controller.started + BUSTER_PREPARATION_WORKER_SECONDS * 1000000ull;
-    string8_list_push(arena, &controller.phases, S8("stage\tphase\twall_us\texit_status\ttimed_out\tcleanup_failed\tcancelled\tstate\n"));
-    CompilerSamplingSignalScope signals = {0};
-    bool deferred = compiler_sampling_signals_begin(&signals);
-    controller.success = controller.success && deferred && compiler_preparation_controller_host_receipt(arena, resolved);
-    String8 trusted_pin[] = {S8("-C"), resolved.options.trusted_root, S8("rev-parse"), S8("HEAD")};
-    compiler_preparation_controller_phase(&controller, S8("trusted-harness-pin"),
-        compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(trusted_pin)), 120000000ull);
-    controller.success = controller.success &&
-        string_equal(production_profile_trim(controller.last_output), resolved.admitted.trusted_revision);
-    String8 clone[] = {S8("clone"), S8("--no-checkout"), S8("--no-tags"),
-        S8("https://github.com/buster14a/buster.git"), resolved.admitted.plan.source_root};
-    compiler_preparation_controller_phase(&controller, S8("clone-preparation-source"),
-        compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(clone)), 120000000ull);
-    String8 fetch[] = {S8("-C"), resolved.admitted.plan.source_root, S8("fetch"), S8("--no-tags"), S8("origin"),
-        resolved.admitted.plan.baseline_revision, resolved.admitted.plan.candidate_revision};
-    compiler_preparation_controller_phase(&controller, S8("fetch-preparation-pins"),
-        compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fetch)), 120000000ull);
-    String8 base_tree = compiler_preparation_controller_tree(&controller, resolved.admitted.plan.baseline_revision, S8("baseline-tree"));
-    String8 head_tree = compiler_preparation_controller_tree(&controller, resolved.admitted.plan.candidate_revision, S8("candidate-tree"));
-    controller.success = controller.success && string_equal(base_tree, resolved.admitted.plan.baseline_tree) &&
-        string_equal(head_tree, resolved.admitted.plan.candidate_tree);
-    String8 checkout[] = {S8("-C"), resolved.admitted.plan.source_root, S8("checkout"), S8("--detach"),
-        resolved.admitted.plan.candidate_revision};
-    compiler_preparation_controller_phase(&controller, S8("candidate-checkout"),
-        compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(checkout)), 120000000ull);
-    bool tools_before = controller.success && compiler_preparation_controller_tools(arena, resolved);
-    controller.success = controller.success && tools_before;
-    String8 qualify[] = {resolved.driver, S8("compiler_closure"), S8("qualify"),
-        resolved.admitted.plan.source_root, resolved.admitted.plan.output_root,
-        resolved.admitted.plan.baseline_revision, resolved.admitted.plan.baseline_tree,
-        resolved.admitted.plan.candidate_revision, resolved.admitted.plan.candidate_tree, resolved.lab, resolved.python};
-    compiler_preparation_controller_phase(&controller, S8("legacy-snapshot-five-long-controls"),
-        (SliceString8)BUSTER_ARRAY_TO_SLICE(qualify), BUSTER_PREPARATION_WORKER_SECONDS * 1000000ull);
-    bool tools_after = compiler_preparation_controller_tools(arena, resolved);
-    controller.success = controller.success && tools_after;
-    // Export partial proof only after the owned manager lease and all adopted
-    // descendants are quiet. Unknown cleanup retains the persistent output.
-    bool exported = !controller.cleanup_failed &&
-        generate_path_kind(arena, resolved.admitted.plan.output_root) != GENERATE_PATH_MISSING &&
-        compiler_preparation_controller_export(arena, resolved);
-    controller.success = controller.success && exported;
-    bool restored = deferred && compiler_sampling_signals_end(&signals);
-    controller.success = controller.success && restored && !compiler_sampling_controller_cancelled() &&
-        os_now_microseconds() <= controller.deadline;
-    String8 terminal = string_format(arena,
-        S8("schema\tbuster-compiler-preparation-controller-v1\nphase\tqualify\npacket\t0\nplan_sha256\t{S8}\n"
-           "process_state\t{S8}\nqualification_state\tunvalidated\ndefault_activated\tfalse\n"
-           "duration_us\t{u64}\ncleanup_proven\t{S8}\nsource_root\t{S8}\noutput_root\t{S8}\n"
-           "tools_before\t{S8}\ntools_after\t{S8}\nexported\t{S8}\n"),
-        resolved.admitted.freeze_sha256, controller.success ? S8("complete") : S8("failed"),
-        os_now_microseconds() - controller.started, controller.cleanup_failed ? S8("false") : S8("true"),
-        resolved.admitted.plan.source_root, resolved.admitted.plan.output_root,
-        tools_before ? S8("true") : S8("false"), tools_after ? S8("true") : S8("false"), exported ? S8("true") : S8("false"));
-    bool recorded = compiler_sampling_controller_flush(&controller) &&
-        file_write(path_join(arena, resolved.options.evidence, S8("preparation.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(terminal)) &&
-        file_write(path_join(arena, resolved.claim, S8("preparation.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(terminal));
-    // The outer manager also charges this publication, but the worker's own
-    // deadline must not be represented by a pre-publication success check.
-    bool within_after_publication = os_now_microseconds() <= controller.deadline;
-    if (recorded && !within_after_publication)
-    {
-        String8 failed = string_format(arena,
-            S8("schema\tbuster-compiler-preparation-controller-v1\nphase\tqualify\npacket\t0\n"
-               "plan_sha256\t{S8}\nprocess_state\tfailed\nqualification_state\tunvalidated\n"
-               "default_activated\tfalse\nreason\tworker-publication-overrun\nduration_us\t{u64}\n"
-               "cleanup_proven\t{S8}\nsource_root\t{S8}\noutput_root\t{S8}\n"),
-            resolved.admitted.freeze_sha256, os_now_microseconds() - controller.started,
-            controller.cleanup_failed ? S8("false") : S8("true"),
-            resolved.admitted.plan.source_root, resolved.admitted.plan.output_root);
-        file_write(path_join(arena, resolved.options.evidence, S8("preparation.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(failed));
-        file_write(path_join(arena, resolved.claim, S8("preparation.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(failed));
-    }
-    result = controller.success && recorded && within_after_publication ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    else string_print(S8("error: preparation private worker claim already consumed or publication failed; retained attempt cannot retry\n"));
 #else
     BUSTER_UNUSED(arena); BUSTER_UNUSED(resolved);
 #endif

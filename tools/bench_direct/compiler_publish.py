@@ -751,16 +751,16 @@ def sampling_supervision(data: bytes) -> dict:
             row["cleanup_proven"] != "true" or row["adopted_signalled"] != "0" or row["adopted_reaped"] != "0":
         raise ValueError("sampling phase cleanup is absent, uncertain or adopted unexpected children")
     for key in ("wall_us", "adoption_waves"):
-        if not re.fullmatch(r"0|[1-9][0-9]{0,19}", row[key]):
-            raise ValueError("sampling supervision duration or wave count is malformed")
+        sampling_integer(row[key])
     if int(row["wall_us"]) <= 0:
         raise ValueError("sampling supervision duration is unavailable")
     return row
 
 
-def sampling_job_accounting(job: object, native_wall_us: int, reservation_seconds: int) -> dict:
+def sampling_job_accounting(job: object, native_wall_us: int, reservation_seconds: int, *,
+                            job_name: str = SAMPLING_HOST_JOB) -> dict:
     """Charge the complete physical job, including checkout/upload/cleanup."""
-    if not isinstance(job, dict) or job.get("name") != SAMPLING_HOST_JOB or \
+    if not isinstance(job, dict) or job.get("name") != job_name or \
             job.get("status") != "completed" or job.get("conclusion") != "success" or \
             type(native_wall_us) is not int or native_wall_us <= 0 or \
             type(reservation_seconds) is not int or reservation_seconds <= 0:
@@ -808,6 +808,9 @@ def sampling_authority(environment: dict) -> tuple[Api, dict]:
             execution.get("run_attempt") != 1 or execution.get("path") != BENCH_WORKFLOW or \
             execution.get("event") != "workflow_run" or execution.get("head_branch") != "main" or \
             not isinstance(execution.get("repository"), dict) or execution["repository"].get("full_name") != repository or \
+            direct_authorize.full_name(execution.get("head_repository")) != repository or \
+            direct_authorize.identity(execution.get("actor")) != direct_authorize.MAINTAINER or \
+            direct_authorize.identity(execution.get("triggering_actor")) != direct_authorize.MAINTAINER or \
             execution.get("head_sha") != environment.get("GITHUB_SHA"):
         raise ValueError("sampling executor workflow provenance is unavailable")
     request = api.request(f"/actions/runs/{request_id}")
@@ -1207,8 +1210,10 @@ def sampling_acquisition(authority: dict, files: dict[str, bytes], context: dict
               "protocol_sha256": plan["protocol_sha256"], "prepared_sha256": prepared["sha256"],
               "reservation_seconds": "1800", "process_state": "complete", "qualification_state": "unvalidated"}
     digests = {"lab_sha256", "python_sha256", "driver_sha256"}
-    if set(row) != set(wanted) | digests | {"python_path"} or not absolute(row.get("python_path")) or \
+    if set(row) != set(wanted) | digests | {"python_path", "trusted_root"} or not absolute(row.get("python_path")) or \
             len(row["python_path"]) > 256 or any(ord(char) < 33 or ord(char) > 126 or char == "\\" for char in row["python_path"]) or \
+            not absolute(row.get("trusted_root")) or len(row["trusted_root"]) > 256 or \
+            any(ord(char) < 33 or ord(char) > 126 or char == "\\" for char in row["trusted_root"]) or \
             any(row.get(key) != value for key, value in wanted.items()) or \
             any(not re.fullmatch(r"[a-f0-9]{64}", row.get(key, "")) for key in digests) or \
             any(name == "identity.tsv" or name == "attempts.tsv" or name.startswith("trial-") or name.startswith("throughput/")
@@ -1440,7 +1445,7 @@ def sampling_validate(api: Api, authority: dict, files: dict[str, bytes]) -> dic
                   authenticated_attempt_history=history, host=host,
                   platform_runner={key: job.get(key) for key in ("id", "runner_id", "runner_name", "runner_group_id", "runner_group_name", "labels")},
                   acquisition_campaign=context["sha256"], acquisition_revision=context["revision"],
-                  acquired_runtime={key: acquired[key] for key in ("python_path", "python_sha256", "lab_sha256", "driver_sha256")},
+                  acquired_runtime={key: acquired[key] for key in ("python_path", "trusted_root", "python_sha256", "lab_sha256", "driver_sha256")},
                   prepared_sha256=prepared["sha256"],
                   acquisition_preparation_costs=sampling_json(files, "prepared/preparation-cost.json"),
                   acquired_binaries={role: {"sha256": prepared["record"][role + "_sha256"],
@@ -1530,12 +1535,651 @@ def sampling_publish(environment: dict) -> int:
 
 
 
+# Distinct preparation research remains disabled until its reviewed native
+# admission admits the sole predeclared request. These are API/data adapters,
+# not a second preparation controller: artifact bytes never become commands.
+PREPARATION_CHECK_NAME = "9700X compiler preparation research"
+PREPARATION_HOST_JOB = "Compiler preparation qualification"
+PREPARATION_ARCHIVE_LIMIT = 2 << 30
+PREPARATION_MEMBER_LIMIT = 8 << 20
+PREPARATION_FILE_LIMIT = 65536
+
+
+def preparation_authority(environment: dict) -> tuple[Api, dict]:
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    import authorize as direct_authorize
+    repository, head = environment.get("BQ_REPOSITORY", ""), environment.get("BQ_HEAD_COMMIT", "")
+    request_id, run_id = environment.get("BQ_REQUEST_RUN_ID", ""), environment.get("BQ_RUN_ID", "")
+    if repository != "buster14a/buster" or not SHA.fullmatch(head) or \
+            any(not DECIMAL.fullmatch(value) for value in (request_id, run_id)) or \
+            environment.get("BQ_RUN_ATTEMPT") != "1" or environment.get("BQ_REQUEST_ATTEMPT") != "1" or \
+            environment.get("GITHUB_RUN_ID") != run_id or environment.get("GITHUB_RUN_ATTEMPT") != "1" or \
+            environment.get("GITHUB_REPOSITORY") != repository or not environment.get("GH_TOKEN"):
+        raise ValueError("preparation publication lacks exact trusted workflow inputs")
+    api = Api(repository, environment["GH_TOKEN"])
+    execution = api.request(f"/actions/runs/{run_id}")
+    if not isinstance(execution, dict) or str(execution.get("id")) != run_id or \
+            execution.get("run_attempt") != 1 or execution.get("path") != BENCH_WORKFLOW or \
+            execution.get("event") != "workflow_run" or execution.get("head_branch") != "main" or \
+            not isinstance(execution.get("repository"), dict) or execution["repository"].get("full_name") != repository or \
+            direct_authorize.full_name(execution.get("head_repository")) != repository or \
+            direct_authorize.identity(execution.get("actor")) != direct_authorize.MAINTAINER or \
+            direct_authorize.identity(execution.get("triggering_actor")) != direct_authorize.MAINTAINER or \
+            execution.get("head_sha") != environment.get("GITHUB_SHA") or \
+            execution.get("display_title") != f"9700X request {request_id}.1 head {head}":
+        raise ValueError("preparation executor workflow provenance is unavailable")
+    request = api.request(f"/actions/runs/{request_id}")
+    pulls = api.request(f"/commits/{head}/pulls?per_page=100")
+    problems, unused_base = direct_authorize.verify(repository, int(request_id), head, request, pulls)
+    if problems:
+        raise ValueError("preparation request ownership failed: " + ", ".join(problems))
+    commit = api.request(f"/commits/{head}")
+    parents = commit.get("parents") if isinstance(commit, dict) else None
+    if not isinstance(parents, list) or not 1 <= len(parents) <= 2 or any(
+            not isinstance(row, dict) or not SHA.fullmatch(str(row.get("sha", ""))) for row in parents):
+        raise ValueError("preparation request has an unsupported parent inventory")
+    compared = [api.request(f"/compare/{row['sha']}...{head}") for row in parents]
+    marker = direct_authorize.sampling_content(repository, direct_authorize.COMPARE_REQUEST, head, environment["GH_TOKEN"])
+    selected = direct_authorize.preparation_fresh_selector(marker, compared)
+    if selected is None:
+        raise ValueError("preparation selector is not fresh against every Git parent")
+    pull = next(row for row in pulls if isinstance(row, dict) and row.get("state") == "open" and
+                isinstance(row.get("head"), dict) and row["head"].get("sha") == head)
+    root = Path(__file__).resolve().parents[2]
+    with tempfile.TemporaryDirectory(prefix="preparation-publication-") as temporary:
+        directory = Path(temporary) / "admission"
+        if not direct_authorize.preparation_data(repository, environment["GH_TOKEN"], request, pull, head, "1",
+                                                marker, compared, directory):
+            raise ValueError("preparation native admission data is unavailable")
+        output = directory / "admitted.env"
+        cleanup, workspace = environment.get("RUNNER_TEMP"), environment.get("GITHUB_WORKSPACE")
+        if not cleanup or not workspace:
+            raise ValueError("preparation hosted cleanup roots are unavailable")
+        command = [str(root / "build.sh"), "compiler_profile_qualification", "--admit-preparation",
+                   *(str(directory / name) for name in ("allowlist.tsv", "request.txt", "facts.tsv", "history.tsv", "plan.tsv")),
+                   cleanup, workspace, str(output)]
+        child_environment = {key: value for key, value in environment.items() if key not in ("GH_TOKEN", "GITHUB_TOKEN")}
+        try:
+            result = subprocess.run(command, cwd=root, env=child_environment, timeout=120, check=False,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired as error:
+            raise ValueError("trusted native preparation admission exceeded its bounded hosted pass") from error
+        if result.returncode != 0 or not output.is_file() or output.stat().st_size > 16384:
+            raise ValueError("trusted native preparation admission refused publication")
+        admitted = {}
+        for line in output.read_text(encoding="ascii").splitlines():
+            key, separator, value = line.partition("=")
+            if not separator or not re.fullmatch(r"preparation_[a-z][a-z0-9_]*", key) or key in admitted or not value or \
+                    any(ord(char) < 32 or ord(char) > 126 for char in value):
+                raise ValueError("native preparation admission output is ambiguous")
+            admitted[key] = value
+        names = ("phase", "packet", "family", "reservation_seconds", "worker_seconds", "timeout_minutes",
+                 "plan_revision", "plan_sha256", "protocol_sha256", "base", "base_tree",
+                 "candidate_revision", "candidate_tree", "trusted_revision")
+        if set(admitted) != {"preparation_admitted", *("preparation_" + name for name in names)} or \
+                admitted.get("preparation_admitted") != "true" or any(
+                    admitted["preparation_" + name] != environment.get("BQ_PREPARATION_" + name.upper()) for name in names):
+            raise ValueError("preparation identity contradicts freshly repeated native admission")
+        raw = {name: (directory / name).read_bytes() for name in
+               ("request.txt", "plan.tsv", "allowlist.tsv", "facts.tsv", "history.tsv")}
+        if hashlib.sha256(raw["plan.tsv"]).hexdigest() != admitted["preparation_plan_sha256"]:
+            raise ValueError("committed preparation plan differs from native admission digest")
+        authority = {"admitted": admitted, "plan": sampling_tsv(raw["plan.tsv"]), "raw": raw,
+                     "history": sampling_tsv(raw["history.tsv"], True), "facts": sampling_tsv(raw["facts.tsv"]),
+                     "request": request, "executor": execution, "request_line": selected[0],
+                     "repository": repository, "head": head, "request_id": request_id, "run_id": run_id}
+    return api, authority
+
+
+def preparation_check_marker(authority: dict) -> str:
+    return ("buster-compiler-preparation-v1:" + authority["admitted"]["preparation_plan_sha256"] +
+            ":qualify:0:" + authority["request_id"] + ":" + authority["run_id"] + ":1")
+
+
+def preparation_owned(row: object, authority: dict) -> bool:
+    from compiler_github import GITHUB_ACTIONS_APP_ID
+    return isinstance(row, dict) and type(row.get("id")) is int and row["id"] > 0 and \
+        row.get("name") == PREPARATION_CHECK_NAME and row.get("head_sha") == authority["head"] and \
+        row.get("external_id") == preparation_check_marker(authority) and isinstance(row.get("app"), dict) and \
+        row["app"].get("id") == GITHUB_ACTIONS_APP_ID and row.get("status") in ("queued", "in_progress", "completed")
+
+
+def preparation_checks(api: Api, authority: dict) -> list[dict]:
+    from compiler_github import GITHUB_ACTIONS_APP_ID
+    query = urllib.parse.urlencode({"check_name": PREPARATION_CHECK_NAME, "filter": "all", "app_id": GITHUB_ACTIONS_APP_ID})
+    rows = api.pages(f"/commits/{authority['head']}/check-runs?{query}", "check_runs")
+    owned = [row for row in rows if preparation_owned(row, authority)]
+    if len(owned) > 1:
+        raise ValueError("preparation attempt has duplicate owned checks")
+    return owned
+
+
+def preparation_write(api: Api, authority: dict, fields: dict) -> dict:
+    from compiler_github import write_check
+    rows = preparation_checks(api, authority)
+    if rows:
+        return write_check(api, rows[0], fields)
+    body = dict(fields, name=PREPARATION_CHECK_NAME, head_sha=authority["head"],
+                external_id=preparation_check_marker(authority))
+    try:
+        written = write_check(api, None, body)
+        if preparation_owned(written, authority):
+            return written
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        pass
+    rows = preparation_checks(api, authority)
+    if len(rows) != 1:
+        raise ValueError("preparation check creation is ambiguous; no duplicate write or host work authorized")
+    return rows[0]
+
+
+def preparation_summary(authority: dict) -> str:
+    return ("Unqualified preparation research; default preparation remains disabled.\n\n"
+            "Lifecycle protocol: preparation-terminal-native-v1.\n"
+            "Phase qualify, packet 0; whole physical-job reservation 5400 seconds.\n\n" +
+            f"Request run {authority['request_id']} attempt 1: {run_url(authority['repository'], authority['request_id'], '1')}\n" +
+            f"Workflow run {authority['run_id']} attempt 1: {run_url(authority['repository'], authority['run_id'], '1')}\n")
+
+
+def preparation_queue(environment: dict) -> int:
+    api, authority = preparation_authority(environment)
+    row = preparation_write(api, authority, {"status": "queued",
+        "details_url": run_url(authority["repository"], authority["run_id"], "1"),
+        "output": {"title": "Queued unqualified preparation research", "summary": preparation_summary(authority)}})
+    if row.get("status") != "queued":
+        raise ValueError("preparation queue is already running or terminal; no new physical assignment authorized")
+    print(f"COMPILER_PREPARATION_QUEUED check={row.get('id')} state={row.get('status')} qualification=unqualified")
+    return 0
+
+
+def preparation_archive(payload: bytes) -> dict[str, bytes]:
+    """Bound ZIP/ZIP64 counts before allocation; retain every regular raw member."""
+    import struct
+    import zlib
+    try:
+        if not isinstance(payload, bytes) or not 0 < len(payload) <= PREPARATION_ARCHIVE_LIMIT:
+            raise ValueError("preparation archive is missing or oversized")
+        end = payload.rfind(b"PK\x05\x06", max(0, len(payload) - 65557))
+        if end < 0 or end + 22 > len(payload):
+            raise ValueError("preparation archive has no bounded ZIP directory")
+        signature, disk, directory_disk, disk_count, count, size, offset, comment = struct.unpack_from("<4s4H2LH", payload, end)
+        directory_end = end
+        if signature != b"PK\x05\x06" or disk or directory_disk or end + 22 + comment != len(payload):
+            raise ValueError("preparation ZIP is multipart or has trailing bytes")
+        if size == 0xffffffff or offset == 0xffffffff:
+            raise ValueError("preparation ZIP64 sizes/offsets exceed the declared archive bound")
+        if count == 0xffff or disk_count == 0xffff:
+            if end < 20:
+                raise ValueError("preparation ZIP64 locator is missing")
+            magic, zip_disk, record_offset, disks = struct.unpack_from("<4sLQL", payload, end - 20)
+            if magic != b"PK\x06\x07" or zip_disk or disks != 1 or record_offset + 56 != end - 20:
+                raise ValueError("preparation ZIP64 locator is malformed")
+            fields = struct.unpack_from("<4sQ2H2L4Q", payload, record_offset)
+            if fields[0] != b"PK\x06\x06" or fields[1] != 44 or fields[4] or fields[5] or fields[6] != fields[7]:
+                raise ValueError("preparation ZIP64 directory is multipart or unsupported")
+            if fields[8] != size or fields[9] != offset:
+                raise ValueError("preparation ZIP64 count record changes the bounded directory")
+            disk_count, count = fields[6:8]
+            directory_end = record_offset
+        if disk_count != count or not 0 < count <= PREPARATION_FILE_LIMIT + 128 or size > 32 << 20 or \
+                offset + size != directory_end:
+            raise ValueError("preparation ZIP directory exceeds its complete bounded population")
+        result, aliases, expanded = {}, set(), 0
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            entries = archive.infolist()
+            if len(entries) != count:
+                raise ValueError("preparation ZIP entry count differs from directory")
+            for entry in entries:
+                name = entry.filename
+                alias = member_identity(name)
+                components = name.rstrip("/").split("/")
+                if not name or len(name) > 512 or "\\" in name or name.startswith("/") or \
+                        any(part in ("", ".", "..") for part in components) or \
+                        any(ord(char) < 32 or ord(char) > 126 for char in name) or alias in aliases:
+                    raise ValueError("preparation ZIP has an unsafe or duplicate member")
+                aliases.add(alias)
+                kind = stat.S_IFMT(entry.external_attr >> 16)
+                if entry.flag_bits & 1 or entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) or \
+                        kind not in ((0, stat.S_IFDIR) if entry.is_dir() else (0, stat.S_IFREG)):
+                    raise ValueError("preparation ZIP has an encrypted or nonregular member")
+                if entry.is_dir():
+                    if entry.file_size:
+                        raise ValueError("preparation ZIP directory carries data")
+                    continue
+                expanded += entry.file_size
+                if len(result) >= PREPARATION_FILE_LIMIT or not 0 <= entry.file_size <= PREPARATION_MEMBER_LIMIT or \
+                        expanded > PREPARATION_ARCHIVE_LIMIT:
+                    raise ValueError("preparation ZIP exceeds its raw file/member/total bound")
+                raw = archive.read(entry)
+                if len(raw) != entry.file_size:
+                    raise ValueError("preparation ZIP member length differs from directory")
+                result[name] = raw
+        return result
+    except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, struct.error) as error:
+        raise ValueError("preparation archive compression or directory data is corrupt") from error
+
+
+def preparation_read_artifact(api: Api, authority: dict) -> tuple[dict[str, bytes], dict]:
+    name = "buster-9700x-preparation-" + authority["head"] + "-1"
+    listing = api.request(f"/actions/runs/{authority['run_id']}/artifacts?" +
+                          urllib.parse.urlencode({"name": name, "per_page": 10}))
+    rows = listing.get("artifacts") if isinstance(listing, dict) else None
+    if not isinstance(rows, list) or len(rows) >= 10:
+        raise ValueError("preparation artifact inventory is unavailable or capped")
+    matches = [row for row in rows if isinstance(row, dict) and row.get("name") == name]
+    if len(matches) != 1:
+        raise ValueError("preparation attempt has no unique evidence artifact")
+    row = matches[0]
+    origin = row.get("workflow_run")
+    if type(row.get("id")) is not int or row["id"] <= 0 or row.get("expired") is not False or \
+            type(row.get("size_in_bytes")) is not int or not 0 < row["size_in_bytes"] <= PREPARATION_ARCHIVE_LIMIT or \
+            not isinstance(origin, dict) or str(origin.get("id")) != authority["run_id"] or \
+            origin.get("head_sha") != authority["executor"].get("head_sha"):
+        raise ValueError("preparation artifact is expired, oversized or belongs to another executor")
+    return preparation_archive(api.download(api.prefix + f"/actions/artifacts/{row['id']}/zip", max_bytes=PREPARATION_ARCHIVE_LIMIT)), row
+
+
+def preparation_expected(api: Api, authority: dict, files: dict[str, bytes]) -> tuple[dict, dict]:
+    from pathlib import Path
+    from compiler_preparation import absolute
+    from sampling_qualification_receipt import _lab
+    plan, admitted = authority["plan"], authority["admitted"]
+    expected = {"base": plan["baseline_revision"], "base_tree": plan["baseline_tree"],
+                "head": plan["candidate_revision"], "head_tree": plan["candidate_tree"],
+                "root": plan["source_root"], "output": plan["output_root"],
+                "python": plan["python_path"], "python_sha256": plan["python_sha256"],
+                "trusted_lab_sha256": plan["lab_sha256"],
+                "trusted_lab": plan["trusted_root"] + "/tools/uarch_lab.py"}
+    for role in ("base", "head"):
+        row = api.request("/git/commits/" + expected[role])
+        if not isinstance(row, dict) or row.get("sha") != expected[role] or \
+                not isinstance(row.get("tree"), dict) or row["tree"].get("sha") != expected[role + "_tree"]:
+            raise ValueError("preparation immutable GitHub source tree contradicts the committed plan")
+    for path, key in (("tools/uarch_lab.py", "lab_sha256"),
+                      ("docs/compiler-preparation-qualification-v1.md", "protocol_sha256")):
+        row = api.request("/contents/" + path + "?ref=" + plan["trusted_revision"])
+        if not isinstance(row, dict) or row.get("type") != "file" or row.get("encoding") != "base64" or \
+                type(row.get("size")) is not int or not 0 < row["size"] <= 1024 * 1024 or not isinstance(row.get("content"), str):
+            raise ValueError("preparation trusted source is missing or oversized")
+        raw = base64.b64decode(row["content"].replace("\n", ""), validate=True)
+        if len(raw) != row["size"] or hashlib.sha256(raw).hexdigest() != plan[key]:
+            raise ValueError("preparation trusted source differs from its predeclared identity")
+    raw_lab = Path(_lab.__file__).read_bytes()
+    if not 0 < len(raw_lab) <= 1024 * 1024 or hashlib.sha256(raw_lab).hexdigest() != plan["lab_sha256"]:
+        raise ValueError("preparation statistical replay module differs from the committed trusted lab source")
+    host = sampling_json(files, "host.json")
+    wanted = {"schema": "buster-compiler-preparation-host-v1", "state": "complete",
+              "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor", "observed_from": "/proc/cpuinfo",
+              "request_head": authority["head"], "run_id": authority["run_id"], "run_attempt": "1",
+              "request_run_id": authority["request_id"], "measurement_trusted_revision": plan["trusted_revision"],
+              "policy_trusted_revision": authority["executor"]["head_sha"],
+              "plan_revision": admitted["preparation_plan_revision"], "plan_sha256": admitted["preparation_plan_sha256"],
+              "protocol_sha256": plan["protocol_sha256"], "trusted_lab_sha256": plan["lab_sha256"],
+              "python": plan["python_path"], "python_sha256": plan["python_sha256"],
+              "native_driver_sha256": plan["native_driver_sha256"], "trusted_lab": expected["trusted_lab"]}
+    if set(host) != set(wanted) | {"logical_processor_records", "native_driver"} or \
+            any(type(host.get(key)) is not type(value) or host.get(key) != value for key, value in wanted.items()) or \
+            type(host.get("logical_processor_records")) is not int or not 0 < host["logical_processor_records"] <= 4096 or \
+            not absolute(host.get("trusted_lab")) or not host["trusted_lab"].endswith("/tools/uarch_lab.py") or \
+            not absolute(host.get("native_driver")):
+        raise ValueError("preparation actual host/tool observation or workflow bindings are incomplete")
+    trusted_root = plan["trusted_root"]
+    if not absolute(trusted_root) or not host["native_driver"].startswith(trusted_root + "/"):
+        raise ValueError("preparation native driver is outside the pinned trusted harness")
+    return expected, host
+
+
+def preparation_bundles(files: dict[str, bytes]) -> tuple[dict, dict]:
+    from compiler_preparation import SERIES
+    receipt = sampling_json(files, "qualification/qualification.json")
+    bundles = {}
+    for arm in ("legacy", "snapshot"):
+        prefix = "qualification/" + arm + "/"
+        immediate = {name[len(prefix):]: raw for name, raw in files.items()
+                     if name.startswith(prefix) and "/" not in name[len(prefix):]}
+        prepared = sampling_json(files, prefix + "prepared.json")
+        bundle = {"prepared": prepared, "manifest": immediate.get("prepared.manifest.tsv"),
+                  "workload": immediate.get("prepared.workload.tsv"), "ledger": immediate.get("phases.tsv"), "files": immediate}
+        if arm == "snapshot":
+            bundle["closure"] = {op: sampling_json(files, prefix + "closure-" + op + ".json")
+                                 for op in ("snapshot", "restore", "verify")}
+            bundle["closure_manifests"] = {op: immediate.get("closure-" + op + ".json.manifest.tsv")
+                                          for op in bundle["closure"]}
+        for member, name, unused_same_source in SERIES:
+            if member == arm:
+                lab, corpus = prefix + name + "-lab/", prefix + name + "-throughput/"
+                bundle[name] = {"lab": sampling_json(files, lab + "compare.json"),
+                                "summary": sampling_json(files, lab + "summary.json"),
+                                "pairs": sampling_json(files, lab + "pairs.json", False),
+                                "throughput": sampling_json(files, corpus + "summary.json"),
+                                "metadata": sampling_json(files, corpus + "metadata.json")}
+                # Preserve data from every declared stream, including empty
+                # command/error logs. No summary can stand in for missing raw.
+                for suffix in ("a/lab.json", "b/lab.json"):
+                    sampling_json(files, lab + suffix)
+                for suffix in ("samples.csv", "telemetry.csv", "jobs.tsv", "commands.jsonl", "capabilities.jsonl", "complete.txt"):
+                    raw = files.get(corpus + suffix)
+                    if not isinstance(raw, bytes) or len(raw) > PREPARATION_MEMBER_LIMIT:
+                        raise ValueError("preparation complete corpus raw log/marker is missing")
+        bundles[arm] = bundle
+    return receipt, bundles
+
+
+def preparation_series_replay(row: dict, expected: dict, same_source: bool) -> dict:
+    """Use the trusted historical statistics on independently retained pairs."""
+    from sampling_qualification_receipt import _lab
+    raw, summary, pairs = row["lab"], row["summary"], row["pairs"]
+    plan = raw.get("plan")
+    count = plan.get("pairs") if isinstance(plan, dict) else None
+    if type(count) is not int or not 10 <= count <= 1000 or count % 2 or not isinstance(pairs, list) or len(pairs) != count * 2:
+        raise ValueError("preparation raw paired population is incomplete or exceeds the immutable profile")
+    if summary.get("plan") != dict(plan, seed=20261003, confidence=0.95, bootstrap_resamples=2000,
+                                  complete_pairs=count, fresh_copy=True) or \
+            summary.get("cpu") != 2 or summary.get("command") != expected["command"] or \
+            summary.get("repo_root") != expected["root"] or \
+            summary.get("steps") != {"env": "ok", "prepare": "ok", "timed": "ok"}:
+        raise ValueError("preparation raw inference/count/workload settings differ from the saved summary")
+    steps = raw.get("steps")
+    if not isinstance(steps, dict) or set(steps) != {"env", "prepare", "timed"} or any(
+            not isinstance(step, dict) or step.get("status") != "ok" for step in steps.values()):
+        raise ValueError("preparation raw comparison has incomplete required steps")
+    host = summary.get("host")
+    if not isinstance(host, dict) or host.get("cpu_model") != "AMD Ryzen 7 9700X 8-Core Processor" or \
+            host.get("git_revision") != expected["base"]:
+        raise ValueError("preparation measured lab host or workload source revision changed")
+    for role in ("baseline", "candidate"):
+        item = summary.get(role)
+        if not isinstance(item, dict) or item.get("runs") != count or item.get("identical_runs") != count:
+            raise ValueError("preparation deterministic-output counts do not cover every declared pair")
+    grouped = []
+    for index in range(count):
+        order = "AB" if (index + 1) % 2 else "BA"
+        members = {}
+        for item, variant in zip(pairs[index * 2:index * 2 + 2], order.lower()):
+            if not isinstance(item, dict) or item.get("pair") != index + 1 or item.get("order") != order or \
+                    item.get("variant") != variant or type(item.get("exit")) is not int or item["exit"] != 0 or \
+                    item.get("identical") is not True or type(item.get("span_s")) not in (int, float) or \
+                    not 1e-9 <= item["span_s"] <= 3600:
+                raise ValueError("preparation raw pairs are missing, failed, unordered or non-deterministic")
+            members[variant] = item
+        grouped.append({"pair": index + 1, "order": order, "metrics_a": {"wall": members["a"]["span_s"]},
+                        "metrics_b": {"wall": members["b"]["span_s"]}})
+    wall = _lab.compare_series([(pair["metrics_a"]["wall"], pair["metrics_b"]["wall"]) for pair in grouped],
+                               "s", "lower", 20261003, time_metric=True, floor=0.005)
+    verdict = summary.get("verdict")
+    metrics = summary.get("metrics")
+    if not isinstance(verdict, dict) or verdict.get("n") != count or verdict.get("min_effect_percent") != 0.5 or \
+            any(verdict.get(key) != wall.get(key) for key in
+                ("ratio", "ci_low", "ci_high", "ci_coverage", "change_percent", "outcome")) or \
+            not isinstance(metrics, dict) or metrics.get("wall") != wall or \
+            summary.get("checks") != _lab.compare_checks(grouped) or \
+            any(check.get("checked") is not True or check.get("flag") is not False for check in summary["checks"].values()):
+        raise ValueError("preparation summary contradicts independently reconstructed wall evidence")
+    if same_source and not 0.995 <= wall["ci_low"] <= 1 <= wall["ci_high"] <= 1.005:
+        raise ValueError("preparation predeclared same-source A/A 95% interval lies outside [0.995,1.005]")
+    return {"complete_pairs": count, "observed_timed_wall_us": sum(item["span_s"] for item in pairs) * 1000000,
+            "ratio": wall["ratio"], "ci_low": wall["ci_low"],
+            "ci_high": wall["ci_high"], "outcome": wall["outcome"], "phase_metrics": summary.get("phase_metrics"),
+            "counters": summary.get("counters"), "phases": summary.get("phases")}
+
+
+def preparation_phase_proofs(authority: dict, files: dict[str, bytes], expected: dict, host: dict) -> tuple[dict, dict, dict]:
+    from compiler_preparation import parse_argv
+    plan_sha = authority["admitted"]["preparation_plan_sha256"]
+    owner_raw = files.get("owner.tsv")
+    owner = sampling_tsv(owner_raw)
+    wanted = {"schema": "buster-compiler-preparation-owner-v1", "phase": "qualify", "packet": "0", "plan_sha256": plan_sha,
+              "wall_scope": "entry-through-child-cleanup-before-terminal-publication", "process_state": "complete",
+              "timed_out": "0", "cleanup_failed": "0", "within_reservation": "true", "cancelled": "0",
+              "qualification_state": "unvalidated", "default_activated": "false"}
+    if set(owner) != set(wanted) | {"physical_packet_wall_us"} or any(owner.get(key) != value for key, value in wanted.items()):
+        raise ValueError("preparation owned worker is failed, cancelled, exhausted or incomplete")
+    owner_wall = sampling_integer(owner["physical_packet_wall_us"], True)
+    publication = sampling_tsv(files.get("owner-publication.tsv"))
+    pub_wanted = {"schema": "buster-compiler-preparation-owner-publication-v1",
+                  "owner_sha256": hashlib.sha256(owner_raw).hexdigest(), "scope": "entry-through-owner-publication",
+                  "observation_publication_us": "unavailable", "within_reservation": "true"}
+    if set(publication) != set(pub_wanted) | {"initial_scope_us", "publication_us", "observed_wall_us"} or \
+            any(publication.get(key) != value for key, value in pub_wanted.items()):
+        raise ValueError("preparation owner publication observation is missing or falsely assigns its final tail")
+    initial = sampling_integer(publication["initial_scope_us"], True)
+    pub_us = sampling_integer(publication["publication_us"])
+    observed_wall = sampling_integer(publication["observed_wall_us"], True)
+    if initial != owner_wall or observed_wall != owner_wall + pub_us or observed_wall > 5400 * 1000000:
+        raise ValueError("preparation owner and publication whole-operation clock accounting contradict")
+    terminal = sampling_tsv(files.get("preparation.tsv"))
+    term_wanted = {"schema": "buster-compiler-preparation-controller-v1", "phase": "qualify", "packet": "0",
+                   "plan_sha256": plan_sha, "process_state": "complete", "qualification_state": "unvalidated",
+                   "default_activated": "false", "cleanup_proven": "true", "source_root": expected["root"],
+                   "output_root": expected["output"], "tools_before": "true", "tools_after": "true", "exported": "true"}
+    if set(terminal) != set(term_wanted) | {"duration_us"} or any(terminal.get(key) != value for key, value in term_wanted.items()):
+        raise ValueError("preparation native control/source/tool/export proof is incomplete")
+    duration = sampling_integer(terminal["duration_us"], True)
+    if duration > owner_wall or duration > 5280 * 1000000:
+        raise ValueError("preparation worker exceeds its reserved native clock")
+    phases = sampling_tsv(files.get("controller.tsv"), True)
+    trusted_root = host["trusted_lab"][:-len("/tools/uarch_lab.py")]
+    git = ["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null"]
+    commands = [
+        ("trusted-harness-pin", git + ["-C", trusted_root, "rev-parse", "HEAD"]),
+        ("clone-preparation-source", git + ["clone", "--no-checkout", "--no-tags", "https://github.com/buster14a/buster.git", expected["root"]]),
+        ("fetch-preparation-pins", git + ["-C", expected["root"], "fetch", "--no-tags", "origin", expected["base"], expected["head"]]),
+        ("baseline-tree", git + ["-C", expected["root"], "rev-parse", expected["base"] + "^{tree}"]),
+        ("candidate-tree", git + ["-C", expected["root"], "rev-parse", expected["head"] + "^{tree}"]),
+        ("candidate-checkout", git + ["-C", expected["root"], "checkout", "--detach", expected["head"]]),
+        ("legacy-snapshot-five-long-controls", [host["native_driver"], "compiler_closure", "qualify", expected["root"],
+            expected["output"], expected["base"], expected["base_tree"], expected["head"], expected["head_tree"],
+            expected["trusted_lab"], expected["python"]])]
+    columns = {"stage", "phase", "wall_us", "exit_status", "timed_out", "cleanup_failed", "cancelled", "state"}
+    proofs = {"owner-supervision.tsv": owner_wall}
+    phase_wall = 0
+    if len(phases) != len(commands):
+        raise ValueError("preparation controller phase population differs from the native fixed plan")
+    for index, (row, (name, argv)) in enumerate(zip(phases, commands), 1):
+        if set(row) != columns or row.get("stage") != str(index) or row.get("phase") != name or row.get("state") != "complete" or \
+                any(row.get(key) != "0" for key in ("exit_status", "timed_out", "cleanup_failed", "cancelled")):
+            raise ValueError("preparation controller phase is failed, missing or undeclared")
+        wall = sampling_integer(row["wall_us"], True)
+        phase_wall += wall
+        stem = f"controller-{index}-{name}"
+        if parse_argv(files.get(stem + ".argv")) != argv:
+            raise ValueError("preparation controller argv changed the admitted recipe")
+        for stream in ("stdout", "stderr"):
+            raw = files.get(stem + "." + stream + ".log")
+            if not isinstance(raw, bytes) or len(raw) > 1024 * 1024:
+                raise ValueError("preparation controller raw phase output is missing or oversized")
+        proofs[stem + "-supervision.tsv"] = wall
+    if phase_wall > duration or {name for name in files if name.endswith("-supervision.tsv")} != set(proofs):
+        raise ValueError("preparation phase clocks or complete supervision proof population contradict")
+    for name, bound in proofs.items():
+        proof = sampling_supervision(files.get(name))
+        if sampling_integer(proof["wall_us"], True) > bound:
+            raise ValueError("preparation supervision exceeds its native phase/owner clock")
+    return owner, publication, terminal
+
+
+def preparation_job(api: Api, authority: dict) -> dict:
+    rows = api.pages(f"/actions/runs/{authority['run_id']}/attempts/1/jobs", "jobs")
+    matches = [row for row in rows if isinstance(row, dict) and row.get("name") == PREPARATION_HOST_JOB]
+    if len(matches) != 1:
+        raise ValueError("preparation physical attempt has no unique platform job")
+    row = matches[0]
+    if type(row.get("id")) is not int or row["id"] <= 0 or str(row.get("run_id")) != authority["run_id"] or \
+            row.get("run_attempt") != 1 or type(row.get("runner_id")) is not int or row["runner_id"] <= 0 or \
+            not isinstance(row.get("runner_name"), str) or not row["runner_name"] or \
+            not isinstance(row.get("labels"), list) or not row["labels"] or any(
+                not isinstance(label, str) or not label for label in row["labels"]):
+        raise ValueError("preparation physical runner platform provenance is unavailable")
+    return row
+
+
+def preparation_observed_costs(api: Api, authority: dict, files: dict[str, bytes]) -> dict:
+    result = {"native_owner_wall_us": None, "native_observed_wall_us": None, "owner_publication_us": None,
+              "observation_publication_us": None, "native_controller_us": None, "physical_job_wall_us": None,
+              "physical_job_wall_upper_us": None, "queue_delay_seconds": None}
+    for name, keys in (("owner.tsv", {"physical_packet_wall_us": "native_owner_wall_us"}),
+                       ("owner-publication.tsv", {"observed_wall_us": "native_observed_wall_us", "publication_us": "owner_publication_us"}),
+                       ("preparation.tsv", {"duration_us": "native_controller_us"})):
+        try:
+            row = sampling_tsv(files.get(name))
+            for source, target in keys.items():
+                result[target] = sampling_integer(row.get(source), target != "owner_publication_us")
+        except (ValueError, UnicodeError, TypeError):
+            pass
+    try:
+        job = preparation_job(api, authority)
+        result.update(platform_job_state=job.get("status"), platform_job_conclusion=job.get("conclusion"))
+        stamps = [datetime.fromisoformat(job[key].replace("Z", "+00:00")) for key in ("created_at", "started_at", "completed_at")]
+        if all(stamp.utcoffset() is not None for stamp in stamps):
+            wall = round((stamps[2] - stamps[1]).total_seconds() * 1000000)
+            queue = (stamps[1] - stamps[0]).total_seconds()
+            if wall > 0 and queue >= 0:
+                result.update(physical_job_wall_us=wall, physical_job_wall_upper_us=wall + 2000000, queue_delay_seconds=queue)
+    except (ValueError, KeyError, TypeError, AttributeError, OverflowError, OSError, urllib.error.URLError, TimeoutError):
+        pass
+    return result
+
+
+def preparation_validate(api: Api, authority: dict, files: dict[str, bytes]) -> dict:
+    from compiler_preparation import validate, WORKLOAD_COMMAND, SERIES
+    if authority["history"]:
+        raise ValueError("preparation is a single charged attempt; prior outcomes cannot authorize replacement")
+    for name, raw in authority["raw"].items():
+        if files.get(name) != raw:
+            raise ValueError("preparation native transport differs from freshly authenticated admission records")
+    expected, host = preparation_expected(api, authority, files)
+    claim = sampling_tsv(files.get("claim.tsv"))
+    wanted = {"schema": "buster-compiler-preparation-claim-v1", "profile": "compiler-baseline-closure-qualification-v1",
+              "phase": "qualify", "packet": "0", "plan_revision": authority["admitted"]["preparation_plan_revision"],
+              "plan_sha256": authority["admitted"]["preparation_plan_sha256"], "request_run_id": authority["request_id"],
+              "request_run_attempt": "1", "executor_run_id": authority["run_id"], "executor_run_attempt": "1",
+              "request_head": authority["head"], "policy_trusted_revision": authority["executor"]["head_sha"],
+              "measurement_trusted_revision": authority["plan"]["trusted_revision"], "source_root": expected["root"],
+              "output_root": expected["output"], "driver": host["native_driver"], "reservation_seconds": "5400",
+              "worker_seconds": "5280", "tail_seconds": "120", "state": "claimed"}
+    for name, label in (("request.txt", "request_sha256"), ("plan.tsv", "plan_transport_sha256"),
+                        ("allowlist.tsv", "allowlist_sha256"), ("facts.tsv", "facts_sha256"), ("history.tsv", "history_sha256")):
+        wanted[label] = hashlib.sha256(authority["raw"][name]).hexdigest()
+    if set(claim) != set(wanted) | {"evidence"} or any(claim.get(key) != value for key, value in wanted.items()) or \
+            not isinstance(claim.get("evidence"), str) or not claim["evidence"].startswith("/") or \
+            claim["evidence"] == "/" or any(part in ("", ".", "..") for part in claim["evidence"][1:].split("/")):
+        raise ValueError("preparation immutable first-claim identity is absent or contradicts admission")
+    owner, publication, terminal = preparation_phase_proofs(authority, files, expected, host)
+    job = preparation_job(api, authority)
+    accounting = sampling_job_accounting(job, sampling_integer(publication["observed_wall_us"], True),
+                                        5400, job_name=PREPARATION_HOST_JOB)
+    accounting.update(native_owner_wall_us=sampling_integer(owner["physical_packet_wall_us"], True),
+                      native_observed_wall_us=sampling_integer(publication["observed_wall_us"], True),
+                      owner_publication_us=sampling_integer(publication["publication_us"]),
+                      observation_publication_us=None, native_controller_us=sampling_integer(terminal["duration_us"], True))
+    receipt, bundles = preparation_bundles(files)
+    problems = validate(expected, receipt, bundles)
+    if problems:
+        raise ValueError("preparation native qualification replay failed: " + "; ".join(problems[:12]))
+    if receipt["duration_us"] > sampling_integer(sampling_tsv(files["controller.tsv"], True)[-1]["wall_us"], True):
+        raise ValueError("preparation qualification duration exceeds its native controller")
+    series_expected = dict(expected, command=WORKLOAD_COMMAND)
+    series = {}
+    from compiler_preparation import frozen_binary
+    for arm, name, same in SERIES:
+        base_arm = "legacy" if name == "cross-build-aa" else arm
+        baseline = frozen_binary(bundles[base_arm]["prepared"], base_arm, "baseline", expected)
+        candidate = frozen_binary(bundles[arm]["prepared"], arm, "baseline" if same else "candidate", expected)
+        provenance = bundles[arm][name]["metadata"].get("compiler_provenance")
+        if not isinstance(provenance, list) or len(provenance) != 2 or any(
+                not isinstance(item, dict) or item.get("path") != binary[0] or item.get("sha256") != binary[1] or
+                type(item.get("bytes")) is not int or item["bytes"] != binary[2]
+                for item, binary in zip(provenance, (baseline, candidate))):
+            raise ValueError("preparation full corpus binary path/hash/true size differs from the frozen arm")
+        series[arm + "/" + name] = preparation_series_replay(bundles[arm][name], series_expected, same)
+        from compiler_preparation import parse_ledger
+        unused_root, phases = parse_ledger(bundles[arm]["prepared"], bundles[arm]["ledger"])
+        lab_phase = next(row for row in phases if row["phase"] == name + "-lab")
+        if series[arm + "/" + name]["observed_timed_wall_us"] > lab_phase["elapsed"] + 2:
+            raise ValueError("preparation raw timed pair wall exceeds its native lab phase")
+        cleanup = sampling_json(bundles[arm]["files"], f"{lab_phase['stage']}-{name}-lab.cleanup.json")
+        if cleanup["duration_us"] > lab_phase["elapsed"]:
+            raise ValueError("preparation native cleanup wall exceeds its observed lab phase")
+    pointers = receipt["preparation_costs"]
+    if pointers["snapshot"]["total_us"] >= pointers["legacy"]["total_us"]:
+        raise ValueError("preparation predeclared complete snapshot cost is not less than legacy cost")
+    history = [{"phase": "qualify", "packet": 0, "request_run_id": authority["request_id"], "run_id": authority["run_id"],
+                "run_attempt": "1", "state": "complete-valid-research", "reservation_seconds": 5400,
+                "actions_job_occupancy_us": accounting["physical_job_wall_upper_us"],
+                "campaign": authority["admitted"]["preparation_plan_sha256"],
+                "freeze_revision": authority["admitted"]["preparation_plan_revision"]}]
+    return {"schema": "buster-compiler-preparation-publication-v1", "packet_state": "complete-valid-research",
+            "qualification_state": "unqualified", "default_activated": False, "routine_profile_enabled": False,
+            "evidence_class": "unqualified-preparation-research", "phase": "qualify", "packet": 0,
+            "plan_revision": authority["admitted"]["preparation_plan_revision"],
+            "plan_sha256": authority["admitted"]["preparation_plan_sha256"],
+            "source_identity": {key: expected[key] for key in ("base", "base_tree", "head", "head_tree")},
+            "measurement_trusted_revision": authority["plan"]["trusted_revision"],
+            "policy_trusted_revision": authority["executor"]["head_sha"], "host": host,
+            "platform_runner": {key: job[key] for key in ("id", "runner_id", "runner_name", "labels")},
+            "reservation_seconds": 5400, "accounting": accounting, "series": series,
+            "preparation_costs": pointers, "qualification_publication_us": None,
+            "predeclared_controls": {"aa_families": 3, "aa_interval": [0.995, 1.005],
+                                    "all_full_corpora_valid": True, "snapshot_cost_less_than_legacy": True},
+            "authenticated_attempt_history": history, "problems": []}
+
+
+def preparation_publish(environment: dict) -> int:
+    api, authority = preparation_authority(environment)
+    files, artifact = {}, {}
+    result = {"schema": "buster-compiler-preparation-publication-v1", "packet_state": "incomplete",
+              "qualification_state": "unqualified", "default_activated": False, "routine_profile_enabled": False,
+              "evidence_class": "unqualified-preparation-research", "phase": "qualify", "packet": 0,
+              "reservation_seconds": 5400, "problems": []}
+    try:
+        files, artifact = preparation_read_artifact(api, authority)
+        if environment.get("BQ_PREPARATION_RESULT") != "success":
+            raise ValueError("preparation physical job is failed, cancelled, skipped or unavailable")
+        result = preparation_validate(api, authority, files)
+    except (OSError, ValueError, UnicodeError, TypeError, KeyError, IndexError, AttributeError, RecursionError,
+            urllib.error.URLError, TimeoutError) as error:
+        result["problems"].append(("evidence validation failed: " + type(error).__name__ + ": " + str(error))[:1000])
+        result["accounting"] = preparation_observed_costs(api, authority, files)
+        result["authenticated_attempt_history"] = list(authority["history"]) + [{
+            "phase": "qualify", "packet": 0, "request_run_id": authority["request_id"], "run_id": authority["run_id"],
+            "run_attempt": "1", "state": "incomplete", "reservation_seconds": 5400,
+            "actions_job_occupancy_us": result["accounting"]["physical_job_wall_upper_us"],
+            "campaign": authority["admitted"]["preparation_plan_sha256"],
+            "freeze_revision": authority["admitted"]["preparation_plan_revision"]}]
+    success = result["packet_state"] == "complete-valid-research" and not result["problems"]
+    conclusion = "success" if success else "failure"
+    title = "Valid unqualified preparation packet" if success else "Incomplete unqualified preparation packet"
+    summary = preparation_summary(authority) + f"\nPacket state: {result['packet_state']}. Qualification state: unqualified.\n"
+    if result["problems"]:
+        summary += "\nEvidence problems:\n" + "\n".join("- " + str(problem)[:1000] for problem in result["problems"][:30]) + "\n"
+    fence = chr(96) * 3
+    summary += "\nObserved accounting:\n" + fence + "json\n" + json.dumps(result.get("accounting", {}), sort_keys=True) + "\n" + fence + "\n"
+    if artifact:
+        summary += "\nEvidence: " + artifact_link(authority["repository"], authority["run_id"], artifact) + "\n"
+    report = json.dumps(result, sort_keys=True, indent=2)
+    row = preparation_write(api, authority, {"status": "completed", "conclusion": conclusion,
+        "details_url": run_url(authority["repository"], authority["run_id"], "1"),
+        "output": {"title": title, "summary": summary[:TEXT_LIMIT], "text": fence + "json\n" + report[:TEXT_LIMIT - 16] + "\n" + fence}})
+    with open(environment.get("GITHUB_STEP_SUMMARY") or os.devnull, "a", encoding="utf-8") as stream:
+        stream.write(summary + "\n")
+    print(f"COMPILER_PREPARATION_PUBLISHED {conclusion} check={row.get('id')} state={row.get('status')} qualification=unqualified")
+    return 0 if success and row.get("status") == "completed" and row.get("conclusion") == "success" else 1
+
+
 def main() -> int:
     if sys.argv[1:] in (["sampling-queue"], ["sampling-publish"]):
         try:
             return (sampling_queue if sys.argv[1] == "sampling-queue" else sampling_publish)(dict(os.environ))
         except (OSError, ValueError, urllib.error.URLError, TimeoutError) as error:
             print(f"COMPILER_SAMPLING_PUBLICATION_REFUSED {error}", file=sys.stderr)
+            return 1
+    if sys.argv[1:] in (["preparation-queue"], ["preparation-publish"]):
+        try:
+            return (preparation_queue if sys.argv[1] == "preparation-queue" else preparation_publish)(dict(os.environ))
+        except (OSError, ValueError, urllib.error.URLError, TimeoutError) as error:
+            print(f"COMPILER_PREPARATION_PUBLICATION_REFUSED {error}", file=sys.stderr)
             return 1
     if sys.argv[1:]:
         print("BENCH_COMPILER_PUBLISH_FAIL unsupported command", file=sys.stderr)
