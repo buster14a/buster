@@ -8949,6 +8949,203 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_back_edge_dead_stores(Un
     return result;
 }
 
+// Block liveness drops the write-back of an escaping value no path out of
+// the block reads (`machine_fast_dead_out`). The program covers a value read
+// only by the branch laid out after its sibling, a value kept across a loop
+// for use after it, a switch whose cases read different values, values
+// carried around a loop on one side of a conditional, nested joins whose
+// values the code after them reads selectively, a promoted local stored
+// before its loop and dirtied inside it, and calls under register pressure.
+// The indirect call in `barrier_loop` stops IR local promotion, so `i` stays a
+// mutable value that is live out of the loop latch only around the back edge;
+// a liveness that ignores back edges drops its store and the loop overruns.
+// Every target must select without fallback, and the host runs the program
+// under every allocator and both frontend forms; the expected values were
+// cross-checked with host GCC and Clang.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_liveness_dead_stores(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static volatile int opaque = 3;\n"
+        "static int sink;\n"
+        "static __attribute__((noinline)) int bump(int x) { sink += x; return x + 1; }\n"
+        "static __attribute__((noinline)) long long sibling(int n)\n"
+        "{\n"
+        "    long long total = 0;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long a = i * 7 + opaque, b = a ^ 85, c = bump(i) + a;\n"
+        "        if (c & 1) { total += bump((int)(c & 63)) * 5 + c; }\n"
+        "        else { total += b * 3 - a + bump((int)(b & 31)); }\n"
+        "        total %= 1000003;\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long after_loop(int n)\n"
+        "{\n"
+        "    long long keep = opaque * 11 + n, s = 0;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        s += bump(i) * (i & 3);\n"
+        "        if (s > 1000) s -= 997;\n"
+        "    }\n"
+        "    return s * 3 + keep;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long cases(int n)\n"
+        "{\n"
+        "    long long r = 0;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long x = bump(i) * 3 + opaque, y = x * x % 1009, z = y ^ x;\n"
+        "        switch (i % 5)\n"
+        "        {\n"
+        "        case 0: r += x; break;\n"
+        "        case 1: r += bump((int)(y & 15)) + y; break;\n"
+        "        case 2: r -= z; break;\n"
+        "        case 3: r += x * y - z; break;\n"
+        "        default: r ^= bump((int)(x & 7)); break;\n"
+        "        }\n"
+        "        r %= 1000033;\n"
+        "    }\n"
+        "    return r;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long carried(int n)\n"
+        "{\n"
+        "    long long p = opaque, q = 1, last = 0;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long t = bump(i) + p;\n"
+        "        if (t & 2) { last = t * 9; p = q + t; }\n"
+        "        else { q = q * 7 % 10007 + bump((int)(t & 3)); }\n"
+        "        p %= 100003;\n"
+        "    }\n"
+        "    return p * 31 + q + last;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long ladder(int n)\n"
+        "{\n"
+        "    long long u = opaque + n, v = u * 3, w = v ^ 21, acc = 0;\n"
+        "    if (n > 4)\n"
+        "    {\n"
+        "        acc = bump((int)u) + v;\n"
+        "        if (n > 8) { acc += bump((int)v) * w; }\n"
+        "        else { acc -= w; }\n"
+        "    }\n"
+        "    else\n"
+        "    {\n"
+        "        acc = bump((int)w) - u;\n"
+        "    }\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        acc = acc * 3 + bump(i) % 5;\n"
+        "        acc %= 999983;\n"
+        "    }\n"
+        "    return acc + (n > 6 ? u : w);\n"
+        "}\n"
+        "static __attribute__((noinline)) unsigned long long pressure(int n)\n"
+        "{\n"
+        "    unsigned long long r = 0;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        unsigned long long a = (unsigned long long)i * 3 + 1, b = a ^ 77, c = a + b, d = c * 5, e = d - a, f = e ^ b, g = f + c, h = g * 9;\n"
+        "        if (i & 1) { r += a * h + (unsigned long long)bump(i & 7); }\n"
+        "        else { unsigned long long s = (unsigned long long)bump(i & 3); r = r * 31 + b + c + d + e + f + g + s; }\n"
+        "    }\n"
+        "    return r;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long churn(int n)\n"
+        "{\n"
+        "    long long s = opaque * 5 + n, m = n ^ opaque;\n"
+        "    m += bump(1);\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        s = (s * 3 + i) % 100003;\n"
+        "        if ((s & 3) == 1) m += bump(i & 7);\n"
+        "    }\n"
+        "    return s * 7 + m;\n"
+        "}\n"
+        "static int (*volatile indirect)(void);\n"
+        "static volatile int guard;\n"
+        "static int five(void) { return 5; }\n"
+        "static __attribute__((noinline)) int barrier_loop(void)\n"
+        "{\n"
+        "    int i = 0, r = 0;\n"
+        "    indirect = five;\n"
+        "    r = indirect();\n"
+        "    while (i < 4 && ++guard < 100)\n"
+        "    {\n"
+        "        i += 1;\n"
+        "        r += indirect();\n"
+        "    }\n"
+        "    return r;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int bad = 0;\n"
+        "    bad |= sibling(30) != 8059ll;\n"
+        "    bad |= after_loop(25) != 1498ll;\n"
+        "    bad |= cases(40) != 241030ll;\n"
+        "    bad |= carried(33) != 3424176ll;\n"
+        "    bad |= ladder(5) != 5047ll;\n"
+        "    bad |= ladder(12) != 815858ll;\n"
+        "    bad |= pressure(40) != 15052400108001533700ull;\n"
+        "    bad |= churn(29) != 22676ll;\n"
+        "    bad |= barrier_loop() != 25;\n"
+        "    return bad | (sink != 2871);\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-liveness-dead-stores"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
+        String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-liveness-dead-stores-object"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[target], frontends[frontend],
+                                         allocators[allocator], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), object, input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 description = string_format(temporary.arena, S8("liveness dead stores object {S8} {S8} {S8}: {S8}"),
+                        targets[target], allocators[allocator], frontends[frontend], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == 0, description);
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-liveness-dead-stores-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), allocators[allocator], frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), executable, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("liveness dead stores native {S8} {S8}: {S8}"),
+                    allocators[allocator], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description);
+                }
+                scratch_end(temporary);
+            }
+        }
+#endif
+    }
+    return result;
+}
+
 // __builtin_return_address(0) lowers to IR_OPCODE_RETURN_ADDRESS, which reads
 // the frame record every System V and Darwin MIR function builds. The callees
 // cover a plain frame, a dynamic allocation and an over-aligned local, under
@@ -28131,6 +28328,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_loop_parameter_registers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fixed_register_vacate);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_back_edge_dead_stores);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_liveness_dead_stores);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_return_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_field_assignment_results);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vector_casts);
