@@ -28964,11 +28964,15 @@ BUSTER_C_INTERNAL u32 c_parse_static_initializer_call(CTypeParseMachine* machine
                             ? c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope, comma + 1, limit) : (CParseConstant){0};
                         constant = comma < close && limit == close && real.valid && imaginary.valid && (real.is_float || imaginary.is_float);
                     }
-                    else if (close < frame->end && (c_ir_math_builtin_link_name(name).length ||
-                             c_symbol_builtin_from_spelling(name) == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM))
+                    else if (close < frame->end)
                     {
-                        CParseConstant value = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope, cursor, close + 1);
-                        constant = value.valid;
+                        CSymbolBuiltin builtin = c_symbol_builtin_from_spelling(name);
+                        bool integer_fold_builtin = c_semantic_integer_builtin_fold_kind(preprocess.target, builtin, name) != C_TYPE_INVALID;
+                        if (c_ir_math_builtin_link_name(name).length || builtin == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM || integer_fold_builtin)
+                        {
+                            CParseConstant value = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope, cursor, close + 1);
+                            constant = value.valid;
+                        }
                     }
                     if (!constant) bad = cursor;
                     else frame->cursor = close + 1;
