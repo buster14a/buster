@@ -2095,6 +2095,10 @@ def preparation_validate(api: Api, authority: dict, files: dict[str, bytes]) -> 
     for name, label in (("request.txt", "request_sha256"), ("plan.tsv", "plan_transport_sha256"),
                         ("allowlist.tsv", "allowlist_sha256"), ("facts.tsv", "facts_sha256"), ("history.tsv", "history_sha256")):
         wanted[label] = hashlib.sha256(authority["raw"][name]).hexdigest()
+    clock_raw = files.get("physical-job-clock.tsv")
+    if not isinstance(clock_raw, bytes):
+        raise ValueError("preparation native pre-entry clock is missing")
+    wanted["physical_job_clock_sha256"] = hashlib.sha256(clock_raw).hexdigest()
     if set(claim) != set(wanted) | {"evidence"} or any(claim.get(key) != value for key, value in wanted.items()) or \
             not isinstance(claim.get("evidence"), str) or not claim["evidence"].startswith("/") or \
             claim["evidence"] == "/" or any(part in ("", ".", "..") for part in claim["evidence"][1:].split("/")):
@@ -2611,15 +2615,21 @@ def utility_phase_proofs(authority: dict, files: dict[str, bytes], host: dict) -
     owner_raw = files.get("owner.tsv")
     owner = sampling_tsv(owner_raw)
     wanted = {"schema": "buster-compiler-closure-utility-owner-v1", "phase": "utility", "packet": "0", "plan_sha256": plan_sha,
-              "wall_scope": "entry-through-child-cleanup-before-terminal-publication", "process_state": "complete",
+              "wall_scope": "public-platform-job-start-lower-through-child-cleanup-before-terminal-publication", "process_state": "complete",
               "timed_out": "0", "cleanup_failed": "0", "within_reservation": "true", "cancelled": "0",
               "qualification_state": "unvalidated", "default_activated": "false"}
-    if set(owner) != set(wanted) | {"physical_packet_wall_us"} or any(owner.get(key) != value for key, value in wanted.items()):
+    if set(owner) != set(wanted) | {"physical_packet_wall_us", "native_entry_wall_us", "job_elapsed_at_native_entry_us", "physical_job_clock_sha256"} or any(owner.get(key) != value for key, value in wanted.items()):
         raise ValueError("utility owned worker is failed, cancelled, exhausted or incomplete")
     owner_wall = sampling_integer(owner["physical_packet_wall_us"], True)
+    native_wall = sampling_integer(owner["native_entry_wall_us"], True)
+    entry_elapsed = sampling_integer(owner["job_elapsed_at_native_entry_us"], True)
+    clock_raw = files.get("physical-job-clock.tsv")
+    if not isinstance(clock_raw, bytes) or owner["physical_job_clock_sha256"] != hashlib.sha256(clock_raw).hexdigest() or \
+            not native_wall <= owner_wall <= native_wall + entry_elapsed or owner_wall > 5400 * 1000000:
+        raise ValueError("utility native entry and public job-start scopes contradict")
     publication = sampling_tsv(files.get("owner-publication.tsv"))
     pub_wanted = {"schema": "buster-compiler-closure-utility-owner-publication-v1",
-                  "owner_sha256": hashlib.sha256(owner_raw).hexdigest(), "scope": "entry-through-owner-publication",
+                  "owner_sha256": hashlib.sha256(owner_raw).hexdigest(), "scope": "public-platform-job-start-lower-through-owner-publication",
                   "observation_publication_us": "unavailable", "within_reservation": "true"}
     if set(publication) != set(pub_wanted) | {"initial_scope_us", "publication_us", "observed_wall_us"} or \
             any(publication.get(key) != value for key, value in pub_wanted.items()):
@@ -2640,7 +2650,7 @@ def utility_phase_proofs(authority: dict, files: dict[str, bytes], host: dict) -
     if set(terminal) != set(term_wanted) | {"duration_us"} or any(terminal.get(key) != value for key, value in term_wanted.items()):
         raise ValueError("utility native control/source/tool/export proof is incomplete")
     duration = sampling_integer(terminal["duration_us"], True)
-    if duration > owner_wall or duration > 5280 * 1000000:
+    if duration > native_wall or duration > 5280 * 1000000:
         raise ValueError("utility worker exceeds its reserved native clock")
     phases = sampling_tsv(files.get("controller.tsv"), True)
     trusted_root = host["trusted_lab"][:-len("/tools/uarch_lab.py")]
@@ -2673,7 +2683,7 @@ def utility_phase_proofs(authority: dict, files: dict[str, bytes], host: dict) -
             (leg + "-trusted-bootstrap", [trusted_root + "/build.sh", "compiler_profile_qualification", "--plan"]),
             (leg + "-ordinary-compare", compare + identity)]
     columns = {"stage", "phase", "wall_us", "exit_status", "timed_out", "cleanup_failed", "cancelled", "state"}
-    proofs = {"owner-supervision.tsv": owner_wall}
+    proofs = {"owner-supervision.tsv": native_wall}
     phase_wall = 0
     if len(phases) != len(commands):
         raise ValueError("utility controller phase population differs from the native fixed plan")
@@ -2761,14 +2771,18 @@ def utility_leg_records(authority: dict, files: dict[str, bytes], host: dict, te
                 type(observed.get(key)) is not type(value) or observed.get(key) != value for key, value in expected.items()) or \
                 type(observed.get("wall_us")) is not int or not 0 < observed["wall_us"] <= inv_wall or cleanup > observed["wall_us"]:
             raise ValueError("utility final inventory raw producer/ledger observation differs")
-        leg_phases = phases[8 + index * 5:13 + index * 5]
+        leg_phases = [item for item in phases if item["phase"].startswith(leg + "-")]
+        if [item["phase"] for item in leg_phases] != [leg + "-" + name for name in
+                ("reset-checkout", "reset-tracked-source", "reset-build-cache", "trusted-bootstrap", "ordinary-compare")]:
+            raise ValueError("utility leg phase recipe is incomplete")
         if sum(sampling_integer(item["wall_us"], True) for item in leg_phases) + inv_wall > wall:
             raise ValueError("utility leg clock omits reset/bootstrap/compare/final inventory work")
         manifest_inventory(inventory_raw, {"root": plan["source_root"], "base": plan["baseline_revision"],
                                            "base_tree": plan["baseline_tree"]})
         row["observed_wall_us"] = wall
     duration = sampling_integer(terminal["duration_us"], True)
-    if sum_wall + sum(sampling_integer(row["wall_us"], True) for row in phases[:8]) > duration or \
+    if sum_wall + sum(sampling_integer(row["wall_us"], True) for row in phases
+                       if not row["phase"].startswith(("legacy-", "snapshot-"))) > duration or \
             sampling_integer(legs[-1]["finish_us"], True) - sampling_integer(legs[0]["start_us"], True) > duration:
         raise ValueError("utility native controller clock omits measured legs or pre-leg work")
     return legs
@@ -3194,6 +3208,10 @@ def utility_validate(api: Api, authority: dict, files: dict[str, bytes]) -> dict
     for name, label in (("request.txt", "request_sha256"), ("plan.tsv", "plan_transport_sha256"),
                         ("allowlist.tsv", "allowlist_sha256"), ("facts.tsv", "facts_sha256"), ("history.tsv", "history_sha256")):
         wanted[label] = hashlib.sha256(authority["raw"][name]).hexdigest()
+    clock_raw = files.get("physical-job-clock.tsv")
+    if not isinstance(clock_raw, bytes):
+        raise ValueError("Utility native pre-entry clock is missing")
+    wanted["physical_job_clock_sha256"] = hashlib.sha256(clock_raw).hexdigest()
     if set(claim) != set(wanted) | {"evidence"} or any(claim.get(key) != value for key, value in wanted.items()) or \
             not isinstance(claim.get("evidence"), str) or not claim["evidence"].startswith("/") or \
             claim["evidence"] == "/" or any(part in ("", ".", "..") for part in claim["evidence"][1:].split("/")):
@@ -3202,7 +3220,11 @@ def utility_validate(api: Api, authority: dict, files: dict[str, bytes]) -> dict
     job = utility_job(api, authority)
     accounting = sampling_job_accounting(job, sampling_integer(publication["observed_wall_us"], True), 5400, job_name=UTILITY_HOST_JOB)
     clock = utility_clock_binding(authority, files, job)
-    accounting.update(native_owner_wall_us=sampling_integer(owner["physical_packet_wall_us"], True),
+    if sampling_integer(owner["job_elapsed_at_native_entry_us"], True) + 2000000 < clock["observed_pre_entry_us"]:
+        raise ValueError("Utility native entry predates its public platform observation")
+    accounting.update(native_owner_wall_us=sampling_integer(owner["native_entry_wall_us"], True),
+                      native_platform_start_wall_us=sampling_integer(owner["physical_packet_wall_us"], True),
+                      job_elapsed_at_native_entry_us=sampling_integer(owner["job_elapsed_at_native_entry_us"], True),
                       native_observed_wall_us=sampling_integer(publication["observed_wall_us"], True),
                       owner_publication_us=sampling_integer(publication["publication_us"]), observation_publication_us=None,
                       native_controller_us=sampling_integer(terminal["duration_us"], True), pre_entry_platform_clock=clock)

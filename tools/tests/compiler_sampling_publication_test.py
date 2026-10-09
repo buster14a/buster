@@ -242,6 +242,20 @@ def physical_files(authority, context, prepared, packet_wall, prep_us):
     return files
 
 
+def physical_clock_fixture(authority, job, kind):
+    # Synthetic API controls bind a synthetic observation; native hosted proofs
+    # do not acquire physical authority from this fixture.
+    start = round(datetime.fromisoformat(job["started_at"].replace("Z", "+00:00")).timestamp() * 1000000)
+    return tsv_bytes({
+        "schema": "buster-compiler-physical-job-clock-v1", "kind": kind, "repository": authority["repository"],
+        "run_id": authority["run_id"], "run_attempt": "1", "policy_trusted_revision": authority["executor"]["head_sha"],
+        "job_id": str(job["id"]), "job_name": job["name"], "runner_id": str(job["runner_id"]),
+        "runner_name": job["runner_name"], "started_at": job["started_at"], "started_unix_us": str(start),
+        "start_lower_unix_us": str(start - 1000000), "observer_started_unix_us": str(start + 1000000),
+        "observer_finished_unix_us": str(start + 1100000), "observer_monotonic_elapsed_us": "100000",
+        "timestamp_precision_us": "1000000", "observation_scope": "public-platform-job-start"})
+
+
 def publication_fixture(phase="pilot", packet=0):
     expected, actual_prepared, producer = preparation_fixture.fixture(False, 3)
     expected = dict(expected)
@@ -397,6 +411,7 @@ def publication_fixture(phase="pilot", packet=0):
                     "created_at": stamp.isoformat(), "started_at": (stamp + timedelta(seconds=60)).isoformat(),
                     "completed_at": (stamp + timedelta(seconds=60 + duration)).isoformat()}
                 if raw_files:
+                    raw_files["physical-job-clock.tsv"] = physical_clock_fixture(item, self.jobs[run_id], "sampling")
                     self.payloads[run_id] = archive([(name, value, stat.S_IFREG) for name, value in raw_files.items()])
         def request(self, path):
             if path.startswith("/git/commits/"):
@@ -866,6 +881,9 @@ def preparation_publication_fixture():
                 "runner_name": "fixture-9700x", "labels": ["self-hosted", "9700x"],
                 "created_at": start.isoformat(), "started_at": (start + timedelta(seconds=10)).isoformat(),
                 "completed_at": (start + timedelta(seconds=40)).isoformat()}
+            files["physical-job-clock.tsv"] = physical_clock_fixture(authority, self.job, "preparation")
+            claim["physical_job_clock_sha256"] = hashlib.sha256(files["physical-job-clock.tsv"]).hexdigest()
+            files["claim.tsv"] = tsv_bytes(claim)
             self.payload = archive([(name, value, stat.S_IFREG) for name, value in files.items()])
         def request(self, path):
             if path.startswith("/git/commits/"):
