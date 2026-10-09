@@ -122,6 +122,25 @@ class StatelessConcurrencyTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(AssertionError):
                 self.assert_retained(fields, "push")
 
+    def test_short_check_writer_queue_retains_and_bounds_pending_jobs(self):
+        # GitHub queue:max admits 100 pending jobs; it cannot promise infinite
+        # delivery. This model exercises the saturation boundary explicitly.
+        pending, cancelled = [], []
+        for job in range(1, 102):
+            if len(pending) < 100:
+                pending.append(job)
+            else:
+                cancelled.append(job)
+        self.assertEqual(pending, list(range(1, 101)))
+        self.assertEqual(cancelled, [101])
+        expected = ("      group: buster-9700x-check-writer\n"
+                    "      cancel-in-progress: false\n"
+                    "      queue: max\n")
+        for filename, count in (("9700x-direct-bench.yml", 4),
+                                ("9700x-compiler-request.yml", 1), ("9700x-lifecycle.yml", 1)):
+            text = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
+            self.assertEqual(text.count(expected), count)
+
     def test_regression_runs_in_benchmark_policy(self):
         text = (ROOT / ".github/workflows/bench-service-policy.yml").read_text(encoding="utf-8")
         self.assertIn("run: python3 -B tools/bench_direct/workflow_concurrency_test.py -v", text)
