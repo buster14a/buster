@@ -301,28 +301,19 @@ BUSTER_GLOBAL_LOCAL CompilerPrerequisiteHistoricalValidation compiler_prerequisi
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL ProcessResult compiler_prerequisite_historical_main(Arena* arena, SliceString8 arguments)
+// Pure output formation makes the data-only boundary independently testable.
+BUSTER_GLOBAL_LOCAL String8 compiler_prerequisite_historical_output(Arena* arena,
+    CompilerPrerequisiteHistoricalValidation observed)
 {
-    ProcessResult result = PROCESS_RESULT_FAILED;
-    bool utility = arguments.length && string_equal(arguments.pointer[0], S8("--validate-historical-utility"));
-    bool valid = arguments.length == 8 && (utility ||
-        string_equal(arguments.pointer[0], S8("--validate-historical-preparation")));
-    String8 data[6] = {0};
-    u64 limits[] = {16384, 512, 16384, BUSTER_SAMPLING_ADMISSION_HISTORY_MAX_BYTES,
-        BUSTER_SAMPLING_FREEZE_MAX_BYTES, 32768};
-    for (u64 i = 0; valid && i < BUSTER_ARRAY_LENGTH(data); i += 1)
-    {
-        valid = compiler_main_route_read(arena, arguments.pointer[i + 1], limits[i], &data[i]);
-    }
-    CompilerPrerequisiteHistoricalValidation observed = valid ? compiler_prerequisite_historical_validate(arena,
-        utility, data[0], data[1], data[2], data[3], data[4], data[5]) : (CompilerPrerequisiteHistoricalValidation){0};
+    String8 output = {0};
+    bool utility = observed.is_utility;
     if (observed.valid)
     {
         CompilerPreparationAdmission preparation = observed.preparation;
         CompilerClosureUtilityAdmission closure = observed.utility;
         String8 prefix = utility ? S8("utility") : S8("preparation");
         String8 extra = utility ? string_format(arena, S8("utility_pull_head={S8}\n"), closure.plan.pull_head) : S8("");
-        String8 output = string_format(arena,
+        output = string_format(arena,
             S8("{S8}_historical_valid=true\n{S8}_policy_revision={S8}\n"
                "{S8}_phase={S8}\n{S8}_packet=0\n{S8}_family={S8}\n"
                "{S8}_reservation_seconds={u64}\n{S8}_worker_seconds={u64}\n{S8}_timeout_minutes={u64}\n"
@@ -347,6 +338,28 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_prerequisite_historical_main(Arena* a
             extra, prefix, utility ? closure.trusted_revision : preparation.trusted_revision,
             prefix, observed.api_sha256, prefix, observed.executor_conclusion,
             prefix, observed.check_conclusion, prefix, observed.check_title, prefix, prefix);
+    }
+    return output;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult compiler_prerequisite_historical_main(Arena* arena, SliceString8 arguments)
+{
+    ProcessResult result = PROCESS_RESULT_FAILED;
+    bool utility = arguments.length && string_equal(arguments.pointer[0], S8("--validate-historical-utility"));
+    bool valid = arguments.length == 8 && (utility ||
+        string_equal(arguments.pointer[0], S8("--validate-historical-preparation")));
+    String8 data[6] = {0};
+    u64 limits[] = {16384, 512, 16384, BUSTER_SAMPLING_ADMISSION_HISTORY_MAX_BYTES,
+        BUSTER_SAMPLING_FREEZE_MAX_BYTES, 32768};
+    for (u64 i = 0; valid && i < BUSTER_ARRAY_LENGTH(data); i += 1)
+    {
+        valid = compiler_main_route_read(arena, arguments.pointer[i + 1], limits[i], &data[i]);
+    }
+    CompilerPrerequisiteHistoricalValidation observed = valid ? compiler_prerequisite_historical_validate(arena,
+        utility, data[0], data[1], data[2], data[3], data[4], data[5]) : (CompilerPrerequisiteHistoricalValidation){0};
+    if (observed.valid)
+    {
+        String8 output = compiler_prerequisite_historical_output(arena, observed);
         if (file_write(arguments.pointer[7], BUSTER_SLICE_TO_BYTE_SLICE(output)))
         {
             result = PROCESS_RESULT_SUCCESS;
