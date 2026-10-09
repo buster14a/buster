@@ -1102,7 +1102,7 @@ class PreparationPublicationOutcomes(unittest.TestCase):
 
 
     def test_hosted_diagnostic_fixture_cannot_be_published_as_physical(self):
-        for name in ("fixture-plan.json", "qualification/legacy/ab-lab/summary.json"):
+        for name in ("fixture-plan.json", "fixture-status.json", "qualification/legacy/ab-lab/summary.json"):
             api, authority, files = preparation_publication_fixture()
             if name in files:
                 value = json.loads(files[name])
