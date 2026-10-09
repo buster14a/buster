@@ -466,5 +466,222 @@ class UtilityOwnedPlanTest(unittest.TestCase):
             self.assertEqual(self.validate(receipt, ownership, rows), [])
 
 
+def main_owned_fixture(policy="legacy-rebuild", profile="compiler-compare-v1", *, spaces=False):
+    """Independent admitted main recipes; profile changes only the lab row."""
+    from compiler_receipt import named_main_profile
+    receipt, ownership, rows = utility_fixture(policy, spaces=spaces)
+    ownership["schema"] = contract.MAIN_POPULATION_SCHEMA
+    receipt["profile"] = copy.deepcopy(named_main_profile(profile))
+    root, work, bins = (ownership[key] for key in ("candidate_root", "work_root", "binaries_root"))
+    row = next(row for row in rows if row["phase"] == "lab")
+    row["argv"] = [ownership["python_path"], "-B", ownership["lab_path"], "compare",
+        "--baseline", bins + "/ide-base", "--candidate", bins + "/ide-cand", "--repo-root", root,
+        "--cpu", "2", "--output", work + "/lab", "--target-minutes", "10", "--warmups", "1"]
+    row["timeout"] = 3000
+    if profile == "compiler-main-40pairs-v1":
+        row["argv"] += ["--pairs", "40", "--seed", "20261003", "--min-effect", "0.5"]
+        row["timeout"] = 300
+    command = b"".join(str(len(item.encode())).encode() + b":" + item.encode() + b"\n" for item in row["argv"])
+    row["command_sha256"] = hashlib.sha256(command).hexdigest()
+    return receipt, ownership, rows
+
+
+class MainOwnedProfilePlanTest(unittest.TestCase):
+    @staticmethod
+    def validate(receipt, ownership, rows, profile, schema=contract.MAIN_POPULATION_SCHEMA):
+        return contract.validate_plan(receipt, ownership, rows,
+                                      expected_phase_schema=schema, expected_profile=profile)
+
+    def test_both_admitted_profiles_and_preparation_recipes_are_complete(self):
+        for policy in ("legacy-rebuild", "snapshot-v1"):
+            for profile in ("compiler-compare-v1", "compiler-main-40pairs-v1"):
+                for spaces in (False, True):
+                    with self.subTest(policy=policy, profile=profile, spaces=spaces):
+                        receipt, ownership, rows = main_owned_fixture(policy, profile, spaces=spaces)
+                        self.assertEqual(self.validate(receipt, ownership, rows, profile), [])
+                        self.assertEqual(len(rows), 11 if policy == "legacy-rebuild" else 12)
+                        lab = next(row for row in rows if row["phase"] == "lab")
+                        self.assertEqual(lab["timeout"], 300 if profile == "compiler-main-40pairs-v1" else 3000)
+                        if profile == "compiler-main-40pairs-v1":
+                            self.assertEqual(lab["argv"][-10:],
+                                ["--target-minutes", "10", "--warmups", "1", "--pairs", "40",
+                                 "--seed", "20261003", "--min-effect", "0.5"])
+                        else:
+                            self.assertEqual(lab["argv"][-4:], ["--target-minutes", "10", "--warmups", "1"])
+                            self.assertNotIn("--pairs", lab["argv"])
+
+    def test_main_schema_requires_explicit_trusted_profile_and_schema(self):
+        for profile in ("compiler-compare-v1", "compiler-main-40pairs-v1"):
+            receipt, ownership, rows = main_owned_fixture(profile=profile)
+            self.assertTrue(contract.validate_plan(receipt, ownership, rows))
+            for token in (None, "", True, 40, 40.0, {}, "compiler-main-41pairs-v1", "compiler-main-40pairs-v2"):
+                with self.subTest(profile=profile, token=token):
+                    self.assertTrue(self.validate(receipt, ownership, rows, token))
+            for schema in (contract.POPULATION_SCHEMA, contract.UTILITY_POPULATION_SCHEMA, "buster-compiler-main-owned-phases-v2"):
+                self.assertTrue(self.validate(receipt, ownership, rows, profile, schema))
+            for declared in (None, contract.POPULATION_SCHEMA, contract.UTILITY_POPULATION_SCHEMA):
+                self.assertTrue(self.validate(receipt, dict(ownership, schema=declared), rows, profile))
+            changed = dict(ownership)
+            changed.pop("schema")
+            self.assertTrue(self.validate(receipt, changed, rows, profile))
+
+    def test_receipt_profile_selfselection_cannot_shorten_the_trusted_route(self):
+        from compiler_receipt import named_main_profile
+        for policy in ("legacy-rebuild", "snapshot-v1"):
+            long, ownership, long_rows = main_owned_fixture(policy)
+            short, _, short_rows = main_owned_fixture(policy, "compiler-main-40pairs-v1")
+            self.assertTrue(self.validate(short, ownership, short_rows, "compiler-compare-v1"))
+            self.assertTrue(self.validate(long, ownership, long_rows, "compiler-main-40pairs-v1"))
+            changed = copy.deepcopy(long)
+            changed["profile"] = copy.deepcopy(named_main_profile("compiler-main-40pairs-v1"))
+            self.assertTrue(self.validate(changed, ownership, short_rows, "compiler-compare-v1"))
+            changed = copy.deepcopy(short)
+            changed["profile"] = copy.deepcopy(PROFILE)
+            self.assertTrue(self.validate(changed, ownership, long_rows, "compiler-main-40pairs-v1"))
+
+    def test_historical_snapshot_and_utility_schemas_remain_long_only(self):
+        from compiler_receipt import named_main_profile
+        fixtures = [fixture("main"), utility_fixture("legacy-rebuild"), utility_fixture("snapshot-v1")]
+        for receipt, ownership, rows in fixtures:
+            schema = ownership.get("schema", contract.POPULATION_SCHEMA)
+            self.assertEqual(contract.validate_plan(receipt, ownership, rows, expected_phase_schema=schema), [])
+            self.assertEqual(self.validate(receipt, ownership, rows, "compiler-compare-v1", schema), [])
+            self.assertTrue(self.validate(receipt, ownership, rows, "compiler-main-40pairs-v1", schema))
+            changed = copy.deepcopy(receipt)
+            changed["profile"] = copy.deepcopy(named_main_profile("compiler-main-40pairs-v1"))
+            self.assertTrue(contract.validate_plan(changed, ownership, rows, expected_phase_schema=schema))
+
+    def test_fixed_40_pair_lab_arguments_deadline_and_order_are_exact(self):
+        receipt, ownership, rows = main_owned_fixture(profile="compiler-main-40pairs-v1")
+        index = next(index for index, row in enumerate(rows) if row["phase"] == "lab")
+        for flag, value in (("--baseline", ownership["binaries_root"] + "/ide-cand"),
+                            ("--candidate", ownership["binaries_root"] + "/ide-base"),
+                            ("--repo-root", "/other-root"), ("--cpu", "3"), ("--output", "/other/lab"),
+                            ("--target-minutes", "1"), ("--warmups", "2"), ("--pairs", "39"),
+                            ("--pairs", "41"), ("--pairs", "600"), ("--pairs", "40.0"),
+                            ("--seed", "20261004"), ("--min-effect", "0.0")):
+            changed = copy.deepcopy(rows)
+            argv = changed[index]["argv"]
+            argv[argv.index(flag) + 1] = value
+            with self.subTest(flag=flag, value=value):
+                self.assertTrue(self.validate(receipt, ownership, changed, "compiler-main-40pairs-v1"))
+        for case in ("pairs-omitted", "seed-omitted", "effect-omitted", "duplicate-pairs", "moved-flags",
+                     "identical-output", "long-deadline", "boolean-deadline", "changed-cwd", "changed-kind", "noop"):
+            changed = copy.deepcopy(rows)
+            row = changed[index]
+            if case in ("pairs-omitted", "seed-omitted", "effect-omitted"):
+                flag = {"pairs-omitted": "--pairs", "seed-omitted": "--seed", "effect-omitted": "--min-effect"}[case]
+                start = row["argv"].index(flag)
+                del row["argv"][start:start + 2]
+            elif case == "duplicate-pairs":
+                row["argv"] += ["--pairs", "40"]
+            elif case == "moved-flags":
+                tail = row["argv"][-6:]
+                del row["argv"][-6:]
+                row["argv"][4:4] = tail
+            elif case == "identical-output":
+                row["argv"].append("--require-identical-output")
+            elif case == "long-deadline":
+                row["timeout"] = 3000
+            elif case == "boolean-deadline":
+                row["timeout"] = True
+            elif case == "changed-cwd":
+                row["cwd"] = ownership["trusted_root"]
+            elif case == "changed-kind":
+                row["kind"] = "capture"
+            else:
+                row["argv"] = ["/bin/true"]
+                row["command_sha256"] = hashlib.sha256(b"9:/bin/true\n").hexdigest()
+            with self.subTest(case=case):
+                self.assertTrue(self.validate(receipt, ownership, changed, "compiler-main-40pairs-v1"))
+
+    def test_named_profile_dictionary_has_exact_types_and_keys(self):
+        receipt, ownership, rows = main_owned_fixture(profile="compiler-main-40pairs-v1")
+        for key, value in (("name", "compiler-compare-v1"), ("cpu", 2.0), ("warmups", True),
+                           ("target_minutes", 10.0), ("pairs", 40.0), ("seed", 20261003.0),
+                           ("min_effect_percent", "0.5"), ("confidence", "0.95"),
+                           ("bootstrap_resamples", 2000.0), ("fresh_copy", 1), ("order", "abba")):
+            changed = copy.deepcopy(receipt)
+            changed["profile"][key] = value
+            with self.subTest(key=key, value=value):
+                self.assertTrue(self.validate(changed, ownership, rows, "compiler-main-40pairs-v1"))
+        for case in ("extra-key", "missing-key", "extra-profile-step"):
+            changed = copy.deepcopy(receipt)
+            if case == "extra-key":
+                changed["profile"]["pairs_alias"] = 40
+            elif case == "missing-key":
+                changed["profile"].pop("fresh_copy")
+            else:
+                changed["profile"]["profile_steps"].append("sampling")
+            self.assertTrue(self.validate(changed, ownership, rows, "compiler-main-40pairs-v1"))
+
+    def test_build_closure_and_full_corpus_do_not_change_with_lab_profile(self):
+        for policy in ("legacy-rebuild", "snapshot-v1"):
+            receipt, ownership, long = main_owned_fixture(policy)
+            short, _, rows = main_owned_fixture(policy, "compiler-main-40pairs-v1")
+            self.assertEqual([row for row in long if row["phase"] != "lab"],
+                             [row for row in rows if row["phase"] != "lab"])
+            self.assertEqual(receipt["throughput_profile"], short["throughput_profile"])
+            index = next(index for index, row in enumerate(rows) if row["phase"] == "throughput")
+            for flag, value in (("--pairs", "10"), ("--mode", "fast"), ("--warmups", "1"), ("--cpu", "3")):
+                changed = copy.deepcopy(rows)
+                argv = changed[index]["argv"]
+                argv[argv.index(flag) + 1] = value
+                self.assertTrue(self.validate(short, ownership, changed, "compiler-main-40pairs-v1"))
+            changed = copy.deepcopy(rows)
+            changed[index]["argv"][0] = ownership["candidate_root"] + "/build/throughput-tools/throughput" \
+                if policy == "legacy-rebuild" else "./build.sh"
+            self.assertTrue(self.validate(short, ownership, changed, "compiler-main-40pairs-v1"))
+
+    def test_main_schema_keeps_exact_core_population_and_rejects_extensions(self):
+        for policy in ("legacy-rebuild", "snapshot-v1"):
+            receipt, ownership, rows = main_owned_fixture(policy, "compiler-main-40pairs-v1")
+            for case in ("omitted", "extra", "reordered", "capture", "extension", "head-closure", "bad-root"):
+                changed = copy.deepcopy(rows)
+                if case == "omitted":
+                    changed.pop()
+                elif case == "extra":
+                    changed.append(copy.deepcopy(rows[-1]))
+                elif case == "reordered":
+                    changed[0], changed[1] = changed[1], changed[0]
+                elif case == "capture":
+                    changed.insert(0, dict(rows[0], kind="capture"))
+                elif case == "extension":
+                    changed.insert(-1, dict(rows[0], phase="inline-acceptance"))
+                elif case == "head-closure":
+                    index = next(index for index, row in enumerate(changed) if row["phase"] == "build-closure")
+                    changed[index]["argv"][-1] = receipt["identity"]["head"]
+                else:
+                    changed[0]["cwd"] = "/other"
+                with self.subTest(policy=policy, case=case):
+                    self.assertTrue(self.validate(receipt, ownership, changed, "compiler-main-40pairs-v1"))
+            for case in ("pull", "inline", "scaling", "analyzer", "legacy-closure", "snapshot-fallback"):
+                changed = copy.deepcopy(receipt)
+                if case == "pull":
+                    changed["mode"] = "pull"
+                elif case == "inline":
+                    changed["inline_acceptance"] = {"requested": True, "profile": copy.deepcopy(INLINE_ACCEPTANCE_PROFILE)}
+                elif case == "scaling":
+                    changed["scaling_profile"] = copy.deepcopy(SCALING_PROFILE)
+                elif case == "analyzer":
+                    changed["analyzer_profile"] = {}
+                elif case == "legacy-closure":
+                    if policy != "legacy-rebuild":
+                        continue
+                    changed["closure"] = {}
+                else:
+                    if policy != "snapshot-v1":
+                        continue
+                    changed["closure"]["fallback"] = "legacy-rebuild"
+                self.assertTrue(self.validate(changed, ownership, rows, "compiler-main-40pairs-v1"))
+
+    def test_complete_scientific_negative_is_still_report_only_data(self):
+        for policy in ("legacy-rebuild", "snapshot-v1"):
+            for profile in ("compiler-compare-v1", "compiler-main-40pairs-v1"):
+                receipt, ownership, rows = main_owned_fixture(policy, profile)
+                receipt.update(state="measured", scientific_outcome="detected slowdown", confirmed_regressions=2)
+                self.assertEqual(self.validate(receipt, ownership, rows, profile), [])
+
+
 if __name__ == "__main__":
     unittest.main()
