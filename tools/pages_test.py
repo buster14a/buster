@@ -17,7 +17,7 @@ SITE = ROOT / "site"
 WORKFLOW = ROOT / ".github/workflows/pages.yml"
 UPLOAD = "actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9"
 DEPLOY = "actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346"
-GUARD = "github.repository == 'buster14a/buster' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
+GUARD = "!cancelled() && needs.build.result == 'success' && github.repository == 'buster14a/buster' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
 
 
 class Page(HTMLParser):
@@ -175,7 +175,8 @@ class PagesTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", text)
         # An exact literal contract, not a YAML parser or a live authorization proof.
         expected = f"""    name: Deploy GitHub Pages
-    if: {GUARD}
+    # Main/manual skip the PR-only planner; require the validated artifact directly.
+    if: ${{{{ {GUARD} }}}}
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 15
