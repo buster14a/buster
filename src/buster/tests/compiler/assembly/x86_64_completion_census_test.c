@@ -346,12 +346,15 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
         .record_capacity = form_count,
         .structural_only = true,
     });
+    BusterX86CompletionCensusDirectWitness direct_capacity_probe = {0};
     BusterX86CompletionCensusResult aggregate = buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
         .arena = arguments->arena,
         .target = census_target,
         .records = 0,
         .record_capacity = 0,
         .structural_only = true,
+        .direct_witnesses = &direct_capacity_probe,
+        .direct_witness_capacity = 1,
     });
     BUSTER_TEST(arguments, audit.complete);
     BUSTER_TEST(arguments, audit.entry_count == form_count);
@@ -388,6 +391,11 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aggregate.intel_source_partition_count == 0 && aggregate.att_source_partition_count == 0);
     BUSTER_TEST(arguments, aggregate.intel_attempted_count == 0 && aggregate.att_attempted_count == 0);
     BUSTER_TEST(arguments, aggregate.diagnostic_count == 0 && aggregate.diagnostic_dropped_count == 0 && aggregate.diagnostics_complete);
+    BUSTER_TEST(arguments, aggregate.direct_witnesses_requested && !aggregate.direct_witnesses_complete);
+    BUSTER_TEST(arguments, aggregate.direct_witness_count == 1 && aggregate.direct_witness_expected_count > 1);
+    BUSTER_TEST(arguments, aggregate.direct_witness_dropped_count + aggregate.direct_witness_count ==
+                             aggregate.direct_witness_expected_count);
+    BUSTER_TEST(arguments, aggregate.structural_complete && aggregate.metadata_emitted_count == structural.metadata_emitted_count);
     for (class_index = 0; class_index < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT; class_index += 1)
     {
         BUSTER_TEST(arguments, aggregate.intel_class_counts[class_index] == 0);
@@ -400,6 +408,11 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     // structural pass.  These counts are the current exhaustive ledger; the
     // reason buckets are assigned only at concrete source-builder/parser
     // branches, never inferred from a form's incidental shape.
+    BusterX86CompletionCensusDirectWitness* census_direct_witnesses =
+        arena_allocate(arguments->arena, BusterX86CompletionCensusDirectWitness, form_count);
+    u32 census_source_witness_capacity = form_count * 2;
+    BusterX86CompletionCensusSourceWitness* census_source_witnesses =
+        arena_allocate(arguments->arena, BusterX86CompletionCensusSourceWitness, census_source_witness_capacity);
     BusterX86CompletionCensusResult source = buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
         .arena = arguments->arena,
         .target = census_target,
@@ -407,7 +420,88 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
         .record_capacity = form_count,
         .run_intel = true,
         .run_att = true,
+        .direct_witnesses = census_direct_witnesses,
+        .direct_witness_capacity = form_count,
+        .source_witnesses = census_source_witnesses,
+        .source_witness_capacity = census_source_witness_capacity,
     });
+    BUSTER_TEST(arguments, census_direct_witnesses && census_source_witnesses);
+    BUSTER_TEST(arguments, source.direct_witnesses_requested && source.direct_witnesses_complete);
+    BUSTER_TEST(arguments, source.direct_witness_expected_count == source.direct_witness_count);
+    BUSTER_TEST(arguments, source.direct_witness_count == source.metadata_emitted_count + source.metadata_emit_failed_count);
+    BUSTER_TEST(arguments, source.source_witnesses_requested && source.source_witnesses_complete);
+    BUSTER_TEST(arguments, source.source_witness_expected_count == source.source_witness_count);
+    BUSTER_TEST(arguments, source.source_witness_count == source.intel_attempted_count + source.att_attempted_count);
+    bool source_form_trace_found = false;
+    for (u32 witness_index = 0; witness_index < source.direct_witness_count; witness_index += 1)
+    {
+        BusterX86CompletionCensusDirectWitness witness = census_direct_witnesses[witness_index];
+        bool row_valid = witness.form_id < form_count && records[witness.form_id].stable_hash == witness.stable_hash &&
+                         records[witness.form_id].metadata_status == witness.status &&
+                         records[witness.form_id].metadata_byte_count == witness.byte_count &&
+                         records[witness.form_id].metadata_relocation_count == witness.relocation_count &&
+                         witness.bytes_complete && witness.relocations_complete &&
+                         witness.captured_byte_count == witness.byte_count &&
+                         witness.captured_relocation_count == witness.relocation_count;
+        BUSTER_TEST(arguments, row_valid);
+    }
+    for (u32 witness_index = 0; witness_index < source.source_witness_count; witness_index += 1)
+    {
+        BusterX86CompletionCensusSourceWitness witness = census_source_witnesses[witness_index];
+        bool form_id_valid = witness.form_id < form_count;
+        BusterX86CompletionCensusRecord record = form_id_valid ? records[witness.form_id] : (BusterX86CompletionCensusRecord){0};
+        u8 expected_class = witness.dialect == 0 ? record.intel_class : record.att_class;
+        u8 expected_reason = witness.dialect == 0 ? record.intel_source_reason : record.att_source_reason;
+        BUSTER_TEST(arguments, form_id_valid && witness.dialect <= 1 && witness.stable_hash == record.stable_hash &&
+                                 witness.classification == expected_class && witness.reason == expected_reason);
+        BUSTER_TEST(arguments, witness.source_generated == (witness.source.length != 0) &&
+                                 witness.assembly_attempted == witness.source_generated);
+        if (witness.assembly_attempted && witness.encoded.diagnostic_count == 0 &&
+            witness.encoded.bytes.length != 0)
+        {
+            BusterX86MetadataForm selected_form = {0};
+            source_form_trace_found |= witness.encoded.form_observation_count == 1 &&
+                                       witness.encoded.selected_form_identity_valid &&
+                                       buster_x86_metadata_form(witness.encoded.selected_form_id, &selected_form) &&
+                                       selected_form.stable_hash == witness.encoded.selected_form_stable_hash &&
+                                       witness.encoded.selected_form_offset == 0 &&
+                                       witness.encoded.selected_form_size == witness.encoded.bytes.length;
+        }
+    }
+    BUSTER_TEST(arguments, source_form_trace_found);
+    {
+        String8 trace_source = S8("mov rax, rbx\n");
+        AssemblyEncodeResult default_trace = assembly_encode(arguments->arena, trace_source,
+            (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult enabled_trace = assembly_encode(arguments->arena, trace_source,
+            (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_INTEL,
+                                    .collect_form_observations = true});
+        BusterX86MetadataForm selected_form = {0};
+        BUSTER_TEST(arguments, default_trace.bytes.length != 0 && default_trace.form_observation_count == 0 &&
+                                 default_trace.selected_form_stable_hash == 0 && !default_trace.selected_form_identity_valid);
+        BUSTER_TEST(arguments, default_trace.bytes.length != 0 && enabled_trace.bytes.length == default_trace.bytes.length &&
+                                 memcmp(enabled_trace.bytes.pointer, default_trace.bytes.pointer, default_trace.bytes.length) == 0 &&
+                                 enabled_trace.form_observation_count == 1 && enabled_trace.selected_form_identity_valid &&
+                                 enabled_trace.selected_form_offset == 0 && enabled_trace.selected_form_size == enabled_trace.bytes.length &&
+                                 buster_x86_metadata_form(enabled_trace.selected_form_id, &selected_form) &&
+                                 selected_form.stable_hash == enabled_trace.selected_form_stable_hash);
+        AssemblyEncodeResult rejected_trace = assembly_encode(arguments->arena, S8("not_an_instruction\n"),
+            (AssemblyEncodeOptions){.target = census_target, .syntax = ASSEMBLY_SYNTAX_INTEL,
+                                    .collect_form_observations = true});
+        BUSTER_TEST(arguments, rejected_trace.diagnostic_count != 0 && rejected_trace.form_observation_count == 0 &&
+                                 rejected_trace.selected_form_id == UINT32_MAX && !rejected_trace.selected_form_identity_valid);
+        AssemblyEncodeResult invalid_arena_trace = assembly_encode(0, trace_source,
+            (AssemblyEncodeOptions){.target = census_target, .collect_form_observations = true});
+        AssemblyEncodeResult invalid_source_trace = assembly_encode(arguments->arena, (String8){.length = 1},
+            (AssemblyEncodeOptions){.target = census_target, .collect_form_observations = true});
+        BUSTER_TEST(arguments, invalid_arena_trace.form_observation_count == 0 &&
+                                 invalid_arena_trace.selected_form_id == UINT32_MAX &&
+                                 !invalid_arena_trace.selected_form_identity_valid && !invalid_arena_trace.bytes.length);
+        BUSTER_TEST(arguments, invalid_source_trace.form_observation_count == 0 &&
+                                 invalid_source_trace.selected_form_id == UINT32_MAX &&
+                                 !invalid_source_trace.selected_form_identity_valid && !invalid_source_trace.bytes.length);
+    }
+
     // The one baseline every feature group shares.  Removing all the groups'
     // features at once and diffing the whole table against the aggregate
     // proves the containment half of each group's gate: no form outside the

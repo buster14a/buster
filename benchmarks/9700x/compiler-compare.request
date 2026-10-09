@@ -72,6 +72,8 @@ request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compile
 # request: PR #3025 main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e exact-candidate throughput-corpus-v2 qualification
 # request: PR #3025 main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8 repeat exact-candidate throughput-corpus-v2 qualification
 request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualification after #3088 landed; main c60bbc25e53a041de2a1e5ae626b3c2e7cf5ad74
+request: PR #3122 schema-4 assembler diagnostic evidence; exact code basis b57f69ced9668b213cf95c45a76397552db08f3e; main f2188669c5174f71879e9b682eded8f7004d8988; fresh Ryzen 7 9700X comparison
+request: PR #3122 schema-4 assembler diagnostic evidence; exact code basis b57f69ced9668b213cf95c45a76397552db08f3e; current main 7a0b0b7142389bc654e01c34fff9ff8be950a5df; fresh exact-head Ryzen 7 9700X comparison
 
 # request: issue #3049 initialize archive search roots for GCC Release
 # request: issue #3049 PR #3051 fresh throughput-corpus-v2 qualification
