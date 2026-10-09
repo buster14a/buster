@@ -2350,6 +2350,8 @@ def utility_net_observation(legacy_us: int, snapshot_us: int, physical_upper_us:
             "charge_policy": "all-physical-residual-to-snapshot",
             "criterion_met": charged_snapshot < legacy_us,
             "assessment_scope": "once-only-controlled-trace",
+            "baseline_recipe_scope": "declared-supervised-ordinary-recipes",
+            "historical_unwrapped_legacy_savings_assessed": False,
             "general_workload_savings_assessed": False,
             "hosted_api_publication_us": None}
 def utility_authority(environment: dict) -> tuple[Api, dict]:
@@ -3270,6 +3272,8 @@ def utility_validate(api: Api, authority: dict, files: dict[str, bytes]) -> dict
             "reservation_seconds": 5400, "leg_order": ["legacy", "snapshot"], "legs": legs,
             "accounting": accounting, "utility_observation": net, "hosted_api_publication_us": None,
             "terminal_publication_us": None, "general_workload_savings_assessed": False,
+            "baseline_recipe_scope": "declared-supervised-ordinary-recipes",
+            "historical_unwrapped_legacy_savings_assessed": False,
             "authenticated_attempt_history": history, "problems": []}
 
 
@@ -3332,7 +3336,9 @@ def utility_publish(environment: dict) -> int:
     result = {"schema": "buster-compiler-closure-utility-publication-v1", "packet_state": "incomplete",
               "qualification_state": "unqualified", "default_activated": False, "routine_profile_enabled": False,
               "evidence_class": "unqualified-closure-utility-research", "phase": "utility", "packet": 0,
-              "reservation_seconds": 5400, "general_workload_savings_assessed": False, "hosted_api_publication_us": None, "problems": []}
+              "reservation_seconds": 5400, "general_workload_savings_assessed": False, "hosted_api_publication_us": None, "problems": [],
+              "baseline_recipe_scope": "declared-supervised-ordinary-recipes",
+              "historical_unwrapped_legacy_savings_assessed": False}
     try:
         files, artifact = utility_read_artifact(api, authority)
         if environment.get("BQ_UTILITY_RESULT") != "success":
@@ -3357,6 +3363,8 @@ def utility_publish(environment: dict) -> int:
     summary += ("\nOnce-only controlled Utility trace: all authenticated physical-job residual time is charged to snapshot. "
                 "Valid ordinary self-host/corpus regressions remain complete report-only data. "
                 "Hosted API/publication time is unavailable and separate; general workload savings is unassessed.\n")
+    summary += ("Baseline recipe scope: declared-supervised-ordinary-recipes. "
+                "Historical unwrapped legacy savings assessed: false.\n")
     if result.get("utility_observation"):
         summary += "\nObserved Utility criterion met: " + str(result["utility_observation"]["criterion_met"]).lower() + ".\n"
     if result["problems"]:
