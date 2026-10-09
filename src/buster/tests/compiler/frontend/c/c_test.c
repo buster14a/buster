@@ -9641,7 +9641,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
         {S8("struct T { _Alignas(_Alignof(short) * 4) char c; }; _Static_assert(sizeof(struct T) == 8, \"T\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("struct T { _Alignas(_Alignof(char)) char c; }; _Static_assert(sizeof(struct T) == 1, \"T\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("union U { _Alignas(_Alignof(double)) char c; int i; }; _Static_assert(sizeof(union U) == 8, \"U\"); int a[sizeof(union U)]; _Static_assert(sizeof(a) == 8 * sizeof(int), \"a\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
-        {S8("struct T { _Alignas(_Alignof(double)) _Alignas(_Alignof(long double)) char c; }; _Static_assert(sizeof(struct T) == 16, \"T\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct T { _Alignas(_Alignof(float)) _Alignas(_Alignof(long long)) char c; }; _Static_assert(sizeof(struct T) == 8, \"T\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("struct T { _Alignas(_Alignof(float)) char c; }; _Static_assert(sizeof(struct T) == 4, \"T\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("char d[(int)3.9]; _Static_assert(sizeof(d) == 3, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("struct T3 { char d[(int)3.9]; }; _Static_assert(sizeof(struct T3) == 3, \"T3\"); int a[sizeof(struct T3)]; _Static_assert(sizeof(a) == 3 * sizeof(int), \"a\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
@@ -9658,23 +9658,44 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
         {S8("enum { N = 5 }; char d[(short)N]; _Static_assert(sizeof(d) == 5, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("enum { N = 300 }; char d[(char)N]; _Static_assert(sizeof(d) == 44, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("char d[(int)sizeof(int)]; _Static_assert(sizeof(d) == 4, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
-        {S8("struct S { int a; long b; }; char d[(unsigned char)sizeof(struct S)]; _Static_assert(sizeof(d) == 16, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
-        {S8("struct S { int a; long b; }; struct T { char d[(int)sizeof(struct S)]; }; _Static_assert(sizeof(struct T) == 16, \"T\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct S { int a; long long b; }; char d[(unsigned char)sizeof(struct S)]; _Static_assert(sizeof(d) == 16, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct S { int a; long long b; }; struct T { char d[(int)sizeof(struct S)]; }; _Static_assert(sizeof(struct T) == 16, \"T\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("struct S { char d[(char)300]; }; char e[sizeof(struct S) + (int)1.5]; _Static_assert(sizeof(e) == 45, \"e\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("struct T { char c; char d[(int)2.5][(char)257]; }; _Static_assert(sizeof(struct T) == 3, \"T\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("char d[(unsigned)3.9]; _Static_assert(sizeof(d) == 3, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("typedef int I; char d[(I)3.9]; _Static_assert(sizeof(d) == 3, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("int f(void) { char d[(char)300]; _Static_assert(sizeof(d) == 44, \"d\"); return sizeof(d); }"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("char d[(unsigned long long)3.9 * 2]; _Static_assert(sizeof(d) == 6, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
-        {S8("char d[(char)-1];"), S8("array bound is a negative integer constant"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("char d[(signed char)-1];"), S8("array bound is a negative integer constant"), C_PREPROCESS_DIALECT_GNU17, false},
         {S8("char d[(int)-1.5];"), S8("array bound is a negative integer constant"), C_PREPROCESS_DIALECT_GNU17, false},
         {S8("struct S { char d[(int)-1.0]; };"), S8("array bound is a negative integer constant"), C_PREPROCESS_DIALECT_GNU17, false},
-        {S8("char d[(char)200];"), S8("array bound is a negative integer constant"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("char d[(signed char)200];"), S8("array bound is a negative integer constant"), C_PREPROCESS_DIALECT_GNU17, false},
         {S8("_Static_assert(sizeof(char[(char)300]) == 300, \"wrong\");"), S8("static assertion failed"), C_PREPROCESS_DIALECT_GNU17, false},
         {S8("struct T { _Alignas(_Alignof(double)) char c; }; _Static_assert(sizeof(struct T) == 16, \"wrong\");"), S8("static assertion failed"), C_PREPROCESS_DIALECT_GNU17, false},
         {S8("struct T { char d[(int)3.9]; }; _Static_assert(sizeof(struct T) == 4, \"wrong\");"), S8("static assertion failed"), C_PREPROCESS_DIALECT_GNU17, false},
         {S8("enum { K = sizeof(char[(char)300]) }; _Static_assert(K == 300, \"wrong\");"), S8("static assertion failed"), C_PREPROCESS_DIALECT_GNU17, false},
         {S8("struct T { _Alignas(3) char c; };"), S8("not a power of two"), C_PREPROCESS_DIALECT_GNU17, false},
+        // A request or bound that names the type being laid out must end in a
+        // diagnostic: the typed query rebuilds the model it names, so a type
+        // that asks about itself used to recurse without bound.
+        {S8("struct A { _Alignas(_Alignof(struct A[1])) char c; };"), S8("invalid object alignment"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct B; struct A { _Alignas(_Alignof(struct B[1])) char c; }; struct B { struct A a; };"), S8("invalid object alignment"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct B; struct A { _Alignas(_Alignof(struct B[1]) * 2) char c; }; struct B { struct A a; };"), S8("invalid object alignment"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct A { _Alignas(_Alignof(struct A[1]) * 1) char c; };"), S8("invalid object alignment"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct B { double d; }; struct A { _Alignas(_Alignof(struct B[2])) char c; }; _Static_assert(sizeof(struct A) == 8, \"A\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct A { _Alignas(_Alignof(struct A *)) char c; }; _Static_assert(sizeof(struct A) == 8, \"A\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        // Integer casts wrap in the untyped path, so a chain of bounds that cast
+        // the previous type's size costs one pass each rather than one nested
+        // model per level.
+        {S8("struct S0 { double d; }; struct S1 { char d[(int)sizeof(struct S0)]; }; struct S2 { char d[(int)sizeof(struct S1)]; }; struct S3 { char d[(int)sizeof(struct S2)]; }; struct S4 { char d[(int)sizeof(struct S3)]; }; struct S5 { char d[(int)sizeof(struct S4)]; }; struct S6 { char d[(int)sizeof(struct S5)]; }; struct S7 { char d[(int)sizeof(struct S6)]; }; struct S8 { char d[(int)sizeof(struct S7)]; }; struct S9 { char d[(int)sizeof(struct S8)]; }; struct S10 { char d[(int)sizeof(struct S9)]; }; struct S11 { char d[(int)sizeof(struct S10)]; }; struct S12 { char d[(int)sizeof(struct S11)]; }; struct S13 { char d[(int)sizeof(struct S12)]; }; struct S14 { char d[(int)sizeof(struct S13)]; }; struct S15 { char d[(int)sizeof(struct S14)]; }; struct S16 { char d[(int)sizeof(struct S15)]; }; struct S17 { char d[(int)sizeof(struct S16)]; }; struct S18 { char d[(int)sizeof(struct S17)]; }; struct S19 { char d[(int)sizeof(struct S18)]; }; struct S20 { char d[(int)sizeof(struct S19)]; }; struct S21 { char d[(int)sizeof(struct S20)]; }; struct S22 { char d[(int)sizeof(struct S21)]; }; struct S23 { char d[(int)sizeof(struct S22)]; }; struct S24 { char d[(int)sizeof(struct S23)]; }; _Static_assert(sizeof(struct S24) == 8, \"chain\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("typedef unsigned long size_t; char d[(size_t)sizeof(int) * 2]; _Static_assert(sizeof(d) == 8, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(short)-1 + 3]; _Static_assert(sizeof(d) == 2, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(unsigned char)~0]; _Static_assert(sizeof(d) == 255, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(int)(unsigned char)511]; _Static_assert(sizeof(d) == 255, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(unsigned)-1 > 5 ? 3 : 4]; _Static_assert(sizeof(d) == 3, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(unsigned long long)5]; _Static_assert(sizeof(d) == 5, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(_Bool)5 + 1]; _Static_assert(sizeof(d) == 2, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("enum { X = 300 }; char d[(char)X + (signed char)200 + 100]; _Static_assert(sizeof(d) == 88, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
     {

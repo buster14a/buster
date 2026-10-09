@@ -2907,15 +2907,38 @@ BUSTER_C_INTERNAL BUSTER_INLINE u32 c_parse_layout_next(CParseLayoutContext* con
     return agenda ? c_parse_layout_agenda_next(context) : c_parse_layout_pass_next(context, cursor);
 }
 
+// Typed queries one chain of layout solves may nest. A request that the
+// untyped evaluator cannot fold asks the protected query, which solves the
+// types its expression names on a private copy of the model, and that solve
+// asks again for their own member alignments and array bounds. A type that
+// names itself (`_Alignas(sizeof(struct A))` inside `struct A`) would
+// otherwise recurse without bound; past the limit the request is refused and
+// the type reports an invalid alignment or an unresolved bound.
+#define C_PARSE_LAYOUT_TYPED_QUERY_DEPTH_LIMIT 4u
+
+// The integer constant of [start, end) through the protected typed query,
+// counting this query in `typed_query_depth`, which the query's private copy of
+// the model inherits. An empty constant once the limit is reached.
+BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_layout_typed_constant(CParseLayoutContext* context, u32 start, u32 end)
+{
+    CIntegerConstant constant = {0};
+    if (context->result->layout_typed_query_depth < C_PARSE_LAYOUT_TYPED_QUERY_DEPTH_LIMIT)
+    {
+        CScopeId scope = c_parse_scope_for_token(context->result, (CScopeId){.value = 0}, start);
+        context->result->layout_typed_query_depth += 1;
+        constant = c_parse_type_integer_constant(context->arena, context->preprocess, context->result, scope, start, end);
+        context->result->layout_typed_query_depth -= 1;
+    }
+    return constant;
+}
+
 // The value of an alignment request through the protected typed query, which
 // runs its own machine on a private copy of the model and never reenters the
 // caller's. False when the request is not a representable non-negative
 // integer constant.
 BUSTER_GLOBAL_LOCAL bool c_parse_layout_typed_alignment_request(CParseLayoutContext* context, CAlignmentSpecifier specifier, u64* value_out)
 {
-    CScopeId scope = c_parse_scope_for_token(context->result, (CScopeId){.value = 0}, specifier.token_start);
-    CIntegerConstant constant = c_parse_type_integer_constant(context->arena, context->preprocess, context->result, scope, specifier.token_start,
-                                                              specifier.token_start + specifier.token_count);
+    CIntegerConstant constant = c_parse_layout_typed_constant(context, specifier.token_start, specifier.token_start + specifier.token_count);
     *value_out = constant.magnitude;
     return constant.valid && !constant.is_negative && !constant.magnitude_high;
 }
@@ -2996,28 +3019,57 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
                     aligned_type = c_parse_pointer_chain(context->result, context->preprocess, aligned_type, &aligned_type_index, type_end);
                     aligned_type = c_parse_array_suffixes(context->result, context->preprocess, aligned_type, &aligned_type_index, type_end);
                 }
-                if (aligned_type.value < context->type_count && aligned_type_index == type_end)
+                // 0 answers, 1 waits for a type of the table, 2 needs the typed query.
+                u32 spelled = 2;
+                u32 spelled_index = aligned_type.value;
+                while (aligned_type_index == type_end && spelled == 2 && spelled_index < context->result->type_count)
                 {
-                    // A type already in the table answers from its own layout,
-                    // or sends the aggregate back to wait for it.
-                    if (!c_parse_layout_resolved(context, agenda, aligned_type.value))
+                    u64 builtin_size = 0;
+                    u32 builtin_alignment = 0;
+                    CType spelled_type = context->result->types[spelled_index];
+                    if (spelled_index < context->type_count)
                     {
-                        valid = false;
+                        // A type already in the table answers from its own layout,
+                        // or sends the aggregate back to wait for it.
+                        spelled = c_parse_layout_resolved(context, agenda, spelled_index) ? 0 : 1;
+                        if (!spelled)
+                        {
+                            *provisional_out |= c_parse_layout_provisional(context, agenda, spelled_index);
+                            requested_alignment = c_parse_layout_alignment(context, agenda, spelled_index);
+                        }
+                    }
+                    else if (spelled_type.kind == C_TYPE_ARRAY)
+                    {
+                        // An array spelling is as aligned as its element, which
+                        // may be a table type still waiting for its own layout.
+                        spelled_index = spelled_type.element_type.value;
+                    }
+                    else if (spelled_type.kind == C_TYPE_POINTER)
+                    {
+                        requested_alignment = c_preprocess_detail(context->preprocess)->data_layout.pointer.alignment;
+                        spelled = 0;
+                    }
+                    else if (c_parse_builtin_type_layout(context->preprocess.target, spelled_type.kind, &builtin_size, &builtin_alignment))
+                    {
+                        requested_alignment = builtin_alignment;
+                        spelled = 0;
+                    }
+                    else
+                    {
                         break;
                     }
-                    *provisional_out |= c_parse_layout_provisional(context, agenda, aligned_type.value);
-                    requested_alignment = c_parse_layout_alignment(context, agenda, aligned_type.value);
                 }
-                else
+                if (spelled == 1)
                 {
-                    // A builtin, pointer or array spelling is parsed into a row
-                    // appended after this solve's type table, which holds no
-                    // layout, and a spelling the machine cannot read as a bare
-                    // type name (`_Alignof(int) * 2`) is an expression. The typed
-                    // query answers both; the untyped evaluator below reads
-                    // identifiers as zero and must not see them.
-                    typed_request = true;
+                    valid = false;
+                    break;
                 }
+                // A spelling the table cannot answer (a struct or function row
+                // appended after the solve's table) or the machine cannot read
+                // as a bare type name (`_Alignof(int) * 2`) is an expression;
+                // the typed query answers it. The untyped evaluator below reads
+                // identifiers as zero and must not see it.
+                typed_request = spelled == 2;
             }
             else
             {
@@ -3055,6 +3107,141 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
     return valid;
 }
 
+BUSTER_C_INTERNAL bool c_parse_expression_signed_kind(CTypeKind kind);
+
+// The closing parenthesis of the cast `(type)` that opens at `open` of an array
+// bound ending at `bound_end`, or zero when the parentheses do not hold only
+// type words and typedef names.
+BUSTER_GLOBAL_LOCAL u32 c_parse_layout_cast_close(CParseResult* result, CPreprocessResult preprocess, u32 open, u32 bound_end)
+{
+    u32 close = c_parse_matching_delimiter(preprocess, open, bound_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+    bool cast_type = close > open + 1 && close < bound_end;
+    for (u32 index = open + 1; cast_type && index < close; index += 1)
+    {
+        CToken type_token = preprocess.tokens[index];
+        bool type_word = type_token.kind == C_TOKEN_IDENTIFIER && c_parse_type_word_for_dialect_token(preprocess, type_token);
+        bool typedef_name = !type_word && c_parse_lookup_typedef_name_token(result, preprocess.spelling_base, type_token, false).value != C_ID_UNDERLYING_INVALID;
+        cast_type = type_word || typedef_name;
+    }
+    return cast_type ? close : 0;
+}
+
+// One past the last token of the unary expression a cast of an array bound
+// converts: prefix operators and further casts, then a parenthesized group, a
+// `sizeof`/`_Alignof` operand or a single token.
+BUSTER_GLOBAL_LOCAL u32 c_parse_layout_cast_operand_end(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 bound_end)
+{
+    u32 index = start;
+    bool prefix = true;
+    while (prefix && index < bound_end)
+    {
+        CToken token = preprocess.tokens[index];
+        u32 inner = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ? c_parse_layout_cast_close(result, preprocess, index, bound_end) : 0;
+        if (inner)
+        {
+            index = inner + 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS) ||
+                 c_token_is_punctuator(&token, C_PUNCTUATOR_TILDE) || c_token_is_punctuator(&token, C_PUNCTUATOR_EXCLAMATION))
+        {
+            index += 1;
+        }
+        else
+        {
+            prefix = false;
+        }
+    }
+    if (index < bound_end)
+    {
+        CToken token = preprocess.tokens[index];
+        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        bool word = token.kind == C_TOKEN_IDENTIFIER && (c_parse_alignof_word(spelling) || string_equal(spelling, S8("sizeof")));
+        bool group = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                     (word && index + 1 < bound_end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS));
+        u32 open = word ? index + 1 : index;
+        if (group)
+        {
+            u32 close = c_parse_matching_delimiter(preprocess, open, bound_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            index = close < bound_end ? close : bound_end - 1;
+        }
+        else if (word)
+        {
+            // `sizeof x` takes the one token after the keyword.
+            index = open < bound_end ? open : bound_end - 1;
+        }
+        index += 1;
+    }
+    return index;
+}
+
+// How a cast in an array bound converts its operand. `bits` is the width of
+// an integer type and `is_signed` its signedness. False for a cast to any
+// other type -- floating, `_Bool`, enumeration, pointer -- which needs the
+// typed query.
+BUSTER_GLOBAL_LOCAL bool c_parse_layout_cast_integer(CParseResult* result, CPreprocessResult preprocess, u32 open, u32 close, u32* bits_out,
+                                                     bool* signed_out)
+{
+    CParseResult cast_parse = *result;
+    cast_parse.deferred_bit_field_width_diagnostic_capacity = cast_parse.deferred_bit_field_width_diagnostic_count;
+    u32 type_index = open + 1;
+    CTypeId type = c_parse_machineless_base_type(&cast_parse, preprocess, result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID, open + 1,
+                                                 close, &type_index);
+    bool integer = false;
+    u64 size = 0;
+    u32 alignment = 0;
+    CTypeKind kind = type.value < cast_parse.type_count && type_index == close ? cast_parse.types[type.value].kind : C_TYPE_INVALID;
+    switch (kind)
+    {
+    case C_TYPE_CHAR:
+    case C_TYPE_SIGNED_CHAR:
+    case C_TYPE_UNSIGNED_CHAR:
+    case C_TYPE_SHORT:
+    case C_TYPE_UNSIGNED_SHORT:
+    case C_TYPE_INT:
+    case C_TYPE_UNSIGNED_INT:
+    case C_TYPE_LONG:
+    case C_TYPE_UNSIGNED_LONG:
+    case C_TYPE_LONG_LONG:
+    case C_TYPE_UNSIGNED_LONG_LONG:
+        integer = c_parse_builtin_type_layout(preprocess.target, kind, &size, &alignment) && size && size <= 8;
+        break;
+    default:
+        break;
+    }
+    *bits_out = integer ? (u32)size * 8 : 0;
+    *signed_out = kind == C_TYPE_CHAR ? target_data_layout(preprocess.target).plain_char_is_signed : c_parse_expression_signed_kind(kind);
+    return integer;
+}
+
+// The cast whose operand ends at `end` of the bound being rewritten, and the
+// mask and sign bit that wrap a value to its type.
+typedef struct CLayoutCastClosure CLayoutCastClosure;
+struct CLayoutCastClosure
+{
+    u32 end;
+    u64 mask;
+    u64 sign;
+};
+
+// Appends `) & mask)`, then `^ sign) - sign)` for a signed type, which closes
+// the `((` or `((((` the cast opened before its operand.
+BUSTER_GLOBAL_LOCAL void c_parse_layout_cast_close_emit(Arena* arena, CSpellingSpace* space, CToken* tokens, u32* count, CLayoutCastClosure closure)
+{
+    tokens[(*count)++] = c_space_token(space, S8(")"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+    tokens[(*count)++] = c_space_token(space, S8("&"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_AMPERSAND);
+    tokens[(*count)++] = c_space_token(space, string_format(arena, S8("{u64}"), closure.mask), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+    tokens[(*count)++] = c_space_token(space, S8(")"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+    if (closure.sign)
+    {
+        tokens[(*count)++] = c_space_token(space, S8("^"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_CARET);
+        tokens[(*count)++] = c_space_token(space, string_format(arena, S8("{u64}"), closure.sign), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+        tokens[(*count)++] = c_space_token(space, S8(")"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        tokens[(*count)++] = c_space_token(space, S8("-"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_MINUS);
+        tokens[(*count)++] = c_space_token(space, string_format(arena, S8("{u64}"), closure.sign), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+        tokens[(*count)++] = c_space_token(space, S8(")"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+    }
+}
+
 // The element count of an array bound that contains a cast, through the
 // protected typed query, which applies the conversion the untyped evaluator
 // would drop. False when the bound is not a representable non-negative
@@ -3062,9 +3249,7 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
 // bound does.
 BUSTER_GLOBAL_LOCAL bool c_parse_layout_typed_array_bound(CParseLayoutContext* context, CArrayBound bound, u64* count_out)
 {
-    CScopeId scope = c_parse_scope_for_token(context->result, (CScopeId){.value = 0}, bound.token_start);
-    CIntegerConstant constant = c_parse_type_integer_constant(context->arena, context->preprocess, context->result, scope, bound.token_start,
-                                                              bound.token_start + bound.token_count);
+    CIntegerConstant constant = c_parse_layout_typed_constant(context, bound.token_start, bound.token_start + bound.token_count);
     *count_out = constant.magnitude;
     return constant.valid && !constant.is_negative && !constant.magnitude_high;
 }
@@ -3213,20 +3398,40 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 CArrayBound bound = result->array_bounds[type.array_bound];
                 u64 count = 0;
                 bool unresolved_identifier = false;
-                // A cast in the bound changes its value (`(char)300`, `(int)3.9`),
-                // which the untyped evaluator below cannot apply, so the typed
-                // query evaluates such a bound once everything it names resolves.
+                // A cast in the bound changes its value (`(char)300`, `(int)3.9`).
+                // An integer cast wraps its operand in the rewritten tokens below,
+                // so the untyped evaluator keeps the bound; a cast to any other
+                // type, or an operand the evaluator cannot read (a floating
+                // constant), sends the bound to the typed query, which rebuilds
+                // the model it names and so stays off the integer path.
                 bool bound_has_cast = false;
-                CToken* bound_tokens = arena_allocate(arena, CToken, bound.token_count * 2 + 1);
-                u32 bound_token_count = 0;
+                bool bound_cast_needs_typed = false;
+                u32 parenthesis_count = 0;
                 u64 bound_spelling_capacity = 0;
                 for (u32 bound_index = 0; bound_index < bound.token_count; bound_index += 1)
                 {
-                    bound_spelling_capacity += c_token_length(preprocess.spelling_base, preprocess.tokens[bound.token_start + bound_index]) + 21;
+                    CToken* bound_token = preprocess.tokens + bound.token_start + bound_index;
+                    bound_spelling_capacity += c_token_length(preprocess.spelling_base, *bound_token) + 21;
+                    if (c_token_is_punctuator(bound_token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        parenthesis_count += 1;
+                        bound_spelling_capacity += 96;
+                    }
                 }
+                // Each cast adds at most four opening and ten closing tokens to
+                // the three it replaces, and a negative constant two for one.
+                CToken* bound_tokens = arena_allocate(arena, CToken, bound.token_count * (parenthesis_count ? 6 : 2) + 1);
+                CLayoutCastClosure* cast_closures = parenthesis_count ? arena_allocate(arena, CLayoutCastClosure, parenthesis_count) : 0;
+                u32 cast_closure_count = 0;
+                u32 bound_token_count = 0;
                 CSpellingSpace bound_space = c_space_local(arena, bound_spelling_capacity);
                 for (u32 bound_index = 0; bound_index < bound.token_count; bound_index += 1)
                 {
+                    while (cast_closure_count && cast_closures[cast_closure_count - 1].end <= bound.token_start + bound_index)
+                    {
+                        cast_closure_count -= 1;
+                        c_parse_layout_cast_close_emit(arena, &bound_space, bound_tokens, &bound_token_count, cast_closures[cast_closure_count]);
+                    }
                     CToken token = preprocess.tokens[bound.token_start + bound_index];
                     bool bound_word_is_alignof = token.kind == C_TOKEN_IDENTIFIER && c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token));
                     bool bound_word_is_sizeof = token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof"));
@@ -3435,47 +3640,37 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         bound_index += close - (bound.token_start + bound_index) - !parenthesized;
                         continue;
                     }
-                    if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    u32 cast_open = bound.token_start + bound_index;
+                    u32 cast_close = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS)
+                                         ? c_parse_layout_cast_close(result, preprocess, cast_open, bound.token_start + bound.token_count)
+                                         : 0;
+                    if (cast_close)
                     {
-                        u32 absolute = bound.token_start + bound_index;
-                        u32 bound_end = bound.token_start + bound.token_count;
-                        u32 close = bound_end;
-                        u32 cast_depth = 0;
-                        for (u32 scan = absolute; scan < bound_end; scan += 1)
+                        u32 cast_bits = 0;
+                        bool cast_signed = false;
+                        bound_has_cast = true;
+                        if (!c_parse_layout_cast_integer(result, preprocess, cast_open, cast_close, &cast_bits, &cast_signed))
                         {
-                            if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                            bound_cast_needs_typed = true;
+                        }
+                        else if (cast_bits < 64)
+                        {
+                            // `((operand) & mask)` wraps to an unsigned type; a signed
+                            // type then flips the sign bit and subtracts it.
+                            u64 cast_mask = (UINT64_C(1) << cast_bits) - 1;
+                            u32 opening_count = cast_signed ? 4 : 2;
+                            for (u32 opening = 0; opening < opening_count; opening += 1)
                             {
-                                cast_depth += 1;
+                                bound_tokens[bound_token_count++] = c_space_token(&bound_space, S8("("), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_LEFT_PARENTHESIS);
                             }
-                            else if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_RIGHT_PARENTHESIS))
-                            {
-                                if (!cast_depth)
-                                {
-                                    break;
-                                }
-                                cast_depth -= 1;
-                                if (!cast_depth)
-                                {
-                                    close = scan;
-                                    break;
-                                }
-                            }
+                            cast_closures[cast_closure_count++] = (CLayoutCastClosure){
+                                .end = c_parse_layout_cast_operand_end(result, preprocess, cast_close + 1, bound.token_start + bound.token_count),
+                                .mask = cast_mask,
+                                .sign = cast_signed ? UINT64_C(1) << (cast_bits - 1) : 0,
+                            };
                         }
-                        bool cast_type = close > absolute + 1 && close < bound_end;
-                        for (u32 cast_type_index = absolute + 1; cast_type && cast_type_index < close; cast_type_index += 1)
-                        {
-                            CToken type_token = preprocess.tokens[cast_type_index];
-                            bool type_word = type_token.kind == C_TOKEN_IDENTIFIER && c_parse_type_word_for_dialect_token(preprocess, type_token);
-                            bool typedef_name =
-                                !type_word && c_parse_lookup_typedef_name_token(result, preprocess.spelling_base, type_token, false).value != C_ID_UNDERLYING_INVALID;
-                            cast_type = type_word || typedef_name;
-                        }
-                        if (cast_type)
-                        {
-                            bound_has_cast = true;
-                            bound_index += close - absolute;
-                            continue;
-                        }
+                        bound_index += cast_close - cast_open;
+                        continue;
                     }
                     if (token.kind == C_TOKEN_IDENTIFIER)
                     {
@@ -3521,6 +3716,11 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                     }
                     bound_tokens[bound_token_count++] = c_space_retoken(&bound_space, preprocess.spelling_base, token);
                 }
+                while (cast_closure_count)
+                {
+                    cast_closure_count -= 1;
+                    c_parse_layout_cast_close_emit(arena, &bound_space, bound_tokens, &bound_token_count, cast_closures[cast_closure_count]);
+                }
                 CPreprocessResult evaluation = {
                     .target = preprocess.target,
                     .dialect = preprocess.dialect,
@@ -3537,9 +3737,11 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                     array_provisional |= !context->machine || !context->machine->inferred_bounds_final;
                 }
                 else if (bound.is_star || unresolved_identifier || !bound.token_count ||
-                         (bound_has_cast ? !c_parse_layout_typed_array_bound(context, bound, &count)
-                                         : (!c_integer_expression_evaluate(arena, bound_space.base, bound_tokens, bound_token_count, 65536, &evaluation, &count) ||
-                                            evaluation.diagnostic_count)))
+                         (bound_cast_needs_typed
+                              ? !c_parse_layout_typed_array_bound(context, bound, &count)
+                              : ((!c_integer_expression_evaluate(arena, bound_space.base, bound_tokens, bound_token_count, 65536, &evaluation, &count) ||
+                                  evaluation.diagnostic_count) &&
+                                 (!bound_has_cast || !c_parse_layout_typed_array_bound(context, bound, &count)))))
                 {
                     continue;
                 }

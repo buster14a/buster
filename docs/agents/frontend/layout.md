@@ -590,15 +590,33 @@ does not start another layout solve or add a whole-table pass. A runtime VLA
 therefore remains nonconstant.
 
 A bound that contains a cast, such as `char d[(char)300]` (44 bytes) or
-`char d[(int)3.9]` (3), cannot use the untyped evaluator, which has no
-conversions. Once every name in it has resolved, `c_parse_layout_typed_array_bound`
-evaluates it with the protected typed query; a bound without a cast keeps the
-untyped fast path. Likewise a member `_Alignas(_Alignof(double))` or
-`_Alignas(_Alignof(short) * 4)` reaches the typed query when the declaration
-machine parses the type into a row past the solve's table (builtin, pointer and
-array spellings) or reads the request as an expression, while a type already in
-the table still waits for its own layout. `c_test_declaration_constraints`
-covers both, beside the negative-bound and false-assertion refusals (#1258).
+`char d[(int)3.9]` (3), needs the conversion the untyped evaluator lacks. While
+the bound's tokens are rewritten, a cast to an integer type narrower than 64
+bits (a builtin spelling or a typedef of one) wraps its operand in the rewritten
+tokens: `((operand) & mask)` for an unsigned type, and
+`((((operand) & mask) ^ sign) - sign)` for a signed one, with the closing
+tokens placed after `c_parse_layout_cast_operand_end`. The bound then stays on
+the untyped fast path and costs no more than a bound without a cast. Only a cast
+to another type (floating, `_Bool`, enumeration, pointer) or an operand the
+evaluator cannot read (a floating constant) reaches `c_parse_layout_typed_array_bound`,
+which runs the protected typed query. That query rebuilds the model its tokens
+name, so it is the slow path; do not route integer casts to it.
+
+A member `_Alignas(_Alignof(T))` whose type name the declaration machine parses
+into a row past the solve's table (builtin, pointer and array spellings) is
+answered by `c_parse_layout_alignment_specifiers` itself: a builtin or pointer
+from the target layout, an array from its element, and a table element waits for
+its own layout like any other table type, which is also what keeps
+`_Alignas(_Alignof(struct A[1]))` inside `struct A` a diagnostic. A request that
+is an expression (`_Alignof(short) * 4`) goes to the typed query. Nested
+typed queries are bounded by `C_PARSE_LAYOUT_TYPED_QUERY_DEPTH_LIMIT`
+(`layout_typed_query_depth` in the model); past it a request is refused. The
+remaining known gaps are tracked on #1258: a member `_Alignas(_Alignof(int (*)[3]))`
+or `sizeof` of a parenthesized abstract declarator is not folded, `(enum E)X` in
+a bound goes to the typed query, and a floating cast chained through more than
+the depth limit of nested `sizeof`s is refused.
+`c_test_declaration_constraints` covers these beside the negative-bound and
+false-assertion refusals (#1258).
 
 Object alignment consumes the same declaration runs as standalone `_Alignof`,
 including literal requests, type-naming requests and completed redeclarations.
