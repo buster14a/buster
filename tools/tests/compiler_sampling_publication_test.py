@@ -1043,6 +1043,40 @@ class PreparationPublicationOutcomes(unittest.TestCase):
         with mock.patch.object(publisher, "PREPARATION_FILE_LIMIT", 65535), self.assertRaises(ValueError):
             publisher.preparation_archive(payload)
 
+
+    def test_current_executor_owner_and_head_repository_are_requeried(self):
+        import authorize as direct_authorize
+        environment = {"BQ_REPOSITORY": "buster14a/buster", "BQ_HEAD_COMMIT": "7" * 40,
+            "BQ_REQUEST_RUN_ID": "200", "BQ_RUN_ID": "201", "BQ_RUN_ATTEMPT": "1", "BQ_REQUEST_ATTEMPT": "1",
+            "GITHUB_RUN_ID": "201", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_REPOSITORY": "buster14a/buster",
+            "GITHUB_SHA": "6" * 40, "GH_TOKEN": "fixture"}
+        execution = {"id": 201, "run_attempt": 1, "path": publisher.BENCH_WORKFLOW, "event": "workflow_run",
+            "head_branch": "main", "head_sha": "6" * 40,
+            "repository": {"full_name": "buster14a/buster"}, "head_repository": {"full_name": "buster14a/buster"},
+            "actor": dict(direct_authorize.MAINTAINER), "triggering_actor": dict(direct_authorize.MAINTAINER),
+            "display_title": "9700X request 200.1 head " + "7" * 40}
+        for field, value in (("actor", {"login": "someone-else", "id": 39247043}),
+                             ("actor", {"login": "davidgmbb", "id": 123}),
+                             ("triggering_actor", {"login": "someone-else", "id": 39247043}),
+                             ("triggering_actor", {"login": "davidgmbb", "id": 123}),
+                             ("head_repository", {"full_name": "fork/buster"})):
+            for function in (publisher.preparation_authority, publisher.sampling_authority):
+                api = mock.Mock()
+                api.request.return_value = dict(execution, **{field: value})
+                with self.subTest(field=field, value=value, route=function.__name__), \
+                        mock.patch.object(publisher, "Api", return_value=api), \
+                        mock.patch.object(direct_authorize, "verify", side_effect=AssertionError("request cannot replace executor proof")):
+                    with self.assertRaisesRegex(ValueError, "executor workflow provenance"):
+                        function(environment)
+                self.assertEqual(api.request.call_args_list, [mock.call("/actions/runs/201")])
+
+    def test_native_supervision_uint64_overflow_is_incomplete(self):
+        for key in ("wall_us", "adoption_waves"):
+            raw = publisher.sampling_tsv(complete_supervision())
+            raw[key] = str(1 << 64)
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                publisher.sampling_supervision(tsv_bytes(raw))
+
     def test_preparation_native_admission_refuses_unbound_input_before_api(self):
         with mock.patch.object(publisher, "Api", side_effect=AssertionError("API must not run")):
             with self.assertRaises(ValueError):
