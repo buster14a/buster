@@ -50,6 +50,7 @@ typedef enum CVendorGenericOperation
     C_VENDOR_GENERIC_REDUCE_OR,
     C_VENDOR_GENERIC_SHUFFLE_VECTOR,
     C_VENDOR_GENERIC_PMULHUW128_SIGNATURE,
+    C_VENDOR_GENERIC_X86_SHIFT_BYTES,
 } CVendorGenericOperation;
 
 typedef enum CVendorGenericCategory

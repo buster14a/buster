@@ -304,6 +304,20 @@ BUSTER_C_SHARED CVendorGenericBuiltin c_vendor_generic_builtin(String8 name)
             .requires_vector = true, .same_type_operands = true,
         };
     }
+    // PSLLDQ/PSRLDQ changed from two long-long lanes in LLVM 21 to
+    // sixteen plain-char lanes in LLVM 23. Both preserve their operand type;
+    // the parser validates the finite shapes and the immediate separately.
+    if (string_equal(name, S8("__builtin_ia32_pslldqi128_byteshift")) ||
+        string_equal(name, S8("__builtin_ia32_psrldqi128_byteshift")))
+    {
+        result = (CVendorGenericBuiltin){
+            .operation = C_VENDOR_GENERIC_X86_SHIFT_BYTES,
+            .category = C_VENDOR_GENERIC_CATEGORY_INTEGER,
+            .result = C_VENDOR_GENERIC_RESULT_FIRST_OPERAND,
+            .minimum_arguments = 2, .maximum_arguments = 2,
+            .requires_vector = true,
+        };
+    }
     if (string_starts_with_sequence(name, S8("__builtin_")))
     {
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_vendor_generic_definitions) && result.operation == C_VENDOR_GENERIC_NONE; index += 1)

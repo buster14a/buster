@@ -580,6 +580,23 @@ all three frontends. [#3300](https://github.com/buster14a/buster/issues/3300)
 owns the reproduced header version difference. Primary LLVM builtin contracts
 were inspected under Apache-2.0 WITH LLVM-exception without implementation copies.
 
+Both `__builtin_ia32_pslldqi128_byteshift` and
+`__builtin_ia32_psrldqi128_byteshift` preserve their finite x86-64 resource-header
+contracts: LLVM 21.1.8 uses two signed long-long lanes, while LLVM 23.1.3 uses
+sixteen plain-char lanes. The result keeps the first operand's exact type;
+manual operand-dependent result queries take precedence over the pinned fixed
+signature. Other signedness, lane kinds and widths remain errors, including
+unused and unevaluated calls. The second argument retains the `int` prototype
+conversion and the existing constant 0..255 requirement. Both contracts reuse
+the existing native byte-shift rule and its 96/96/0 reservation; no generated
+catalog, generic capability whitelist, or machine opcode is changed. Off-x86
+queries remain false and calls retain the unavailable-target diagnostic.
+`compiler_driver_test_x86_byte_shift_contracts` checks exact types, malformed
+calls, native objects on all three frontends and both allocators, byte-order
+edge cases, once-only evaluation and `sizeof` non-evaluation.
+[#3302](https://github.com/buster14a/buster/issues/3302) owns this header version
+difference. LLVM contracts were inspected without copying implementation.
+
 Microsoft's `__popcnt` and `__popcnt64` are separately admitted only for
 Windows x64. Their exact signatures are `unsigned int(unsigned int)` and
 `unsigned long long(unsigned long long)`, including unevaluated result typing.

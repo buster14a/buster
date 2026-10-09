@@ -5659,7 +5659,9 @@ BUSTER_C_SHARED CSymbolBuiltin c_semantic_builtin_kind_for_target(Target target,
     // The dual resource-header contract is x86-only typed admission. Other
     // targets retain this reserved spelling's unavailable vendor signature.
     if (builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC && target.cpu_arch != CPU_ARCH_X86_64 &&
-        string_equal(name, S8("__builtin_ia32_pmulhuw128")))
+        (string_equal(name, S8("__builtin_ia32_pmulhuw128")) ||
+         string_equal(name, S8("__builtin_ia32_pslldqi128_byteshift")) ||
+         string_equal(name, S8("__builtin_ia32_psrldqi128_byteshift"))))
     {
         builtin = C_SYMBOL_BUILTIN_VENDOR_TARGET;
     }
@@ -31444,6 +31446,17 @@ BUSTER_C_INTERNAL bool c_parse_vendor_generic_category(CParseResult* result, Tar
             vector.vector_byte_size == 16 && short_lane &&
             c_parse_builtin_type_layout(target, value.kind, &lane_size, &lane_alignment) && lane_size == 2;
     }
+    if (builtin.operation == C_VENDOR_GENERIC_X86_SHIFT_BYTES)
+    {
+        CType vector = type.value < result->type_count ? result->types[type.value] : (CType){0};
+        u64 lane_size = 0;
+        u32 lane_alignment = 0;
+        bool lane = value.kind == C_TYPE_LONG_LONG || value.kind == C_TYPE_CHAR;
+        bool layout = lane && c_parse_builtin_type_layout(target, value.kind, &lane_size, &lane_alignment);
+        valid &= target.cpu_arch == CPU_ARCH_X86_64 && vector.kind == C_TYPE_VECTOR && vector.is_complete &&
+            vector.vector_byte_size == 16 && layout &&
+            ((value.kind == C_TYPE_LONG_LONG && lane_size == 8) || (value.kind == C_TYPE_CHAR && lane_size == 1));
+    }
     return valid;
 }
 
@@ -31701,7 +31714,31 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
         if (!fixed && !message.length)
         {
             CVendorGenericOperation operation = generic.operation;
-            if (operation == C_VENDOR_GENERIC_BIT_CAST)
+            if (operation == C_VENDOR_GENERIC_X86_SHIFT_BYTES)
+            {
+                location = starts[0];
+                if (!c_parse_vendor_generic_category(result, preprocess.target, types[0], generic))
+                    message = string_format(result->arena, S8("{S8} has an invalid scalar or vector operand type"), name);
+                CTypeId expected = c_semantic_vendor_builtin_type(result, preprocess.target, (CVendorBuiltinType){.kind = C_TYPE_INT});
+                if (!message.length && !c_parse_vendor_argument_compatible(machine, result, preprocess, scope, expected,
+                                                                           types[1], starts[1], ends[1]))
+                {
+                    location = starts[1];
+                    message = string_format(result->arena, S8("argument 2 of {S8} has an incompatible type"), name);
+                }
+                if (!message.length)
+                {
+                    CIntegerConstant constant = c_parse_type_integer_constant(machine->scratch_arena, preprocess, result, scope,
+                                                                               starts[1], ends[1]);
+                    if (!c_parse_vendor_immediate_permitted(preprocess.target, C_TYPE_INT, constant,
+                                                           c_semantic_vendor_immediate_limit(name, 1)))
+                    {
+                        location = starts[1];
+                        message = string_format(result->arena, S8("argument 2 of {S8} requires an integer constant in the permitted range"), name);
+                    }
+                }
+            }
+            else if (operation == C_VENDOR_GENERIC_BIT_CAST)
             {
                 u64 to_size = 0, from_size = 0;
                 u32 to_alignment = 0, from_alignment = 0;

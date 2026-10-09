@@ -23019,7 +23019,9 @@ BUSTER_C_INTERNAL bool c_ir_vendor_result_type_attempt(CIntegerIrBuilder* builde
     CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
     IrTypeId type = IR_TYPE_ID_INVALID;
     bool valid = true;
-    if (c_semantic_vendor_builtin_signature(builder->target, name, &signature))
+    bool operand_signature = generic.operation == C_VENDOR_GENERIC_PMULHUW128_SIGNATURE ||
+                             generic.operation == C_VENDOR_GENERIC_X86_SHIFT_BYTES;
+    if (!operand_signature && c_semantic_vendor_builtin_signature(builder->target, name, &signature))
         type = c_ir_vendor_signature_type(builder, signature.types[0]);
     else if (generic.operation)
     {
@@ -23102,7 +23104,9 @@ BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* buil
     if (result == C_SYMBOL_BUILTIN_VENDOR_GENERIC)
     {
         String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
-        target_owned_builtin = string_equal(spelling, S8("__builtin_ia32_pmulhuw128"));
+        target_owned_builtin = string_equal(spelling, S8("__builtin_ia32_pmulhuw128")) ||
+                               string_equal(spelling, S8("__builtin_ia32_pslldqi128_byteshift")) ||
+                               string_equal(spelling, S8("__builtin_ia32_psrldqi128_byteshift"));
     }
     if (!target_owned_builtin && (result == C_SYMBOL_BUILTIN_PREFETCH || result == C_SYMBOL_BUILTIN_ASSUME ||
                                   result == C_SYMBOL_BUILTIN_DEBUGTRAP))
@@ -25463,13 +25467,17 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     return C_IR_PREPARED_CALL_STEP_FAILED;
                 u32 argument = frame->as.prepared_call.state->argument_index;
                 IrValueId value = child_value;
-                if (!fixed && generic.operation == C_VENDOR_GENERIC_BIT_CAST && value.value < builder->function->value_count &&
+                if (!fixed && (generic.operation == C_VENDOR_GENERIC_BIT_CAST ||
+                               (generic.operation == C_VENDOR_GENERIC_X86_SHIFT_BYTES && argument == 0)) &&
+                    value.value < builder->function->value_count &&
                     builder->function->values[value.value].category == IR_VALUE_PLACE)
                     value = c_ir_emit_load_place_raw(builder, value, builder->function->values[value.value].canonical_type,
                                                      c_ir_token_source_range(builder, token));
                 if (fixed)
                     value = c_ir_emit_cast(builder, value, c_ir_vendor_signature_type(builder, signature.types[argument + 1]),
                                            c_ir_token_source_range(builder, token));
+                else if (generic.operation == C_VENDOR_GENERIC_X86_SHIFT_BYTES && argument == 1)
+                    value = c_ir_emit_cast(builder, value, builder->s32_type, c_ir_token_source_range(builder, token));
                 if (value.value == IR_ID_UNDERLYING_INVALID) return C_IR_PREPARED_CALL_STEP_FAILED;
                 selected->arguments[argument] = value;
                 frame->as.prepared_call.state->argument_index += 1;
@@ -25498,7 +25506,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             IrTypeId type = IR_TYPE_ID_INVALID;
             if (!c_ir_vendor_result_type(builder, selected->token_index, selected->close_index, &type))
                 return C_IR_PREPARED_CALL_STEP_FAILED;
-            selected->result = fixed ? c_ir_emit_vendor_builtin(builder, name, selected->arguments, emitted_count, token) :
+            selected->result = fixed || generic.operation == C_VENDOR_GENERIC_X86_SHIFT_BYTES ?
+                c_ir_emit_vendor_builtin(builder, name, selected->arguments, emitted_count, token) :
                 c_ir_emit_vendor_generic(builder, name, type, selected->arguments, emitted_count, token);
             // Void target intrinsics still produce an internal placeholder
             // after their side effects, matching compiler-owned void builtins.
@@ -58561,7 +58570,8 @@ BUSTER_C_INTERNAL CIrVendorFunctionBudget c_ir_vendor_function_budget(CIntegerIr
         budget.values += shift_budget.values;
         budget.blocks += shift_budget.blocks;
         CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
-        if (generic.operation && c_semantic_vendor_builtin_supported(builder->target, name))
+        if (generic.operation && generic.operation != C_VENDOR_GENERIC_X86_SHIFT_BYTES &&
+            c_semantic_vendor_builtin_supported(builder->target, name))
         {
             u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end,
                 C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);

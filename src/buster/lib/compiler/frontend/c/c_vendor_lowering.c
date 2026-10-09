@@ -721,7 +721,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_vendor_shift_bytes(CIntegerIrBuilder* builder, 
                                                    IrSourceRange source)
 {
     IrTypeId element = c_ir_vendor_unsigned_type(builder, 8);
-    bool valid = c_ir_vendor_vector_shape(builder, input, 64, 2);
+    bool valid = c_ir_vendor_vector_shape(builder, input, 64, 2) ||
+                 c_ir_vendor_vector_shape(builder, input, 8, 16);
     IrTypeId output_type = valid ? builder->function->values[input.value].canonical_type : IR_TYPE_ID_INVALID;
     IrValueId bytes = valid ? c_ir_vendor_reinterpret(builder, input, element, 16, source) : IR_VALUE_ID_INVALID;
     IrValueId result = IR_VALUE_ID_INVALID;

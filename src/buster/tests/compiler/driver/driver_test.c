@@ -24773,6 +24773,193 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pmulhuw_header_contracts
     return result;
 }
 
+// LLVM 21's two long-long lanes and LLVM 23's sixteen plain-char lanes
+// share the same native byte-shift rule, while preserving each source type.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x86_byte_shift_contracts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa"), S8("-fc-ast-pilot=implicit")};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 targets[] = {S8("x86_64-windows"), S8("x86_64-linux")};
+    String8 names[] = {S8("__builtin_ia32_pslldqi128_byteshift"), S8("__builtin_ia32_psrldqi128_byteshift")};
+    String8 prefix = S8(
+        "typedef long long v2ll __attribute__((vector_size(16)));\n"
+        "typedef unsigned long long v2ull __attribute__((vector_size(16)));\n"
+        "typedef char v16c __attribute__((vector_size(16)));\n"
+        "typedef signed char v16s __attribute__((vector_size(16)));\n"
+        "typedef unsigned char v16u __attribute__((vector_size(16)));\n"
+        "typedef char v8c __attribute__((vector_size(8)));\n"
+        "typedef short v8s __attribute__((vector_size(16)));\n"
+        "typedef float v4f __attribute__((vector_size(16)));\n"
+        "#if !__has_builtin(__builtin_ia32_pslldqi128_byteshift) || !__has_builtin(__builtin_ia32_psrldqi128_byteshift)\n"
+        "#error missing x64 byte shifts\n#endif\n");
+    String8 type_checks = S8(
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_ia32_pslldqi128_byteshift((v2ll){0}, 0)), v2ll), \"left old type\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_ia32_psrldqi128_byteshift((v2ll){0}, 255)), v2ll), \"right old type\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_ia32_pslldqi128_byteshift((v16c){0}, 0)), v16c), \"left new type\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_ia32_psrldqi128_byteshift((v16c){0}, 255)), v16c), \"right new type\");\n"
+        "_Static_assert(sizeof(__builtin_ia32_pslldqi128_byteshift((v2ll){0}, 0)) == 16, \"left old size\");\n"
+        "_Static_assert(sizeof(__builtin_ia32_psrldqi128_byteshift((v2ll){0}, 255)) == 16, \"right old size\");\n"
+        "_Static_assert(sizeof(__builtin_ia32_pslldqi128_byteshift((v16c){0}, 0)) == 16, \"left new size\");\n"
+        "_Static_assert(sizeof(__builtin_ia32_psrldqi128_byteshift((v16c){0}, 255)) == 16, \"right new size\");\n"
+        "static __inline__ v2ll unused_old(v2ll a) { return __builtin_ia32_pslldqi128_byteshift(a, 3); }\n"
+        "static __inline__ v16c unused_new(v16c a) { return __builtin_ia32_psrldqi128_byteshift(a, 3); }\n"
+        "typedef union { v2ll old; v16c modern; unsigned char bytes[16]; } bits;\n");
+    String8 runtime = S8(
+        "int main(void) { int mismatch = 0; bits input; bits output; bits inputs[2];\n"
+        "for (int i = 0; i < 16; i += 1) input.bytes[i] = (unsigned char)(129 + i * 7);\n"
+        "inputs[0] = input; inputs[1] = input;\n"
+        "volatile int reads = 0;\n"
+        "output.modern = __builtin_ia32_pslldqi128_byteshift(inputs[reads++].modern, 3);\n"
+        "mismatch |= reads != 1;\n"
+        "output.old = __builtin_ia32_psrldqi128_byteshift(inputs[reads++].old, 3);\n"
+        "mismatch |= reads != 2;\n"
+        "mismatch |= sizeof(__builtin_ia32_pslldqi128_byteshift(inputs[reads++].modern, 3)) != 16;\n"
+        "mismatch |= sizeof(__builtin_ia32_psrldqi128_byteshift(inputs[reads++].old, 3)) != 16 || reads != 2;\n");
+    String8 counts[] = {S8("0"), S8("1"), S8("3"), S8("7"), S8("8"), S8("15"), S8("16"), S8("17"), S8("255"), S8("0x100000005ULL")};
+    u32 expected_counts[] = {0, 1, 3, 7, 8, 15, 16, 17, 255, 5};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                String8 source = string_format(arena, S8("{S8}{S8}{S8}"), prefix, type_checks, runtime);
+                for (u32 contract = 0; contract < 2; contract += 1)
+                {
+                    String8 field = contract ? S8("modern") : S8("old");
+                    for (u32 operation = 0; operation < 2; operation += 1)
+                    {
+                        for (u32 count = 0; count < BUSTER_ARRAY_LENGTH(counts); count += 1)
+                        {
+                            String8 comparison = string_format(arena,
+                                S8("output.{S8} = {S8}(input.{S8}, {S8});\n"
+                                   "for (int i = 0; i < 16; i += 1) {{ int j = i {S8} {u32};\n"
+                                   "unsigned char expected = j >= 0 && j < 16 ? input.bytes[j] : 0;\n"
+                                   "mismatch |= output.bytes[i] != expected; }}\n"),
+                                field, names[operation], field, counts[count], operation ? S8("+") : S8("-"), expected_counts[count]);
+                            source = string_format(arena, S8("{S8}{S8}"), source, comparison);
+                        }
+                    }
+                }
+                source = string_format(arena, S8("{S8}return mismatch; }}\n"), source);
+                String8 input = buster_test_temporary_path(arena, S8("buster-byte-shift-contracts"), S8(".c"));
+                String8 output = buster_test_temporary_path(arena, S8("buster-byte-shift-contracts"), target ? S8(".o") : S8(".obj"));
+                if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+                {
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"),
+                                         targets[target], allocators[allocator], forms[form], S8("-fno-machine-fallback"),
+                                         S8("-fverify-codegen"), S8("-o"), output, input};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                    String8 description = string_format(arena, S8("byte-shift contracts {S8} {S8} {S8}: {S8}"),
+                                                        targets[target], allocators[allocator], forms[form], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+#if BUSTER_CPU_ARCH_X86_64 && (BUSTER_WINDOWS || BUSTER_LINUX)
+                    bool host_target = target == (BUSTER_WINDOWS ? 0u : 1u);
+                    if (host_target && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 executable = buster_test_temporary_path(arena, S8("buster-byte-shift-runtime"), BUSTER_WINDOWS ? S8(".exe") : S8(""));
+                        String8 link[] = {S8("-g0"), S8("-nostdinc"), S8("-std=gnu11"), allocators[allocator], forms[form],
+                                          S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), executable, input};
+                        CompilerDriverInvocation linked_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link));
+                        linked_invocation.reject_machine_fallback = true;
+                        CompilerDriverResult linked = compiler_driver_execute_invocation(arena, linked_invocation);
+                        BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+                        if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                            BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(arena, executable), description);
+                        os_file_delete(executable);
+                    }
+#endif
+                }
+                os_file_delete(output);
+                os_file_delete(input);
+                scratch_end(temporary);
+            }
+        }
+    }
+    struct { String8 arguments; String8 diagnostic; } invalid[] = {
+        {S8(""), S8("too few arguments")},
+        {S8("(v16c){0}"), S8("too few arguments")},
+        {S8("(v16c){0}, 0, 0"), S8("too many arguments")},
+        {S8("0, 0"), S8("invalid scalar or vector operand type")},
+        {S8("(v2ull){0}, 0"), S8("invalid scalar or vector operand type")},
+        {S8("(v16s){0}, 0"), S8("invalid scalar or vector operand type")},
+        {S8("(v16u){0}, 0"), S8("invalid scalar or vector operand type")},
+        {S8("(v8s){0}, 0"), S8("invalid scalar or vector operand type")},
+        {S8("(v4f){0}, 0"), S8("invalid scalar or vector operand type")},
+        {S8("(v8c){0}, 0"), S8("invalid scalar or vector operand type")},
+        {S8("(v16c){0}, immediate"), S8("requires an integer constant in the permitted range")},
+        {S8("(v16c){0}, -1"), S8("requires an integer constant in the permitted range")},
+        {S8("(v16c){0}, 256"), S8("requires an integer constant in the permitted range")},
+        {S8("(v2ll){0}, immediate"), S8("requires an integer constant in the permitted range")},
+        {S8("(v2ll){0}, -1"), S8("requires an integer constant in the permitted range")},
+        {S8("(v2ll){0}, 256"), S8("requires an integer constant in the permitted range")},
+        {S8("(v16c){0}, (v16c){0}"), S8("argument 2")},
+    };
+    for (u32 operation = 0; operation < BUSTER_ARRAY_LENGTH(names); operation += 1)
+    {
+        for (u32 item = 0; item < BUSTER_ARRAY_LENGTH(invalid); item += 1)
+        {
+            for (u32 context = 0; context < 2; context += 1)
+            {
+                for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    Arena* arena = temporary.arena;
+                    String8 call = string_format(arena, S8("{S8}({S8})"), names[operation], invalid[item].arguments);
+                    String8 body = context
+                        ? string_format(arena, S8("int invalid(int immediate) {{ return sizeof(({S8}, 1)); }}\n"), call)
+                        : string_format(arena, S8("static __inline__ void unused(int immediate) {{ {S8}; return; }}\nint admission(void) {{ return 0; }}\n"), call);
+                    String8 source = string_format(arena, S8("{S8}{S8}"), prefix, body);
+                    String8 input = buster_test_temporary_path(arena, S8("buster-byte-shift-invalid"), S8(".c"));
+                    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+                    {
+                        String8 command[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"), targets[0], forms[form], input};
+                        CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                        BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE &&
+                            compiler_driver_test_diagnostic_contains(compiled.diagnostic, names[operation]) &&
+                            compiler_driver_test_diagnostic_contains(compiled.diagnostic, invalid[item].diagnostic), compiled.diagnostic);
+                    }
+                    os_file_delete(input);
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    String8 off_prefix = S8(
+        "typedef char v16c __attribute__((vector_size(16)));\n"
+        "#if __has_builtin(__builtin_ia32_pslldqi128_byteshift) || __has_builtin(__builtin_ia32_psrldqi128_byteshift)\n"
+        "#error off-target byte shifts advertised\n#endif\n");
+    for (u32 operation = 0; operation < BUSTER_ARRAY_LENGTH(names); operation += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 source = string_format(arena, S8("{S8}v16c unavailable(v16c a) {{ return {S8}(a, 0); }}\n"),
+                                          off_prefix, names[operation]);
+            String8 input = buster_test_temporary_path(arena, S8("buster-byte-shift-unavailable"), S8(".c"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+            {
+                String8 command[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"), S8("aarch64-windows"), forms[form], input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE &&
+                    compiler_driver_test_diagnostic_contains(compiled.diagnostic, names[operation]) &&
+                    compiler_driver_test_diagnostic_contains(compiled.diagnostic, S8("unavailable for this target")), compiled.diagnostic);
+            }
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_microsoft_debugbreak(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -29052,6 +29239,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_microsoft_popcnt);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_microsoft_debugbreak);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pmulhuw_header_contracts);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x86_byte_shift_contracts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_microsoft_intrin_fallbacks);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_direct_emitter_preparation);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_borrowed_payloads);

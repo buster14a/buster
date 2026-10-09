@@ -4484,6 +4484,8 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__popcnt64"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
     { S8_INITIALIZER("__debugbreak"), C_SYMBOL_BUILTIN_DEBUGTRAP },
     { S8_INITIALIZER("__builtin_ia32_pmulhuw128"), C_SYMBOL_BUILTIN_VENDOR_GENERIC },
+    { S8_INITIALIZER("__builtin_ia32_pslldqi128_byteshift"), C_SYMBOL_BUILTIN_VENDOR_GENERIC },
+    { S8_INITIALIZER("__builtin_ia32_psrldqi128_byteshift"), C_SYMBOL_BUILTIN_VENDOR_GENERIC },
 };
 
 #define C_SYMBOL_PREDEFINED_COUNT BUSTER_ARRAY_LENGTH(c_symbol_predefined)
