@@ -253,7 +253,7 @@ BUSTER_GLOBAL_LOCAL CompilerClosureUtilityAdmission compiler_closure_utility_adm
     if (valid)
     {
         result.plan = plan;
-        result.phase = S8("qualify");
+        result.phase = S8("utility");
         result.family = S8("utility");
         result.freeze_revision = config[CLOSURE_UTILITY_CONFIG_FREEZE_REVISION];
         result.freeze_sha256 = config[CLOSURE_UTILITY_CONFIG_FREEZE_SHA];
