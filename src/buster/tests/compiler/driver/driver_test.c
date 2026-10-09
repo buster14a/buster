@@ -3815,6 +3815,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int f(int); int g(void) { return sizeof(f(1)); }\n"), true},
         {S8("int g(int x) { return x * 3 + 1; }\n"), true},
         {S8("int g(void) { int a[sizeof(int)]; return a[0]; }\n"), true},
+        {S8("int f(void) { return sizeof(int *); }\n"), true},
+        {S8("int f(int x, int y) { return x ?: y; }\n"), true, true},
+        {S8("int f(void) { return ((int){ 1 }); }\n"), true},
+        {S8("int f(int x) { return -x + +x; }\n"), true},
+        {S8("int f(void) { done: return 1; }\n"), true},
         {S8("int g(void) { int a[2]; return _Generic(a, int *: 1); }\n"), true},
         {S8("int g(void) { const int x = 1; return _Generic(x, int: 1); }\n"), true},
         {S8("int g(void) { const int *p = 0; return _Generic(p, const int *: 1, int *: 2); }\n"), true},
@@ -4146,6 +4151,65 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
                                 string_format(arena, S8("source={S8}\nsyntax={S8}\nobject={S8}"),
                                               cases[index].source, first_rendered, second_rendered));
             }
+            scratch_end(temporary);
+        }
+    }
+    struct
+    {
+        String8 source;
+        String8 code;
+        String8 message;
+        u32 column;
+    } malformed[] = {
+        {S8("struct;\nint main(void) { return 0; }\n"), S8("c.expected-declaration"), S8("expected a tag name or '{'"), 7},
+        {S8("int main(void) { return (1 + ); }\n"), S8("c.expected-expression"), S8("expected an expression"), 30},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(malformed); index += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-malformed-syntax"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-malformed-syntax"), S8(".o"));
+            BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(malformed[index].source)));
+            String8 syntax_command[] = {S8("-g0"), S8("-std=c23"), forms[form], S8("-fsyntax-only"), input};
+            String8 object_command[] = {S8("-g0"), S8("-std=c23"), forms[form], S8("-c"), S8("-o"), output, input};
+            CompilerDriverResult syntax = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+            CompilerDriverResult object = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+            String8 description = string_format(arena, S8("source={S8}\nsyntax={S8}\nobject={S8}"), malformed[index].source,
+                                                syntax.diagnostic, object.diagnostic);
+            BUSTER_TEST_RAW(arguments, syntax.error != COMPILER_DRIVER_ERROR_NONE, description);
+            BUSTER_TEST(arguments, syntax.error == object.error);
+            BUSTER_STRING_TEST(arguments, syntax.diagnostic, object.diagnostic);
+            BUSTER_TEST(arguments, syntax.diagnostic_count == 1 && object.diagnostic_count == 1);
+            BUSTER_TEST(arguments, !object.has_object);
+            if (syntax.diagnostic_count == 1 && object.diagnostic_count == 1)
+            {
+                CompilerDiagnostic first = syntax.diagnostics[0];
+                CompilerDiagnostic second = object.diagnostics[0];
+                BUSTER_STRING_TEST(arguments, first.code, malformed[index].code);
+                BUSTER_STRING_TEST(arguments, first.message, malformed[index].message);
+                BUSTER_TEST(arguments, first.severity == COMPILER_DIAGNOSTIC_ERROR && second.severity == first.severity);
+                BUSTER_TEST(arguments, first.primary.position.line == 1 && first.primary.position.column == malformed[index].column);
+                BUSTER_TEST(arguments, second.primary.position.line == first.primary.position.line &&
+                                      second.primary.position.column == first.primary.position.column);
+                BUSTER_STRING_TEST(arguments, first.code, second.code);
+                BUSTER_STRING_TEST(arguments, first.message, second.message);
+                BUSTER_TEST_RAW(arguments, string_equal(compiler_diagnostic_render(arena, first), compiler_diagnostic_render(arena, second)),
+                                description);
+            }
+            OsFileDescriptor* output_file = os_file_open(output, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0},
+                                                         (OsFileShareFlags){0});
+            BUSTER_TEST(arguments, output_file == 0);
+            if (output_file)
+            {
+                BUSTER_TEST(arguments, os_file_close(output_file));
+                BUSTER_TEST(arguments, os_file_delete(output));
+            }
+            BUSTER_TEST(arguments, os_file_delete(input));
             scratch_end(temporary);
         }
     }
