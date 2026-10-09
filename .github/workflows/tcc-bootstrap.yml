@@ -76,8 +76,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./build.sh source_size --write-baseline
-          cat docs/source-size-baseline.txt
           ./build.sh compiler_closure self-test
 
       - name: Reject deleted cached dependencies without a fatal diagnostic

@@ -59,6 +59,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena)
         // Real restore must recover ignored and build-generated inputs and the
         // saved baseline driver, and remove candidate-only source/cache files.
         make_directory_recursive(arena, path_join(arena, root, S8("build/generated")));
+        make_directory_recursive(arena, path_join(arena, root, S8("build/throughput-tools")));
         make_directory_recursive(arena, path_join(arena, root, S8(".cache/bootstrap-driver")));
         passed = production_profile_write(header, S8("candidate generated source\n")) &&
             production_profile_write(generated, S8("candidate build generated input\n")) &&
