@@ -400,7 +400,7 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         self.assertIn("github.run_id", text.split("concurrency:", 1)[1].split("permissions:", 1)[0])
 
     def test_actual_no_code_completion_requires_classification_and_all_omissions(self):
-        text = (ROOT / ".github/workflows/ci.yml").read_text()
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         aggregate = text.split("\n  complete:", 1)[1]
         body = textwrap.dedent(aggregate.split("      - name: Require every shard\n", 1)[1]
                                .split("        run: |\n", 1)[1])
@@ -430,7 +430,7 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
             for value in ("false", "", "TRUE", "unknown"):
                 self.assertNotEqual(execute(dict(good, NO_CODE=value)).returncode, 0)
             self.assertNotEqual(execute(dict(good, REUSE_REQUESTED="true")).returncode, 0)
-            self.assertIn("no workload execution is claimed", (Path(temporary) / "summary").read_text())
+            self.assertIn("no workload execution is claimed", (Path(temporary) / "summary").read_text(encoding="utf-8"))
 
     def test_actual_aggregate_rejects_missing_skipped_cancelled_and_failed_shards(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
