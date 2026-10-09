@@ -1,6 +1,6 @@
 // Native producer/consumer controls for the attempt-local closure.
 #if BUSTER_LINUX
-BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena)
+BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena, String8 export)
 {
     String8 directory = string_format(arena, S8("build/compiler-closure-self-test-{u64}"), os_now_microseconds());
     make_directory_recursive(arena, directory);
@@ -8,6 +8,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena)
     String8 root = path_join(arena, directory, S8("checkout with spaces"));
     String8 snapshot = path_join(arena, directory, S8("snapshot"));
     String8 report = path_join(arena, directory, S8("native.json"));
+    String8 snapshot_report = path_join(arena, directory, S8("snapshot.json"));
+    String8 restore_report = path_join(arena, directory, S8("restore.json"));
+    String8 verify_report = path_join(arena, directory, S8("verify.json"));
     make_directory_recursive(arena, path_join(arena, root, S8("src/generated")));
     make_directory_recursive(arena, path_join(arena, root, S8("build/generated")));
     make_directory_recursive(arena, path_join(arena, root, S8("build/Release")));
@@ -87,7 +90,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena)
     String8 base = production_profile_trim(revision.output);
     String8 base_tree = production_profile_trim(tree.output);
     passed = passed && revision.success && tree.success &&
-        compiler_closure_transfer(arena, S8("snapshot"), root, snapshot, base, base_tree, report, S8("-"));
+        compiler_closure_transfer(arena, S8("snapshot"), root, snapshot, base, base_tree, snapshot_report, S8("-"));
     String8 digest = compiler_closure_read(arena, path_join(arena, snapshot, S8(".complete")), SHA256_HEX_CAPACITY - 1);
     if (passed)
     {
@@ -101,8 +104,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena)
             production_profile_write(bootstrap, S8("candidate driver\n")) &&
             production_profile_write(harness, S8("#!/bin/sh\nprintf 'candidate corpus consumer\\n'\n")) &&
             production_profile_write(path_join(arena, root, S8("src/generated/candidate-only.h")), S8("candidate only\n")) &&
-            compiler_closure_transfer(arena, S8("restore"), root, snapshot, base, base_tree, report, digest) &&
-            compiler_closure_transfer(arena, S8("verify"), root, snapshot, base, base_tree, report, digest);
+            compiler_closure_transfer(arena, S8("restore"), root, snapshot, base, base_tree, restore_report, digest) &&
+            compiler_closure_transfer(arena, S8("verify"), root, snapshot, base, base_tree, verify_report, digest);
     }
     if (passed)
     {
@@ -112,6 +115,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena)
             !path_exists(arena, path_join(arena, root, S8("src/generated/candidate-only.h")));
     }
 
+
+    if (passed && export.length)
+    {
+        // Retain successful producer/consumer bytes for the hosted Python
+        // publisher replay before subsequent refusal controls alter state.
+        passed = os_make_directory_exclusive(export).created;
+        String8 paths[] = {snapshot_report, restore_report, verify_report};
+        String8 names[] = {S8("snapshot.json"), S8("restore.json"), S8("verify.json")};
+        for (u64 index = 0; passed && index < BUSTER_ARRAY_LENGTH(paths); index += 1)
+        {
+            passed = file_copy((CopyFileArguments){.original_path = paths[index],
+                .new_path = path_join(arena, export, names[index])}) &&
+                file_copy((CopyFileArguments){.original_path = string_format(arena, S8("{S8}.manifest.tsv"), paths[index]),
+                    .new_path = path_join(arena, export, string_format(arena, S8("{S8}.manifest.tsv"), names[index]))});
+        }
+    }
     if (passed)
     {
         String8 cache = path_join(arena, root, S8(".cache/bootstrap-driver"));

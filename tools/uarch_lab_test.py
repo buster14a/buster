@@ -2150,9 +2150,11 @@ class ExperimentalOwnerGroupTest(unittest.TestCase):
                   "status,out,err,*_=lab.run_measured([sys.executable,'-c',"
                   "'import os; print(os.getpgrp())'],None,dict(os.environ),2); "
                   "assert status==0 and int(out)==os.getpgrp(),(status,out,err)")
-        completed = subprocess.run([sys.executable, "-B", "-c", source], cwd=os.path.dirname(lab.__file__),
-                                   start_new_session=True, capture_output=True, timeout=5)
-        self.assertEqual(completed.returncode, 0, completed.stderr.decode(errors="replace"))
+        for ownership in ({"start_new_session": True}, {"process_group": 0}):
+            with self.subTest(ownership=ownership):
+                completed = subprocess.run([sys.executable, "-B", "-c", source], cwd=os.path.dirname(lab.__file__),
+                                           capture_output=True, timeout=5, **ownership)
+                self.assertEqual(completed.returncode, 0, completed.stderr.decode(errors="replace"))
 
     def test_timeout_aborts_the_owned_group_and_its_grandchild(self):
         import signal

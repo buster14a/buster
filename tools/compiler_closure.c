@@ -296,6 +296,7 @@ struct CompilerClosureBootstrapIdentity
     String8 artifact;
     String8 artifact_sha256;
     u64 dependency_count;
+    u64 dependency_bytes;
 };
 
 BUSTER_GLOBAL_LOCAL bool compiler_closure_marker_fields(String8 line, String8 fields[4], u64* count)
@@ -410,14 +411,17 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_bootstrap_marker(Arena* arena, String8
                     struct stat status = {0};
                     if (result)
                     {
-                        result = compiler_closure_hash(arena, resolved, &actual_sha256, &status) &&
-                            string_equal(actual_sha256, fields[2]);
+                        String8 terminated = string_duplicate_arena(arena, resolved, true);
+                        result = lstat((char*)terminated.pointer, &status) == 0 && S_ISREG(status.st_mode) && status.st_size >= 0 &&
+                            (u64)status.st_size <= BUSTER_COMPILER_CLOSURE_BYTE_LIMIT - parsed.dependency_bytes &&
+                            compiler_closure_hash(arena, resolved, &actual_sha256, &status) && string_equal(actual_sha256, fields[2]);
                     }
                     if (result)
                     {
                         saw_build_c |= string_equal(resolved, path_join(arena, source, S8("build.c")));
                         previous_dependency = fields[1];
                         parsed.dependency_count += 1;
+                        parsed.dependency_bytes += (u64)status.st_size;
                     }
                 }
             }
@@ -766,9 +770,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_main(Arena* arena, SliceStrin
 {
     ProcessResult result = PROCESS_RESULT_FAILED;
 #if BUSTER_LINUX
-    if (arguments.length == 1 && string_equal(arguments.pointer[0], S8("self-test")))
+    if ((arguments.length == 1 || (arguments.length == 3 && string_equal(arguments.pointer[1], S8("--export")))) &&
+        string_equal(arguments.pointer[0], S8("self-test")))
     {
-        result = compiler_closure_self_test(arena);
+        result = compiler_closure_self_test(arena, arguments.length == 3 ? arguments.pointer[2] : (String8){0});
     }
     else if (arguments.length == 7)
     {

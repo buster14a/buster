@@ -1059,13 +1059,13 @@ def harness_resident_bytes():
 
 
 def experimental_owner_group():
-    """Explicit native-controller mode; timed descendants stay in its outer owned session."""
+    """Explicit native-controller mode; timed descendants stay in its outer owned group."""
     value = os.environ.get("BUSTER_MEASUREMENT_OWNER_GROUP")
     if value is None:
         return None
     if os.name != "posix" or not value.isdecimal() or int(value) <= 1 or \
-            int(value) != os.getpgrp() or os.getsid(0) != os.getpgrp():
-        raise ValueError("experimental measurement owner group is not this independently owned session")
+            int(value) != os.getpgrp() or os.getpgid(int(value)) != int(value):
+        raise ValueError("experimental measurement owner group is not this independently owned process group")
     return int(value)
 
 
