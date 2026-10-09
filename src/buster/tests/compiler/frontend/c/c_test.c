@@ -6275,7 +6275,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_stack_capacity(UnitTestArg
         arena_allocate(work, u8, work->reserved_size - work->position - 64);
         failure = (String8){0};
         BUSTER_TEST(arguments, !c_test_initializer_flat_bytes(persistent, work, 16, bytes, &inferred_count, &scratch_bytes, &failure));
-        BUSTER_STRING_TEST(arguments, failure, S8("initializer nesting exceeds its capacity"));
+        BUSTER_STRING_TEST(arguments, failure, S8("initializer working storage exceeds the scratch reservation"));
         arena_reset_to_start(persistent);
         arena_reset_to_start(work);
 

@@ -135,6 +135,8 @@
 //                                                 inference
 //   c_ir_initializer_slot_table                   the slot projection of an
 //                                                 initialized aggregate
+//   c_ir_initializer_nesting_depth                by-value type depth that sizes
+//                                                 initializer frames/contexts
 //   c_ir_constant_initializer_leaf_class          the literal leaves of an
 //                                                 aggregate, folded in place
 //   c_ir_constant_apply_*, c_ir_constant_evaluate constant-expression
@@ -48767,7 +48769,12 @@ struct CIrInitializerSlotCache
 {
     Arena* arena;
     CIrInitializerSlotTable** tables;
+    // The by-value nesting depth of every struct and union an initializer
+    // sizing question has reached (c_ir_initializer_nesting_depth), indexed
+    // like `tables`; zero means not yet computed.
+    u32* depths;
     u32 capacity;
+    u32 depth_capacity;
 };
 
 BUSTER_C_INTERNAL CIrInitializerSlot c_ir_initializer_slot_from_field(IrType* type, IrField* field)
@@ -48950,10 +48957,193 @@ BUSTER_C_INTERNAL IrField* c_ir_constant_initializer_field_at(CIntegerIrBuilder*
     return field;
 }
 
+// How deeply an initialized type nests by value: the number of types on the
+// longest chain of arrays, vectors, structs and unions from the type down to a
+// scalar, the scalar counted.  The frame stack of an initializer walk, the
+// continuations a designator leaves behind and the contexts suspended for
+// `[a ... b] = {...}` ranges each follow one such chain, because brace
+// elision, designators and ranges all descend into a strict by-value
+// subobject.  This depth therefore sizes them, never the token count: a table
+// of a quarter million `const char *` is two types deep however long it is.
+typedef struct CIrInitializerDepthFrame CIrInitializerDepthFrame;
+struct CIrInitializerDepthFrame
+{
+    IrType* type;
+    u32 next_field;
+    // The deepest chain below the fields visited so far.
+    u32 best;
+    // The array levels between this record and the child being walked.
+    u32 child_levels;
+};
+
+BUSTER_C_INTERNAL bool c_ir_initializer_depth_is_record(IrType const* type)
+{
+    return type && type->layout.resolved && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION);
+}
+
+// The type under every array and vector level, counting the levels. An
+// acyclic chain holds each type once, which bounds the loop.
+BUSTER_C_INTERNAL IrType* c_ir_initializer_depth_strip(IrTypeTable* types, IrType* type, u32* levels)
+{
+    while (type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) && *levels < types->count)
+    {
+        *levels += 1;
+        type = ir_type_from_id(types, type->element_type);
+    }
+    return type;
+}
+
+// The cached depth of a struct or union, or null for any other type, for a
+// builder without a cache (the test hooks) and for a type that is not a row
+// of the program's table.
+BUSTER_C_INTERNAL u32* c_ir_initializer_depth_memo(CIntegerIrBuilder* builder, IrType const* type)
+{
+    u32* memo = 0;
+    CIrInitializerSlotCache* cache = builder->slot_cache;
+    IrTypeTable* types = &builder->program->types;
+    if (cache && type && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION))
+    {
+        if (!cache->depths)
+        {
+            cache->depth_capacity = types->capacity;
+            cache->depths = arena_allocate_zeroed(cache->arena, u32, cache->depth_capacity ? cache->depth_capacity : 1);
+        }
+        u32 index = type->id.value;
+        if (index < cache->depth_capacity && index < types->count && types->types + index == type)
+        {
+            memo = cache->depths + index;
+        }
+    }
+    return memo;
+}
+
+// Depth of a resolved struct or union by an explicit stack of the records on
+// the current path. Each record's fields are visited once and the answer is
+// kept, so a wide record is never walked again; a field that is a scalar or a
+// pointer costs one type read. False when the stack cannot be carved from
+// `arena` or the type contains itself, which a resolved type cannot.
+BUSTER_C_INTERNAL bool c_ir_initializer_record_depth(CIntegerIrBuilder* builder, Arena* arena, IrType* root, u32* depth_out)
+{
+    IrTypeTable* types = &builder->program->types;
+    u32 capacity = 8;
+    u64 position = arena->position;
+    bool valid = c_ir_arena_reservation_advance(arena->reserved_size, &position, sizeof(CIrInitializerDepthFrame), capacity,
+                                                 BUSTER_ALIGN_OF(CIrInitializerDepthFrame));
+    CIrInitializerDepthFrame* stack = valid ? arena_allocate(arena, CIrInitializerDepthFrame, capacity) : 0;
+    u32 count = 0;
+    u32 depth = 0;
+    if (valid)
+    {
+        stack[count++] = (CIrInitializerDepthFrame){.type = root};
+    }
+    while (valid && count)
+    {
+        CIrInitializerDepthFrame* frame = stack + count - 1;
+        if (frame->next_field < frame->type->field_count)
+        {
+            IrField* field = frame->type->fields + frame->next_field;
+            frame->next_field += 1;
+            u32 levels = 0;
+            IrType* child = c_ir_initializer_depth_strip(types, ir_type_from_id(types, field->type), &levels);
+            u32 candidate = levels + 1;
+            bool descend = false;
+            if (c_ir_initializer_depth_is_record(child))
+            {
+                u32* memo = c_ir_initializer_depth_memo(builder, child);
+                if (memo && *memo)
+                {
+                    candidate = levels + *memo;
+                }
+                else
+                {
+                    descend = true;
+                }
+            }
+            if (!descend)
+            {
+                frame->best = BUSTER_MAX(frame->best, candidate);
+            }
+            else if (count > types->count)
+            {
+                valid = false;
+            }
+            else
+            {
+                if (count == capacity)
+                {
+                    u64 grown = (u64)capacity * 2;
+                    position = arena->position;
+                    valid = grown <= UINT32_MAX &&
+                            c_ir_arena_reservation_advance(arena->reserved_size, &position, sizeof(CIrInitializerDepthFrame), grown,
+                                                           BUSTER_ALIGN_OF(CIrInitializerDepthFrame));
+                    if (valid)
+                    {
+                        CIrInitializerDepthFrame* larger = arena_allocate(arena, CIrInitializerDepthFrame, grown);
+                        memcpy(larger, stack, (u64)count * sizeof(*stack));
+                        stack = larger;
+                        capacity = (u32)grown;
+                        frame = stack + count - 1;
+                    }
+                }
+                if (valid)
+                {
+                    frame->child_levels = levels;
+                    stack[count++] = (CIrInitializerDepthFrame){.type = child};
+                }
+            }
+        }
+        else
+        {
+            u32 finished = frame->best + 1;
+            u32* memo = c_ir_initializer_depth_memo(builder, frame->type);
+            if (memo)
+            {
+                *memo = finished;
+            }
+            count -= 1;
+            if (count)
+            {
+                CIrInitializerDepthFrame* parent = stack + count - 1;
+                parent->best = BUSTER_MAX(parent->best, parent->child_levels + finished);
+            }
+            else
+            {
+                depth = finished;
+            }
+        }
+    }
+    *depth_out = valid ? depth : 0;
+    return valid;
+}
+
+// The depth of `root_type`; a scalar or pointer answers without allocating.
+// False when the walk of a record could not be carved from `arena`.
+BUSTER_C_INTERNAL bool c_ir_initializer_nesting_depth(CIntegerIrBuilder* builder, Arena* arena, IrTypeId root_type, u64* depth_out)
+{
+    IrTypeTable* types = &builder->program->types;
+    u32 levels = 0;
+    IrType* root = c_ir_initializer_depth_strip(types, ir_type_from_id(types, root_type), &levels);
+    u64 depth = (u64)levels + 1;
+    bool valid = true;
+    if (c_ir_initializer_depth_is_record(root))
+    {
+        u32* memo = c_ir_initializer_depth_memo(builder, root);
+        u32 record_depth = memo ? *memo : 0;
+        if (!record_depth)
+        {
+            valid = c_ir_initializer_record_depth(builder, arena, root, &record_depth);
+        }
+        depth = (u64)levels + record_depth;
+    }
+    *depth_out = valid ? depth : 0;
+    return valid;
+}
+
 BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId root_type, u8* bytes, u64 byte_count,
                                                          IrGlobalRelocation* relocations, u32* relocation_count, u32 relocation_capacity);
 
-BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* builder, Arena* task_arena, Arena* context_arena, u32 start, u32 end, IrTypeId root_type,
+BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* builder, Arena* task_arena, Arena* context_arena, u32 context_capacity,
+                                                              u32 start, u32 end, IrTypeId root_type,
                                                               u8* bytes, u64 byte_count, IrGlobalRelocation* relocations, u32* relocation_count,
                                                               u32 relocation_capacity);
 
@@ -49949,8 +50139,13 @@ BUSTER_C_INTERNAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuilder
     }
     // Each active frame follows a by-value aggregate descent. A resolved
     // type cannot contain itself by value; the inferred root is one extra
-    // synthetic frame. Flat element counts therefore do not size the stack.
-    u64 span = BUSTER_MIN((u64)end - start, (u64)builder->program->types.count);
+    // synthetic frame. The element type's nesting depth therefore sizes the
+    // stack, and the flat element count does not.
+    u64 span = 0;
+    if (!c_ir_initializer_nesting_depth(builder, temporary_arena, element_type, &span))
+    {
+        return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer working storage exceeds the scratch reservation"), start);
+    }
     u64 work_position = temporary_arena->position;
     if (span > UINT32_MAX - 2 || span + 2 > UINT32_MAX / sizeof(CIrInitializerInferenceFrame) ||
         span + 1 > UINT32_MAX / sizeof(CIrInitializerContinuation) ||
@@ -49959,7 +50154,7 @@ BUSTER_C_INTERNAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuilder
         !c_ir_arena_reservation_advance(temporary_arena->reserved_size, &work_position, sizeof(CIrInitializerContinuation), span + 1,
                                        BUSTER_ALIGN_OF(CIrInitializerContinuation)))
     {
-        return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer nesting exceeds its capacity"), start);
+        return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer working storage exceeds the scratch reservation"), start);
     }
     u32 capacity = (u32)(span + 2);
     CIrInitializerInferenceFrame* frames = arena_allocate(temporary_arena, CIrInitializerInferenceFrame, capacity);
@@ -51484,7 +51679,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
                 };
                 continue;
             }
-            if (frame_count + designator.continuation_count >= capacity) return false;
+            if (frame_count + designator.continuation_count >= capacity)
+            {
+                return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), value_start);
+            }
             if (selected == UINT64_MAX)
             {
                 return c_ir_constant_initializer_fail(builder, S8("aggregate initializer index overflows the target size"), frame->cursor);
@@ -51634,9 +51832,15 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_begin(CIntegerIrBuilder
         return true;
     }
     // Frames, designator continuations and ranges follow one by-value type
-    // path, including brace elision and promoted anonymous members. The
-    // finalized type count bounds that path without scanning a flat list.
-    u64 span = BUSTER_MIN((u64)end - start, (u64)builder->program->types.count);
+    // path, including brace elision and promoted anonymous members, so the
+    // initialized type's nesting depth bounds them; the length of the list
+    // does not. The run-time capacity checks in c_ir_constant_initializer_
+    // context_step stay as the guard for any input that would still outgrow it.
+    u64 span = 0;
+    if (!c_ir_initializer_nesting_depth(builder, task_arena, root_type, &span))
+    {
+        return c_ir_constant_initializer_fail(builder, S8("initializer working storage exceeds the scratch reservation"), start);
+    }
     u64 work_position = task_arena->position;
     if (span > UINT32_MAX - 2 || span + 2 > UINT32_MAX / sizeof(CIrConstantInitializerFrame) ||
         span + 1 > UINT32_MAX / sizeof(CIrConstantInitializerContinuation) || span + 1 > UINT32_MAX / sizeof(CIrConstantInitializerRange) ||
@@ -51647,7 +51851,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_begin(CIntegerIrBuilder
         !c_ir_arena_reservation_advance(task_arena->reserved_size, &work_position, sizeof(CIrConstantInitializerRange), span + 1,
                                        BUSTER_ALIGN_OF(CIrConstantInitializerRange)))
     {
-        return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), start);
+        return c_ir_constant_initializer_fail(builder, S8("initializer working storage exceeds the scratch reservation"), start);
     }
     context->work_capacity = (u32)(span + 1);
     context->frame_capacity = (u32)(span + 2);
@@ -51706,7 +51910,8 @@ bool c_test_ir_initializer_context_buffer_budget(void)
 }
 #endif
 
-BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* builder, Arena* task_arena, Arena* context_arena, u32 start, u32 end, IrTypeId root_type,
+BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* builder, Arena* task_arena, Arena* context_arena, u32 context_capacity,
+                                                              u32 start, u32 end, IrTypeId root_type,
                                                               u8* bytes, u64 byte_count, IrGlobalRelocation* relocations, u32* relocation_count,
                                                               u32 relocation_capacity)
 {
@@ -51715,16 +51920,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* b
         return false;
     }
     // A suspended GNU range initializes a strict subobject of its parent's
-    // current frame, so context nesting has the same by-value type bound.
-    u64 context_capacity_u64 = BUSTER_MIN((u64)end - start, (u64)builder->program->types.count) + 2;
-    u64 work_position = task_arena->position;
-    if (context_capacity_u64 > UINT32_MAX || context_capacity_u64 > UINT32_MAX / sizeof(CIrConstantInitializerContext) ||
-        !c_ir_arena_reservation_advance(task_arena->reserved_size, &work_position, sizeof(CIrConstantInitializerContext), context_capacity_u64,
-                                       BUSTER_ALIGN_OF(CIrConstantInitializerContext)))
-    {
-        return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), start);
-    }
-    u32 context_capacity = (u32)context_capacity_u64;
+    // current frame, so context nesting has the same by-value type bound. The
+    // caller carved `context_capacity` slots from `context_arena` for it.
+    u64 work_position;
     CIrConstantInitializerContext* contexts = arena_allocate(context_arena, CIrConstantInitializerContext, context_capacity);
     if (!contexts || !c_ir_constant_initializer_context_begin(builder, task_arena, start, end, root_type, bytes, byte_count, relocations,
                                                                relocation_count, relocation_capacity, contexts))
@@ -51787,9 +51985,13 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* b
             context->finished = true;
             continue;
         }
-        if (context->step != C_IR_CONSTANT_INITIALIZER_CONTEXT_PUSH_RANGE || context_count >= context_capacity)
+        if (context->step != C_IR_CONSTANT_INITIALIZER_CONTEXT_PUSH_RANGE)
         {
             return false;
+        }
+        if (context_count >= context_capacity)
+        {
+            return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), context->pending_range.value_start);
         }
         CIrConstantInitializerPendingRange* pending = &context->pending_range;
         IrType* value_type = ir_type_from_id(&builder->program->types, pending->designator.value_type);
@@ -51834,13 +52036,23 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builde
     bool result = false;
     if (builder && builder->scratch_arena && start < end && end - start <= UINT32_MAX - 2)
     {
-        u64 context_capacity = (u64)end - start + 2;
-        u64 reserved_size;
-        if (c_ir_constant_initializer_context_buffer_size(context_capacity, &reserved_size))
+        TemporalArena temporary = arena_begin_temporal(builder->scratch_arena);
+        // One context per suspended range level plus a margin, which is the
+        // type's nesting depth rather than the length of the list.
+        u64 depth = 0;
+        u64 reserved_size = 0;
+        if (!c_ir_initializer_nesting_depth(builder, temporary.arena, root_type, &depth))
         {
-            // Full-span context slots can exceed shared scratch before the
-            // first initializer runs. Only this fixed array lives privately;
-            // frames and materialized range work retain their task arena.
+            result = c_ir_constant_initializer_fail(builder, S8("initializer working storage exceeds the scratch reservation"), start);
+        }
+        else if (!c_ir_constant_initializer_context_buffer_size(depth + 2, &reserved_size))
+        {
+            result = c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), start);
+        }
+        else
+        {
+            // The context array lives privately; frames and materialized
+            // range work retain their task arena.
 #if BUSTER_INCLUDE_TESTS
             if (c_test_initializer_context_failure)
             {
@@ -51857,10 +52069,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builde
             });
             if (context_arena)
             {
-                TemporalArena temporary = arena_begin_temporal(builder->scratch_arena);
-                result = c_ir_constant_initializer_bytes_core(builder, temporary.arena, context_arena, start, end, root_type, bytes, byte_count,
-                                                               relocations, relocation_count, relocation_capacity);
-                scratch_end(temporary);
+                result = c_ir_constant_initializer_bytes_core(builder, temporary.arena, context_arena, (u32)(depth + 2), start, end, root_type, bytes,
+                                                               byte_count, relocations, relocation_count, relocation_capacity);
                 arena_destroy(context_arena, 1);
             }
             else
@@ -51868,10 +52078,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builde
                 result = c_ir_constant_initializer_fail(builder, S8("could not allocate constant initializer contexts"), start);
             }
         }
-        else
-        {
-            result = c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), start);
-        }
+        scratch_end(temporary);
     }
     return result;
 }
