@@ -229,32 +229,43 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_argument_error(Arena* arena, CompilerDr
     invocation->diagnostic = string_format(arena, format, argument);
 }
 
-// The -W<name> spellings that select a published warning group. The first
-// spelling of each group is the one a promoted warning names. GCC and Clang
-// disagree on the #warning group (cpp and #warnings) and on the extra-tokens
-// one (endif-labels covers only #else/#endif there), so both are accepted.
+// The -W<name> spellings that select published warning groups. Each name
+// carries the mask of the groups it covers, one bit per
+// CompilerDriverWarningGroup: a group's own spellings cover that group and a
+// parent such as gnu or everything covers its members. The first spelling of
+// each group is the one a promoted warning names. GCC and Clang disagree on
+// the #warning group (cpp and #warnings) and on the extra-tokens one
+// (endif-labels covers only #else/#endif there), so both are accepted;
+// everything is Clang's and covers every group.
 typedef struct CompilerDriverWarningName CompilerDriverWarningName;
 struct CompilerDriverWarningName
 {
     String8 name;
-    CompilerDriverWarningGroup group;
+    u32 groups;
 };
 
-BUSTER_GLOBAL_LOCAL CompilerDriverWarningGroup compiler_driver_warning_group_find(String8 name)
+#define COMPILER_DRIVER_WARNING_GROUP_BIT(group) (1u << (group))
+#define COMPILER_DRIVER_WARNING_GROUP_MASK_ALL ((1u << COMPILER_DRIVER_WARNING_GROUP_COUNT) - 1u)
+
+// Returns the mask of groups a -W name selects; zero for a name no published
+// warning belongs to.
+BUSTER_GLOBAL_LOCAL u32 compiler_driver_warning_group_find(String8 name)
 {
     static const CompilerDriverWarningName names[] = {
-        {S8_INITIALIZER("cpp"), COMPILER_DRIVER_WARNING_GROUP_CPP},
-        {S8_INITIALIZER("#warnings"), COMPILER_DRIVER_WARNING_GROUP_CPP},
-        {S8_INITIALIZER("extra-tokens"), COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS},
-        {S8_INITIALIZER("endif-labels"), COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS},
-        {S8_INITIALIZER("gnu-designator"), COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR},
+        {S8_INITIALIZER("cpp"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_CPP)},
+        {S8_INITIALIZER("#warnings"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_CPP)},
+        {S8_INITIALIZER("extra-tokens"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS)},
+        {S8_INITIALIZER("endif-labels"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS)},
+        {S8_INITIALIZER("gnu-designator"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR)},
+        {S8_INITIALIZER("gnu"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR)},
+        {S8_INITIALIZER("everything"), COMPILER_DRIVER_WARNING_GROUP_MASK_ALL},
     };
-    CompilerDriverWarningGroup result = COMPILER_DRIVER_WARNING_GROUP_COUNT;
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names) && result == COMPILER_DRIVER_WARNING_GROUP_COUNT; index += 1)
+    u32 result = 0;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names) && !result; index += 1)
     {
         if (string_equal(names[index].name, name))
         {
-            result = names[index].group;
+            result = names[index].groups;
         }
     }
     return result;
@@ -295,11 +306,13 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWarningGroup compiler_driver_warning_group_of_
 }
 
 // Applies one -W argument. -Werror, -Wno-error, -Werror=<g>, -Wno-error=<g>,
-// -Wno-<g> and -W<g> change the policy; every other spelling (-Wall,
+// -Wno-<g> and -W<g> change the policy, where <g> is a group or a parent name
+// (gnu, everything) that acts on each member; every other spelling (-Wall,
 // -Wextra, a name no warning here has) is accepted and changes nothing.
 BUSTER_GLOBAL_LOCAL void compiler_driver_warning_policy_apply(CompilerDriverWarningPolicy* policy, String8 argument)
 {
     String8 option = string_slice(argument, 2, argument.length);
+    u32 groups = 0;
     if (string_equal(option, S8("error")))
     {
         policy->werror = true;
@@ -310,35 +323,37 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_warning_policy_apply(CompilerDriverWarn
     }
     else if (string_starts_with_sequence(option, S8("error=")))
     {
-        CompilerDriverWarningGroup group = compiler_driver_warning_group_find(string_slice(option, 6, option.length));
-        if (group != COMPILER_DRIVER_WARNING_GROUP_COUNT)
+        groups = compiler_driver_warning_group_find(string_slice(option, 6, option.length));
+        for (u32 group = 0; group < COMPILER_DRIVER_WARNING_GROUP_COUNT; group += 1)
         {
-            policy->promotion[group] = COMPILER_DRIVER_WARNING_PROMOTION_ERROR;
-            policy->disabled[group] = false;
+            if (groups & COMPILER_DRIVER_WARNING_GROUP_BIT(group))
+            {
+                policy->promotion[group] = COMPILER_DRIVER_WARNING_PROMOTION_ERROR;
+                policy->disabled[group] = false;
+            }
         }
     }
     else if (string_starts_with_sequence(option, S8("no-error=")))
     {
-        CompilerDriverWarningGroup group = compiler_driver_warning_group_find(string_slice(option, 9, option.length));
-        if (group != COMPILER_DRIVER_WARNING_GROUP_COUNT)
+        groups = compiler_driver_warning_group_find(string_slice(option, 9, option.length));
+        for (u32 group = 0; group < COMPILER_DRIVER_WARNING_GROUP_COUNT; group += 1)
         {
-            policy->promotion[group] = COMPILER_DRIVER_WARNING_PROMOTION_WARNING;
-        }
-    }
-    else if (string_starts_with_sequence(option, S8("no-")))
-    {
-        CompilerDriverWarningGroup group = compiler_driver_warning_group_find(string_slice(option, 3, option.length));
-        if (group != COMPILER_DRIVER_WARNING_GROUP_COUNT)
-        {
-            policy->disabled[group] = true;
+            if (groups & COMPILER_DRIVER_WARNING_GROUP_BIT(group))
+            {
+                policy->promotion[group] = COMPILER_DRIVER_WARNING_PROMOTION_WARNING;
+            }
         }
     }
     else
     {
-        CompilerDriverWarningGroup group = compiler_driver_warning_group_find(option);
-        if (group != COMPILER_DRIVER_WARNING_GROUP_COUNT)
+        bool disable = string_starts_with_sequence(option, S8("no-"));
+        groups = compiler_driver_warning_group_find(disable ? string_slice(option, 3, option.length) : option);
+        for (u32 group = 0; group < COMPILER_DRIVER_WARNING_GROUP_COUNT; group += 1)
         {
-            policy->disabled[group] = false;
+            if (groups & COMPILER_DRIVER_WARNING_GROUP_BIT(group))
+            {
+                policy->disabled[group] = disable;
+            }
         }
     }
 }

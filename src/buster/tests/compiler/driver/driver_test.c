@@ -1128,6 +1128,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_warning_policy(UnitTestA
         BUSTER_TEST(arguments, reset.error == COMPILER_DRIVER_ERROR_NONE && !reset.warning_policy.werror);
         BUSTER_TEST(arguments, !reset.warning_policy.disabled[COMPILER_DRIVER_WARNING_GROUP_CPP]);
         BUSTER_TEST(arguments, reset.warning_policy.promotion[COMPILER_DRIVER_WARNING_GROUP_CPP] == COMPILER_DRIVER_WARNING_PROMOTION_ERROR);
+        // A parent name acts on each member group.
+        String8 parent_line[] = {S8("-Werror=everything"), S8("-Wno-error=gnu"), S8("-Wno-gnu"), S8("-c"), S8("source.c")};
+        CompilerDriverInvocation parent = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parent_line));
+        BUSTER_TEST(arguments, parent.error == COMPILER_DRIVER_ERROR_NONE && !parent.warning_policy.werror);
+        BUSTER_TEST(arguments, parent.warning_policy.promotion[COMPILER_DRIVER_WARNING_GROUP_CPP] == COMPILER_DRIVER_WARNING_PROMOTION_ERROR);
+        BUSTER_TEST(arguments, parent.warning_policy.promotion[COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS] == COMPILER_DRIVER_WARNING_PROMOTION_ERROR);
+        BUSTER_TEST(arguments, parent.warning_policy.promotion[COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR] == COMPILER_DRIVER_WARNING_PROMOTION_WARNING);
+        BUSTER_TEST(arguments, parent.warning_policy.disabled[COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR]);
+        BUSTER_TEST(arguments, !parent.warning_policy.disabled[COMPILER_DRIVER_WARNING_GROUP_CPP]);
     }
     String8 sources[] = {
         S8("#warning policy-warning\nint main(void) { return 0; }\n"),
@@ -1198,6 +1207,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_warning_policy(UnitTestA
         {2, {S8("-Werror=gnu-designator"), none, none}, true, false, designator_tag},
         {2, {S8("-Werror"), S8("-Wno-gnu-designator"), none}, false, false, none},
         {2, {S8("-Werror=cpp"), none, none}, false, true, none},
+        // Parent groups act on their members: everything covers every group,
+        // gnu covers the designator and no other warning here.
+        {0, {S8("-Wno-everything"), S8("-Werror"), none}, false, false, none},
+        {0, {S8("-Werror"), S8("-Wno-everything"), none}, false, false, none},
+        {0, {S8("-Wno-everything"), S8("-Weverything"), S8("-Werror")}, true, false, cpp_tag},
+        {0, {S8("-Wno-everything"), S8("-Werror=cpp"), none}, true, false, cpp_tag},
+        {0, {S8("-Werror=everything"), none, none}, true, false, cpp_tag},
+        {0, {S8("-Werror=everything"), S8("-Wno-error=cpp"), none}, false, true, none},
+        {0, {S8("-Wno-error=everything"), S8("-Werror"), none}, false, true, none},
+        {0, {S8("-Werror=everything"), S8("-Wno-everything"), none}, false, false, none},
+        {0, {S8("-Werror=gnu"), none, none}, false, true, none},
+        {0, {S8("-Wno-gnu"), S8("-Werror"), none}, true, false, cpp_tag},
+        {1, {S8("-Werror=everything"), none, none}, true, false, extra_tag},
+        {1, {S8("-Wno-everything"), S8("-Werror"), none}, false, false, none},
+        {1, {S8("-Werror=gnu"), S8("-Wno-gnu"), none}, false, true, none},
+        {2, {S8("-Wno-everything"), S8("-Werror"), none}, false, false, none},
+        {2, {S8("-Werror=everything"), none, none}, true, false, designator_tag},
+        {2, {S8("-Wno-gnu"), S8("-Werror"), none}, false, false, none},
+        {2, {S8("-Wno-error=gnu"), S8("-Werror"), none}, false, true, none},
+        {2, {S8("-Werror=gnu"), none, none}, true, false, designator_tag},
+        {2, {S8("-Werror=gnu-designator"), S8("-Wno-gnu"), none}, false, false, none},
+        {2, {S8("-Wno-gnu"), S8("-Wgnu"), S8("-Werror")}, true, false, designator_tag},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
     {

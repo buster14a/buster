@@ -1290,6 +1290,10 @@ a group or the global flag wins:
   order.
 - `-Wno-<group>` drops that group; `-W<group>` and `-Werror=<group>` enable it
   again.
+- A parent name acts on each of its members: `gnu` covers `gnu-designator`
+  and `everything` (Clang) covers every group, so `-Wno-everything`,
+  `-Wno-gnu`, `-Werror=gnu` and `-Wno-error=everything` behave as if each
+  member were named, in the same left-to-right order.
 - `-Werror` makes every enabled warning an error, including one with no group;
   `-Wno-error` undoes it.
 - `-Werror=<group>` promotes one group and `-Wno-error=<group>` exempts one.
@@ -1306,11 +1310,15 @@ in `CompilerDriverResult.diagnostics` and the per-input `error_count` are those
 of an error, and `tokenizer_warning_count` no longer counts it.
 
 Every other `-W...` spelling is still accepted and ignored: `-Wall`, `-Wextra`,
-and names that no warning here belongs to (`-Werror=unused-variable` neither
-enables nor promotes anything). Diagnosing unknown or unimplemented names is a
+and names that are neither a group nor a parent of one (`-Werror=unused-variable`
+neither enables nor promotes anything). Diagnosing unknown or unimplemented names is a
 separate decision (#1574). The parser and lowering still have no warning
 channel, so signed-overflow in constant expressions is not yet a warning that
 `-Werror` can promote.
+
+Under a bare `-Werror` the GNU obsolete designator fails the build, as it does
+in Clang (where `-Wgnu-designator` is on by default); GCC accepts the same
+source silently.
 
 ## Source debug information
 
