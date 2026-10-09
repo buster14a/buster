@@ -1349,11 +1349,32 @@ def terminal_review_native(records: dict[str, str], kind: str) -> dict[str, str]
     if any(result.get(kind + "_" + key) != value for key, value in wanted.items()) or kind + "_admitted" in result:
         raise ValueError("historical terminal validation changed its data-only boundary")
     import hashlib
-    expected = {"historical_api_sha256": hashlib.sha256(records["api"].encode("utf-8")).hexdigest(),
-                "historical_terminal_api_sha256": hashlib.sha256(records["envelope"].encode("utf-8")).hexdigest(),
-                "historical_terminal_api_bytes": str(len(records["envelope"].encode("utf-8")))}
-    if any(result.get(kind + "_" + key) != value for key, value in expected.items()):
-        raise ValueError("native terminal API digest binding differs")
+    api_proof = sampling_review_record(records["api"])
+    terminal = sampling_review_record(records["terminal"])
+    plan = sampling_review_record(records["acquisition"] if kind == "sampling" else records["plan"])
+    expected = {key: value for key, value in wanted.items()}
+    expected.update({"phase": terminal["phase"], "packet": terminal["packet"], "family": terminal["family"],
+                     "policy_revision": api_proof["policy_revision"],
+                     "plan_revision": records["request"].strip().rsplit(" ", 1)[-1],
+                     "plan_sha256": api_proof["freeze_sha256"], "trusted_revision": plan["trusted_revision"],
+                     "protocol_sha256": plan["protocol_sha256"], "historical_context_revision": terminal["context_revision"],
+                     "historical_request_run_id": api_proof["request_run_id"], "historical_request_run_attempt": "1",
+                     "historical_request_head": api_proof["request_head"],
+                     "historical_request_conclusion": api_proof["request_conclusion"],
+                     "historical_executor_run_id": api_proof["executor_run_id"],
+                     "historical_executor_run_attempt": api_proof["executor_run_attempt"],
+                     "historical_executor_conclusion": api_proof["executor_conclusion"],
+                     "historical_terminal_state": terminal["terminal_state"],
+                     "historical_api_sha256": hashlib.sha256(records["api"].encode("utf-8")).hexdigest(),
+                     "historical_terminal_api_sha256": hashlib.sha256(records["envelope"].encode("utf-8")).hexdigest(),
+                     "historical_terminal_api_bytes": str(len(records["envelope"].encode("utf-8")))})
+    expected.update({"historical_" + field: terminal[field] for field in
+                     ("physical_job_id", "physical_job_state", "physical_job_conclusion",
+                      "physical_job_started_at", "physical_job_completed_at")})
+    if kind == "sampling":
+        expected.update({"freeze_revision": expected["plan_revision"], "freeze_sha256": expected["plan_sha256"]})
+    if result != {kind + "_" + key: value for key, value in expected.items()}:
+        raise ValueError("native terminal output identity or data-only boundary differs")
     return result
 
 
