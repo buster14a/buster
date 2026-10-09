@@ -2176,55 +2176,36 @@ BUSTER_GLOBAL_LOCAL void machine_fast_close_live_ranges(Arena* arena, MachineFun
     u64* live_out = arena_allocate(arena, u64, plane ? plane : 1);
     memset(live_in, 0, (plane ? plane : 1) * sizeof(*live_in));
     memset(live_out, 0, (plane ? plane : 1) * sizeof(*live_out));
-    // Seed an explicit LIFO in ascending order so its first pulls preserve
-    // the old reverse-index sweep. After that, only a block whose
-    // live-out gained a bit is pending; converged regions are never
-    // re-swept. `queued` bounds the stack to one entry per block.
-    u32 work_axis = block_count ? block_count : 1u;
-    u32* worklist = arena_allocate(arena, u32, work_axis);
-    u8* queued = arena_allocate(arena, u8, work_axis);
-    memset(queued, 0, work_axis);
-    u32 work_count = 0;
-    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    // Frozen #3212 calibration reversal: full reverse-block sweeps retain
+    // the same monotone fixed point and occupied-block publication below.
+    bool changed = true;
+    while (changed)
     {
-        worklist[work_count++] = block_index;
-        queued[block_index] = 1;
-    }
-    while (work_count)
-    {
-        u32 block_index = worklist[--work_count];
-        queued[block_index] = 0;
-        u64 const* block_reads = reads + (u64)block_index * words;
-        u64 const* block_writes = writes + (u64)block_index * words;
-        u64* block_in = live_in + (u64)block_index * words;
-        u64 const* block_out = live_out + (u64)block_index * words;
-        for (u32 word = 0; word < words; word += 1)
+        changed = false;
+        for (u32 index = block_count; index; index -= 1)
         {
-            block_in[word] = block_reads[word] | (block_out[word] & ~block_writes[word]);
-        }
-        u32 first = prepass->predecessor_offsets[block_index];
-        u32 limit = prepass->predecessor_offsets[block_index + 1u];
-        // The block's own transfer plus one merge per predecessor edge.
-        WORK_LEDGER_RECORD(MACHINE_LIVENESS_WORD_UPDATES, (u64)words * (1u + limit - first));
-        for (u32 entry = first; entry < limit; entry += 1)
-        {
-            u32 predecessor = prepass->predecessor_list[entry];
-            u64* predecessor_out = live_out + (u64)predecessor * words;
-            bool predecessor_changed = false;
+            u32 block_index = index - 1u;
+            u64 const* block_reads = reads + (u64)block_index * words;
+            u64 const* block_writes = writes + (u64)block_index * words;
+            u64* block_in = live_in + (u64)block_index * words;
+            u64 const* block_out = live_out + (u64)block_index * words;
             for (u32 word = 0; word < words; word += 1)
             {
-                u64 previous = predecessor_out[word];
-                u64 merged = previous | block_in[word];
-                if (merged != previous)
-                {
-                    predecessor_out[word] = merged;
-                    predecessor_changed = true;
-                }
+                block_in[word] = block_reads[word] | (block_out[word] & ~block_writes[word]);
             }
-            if (predecessor_changed && !queued[predecessor])
+            u32 first = prepass->predecessor_offsets[block_index];
+            u32 limit = prepass->predecessor_offsets[block_index + 1u];
+            // Charge every sweep's transfer and predecessor merges.
+            WORK_LEDGER_RECORD(MACHINE_LIVENESS_WORD_UPDATES, (u64)words * (1u + limit - first));
+            for (u32 entry = first; entry < limit; entry += 1)
             {
-                worklist[work_count++] = predecessor;
-                queued[predecessor] = 1;
+                u64* predecessor_out = live_out + (u64)prepass->predecessor_list[entry] * words;
+                for (u32 word = 0; word < words; word += 1)
+                {
+                    u64 merged = predecessor_out[word] | block_in[word];
+                    changed = changed || merged != predecessor_out[word];
+                    predecessor_out[word] = merged;
+                }
             }
         }
     }
