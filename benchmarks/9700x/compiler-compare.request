@@ -3,6 +3,7 @@
 # request: issue #2680 PR #3031 current-main throughput-corpus-v2 fresh qualification
 request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
 # request: issue #2680 PR #3031 throughput-corpus-v2 qualification against main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
+request: issue #2522 unwrap parenthesized logical chains; current main 8ea54465a2309f95bcb160143ce4804e05a8dbc8
 # request: issue #2680 PR #3031 throughput-corpus-v2 qualification against main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
 # request: PR #3031 main 88a8da42a0ede1a778101969880c72291c7bc480 current-main exact-candidate throughput-corpus-v2 qualification after #3025 integration
 # request: issue #3030 hosted CI inventory acceptance with benchmark metadata
