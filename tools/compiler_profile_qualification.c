@@ -3,6 +3,8 @@
 // rejects undeclared controls; *_run records every attempted/not-run series;
 // *_self_test covers the parser and immutable candidate profiles.
 // This runner does not infer qualification from successful process exits.
+#include "compiler_profile_qualification_ledger.c"
+
 #define BUSTER_SAMPLING_PACKET_LIMIT_US (60ull * 60ull * 1000000ull)
 #define BUSTER_SAMPLING_PACKET_TRIALS 4
 #define BUSTER_SAMPLING_CAPTURE_BYTES BUSTER_MB(16)
@@ -134,7 +136,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_output_valid(Arena* arena, String8 ou
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_self_test(void)
+BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_self_test(Arena* arena)
 {
     ProcessResult result = PROCESS_RESULT_SUCCESS;
     CompilerSamplingProfile small = compiler_sampling_profile(S8("compiler-main-40pairs-candidate-v1"));
@@ -155,6 +157,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_self_test(void)
         !compiler_sampling_revision_valid(S8("0123456789abcdef0123456789abcdef0123456g")) &&
         compiler_sampling_path_overlap(S8("/tmp/output"), S8("/tmp/output/child")) &&
         !compiler_sampling_path_overlap(S8("/tmp/output"), S8("/tmp/output-other"));
+    good = good && compiler_sampling_schedule_self_test(arena) == PROCESS_RESULT_SUCCESS;
     if (!good) result = PROCESS_RESULT_FAILED;
     string_print(S8("COMPILER_SAMPLING_SELF_TEST status={S8} routine_enabled=false\n"),
         good ? S8("pass") : S8("fail"));
@@ -286,7 +289,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* are
     ProcessResult result = PROCESS_RESULT_FAILED;
     if (options.valid && options.self_test)
     {
-        result = compiler_sampling_self_test();
+        result = compiler_sampling_self_test(arena);
     }
     else if (options.valid && options.plan)
     {
