@@ -1387,328 +1387,351 @@ def terminal_review_native(records: dict[str, str], kind: str) -> dict[str, str]
 
 def review_terminal_authority(api, repository: str, original_request_attempt: dict,
                               original_executor_attempt: dict | None, kind: str, *,
-                              context_revision: str | None = None, prefix_attempts=None) -> dict:
+                              context_revision: str | None = None, prefix_attempts=None,
+                              diagnostic: dict | None = None) -> dict:
     """Review original failed/hostless API data; no OPEN relabeling or execution authority."""
     import hashlib
     from types import SimpleNamespace
     if repository != "buster14a/buster" or kind not in ("sampling", "preparation", "utility"):
         raise ValueError("historical terminal repository/kind is foreign")
+    if diagnostic is not None and (type(diagnostic) is not dict or diagnostic):
+        raise ValueError("historical terminal diagnostic sink must be an empty dictionary")
     observations = {}
-    def read(path):
-        if path not in observations:
-            observations[path] = api.request(path)
-        return observations[path]
-    observed_api = SimpleNamespace(request=read)
-    def original(supplied):
-        if not isinstance(supplied, dict) or type(supplied.get("id")) is not int or supplied["id"] <= 0 or \
-                type(supplied.get("run_attempt")) is not int or supplied["run_attempt"] != 1:
-            raise ValueError("historical terminal caller lacks a typed original first attempt")
-        actual = read(f"/actions/runs/{supplied['id']}/attempts/1")
-        latest = read(f"/actions/runs/{supplied['id']}")
-        if not isinstance(actual, dict) or type(actual.get("id")) is not int or actual["id"] != supplied["id"] or \
-                type(actual.get("run_attempt")) is not int or actual["run_attempt"] != 1 or \
-                not isinstance(latest, dict) or type(latest.get("id")) is not int or latest["id"] != actual["id"] or \
-                type(latest.get("run_attempt")) is not int or latest["run_attempt"] != 1:
-            raise ValueError("historical terminal original attempt is unavailable or was rerun")
-        for key in ("id", "run_attempt", "head_sha", "path", "event", "repository", "head_repository", "display_title"):
-            if supplied.get(key) != actual.get(key):
-                raise ValueError("historical terminal caller relabeled an original API attempt")
-        return actual, latest
-    conclusions = {"success", "failure", "cancelled", "timed_out", "skipped", "neutral", "action_required", "startup_failure"}
-    request, latest_request = original(original_request_attempt)
-    execution, latest_execution = original(original_executor_attempt) if original_executor_attempt is not None else (None, None)
-    head, request_id = request.get("head_sha"), str(request["id"])
-    if not isinstance(head, str) or not COMMIT.fullmatch(head) or \
-            request.get("path") != REQUEST_WORKFLOW or request.get("event") != "pull_request" or \
-            request.get("status") != "completed" or request.get("conclusion") not in conclusions:
-        raise ValueError("historical terminal original request is not a terminal owner workflow")
-    rows = (request, execution) if execution is not None else (request,)
-    if any(full_name(row.get(key)) != repository for row in rows for key in ("repository", "head_repository")) or \
-            any(identity(row.get(key)) != MAINTAINER for row in rows for key in ("actor", "triggering_actor")):
-        raise ValueError("historical terminal original owner/repository provenance is foreign")
-    policy_revision, relation, run_id = "-", "-", "-"
-    if execution is not None:
-        policy_revision, run_id = execution.get("head_sha"), str(execution["id"])
-        if context_revision is not None or run_id == request_id or \
-                not isinstance(policy_revision, str) or not COMMIT.fullmatch(policy_revision) or \
-                execution.get("path") != ".github/workflows/9700x-direct-bench.yml" or \
-                execution.get("event") != "workflow_run" or execution.get("head_branch") != "main" or \
-                execution.get("display_title") != f"9700X request {request_id}.1 head {head}" or \
-                execution.get("status") != "completed" or execution.get("conclusion") not in conclusions:
-            raise ValueError("historical terminal original executor provenance is foreign or nonterminal")
-        context = policy_revision
-    else:
-        if not isinstance(context_revision, str) or not COMMIT.fullmatch(context_revision):
-            raise ValueError("hostless terminal review lacks a separate immutable protected context")
-        context = context_revision
-    on_main = read(f"/compare/{context}...main")
-    context_relation = on_main.get("status") if isinstance(on_main, dict) else None
-    if context_relation not in ("ahead", "identical"):
-        raise ValueError("historical terminal policy/context is outside protected main")
-    if execution is not None:
-        relation = context_relation
-    source_commit = read(f"/commits/{head}")
-    parents = source_commit.get("parents") if isinstance(source_commit, dict) else None
-    if not isinstance(parents, list) or not 1 <= len(parents) <= 2 or any(
-            not isinstance(row, dict) or not isinstance(row.get("sha"), str) or
-            not COMMIT.fullmatch(row["sha"]) for row in parents):
-        raise ValueError("historical terminal source parent inventory is unavailable")
-    comparisons = [read(f"/compare/{row['sha']}...{head}") for row in parents]
-    compared_heads = [sampling_review_compare_head(row, head) for row in comparisons]
-    unused_files, problems = request_delta(head, source_commit, comparisons)
-    if problems:
-        raise ValueError("historical terminal every-parent source proof failed: " + "; ".join(problems))
-    marker_text = sampling_content(repository, COMPARE_REQUEST, head, "", api=observed_api)
-    selector = sampling_fresh_selector if kind == "sampling" else utility_fresh_selector if kind == "utility" else preparation_fresh_selector
-    selected = selector(marker_text, comparisons)
-    if selected is None:
-        raise ValueError("historical terminal selector was inherited, moved or not fresh")
-    line, phase, packet, revision = selected
-    associated = read(f"/commits/{head}/pulls?per_page=100")
-    snapshot = request.get("pull_requests", [])
-    if not isinstance(snapshot, list) or len(snapshot) > 1:
-        raise ValueError("historical terminal request has ambiguous pull membership")
-    number = snapshot[0].get("number") if snapshot and isinstance(snapshot[0], dict) else None
-    if snapshot and (type(number) is not int or number <= 0):
-        raise ValueError("historical terminal pull snapshot has no typed number")
-    matches = [row for row in associated if isinstance(row, dict) and (number is None or row.get("number") == number)] \
-        if isinstance(associated, list) and len(associated) < 100 else []
-    if len(matches) != 1:
-        raise ValueError("historical terminal commit has no unique original owning pull")
-    pull = matches[0]
-    if type(pull.get("number")) is not int or pull["number"] <= 0 or identity(pull.get("user")) != MAINTAINER or \
-            pull.get("state") not in ("open", "closed") or \
-            not isinstance(pull.get("head"), dict) or not isinstance(pull["head"].get("sha"), str) or \
-            not COMMIT.fullmatch(pull["head"]["sha"]) or full_name(pull["head"].get("repo")) != repository or \
-            not isinstance(pull.get("base"), dict) or full_name(pull["base"].get("repo")) != repository:
-        raise ValueError("historical terminal observed pull membership/owner is foreign")
-    allowlist_path = SAMPLING_ALLOWLIST if kind == "sampling" else UTILITY_ALLOWLIST if kind == "utility" else PREPARATION_ALLOWLIST
-    plan_path = SAMPLING_FREEZE if kind == "sampling" else UTILITY_PLAN if kind == "utility" else PREPARATION_PLAN
-    context_allowlist_text = sampling_content(repository, allowlist_path, context, "", api=observed_api)
-    config = sampling_review_record(context_allowlist_text)
-    freeze_text = sampling_content(repository, plan_path, revision, "", api=observed_api)
-    frozen = sampling_review_record(freeze_text)
-    parent_revision = frozen.get("campaign_parent_revision", "-") if kind == "sampling" and phase != "acquire" else "-"
-    parent_text = "" if parent_revision == "-" else sampling_content(repository, plan_path, parent_revision, "", api=observed_api)
-    parent = sampling_review_record(parent_text) if parent_text else {}
-    ancestor_revision = parent.get("campaign_parent_revision", "-") if kind == "sampling" and phase == "confirm" else "-"
-    ancestor_campaign = parent.get("campaign_parent", "-") if kind == "sampling" and phase == "confirm" else "-"
-    acquisition_text = (freeze_text if phase == "acquire" else parent_text if phase == "pilot" else
-                        sampling_content(repository, plan_path, ancestor_revision, "", api=observed_api)) if kind == "sampling" else ""
-    acquisition = sampling_review_record(acquisition_text) if acquisition_text else {}
-    for reference in {revision, parent_revision, ancestor_revision, (acquisition if kind == "sampling" else frozen).get("trusted_revision", "-")} - {"-"}:
-        if not isinstance(reference, str) or not COMMIT.fullmatch(reference):
-            raise ValueError("historical terminal immutable reference is malformed")
-        lineage = read(f"/compare/{reference}...{context}")
-        if not isinstance(lineage, dict) or lineage.get("status") not in ("ahead", "identical"):
-            raise ValueError("historical terminal frozen source is outside its protected policy/context")
-    context_schema = "buster-main-sampling-admission-v1" if kind == "sampling" else \
-        "buster-compiler-closure-utility-admission-v1" if kind == "utility" else "buster-compiler-preparation-admission-v1"
-    if config.get("schema") != context_schema or config.get("state") != phase or \
-            config.get("repository") != repository or config.get("owner_login") != MAINTAINER["login"] or \
-            config.get("owner_id") != str(MAINTAINER["id"]) or config.get("freeze_revision") != revision or \
-            config.get("freeze_sha256") != hashlib.sha256(freeze_text.encode("utf-8")).hexdigest() or \
-            config.get("protocol_sha256") != frozen.get("protocol_sha256") or \
-            kind == "sampling" and (config.get("parent_freeze_revision") != parent_revision or
-                                   config.get("campaign_parent") != frozen.get("campaign_parent", "-")):
-        raise ValueError("historical terminal protected context does not bind the selected committed plan chain")
-    since = config.get("history_since")
-    if not isinstance(since, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", since):
-        raise ValueError("historical terminal complete inventory window is unavailable")
-    created = request.get("created_at")
-    if not isinstance(created, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", created) or \
-            datetime.fromisoformat(since.replace("Z", "+00:00")) > datetime.fromisoformat(created.replace("Z", "+00:00")):
-        raise ValueError("historical terminal inventory window truncates the original request")
-    executors = sampling_executor_inventory(repository, "", since, api=observed_api)
-    if any(not isinstance(row.get("display_title"), str) or not row["display_title"] for row in executors):
-        raise ValueError("historical terminal executor inventory cannot prove canonical title absence")
-    candidates = [row for row in executors if isinstance(row.get("display_title"), str) and
-                  row["display_title"].startswith(f"9700X request {request_id}.1 ")]
-    if len(candidates) != (1 if execution is not None else 0) or \
-            execution is not None and (candidates[0]["id"] != execution["id"] or candidates[0]["display_title"] != execution["display_title"]):
-        raise ValueError("historical terminal executor absence/identity contradicts complete inventory")
-    digest = lambda text: hashlib.sha256(text.encode("utf-8")).hexdigest()
-    freeze_sha = digest(freeze_text)
-    history = sampling_attempt_history(repository, "", request_id, since, revision, freeze_sha,
-        parent_revision, frozen.get("campaign_parent", "-"), ancestor_revision, ancestor_campaign,
-        preparation=kind == "preparation", utility=kind == "utility",
-        api=observed_api, historical=True, before_created=created)
-    if prefix_attempts is not None and prefix_attempts != history:
-        raise ValueError("historical terminal supplied prefix differs from complete original API history")
-    allowlist_text = context_allowlist_text if execution is not None else ""
-    facts = {
-        "schema": "buster-main-sampling-github-facts-v1", "repository": repository,
-        "request_run_id": request_id, "request_run_attempt": "1", "executor_run_id": run_id,
-        "executor_run_attempt": "1" if execution is not None else "-", "request_head": head, "trusted_revision": policy_revision,
-        "owner_login": MAINTAINER["login"], "owner_id": str(MAINTAINER["id"]),
-        "actor_login": request["actor"]["login"], "actor_id": str(request["actor"]["id"]),
-        "triggering_login": request["triggering_actor"]["login"], "triggering_id": str(request["triggering_actor"]["id"]),
-        "pull_author_login": pull["user"]["login"], "pull_author_id": str(pull["user"]["id"]),
-        "request_repository": full_name(request["repository"]), "request_head_repository": full_name(request["head_repository"]),
-        "pull_repository": full_name(pull["head"]["repo"]), "pull_state": pull["state"],
-        "parent_count": str(len(parents)), "fresh_parent_0": sampling_added(comparisons[0], line),
-        "fresh_parent_1": sampling_added(comparisons[1], line) if len(parents) == 2 else "-"}
-    facts_text = "".join(f"{key}\t{value}\n" for key, value in facts.items())
-    history_text = "\t".join(SAMPLING_HISTORY_HEADER) + "\n" + "".join("\t".join(row) + "\n" for row in history)
-    check_name = SAMPLING_CHECK if kind == "sampling" else UTILITY_CHECK if kind == "utility" else PREPARATION_CHECK
-    check_prefix = "buster-main-sampling-v1:" if kind == "sampling" else "buster-compiler-closure-utility-v1:" if kind == "utility" else "buster-compiler-preparation-v1:"
-    external_prefix = f"{check_prefix}{freeze_sha}:{phase}:{packet}:{request_id}:"
-    expected_external = f"{external_prefix}{run_id}:1"
-    listed = read(f"/commits/{head}/check-runs?check_name={urllib.parse.quote(check_name)}&filter=all&per_page=100")
-    checks = listed.get("check_runs") if isinstance(listed, dict) else None
-    if not isinstance(checks, list) or len(checks) >= 100 or type(listed.get("total_count")) is not int or listed["total_count"] != len(checks):
-        raise ValueError("historical terminal check inventory is unavailable or capped")
-    own = [row for row in checks if isinstance(row, dict) and row.get("name") == check_name and row.get("head_sha") == head and
-           isinstance(row.get("app"), dict) and row["app"].get("id") == 15368 and
-           isinstance(row.get("external_id"), str) and row["external_id"].startswith(external_prefix)]
-    if len(own) > 1 or own and (execution is None or own[0].get("external_id") != expected_external):
-        raise ValueError("historical terminal retained check contradicts executor inventory")
-    check = own[0] if own else None
-    job = None
-    if execution is not None:
-        jobs_record = read(f"/actions/runs/{run_id}/attempts/1/jobs?per_page=100")
-        jobs = jobs_record.get("jobs") if isinstance(jobs_record, dict) else None
-        if not isinstance(jobs, list) or len(jobs) >= 100 or type(jobs_record.get("total_count")) is not int or jobs_record["total_count"] != len(jobs):
-            raise ValueError("historical terminal original job inventory is unavailable or capped")
-        job_name = "Sampling qualification packet" if kind == "sampling" else "Compiler closure utility" if kind == "utility" else "Compiler preparation qualification"
-        physical = [row for row in jobs if isinstance(row, dict) and row.get("name") == job_name]
-        if len(physical) > 1:
-            raise ValueError("historical terminal original physical job is ambiguous")
-        job = physical[0] if physical else None
-        if job is not None and (type(job.get("id")) is not int or job["id"] <= 0 or
-                                type(job.get("run_id")) is not int or job["run_id"] != execution["id"] or
-                                type(job.get("run_attempt")) is not int or job["run_attempt"] != 1 or job.get("head_sha") != policy_revision or
-                                job.get("status") != "completed" or job.get("conclusion") not in conclusions):
-            raise ValueError("historical terminal physical job identity/state is foreign or nonterminal")
-    expected_artifact_name = "buster-9700x-" + kind + "-" + head + "-1"
-    artifact_inventory, artifact_total, artifact_pages = [], None, []
-    if execution is not None:
-        for page in range(1, 11):
-            artifact_path = f"/actions/runs/{run_id}/artifacts?per_page=100&page={page}"
-            listing = read(artifact_path)
-            artifact_pages.append(artifact_path)
-            members = listing.get("artifacts") if isinstance(listing, dict) else None
-            total = listing.get("total_count") if isinstance(listing, dict) else None
-            if not isinstance(members, list) or len(members) > 100 or type(total) is not int or not 0 <= total <= 1000:
-                raise ValueError("historical terminal artifact inventory is unavailable or capped")
-            if artifact_total is None:
-                artifact_total = total
-            if total != artifact_total:
-                raise ValueError("historical terminal artifact inventory changed during reading")
-            artifact_inventory.extend(members)
-            if len(artifact_inventory) >= total:
-                break
-            if len(members) != 100:
-                raise ValueError("historical terminal artifact inventory is incomplete")
-        if len(artifact_inventory) != artifact_total or any(not isinstance(row, dict) or
-                type(row.get("id")) is not int or row["id"] <= 0 or not isinstance(row.get("name"), str) or not row["name"] for row in artifact_inventory) or \
-                len({row["id"] for row in artifact_inventory}) != artifact_total:
-            raise ValueError("historical terminal artifact inventory is incomplete or duplicated")
-    selected_artifacts = [row for row in artifact_inventory if row.get("name") == expected_artifact_name]
-    if len(selected_artifacts) > 1:
-        raise ValueError("historical terminal expected artifact is ambiguous")
-    selected_artifact = selected_artifacts[0] if selected_artifacts else None
-    if selected_artifact is not None:
-        origin = selected_artifact.get("workflow_run")
-        if not isinstance(origin, dict) or type(origin.get("id")) is not int or origin["id"] != execution["id"] or \
-                origin.get("head_sha") != policy_revision or type(selected_artifact.get("expired")) is not bool or \
-                type(selected_artifact.get("size_in_bytes")) is not int or selected_artifact["size_in_bytes"] < 0:
-            raise ValueError("historical terminal selected artifact identity is foreign or malformed")
-    executor_fields = {
-        "executor_run_id": run_id, "executor_run_attempt": "1" if execution else "-", "executor_latest_attempt": "1" if execution else "-",
-        "executor_workflow": execution["path"] if execution else "-", "executor_event": execution["event"] if execution else "-",
-        "executor_branch": execution["head_branch"] if execution else "-", "executor_head": policy_revision,
-        "executor_title": execution["display_title"] if execution else "-", "executor_status": execution["status"] if execution else "-",
-        "executor_conclusion": execution["conclusion"] if execution else "-", "executor_actor_login": execution["actor"]["login"] if execution else "-",
-        "executor_actor_id": str(execution["actor"]["id"]) if execution else "-", "executor_triggering_login": execution["triggering_actor"]["login"] if execution else "-",
-        "executor_triggering_id": str(execution["triggering_actor"]["id"]) if execution else "-"}
-    proof = {
-        "schema": "buster-main-sampling-historical-api-v1" if kind == "sampling" else "buster-compiler-prerequisite-historical-api-v1",
-        "repository": repository, "policy_revision": policy_revision, "policy_main_relation": relation,
-        "request_run_id": request_id, "request_run_attempt": "1", "request_latest_attempt": str(latest_request["run_attempt"]),
-        "request_workflow": request["path"], "request_event": request["event"], "request_status": request["status"],
-        "request_conclusion": request["conclusion"], "request_head": head, "source_commit": source_commit["sha"],
-        "first_parent": parents[0]["sha"], "second_parent": parents[1]["sha"] if len(parents) == 2 else "-",
-        "compare_parent_0": comparisons[0]["base_commit"]["sha"], "compare_head_0": compared_heads[0],
-        "compare_parent_1": comparisons[1]["base_commit"]["sha"] if len(parents) == 2 else "-",
-        "compare_head_1": compared_heads[1] if len(parents) == 2 else "-", **executor_fields,
-        "pull_number": str(pull["number"]), "associated_pull_number": str(pull["number"]), "associated_commit": head,
-        "pull_state": pull["state"], "pull_current_head": pull["head"]["sha"],
-        "allowlist_sha256": digest(allowlist_text), "facts_sha256": digest(facts_text), "history_sha256": digest(history_text),
-        "freeze_sha256": freeze_sha, "parent_freeze_sha256": digest(parent_text) if parent_text else "-",
-        "acquisition_sha256": digest(acquisition_text) if kind == "sampling" else "-",
-        "check_name": check["name"] if check else "-", "check_app_id": str(check["app"]["id"]) if check else "-",
-        "check_head": check["head_sha"] if check else "-", "check_external_id": check["external_id"] if check else "-",
-        "check_status": check.get("status") if check else "-", "check_conclusion": (check.get("conclusion") or "-") if check else "-",
-        "check_title": check.get("output", {}).get("title", "-") if check and isinstance(check.get("output"), dict) else "-"}
-    envelope = json.dumps({"schema": "buster-compiler-historical-terminal-api-envelope-v1", "repository": repository,
-                          "kind": kind, "request_run": request_id, "executor_run": run_id,
-                          "context_revision": context_revision if execution is None else "-",
-                          "api_observations": observations, "native_api_proof": proof,
-                          "artifact_inventory_selection": {"expected_name": expected_artifact_name,
-                              "executor_run": run_id, "complete": True, "pages": artifact_pages,
-                              "matching_ids": [row["id"] for row in selected_artifacts],
-                              "selected_id": selected_artifact["id"] if selected_artifact is not None else None},
-                          "review_context_selection": {"revision": context, "allowlist_path": allowlist_path,
-                              "allowlist_sha256": digest(context_allowlist_text), "freeze_revision": revision,
-                              "freeze_sha256": freeze_sha, "parent_freeze_revision": parent_revision,
-                              "parent_freeze_sha256": digest(parent_text) if parent_text else "-",
-                              "acquisition_sha256": digest(acquisition_text) if kind == "sampling" else "-",
-                              "history_since": since}},
-                         sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-    if len(envelope) > 8 * 1024 * 1024:
-        raise ValueError("historical terminal API envelope exceeds the bounded archive size")
-    selected_conclusions = [request["conclusion"]] + ([execution["conclusion"]] if execution else []) + ([job["conclusion"]] if job else [])
-    state = "hostless" if execution is None else "cancelled" if "cancelled" in selected_conclusions else \
-        "failed" if any(value in ("failure", "timed_out", "action_required", "startup_failure") for value in selected_conclusions) else \
-        "invalid" if check and check.get("status") == "completed" else "incomplete"
-    def job_time(key):
-        value = job.get(key) if job else None
-        if value is not None and (not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", value)):
-            raise ValueError("historical terminal physical timestamp is malformed")
-        if value is not None:
-            datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return value if value is not None else "-"
-    started, completed = job_time("started_at"), job_time("completed_at")
-    if started != "-" and completed != "-" and started > completed:
-        raise ValueError("historical terminal physical timestamps run backwards")
-    if kind == "sampling":
-        from sampling_qualification_receipt import schedule
-        planned = schedule(phase, int(packet))
-        if not planned:
-            raise ValueError("historical terminal selector has no fixed native schedule")
-        family = planned["family"]
-    else:
-        family = kind
-    terminal = {
-        "schema": "buster-compiler-historical-terminal-v1", "kind": kind, "phase": phase, "packet": packet,
-        "family": family,
-        "executor_inventory_count": str(len(candidates)), "selected_executor_inventory_id": run_id,
-        "physical_job_id": str(job["id"]) if job else "-", "physical_job_state": job["status"] if job else "-",
-        "physical_job_conclusion": job["conclusion"] if job else "-", "physical_job_started_at": started, "physical_job_completed_at": completed,
-        "terminal_state": state, "terminal_api_sha256": hashlib.sha256(envelope).hexdigest(), "terminal_api_bytes": str(len(envelope)),
-        "context_revision": context_revision if execution is None else "-", "context_main_relation": context_relation if execution is None else "-"}
-    records = {"allowlist": allowlist_text, "request": line + "\n", "facts": facts_text, "history": history_text}
-    records.update({"freeze": freeze_text, "parent": parent_text, "acquisition": acquisition_text} if kind == "sampling" else {"plan": freeze_text})
-    records.update({"api": "".join(f"{key}\t{value}\n" for key, value in proof.items()),
-                    "terminal": "".join(f"{key}\t{value}\n" for key, value in terminal.items()), "envelope": envelope.decode("ascii")})
-    admitted = terminal_review_native(records, kind)
-    transport = {"request.txt": "request", "allowlist.tsv": "allowlist", "facts.tsv": "facts", "history.tsv": "history"}
-    transport.update({"freeze.tsv": "freeze", "parent-freeze.tsv": "parent", "acquisition-plan.tsv": "acquisition"} if kind == "sampling" else {"plan.tsv": "plan"})
-    result = {"admitted": admitted, "facts": facts, "history": [dict(zip(SAMPLING_HISTORY_HEADER, row)) for row in history],
-              "request_line": line, "request": request, "executor": execution, "repository": repository,
-              "head": head, "request_id": request_id, "run_id": run_id, "pull": str(pull["number"]),
-              "historical_terminal_review": True, "raw": {name: records[key].encode("utf-8") for name, key in transport.items()},
-              "historical_records": {key: value.encode("utf-8") for key, value in records.items()},
-              "native_api_proof": proof, "terminal_proof": terminal, "terminal_api_envelope": envelope,
-              "terminal_api_sha256": hashlib.sha256(envelope).hexdigest(), "historical_context_revision": context_revision if execution is None else "-",
-              "selected_physical_job": job, "terminal_artifact_inventory": artifact_inventory,
-              "selected_artifact": selected_artifact, "expected_artifact_name": expected_artifact_name,
-              "artifact_inventory_complete": True}
-    result.update({"freeze": frozen, "freeze_bytes": freeze_text.encode("utf-8"), "parent_freeze": parent,
-                   "acquisition_plan": acquisition, "acquisition_plan_bytes": acquisition_text.encode("utf-8")} if kind == "sampling" else
-                  {"plan": frozen, "plan_bytes": freeze_text.encode("utf-8")})
-    return result
+    try:
+        def read(path):
+            if path not in observations:
+                observations[path] = api.request(path)
+            return observations[path]
+        observed_api = SimpleNamespace(request=read)
+        def original(supplied):
+            if not isinstance(supplied, dict) or type(supplied.get("id")) is not int or supplied["id"] <= 0 or \
+                    type(supplied.get("run_attempt")) is not int or supplied["run_attempt"] != 1:
+                raise ValueError("historical terminal caller lacks a typed original first attempt")
+            actual = read(f"/actions/runs/{supplied['id']}/attempts/1")
+            latest = read(f"/actions/runs/{supplied['id']}")
+            if not isinstance(actual, dict) or type(actual.get("id")) is not int or actual["id"] != supplied["id"] or \
+                    type(actual.get("run_attempt")) is not int or actual["run_attempt"] != 1 or \
+                    not isinstance(latest, dict) or type(latest.get("id")) is not int or latest["id"] != actual["id"] or \
+                    type(latest.get("run_attempt")) is not int or latest["run_attempt"] != 1:
+                raise ValueError("historical terminal original attempt is unavailable or was rerun")
+            for key in ("id", "run_attempt", "head_sha", "path", "event", "repository", "head_repository", "display_title"):
+                if supplied.get(key) != actual.get(key):
+                    raise ValueError("historical terminal caller relabeled an original API attempt")
+            return actual, latest
+        conclusions = {"success", "failure", "cancelled", "timed_out", "skipped", "neutral", "action_required", "startup_failure"}
+        request, latest_request = original(original_request_attempt)
+        execution, latest_execution = original(original_executor_attempt) if original_executor_attempt is not None else (None, None)
+        head, request_id = request.get("head_sha"), str(request["id"])
+        if not isinstance(head, str) or not COMMIT.fullmatch(head) or \
+                request.get("path") != REQUEST_WORKFLOW or request.get("event") != "pull_request" or \
+                request.get("status") != "completed" or request.get("conclusion") not in conclusions:
+            raise ValueError("historical terminal original request is not a terminal owner workflow")
+        rows = (request, execution) if execution is not None else (request,)
+        if any(full_name(row.get(key)) != repository for row in rows for key in ("repository", "head_repository")) or \
+                any(identity(row.get(key)) != MAINTAINER for row in rows for key in ("actor", "triggering_actor")):
+            raise ValueError("historical terminal original owner/repository provenance is foreign")
+        policy_revision, relation, run_id = "-", "-", "-"
+        if execution is not None:
+            policy_revision, run_id = execution.get("head_sha"), str(execution["id"])
+            if context_revision is not None or run_id == request_id or \
+                    not isinstance(policy_revision, str) or not COMMIT.fullmatch(policy_revision) or \
+                    execution.get("path") != ".github/workflows/9700x-direct-bench.yml" or \
+                    execution.get("event") != "workflow_run" or execution.get("head_branch") != "main" or \
+                    execution.get("display_title") != f"9700X request {request_id}.1 head {head}" or \
+                    execution.get("status") != "completed" or execution.get("conclusion") not in conclusions:
+                raise ValueError("historical terminal original executor provenance is foreign or nonterminal")
+            context = policy_revision
+        else:
+            if not isinstance(context_revision, str) or not COMMIT.fullmatch(context_revision):
+                raise ValueError("hostless terminal review lacks a separate immutable protected context")
+            context = context_revision
+        on_main = read(f"/compare/{context}...main")
+        context_relation = on_main.get("status") if isinstance(on_main, dict) else None
+        if context_relation not in ("ahead", "identical"):
+            raise ValueError("historical terminal policy/context is outside protected main")
+        if execution is not None:
+            relation = context_relation
+        source_commit = read(f"/commits/{head}")
+        parents = source_commit.get("parents") if isinstance(source_commit, dict) else None
+        if not isinstance(parents, list) or not 1 <= len(parents) <= 2 or any(
+                not isinstance(row, dict) or not isinstance(row.get("sha"), str) or
+                not COMMIT.fullmatch(row["sha"]) for row in parents):
+            raise ValueError("historical terminal source parent inventory is unavailable")
+        comparisons = [read(f"/compare/{row['sha']}...{head}") for row in parents]
+        compared_heads = [sampling_review_compare_head(row, head) for row in comparisons]
+        unused_files, problems = request_delta(head, source_commit, comparisons)
+        if problems:
+            raise ValueError("historical terminal every-parent source proof failed: " + "; ".join(problems))
+        marker_text = sampling_content(repository, COMPARE_REQUEST, head, "", api=observed_api)
+        selector = sampling_fresh_selector if kind == "sampling" else utility_fresh_selector if kind == "utility" else preparation_fresh_selector
+        selected = selector(marker_text, comparisons)
+        if selected is None:
+            raise ValueError("historical terminal selector was inherited, moved or not fresh")
+        line, phase, packet, revision = selected
+        associated = read(f"/commits/{head}/pulls?per_page=100")
+        snapshot = request.get("pull_requests", [])
+        if not isinstance(snapshot, list) or len(snapshot) > 1:
+            raise ValueError("historical terminal request has ambiguous pull membership")
+        number = snapshot[0].get("number") if snapshot and isinstance(snapshot[0], dict) else None
+        if snapshot and (type(number) is not int or number <= 0):
+            raise ValueError("historical terminal pull snapshot has no typed number")
+        matches = [row for row in associated if isinstance(row, dict) and (number is None or row.get("number") == number)] \
+            if isinstance(associated, list) and len(associated) < 100 else []
+        if len(matches) != 1:
+            raise ValueError("historical terminal commit has no unique original owning pull")
+        pull = matches[0]
+        if type(pull.get("number")) is not int or pull["number"] <= 0 or identity(pull.get("user")) != MAINTAINER or \
+                pull.get("state") not in ("open", "closed") or \
+                not isinstance(pull.get("head"), dict) or not isinstance(pull["head"].get("sha"), str) or \
+                not COMMIT.fullmatch(pull["head"]["sha"]) or full_name(pull["head"].get("repo")) != repository or \
+                not isinstance(pull.get("base"), dict) or full_name(pull["base"].get("repo")) != repository:
+            raise ValueError("historical terminal observed pull membership/owner is foreign")
+        allowlist_path = SAMPLING_ALLOWLIST if kind == "sampling" else UTILITY_ALLOWLIST if kind == "utility" else PREPARATION_ALLOWLIST
+        plan_path = SAMPLING_FREEZE if kind == "sampling" else UTILITY_PLAN if kind == "utility" else PREPARATION_PLAN
+        context_allowlist_text = sampling_content(repository, allowlist_path, context, "", api=observed_api)
+        config = sampling_review_record(context_allowlist_text)
+        freeze_text = sampling_content(repository, plan_path, revision, "", api=observed_api)
+        frozen = sampling_review_record(freeze_text)
+        parent_revision = frozen.get("campaign_parent_revision", "-") if kind == "sampling" and phase != "acquire" else "-"
+        parent_text = "" if parent_revision == "-" else sampling_content(repository, plan_path, parent_revision, "", api=observed_api)
+        parent = sampling_review_record(parent_text) if parent_text else {}
+        ancestor_revision = parent.get("campaign_parent_revision", "-") if kind == "sampling" and phase == "confirm" else "-"
+        ancestor_campaign = parent.get("campaign_parent", "-") if kind == "sampling" and phase == "confirm" else "-"
+        acquisition_text = (freeze_text if phase == "acquire" else parent_text if phase == "pilot" else
+                            sampling_content(repository, plan_path, ancestor_revision, "", api=observed_api)) if kind == "sampling" else ""
+        acquisition = sampling_review_record(acquisition_text) if acquisition_text else {}
+        for reference in {revision, parent_revision, ancestor_revision, (acquisition if kind == "sampling" else frozen).get("trusted_revision", "-")} - {"-"}:
+            if not isinstance(reference, str) or not COMMIT.fullmatch(reference):
+                raise ValueError("historical terminal immutable reference is malformed")
+            lineage = read(f"/compare/{reference}...{context}")
+            if not isinstance(lineage, dict) or lineage.get("status") not in ("ahead", "identical"):
+                raise ValueError("historical terminal frozen source is outside its protected policy/context")
+        context_schema = "buster-main-sampling-admission-v1" if kind == "sampling" else \
+            "buster-compiler-closure-utility-admission-v1" if kind == "utility" else "buster-compiler-preparation-admission-v1"
+        if config.get("schema") != context_schema or config.get("state") != phase or \
+                config.get("repository") != repository or config.get("owner_login") != MAINTAINER["login"] or \
+                config.get("owner_id") != str(MAINTAINER["id"]) or config.get("freeze_revision") != revision or \
+                config.get("freeze_sha256") != hashlib.sha256(freeze_text.encode("utf-8")).hexdigest() or \
+                config.get("protocol_sha256") != frozen.get("protocol_sha256") or \
+                kind == "sampling" and (config.get("parent_freeze_revision") != parent_revision or
+                                       config.get("campaign_parent") != frozen.get("campaign_parent", "-")):
+            raise ValueError("historical terminal protected context does not bind the selected committed plan chain")
+        since = config.get("history_since")
+        if not isinstance(since, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", since):
+            raise ValueError("historical terminal complete inventory window is unavailable")
+        created = request.get("created_at")
+        if not isinstance(created, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", created) or \
+                datetime.fromisoformat(since.replace("Z", "+00:00")) > datetime.fromisoformat(created.replace("Z", "+00:00")):
+            raise ValueError("historical terminal inventory window truncates the original request")
+        executors = sampling_executor_inventory(repository, "", since, api=observed_api)
+        if any(not isinstance(row.get("display_title"), str) or not row["display_title"] for row in executors):
+            raise ValueError("historical terminal executor inventory cannot prove canonical title absence")
+        candidates = [row for row in executors if isinstance(row.get("display_title"), str) and
+                      row["display_title"].startswith(f"9700X request {request_id}.1 ")]
+        if len(candidates) != (1 if execution is not None else 0) or \
+                execution is not None and (candidates[0]["id"] != execution["id"] or candidates[0]["display_title"] != execution["display_title"]):
+            raise ValueError("historical terminal executor absence/identity contradicts complete inventory")
+        digest = lambda text: hashlib.sha256(text.encode("utf-8")).hexdigest()
+        freeze_sha = digest(freeze_text)
+        history = sampling_attempt_history(repository, "", request_id, since, revision, freeze_sha,
+            parent_revision, frozen.get("campaign_parent", "-"), ancestor_revision, ancestor_campaign,
+            preparation=kind == "preparation", utility=kind == "utility",
+            api=observed_api, historical=True, before_created=created)
+        if prefix_attempts is not None and prefix_attempts != history:
+            raise ValueError("historical terminal supplied prefix differs from complete original API history")
+        allowlist_text = context_allowlist_text if execution is not None else ""
+        facts = {
+            "schema": "buster-main-sampling-github-facts-v1", "repository": repository,
+            "request_run_id": request_id, "request_run_attempt": "1", "executor_run_id": run_id,
+            "executor_run_attempt": "1" if execution is not None else "-", "request_head": head, "trusted_revision": policy_revision,
+            "owner_login": MAINTAINER["login"], "owner_id": str(MAINTAINER["id"]),
+            "actor_login": request["actor"]["login"], "actor_id": str(request["actor"]["id"]),
+            "triggering_login": request["triggering_actor"]["login"], "triggering_id": str(request["triggering_actor"]["id"]),
+            "pull_author_login": pull["user"]["login"], "pull_author_id": str(pull["user"]["id"]),
+            "request_repository": full_name(request["repository"]), "request_head_repository": full_name(request["head_repository"]),
+            "pull_repository": full_name(pull["head"]["repo"]), "pull_state": pull["state"],
+            "parent_count": str(len(parents)), "fresh_parent_0": sampling_added(comparisons[0], line),
+            "fresh_parent_1": sampling_added(comparisons[1], line) if len(parents) == 2 else "-"}
+        facts_text = "".join(f"{key}\t{value}\n" for key, value in facts.items())
+        history_text = "\t".join(SAMPLING_HISTORY_HEADER) + "\n" + "".join("\t".join(row) + "\n" for row in history)
+        check_name = SAMPLING_CHECK if kind == "sampling" else UTILITY_CHECK if kind == "utility" else PREPARATION_CHECK
+        check_prefix = "buster-main-sampling-v1:" if kind == "sampling" else "buster-compiler-closure-utility-v1:" if kind == "utility" else "buster-compiler-preparation-v1:"
+        external_prefix = f"{check_prefix}{freeze_sha}:{phase}:{packet}:{request_id}:"
+        expected_external = f"{external_prefix}{run_id}:1"
+        listed = read(f"/commits/{head}/check-runs?check_name={urllib.parse.quote(check_name)}&filter=all&per_page=100")
+        checks = listed.get("check_runs") if isinstance(listed, dict) else None
+        if not isinstance(checks, list) or len(checks) >= 100 or type(listed.get("total_count")) is not int or listed["total_count"] != len(checks):
+            raise ValueError("historical terminal check inventory is unavailable or capped")
+        own = [row for row in checks if isinstance(row, dict) and row.get("name") == check_name and row.get("head_sha") == head and
+               isinstance(row.get("app"), dict) and row["app"].get("id") == 15368 and
+               isinstance(row.get("external_id"), str) and row["external_id"].startswith(external_prefix)]
+        if len(own) > 1 or own and (execution is None or own[0].get("external_id") != expected_external):
+            raise ValueError("historical terminal retained check contradicts executor inventory")
+        check = own[0] if own else None
+        job = None
+        if execution is not None:
+            jobs_record = read(f"/actions/runs/{run_id}/attempts/1/jobs?per_page=100")
+            jobs = jobs_record.get("jobs") if isinstance(jobs_record, dict) else None
+            if not isinstance(jobs, list) or len(jobs) >= 100 or type(jobs_record.get("total_count")) is not int or jobs_record["total_count"] != len(jobs):
+                raise ValueError("historical terminal original job inventory is unavailable or capped")
+            job_name = "Sampling qualification packet" if kind == "sampling" else "Compiler closure utility" if kind == "utility" else "Compiler preparation qualification"
+            physical = [row for row in jobs if isinstance(row, dict) and row.get("name") == job_name]
+            if len(physical) > 1:
+                raise ValueError("historical terminal original physical job is ambiguous")
+            job = physical[0] if physical else None
+            if job is not None and (type(job.get("id")) is not int or job["id"] <= 0 or
+                                    type(job.get("run_id")) is not int or job["run_id"] != execution["id"] or
+                                    type(job.get("run_attempt")) is not int or job["run_attempt"] != 1 or job.get("head_sha") != policy_revision or
+                                    job.get("status") != "completed" or job.get("conclusion") not in conclusions):
+                raise ValueError("historical terminal physical job identity/state is foreign or nonterminal")
+        expected_artifact_name = "buster-9700x-" + kind + "-" + head + "-1"
+        artifact_inventory, artifact_total, artifact_pages = [], None, []
+        if execution is not None:
+            for page in range(1, 11):
+                artifact_path = f"/actions/runs/{run_id}/artifacts?per_page=100&page={page}"
+                listing = read(artifact_path)
+                artifact_pages.append(artifact_path)
+                members = listing.get("artifacts") if isinstance(listing, dict) else None
+                total = listing.get("total_count") if isinstance(listing, dict) else None
+                if not isinstance(members, list) or len(members) > 100 or type(total) is not int or not 0 <= total <= 1000:
+                    raise ValueError("historical terminal artifact inventory is unavailable or capped")
+                if artifact_total is None:
+                    artifact_total = total
+                if total != artifact_total:
+                    raise ValueError("historical terminal artifact inventory changed during reading")
+                artifact_inventory.extend(members)
+                if len(artifact_inventory) >= total:
+                    break
+                if len(members) != 100:
+                    raise ValueError("historical terminal artifact inventory is incomplete")
+            if len(artifact_inventory) != artifact_total or any(not isinstance(row, dict) or
+                    type(row.get("id")) is not int or row["id"] <= 0 or not isinstance(row.get("name"), str) or not row["name"] for row in artifact_inventory) or \
+                    len({row["id"] for row in artifact_inventory}) != artifact_total:
+                raise ValueError("historical terminal artifact inventory is incomplete or duplicated")
+        selected_artifacts = [row for row in artifact_inventory if row.get("name") == expected_artifact_name]
+        if len(selected_artifacts) > 1:
+            raise ValueError("historical terminal expected artifact is ambiguous")
+        selected_artifact = selected_artifacts[0] if selected_artifacts else None
+        if selected_artifact is not None:
+            origin = selected_artifact.get("workflow_run")
+            if not isinstance(origin, dict) or type(origin.get("id")) is not int or origin["id"] != execution["id"] or \
+                    origin.get("head_sha") != policy_revision or type(selected_artifact.get("expired")) is not bool or \
+                    type(selected_artifact.get("size_in_bytes")) is not int or selected_artifact["size_in_bytes"] < 0:
+                raise ValueError("historical terminal selected artifact identity is foreign or malformed")
+        executor_fields = {
+            "executor_run_id": run_id, "executor_run_attempt": "1" if execution else "-", "executor_latest_attempt": "1" if execution else "-",
+            "executor_workflow": execution["path"] if execution else "-", "executor_event": execution["event"] if execution else "-",
+            "executor_branch": execution["head_branch"] if execution else "-", "executor_head": policy_revision,
+            "executor_title": execution["display_title"] if execution else "-", "executor_status": execution["status"] if execution else "-",
+            "executor_conclusion": execution["conclusion"] if execution else "-", "executor_actor_login": execution["actor"]["login"] if execution else "-",
+            "executor_actor_id": str(execution["actor"]["id"]) if execution else "-", "executor_triggering_login": execution["triggering_actor"]["login"] if execution else "-",
+            "executor_triggering_id": str(execution["triggering_actor"]["id"]) if execution else "-"}
+        proof = {
+            "schema": "buster-main-sampling-historical-api-v1" if kind == "sampling" else "buster-compiler-prerequisite-historical-api-v1",
+            "repository": repository, "policy_revision": policy_revision, "policy_main_relation": relation,
+            "request_run_id": request_id, "request_run_attempt": "1", "request_latest_attempt": str(latest_request["run_attempt"]),
+            "request_workflow": request["path"], "request_event": request["event"], "request_status": request["status"],
+            "request_conclusion": request["conclusion"], "request_head": head, "source_commit": source_commit["sha"],
+            "first_parent": parents[0]["sha"], "second_parent": parents[1]["sha"] if len(parents) == 2 else "-",
+            "compare_parent_0": comparisons[0]["base_commit"]["sha"], "compare_head_0": compared_heads[0],
+            "compare_parent_1": comparisons[1]["base_commit"]["sha"] if len(parents) == 2 else "-",
+            "compare_head_1": compared_heads[1] if len(parents) == 2 else "-", **executor_fields,
+            "pull_number": str(pull["number"]), "associated_pull_number": str(pull["number"]), "associated_commit": head,
+            "pull_state": pull["state"], "pull_current_head": pull["head"]["sha"],
+            "allowlist_sha256": digest(allowlist_text), "facts_sha256": digest(facts_text), "history_sha256": digest(history_text),
+            "freeze_sha256": freeze_sha, "parent_freeze_sha256": digest(parent_text) if parent_text else "-",
+            "acquisition_sha256": digest(acquisition_text) if kind == "sampling" else "-",
+            "check_name": check["name"] if check else "-", "check_app_id": str(check["app"]["id"]) if check else "-",
+            "check_head": check["head_sha"] if check else "-", "check_external_id": check["external_id"] if check else "-",
+            "check_status": check.get("status") if check else "-", "check_conclusion": (check.get("conclusion") or "-") if check else "-",
+            "check_title": check.get("output", {}).get("title", "-") if check and isinstance(check.get("output"), dict) else "-"}
+        envelope = json.dumps({"schema": "buster-compiler-historical-terminal-api-envelope-v1", "repository": repository,
+                              "kind": kind, "request_run": request_id, "executor_run": run_id,
+                              "context_revision": context_revision if execution is None else "-",
+                              "api_observations": observations, "native_api_proof": proof,
+                              "artifact_inventory_selection": {"expected_name": expected_artifact_name,
+                                  "executor_run": run_id, "complete": True, "pages": artifact_pages,
+                                  "matching_ids": [row["id"] for row in selected_artifacts],
+                                  "selected_id": selected_artifact["id"] if selected_artifact is not None else None},
+                              "review_context_selection": {"revision": context, "allowlist_path": allowlist_path,
+                                  "allowlist_sha256": digest(context_allowlist_text), "freeze_revision": revision,
+                                  "freeze_sha256": freeze_sha, "parent_freeze_revision": parent_revision,
+                                  "parent_freeze_sha256": digest(parent_text) if parent_text else "-",
+                                  "acquisition_sha256": digest(acquisition_text) if kind == "sampling" else "-",
+                                  "history_since": since}},
+                             sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        if len(envelope) > 8 * 1024 * 1024:
+            raise ValueError("historical terminal API envelope exceeds the bounded archive size")
+        selected_conclusions = [request["conclusion"]] + ([execution["conclusion"]] if execution else []) + ([job["conclusion"]] if job else [])
+        state = "hostless" if execution is None else "cancelled" if "cancelled" in selected_conclusions else \
+            "failed" if any(value in ("failure", "timed_out", "action_required", "startup_failure") for value in selected_conclusions) else \
+            "invalid" if check and check.get("status") == "completed" else "incomplete"
+        def job_time(key):
+            value = job.get(key) if job else None
+            if value is not None and (not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", value)):
+                raise ValueError("historical terminal physical timestamp is malformed")
+            if value is not None:
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return value if value is not None else "-"
+        started, completed = job_time("started_at"), job_time("completed_at")
+        if started != "-" and completed != "-" and started > completed:
+            raise ValueError("historical terminal physical timestamps run backwards")
+        if kind == "sampling":
+            from sampling_qualification_receipt import schedule
+            planned = schedule(phase, int(packet))
+            if not planned:
+                raise ValueError("historical terminal selector has no fixed native schedule")
+            family = planned["family"]
+        else:
+            family = kind
+        terminal = {
+            "schema": "buster-compiler-historical-terminal-v1", "kind": kind, "phase": phase, "packet": packet,
+            "family": family,
+            "executor_inventory_count": str(len(candidates)), "selected_executor_inventory_id": run_id,
+            "physical_job_id": str(job["id"]) if job else "-", "physical_job_state": job["status"] if job else "-",
+            "physical_job_conclusion": job["conclusion"] if job else "-", "physical_job_started_at": started, "physical_job_completed_at": completed,
+            "terminal_state": state, "terminal_api_sha256": hashlib.sha256(envelope).hexdigest(), "terminal_api_bytes": str(len(envelope)),
+            "context_revision": context_revision if execution is None else "-", "context_main_relation": context_relation if execution is None else "-"}
+        records = {"allowlist": allowlist_text, "request": line + "\n", "facts": facts_text, "history": history_text}
+        records.update({"freeze": freeze_text, "parent": parent_text, "acquisition": acquisition_text} if kind == "sampling" else {"plan": freeze_text})
+        records.update({"api": "".join(f"{key}\t{value}\n" for key, value in proof.items()),
+                        "terminal": "".join(f"{key}\t{value}\n" for key, value in terminal.items()), "envelope": envelope.decode("ascii")})
+        admitted = terminal_review_native(records, kind)
+        transport = {"request.txt": "request", "allowlist.tsv": "allowlist", "facts.tsv": "facts", "history.tsv": "history"}
+        transport.update({"freeze.tsv": "freeze", "parent-freeze.tsv": "parent", "acquisition-plan.tsv": "acquisition"} if kind == "sampling" else {"plan.tsv": "plan"})
+        result = {"admitted": admitted, "facts": facts, "history": [dict(zip(SAMPLING_HISTORY_HEADER, row)) for row in history],
+                  "request_line": line, "request": request, "executor": execution, "repository": repository,
+                  "head": head, "request_id": request_id, "run_id": run_id, "pull": str(pull["number"]),
+                  "historical_terminal_review": True, "raw": {name: records[key].encode("utf-8") for name, key in transport.items()},
+                  "historical_records": {key: value.encode("utf-8") for key, value in records.items()},
+                  "native_api_proof": proof, "terminal_proof": terminal, "terminal_api_envelope": envelope,
+                  "terminal_api_sha256": hashlib.sha256(envelope).hexdigest(), "historical_context_revision": context_revision if execution is None else "-",
+                  "selected_physical_job": job, "terminal_artifact_inventory": artifact_inventory,
+                  "selected_artifact": selected_artifact, "expected_artifact_name": expected_artifact_name,
+                  "artifact_inventory_complete": True}
+        result.update({"freeze": frozen, "freeze_bytes": freeze_text.encode("utf-8"), "parent_freeze": parent,
+                       "acquisition_plan": acquisition, "acquisition_plan_bytes": acquisition_text.encode("utf-8")} if kind == "sampling" else
+                      {"plan": frozen, "plan_bytes": freeze_text.encode("utf-8")})
+        return result
+    except Exception:
+        if diagnostic is not None:
+            diagnostic.update({"terminal_valid": False, "execution_authority": False,
+                               "qualification": "unqualified"})
+            try:
+                retained = json.dumps({"schema": "buster-compiler-historical-terminal-diagnostic-envelope-v1",
+                    "repository": repository, "kind": kind, "terminal_valid": False,
+                    "execution_authority": False, "qualification": "unqualified",
+                    "api_observations": observations}, sort_keys=True, separators=(",", ":"),
+                    ensure_ascii=True).encode("ascii")
+                if len(retained) <= 8 * 1024 * 1024:
+                    diagnostic.update({"api_observations": observations, "diagnostic_envelope": retained,
+                                       "diagnostic_sha256": hashlib.sha256(retained).hexdigest()})
+                else:
+                    diagnostic["diagnostic_envelope_unavailable"] = "API observations exceed the 8 MiB data bound"
+            except (TypeError, ValueError, OverflowError):
+                diagnostic["diagnostic_envelope_unavailable"] = "API observations are not bounded JSON data"
+        raise
+
 
 
 def main() -> int:
