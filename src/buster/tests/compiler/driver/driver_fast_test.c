@@ -594,8 +594,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_large_static_initializer
     CompilerDriverInitializerSource source = {.bytes = arena_allocate(arena, u8, capacity), .capacity = capacity};
     TemporalArena round = arena_begin_temporal(arena);
 
-    // 1,000,000 unsigned char elements, the length inferred from the list.
-    u32 const blob_count = 1000000;
+    // 1,000,000 unsigned char elements (400,000 on the emulator and device
+    // targets, whose test deadlines leave little headroom; still past the
+    // 350,000 the per-token query stacks allowed), the length inferred from
+    // the list.
+    u32 const blob_count = BUSTER_ANDROID || BUSTER_IOS ? 400000 : 1000000;
     compiler_driver_test_source_text(&source, S8("unsigned char blob[] = {"));
     for (u32 index = 0; index < blob_count; index += 1)
     {
@@ -627,9 +630,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_large_static_initializer
 
     scratch_end(round);
     round = arena_begin_temporal(arena);
-    // 250,000 string pointers: a two-type-deep initializer whose token count
-    // used to size its working storage.
-    u32 const string_count = 250000;
+    // 250,000 string pointers (50,000 on mobile, which only desktop targets
+    // run at the size the old bound refused, about 160,000): a two-type-deep
+    // initializer whose token count used to size its working storage.
+    u32 const string_count = BUSTER_ANDROID || BUSTER_IOS ? 50000 : 250000;
     source.length = 0;
     compiler_driver_test_source_text(&source, S8("const char *names[] = {"));
     for (u32 index = 0; index < string_count; index += 1)
@@ -678,8 +682,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_large_static_initializer
 
     scratch_end(round);
     round = arena_begin_temporal(arena);
-    // 200,000 records, each holding an id and the address of an array element.
-    u32 const record_count = 200000;
+    // 200,000 records (60,000 on mobile; the old bound was 50,000), each
+    // holding an id and the address of an array element.
+    u32 const record_count = BUSTER_ANDROID || BUSTER_IOS ? 60000 : 200000;
     source.length = 0;
     compiler_driver_test_source_text(&source, S8("int targets[16]; struct P { int id; int *target; };\nstruct P records[] = {"));
     for (u32 index = 0; index < record_count; index += 1)

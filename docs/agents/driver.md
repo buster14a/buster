@@ -1363,9 +1363,12 @@ a flat table does not limit them. Driver regressions
 (`compiler_driver_test_large_static_initializers`) compile with `-c` a
 1,000,000-element `unsigned char` array, a 250,000-entry `const char *` table
 and a 200,000-entry struct array. Remaining limits: a flat initializer past
-about 1.7 million elements stops in `c_parse_typed_constant`, and a single
+about 1.7 million elements stops in `c_parse_typed_constant`; a single
 function of about 225,000 non-foldable statements exhausts the machine scratch
-in `codegen.c` (both tracked by #2527). A reservation that cannot be carved
+in `codegen.c` (both tracked by #2527); and an array of
+`struct { int a; const char *s; short v[3]; }` compiles to 220,000 entries but
+aborts with an arena validation failure from 230,000 (#3254). The mobile
+builds of the driver fixture use smaller counts to keep their deadlines. A reservation that cannot be carved
 is a positioned `initializer working storage exceeds the scratch reservation`
 or `initializer nesting exceeds its capacity` diagnostic and a failed result.
 
