@@ -243,7 +243,8 @@ def check_results(runs: dict, jobs: dict, candidate: dict,
         no_code = candidate.get("no_code") is True
         plans = [row for row in jobs.get(key, [])
                  if row.get("name") == "No-code plan / Classify no-code changes"]
-        omitted = no_code and bool(plans) and context != "CI complete"
+        omitted = (no_code and bool(plans) and context != "CI complete" and
+                   job.get("conclusion") == "skipped")
         expected = "skipped" if omitted else "success"
         require(job.get("status") == "completed" and job.get("conclusion") == expected,
                 context + ": required job did not succeed" if not no_code else
@@ -256,8 +257,11 @@ def check_results(runs: dict, jobs: dict, candidate: dict,
                     plans[0].get("run_attempt") == run["run_attempt"],
                     context + ": missing exact-attempt classification")
             if expected == "skipped":
-                require(not job.get("runner_id") and not job.get("steps"),
-                        context + ": skipped no-code workload allocated a runner")
+                for row in jobs.get(key, []):
+                    if row.get("name") != "No-code plan / Classify no-code changes":
+                        require(row.get("status") == "completed" and row.get("conclusion") == "skipped" and
+                                not row.get("runner_id") and not row.get("steps"),
+                                context + ": no-code workload was selected or allocated a runner")
         evidence.append({"context": context, "workflow": filename, "run_id": run["id"],
                          "run_attempt": run["run_attempt"], "job_id": job["id"],
                          **({"disposition": "not-applicable-no-code" if omitted else "executed"} if no_code else {})})
