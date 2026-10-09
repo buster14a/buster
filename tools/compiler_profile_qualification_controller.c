@@ -722,6 +722,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_resolve(Arena* arena, Comp
     result.packet.prepared = path_join(arena, path_join(arena, path_join(arena, store, result.acquisition_sha256), S8("prepared")), S8("prepared.json"));
     result.packet.prep_us = 0;
     result.packet.prep_text = S8("0");
+    valid = valid && compiler_sampling_acquisition_path(result.packet.python);
     result.packet.valid = valid;
     if (valid) *output = result;
     return valid;
