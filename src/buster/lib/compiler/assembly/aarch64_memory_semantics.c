@@ -1556,7 +1556,7 @@ buster_a64_memory_decode_immediate(BusterA64SemanticForm form, BusterA64Semantic
         if (field.width == 0 || field.width > 32) { return false;
 }
         u32 sign = UINT32_C(1) << (field.width - 1);
-        s64 value = (raw & sign) ? (s64)(raw | ~((UINT32_C(1) << field.width) - 1)) : (s64)raw;
+        s64 value = (raw & sign) ? (s64)raw - (INT64_C(1) << field.width) : (s64)raw;
         *result = buster_a64_memory_value_immediate(value, field.width, true);
     }
     else { *result = buster_a64_memory_value_immediate(raw, field.width, false);
