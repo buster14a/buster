@@ -3005,7 +3005,7 @@ BUSTER_GLOBAL_LOCAL IrValueId machine_debug_local_place(IrFunction* function, Ma
                                                          IrValueId const* local_places, IrDebugLocal const* local, u32 parameter_ordinal)
 {
     IrValueId parameter_place = IR_VALUE_ID_INVALID;
-    if (local->is_parameter && function->published_cfg)
+    if (local->is_parameter && function->published_cfg && function->published_cfg->parameters)
     {
         for (u32 parameter_index = 0; parameter_index < function->published_cfg->parameter_count; parameter_index += 1)
         {
@@ -3126,6 +3126,10 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
                 unresolved[unresolved_count++] = debug_index;
             }
         }
+        bool published_cfg_valid = !ir_function->block_count ||
+                                   (ir_function->published_cfg && ir_function->published_cfg->blocks &&
+                                    ir_function->published_cfg->block_count == ir_function->block_count &&
+                                    (!ir_function->published_cfg->parameter_count || ir_function->published_cfg->parameters));
 
         u32 local_slot_count = 8u;
         while (local_slot_count / 2u < unresolved_count && local_slot_count < (1u << 30))
@@ -3178,7 +3182,8 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
         }
         MachineBuilderStream block_value_stream;
         machine_stream_initialize(&block_value_stream, sizeof(MachineDebugBlockValue));
-        for (u32 block_index = 0; result && unresolved_count && block_index < ir_function->block_count; block_index += 1)
+        for (u32 block_index = 0; result && published_cfg_valid && unresolved_count && block_index < ir_function->block_count;
+             block_index += 1)
         {
             IrBlock const* block = ir_function->blocks + block_index;
             IrCfgBlock const* published = ir_function->published_cfg->blocks + block_index;
@@ -3447,7 +3452,7 @@ BUSTER_GLOBAL_LOCAL IrValueId machine_debug_local_place_dense(IrFunction* functi
                                                          u32 parameter_ordinal)
 {
     IrValueId parameter_place = IR_VALUE_ID_INVALID;
-    if (local->is_parameter && function->published_cfg)
+    if (local->is_parameter && function->published_cfg && function->published_cfg->parameters)
     {
         for (u32 parameter_index = 0; parameter_index < function->published_cfg->parameter_count; parameter_index += 1)
         {
@@ -3523,6 +3528,10 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build_dense(Arena* arena, IrProgra
         memset(local_places, 0xff, sizeof(*local_places) * ir_function->local_count);
         MachineDebugFacts facts = {0};
         machine_debug_local_first_stores_initialize(arena, ir_function, &facts);
+        bool published_cfg_valid = !ir_function->block_count ||
+                                   (ir_function->published_cfg && ir_function->published_cfg->blocks &&
+                                    ir_function->published_cfg->block_count == ir_function->block_count &&
+                                    (!ir_function->published_cfg->parameter_count || ir_function->published_cfg->parameters));
         IrCfgBlock const* entry = ir_function->published_cfg && ir_function->published_cfg->blocks &&
                                           ir_function->entry.value < ir_function->published_cfg->block_count
                                       ? ir_function->published_cfg->blocks + ir_function->entry.value
@@ -3554,7 +3563,7 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build_dense(Arena* arena, IrProgra
             u64 local_capacity = place.value != IR_ID_UNDERLYING_INVALID;
             if (!local_capacity)
             {
-                for (u32 block_index = 0; block_index < ir_function->block_count; block_index += 1)
+                for (u32 block_index = 0; published_cfg_valid && block_index < ir_function->block_count; block_index += 1)
                 {
                     IrCfgBlock const* published = ir_function->published_cfg->blocks + block_index;
                     IrValueId value = machine_debug_block_value(ir_function, local, block_index);
@@ -3615,7 +3624,7 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build_dense(Arena* arena, IrProgra
             }
             else
             {
-                for (u32 block_index = 0; block_index < ir_function->block_count; block_index += 1)
+                for (u32 block_index = 0; published_cfg_valid && block_index < ir_function->block_count; block_index += 1)
                 {
                     IrBlock* block = ir_function->blocks + block_index;
                     IrCfgBlock const* published = ir_function->published_cfg->blocks + block_index;
