@@ -4480,6 +4480,8 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     // Microsoft xmmintrin.h exposes _mm_prefetch as a true compiler builtin.
     // Target-aware classification declasses this spelling outside Win64.
     { S8_INITIALIZER("_mm_prefetch"), C_SYMBOL_BUILTIN_PREFETCH },
+    { S8_INITIALIZER("__popcnt"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
+    { S8_INITIALIZER("__popcnt64"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
 };
 
 #define C_SYMBOL_PREDEFINED_COUNT BUSTER_ARRAY_LENGTH(c_symbol_predefined)

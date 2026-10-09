@@ -24497,12 +24497,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_microsoft_popcnt(UnitTes
     String8 features[] = {S8("-mattr=-popcnt"), S8("-mattr=+popcnt")};
     String8 positive_source = S8(
         "#if __has_builtin(__popcnt) != 1 || __has_builtin(__popcnt64) != 1\n#error missing Windows x64 counts\n#endif\n"
-        "extern unsigned int __popcnt(unsigned int);\n"
-        "extern unsigned long long __popcnt64(unsigned long long);\n"
         "_Static_assert(__builtin_types_compatible_p(__typeof__(__popcnt(0u)), unsigned int), \"unsigned 32 result\");\n"
         "_Static_assert(__builtin_types_compatible_p(__typeof__(__popcnt64(0ull)), unsigned long long), \"unsigned 64 result\");\n"
         "_Static_assert(sizeof(__popcnt(0u)) == sizeof(unsigned int), \"32 result size\");\n"
         "_Static_assert(sizeof(__popcnt64(0ull)) == sizeof(unsigned long long), \"64 result size\");\n"
+        "extern unsigned int __popcnt(unsigned int);\n"
+        "extern unsigned long long __popcnt64(unsigned long long);\n"
         "static __attribute__((noinline)) unsigned int count32(unsigned int value) { return __popcnt(value); }\n"
         "static __attribute__((noinline)) unsigned long long count64(unsigned long long value) { return __popcnt64(value); }\n"
         "int main(void)\n"
