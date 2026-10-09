@@ -1496,7 +1496,8 @@ class HistoricalSamplingDataTests(unittest.TestCase):
     def test_historical_review_never_accepts_physical_admission(self):
         self.assertFalse(publisher.sampling_reviewed({}))
         self.assertTrue(publisher.sampling_reviewed({"historical_review": True,
-            "admitted": {"sampling_historical_valid": "true"}}))
+            "admitted": {"sampling_historical_valid": "true", "sampling_historical_execution_authority": "false",
+                         "sampling_historical_qualification": "unqualified"}}))
         for altered in ({"historical_review": 1}, {"historical_review": True, "admitted": {}},
                         {"historical_review": True, "admitted": {"sampling_historical_valid": True}},
                         {"historical_review": True, "admitted": {"sampling_historical_valid": "true",
@@ -1513,7 +1514,8 @@ class HistoricalSamplingDataTests(unittest.TestCase):
                     "freeze_revision": context["revision"], "state": "complete",
                     "request_run_attempt": "1", "executor_run_attempt": "1",
                     "request_run_id": "100", "executor_run_id": "200"}
-        old = {"historical_review": True, "admitted": {"sampling_historical_valid": "true"},
+        old = {"historical_review": True, "admitted": {"sampling_historical_valid": "true", "sampling_historical_execution_authority": "false",
+                             "sampling_historical_qualification": "unqualified"},
                "history": [], "request": request, "executor": executor, "repository": REPOSITORY,
                "head": HEAD, "request_id": "100", "run_id": "200", "acquisition_plan_bytes": b"original\n",
                "facts": {"pull_state": "closed", "policy": "original-acquisition"}}
@@ -1564,6 +1566,152 @@ class HistoricalSamplingDataTests(unittest.TestCase):
                 publisher.campaign_artifact_identity(payload, altered, files, True)
         with self.assertRaises(ValueError):
             publisher.campaign_artifact_identity(payload, row, files, 1)
+
+
+
+class CampaignFactsDataTests(unittest.TestCase):
+    def authority_and_result(self, phase, packet, index):
+        from sampling_qualification_receipt import schedule
+        prefix = "sampling" if phase in ("acquire", "pilot", "confirm") else phase
+        admitted = {prefix + "_trusted_revision": REVISION, prefix + "_historical_valid": "true",
+                    ("sampling_freeze_revision" if prefix == "sampling" else prefix + "_plan_revision"): "c" * 40,
+                    ("sampling_freeze_sha256" if prefix == "sampling" else prefix + "_plan_sha256"): "d" * 64}
+        if prefix == "sampling":
+            admitted.update(sampling_historical_execution_authority="false", sampling_historical_qualification="unqualified",
+                            sampling_policy_revision="e" * 40)
+        request, executor = {"id": index + 100, "run_attempt": 1}, {"id": index + 200, "run_attempt": 1, "head_sha": "e" * 40}
+        authority = {"historical_review": True, "repository": REPOSITORY, "admitted": admitted,
+                     "request_id": str(request["id"]), "run_id": str(executor["id"]), "request": request,
+                     "executor": executor, "freeze": {"campaign_parent": "f" * 64},
+                     "facts": {"pull_state": "closed"}}
+        result = {"qualification_state": "unqualified", "packet_state": "complete-valid-research", "problems": [],
+                  "phase": "qualify" if phase == "preparation" else phase, "packet": packet,
+                  "accounting": {"physical_job_wall_upper_us": 100000000, "native_owner_wall_us": 90000000}}
+        if prefix == "sampling":
+            plan = schedule(phase, packet)
+            result["series"] = [{"profile": profile, "ordinal": ordinal, "outcome": "no detectable difference",
+                                 "uncertainty": {"ci_low": 1.021, "ci_high": 1.024}}
+                                for profile, ordinal, pairs in plan["slots"]]
+        elif phase == "preparation":
+            result.update(packet_state="complete-negative-research",
+                series={label: {"ci_low": 0.994, "ci_high": 1.006}
+                        for label in ("legacy/immutable-aa", "snapshot/immutable-aa", "snapshot/cross-build-aa")},
+                control_failures=["complete scientific negative"])
+        else:
+            result.update(packet_state="complete-negative-research",
+                          utility_observation=publisher.utility_net_observation(10000000, 8000000, 30000000))
+        artifact = {"id": index + 300, "verified_zip_sha256": "1" * 64, "verified_zip_bytes": index + 1000,
+                    "verified_member_manifest_sha256": hashlib.sha256(b"retained manifest\n").hexdigest(),
+                    "verified_member_manifest": b"retained manifest\n"}
+        return authority, result, artifact
+
+    def test_ppm_never_rounds_a_borderline_interval_into_acceptance(self):
+        import math
+        self.assertEqual(publisher.campaign_ppm(1.02, 1.025)[:2], (20000, 25000))
+        self.assertEqual(publisher.campaign_ppm(math.nextafter(1.02, 0), 1.025)[0], 19999)
+        self.assertEqual(publisher.campaign_ppm(1.02, math.nextafter(1.025, math.inf))[1], 25001)
+        self.assertEqual(publisher.campaign_ppm(1.0, math.nextafter(1.02, math.inf))[2], 10001)
+        self.assertLess(publisher.campaign_ppm(0.99, 1.01)[0], 0)
+        for first, last in ((True, 1.0), (1.0, False), (float("nan"), 1), (1, float("inf")), (2, 1), (0, 1)):
+            with self.subTest(first=first, last=last), self.assertRaises(ValueError):
+                publisher.campaign_ppm(first, last)
+
+    def test_complete_negative_utility_and_aa_are_data_not_qualification(self):
+        authority, result, artifact = self.authority_and_result("utility", 0, 45)
+        fact, replay = publisher.campaign_complete_fact("utility", 0, authority, artifact, result)
+        self.assertEqual(fact["state"], "complete")
+        self.assertEqual(fact["corpus_cells"], "24")
+        self.assertFalse(json.loads(replay)["validation"]["utility_observation"]["criterion_met"])
+        self.assertEqual(fact["raw_replay_sha256"], hashlib.sha256(replay).hexdigest())
+        with self.assertRaises(ValueError):
+            publisher.campaign_complete_fact("utility", 0, authority, artifact, dict(result, packet_state="incomplete"))
+
+    def test_raw_slot_order_cannot_be_relabelled(self):
+        authority, result, artifact = self.authority_and_result("pilot", 1, 2)
+        fact, unused = publisher.campaign_complete_fact("pilot", 1, authority, artifact, result)
+        self.assertEqual(fact["slots"], "unchanged,unchanged,unchanged")
+        self.assertEqual(fact["slot_validations"], "valid,valid,valid")
+        changed = copy.deepcopy(result)
+        changed["series"].reverse()
+        with self.assertRaises(ValueError):
+            publisher.campaign_complete_fact("pilot", 1, authority, artifact, changed)
+        changed = copy.deepcopy(result)
+        changed["problems"] = ["raw output changed"]
+        with self.assertRaises(ValueError):
+            publisher.campaign_complete_fact("pilot", 1, authority, artifact, changed)
+
+    def test_archive_is_joined_to_exact_zip_and_not_opaque_uri(self):
+        authority, result, artifact = self.authority_and_result("utility", 0, 45)
+        fact, unused = publisher.campaign_complete_fact("utility", 0, authority, artifact, result)
+        missing = publisher.campaign_archive_row(fact, None)
+        self.assertEqual(missing["archive_reference"], "-")
+        saved = dict(missing, archive_kind="library", archive_reference="libfile_" + "3" * 32, archive_version="0",
+                     archive_sha256=fact["artifact_sha256"], archive_bytes=fact["artifact_bytes"],
+                     archive_receipt_sha256="4" * 64)
+        self.assertEqual(publisher.campaign_archive_row(fact, saved), saved)
+        for changed in (dict(saved, archive_reference="https://signed.example/zip"),
+                        dict(saved, artifact_id="999"), dict(saved, archive_version=0),
+                        dict(saved, archive_sha256="5" * 64), dict(saved, archive_bytes="1"),
+                        dict(saved, archive_receipt_sha256="-")):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                publisher.campaign_archive_row(fact, changed)
+
+    def test_all_46_slots_invoke_existing_raw_validators_and_remain_unqualified(self):
+        plan = [("acquire", 0), *(("pilot", i) for i in range(3)), *(("confirm", i) for i in range(40)),
+                ("preparation", 0), ("utility", 0)]
+        reviewed, results, artifacts = [], {}, {}
+        prep_files = {"qualification/" + label + "-throughput/summary.json": b'{"confirmed_regressions":0}'
+                      for label in ("legacy/immutable-aa", "snapshot/immutable-aa", "snapshot/cross-build-aa")}
+        for index, (phase, packet) in enumerate(plan):
+            authority, result, artifact = self.authority_and_result(phase, packet, index)
+            reviewed.append(authority)
+            results[authority["run_id"]] = result
+            artifacts[authority["run_id"]] = artifact
+        def read(unused_api, authority, *, retain_archive_identity=False):
+            self.assertIs(retain_archive_identity, True)
+            return prep_files, artifacts[authority["run_id"]]
+        def validate(unused_api, authority, unused_files):
+            return results[authority["run_id"]]
+        with patch.object(publisher, "sampling_read_artifact", side_effect=read) as sr, \
+                patch.object(publisher, "preparation_read_artifact", side_effect=read) as pr, \
+                patch.object(publisher, "utility_read_artifact", side_effect=read) as ur, \
+                patch.object(publisher, "sampling_validate", side_effect=validate) as sv, \
+                patch.object(publisher, "preparation_validate", side_effect=validate) as pv, \
+                patch.object(publisher, "utility_validate", side_effect=validate) as uv:
+            result = publisher.campaign_raw_facts(object(), REPOSITORY, reviewed, [None] * 46)
+            self.assertEqual((sr.call_count, pr.call_count, ur.call_count, sv.call_count, pv.call_count, uv.call_count),
+                             (44, 1, 1, 44, 1, 1))
+            self.assertEqual(len(result["raw_replays"]), 46)
+            self.assertEqual(len(result["raw_manifests"]), 46)
+            rows = result["facts"].decode().splitlines()
+            self.assertEqual(len(rows), 47)
+            self.assertEqual(rows[0].split("\t"), list(publisher.CAMPAIGN_FACT_FIELDS))
+            self.assertEqual(rows[-1].split("\t")[17], "complete")
+            self.assertFalse(result["physical_qualification"])
+            self.assertFalse(result["archive_storage_assessed"])
+            criterion = dict(line.split("\t") for line in result["criteria"].decode().splitlines())
+            self.assertEqual(criterion["utility_job_wall_us"], "30000000")
+            self.assertEqual(criterion["utility_legacy_wall_us"], "10000000")
+            self.assertLess(int(criterion["legacy_immutable_aa_low_ppm"]), -5000)
+            self.assertEqual(criterion["aa_corpus_regressions"], "0")
+            altered = copy.deepcopy(reviewed)
+            altered[10]["run_id"] = reviewed[9]["run_id"]
+            with self.assertRaises(ValueError):
+                publisher.campaign_raw_facts(object(), REPOSITORY, altered, [None] * 46)
+            results[reviewed[20]["run_id"]]["packet_state"] = "incomplete"
+            with self.assertRaises(ValueError):
+                publisher.campaign_raw_facts(object(), REPOSITORY, reviewed, [None] * 46)
+
+    def test_not_run_is_explicit_and_does_not_invent_an_attempt(self):
+        result = publisher.campaign_raw_facts(object(), REPOSITORY, [None] * 46, [None] * 46)
+        self.assertEqual(result["criteria"], b"")
+        self.assertEqual(result["raw_replays"], {})
+        rows = result["facts"].decode().splitlines()[1:]
+        self.assertEqual(len(rows), 46)
+        self.assertTrue(all(row.split("\t")[17] == "not_run" for row in rows))
+        self.assertTrue(all(row.split("\t")[3:7] == ["-"] * 4 for row in rows))
+        with self.assertRaises(ValueError):
+            publisher.campaign_raw_facts(object(), REPOSITORY, [None] * 45, [None] * 46)
 
 
 if __name__ == "__main__":
