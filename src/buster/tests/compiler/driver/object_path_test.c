@@ -2094,13 +2094,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_preinit_tests(UnitTestArg
                 BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
             }
+            // `-shared` is a Linux x86-64 image kind: the driver refuses it as an
+            // unsupported option on AArch64, so the refusal is checked there.
+#if BUSTER_CPU_ARCH_X86_64
             // A self-contained copy, so nothing but the preinit entry can fail it.
             String8 shared_asm_source = string_format_z(arena, S8("{S8}/hook-shared.s"), root);
-#if BUSTER_CPU_ARCH_AARCH64
-            String8 shared_asm_text = S8("\t.text\nshared_hook:\n\tret\n\t.section .preinit_array,\"aw\",@preinit_array\n\t.balign 8\n\t.quad shared_hook\n");
-#else
             String8 shared_asm_text = S8("\t.text\nshared_hook:\n\tretq\n\t.section .preinit_array,\"aw\",@preinit_array\n\t.balign 8\n\t.quad shared_hook\n");
-#endif
             BUSTER_TEST(arguments, file_write(shared_asm_source, BUSTER_SLICE_TO_BYTE_SLICE(shared_asm_text)));
             String8 asm_shared_output = string_format_z(arena, S8("{S8}/asm-preinit.so"), root);
             String8 asm_shared_command[] = {S8("-shared"), shared_asm_source, S8("-o"), asm_shared_output};
@@ -2109,6 +2108,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_preinit_tests(UnitTestArg
             BUSTER_TEST(arguments, asm_shared.error != COMPILER_DRIVER_ERROR_NONE);
             BUSTER_TEST(arguments, string_first_sequence(asm_shared.diagnostic, S8(".preinit_array")) < asm_shared.diagnostic.length);
             BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(asm_shared_output));
+#endif
             // The host's own data sections stay data.
             String8 data_oracle = string_format_z(arena, S8("{S8}/data-oracle"), root);
             String8 data_output = string_format_z(arena, S8("{S8}/data-buster"), root);
@@ -2121,6 +2121,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_preinit_tests(UnitTestArg
                 arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(data_command)));
             BUSTER_TEST(arguments, data_compiled.error == COMPILER_DRIVER_ERROR_NONE);
             if (data_compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, data_output));
+#if BUSTER_CPU_ARCH_X86_64
             // A shared object cannot hold a preinit array: GNU ld refuses it,
             // and so does this linker, naming the section, with no output.
             String8 shared_oracle = string_format_z(arena, S8("{S8}/preinit-oracle.so"), root);
@@ -2133,6 +2134,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_preinit_tests(UnitTestArg
             BUSTER_TEST(arguments, shared.error != COMPILER_DRIVER_ERROR_NONE);
             BUSTER_TEST(arguments, string_first_sequence(shared.diagnostic, S8(".preinit_array")) < shared.diagnostic.length);
             BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(shared_output));
+#endif
         }
         BUSTER_TEST(arguments, os_directory_delete(root));
     }
