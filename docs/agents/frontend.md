@@ -528,12 +528,13 @@ admits the wrapper type layouts, and validates equal-lane
 parameters and results receive a named semantic refusal; reached casts,
 bitcasts and vector conversions receive a named lowering refusal. No half
 arithmetic, promotion, F16C lowering or ABI support is implied.
-Static assertions and semantic type/layout checks can use the storage-half
-type without lowering a half value. Function-body queries that contain
-storage-half casts or bitcasts, including `sizeof` and `typeof` operands,
-retain named unsupported diagnostics; no IR type or constant-folding path is
-claimed for those expressions. `_Generic` evaluation-context handling is not
-complete; `c_test_vendor_storage_half_admission` covers both frontend forms.
+Static assertions and semantic type/layout checks outside function bodies
+can inspect the storage-half type without lowering a half value. Function-body
+expressions that require a storage-half value or IR type, including `sizeof`
+and `typeof` queries, are outside this scope. Reachable half casts, bitcasts
+and vector conversions retain named unsupported diagnostics. `_Generic`
+evaluation-context handling is not complete;
+`c_test_vendor_storage_half_admission` covers both frontend forms.
 
 Microsoft's `__cpuidex` is a separate, target-bounded intrinsic: its signature
 is `void(int[4], int, int)`, and it is admitted only for x86-64 Windows. The
