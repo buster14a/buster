@@ -366,7 +366,8 @@ fixture as well as compiling both architectures.
   `.text` under FAST and QUALITY. Switch
   and cold edges, vector/mask parameters and the slot-zero scratch keep the
   memory form. Except at a loop header, the same contract also carries each live, escaping,
-  immutable, non-pinned general value the designated predecessor holds dirty,
+  non-pinned general value the designated predecessor holds dirty (mutable
+  values included, as plain joins already carried them),
   in the register it already occupies; an edge that delivers it there keeps
   it across the parameter publication, and any other edge stores and reloads
   it as before. The carried value's dirtiness is the OR over the edges. A

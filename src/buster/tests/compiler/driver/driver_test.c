@@ -9936,7 +9936,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_deferred_edge_stores(Uni
 // and the host runs the program under both allocators and frontend forms
 // (expected values cross-checked with host GCC and Clang). FAST and QUALITY
 // stored 19 (x86-64 Linux) and 16 (x86-64 Windows) values at block boundaries
-// before the rule and 11 and 8 with it.
+// before the rule and 11 and 8 with it; carrying mutable values as well
+// brings that to 7 and 6.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_contract_carry_lanes(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9989,7 +9990,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_contract_carry
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
         String8 targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
-        u64 boundary_spill_bounds[] = {11, 8, UINT64_MAX, UINT64_MAX, UINT64_MAX};
+        u64 boundary_spill_bounds[] = {7, 6, UINT64_MAX, UINT64_MAX, UINT64_MAX};
         String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
         for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
