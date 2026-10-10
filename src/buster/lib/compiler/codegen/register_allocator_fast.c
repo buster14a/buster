@@ -1561,6 +1561,24 @@ BUSTER_GLOBAL_LOCAL u32* machine_fast_loop_floors(Arena* arena, MachineFunction 
     return floors;
 }
 
+// Whether a parameter contract may carry `value`, which the designated
+// predecessor holds dirty, into `block` alongside its parameters: a live,
+// escaping, general, immutable, unpinned value that is not itself one of the
+// block's parameters.
+BUSTER_GLOBAL_LOCAL bool machine_fast_carriable(MachineFastState* state, MachineBlock const* block, u32 value)
+{
+    MachineFunction* function = state->function;
+    MachineVirtualRegister const* carried = function->virtual_registers + value;
+    bool keep = state->escapes[value] && state->rematerialize_immediates[value] == UINT32_MAX && state->last_use[value] >= block->first_instruction &&
+                carried->register_class == MACHINE_REGISTER_CLASS_GENERAL && !(carried->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) &&
+                !(state->pinned_registers && state->pinned_registers[value] != UINT32_MAX);
+    for (u32 parameter_index = 0; keep && parameter_index < block->parameter_count; parameter_index += 1)
+    {
+        keep = function->block_parameters[block->parameter_offset + parameter_index].virtual_register != value;
+    }
+    return keep;
+}
+
 // Register contract of a join block's parameters. When every predecessor
 // reaches the block through a single-target jump, each edge's parallel copy
 // can publish an immutable parameter straight into a register instead of its
@@ -1574,9 +1592,13 @@ BUSTER_GLOBAL_LOCAL u32* machine_fast_loop_floors(Arena* arena, MachineFunction 
 // terminator. A later census found 13,273 such headers carrying 20,498
 // parameters and 29,490 back-edge home stores. Hints come only from a scanned
 // predecessor, and a loop header carries no other values, since a back edge
-// would have to restore them every iteration. A header with no scanned
-// predecessor, a cold block, a switch edge, a pinned, mutable or non-general
-// parameter, or an empty candidate set keeps the parameter in memory.
+// would have to restore them every iteration. A parameter whose source the
+// designated predecessor does not already hold avoids the lanes of values the
+// block would carry (`machine_fast_carriable`): taking one displaced that
+// value into an edge store and a reload, about 2.1 k FAST spills on unity
+// `ide.c`. A header with no scanned predecessor, a cold block, a switch edge,
+// a pinned, mutable or non-general parameter, or an empty candidate set keeps
+// the parameter in memory.
 BUSTER_GLOBAL_LOCAL u64 machine_fast_parameter_contract(MachineFastState* state, MachineFastPrepass const* prepass, u32 block_index,
                                                         u32 const* out_owner, u64 const* out_held, u64 const* out_dirty, u32 register_count,
                                                         u32* entry_owner, u64* entry_dirty)
@@ -1627,6 +1649,17 @@ BUSTER_GLOBAL_LOCAL u64 machine_fast_parameter_contract(MachineFastState* state,
         u64 available = (register_count < 64u ? machine_fast_lane(register_count) - 1u : UINT64_MAX) & ~forbidden &
                         ~(description->callee_saved_mask & ~state->placement->callee_saved_mask);
         u32 const* designated_owner = out_owner + (u64)designated * register_count;
+        // Lanes whose designated value the block below would carry. A
+        // parameter placed on one of them displaces that value, which the
+        // edge then stores and the block reloads, so a parameter without a
+        // source match takes another lane when one is free.
+        u64 carry_candidates = loop_header ? 0 : out_held[designated] & out_dirty[designated] & available & description->allocatable_mask;
+        u64 carriable = 0;
+        for (u64 remaining = carry_candidates; remaining; remaining &= remaining - 1u)
+        {
+            u32 contract_register = machine_fast_first_set(remaining);
+            carriable |= machine_fast_carriable(state, block, designated_owner[contract_register]) ? machine_fast_lane(contract_register) : 0u;
+        }
         for (u32 parameter_index = 0; parameter_index < block->parameter_count; parameter_index += 1)
         {
             u32 parameter = function->block_parameters[block->parameter_offset + parameter_index].virtual_register;
@@ -1644,7 +1677,8 @@ BUSTER_GLOBAL_LOCAL u64 machine_fast_parameter_contract(MachineFastState* state,
                              : 0;
             u32 hint = state->register_hints[parameter];
             hinted = !hinted && hint != 0xff ? machine_fast_lane(hint) & candidates : hinted;
-            u32 contract_register = machine_fast_first_set(hinted ? hinted : candidates);
+            u64 uncarried = candidates & ~carriable;
+            u32 contract_register = machine_fast_first_set(hinted ? hinted : uncarried ? uncarried : candidates);
             entry_owner[contract_register] = parameter;
             result |= machine_fast_lane(contract_register);
             available &= ~machine_fast_lane(contract_register);
@@ -1657,21 +1691,11 @@ BUSTER_GLOBAL_LOCAL u64 machine_fast_parameter_contract(MachineFastState* state,
         // already sits in the same register; elsewhere it stores (if dirty)
         // and reloads, as the flush and the block's first use did before.
         // Dirtiness is the OR over what each edge delivers.
-        u64 carry_candidates = loop_header ? 0 : out_held[designated] & out_dirty[designated] & available & description->allocatable_mask;
-        for (u64 remaining = carry_candidates; remaining; remaining &= remaining - 1u)
+        for (u64 remaining = carriable & available; remaining; remaining &= remaining - 1u)
         {
             u32 contract_register = machine_fast_first_set(remaining);
             u32 value = designated_owner[contract_register];
-            MachineVirtualRegister const* carried = function->virtual_registers + value;
-            bool keep = state->escapes[value] && state->rematerialize_immediates[value] == UINT32_MAX && state->last_use[value] >= block->first_instruction &&
-                        carried->register_class == MACHINE_REGISTER_CLASS_GENERAL && !(carried->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) &&
-                        !(state->pinned_registers && state->pinned_registers[value] != UINT32_MAX) &&
-                        !machine_fast_owner_contains(entry_owner, result, value);
-            for (u32 parameter_index = 0; keep && parameter_index < block->parameter_count; parameter_index += 1)
-            {
-                keep = function->block_parameters[block->parameter_offset + parameter_index].virtual_register != value;
-            }
-            if (keep)
+            if (!machine_fast_owner_contains(entry_owner, result, value))
             {
                 u64 lane = machine_fast_lane(contract_register);
                 for (u32 predecessor_index = first_predecessor; predecessor_index < predecessor_limit; predecessor_index += 1)
