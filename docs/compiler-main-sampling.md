@@ -31,8 +31,10 @@ These are three alternatives; keep exactly one active selector, replacing an
 earlier selector when advancing the request. An inherited selector alone does
 not suppress a fresh ordinary comparison request. This PR adds no request line.
 The committed [admission configuration](compiler-main-sampling-admission-v1.tsv)
-is disabled; arbitrary selectors, freezes or changed owner/actor/source facts
-cannot assign the physical job.
+admits only the phase and freeze it names (currently `acquire`, bound to the
+[acquisition plan](compiler-main-sampling-freeze-v1.tsv) by commit and digest);
+arbitrary selectors, other freezes or changed owner/actor/source facts cannot
+assign the physical job.
 
 The hosted authorizer reads exact GitHub source/request/attempt records and
 all prior campaign attempts, then the native admission policy validates them.

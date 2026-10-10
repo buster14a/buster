@@ -17,6 +17,12 @@ enum
     // Match the MSVC/LLVM maximum including the four-byte record prefix.
     CODEVIEW_MAX_RECORD_SIZE = 0xff00,
     CODEVIEW_CONTINUATION_SIZE = 8,
+    // Largest S_DEFRANGE_* record emitted (S_DEFRANGE_SUBFIELD_REGISTER: the
+    // four-byte prefix plus 16 payload bytes), rounded up to a padded bound.
+    CODEVIEW_DEFRANGE_RECORD_BYTES = 24,
+    // S_DEFRANGE_* records carry a 16-bit range length; longer ranges are
+    // emitted as consecutive records of at most this many bytes.
+    CODEVIEW_DEFRANGE_MAX_LENGTH = 0xffff,
 };
 
 enum
@@ -304,6 +310,14 @@ BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add(u64* capacity, u64 cou
     return valid;
 }
 
+// Records one location range becomes per location piece: a range longer than
+// the 16-bit S_DEFRANGE_* length is split rather than truncated.
+BUSTER_GLOBAL_LOCAL u32 codeview_range_record_count(DebugLocationRange const* range)
+{
+    u32 length = range->end > range->start ? range->end - range->start : 0;
+    return length / CODEVIEW_DEFRANGE_MAX_LENGTH + (length % CODEVIEW_DEFRANGE_MAX_LENGTH != 0);
+}
+
 BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_variable(u64* capacity, DebugModel* model,
                                                                     DebugVariableId id)
 {
@@ -315,9 +329,10 @@ BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_variable(u64* capacity
     for (u32 location_index = 0; location_index < variable->location_count; location_index += 1)
     {
         DebugLocationRange* range = variable->locations + location_index;
+        u32 records = codeview_range_record_count(range);
         if (range->location.kind == DEBUG_LOCATION_REGISTER || range->location.kind == DEBUG_LOCATION_FRAME)
         {
-            if (!codeview_relocation_capacity_add(capacity, 2))
+            if (!codeview_relocation_capacity_add(capacity, 2u * (u64)records))
             {
                 return false;
             }
@@ -328,7 +343,7 @@ BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_variable(u64* capacity
             {
                 DebugLocationKind kind = range->location.pieces[piece_index].kind;
                 if ((kind == DEBUG_LOCATION_REGISTER || kind == DEBUG_LOCATION_FRAME) &&
-                    !codeview_relocation_capacity_add(capacity, 2))
+                    !codeview_relocation_capacity_add(capacity, 2u * (u64)records))
                 {
                     return false;
                 }
@@ -363,52 +378,55 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(ByteWriter* symbols, Debug
     {
         return;
     }
-    u32 start = range->start >= function_offset ? range->start - function_offset : 0;
-    u32 length = range->end - range->start;
-    if (range->location.kind == DEBUG_LOCATION_REGISTER)
+    u32 range_start = range->start >= function_offset ? range->start - function_offset : 0;
+    u32 range_length = range->end - range->start;
+    for (u64 offset = 0; offset < range_length; offset += CODEVIEW_DEFRANGE_MAX_LENGTH)
     {
-        u64 record = codeview_record_begin(symbols, S_DEFRANGE_REGISTER);
-        u32 reg = debug_register_codeview_number((Target){.cpu_arch = (CpuArch)codeview_model_register_target(machine)}, range->location.reg);
-        byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(reg, UINT16_MAX));
-        byte_writer_emit_u16_le(symbols, 0);
-        codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, start);
-        byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(length, UINT16_MAX));
-        codeview_record_end(symbols, record);
-    }
-    else if (range->location.kind == DEBUG_LOCATION_FRAME)
-    {
-        u64 record = codeview_record_begin(symbols, S_DEFRANGE_FRAMEPOINTER_REL);
-        byte_writer_emit_u32_le(symbols, (u32)range->location.frame_offset);
-        codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, start);
-        byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(length, UINT16_MAX));
-        codeview_record_end(symbols, record);
-    }
-    else if (range->location.kind == DEBUG_LOCATION_PIECEWISE)
-    {
-        for (u32 piece_index = 0; piece_index < range->location.piece_count; piece_index += 1)
+        u32 start = range_start + (u32)offset;
+        u32 length = (u32)BUSTER_MIN((u64)range_length - offset, (u64)CODEVIEW_DEFRANGE_MAX_LENGTH);
+        if (range->location.kind == DEBUG_LOCATION_REGISTER)
         {
-            DebugLocationPiece* piece = range->location.pieces + piece_index;
-            u32 piece_start = range->start >= function_offset ? range->start - function_offset : 0;
-            u32 piece_length = range->end - range->start;
-            if (piece->kind == DEBUG_LOCATION_REGISTER)
+            u64 record = codeview_record_begin(symbols, S_DEFRANGE_REGISTER);
+            u32 reg = debug_register_codeview_number((Target){.cpu_arch = (CpuArch)codeview_model_register_target(machine)}, range->location.reg);
+            byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(reg, UINT16_MAX));
+            byte_writer_emit_u16_le(symbols, 0);
+            codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, start);
+            byte_writer_emit_u16_le(symbols, (u16)length);
+            codeview_record_end(symbols, record);
+        }
+        else if (range->location.kind == DEBUG_LOCATION_FRAME)
+        {
+            u64 record = codeview_record_begin(symbols, S_DEFRANGE_FRAMEPOINTER_REL);
+            byte_writer_emit_u32_le(symbols, (u32)range->location.frame_offset);
+            codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, start);
+            byte_writer_emit_u16_le(symbols, (u16)length);
+            codeview_record_end(symbols, record);
+        }
+        else if (range->location.kind == DEBUG_LOCATION_PIECEWISE)
+        {
+            for (u32 piece_index = 0; piece_index < range->location.piece_count; piece_index += 1)
             {
-                u64 record = codeview_record_begin(symbols, S_DEFRANGE_SUBFIELD_REGISTER);
-                u32 reg = debug_register_codeview_number((Target){.cpu_arch = (CpuArch)codeview_model_register_target(machine)}, piece->reg);
-                byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(reg, UINT16_MAX));
-                byte_writer_emit_u16_le(symbols, 0);
-                byte_writer_emit_u32_le(symbols, piece->value_offset);
-                codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, piece_start);
-                byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));
-                codeview_record_end(symbols, record);
-            }
-            else if (piece->kind == DEBUG_LOCATION_FRAME)
-            {
-                u64 record = codeview_record_begin(symbols, S_DEFRANGE_SUBFIELD);
-                byte_writer_emit_u32_le(symbols, 0);
-                byte_writer_emit_u32_le(symbols, piece->value_offset);
-                codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, piece_start);
-                byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));
-                codeview_record_end(symbols, record);
+                DebugLocationPiece* piece = range->location.pieces + piece_index;
+                if (piece->kind == DEBUG_LOCATION_REGISTER)
+                {
+                    u64 record = codeview_record_begin(symbols, S_DEFRANGE_SUBFIELD_REGISTER);
+                    u32 reg = debug_register_codeview_number((Target){.cpu_arch = (CpuArch)codeview_model_register_target(machine)}, piece->reg);
+                    byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(reg, UINT16_MAX));
+                    byte_writer_emit_u16_le(symbols, 0);
+                    byte_writer_emit_u32_le(symbols, piece->value_offset);
+                    codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, start);
+                    byte_writer_emit_u16_le(symbols, (u16)length);
+                    codeview_record_end(symbols, record);
+                }
+                else if (piece->kind == DEBUG_LOCATION_FRAME)
+                {
+                    u64 record = codeview_record_begin(symbols, S_DEFRANGE_SUBFIELD);
+                    byte_writer_emit_u32_le(symbols, 0);
+                    byte_writer_emit_u32_le(symbols, piece->value_offset);
+                    codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, start);
+                    byte_writer_emit_u16_le(symbols, (u16)length);
+                    codeview_record_end(symbols, record);
+                }
             }
         }
     }
@@ -892,6 +910,20 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
         {
             symbol_capacity += (u64)input.model->variable_count * 192 + (u64)input.model->scope_count * 96 +
                                (u64)input.model->inline_site_count * 64 + 256;
+            // Every location range (each piece of a piecewise one) is its own
+            // S_DEFRANGE_* record, so a variable's bytes grow with its ranges
+            // and name rather than fitting one fixed per-variable reserve.
+            for (u32 variable_index = 0; variable_index < input.model->variable_count; variable_index += 1)
+            {
+                DebugVariable const* variable = input.model->variables + variable_index;
+                symbol_capacity += variable->name.length + variable->linkage_name.length;
+                for (u32 location_index = 0; variable->locations && location_index < variable->location_count; location_index += 1)
+                {
+                    DebugLocationRange const* range = variable->locations + location_index;
+                    u32 pieces = range->location.piece_count;
+                    symbol_capacity += (u64)CODEVIEW_DEFRANGE_RECORD_BYTES * (pieces ? pieces : 1u) * codeview_range_record_count(range);
+                }
+            }
         }
         ByteWriter symbols = byte_writer_make(arena_allocate(arena, u8, symbol_capacity), symbol_capacity);
         // Count the same scope tree once per emitted function. Debug models may
