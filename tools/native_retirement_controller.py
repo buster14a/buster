@@ -20,7 +20,8 @@ Map: ledger codec; writer/outcome reconciliation; catch-up detection
 two-phase plan -> immutable artifact upload -> dispatch; catch_up opener;
 superseded_push, which turns a main-push stale-main exit green only after an
 exact successor run exists (docs/main-push-maintenance.md). An uncertain POST
-is never retried.
+is never retried. disposition bars a catch-up blocked before its POST only for
+its own main revision, since its empty source head never changes (#3327).
 """
 from __future__ import annotations
 
@@ -43,6 +44,9 @@ ACTIVE = frozenset(("queued", "in_progress", "waiting", "pending", "requested"))
 OUTCOME_JOB = "Native retirement automation outcome"
 OUTCOME_STEPS = {"Superseded request": "superseded", "Published request": "published",
                  "Blocked request": "blocked"}
+# Detail prefix of a block recorded before the dispatch POST: positive proof
+# that no writer was requested, unlike an uncertain POST or a writer outcome.
+NOT_DISPATCHED = "not dispatched: "
 CATCH_UP_PATH = ".github/workflows/native-retirement-catch-up.yml"
 CATCH_UP_EVENTS = frozenset(("push", "schedule", "workflow_dispatch"))
 CATCH_UP_TITLE = "Native retirement catch-up: publish generated state for main"
@@ -167,7 +171,15 @@ def reconcile(api, record: dict) -> dict:
     return result
 
 
-def disposition(records: list[dict], request: dict) -> str:
+def disposition(records: list[dict], request: dict, catch_up: bool = False) -> str:
+    """A blocked request bars its source and policy.
+
+    One exception: a catch-up blocked before its dispatch POST (NOT_DISPATCHED)
+    bars only its own main revision. Its source is a bot-made empty commit that
+    never changes while its PR stays open, and no writer was requested, so the
+    next main revision may request one. An uncertain POST, a cancellation or a
+    writer failure stays blocked for owner reconciliation like any request.
+    """
     result = "eligible"
     for record in records:
         old = record["request"]
@@ -175,7 +187,9 @@ def disposition(records: list[dict], request: dict) -> str:
             result = "active-or-uncertain"
             break
         if (record["state"] == "blocked" and old["source_head"] == request["source_head"] and
-                old["policy_sha256"] == request["policy_sha256"]):
+                old["policy_sha256"] == request["policy_sha256"] and
+                not (catch_up and record["detail"].startswith(NOT_DISPATCHED) and
+                     old["base"] != request["base"])):
             result = "failed-or-cancelled-source"
             break
         if old["key"] == request["key"]:
@@ -324,6 +338,7 @@ def plan(api, repo: Path, base: str, run_id: int) -> dict:
     pulls = api.all("pulls", state="open", base="main")
     pulls.sort(key=lambda pr: (pr.get("auto_merge") is None, pr.get("number", 0)))
     selected = None
+    selected_catch_up = False
     for pull in pulls:
         if not eligible_pr(pull, api.repository):
             continue
@@ -349,10 +364,11 @@ def plan(api, repo: Path, base: str, run_id: int) -> dict:
             request = automation.new_request(
                 api.repository, number, base, candidate["head"], candidate["source_head"],
                 candidate["classification"], policy_digest, run_id)
-            state = disposition(records, request)
+            state = disposition(records, request, candidate.get("catch_up", False))
             observations.append({"number": number, "status": state})
             if selected is None and state == "eligible":
                 selected = request
+                selected_catch_up = candidate.get("catch_up", False)
         except (ValueError, integration.IntegrationError) as error:
             observations.append({"number": number, "status": "blocked", "detail": str(error)[:500]})
     if selected is None:
@@ -368,7 +384,7 @@ def plan(api, repo: Path, base: str, run_id: int) -> dict:
     # One serialized controller is the only ledger writer; a persisted claim
     # precedes artifact upload and POST, so job interruption cannot duplicate it.
     existing = ledger(api, selected["number"])
-    if disposition(existing, selected) != "eligible":
+    if disposition(existing, selected, selected_catch_up) != "eligible":
         raise automation.AutomationError("candidate acquired a concurrent claim")
     record = {"schema": LEDGER_SCHEMA, "request": selected, "state": "claimed",
               "run_id": None, "detail": "claim persisted before artifact upload and dispatch"}
@@ -394,7 +410,12 @@ def _dispatch(api, request: dict) -> dict:
         raise automation.AutomationError("dispatch requires its own unique unconsumed claim")
     record = records[0]
     # Artifact upload must already have committed one exact controller request.
-    automation.read_request_artifact(api, request)
+    # Refusing it precedes the POST, so the claim is known not to be dispatched.
+    try:
+        automation.read_request_artifact(api, request)
+    except automation.AutomationError as error:
+        save(api, record, "blocked", NOT_DISPATCHED + str(error)[:400])
+        raise
     existing = find_writer(api, record)
     if existing is not None:
         save(api, record, "dispatched", "recovered existing exact-key writer", existing["id"])
