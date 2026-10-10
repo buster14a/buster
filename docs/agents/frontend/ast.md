@@ -297,7 +297,8 @@ Under `-v` the driver prints four rows with the other verbose counters:
   nodes_accepted=<those it gave a type> answers=<type queries answered from
   the tree> declines=<queries that mapped to a node the typer does not vouch
   for> misses=<queries that mapped to no node> gated=<queries met in a machine
-  state the typer leaves alone>`
+  state the typer leaves alone> late_checks=<queries that re-typed a late
+  node> late_nodes=<nodes they re-typed> late_answers=<answers among them>`
 - `C_AST_SPLIT units=<units whose records the tree split published>
   records=<records it published> assertions=<body _Static_assert ranges it
   published> fallbacks=<units it handed to c_parse_ast's walker>
@@ -881,6 +882,26 @@ The same audit records that version's hosted census, diagnostic only:
 - On the merge with main `f6e8d25f`, the same arms read −0.077% on the
   default path and −0.84% under the pilot.
 - The requested 9700X comparison decides the performance disposition (#2761).
+
+For the late rows ([Late rows](#late-rows)), these budgets were declared
+before the measured runs, on the same input and flags as stage 3, with
+Callgrind on tests-off `-march=x86-64-v3` builds and the same four arms (A
+base default, B base with `-fc-ast-pilot`, C candidate with it, D candidate
+default). The base is main `f38a7716`, which the candidate branches from.
+- correctness: no verify mismatch over the corpus and the frontend sources,
+  with a floor on late answers there; identical diagnostics and type-table
+  sizes with and without the tree; byte-identical `-c` objects (`-g0` and
+  `-g`) across the four arms, and `c_test_type_interning_objects` passing.
+- coverage: on the self-host, the late re-checks answer at least 2,000 of
+  the about 3,600 `&` and `*`-level queries the census counted.
+- the late rows' effect on the pilot (C against B): the whole compile costs
+  fewer instructions, with the re-typing charged, and machine runs from
+  queries fall.
+- the default path (D against A): the change adds no work there, so within
+  ±0.05% Ir on `-fsyntax-only` and on `-c` (`-g0`).
+- adoption of the hook as the default: unchanged. Hosted counts are
+  diagnostic; Zen 5 acceptance (#2761) stays incomplete, and no benchmark
+  request is made for this slice.
 
 For the in-place columns ([storage](#storage-and-lifetime)), these budgets were
 declared before the measured runs, on the same input and flags, with stage 2's

@@ -212,6 +212,15 @@
 // call (c_parse_expression_tree_query). The node is never SAFE through it: a
 // parent's machine run would type the literal too.
 #define C_AST_TYPE_FLAG_REPLAY (1u << 5)
+// A body's node declined only because an interned row it reads (an `&`'s
+// pointer, a cast's or compound literal's primitive row or `*` level) did not
+// exist yet when the body was typed: a query of the same body may mint it
+// later. The mark is sticky, and the query re-types the node then
+// (c_ast_types_retype).
+#define C_AST_TYPE_FLAG_LATE (1u << 6)
+// A node whose subtree holds a C_AST_TYPE_FLAG_LATE node below it.
+#define C_AST_TYPE_FLAG_LATE_BELOW (1u << 7)
+#define C_AST_TYPE_FLAG_LATE_MARKS (C_AST_TYPE_FLAG_LATE | C_AST_TYPE_FLAG_LATE_BELOW)
 
 // INIT_DECLARATOR's presence bit for an initializer, its last child (c_ast.h).
 #define C_AST_TYPE_INIT_DECLARATOR_INITIALIZER (1u << 2)
@@ -1211,6 +1220,14 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE CTypeId c_ast_types_interned(CAstTypeBody cons
     return body->entities ? C_TYPE_ID_INVALID : c_parse_interned_type(body->result, type);
 }
 
+// Marks a node `late` declined for want of an interned row
+// (C_AST_TYPE_FLAG_LATE). Only a body's rows can appear later: an initializer
+// reads none (c_ast_types_interned).
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_ast_types_mark_late(CAstTypeBody* body, u32 relative, bool late)
+{
+    body->flags[relative] |= late && !body->entities ? C_AST_TYPE_FLAG_LATE : 0;
+}
+
 // Whether a specifier word is one c_parse_primitive_type reads into a plain
 // row: the arithmetic and void words, `const` and `volatile`. `restrict` and
 // `_Atomic` are left out, and so is every word another reader handles.
@@ -1289,6 +1306,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody* body, CPreproces
     }
     CTypeId type = C_TYPE_ID_INVALID;
     bool lookup = false;
+    bool late = false;
     if (words && ast->kinds[first] == C_AST_TYPEDEF_NAME)
     {
         bool identifier = open + 1 < body->token_total && body->tokens[open + 1].kind == C_TOKEN_IDENTIFIER;
@@ -1310,6 +1328,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody* body, CPreproces
         bool plain = spelling.seen_type && spelling.valid_specifiers && spelling.declarator_start == star && spelling.type.kind != C_TYPE_INVALID &&
                      spelling.type.kind != C_TYPE_VA_LIST;
         type = plain ? c_ast_types_interned(body, spelling.type) : C_TYPE_ID_INVALID;
+        late = plain && type.value >= result->type_count;
     }
     for (u32 level = star; type.value < result->type_count && level < close; level += 1)
     {
@@ -1319,7 +1338,9 @@ BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody* body, CPreproces
                                               .array_bound = C_ARRAY_BOUND_INVALID,
                                               .kind = C_TYPE_POINTER,
                                           });
+        late = type.value >= result->type_count;
     }
+    c_ast_types_mark_late(body, relative, late);
     *lookup_out = lookup;
     return type.value < result->type_count ? type : C_TYPE_ID_INVALID;
 }
@@ -1394,6 +1415,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_address(CAstTypeBody* body, CPreprocessResu
                                                                                                .kind = C_TYPE_POINTER,
                                                                                            })
                                                               : C_TYPE_ID_INVALID;
+    c_ast_types_mark_late(body, relative, (operand_flags & C_AST_TYPE_FLAG_ACCEPTED) && type.value >= result->type_count);
     if (type.value < result->type_count)
     {
         u32 flags = c_ast_types_inherit(operand_flags, operand_flags);
@@ -1531,12 +1553,17 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_node(CAstTypeBody* body, CTypeParseMac
     }
 }
 
-// The eager pass: one forward loop, children before parents.
+// The eager pass: one forward loop, children before parents. A typed node
+// whose subtree holds a late node is marked C_AST_TYPE_FLAG_LATE_BELOW; in
+// postorder that holds when the newest late node starts at or after the
+// node's subtree.
 BUSTER_GLOBAL_LOCAL void c_ast_types_type_body(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess)
 {
     CAst const* ast = body->ast;
     u32 visited = 0;
     u32 accepted = 0;
+    // The newest late node's relative index + 1, 0 for none.
+    u32 late_newest = 0;
     for (u32 node = body->begin; node <= body->node; node += 1)
     {
         u32 relative = node - body->begin;
@@ -1563,12 +1590,44 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_body(CAstTypeBody* body, CTypeParseMac
                 body->start_head[first - body->token_start] = relative + 1;
                 c_ast_types_type_node(body, machine, preprocess, node, relative);
                 accepted += (body->flags[relative] & C_AST_TYPE_FLAG_ACCEPTED) != 0;
+                bool late = (body->flags[relative] & C_AST_TYPE_FLAG_LATE) != 0;
+                body->flags[relative] |= !late && late_newest > c_ast_subtree_begin(ast, node) - body->begin ? C_AST_TYPE_FLAG_LATE_BELOW : 0;
+                late_newest = late ? relative + 1 : late_newest;
             }
         }
     }
     body->statistics->nodes_typed += visited;
     body->statistics->nodes_accepted += accepted;
     WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_NODES, visited);
+}
+
+// Re-types, in index order, the nodes of `node`'s subtree that carry a late
+// mark, at a query: the rows the eager pass missed may exist by now, and a row
+// that does is exactly the one the machine's run would find instead of
+// appending it. Every other node of the subtree reads no late row, so its
+// eager result stands. The marks stay, because a speculative rollback may
+// take a late row back; every query that reaches a marked node re-types it.
+// The rules write only the region's arrays, as an initializer's typing does
+// at its first query.
+BUSTER_GLOBAL_LOCAL void c_ast_types_retype(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess, u32 node)
+{
+    u32 last = node - body->begin;
+    u32 retyped = 0;
+    for (u32 relative = c_ast_subtree_begin(body->ast, node) - body->begin; relative <= last; relative += 1)
+    {
+        u32 marks = body->flags[relative] & C_AST_TYPE_FLAG_LATE_MARKS;
+        if (marks)
+        {
+            body->types[relative] = C_TYPE_ID_INVALID;
+            body->flags[relative] = 0;
+            body->widths[relative] = 0;
+            c_ast_types_type_node(body, machine, preprocess, body->begin + relative, relative);
+            body->flags[relative] |= (u8)marks;
+            retyped += 1;
+        }
+    }
+    body->statistics->late_checks += 1;
+    body->statistics->late_nodes += retyped;
 }
 
 // Whether the typer may type now: a tree index, an idle machine and the
@@ -1798,8 +1857,12 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
         }
         else
         {
-            u32 flags = body->flags[relative];
             u32 node = body->begin + relative;
+            if (body->flags[relative] & C_AST_TYPE_FLAG_LATE_MARKS)
+            {
+                c_ast_types_retype(body, machine, preprocess, node);
+            }
+            u32 flags = body->flags[relative];
             bool checked = machine->validate_expression_constraints;
             bool replay = checked && !(flags & C_AST_TYPE_FLAG_SAFE) && (flags & C_AST_TYPE_FLAG_REPLAY);
             bool vouched = (flags & C_AST_TYPE_FLAG_ACCEPTED) && (!checked || (flags & C_AST_TYPE_FLAG_SAFE) || replay) &&
@@ -1812,6 +1875,7 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
             if (vouched)
             {
                 body->statistics->answers += 1;
+                body->statistics->late_answers += (flags & C_AST_TYPE_FLAG_LATE_MARKS) != 0;
                 answer.status = C_AST_TYPE_ANSWER;
                 answer.type = body->types[relative];
                 answer.nonplace_projection = (flags & C_AST_TYPE_FLAG_NONPLACE) != 0;
@@ -2160,6 +2224,29 @@ CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult prepro
             probe.replay = answer.replay_end > answer.replay_start;
         }
         c_ast_types_body_end(&machine);
+        // An initializer reads no interned row, so its late answer is its
+        // answer.
+        probe.late_status = probe.status;
+        probe.late_kind = probe.kind;
+        probe.late_replay = probe.replay;
+        if (body)
+        {
+            u32 interned = result->interned_type_count;
+            result->interned_type_count = 0;
+            c_ast_types_body_begin(&machine, result, &preprocess, declaration);
+            result->interned_type_count = interned;
+            if (machine.ast_types)
+            {
+                CScopeId scope = c_parse_scope_for_token(result, declaration->scope, start);
+                CAstTypeAnswer answer = c_ast_types_answer(&machine, &preprocess, result, scope, start, end);
+                probe.late_status = (u32)answer.status;
+                probe.late_kind = answer.type.value < result->type_count ? result->types[answer.type.value].kind : C_TYPE_INVALID;
+                probe.late_replay = answer.replay_end > answer.replay_start;
+                probe.late_checks = machine.ast_types->local_statistics.late_checks;
+                probe.late_answers = machine.ast_types->local_statistics.late_answers;
+            }
+            c_ast_types_body_end(&machine);
+        }
         result->expression_scalar_types = previous_scalars;
         scratch_end(temporary);
     }

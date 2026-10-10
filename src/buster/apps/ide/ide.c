@@ -2112,9 +2112,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          tree.walk_nanoseconds, tree.walk_steps, tree.scan_nanoseconds, tree.children_nanoseconds, tree.child_entries, tree.scan_calls);
             // Counts, not times: what the tree expression typer did for the unit's function bodies and file-scope initializers.
             string_print(S8("C_AST_TYPES bodies={u64} initializers={u64} nodes_typed={u64} nodes_accepted={u64} answers={u64} declines={u64} misses={u64} "
-                            "gated={u64}\n"),
+                            "gated={u64} late_checks={u64} late_nodes={u64} late_answers={u64}\n"),
                          tree.types.bodies, tree.types.initializers, tree.types.nodes_typed, tree.types.nodes_accepted, tree.types.answers,
-                         tree.types.declines, tree.types.misses, tree.types.gated);
+                         tree.types.declines, tree.types.misses, tree.types.gated, tree.types.late_checks, tree.types.late_nodes,
+                         tree.types.late_answers);
             // Counts: the declaration split read from the tree, and the units handed to the token walker.
             string_print(S8("C_AST_SPLIT units={u64} records={u64} assertions={u64} fallbacks={u64} reason={S8} fallback_token={u32}\n"),
                          tree.split.units, tree.split.records, tree.split.assertions, tree.split.fallbacks,
