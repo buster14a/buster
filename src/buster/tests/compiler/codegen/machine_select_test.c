@@ -754,6 +754,68 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_aggregate_load_sources
     return result;
 }
 
+// The classification pass reads the row walk's result-row projection in
+// canonical layout order. A forward goto stores blocks away from reverse
+// postorder, so a projection consumed in storage order would number the
+// classification vregs differently. Independent oracle: walk the published
+// rows in layout order and require each value's first vreg to grow with it.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_result_row_order(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("struct order_wide { long a, b, c; };\n"
+                       "long order_layout(long x, struct order_wide w, long* p) {\n"
+                       "    long y = x; struct order_wide copy = w; goto second;\n"
+                       "first: y += copy.b + *p; goto done;\n"
+                       "second: y *= w.c; if (y > 10) goto first; y -= p[1];\n"
+                       "done: return y + copy.a; }\n");
+    CpuArch arches[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 arch_index = 0; arch_index < BUSTER_ARRAY_LENGTH(arches); arch_index += 1)
+    {
+        Target target = {.cpu_arch = arches[arch_index], .os = OPERATING_SYSTEM_LINUX};
+        IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
+        IrFunction* function = program ? machine_selection_test_find(program, S8("order_layout")) : 0;
+        BUSTER_TEST(arguments, function != 0);
+        if (!function) { continue; }
+        MachineSelectResult checked = machine_select_canonical_function(arguments->arena, program, function, target);
+        MachineSelectResult validated = machine_select_validated_canonical_function(arguments->arena, program, function, target, false, false, 0);
+        BUSTER_TEST(arguments, checked.supported && machine_verify_function(&checked.function).error == MACHINE_VERIFY_NONE);
+        BUSTER_TEST(arguments, machine_selection_test_ordered_rows_equal(&checked, &validated));
+        if (!checked.supported) { continue; }
+        u32* layout = machine_selection_canonical_layout(arguments->arena, function);
+        bool reordered = false;
+        for (u32 layout_index = 0; layout && layout_index < function->block_count; layout_index += 1)
+        {
+            reordered |= layout[layout_index] != layout_index;
+        }
+        BUSTER_TEST(arguments, reordered);
+        u32 previous = 0;
+        u32 classified = 0;
+        bool ordered = true;
+        for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
+        {
+            u32 block_index = layout ? layout[layout_index] : layout_index;
+            IrCfgBlock const* block = function->published_cfg->blocks + block_index;
+            for (u32 row = block->first_instruction; row < block->first_instruction + block->instruction_count; row += 1)
+            {
+                u32 value = function->instructions[row].result.value;
+                u32 first = UINT32_MAX;
+                for (u32 vreg = 0; value < function->value_count && first == UINT32_MAX && vreg < checked.function.virtual_register_count; vreg += 1)
+                {
+                    first = checked.function.virtual_registers[vreg].typed_origin == value ? vreg : UINT32_MAX;
+                }
+                if (first != UINT32_MAX)
+                {
+                    ordered &= !classified || first > previous;
+                    previous = first;
+                    classified += 1;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, ordered && classified > 4);
+    }
+    return result;
+}
+
 UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -769,6 +831,9 @@ UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
     UnitTestResult aggregate_load_result = machine_selection_test_aggregate_load_sources(arguments);
     result.test_count += aggregate_load_result.test_count;
     result.succeeded_test_count += aggregate_load_result.succeeded_test_count;
+    UnitTestResult result_row_result = machine_selection_test_result_row_order(arguments);
+    result.test_count += result_row_result.test_count;
+    result.succeeded_test_count += result_row_result.succeeded_test_count;
     String8 source = S8("int selection_add(int a, int b) { int local = 7; return a + local + b; }\n"
                          "int selection_memory(int *p) { *p += 1; return *p; }\n"
                          "int selection_order(void) { return 1 + 2; }\n");

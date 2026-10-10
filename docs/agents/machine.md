@@ -218,6 +218,15 @@ fixture as well as compiling both architectures.
   do not introduce a third permanent graph IR. The unused declarative selector
   was removed in [#269](https://github.com/buster14a/buster/pull/269), resolving
   [#42](https://github.com/buster14a/buster/issues/42).
+- Each target selector decodes canonical operands once per function, in its
+  first target-order row walk. That walk accumulates value/use, local-promotion
+  and direct-call facts, the aliasing/fusion candidate rows, and one
+  `MachineSelectionResultRow` per result-defining row with per-block offsets.
+  Later prepasses consume those projections; the classification pass reads
+  result rows in layout order rather than re-entering every canonical row. The
+  stateful selection walk stays scalar. Do not add another per-function operand
+  stream unless a measured rescan remains for it to replace
+  ([#132](https://github.com/buster14a/buster/issues/132)).
 - `MachineSelectResult.signature_rejected` is set only inside target function
   signature gates; other unclassified selection failures remain distinct.
   Native dispatch maps signature, opcode, verification, placement, encoding,

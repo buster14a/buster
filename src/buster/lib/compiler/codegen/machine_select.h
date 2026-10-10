@@ -7,7 +7,8 @@
 // Target-neutral facts consumed by the handwritten x86-64 and AArch64
 // selectors. machine_type_classes_build projects module types once;
 // machine_selection_value_facts_allocate serves
-// the target row walks. machine_selection_validate_function checks only the
+// the target row walks, which also project MachineSelectionResultRow for their
+// classification passes. machine_selection_validate_function checks only the
 // storage/ownership contract of the unvalidated selector entry point.
 // machine_selection_is_compiler_barrier shares the empty-assembly shape check.
 
@@ -86,6 +87,22 @@ struct MachineSelectionValueFacts
     u32* use_counts;
     u32* use_blocks;
 };
+
+// One entry per row that defines a value, appended by that same row walk in
+// storage block order with per-block offsets. The classification pass reads
+// these twelve bytes in layout order instead of re-entering every 64-byte
+// canonical row, rows without a result included, only to rediscover the
+// result and opcode. row is kept for the rare ARGUMENT immediate read.
+typedef struct MachineSelectionResultRow MachineSelectionResultRow;
+struct MachineSelectionResultRow
+{
+    u32 row;
+    u32 value;
+    u8 opcode;
+    u8 unary_operation;
+};
+
+BUSTER_CT_CHECK(sizeof(MachineSelectionResultRow) == 12);
 
 // Demand-filled canonical address analysis. A bounded cache avoids a second
 // function walk and per-value storage for functions which never ask for an
