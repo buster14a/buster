@@ -388,6 +388,29 @@ class CatchUpDetectionTests(unittest.TestCase):
         refreshed = self.commit(later, header, b"/* newest */\n")
         self.assertFalse(c.catch_up_admissible(self.repo, refreshed, published))
 
+    def test_catch_up_published_after_main_moved_is_not_requested_again(self):
+        # The writer publishes a catch-up for its expected base when main moved
+        # on without generated state (#1893); the controller must then treat
+        # that head as current, not plan another writer run.
+        import native_retirement_merge_gate as gate
+        request = git(self.repo, "commit-tree", self.fresh + "^{tree}", "-p", self.fresh, "-m", "request")
+        expected = self.commit(self.fresh, "README.md", b"expected\n")
+        header = "tools/native_retirement_dependency_binding.generated.h"
+        published_tree = git(self.repo, "rev-parse",
+                             self.commit(expected, header, b"/* newer */\n") + "^{tree}")
+        published = git(self.repo, "commit-tree", published_tree, "-p", expected, "-p", request,
+                        "-m", f"catch-up\n\n{gate.TRAILER_BASE}: {expected}\n")
+        moved = self.commit(expected, "src/buster/lib/hash.h", b"changed\n")
+        self.assertTrue(i.catch_up_main_admissible(self.repo, expected, request, moved))
+        self.assertTrue(c.catch_up_admissible(self.repo, moved, published))
+        # Generated state on main still supersedes the run and the published head.
+        generated = self.commit(moved, header, b"/* newest */\n")
+        self.assertFalse(i.catch_up_main_admissible(self.repo, expected, request, generated))
+        self.assertFalse(c.catch_up_admissible(self.repo, generated, published))
+        # A non-catch-up candidate is never relaxed by the writer.
+        bound = self.commit(self.fresh, "src/buster/lib/hash.h", b"bound\n")
+        self.assertFalse(i.catch_up_main_admissible(self.repo, expected, bound, moved))
+
     def test_writer_is_requested_only_for_trust_transitions_and_needed_catch_ups(self):
         import native_retirement_merge_gate as gate
         human = {"number": 7, "state": "open", "draft": False, "user": {"login": "author", "id": 5, "type": "User"},
@@ -440,15 +463,36 @@ class CatchUpAPI:
         self.run = run_record(300, c.CATCH_UP_PATH, "push")
         self.pulls = list(pulls)
         self.calls = []
-        self.branch_exists = False
+        self.token = "fixture-token"
+        # Live catch-up branch value (None: absent), moved only by lease().
+        self.branch = None
+        # (method, path) after whose response a racing writer publishes FRESH.
+        self.publish_after = None
+        # Published catch-up heads: sha -> (recorded base, CI complete check runs).
+        self.published = {}
+        self.ahead = True
+        self.writer_active = False
 
     def all(self, path, **query):
         if path != "pulls" or query != {"state": "open", "base": "main"}:
             raise AssertionError((path, query))
         return copy.deepcopy(self.pulls)
 
+    def lease(self, commit, expected):
+        # The writer's and the opener's branch updates are both leased pushes.
+        if self.branch == expected:
+            self.branch = commit
+        return self.branch == commit
+
     def request(self, path, *, method="GET", body=None, **query):
         self.calls.append((method, path, body))
+        response = self.respond(path, method, body, query)
+        if self.publish_after == (method, path):
+            self.publish_after = None
+            self.lease(FRESH, self.branch)
+        return response
+
+    def respond(self, path, method, body, query):
         if path == "actions/runs/300":
             return copy.deepcopy(self.run)
         if path == "git/ref/heads/main":
@@ -458,25 +502,57 @@ class CatchUpAPI:
             return {"type": "file", "encoding": "base64", "content": base64.b64encode(raw).decode()}
         if path == "actions/workflows/" + Path(a.CONTROLLER_PATH).name:
             return {"path": a.CONTROLLER_PATH, "state": "active"}
-        if path == "git/commits/" + BASE:
-            return {"tree": {"sha": "e" * 40}}
-        if path == "git/commits" and method == "POST":
-            return {"sha": "f" * 40}
+        if path.startswith("git/commits/"):
+            sha = path[len("git/commits/"):]
+            commit = {"parents": [{"sha": BASE}], "message": "Request native-retirement catch-up\n"}
+            if sha in self.published:
+                commit = {"parents": [{"sha": BASE}, {"sha": sha}],
+                          "message": "Publish\n\nNative-retirement-base: " + self.published[sha][0] + "\n"}
+            return commit
+        if path.startswith("commits/") and path.endswith("/check-runs"):
+            sha = path[len("commits/"):-len("/check-runs")]
+            return {"check_runs": [{"head_sha": sha, "app": {"id": 15368}, "name": "CI complete", **check}
+                                   for check in self.published.get(sha, ("", []))[1]]}
+        if path.startswith("compare/"):
+            return {"status": "ahead" if self.ahead else "behind"}
+        if path == "actions/workflows/" + Path(a.WRITER_PATH).name + "/runs":
+            active = self.writer_active and query.get("status") == "in_progress"
+            return {"workflow_runs": [{"id": 400}] if active else []}
+        if method == "GET" and path.startswith("pulls/"):
+            live = copy.deepcopy(next(pull for pull in self.pulls if path == "pulls/" + str(pull["number"])))
+            live["head"]["sha"] = self.branch
+            return live
         if path == "git/ref/heads/native-retirement/catch-up":
-            if not self.branch_exists:
+            if self.branch is None:
                 raise urllib.error.HTTPError(path, 404, "Not Found", {}, None)
-            return {"object": {"sha": "9" * 40}}
-        if method in ("POST", "PATCH") and path.startswith(("git/refs", "pulls")):
+            return {"object": {"sha": self.branch}}
+        if method == "POST" and path.startswith("issues/") and path.endswith("/comments"):
+            return {"id": 7}
+        if method in ("POST", "PATCH") and path.startswith("pulls"):
             return {"number": 1900, "node_id": "PR_node"} if path == "pulls" else {}
         raise AssertionError((method, path, body, query))
+
+
+FRESH = "a" * 40
+REQUEST = "f" * 40
 
 
 class CatchUpOpenerTests(unittest.TestCase):
     def run_catch_up(self, api, stale):
         with mock.patch.object(i, "_commit", return_value=BASE), \
-                mock.patch.object(c, "snapshot_stale", return_value=stale):
+                mock.patch.object(c, "snapshot_stale", return_value=stale), \
+                mock.patch.object(c, "catch_up_commit", return_value=REQUEST), \
+                mock.patch.object(c, "lease_catch_up_branch",
+                                  side_effect=lambda repo, token, commit, expected:
+                                  api.lease(commit, expected)):
             report = c.catch_up(api, ROOT, BASE, 300)
         return report
+
+    def failed_api(self):
+        api = CatchUpAPI([self.catch_up_pr()])
+        api.branch = HEAD
+        api.published[HEAD] = (MOVED, [{"status": "completed", "conclusion": "failure"}])
+        return api
 
     def catch_up_pr(self, number=1899):
         import native_retirement_merge_gate as gate
@@ -485,33 +561,124 @@ class CatchUpOpenerTests(unittest.TestCase):
                 "base": {"ref": "main", "repo": {"full_name": REPOSITORY}}}
 
     def test_stale_main_opens_one_empty_request_without_auto_merge(self):
-        for exists in (False, True):
-            with self.subTest(branch_exists=exists):
+        for branch in (None, "9" * 40):
+            with self.subTest(branch=branch):
                 api = CatchUpAPI()
-                api.branch_exists = exists
+                api.branch = branch
                 report = self.run_catch_up(api, True)
-                self.assertEqual(report, {"status": "opened", "pull_request": 1900, "head": "f" * 40})
-                commit = [call for call in api.calls if call[:2] == ("POST", "git/commits")]
-                self.assertEqual(commit[0][2]["tree"], "e" * 40)
-                self.assertEqual(commit[0][2]["parents"], [BASE])
-                if exists:
-                    self.assertIn(("PATCH", "git/refs/heads/native-retirement/catch-up",
-                                   {"sha": "f" * 40, "force": True}), api.calls)
-                else:
-                    self.assertIn(("POST", "git/refs", {"ref": "refs/heads/native-retirement/catch-up",
-                                                        "sha": "f" * 40}), api.calls)
+                self.assertEqual(report, {"status": "opened", "pull_request": 1900, "head": REQUEST})
+                self.assertEqual(api.branch, REQUEST)
+                self.assertEqual([call[:2] for call in api.calls if call[0] != "GET"], [("POST", "pulls")])
                 # A GITHUB_TOKEN enqueue would start no merge_group CI; the
                 # writer enables auto-merge with its publication credential.
                 self.assertFalse(hasattr(c, "AUTO_MERGE_MUTATION"))
 
     def test_open_request_is_reused_and_fresh_main_retires_it(self):
         api = CatchUpAPI([self.catch_up_pr()])
+        api.branch = HEAD
         report = self.run_catch_up(api, True)
         self.assertEqual(report, {"status": "pending", "pull_requests": [1899]})
         self.assertFalse([call for call in api.calls if call[0] != "GET"])
         report = self.run_catch_up(api, False)
         self.assertEqual(report, {"status": "current", "closed": [1899]})
         self.assertIn(("PATCH", "pulls/1899", {"state": "closed"}), api.calls)
+
+    def test_failed_published_catch_up_is_replaced_once_main_advances(self):
+        # #3271: a published catch-up whose exact head failed CI complete sat
+        # open forever. Once main advances past its recorded base, the opener
+        # closes it with an explanation and opens one fresh request.
+        api = self.failed_api()
+        report = self.run_catch_up(api, True)
+        self.assertEqual(report, {"status": "opened", "pull_request": 1900, "head": REQUEST,
+                                  "replaced": [1899]})
+        writes = [call[:2] for call in api.calls if call[0] != "GET"]
+        self.assertEqual(writes, [("PATCH", "pulls/1899"), ("POST", "pulls"),
+                                  ("POST", "issues/1899/comments")])
+        self.assertEqual(api.branch, REQUEST)
+        self.assertIn(("GET", "compare/" + MOVED + "..." + BASE, None), api.calls)
+
+    def test_writer_publication_at_any_point_is_never_closed_or_overwritten(self):
+        # Review of #3363: the opener and writer have separate concurrency
+        # groups, so a writer may publish after any read the opener makes.
+        # Both move the branch only by a leased push, so the opener replaces
+        # exactly the failed head or nothing: a publication before the live
+        # read leaves the PR alone, and one after it, including after the
+        # close and immediately before the replacement, refuses the lease and
+        # reopens the PR at the fresh head.
+        writer = "actions/workflows/" + Path(a.WRITER_PATH).name + "/runs"
+        before = []
+        after = [("PATCH", "pulls/1899", {"state": "closed"}),
+                 ("PATCH", "pulls/1899", {"state": "open"})]
+        cases = {
+            "during the scan": (("GET", "compare/" + MOVED + "..." + BASE), before),
+            "after the writer check": (("GET", writer), before),
+            "after the final live read": (("GET", "pulls/1899"), after),
+            "after the close": (("PATCH", "pulls/1899"), after),
+        }
+        for name, (trigger, expected) in cases.items():
+            with self.subTest(name):
+                api = self.failed_api()
+                api.publish_after = trigger
+                report = self.run_catch_up(api, True)
+                self.assertEqual(api.branch, FRESH)
+                self.assertEqual([call for call in api.calls if call[0] != "GET"], expected)
+                self.assertNotIn(("POST", "pulls"), [call[:2] for call in api.calls])
+                self.assertEqual(report["pull_requests" if not expected else "kept"], [1899])
+
+    def test_active_writer_defers_failed_catch_up_retirement(self):
+        api = self.failed_api()
+        api.writer_active = True
+        self.assertEqual(self.run_catch_up(api, True), {"status": "pending", "pull_requests": [1899]})
+        self.assertFalse([call for call in api.calls if call[0] != "GET"])
+        self.assertEqual(api.branch, HEAD)
+
+    def test_failed_catch_up_on_superseded_main_run_writes_nothing(self):
+        # A stale-main exit must precede every write (main-push-maintenance.md).
+        api = self.failed_api()
+        original = api.request
+
+        def moving(path, **kwargs):
+            if path == "git/ref/heads/main":
+                api.calls.append(("GET", path, None))
+                return {"object": {"sha": "d" * 40}}
+            return original(path, **kwargs)
+        api.request = moving
+        with self.assertRaises(a.AutomationMoved):
+            self.run_catch_up(api, True)
+        self.assertFalse([call for call in api.calls if call[0] != "GET"])
+
+    def test_failed_catch_up_is_not_rebuilt_without_new_main(self):
+        # Identical inputs would reproduce a deterministic failure: the same
+        # main revision, a newer recorded base, pending or passing CI and an
+        # unpublished empty head all leave the request pending.
+        cases = {
+            "same main": (BASE, "completed", "failure", True),
+            "recorded base newer than this run": (MOVED, "completed", "failure", False),
+            "pending CI": (MOVED, "in_progress", None, True),
+            "passing CI": (MOVED, "completed", "success", True),
+            "unpublished": (None, "completed", "failure", True),
+        }
+        for name, (recorded, status, conclusion, ahead) in cases.items():
+            with self.subTest(name):
+                api = CatchUpAPI([self.catch_up_pr()])
+                api.branch = HEAD
+                api.ahead = ahead
+                if recorded is not None:
+                    api.published[HEAD] = (recorded, [{"status": status, "conclusion": conclusion}])
+                report = self.run_catch_up(api, True)
+                self.assertEqual(report, {"status": "pending", "pull_requests": [1899]})
+                self.assertFalse([call for call in api.calls if call[0] != "GET"])
+
+    def test_replacement_failing_again_waits_for_the_next_main_revision(self):
+        # The replacement records the main it was built for, so a
+        # deterministic failure costs at most one writer run per main revision.
+        replacement = self.catch_up_pr(1900)
+        api = CatchUpAPI([replacement])
+        api.branch = HEAD
+        api.published[HEAD] = (BASE, [{"status": "completed", "conclusion": "failure"}])
+        self.assertEqual(self.run_catch_up(api, True), {"status": "pending", "pull_requests": [1900]})
+        api.published[HEAD] = (MOVED, [{"status": "completed", "conclusion": "failure"}])
+        self.assertEqual(self.run_catch_up(api, True)["replaced"], [1900])
 
     def test_human_pr_on_catch_up_branch_is_ignored(self):
         human = self.catch_up_pr()
@@ -541,6 +708,67 @@ class CatchUpOpenerTests(unittest.TestCase):
         with self.assertRaises(a.AutomationMoved):
             self.run_catch_up(api, True)
         self.assertFalse([call for call in api.calls if call[0] == "POST"])
+
+
+class CatchUpLeaseTests(unittest.TestCase):
+    """The branch compare-and-swap against a real Git remote, no network."""
+
+    def git(self, repo, *arguments):
+        # Runners have no global identity; the fixture's own commits need one.
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", os.fspath(repo),
+                               *arguments], check=True, capture_output=True, text=True).stdout.strip()
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        self.remote = root / "remote.git"
+        self.work = root / "work"
+        subprocess.run(["git", "init", "-q", "--bare", os.fspath(self.remote)], check=True)
+        subprocess.run(["git", "init", "-q", os.fspath(self.work)], check=True)
+        (self.work / "file").write_text("main\n")
+        self.git(self.work, "add", "file")
+        self.git(self.work, "commit", "-q", "-m", "main")
+        self.git(self.work, "remote", "add", "origin", os.fspath(self.remote))
+        self.base = self.git(self.work, "rev-parse", "HEAD")
+
+    def branch(self):
+        import native_retirement_merge_gate as gate
+        line = self.git(self.remote, "for-each-ref", "--format=%(objectname)",
+                        "refs/heads/" + gate.CATCH_UP_BRANCH)
+        return line or None
+
+    def test_request_commit_is_empty_on_main_and_lease_is_compare_and_swap(self):
+        import native_retirement_merge_gate as gate
+        commit = c.catch_up_commit(self.work, self.base)
+        self.assertEqual(self.git(self.work, "rev-parse", commit + "^{tree}"),
+                         self.git(self.work, "rev-parse", self.base + "^{tree}"))
+        self.assertEqual(self.git(self.work, "rev-list", "--parents", "-n", "1", commit).split()[1:],
+                         [self.base])
+        self.assertIn("github-actions[bot]", self.git(self.work, "log", "-1", "--format=%an %cn", commit))
+        # Absent branch: only an absent expectation creates it.
+        self.assertFalse(c.lease_catch_up_branch(self.work, "t", commit, self.base))
+        self.assertIsNone(self.branch())
+        self.assertTrue(c.lease_catch_up_branch(self.work, "t", commit, None))
+        self.assertEqual(self.branch(), commit)
+        # A writer publishes over the failed head after the opener read it:
+        # the opener's lease on that failed head is refused and keeps it.
+        published = self.git(self.work, "commit-tree", self.base + "^{tree}", "-p", self.base,
+                             "-p", commit, "-m", "published")
+        self.git(self.work, "push", "-q", "--force-with-lease=refs/heads/" + gate.CATCH_UP_BRANCH +
+                 ":" + commit, "origin", published + ":refs/heads/" + gate.CATCH_UP_BRANCH)
+        replacement = c.catch_up_commit(self.work, self.base)
+        self.assertFalse(c.lease_catch_up_branch(self.work, "t", replacement, commit))
+        self.assertEqual(self.branch(), published)
+        # And the converse: once the opener replaced it, the writer's lease
+        # on the head it was requested for is refused in turn.
+        self.assertTrue(c.lease_catch_up_branch(self.work, "t", replacement, published))
+        late = subprocess.run(["git", "-C", os.fspath(self.work), "push", "-q",
+                               "--force-with-lease=refs/heads/" + gate.CATCH_UP_BRANCH + ":" + published,
+                               "origin", published + ":refs/heads/" + gate.CATCH_UP_BRANCH],
+                              capture_output=True, check=False)
+        self.assertNotEqual(late.returncode, 0)
+        self.assertEqual(self.branch(), replacement)
 
 
 MOVED = "e" * 40
@@ -719,6 +947,8 @@ class WorkflowTests(unittest.TestCase):
                           "statuses: write", "workflow_run", "native_retirement_rebind.py"):
             self.assertNotIn(forbidden, text)
         self.assertEqual(text.count("contents: write"), 1)
+        self.assertIn("checks: read", text)
+        self.assertNotIn("checks: write", text)
         self.assertIn("native_retirement_controller.py catch-up", text)
         self.assertIn("name: Native retirement catch-up\n", text)
         for module in (i.TRUST_IMPLEMENTATION_PATHS,):
