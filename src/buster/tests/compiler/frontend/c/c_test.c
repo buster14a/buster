@@ -46881,6 +46881,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_library_builtins_runtime(UnitTestA
 // integer types without converting them to a common type, so each case here
 // pairs a signedness or width combination with the answer Clang 18 gives. The
 // program returns zero, or a line number identifying the failing check.
+// Plain `char` is unsigned on AArch64, so the narrow signed cases name
+// `signed char`. Only the hosts that run the program define it.
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
 BUSTER_GLOBAL_LOCAL String8 const c_test_generic_overflow_runtime_sources[] = {
     S8_INITIALIZER(
         "#define INT_MAX 2147483647\n"
@@ -46919,7 +46922,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_generic_overflow_runtime_sources[] = {
         "CASE(mul, int, int, short, 300, 300, 1, 24464LL)\n"
         "CASE(mul, int, int, short, -300, 100, 0, -30000LL)\n"
         "CASE(sub, int, int, signed char, -100, 100, 1, 56LL)\n"
-        "CASE(add, char, char, char, 100, 100, 1, -56LL)\n"
+        "CASE(add, signed char, signed char, signed char, 100, 100, 1, -56LL)\n"
         "CASE(add, unsigned char, unsigned char, unsigned char, 255, 1, 1, 0LL)\n"
         "CASE(add, short, short, int, 32767, 32767, 0, 65534LL)\n"
         "CASE(mul, long long, long long, long long, 3000000000LL, 4, 0, 12000000000LL)\n"
@@ -47006,6 +47009,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_generic_overflow_runtime_sources[] = {
         "    return status;\n"
         "}\n"),
 };
+#endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_overflow_builtins_runtime(UnitTestArguments* arguments)
 {
@@ -60057,6 +60061,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_function_pointer_array_type_name_runtime);
     C_TEST_FIXTURE(arguments, c_test_function_typedef_scopes);
     C_TEST_FIXTURE(arguments, c_test_generic_function_designator_call);
+    C_TEST_FIXTURE(arguments, c_test_generic_overflow_builtins);
+    C_TEST_FIXTURE(arguments, c_test_generic_overflow_builtins_runtime);
     C_TEST_FIXTURE(arguments, c_test_generic_string_subscripts);
     C_TEST_FIXTURE(arguments, c_test_elifdef_and_wide_character_constants);
     C_TEST_FIXTURE(arguments, c_test_abstract_declarator_and_pointer_typing);
@@ -60335,8 +60341,6 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_libm_rounding_builtins_lowering);
     C_TEST_FIXTURE(arguments, c_test_generic_float_builtins_runtime);
     C_TEST_FIXTURE(arguments, c_test_gnu_library_builtins_runtime);
-    C_TEST_FIXTURE(arguments, c_test_generic_overflow_builtins);
-    C_TEST_FIXTURE(arguments, c_test_generic_overflow_builtins_runtime);
     C_TEST_FIXTURE(arguments, c_test_quiet_nan_compare_runtime);
     C_TEST_FIXTURE(arguments, c_test_atomic_float_compare_exchange_runtime);
     C_TEST_FIXTURE(arguments, c_test_aarch64_float_compare_quiet_signaling);
