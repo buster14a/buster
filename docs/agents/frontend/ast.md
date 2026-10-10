@@ -400,7 +400,8 @@ unchanged.
       `*`s. The answer is the typedef's row or the interned primitive row,
       under interned pointer rows. Each is accepted only once every row it
       reads is already interned, so its machine run appends nothing at any
-      task level.
+      task level. A row the body's own queries mint after the eager pass is
+      found at the query instead ([Late rows](#late-rows)).
 - **What it declines.** Every shape whose machine answer appends a row stays
   with the machine:
   - a qualified member or array element;
@@ -410,8 +411,8 @@ unchanged.
   - a cast or compound literal to any other type name: a qualified typedef,
     a tag, a qualified or `restrict` pointer, or an array or function
     declarator. Their readers append rows that are not interned.
-  - `&` or a type name whose interned rows do not exist yet when the body is
-    typed;
+  - `&` or a type name whose interned rows do not exist yet when it is
+    queried ([Late rows](#late-rows));
   - a string literal. Its array row is not interned, because lowering gives
     each array row its own IR array type and `-g` describes every IR type.
     A query on one costs the machine little: the unity self-host makes about
@@ -459,6 +460,41 @@ unchanged.
   diagnostics and table sizes as they were. A `[index]` designator, and a
   probe range that starts at a `{` but runs on (`{ .a` before `.a.b`), still
   run the machine.
+
+### Late rows
+
+The eager pass types a body before any of its queries run, but most of the
+pointer and primitive rows its `&` and casts read are minted by those queries:
+the first `&a` of a body interns `int *`, and every later `&b` of an `int`
+could read it. Interning the declarations' rows earlier would reorder the `-g`
+type entries ([Interned rows](#interned-rows)), so the typer checks again at
+the query instead:
+- **Marks.** A node declined only because an interned row it reads did not
+  exist is marked `C_AST_TYPE_FLAG_LATE`: an `&` over an accepted operand, and
+  a cast or compound literal whose primitive row or a `*` level's row was
+  missing. Every typed node whose subtree holds a late node is marked
+  `C_AST_TYPE_FLAG_LATE_BELOW`. In postorder that holds when the newest late
+  node is inside the node's subtree, so the pass keeps one index for it.
+  Initializers read no interned row, so they are never marked.
+- **The re-check.** When a query's range maps to a marked node,
+  `c_ast_types_retype` re-types, in index order, the marked nodes of its
+  subtree with the same rules, before the answer is decided. The unmarked
+  nodes read no late row, so their eager results stand. A row that exists now
+  is the one the machine's run would find instead of appending it, so the
+  answer's run appends nothing, as for any accepted node. A row still missing
+  leaves the node declined.
+- **Marks stay.** A speculative rollback can take a late row back, so the
+  marks are never cleared: every query that reaches a marked node re-types it
+  against the live interning log.
+
+Nothing is interned earlier and nothing is appended, so the type tables, the
+diagnostics and the `-c` objects (`-g0` and `-g`) are those of the pilot
+without the re-check. `c_ast_test_types` asks every body case a second time
+over a body typed with the interning log hidden, as if no query had minted a
+row yet, and requires the same answer; the cases marked `late` must be
+answered by a re-check. The corpus gate counts late answers against a floor
+(`C_AST_CORPUS_TYPE_LATE_ANSWER_FLOOR`), and each is verified against the
+machine.
 
 ### Interned rows
 

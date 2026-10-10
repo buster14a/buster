@@ -18,7 +18,10 @@
 // machine run appends nothing. Stage 3 adds the shapes whose rows are interned:
 // `&`, and a cast or compound literal whose type name is a typedef name or a
 // run of primitive specifier words under plain `*`s, each accepted only once
-// every row it reads is interned. It declines every shape whose machine answer
+// every row it reads is interned. A row the body's own queries mint after the
+// eager pass is found at the query: the node is marked late
+// (C_AST_TYPE_FLAG_LATE) and re-typed when a query reaches it
+// (c_ast_types_retype). It declines every shape whose machine answer
 // appends a row: a qualified member or array element, a string literal, an
 // array operand that decays, a pointer conditional, a qualified operand losing
 // its qualifiers without a recorded unqualified row, and a cast or compound
@@ -74,6 +77,15 @@
 // by induction an accepted node's whole machine run appends nothing. It is
 // checked-safe when its operands are and its own checked-mode rule raises no
 // constraint.
+//
+// Late rows. A body's `&` and casts mostly read rows its own queries intern,
+// after the eager pass has run. A node declined only for a missing interned
+// row is marked C_AST_TYPE_FLAG_LATE, and every typed node above one
+// C_AST_TYPE_FLAG_LATE_BELOW. A query that maps to a marked node first
+// re-types the marked nodes of its subtree in index order with the same rules
+// (c_ast_types_retype): a row that exists now is the one the machine would
+// find instead of appending. The marks stay, because a rollback may take a
+// late row back.
 //
 // The query. c_parse_expression_type_query reads the per-body memo first and
 // asks this file only on a miss, before the literal fast path and the machine
@@ -179,7 +191,8 @@
 //   c_ast_types_interned, c_ast_types_type_name,  stage-3 rules over interned
 //   c_ast_types_cast,                             rows
 //   c_ast_types_compound_literal,
-//   c_ast_types_address
+//   c_ast_types_address, c_ast_types_mark_late
+//   c_ast_types_retype                           late rows, re-typed at a query
 //   c_ast_types_locate, c_ast_types_answer       query lookup and the decision
 //   c_ast_types_lookups_agree                    query-scope name checks
 //   c_ast_types_publish                          machine state after an answer
@@ -1271,7 +1284,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_primitive_word(u32 word)
 // frame, each followed by c_parse_pointer_chain; the typedef row is the
 // entity's own (c_parse_qualified_typedef_type with no qualifier), and the
 // primitive and pointer rows are interned (CTypeInterning in c_internal.h),
-// so the name is accepted only when each of them is already interned. Any
+// so the name is accepted only when each of them is already interned, and is
+// marked late when one is not. Any
 // other type name builds rows (a qualified typedef, a tag, an array or
 // function declarator, an attribute) and yields C_TYPE_ID_INVALID. The
 // typedef name is the binder's in a body; in an initializer it is the bound
@@ -1401,7 +1415,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_compound_literal(CAstTypeBody* body, CPrepr
 
 // `&operand`: the machine's ADDRESS_OF operation appends a pointer to the
 // operand's row, an interned row (CTypeInterning), so the node is accepted
-// only when that row already exists. With constraint checks the operand must
+// only when that row already exists; without it the node is marked late. With constraint checks the operand must
 // have a place's shape (c_parse_expression_place_shape over the same tokens);
 // no accepted operand carries the nonplace fact the machine also tests.
 BUSTER_GLOBAL_LOCAL void c_ast_types_address(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 relative)
