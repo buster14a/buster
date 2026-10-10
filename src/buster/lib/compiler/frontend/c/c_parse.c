@@ -3205,13 +3205,15 @@ BUSTER_GLOBAL_LOCAL CLayoutAlignmentFold c_parse_layout_alignment_fold_operand(C
 // query for that type's own requests: call nesting as deep as a chain of
 // `_Alignas(sizeof(struct S{n-1}))` records in the source (#3269).
 //
-// Only `+`, `*`, parentheses and integer literals may join the terms. Over
-// non-negative operands every subexpression the result does not multiply by
-// zero is at most the result, and one multiplied by zero is zero in every
-// type, so an answer below 2^31 is the value the typed rules give whatever
-// the operand types; the untyped evaluator's answer is used only then. Any
-// other shape, a larger answer, or an operand the fold cannot read is left
-// to the typed query.
+// Only `+`, `*`, parentheses and integer literals may join the terms. For
+// non-negative a and b, both a + b and a * b are at most max(a, 2) * max(b, 2),
+// so every subexpression is at most the product of max(operand, 2) over all
+// operands. When that bound is below 2^31 no intermediate value can overflow
+// `int`, wrap an unsigned type of 32 bits or more, or wrap the untyped
+// evaluator's 64-bit arithmetic. The evaluator's answer is then the value the
+// typed rules give, whatever the operand types and suffixes, and it is used
+// only in that case. Any other shape, a larger bound, or an operand the fold
+// cannot read goes to the typed query.
 BUSTER_GLOBAL_LOCAL CLayoutAlignmentFold c_parse_layout_alignment_fold(CParseLayoutContext* context, CParseLayoutAgenda* agenda, CAlignmentSpecifier specifier,
                                                                        u64* value_out, bool* provisional_out)
 {
@@ -3291,29 +3293,46 @@ BUSTER_GLOBAL_LOCAL CLayoutAlignmentFold c_parse_layout_alignment_fold(CParseLay
         CSpellingSpace space = c_space_local(arena, spelling_capacity);
         u32 token_count = 0;
         term_index = 0;
+        u64 const bound_limit = UINT64_C(1) << 31;
+        u64 bound = 1;
+        CPreprocessResult evaluation = {
+            .target = preprocess.target,
+            .dialect = preprocess.dialect,
+        };
         for (u32 index = start; index < end; index += 1)
         {
             CToken token = preprocess.tokens[index];
+            u64 operand = 1;
+            bool operand_read = true;
             if (token.kind == C_TOKEN_IDENTIFIER)
             {
-                tokens[token_count++] = c_space_token(&space, string_format(arena, S8("{u64}"), term_values[term_index]), C_TOKEN_PREPROCESSING_NUMBER,
-                                                      C_PUNCTUATOR_NONE);
+                operand = term_values[term_index];
+                tokens[token_count++] = c_space_token(&space, string_format(arena, S8("{u64}"), operand), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
                 term_index += 1;
                 index = c_parse_matching_delimiter(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             }
             else
             {
                 tokens[token_count++] = c_space_retoken(&space, preprocess.spelling_base, token);
+                // A literal's own value enters the bound; one the evaluator
+                // cannot read alone saturates it.
+                operand_read = token.kind != C_TOKEN_PREPROCESSING_NUMBER ||
+                               (c_integer_expression_evaluate(arena, space.base, tokens + token_count - 1, 1, 65536, &evaluation, &operand) &&
+                                !evaluation.diagnostic_count);
+                operand = token.kind == C_TOKEN_PREPROCESSING_NUMBER ? (operand < 2 ? 2 : operand) : 1;
             }
+            // Punctuators leave the bound as it is; every operand raises it
+            // by at least a factor of two.
+            operand = operand_read ? operand : bound_limit;
+            operand = token.kind == C_TOKEN_IDENTIFIER && operand < 2 ? 2 : operand;
+            bound = bound >= bound_limit || operand >= bound_limit ? bound_limit : bound * operand;
+            bound = bound > bound_limit ? bound_limit : bound;
         }
-        CPreprocessResult evaluation = {
-            .target = preprocess.target,
-            .dialect = preprocess.dialect,
-        };
         u64 value = 0;
-        bool evaluated = c_integer_expression_evaluate(arena, space.base, tokens, token_count, 65536, &evaluation, &value) && !evaluation.diagnostic_count;
+        bool evaluated = bound < bound_limit && c_integer_expression_evaluate(arena, space.base, tokens, token_count, 65536, &evaluation, &value) &&
+                         !evaluation.diagnostic_count;
         arena_set_position(arena, position);
-        fold = evaluated && value < (UINT64_C(1) << 31) ? C_LAYOUT_ALIGNMENT_FOLD_VALUE : C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED;
+        fold = evaluated && value < bound_limit ? C_LAYOUT_ALIGNMENT_FOLD_VALUE : C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED;
         *value_out = value;
         *provisional_out |= fold == C_LAYOUT_ALIGNMENT_FOLD_VALUE && provisional;
     }

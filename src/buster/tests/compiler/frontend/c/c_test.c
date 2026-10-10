@@ -950,6 +950,43 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignas_typed_query_chain(UnitTestArgu
     return result;
 }
 
+// The alignment fold answers only when no intermediate value can wrap. These
+// requests wrap an unsigned product, so they reach the typed query, which
+// keeps the C arithmetic: a wrapped product is zero. A request whose 32-bit
+// product does not wrap the final 64-bit sum stays oversized and is refused,
+// not folded to a small alignment (#3269).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignas_fold_typed_width(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 accepted[] = {
+        S8("struct W { _Alignas(sizeof(int) * 0 + 65536U * 65536U * 0 + 8) char c; };\n"
+           "_Static_assert(_Alignof(struct W) == 8, \"w\");\n"),
+        S8("struct X { _Alignas(sizeof(int) + 65536U * 65536U + 4) char c; };\n"
+           "_Static_assert(_Alignof(struct X) == 8, \"x\");\n"),
+        S8("struct Y { _Alignas(sizeof(int) * 2 + 4 * (1 + 1)) char c; };\n"
+           "_Static_assert(_Alignof(struct Y) == 16, \"y\");\n"),
+        S8("struct Q { _Alignas(sizeof(int) * 4294967296ULL * 4294967296ULL + 8) char c; };\n"
+           "_Static_assert(_Alignof(struct Q) == 8, \"q\");\n"),
+    };
+    String8 refused[] = {
+        S8("struct R { _Alignas(sizeof(int) * 0 + 65536U * 65536U + 18446744069414584328ULL) char c; };\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(accepted) + BUSTER_ARRAY_LENGTH(refused); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        bool accept = index < BUSTER_ARRAY_LENGTH(accepted);
+        String8 source = accept ? accepted[index] : refused[index - BUSTER_ARRAY_LENGTH(accepted)];
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("alignas-fold-typed-width.c"), target_native, &preprocess, &parse);
+        u64 diagnostics = preprocess.diagnostic_count + parse.diagnostic_count + lowered.diagnostic_count;
+        BUSTER_TEST_RAW(arguments, accept ? diagnostics == 0 && lowered.canonical_ir_certified : diagnostics != 0,
+                        lowered.diagnostic_count ? lowered.diagnostics[0].message : source);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // A 300-label switch whose labels are a permutation of 0..299, so no label is
 // adjacent to its neighbor in value. With `duplicate_position` below the label
 // count, that label repeats the value at position 40: the overlap is injected
@@ -59076,6 +59113,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_array_object_size_limits);
     C_TEST_FIXTURE(arguments, c_test_static_assert_object_size_scaling);
     C_TEST_FIXTURE(arguments, c_test_alignas_typed_query_chain);
+    C_TEST_FIXTURE(arguments, c_test_alignas_fold_typed_width);
     C_TEST_FIXTURE(arguments, c_test_declaration_constraints);
     C_TEST_FIXTURE(arguments, c_test_declaration_regressions);
     C_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
