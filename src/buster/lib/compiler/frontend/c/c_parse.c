@@ -29475,7 +29475,6 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_offsetof(CTypeParseMachine* ma
     CTypeId type = task->cast_type;
     u32 cursor = task->split;
     bool member = task->state == 8;
-    u64 maximum = ir_integer_mask((IrInteger){.low = UINT64_MAX}, target_data_layout(preprocess.target).pointer.bit_width).low;
     CTypeParseMachine* layout_machine = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE ? 0 : machine;
     if (member)
     {
@@ -29505,55 +29504,34 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_offsetof(CTypeParseMachine* ma
                       (result->types[type.value].kind == C_TYPE_STRUCT || result->types[type.value].kind == C_TYPE_UNION);
         cursor = comma + 1;
     }
-    else
+    COffsetofWalk walk = c_offsetof_walk_begin(preprocess.target, cursor, task->colon, value.integer, member, value.valid);
+    if (!member)
     {
+        // The scheduler left the cursor past this index's `]` and the type on
+        // its element.
         IrType scalar = c_parse_constant_scalar_type(result, preprocess.target, index.type);
-        IrInteger bits = ir_integer_mask((IrInteger){.low = index.integer, .high = index.integer_high}, scalar.bit_width);
         u64 size = 0;
         u32 alignment = 0;
+        bool resolved = walk.valid && c_parse_type_layout(layout_machine, arena, preprocess, result, type, &size, &alignment);
         value.faulted |= index.faulted;
-        value.valid = value.valid && index.valid && !index.faulted && !index.is_float &&
-                      (scalar.kind == IR_TYPE_INTEGER || scalar.kind == IR_TYPE_BOOLEAN) && scalar.bit_width &&
-                      scalar.bit_width <= 128 && !bits.high && !(scalar.is_signed && ir_integer_sign_bit(bits, scalar.bit_width)) &&
-                      c_parse_type_layout(layout_machine, arena, preprocess, result, type, &size, &alignment);
-        if (value.valid)
-        {
-            value.valid = !size || bits.low <= maximum / size;
-            if (value.valid)
-            {
-                u64 offset = bits.low * size;
-                value.valid = value.integer <= maximum - offset;
-                if (value.valid) value.integer += offset;
-            }
-        }
+        c_offsetof_walk_index(&walk, index.valid && !index.faulted && !index.is_float ? &scalar : 0,
+                              (IrInteger){.low = index.integer, .high = index.integer_high}, resolved, size, cursor - 1);
     }
-    while (value.valid && cursor < task->colon)
+    COffsetofStep step = c_offsetof_walk_next(&walk, preprocess.tokens);
+    while (step == C_OFFSETOF_STEP_MEMBER)
     {
-        CToken token = preprocess.tokens[cursor];
-        if (member)
-        {
-            u64 offset = 0;
-            value.valid = token.kind == C_TOKEN_IDENTIFIER &&
-                          c_parse_constant_member_offset(layout_machine, arena, preprocess, result, type, token.symbol,
-                                                         c_token_spelling(preprocess.spelling_base, token), &type, &offset) &&
-                          offset <= maximum && value.integer <= maximum - offset;
-            if (value.valid) value.integer += offset;
-            cursor += 1;
-            member = false;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-        {
-            break;
-        }
-        else
-        {
-            value.valid = c_token_is_punctuator(&token, C_PUNCTUATOR_DOT) && cursor + 1 < task->colon;
-            cursor += 1;
-            member = true;
-        }
+        CToken token = preprocess.tokens[walk.cursor];
+        u64 offset = 0;
+        bool found = c_parse_constant_member_offset(layout_machine, arena, preprocess, result, type, token.symbol,
+                                                    c_token_spelling(preprocess.spelling_base, token), &type, &offset);
+        c_offsetof_walk_member(&walk, found, offset);
+        step = c_offsetof_walk_next(&walk, preprocess.tokens);
     }
-    value.valid &= !member;
-    task->split = cursor;
+    // An INDEX step returns to the scheduler with the cursor on its `[`; the
+    // index is evaluated as a typed child and resumes in state 9.
+    value.valid = step == C_OFFSETOF_STEP_END || step == C_OFFSETOF_STEP_INDEX;
+    value.integer = walk.offset;
+    task->split = walk.cursor;
     task->cast_type = type;
     return value;
 }

@@ -1671,6 +1671,41 @@ struct CIrConstantValue
 };
 
 BUSTER_C_EXTERN bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment);
+
+// The one offsetof member-designator walk (#1570), shared by the parser's
+// constant evaluator (c_parse_constant_offsetof) and lowering
+// (c_ir_constant_offsetof_attempt). It owns the designator grammar
+// `member ( '[' index ']' | '.' member )*`, index admission (an integer or
+// boolean of at most 128 bits whose converted value is nonnegative) and the
+// target-size_t member and index arithmetic. Each caller resolves member
+// names and element sizes in its own type system (#1247), and finds the `]`
+// matching an INDEX step with its own delimiter table.
+typedef enum COffsetofStep
+{
+    C_OFFSETOF_STEP_INVALID,
+    C_OFFSETOF_STEP_MEMBER,
+    C_OFFSETOF_STEP_INDEX,
+    C_OFFSETOF_STEP_END,
+} COffsetofStep;
+
+typedef struct COffsetofWalk COffsetofWalk;
+struct COffsetofWalk
+{
+    u64 offset;
+    u64 maximum;
+    u32 cursor;
+    u32 end;
+    bool expect_member;
+    bool valid;
+    u8 reserved[2];
+};
+
+BUSTER_C_EXTERN COffsetofWalk c_offsetof_walk_begin(Target target, u32 cursor, u32 end, u64 offset, bool expect_member, bool valid);
+BUSTER_C_EXTERN COffsetofStep c_offsetof_walk_next(COffsetofWalk* walk, CToken const* tokens);
+BUSTER_C_EXTERN void c_offsetof_walk_member(COffsetofWalk* walk, bool found, u64 member_offset);
+BUSTER_C_EXTERN void c_offsetof_walk_index(COffsetofWalk* walk, IrType const* index_type, IrInteger index, bool element_resolved, u64 element_size,
+                                           u32 close);
+BUSTER_C_EXTERN void c_offsetof_walk_runtime_index(COffsetofWalk* walk, bool element_resolved, u32 close);
 BUSTER_C_EXTERN bool c_ir_constant_wide_float_cast(CIrConstantValue const* source, IrType* source_type,
                                                      IrType const* target, CIrConstantValue* result);
 BUSTER_C_EXTERN bool c_ir_constant_wide_float_to_integer(CIrConstantValue const* source, IrType const* source_type,

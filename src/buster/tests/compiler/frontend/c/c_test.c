@@ -57726,6 +57726,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_indices(UnitTestArgumen
     return result;
 }
 
+// The shared COffsetofWalk refuses every row in all four contexts: index
+// admission, target-size_t arithmetic, designator grammar and bit-fields.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_refusals(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -57750,6 +57752,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_refusals(UnitTestArgume
         {S8("struct B { int value; };"), S8("value."), false},
         {S8("struct B { struct { int value; } named; };"), S8("named value"), false},
         {S8("struct B { struct { int value; } named; };"), S8("named..value"), false},
+        {S8("struct B { int lead; int values[2]; };"), S8("values[0]lead"), false},
+        {S8("struct B { int lead; int values[2]; };"), S8("values[0]."), false},
+        {S8("struct B { int value; };"), S8("value[0]"), false},
+        {S8("struct B { int values[2]; };"), S8("values[0][0]"), false},
+        {S8("struct B { int lead; int bits : 3; };"), S8("bits"), false},
+        {S8("struct B { int lead; struct { int bits : 3; }; };"), S8("bits"), false},
     };
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
     {
