@@ -3778,6 +3778,15 @@ BUSTER_GLOBAL_LOCAL CAstSplitCase const c_ast_split_cases[] = {
     {S8_INITIALIZER("int cy = (constexpr int){3}, cz; constexpr int cw = 2;"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_NONE, 0},
     {S8_INITIALIZER("int x = 0x;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DIAGNOSTIC},
     {S8_INITIALIZER("long long long y;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DIAGNOSTIC},
+    // The probe skips a specifier run spelled like one that already
+    // validated clean, so a repeated run must not hide a later invalid one,
+    // whether keyed or too long to key.
+    {S8_INITIALIZER("long long a; long long b; long long long c;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DIAGNOSTIC},
+    {S8_INITIALIZER("unsigned int a; unsigned int b; unsigned unsigned c;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DIAGNOSTIC},
+    {S8_INITIALIZER("static const volatile unsigned long long int a; static const volatile long long long int b;"), C_PREPROCESS_DIALECT_GNU17,
+     C_PARSER_TREE_FALLBACK_DIAGNOSTIC},
+    {S8_INITIALIZER("int a; int b; static const int c; static const int d; struct S { int x; } s; struct S t;"), C_PREPROCESS_DIALECT_GNU17,
+     C_PARSER_TREE_FALLBACK_NONE, 0},
     {S8_INITIALIZER("_Alignas(8) int a;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_SPECIFIERS},
     {S8_INITIALIZER("__typeof__(1) t;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_SPECIFIERS},
     {S8_INITIALIZER("enum E : int { A };"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_SPECIFIERS},

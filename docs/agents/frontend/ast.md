@@ -481,7 +481,11 @@ two cases:
    validators over every token: integer spelling, type-specifier runs and the
    missing return operand. It reads the shape sidecar in 64-token windows. The
    walker validates a subset of those tokens, so a clean probe means a clean
-   walk.
+   walk. An identifier lane is classified as a type word or `return` from its
+   interned id, with one bound compare and one `word_bits` read. A specifier
+   run of at most four interned type words, with no tag keyword, is checked
+   only of the run's own tokens, so its verdict depends on its ids alone. A
+   run spelled like one that already validated clean is skipped.
 2. **The walker would read a shape differently from the grammar, or no rule
    here states what it reads.** `CParserTreeFallback` names each case:
    - `specifiers`: a parenthesized specifier (`typeof`, `_Atomic(T)`,

@@ -28494,6 +28494,64 @@ BUSTER_C_INTERNAL bool c_parser_tree_return_operand(CPreprocessResult const* pre
     return missing;
 }
 
+// The probe's memo of specifier runs that validated clean, keyed by the run's
+// interned ids, 16 bits each. A run of at most C_PARSER_TREE_PROBE_RUN_WORDS
+// interned type words with no tag keyword holds only identifiers, so every
+// read c_parser_validate_type_specifiers makes of it stays inside the run:
+// the tag rules need a tag keyword, and c_ir_primitive_type_kind's skips are
+// bounded by the run's end and need punctuators to match. Its verdict is
+// therefore a function of the ids alone, and a run spelled like a clean one
+// is clean. Any other run, or a full table, is validated as before.
+#define C_PARSER_TREE_PROBE_RUN_WORDS 4u
+#define C_PARSER_TREE_PROBE_RUN_SLOTS 256u
+#define C_PARSER_TREE_PROBE_RUN_PROBES 8u
+
+// The key of the specifier run starting at the interned type word `index`,
+// with its end, or 0 when the run cannot be keyed: it is too long, holds a
+// tag keyword, or ends at an uninterned identifier, which only the spelling
+// predicates can classify.
+BUSTER_C_INTERNAL u64 c_parser_tree_probe_run_key(CPreprocessResult const* preprocess, u16 type_mask, u32 index, u32* run_end)
+{
+    CToken const* tokens = preprocess->tokens;
+    u16 const* word_bits = preprocess->symbols->word_bits;
+    u32 predefined_limit = preprocess->symbols->predefined_limit;
+    u32 token_count = (u32)preprocess->token_count;
+    u64 key = 0;
+    u32 end = index;
+    bool keyed = predefined_limit <= UINT16_MAX;
+    bool open = keyed;
+    while (open && end < token_count)
+    {
+        CToken token = tokens[end];
+        bool identifier = token.kind == C_TOKEN_IDENTIFIER;
+        keyed = keyed && (!identifier || token.symbol != 0);
+        open = keyed && identifier && token.symbol <= predefined_limit && (word_bits[token.symbol] & type_mask) != 0;
+        if (open)
+        {
+            keyed = end - index < C_PARSER_TREE_PROBE_RUN_WORDS && !(token.symbol < 64 && ((C_PARSE_AGGREGATE_KEYWORDS >> token.symbol) & 1));
+            key = (key << 16) | token.symbol;
+            end += 1;
+            open = keyed;
+        }
+    }
+    *run_end = end;
+    return keyed ? key : 0;
+}
+
+// The slot holding `key`, else the empty slot it would take, else
+// C_PARSER_TREE_PROBE_RUN_SLOTS when its probe sequence is full.
+BUSTER_C_INTERNAL u32 c_parser_tree_probe_run_slot(u64 const* runs, u64 key)
+{
+    u32 slot = C_PARSER_TREE_PROBE_RUN_SLOTS;
+    u32 home = (u32)((key * UINT64_C(0x9E3779B97F4A7C15)) >> 56);
+    for (u32 step = 0; step < C_PARSER_TREE_PROBE_RUN_PROBES && slot == C_PARSER_TREE_PROBE_RUN_SLOTS; step += 1)
+    {
+        u32 candidate = (home + step) % C_PARSER_TREE_PROBE_RUN_SLOTS;
+        slot = runs[candidate] == key || runs[candidate] == 0 ? candidate : slot;
+    }
+    return slot;
+}
+
 // Would c_parse_ast_run report anything for this stream? Its own validators
 // run here, into a one-row result, over a superset of the tokens it
 // validates: it steps over declaration decorations outside bodies, and checks
@@ -28511,7 +28569,9 @@ BUSTER_C_INTERNAL bool c_parser_tree_return_operand(CPreprocessResult const* pre
 // id above predefined_limit is neither, on one compare, and one inside it
 // reads the word_bits row under the dialect's mask, hoisted out of the loop.
 // Only an uninterned token, or a stream without a symbol table, asks the two
-// predicates, so the candidates are the same tokens either way.
+// predicates, so the candidates are the same tokens either way. A specifier
+// run spelled like one that already validated clean is skipped (see
+// C_PARSER_TREE_PROBE_RUN_WORDS).
 BUSTER_C_INTERNAL bool c_parser_tree_probe(Arena* arena, CPreprocessResult const* preprocess, CNumberFacts const* facts)
 {
     CParserResult probe = {.number_facts = facts, .diagnostic_capacity = 1};
@@ -28532,6 +28592,7 @@ BUSTER_C_INTERNAL bool c_parser_tree_probe(Arena* arena, CPreprocessResult const
     u32 token_count = (u32)preprocess->token_count;
     u32 validated_end = 0;
     bool missing = false;
+    u64 runs[C_PARSER_TREE_PROBE_RUN_SLOTS] = {0};
     Simd512 number_shape = simd512_splat((u8)C_TOKEN_PREPROCESSING_NUMBER);
     Simd512 identifier_shape = simd512_splat((u8)C_TOKEN_IDENTIFIER);
     for (u32 base = 0; base < token_count; base += 64)
@@ -28573,7 +28634,21 @@ BUSTER_C_INTERNAL bool c_parser_tree_probe(Arena* arena, CPreprocessResult const
             }
             if (type_word && index >= validated_end)
             {
-                c_parser_validate_type_specifiers(arena, &probe, preprocess, index, &validated_end);
+                u32 run_end = index;
+                u64 key = symbol && word_bits ? c_parser_tree_probe_run_key(preprocess, type_mask, index, &run_end) : 0;
+                u32 slot = key ? c_parser_tree_probe_run_slot(runs, key) : C_PARSER_TREE_PROBE_RUN_SLOTS;
+                if (slot < C_PARSER_TREE_PROBE_RUN_SLOTS && runs[slot] == key)
+                {
+                    validated_end = run_end;
+                }
+                else
+                {
+                    c_parser_validate_type_specifiers(arena, &probe, preprocess, index, &validated_end);
+                    if (slot < C_PARSER_TREE_PROBE_RUN_SLOTS && probe.diagnostic_count == 0)
+                    {
+                        runs[slot] = key;
+                    }
+                }
             }
             if (is_return)
             {
