@@ -350,11 +350,20 @@ fixture as well as compiling both architectures.
   parameter home, so the home is written only if the join later evicts or
   carries the value. A lone general assignment publishes directly (copy,
   reload or rematerialization) without the edge-copy temporary tile. An edge
-  with several general assignments still stages its sources through the tile
-  for parallel-copy semantics, except a source with a rematerialization recipe
-  (constant or frame address): it reads no register, so it skips the capture
-  and rematerializes straight into its destination after the other sources
-  are staged (`MACHINE_FAST_EDGE_SOURCE_RECREATED`). Switch
+  with several assignments, all general, publishes them as a register
+  parallel move (`machine_fast_publish_edge_parallel`): a home parameter
+  stores straight from its source register, register targets copy in
+  dependency order, and memory or recreatable sources load last. One free
+  register (`machine_fast_free_edge_register`: not a source, target, carried
+  value, pinned register or unsaved callee-saved register; the first slot
+  scratch is preferred) stages memory sources bound for homes and saves one
+  value to break each copy cycle. An edge with a vector or mask assignment,
+  or with no free register, still stages its resident sources through the
+  tile. Either way a source with a rematerialization recipe (constant or
+  frame address) reads no register and rematerializes straight into its
+  destination (`MACHINE_FAST_EDGE_SOURCE_RECREATED`). On unity `ide.c` the
+  parallel move removed about 46 k stack-referencing instructions and 2% of
+  `.text` under FAST and QUALITY. Switch
   and cold edges, vector/mask parameters and the slot-zero scratch keep the
   memory form. Except at a loop header, the same contract also carries each live, escaping,
   immutable, non-pinned general value the designated predecessor holds dirty,
