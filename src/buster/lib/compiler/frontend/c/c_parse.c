@@ -1197,19 +1197,19 @@ BUSTER_C_SHARED void c_parse_diagnostic(CParseResult* result, CSourceLocation lo
 }
 
 // The per-body validation scratch guard (#1256). Per-body validation sizes
-// its arrays by the body's tokens, operands, labels, cases and scopes, so a
-// large enough body cannot fit the thread's scratch arena. Each such
-// allocation goes through c_parse_body_scratch_allocate, which checks the
-// request against the body's limit in O(1) before bumping: overflow-checked
-// size, alignment padding and the arena's reserved end. A miss marks the body
-// exhausted instead of aborting in arena_allocate_bytes; the families skip
-// their work, and the caller reports the function once and continues with the
-// next body. The limit keeps C_PARSE_BODY_SCRATCH_HEADROOM of the arena free
-// for the allocations the guard does not route: fixed-size records, the
-// enum-mode alignment-specifier evaluation, the initializer slot tables, and
-// the leaf and member typing reached through generic arena parameters. The
-// headroom is a margin for those, not a proven bound on them.
-#define C_PARSE_BODY_SCRATCH_HEADROOM BUSTER_MB(16)
+// its arrays by the body's tokens, operands, labels, cases and scopes, and the
+// constant, layout and typing queries it makes size theirs by the expression
+// or the type table, so a large enough body cannot fit the thread's scratch
+// arena. While the guard is open, every allocation from the guarded arena goes
+// through c_parse_body_scratch_allocate or is checked first by
+// c_parse_body_scratch_fits: an O(1) test of the overflow-checked size and
+// alignment padding against the body's limit. A miss marks the body exhausted
+// instead of aborting in arena_allocate_bytes; the families skip their work,
+// and the caller reports the function once and continues with the next body.
+// No allocation reaches the guarded arena unchecked while the guard is open
+// (docs/agents/frontend/semantic-validation.md lists the routed families and
+// how the enumeration was made), so the limit is the arena's whole reservation
+// and no headroom is kept back.
 typedef struct CParseBodyScratchGuard CParseBodyScratchGuard;
 struct CParseBodyScratchGuard
 {
@@ -1255,38 +1255,65 @@ BUSTER_GLOBAL_LOCAL void c_parse_body_scratch_test_record(u64 element_size, u64 
 }
 #endif
 
+BUSTER_C_SHARED bool c_parse_body_scratch_guarded(Arena const* arena)
+{
+    return arena && arena == c_parse_body_scratch_guard.arena;
+}
+
+BUSTER_C_SHARED Arena* c_parse_body_scratch_arena(void)
+{
+    return c_parse_body_scratch_guard.arena;
+}
+
+// The guard's check for `count` elements of `element_size` bytes at the
+// guarded arena's position. The first miss marks the body exhausted; once it
+// is, every later request of the body is refused without another check.
+BUSTER_C_INTERNAL bool c_parse_body_scratch_check(Arena* arena, u64 element_size, u64 count, u64 alignment)
+{
+    CParseBodyScratchGuard* guard = &c_parse_body_scratch_guard;
+    bool fits = false;
+    if (!guard->exhausted)
+    {
+        u64 aligned = 0;
+        fits = element_size && count <= ARENA_MAX_RESERVATION / element_size && arena_align_position_checked(arena, arena->position, alignment, &aligned) &&
+               aligned <= guard->limit && element_size * count <= guard->limit - aligned;
+        guard->exhausted = !fits;
+#if BUSTER_INCLUDE_TESTS
+        c_parse_body_scratch_test_record(element_size, count, fits ? aligned + element_size * count - c_parse_body_scratch_test_base : UINT64_MAX);
+#endif
+    }
+    return fits;
+}
+
 BUSTER_C_SHARED void* c_parse_body_scratch_allocate(Arena* arena, u64 element_size, u64 count, u64 alignment)
 {
     void* pointer = 0;
-    CParseBodyScratchGuard* guard = &c_parse_body_scratch_guard;
-    if (arena != guard->arena)
+    if (!c_parse_body_scratch_guarded(arena))
     {
         pointer = arena_allocate_bytes(arena, arena_array_size(element_size, count), alignment);
     }
-    else if (!guard->exhausted)
+    else if (c_parse_body_scratch_check(arena, element_size, count, alignment))
     {
-        u64 aligned = 0;
-        bool fits = count <= ARENA_MAX_RESERVATION / element_size && arena_align_position_checked(arena, arena->position, alignment, &aligned) &&
-                    aligned <= guard->limit && element_size * count <= guard->limit - aligned;
-        if (fits)
-        {
-            pointer = arena_allocate_bytes(arena, element_size * count, alignment);
-        }
-        else
-        {
-            guard->exhausted = true;
-        }
-#if BUSTER_INCLUDE_TESTS
-        c_parse_body_scratch_test_record(element_size, count, fits ? arena->position - c_parse_body_scratch_test_base : UINT64_MAX);
-#endif
+        pointer = arena_allocate_bytes(arena, element_size * count, alignment);
     }
     return pointer;
+}
+
+BUSTER_C_SHARED bool c_parse_body_scratch_fits(Arena* arena, u64 size, u64 alignment)
+{
+    bool fits = !c_parse_body_scratch_guarded(arena) || c_parse_body_scratch_check(arena, 1, size, alignment);
+    return fits;
+}
+
+BUSTER_C_SHARED void c_parse_body_scratch_refuse(void)
+{
+    c_parse_body_scratch_guard.exhausted |= c_parse_body_scratch_guard.arena != 0;
 }
 
 // Opens the guard for one body on `arena`, measured from its current position.
 BUSTER_C_INTERNAL void c_parse_body_scratch_guard_begin(Arena* arena)
 {
-    u64 limit = arena->reserved_size > C_PARSE_BODY_SCRATCH_HEADROOM ? arena->reserved_size - C_PARSE_BODY_SCRATCH_HEADROOM : 0;
+    u64 limit = arena->reserved_size;
 #if BUSTER_INCLUDE_TESTS
     if (c_parse_body_scratch_test_limit && c_parse_body_scratch_test_limit < limit - BUSTER_MIN(limit, arena->position))
     {
@@ -3499,21 +3526,39 @@ struct CLayoutCastClosure
     u64 sign;
 };
 
+// The decimal spelling of `value` as one preprocessing-number token in
+// `space`. The digits are formed on the stack, so rewriting a constant into an
+// evaluation buffer allocates nothing beyond the space the caller sized.
+#define C_PARSE_U64_DECIMAL_DIGITS 20
+BUSTER_C_INTERNAL CToken c_parse_space_decimal(CSpellingSpace* space, u64 value)
+{
+    char8 digits[C_PARSE_U64_DECIMAL_DIGITS];
+    u32 start = C_PARSE_U64_DECIMAL_DIGITS;
+    u64 remaining = value;
+    do
+    {
+        digits[--start] = (char8)('0' + remaining % 10);
+        remaining /= 10;
+    } while (remaining);
+    return c_space_token(space, (String8){.pointer = digits + start, .length = C_PARSE_U64_DECIMAL_DIGITS - start}, C_TOKEN_PREPROCESSING_NUMBER,
+                         C_PUNCTUATOR_NONE);
+}
+
 // Appends `) & mask)`, then `^ sign) - sign)` for a signed type, which closes
 // the `((` or `((((` the cast opened before its operand.
-BUSTER_GLOBAL_LOCAL void c_parse_layout_cast_close_emit(Arena* arena, CSpellingSpace* space, CToken* tokens, u32* count, CLayoutCastClosure closure)
+BUSTER_GLOBAL_LOCAL void c_parse_layout_cast_close_emit(CSpellingSpace* space, CToken* tokens, u32* count, CLayoutCastClosure closure)
 {
     tokens[(*count)++] = c_space_token(space, S8(")"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_RIGHT_PARENTHESIS);
     tokens[(*count)++] = c_space_token(space, S8("&"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_AMPERSAND);
-    tokens[(*count)++] = c_space_token(space, string_format(arena, S8("{u64}"), closure.mask), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+    tokens[(*count)++] = c_parse_space_decimal(space, closure.mask);
     tokens[(*count)++] = c_space_token(space, S8(")"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_RIGHT_PARENTHESIS);
     if (closure.sign)
     {
         tokens[(*count)++] = c_space_token(space, S8("^"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_CARET);
-        tokens[(*count)++] = c_space_token(space, string_format(arena, S8("{u64}"), closure.sign), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+        tokens[(*count)++] = c_parse_space_decimal(space, closure.sign);
         tokens[(*count)++] = c_space_token(space, S8(")"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_RIGHT_PARENTHESIS);
         tokens[(*count)++] = c_space_token(space, S8("-"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_MINUS);
-        tokens[(*count)++] = c_space_token(space, string_format(arena, S8("{u64}"), closure.sign), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+        tokens[(*count)++] = c_parse_space_decimal(space, closure.sign);
         tokens[(*count)++] = c_space_token(space, S8(")"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_RIGHT_PARENTHESIS);
     }
 }
@@ -3714,17 +3759,25 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 }
                 // Each cast adds at most four opening and ten closing tokens to
                 // the three it replaces, and a negative constant two for one.
-                CToken* bound_tokens = arena_allocate(arena, CToken, bound.token_count * (parenthesis_count ? 6 : 2) + 1);
-                CLayoutCastClosure* cast_closures = parenthesis_count ? arena_allocate(arena, CLayoutCastClosure, parenthesis_count) : 0;
+                // Guarded while a function body is validated (#1256): a miss
+                // leaves the array unresolved, and the body reports its
+                // exhaustion.
+                CToken* bound_tokens = C_PARSE_BODY_SCRATCH_ARRAY(arena, CToken, (u64)bound.token_count * (parenthesis_count ? 6 : 2) + 1);
+                CLayoutCastClosure* cast_closures = parenthesis_count ? C_PARSE_BODY_SCRATCH_ARRAY(arena, CLayoutCastClosure, parenthesis_count) : 0;
                 u32 cast_closure_count = 0;
                 u32 bound_token_count = 0;
-                CSpellingSpace bound_space = c_space_local(arena, bound_spelling_capacity);
+                CSpellingSpace bound_space = bound_tokens && (cast_closures || !parenthesis_count) ? c_space_local(arena, bound_spelling_capacity)
+                                                                                                    : (CSpellingSpace){0};
+                if (!bound_space.base)
+                {
+                    continue;
+                }
                 for (u32 bound_index = 0; bound_index < bound.token_count; bound_index += 1)
                 {
                     while (cast_closure_count && cast_closures[cast_closure_count - 1].end <= bound.token_start + bound_index)
                     {
                         cast_closure_count -= 1;
-                        c_parse_layout_cast_close_emit(arena, &bound_space, bound_tokens, &bound_token_count, cast_closures[cast_closure_count]);
+                        c_parse_layout_cast_close_emit(&bound_space, bound_tokens, &bound_token_count, cast_closures[cast_closure_count]);
                     }
                     CToken token = preprocess.tokens[bound.token_start + bound_index];
                     bool bound_word_is_alignof = token.kind == C_TOKEN_IDENTIFIER && c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token));
@@ -3946,9 +3999,8 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                             unresolved_identifier = true;
                             break;
                         }
-                        bound_tokens[bound_token_count++] = c_space_token(
-                            &bound_space, string_format(arena, S8("{u64}"), bound_word_is_alignof ? operand_alignment : operand_size),
-                            C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+                        bound_tokens[bound_token_count++] =
+                            c_parse_space_decimal(&bound_space, bound_word_is_alignof ? operand_alignment : operand_size);
                         bound_index += close - (bound.token_start + bound_index) - !parenthesized;
                         continue;
                     }
@@ -4056,8 +4108,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                             bound_not_monotone = true;
                             bound_tokens[bound_token_count++] = c_space_token(&bound_space, S8("-"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_MINUS);
                         }
-                        bound_tokens[bound_token_count++] = c_space_token(&bound_space, string_format(arena, S8("{u64}"), constant_value),
-                                                                          C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+                        bound_tokens[bound_token_count++] = c_parse_space_decimal(&bound_space, constant_value);
                         continue;
                     }
                     if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
@@ -4081,7 +4132,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 while (cast_closure_count)
                 {
                     cast_closure_count -= 1;
-                    c_parse_layout_cast_close_emit(arena, &bound_space, bound_tokens, &bound_token_count, cast_closures[cast_closure_count]);
+                    c_parse_layout_cast_close_emit(&bound_space, bound_tokens, &bound_token_count, cast_closures[cast_closure_count]);
                 }
                 CPreprocessResult evaluation = {
                     .target = preprocess.target,
@@ -4288,7 +4339,7 @@ requested_resolved:
 // from the committed rows when there is a cache and by the seed rule
 // otherwise, attempts in pending order until the requested type resolves or
 // a pass resolves nothing, and then the commit.
-BUSTER_C_INTERNAL bool c_parse_type_layout_passes(CParseLayoutContext* context, CTypeLayoutCache* cache, u64* size_out, u32* alignment_out)
+BUSTER_C_INTERNAL bool c_parse_type_layout_passes_run(CParseLayoutContext* context, CTypeLayoutCache* cache, u64* size_out, u32* alignment_out)
 {
     CTypeParseMachine* machine = context->machine;
     Arena* arena = context->arena;
@@ -4440,6 +4491,24 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_passes(CParseLayoutContext* context, 
         *alignment_out = alignments[requested.value];
     }
     return answered;
+}
+
+// The bytes c_parse_type_layout_passes_run carves from the query arena
+// beyond its arrays: one alignment pad before each of its five tables.
+#define C_PARSE_LAYOUT_PASSES_PADDING (5 * sizeof(u64))
+
+// The ordered passes. In a function body's guarded scratch arena (#1256) the
+// pending list and the four per-type tables are checked against the body's
+// limit before any is carved: the pending list holds at most the cache's live
+// list plus every type the seeding adds and the offset replay, or the whole
+// table without a cache. A refusal leaves the type unanswered, and the body
+// reports its exhaustion.
+BUSTER_C_INTERNAL bool c_parse_type_layout_passes(CParseLayoutContext* context, CTypeLayoutCache* cache, u64* size_out, u32* alignment_out)
+{
+    u64 type_count = context->result->type_count;
+    u64 pending_bound = cache ? (u64)cache->pending_count + (type_count - BUSTER_MIN((u64)cache->pending_seeded, type_count)) + 2 : type_count + 1;
+    u64 bytes = pending_bound * sizeof(u32) + (type_count + 1) * (sizeof(u64) + sizeof(u32) + 2 * sizeof(bool)) + C_PARSE_LAYOUT_PASSES_PADDING;
+    return c_parse_body_scratch_fits(context->arena, bytes, 1) && c_parse_type_layout_passes_run(context, cache, size_out, alignment_out);
 }
 
 // The demand-driven solve (see CParseLayoutAgenda). Its state lives in
@@ -4596,7 +4665,11 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
     // the requested type's closure instead of the whole table's.
     bool settled = false;
     bool answered = false;
-    if (agenda_allowed && (layout_context.cache || (!cache && !machine && layout_context.type_count <= C_PARSE_LAYOUT_AGENDA_TYPE_LIMIT)))
+    // The agenda grows its tables as the closure is discovered, so it never
+    // runs in a function body's guarded scratch arena (#1256); the ordered
+    // passes answer the same query there with checked tables.
+    if (agenda_allowed && !c_parse_body_scratch_guarded(query_arena) &&
+        (layout_context.cache || (!cache && !machine && layout_context.type_count <= C_PARSE_LAYOUT_AGENDA_TYPE_LIMIT)))
     {
         answered = c_parse_type_layout_agenda(&layout_context, size_out, alignment_out, &settled);
     }
@@ -4952,8 +5025,10 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
         bool is_unprototyped = type->is_unprototyped && !c_preprocess_dialect_is_c23(preprocess.dialect);
         if (complete && !c_semantic_call_accepts_arity(type->parameter_count, type->is_variadic, is_unprototyped, argument_count))
         {
-            result.message = c_semantic_call_arity_message(arena, indirect ? (String8){0} : c_token_spelling(preprocess.spelling_base, token),
-                                                          type->parameter_count, type->is_variadic, argument_count);
+            // A caller without an arena asks only whether a call is refused.
+            result.message = arena ? c_semantic_call_arity_message(arena, indirect ? (String8){0} : c_token_spelling(preprocess.spelling_base, token),
+                                                                  type->parameter_count, type->is_variadic, argument_count)
+                                   : S8("call arity mismatch");
             result.token_index = index;
         }
     }
@@ -5403,15 +5478,21 @@ BUSTER_C_SHARED CTypeId c_parse_member_type(Arena* arena, CParseResult* result, 
         // call on the self-compile; only a search that outgrows the bound
         // switches to that table, seeded from the queue.
         TemporalArena field_search = arena_begin_temporal(arena);
-        CTypeId* work = arena_allocate(field_search.arena, CTypeId, result->type_count + 1);
+        // Both tables are guarded while a function body is validated
+        // (#1256): a miss ends the search unanswered, and the body reports
+        // its exhaustion.
+        CTypeId* work = C_PARSE_BODY_SCRATCH_ARRAY(field_search.arena, CTypeId, (u64)result->type_count + 1);
         bool* visited = 0;
         WORK_LEDGER_RECORD(POPULATION_MEMBER_PROMOTED_SEARCHES, 1);
 #if BUSTER_INCLUDE_TESTS
         c_parse_member_search_counts[0] += 1;
 #endif
         u32 work_index = 0;
-        u32 work_count = 1;
-        work[0] = type;
+        u32 work_count = work != 0;
+        if (work)
+        {
+            work[0] = type;
+        }
         while (work_index < work_count && field_type.value == C_ID_UNDERLYING_INVALID)
         {
             CTypeId candidate_id = work[work_index++];
@@ -5455,7 +5536,12 @@ BUSTER_C_SHARED CTypeId c_parse_member_type(Arena* arena, CParseResult* result, 
                 }
                 if (!visited && work_count == C_PARSE_MEMBER_SEARCH_QUEUE_SCAN_LIMIT)
                 {
-                    visited = arena_allocate(field_search.arena, bool, result->type_count + 1);
+                    visited = C_PARSE_BODY_SCRATCH_ARRAY(field_search.arena, bool, (u64)result->type_count + 1);
+                    if (!visited)
+                    {
+                        work_index = work_count;
+                        break;
+                    }
                     WORK_LEDGER_RECORD(POPULATION_MEMBER_VISITED_BYTES_CLEARED, sizeof(*visited) * (result->type_count + 1));
                     memset(visited, 0, sizeof(*visited) * (result->type_count + 1));
 #if BUSTER_INCLUDE_TESTS
@@ -8661,14 +8747,18 @@ BUSTER_C_INTERNAL bool c_parse_constant_expression_evaluate(CTypeParseMachine* m
     }
     bool valid = expression_start < expression_end && expression_end <= preprocess.token_count;
     u32 expression_count = valid ? expression_end - expression_start : 0;
-    CToken* tokens = arena_allocate(arena, CToken, expression_count * 2 + 1);
+    // Guarded while a function body is validated (#1256): a miss leaves the
+    // expression unevaluated, and the body reports its exhaustion.
+    CToken* tokens = C_PARSE_BODY_SCRATCH_ARRAY(arena, CToken, (u64)expression_count * 2 + 1);
     u32 token_count = 0;
     u64 evaluation_spelling_capacity = 0;
-    for (u32 expression_index = 0; expression_index < expression_count; expression_index += 1)
+    for (u32 expression_index = 0; tokens && expression_index < expression_count; expression_index += 1)
     {
         evaluation_spelling_capacity += c_token_length(preprocess.spelling_base, preprocess.tokens[expression_start + expression_index]) + 21;
     }
-    CSpellingSpace evaluation_space = c_space_local(arena, evaluation_spelling_capacity);
+    CSpellingSpace evaluation_space = tokens ? c_space_local(arena, evaluation_spelling_capacity) : (CSpellingSpace){0};
+    valid = valid && tokens && evaluation_space.base;
+    expression_count = valid ? expression_count : 0;
     for (u32 expression_index = 0; expression_index < expression_count; expression_index += 1)
     {
         CToken token = preprocess.tokens[expression_start + expression_index];
@@ -8847,8 +8937,7 @@ BUSTER_C_INTERNAL bool c_parse_constant_expression_evaluate(CTypeParseMachine* m
                 break;
             }
             bool evaluation_word_is_alignof = c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token));
-            token = c_space_token(&evaluation_space, string_format(arena, S8("{u64}"), evaluation_word_is_alignof ? alignment : size),
-                                  C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+            token = c_parse_space_decimal(&evaluation_space, evaluation_word_is_alignof ? alignment : size);
             expression_index = (literal_close != UINT32_MAX ? literal_close : type_end) - expression_start;
             tokens[token_count++] = token;
             continue;
@@ -8870,8 +8959,7 @@ BUSTER_C_INTERNAL bool c_parse_constant_expression_evaluate(CTypeParseMachine* m
             {
                 tokens[token_count++] = c_space_token(&evaluation_space, S8("-"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_MINUS);
             }
-            tokens[token_count++] = c_space_token(&evaluation_space, string_format(arena, S8("{u64}"), constant->constant_value),
-                                                  C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+            tokens[token_count++] = c_parse_space_decimal(&evaluation_space, constant->constant_value);
             continue;
         }
         tokens[token_count++] = c_space_retoken(&evaluation_space, preprocess.spelling_base, token);
@@ -9509,7 +9597,12 @@ BUSTER_C_SHARED bool c_ir_count_string_literal_range_for_target(Arena* arena, CP
 
 BUSTER_C_INTERNAL bool c_parse_arena_can_allocate(Arena* arena, u64 size, u64 alignment)
 {
-    if (!arena || !alignment || !arena->granularity || alignment - 1 > UINT64_MAX - arena->position)
+    // A result whose rows live in the guarded scratch arena (#1256) grows
+    // within the open body's limit. The guard is asked first, so a request
+    // past that limit marks the body exhausted rather than failing as a
+    // reservation of the result.
+    bool guard_fits = arena && alignment && c_parse_body_scratch_fits(arena, size, alignment);
+    if (!guard_fits || !arena->granularity || alignment - 1 > UINT64_MAX - arena->position)
     {
         return false;
     }
@@ -9989,28 +10082,36 @@ BUSTER_C_INTERNAL u32 c_parse_initializer_slot_cache_find(CParseInitializerSlotC
     return index;
 }
 
-BUSTER_C_INTERNAL void c_parse_initializer_slot_cache_grow(CParseInitializerSlotCache* cache)
+// The cache and its tables are guarded while a function body is validated
+// (#1256): a refused table leaves the question to the member walks, which
+// answer it without a table, and the body reports its exhaustion.
+BUSTER_C_INTERNAL bool c_parse_initializer_slot_cache_grow(CParseInitializerSlotCache* cache)
 {
     CParseInitializerSlotTable* old_tables = cache->tables;
     u32 old_capacity = cache->capacity;
-    cache->capacity = old_capacity ? old_capacity * 2 : C_PARSE_INITIALIZER_SLOT_CACHE_INITIAL_CAPACITY;
-    cache->tables = arena_allocate(cache->arena, CParseInitializerSlotTable, cache->capacity);
-    memset(cache->tables, 0, sizeof(*cache->tables) * cache->capacity);
-    for (u32 index = 0; index < old_capacity; index += 1)
+    u32 capacity = old_capacity ? old_capacity * 2 : C_PARSE_INITIALIZER_SLOT_CACHE_INITIAL_CAPACITY;
+    CParseInitializerSlotTable* tables = C_PARSE_BODY_SCRATCH_ARRAY(cache->arena, CParseInitializerSlotTable, capacity);
+    if (tables)
     {
-        if (old_tables[index].type_plus_one)
+        memset(tables, 0, sizeof(*tables) * capacity);
+        cache->tables = tables;
+        cache->capacity = capacity;
+        for (u32 index = 0; index < old_capacity; index += 1)
         {
-            cache->tables[c_parse_initializer_slot_cache_find(cache, old_tables[index].type_plus_one)] = old_tables[index];
+            if (old_tables[index].type_plus_one)
+            {
+                cache->tables[c_parse_initializer_slot_cache_find(cache, old_tables[index].type_plus_one)] = old_tables[index];
+            }
         }
     }
+    return tables != 0;
 }
 
-BUSTER_C_INTERNAL void c_parse_initializer_slot_table_build(CParseInitializerSlotCache* cache, CParseResult* result, CType* type,
-                                                              CParseInitializerSlotTable* table)
+BUSTER_C_INTERNAL void c_parse_initializer_slot_table_fill(CParseResult* result, CType* type, CParseInitializerSlotTable* table, u32* member_slots,
+                                                             u32* slot_members)
 {
-    u32 row_capacity = type->member_count ? type->member_count : 1;
-    table->member_slots = arena_allocate(cache->arena, u32, row_capacity);
-    table->slot_members = arena_allocate(cache->arena, u32, row_capacity);
+    table->member_slots = member_slots;
+    table->slot_members = slot_members;
     table->member_start = type->member_start;
     table->member_count = type->member_count;
     C_PARSE_INITIALIZER_SLOT_VISITS(type->member_count);
@@ -10042,6 +10143,20 @@ BUSTER_C_INTERNAL void c_parse_initializer_slot_table_build(CParseInitializerSlo
 #endif
 }
 
+BUSTER_C_INTERNAL bool c_parse_initializer_slot_table_build(CParseInitializerSlotCache* cache, CParseResult* result, CType* type,
+                                                              CParseInitializerSlotTable* table)
+{
+    u32 row_capacity = type->member_count ? type->member_count : 1;
+    u32* member_slots = C_PARSE_BODY_SCRATCH_ARRAY(cache->arena, u32, row_capacity);
+    u32* slot_members = member_slots ? C_PARSE_BODY_SCRATCH_ARRAY(cache->arena, u32, row_capacity) : 0;
+    bool built = slot_members != 0;
+    if (built)
+    {
+        c_parse_initializer_slot_table_fill(result, type, table, member_slots, slot_members);
+    }
+    return built;
+}
+
 // The table of a struct or union, built on the walk's first question about
 // it. Null without a cache (the callers outside an inference walk) and for
 // every other kind or a type outside the table; those take the walks.
@@ -10051,21 +10166,19 @@ BUSTER_C_INTERNAL CParseInitializerSlotTable* c_parse_initializer_slot_table(CPa
     if (cache && result && type && (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION) && type >= result->types &&
         type < result->types + result->type_count)
     {
-        if ((cache->count + 1) * 2 > cache->capacity)
-        {
-            c_parse_initializer_slot_cache_grow(cache);
-        }
+        bool room = (cache->count + 1) * 2 <= cache->capacity || c_parse_initializer_slot_cache_grow(cache);
         u32 type_plus_one = (u32)(type - result->types) + 1;
-        table = cache->tables + c_parse_initializer_slot_cache_find(cache, type_plus_one);
-        if (!table->type_plus_one)
+        table = room ? cache->tables + c_parse_initializer_slot_cache_find(cache, type_plus_one) : 0;
+        if (table && !table->type_plus_one)
         {
-            table->type_plus_one = type_plus_one;
-            cache->count += 1;
-            c_parse_initializer_slot_table_build(cache, result, type, table);
+            bool built = c_parse_initializer_slot_table_build(cache, result, type, table);
+            table->type_plus_one = built ? type_plus_one : 0;
+            cache->count += built;
+            table = built ? table : 0;
         }
-        else if (table->member_start != type->member_start || table->member_count != type->member_count)
+        else if (table && (table->member_start != type->member_start || table->member_count != type->member_count))
         {
-            c_parse_initializer_slot_table_build(cache, result, type, table);
+            table = c_parse_initializer_slot_table_build(cache, result, type, table) ? table : 0;
         }
     }
     return table;
@@ -15159,13 +15272,16 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         if (bit_width_token_count == 1 && preprocess.tokens[declarator].kind == C_TOKEN_PREPROCESSING_NUMBER)
         {
             u64 mark = machine->scratch_arena->position;
+            // Guarded while a function body is validated (#1256): a miss
+            // leaves the width unresolved, and the body reports exhaustion.
             CPreprocessResult evaluation = {
-                .diagnostics = arena_allocate(machine->scratch_arena, CDiagnostic, 2),
+                .diagnostics = C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, CDiagnostic, 2),
                 .target = preprocess.target,
                 .dialect = preprocess.dialect,
             };
             u64 width = 0;
-            if (c_integer_expression_evaluate(machine->scratch_arena, preprocess.spelling_base, preprocess.tokens + declarator, 1, 65536, &evaluation, &width) &&
+            if (evaluation.diagnostics &&
+                c_integer_expression_evaluate(machine->scratch_arena, preprocess.spelling_base, preprocess.tokens + declarator, 1, 65536, &evaluation, &width) &&
                 !evaluation.diagnostic_count && width <= UINT32_MAX)
             {
                 bit_width = (u32)width;
@@ -27074,16 +27190,25 @@ void c_test_member_offset_counts(u64* types, u64* members, u64* scratch_bytes)
 // The per-query reached set grows with the promoted search, never with the
 // translation unit's type count. Mark on dequeue to preserve the original BFS
 // order and the first path to a repeated aggregate.
+// The reached set is guarded while a function body is validated (#1256): a
+// refused growth reports the type as already reached, so the search skips
+// it, and the body reports its exhaustion.
 BUSTER_C_INTERNAL bool c_parse_member_offset_visit(Arena* arena, u32 type, u32** slots, u32* capacity, u32* count)
 {
+    bool room = true;
     if ((*count + 1) * 2 > *capacity)
     {
         u32 new_capacity = *capacity * 2;
-        u32* grown = arena_allocate_zeroed(arena, u32, new_capacity);
+        u32* grown = C_PARSE_BODY_SCRATCH_ARRAY(arena, u32, new_capacity);
+        room = grown != 0;
 #if BUSTER_INCLUDE_TESTS
-        c_parse_member_offset_counts[2] += sizeof(*grown) * new_capacity;
+        c_parse_member_offset_counts[2] += room ? sizeof(*grown) * new_capacity : 0;
 #endif
-        for (u32 index = 0; index < *capacity; index += 1)
+        if (room)
+        {
+            memset(grown, 0, sizeof(*grown) * new_capacity);
+        }
+        for (u32 index = 0; room && index < *capacity; index += 1)
         {
             u32 occupant = (*slots)[index];
             if (occupant)
@@ -27093,12 +27218,12 @@ BUSTER_C_INTERNAL bool c_parse_member_offset_visit(Arena* arena, u32 type, u32**
                 grown[slot] = occupant;
             }
         }
-        *slots = grown;
-        *capacity = new_capacity;
+        *slots = room ? grown : *slots;
+        *capacity = room ? new_capacity : *capacity;
     }
     u32 slot = c_parse_layout_agenda_slot(type, *capacity);
-    while ((*slots)[slot] && (*slots)[slot] != type + 1) slot = (slot + 1) & (*capacity - 1);
-    bool fresh = !(*slots)[slot];
+    while (room && (*slots)[slot] && (*slots)[slot] != type + 1) slot = (slot + 1) & (*capacity - 1);
+    bool fresh = room && !(*slots)[slot];
     if (fresh)
     {
         (*slots)[slot] = type + 1;
@@ -27163,16 +27288,25 @@ BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine
                         {
                             if (count == work_capacity)
                             {
+                                // Guarded while a function body is validated
+                                // (#1256): a refused growth drops the member
+                                // from the search.
                                 u32 capacity = work_capacity * 2;
-                                CParseMemberOffsetWork* grown = arena_allocate(arena, CParseMemberOffsetWork, capacity);
-                                memcpy(grown, work, sizeof(*grown) * count);
-                                work = grown;
-                                work_capacity = capacity;
+                                CParseMemberOffsetWork* grown = C_PARSE_BODY_SCRATCH_ARRAY(arena, CParseMemberOffsetWork, capacity);
+                                if (grown)
+                                {
+                                    memcpy(grown, work, sizeof(*grown) * count);
+                                    work = grown;
+                                    work_capacity = capacity;
+                                }
 #if BUSTER_INCLUDE_TESTS
-                                c_parse_member_offset_counts[2] += sizeof(*grown) * capacity;
+                                c_parse_member_offset_counts[2] += grown ? sizeof(*grown) * capacity : 0;
 #endif
                             }
-                            work[count++] = (CParseMemberOffsetWork){.type = member.type, .offset = item.offset + offset};
+                            if (count < work_capacity)
+                            {
+                                work[count++] = (CParseMemberOffsetWork){.type = member.type, .offset = item.offset + offset};
+                            }
                         }
                     }
                 }
@@ -28205,12 +28339,32 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
                 .flags = {.no_pool = 1},
             });
         }
+        // Expression frames rewind machine scratch when they finish. Private
+        // type rows must outlive those frames, so keep their growth in the
+        // other scratch arena until the stable integer value has been read.
+        //
+        // While a function body is validated the model must not land in that
+        // body's guarded scratch arena (#1256): its rows, member indexes and
+        // messages are allocated by the whole type machinery, not through the
+        // guard. The other scratch arena serves when the caller's is neither,
+        // and a private arena when the caller's is that other one; an arena
+        // that cannot be created refuses the query and exhausts the body.
+        Arena* model_conflicts[] = {
+            arena,
+            c_parse_body_scratch_arena() ? c_parse_body_scratch_arena() : arena,
+        };
+        Arena* model_scratch = fixed_buffer_arena ? thread_context_get_scratch(model_conflicts, BUSTER_ARRAY_LENGTH(model_conflicts)) : 0;
+        Arena* model_private = fixed_buffer_arena && !model_scratch ? arena_create((ArenaCreation){0}) : 0;
+        if (fixed_buffer_arena && !model_scratch && !model_private)
+        {
+            c_parse_body_scratch_refuse();
+            bool fixed_buffers_destroyed = arena_destroy(fixed_buffer_arena, 1);
+            BUSTER_VALIDATE(fixed_buffers_destroyed);
+            fixed_buffer_arena = 0;
+        }
         if (fixed_buffer_arena)
         {
-            // Expression frames rewind machine scratch when they finish. Private
-            // type rows must outlive those frames, so keep their growth in the
-            // other scratch arena until the stable integer value has been read.
-            TemporalArena model_temporary = scratch_begin(&arena, 1);
+            TemporalArena model_temporary = arena_begin_temporal(model_scratch ? model_scratch : model_private);
             CParseResult query = *result;
             query.arena = model_temporary.arena;
             query.protected_type_constant_query = true;
@@ -28285,11 +28439,14 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
             bool supported = c_parse_type_constant_vector_arguments_supported(&query, preprocess, start, end, sizeof_expression_query);
             bool single = end == start + 1;
             u32 capacity = single || !supported ? 0 : end - start + 16;
+            // Guarded while a function body is validated (#1256): a refused
+            // machine leaves the query unanswered, and the body reports its
+            // exhaustion.
             CTypeParseMachine query_machine = {
-                .frames = capacity ? arena_allocate(arena, CTypeParseFrame, capacity) : 0,
-                .frame_checkpoints = capacity ? arena_allocate(arena, CParseResult, capacity) : 0,
-                .mutations = capacity ? arena_allocate(arena, CTypeMutation, capacity) : 0,
-                .expression_tasks = capacity ? arena_allocate(arena, CParseExpressionTypeTask, capacity) : 0,
+                .frames = capacity ? C_PARSE_BODY_SCRATCH_ARRAY(arena, CTypeParseFrame, capacity) : 0,
+                .frame_checkpoints = capacity ? C_PARSE_BODY_SCRATCH_ARRAY(arena, CParseResult, capacity) : 0,
+                .mutations = capacity ? C_PARSE_BODY_SCRATCH_ARRAY(arena, CTypeMutation, capacity) : 0,
+                .expression_tasks = capacity ? C_PARSE_BODY_SCRATCH_ARRAY(arena, CParseExpressionTypeTask, capacity) : 0,
                 .scratch_arena = arena,
                 .frame_capacity = capacity,
                 .mutation_capacity = capacity,
@@ -28297,6 +28454,8 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
                 .constant_evaluation_mode = C_CONSTANT_EVALUATION_TYPE,
                 .enum_sizeof_expression_query = sizeof_expression_query,
             };
+            supported = supported && (!capacity || (query_machine.frames && query_machine.frame_checkpoints && query_machine.mutations &&
+                                                    query_machine.expression_tasks));
             u32 error_token = start;
             CParseResult syntax_checkpoint = query;
             CTokenPositionIndex syntax_positions = {0};
@@ -28355,7 +28514,9 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
                         // Direct prefix typing gives a call's return type without
                         // checking its arguments. Validate the unevaluated named
                         // calls against this private model before exporting a fact.
-                        CCallArityDiagnostic checked = c_semantic_check_named_call_arities(arena, &query, preprocess, start, end);
+                        // Only whether a call is refused matters here, so
+                        // no message is formed (#1256).
+                        CCallArityDiagnostic checked = c_semantic_check_named_call_arities(0, &query, preprocess, start, end);
                         valid = !checked.message.length;
                     }
                     u64 size = 0;
@@ -28387,6 +28548,11 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
                 if (member_alignment) *member_alignment = 0;
             }
             scratch_end(model_temporary);
+            if (model_private)
+            {
+                bool model_destroyed = arena_destroy(model_private, 1);
+                BUSTER_VALIDATE(model_destroyed);
+            }
             bool fixed_buffers_destroyed = arena_destroy(fixed_buffer_arena, 1);
             BUSTER_VALIDATE(fixed_buffers_destroyed);
         }
@@ -30045,8 +30211,10 @@ BUSTER_C_INTERNAL bool c_parse_alignof_object_alignment(CTypeParseMachine* machi
                 CAlignmentSpecifier specifier = result->alignments[run_start + index];
                 u64 requested = 0;
                 u64 mark = machine->scratch_arena->position;
+                // Guarded while a function body is validated (#1256): a miss
+                // refuses the alignment, and the body reports exhaustion.
                 CPreprocessResult evaluation = {
-                    .diagnostics = arena_allocate(machine->scratch_arena, CDiagnostic, specifier.token_count + 1),
+                    .diagnostics = C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, CDiagnostic, (u64)specifier.token_count + 1),
                     .target = preprocess.target,
                     .dialect = preprocess.dialect,
                 };
@@ -30056,7 +30224,7 @@ BUSTER_C_INTERNAL bool c_parse_alignof_object_alignment(CTypeParseMachine* machi
                                c_parse_builtin_type_layout(preprocess.target, result->types[specifier.type.value].kind, &builtin_size, &builtin_alignment);
                 requested = builtin_alignment;
                 valid = builtin ||
-                        (specifier.type.value >= result->type_count &&
+                        (specifier.type.value >= result->type_count && evaluation.diagnostics &&
                          c_integer_expression_evaluate(machine->scratch_arena, preprocess.spelling_base, preprocess.tokens + specifier.token_start,
                                                       specifier.token_count, 65536, &evaluation, &requested) &&
                          !evaluation.diagnostic_count && requested <= UINT32_MAX && !(requested & (requested - 1)));
@@ -34435,6 +34603,10 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
     // The function-definition index of the syntax tree, when there is one,
     // lives with the other tables built once outside the per-body checkpoints.
     c_ast_types_bodies_prepare(machine, result);
+    // The lazy position index sizes its build by the whole unit and builds in
+    // a scratch arena, so it is forced here, before any body's guard opens,
+    // rather than on a body's first delimiter query (#1256).
+    c_parse_position_index_ensure(result, preprocess);
     for (u32 declaration_index = 0; declaration_index < result->declaration_count; declaration_index += 1)
     {
         CDeclaration* declaration = result->declarations + declaration_index;

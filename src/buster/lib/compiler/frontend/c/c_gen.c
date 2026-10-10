@@ -11762,11 +11762,16 @@ BUSTER_C_SHARED bool c_ir_number_imaginary_spelling(Arena* arena, String8 spelli
         *real_out = (String8){.pointer = spelling.pointer, .length = spelling.length - 1};
         return true;
     }
-    char8* copy = arena_allocate(arena, char8, spelling.length - 1);
-    memcpy(copy, spelling.pointer, imaginary_index);
-    memcpy(copy + imaginary_index, spelling.pointer + imaginary_index + 1, spelling.length - imaginary_index - 1);
-    *real_out = (String8){.pointer = copy, .length = spelling.length - 1};
-    return true;
+    // Guarded while a function body is validated (#1256): a miss answers
+    // "not imaginary", and the body reports its exhaustion.
+    char8* copy = C_PARSE_BODY_SCRATCH_ARRAY(arena, char8, spelling.length - 1);
+    if (copy)
+    {
+        memcpy(copy, spelling.pointer, imaginary_index);
+        memcpy(copy + imaginary_index, spelling.pointer + imaginary_index + 1, spelling.length - imaginary_index - 1);
+        *real_out = (String8){.pointer = copy, .length = spelling.length - 1};
+    }
+    return copy != 0;
 }
 
 // The suffix of a floating constant: how many trailing bytes it occupies and
