@@ -246,8 +246,19 @@ The typed `__builtin_{s,u}{add,sub,mul}{,l,ll}_overflow` checks
 the wrapped result through the third argument and answer `_Bool`. Lowering
 computes in the unsigned counterpart: sign tests for add/sub, and for multiply
 a divide-back check of the magnitudes' product, so no wider type, trap or
-runtime helper is needed. The generic `__builtin_*_overflow` forms (#1394) and
-`__builtin_return_address` are not implemented and answer `__has_builtin` 0.
+runtime helper is needed. The generic `__builtin_{add,sub,mul}_overflow`
+(#1394) take any two integer operands and a pointer to any non-const integer
+(`_Bool` and enums included); `c_ir_emit_generic_overflow_builtin` computes the
+exact result in signed 64- or 128-bit arithmetic, stores its low bits (bit 0
+for `_Bool`) and answers whether it left the result type's range. Same-signedness
+operands no wider than the result use the typed lowering at the result type
+(add/sub only at 128 bits). Refused with a structured diagnostic: multiply with
+a 128-bit operand or result, an exact result needing more than 128 signed bits
+(a 128-bit operand that also narrows or changes signedness, an unsigned 64-bit
+product into 128 bits), and anything needing 128-bit arithmetic on targets other
+than x86-64 and AArch64 (WebAssembly). The parser rejects wrong arity, non-integer
+operands and a result that is not a pointer to a non-const integer.
+`__builtin_return_address` is not implemented and answers `__has_builtin` 0.
 `__builtin_fabsl` clears the stored sign bit, `__builtin_fmax`/`fmin` and their
 `f`/`l` forms read NaN-ness from the stored bits and select the other operand,
 and `__builtin_powi`/`powif`/`powil` run an inline square-and-multiply loop;
