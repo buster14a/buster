@@ -1,11 +1,11 @@
 schema	buster-main-sampling-admission-v1
-state	disabled
-freeze_revision	-
-freeze_sha256	-
+state	acquire
+freeze_revision	3ed4bdafe05c3e9cd1b58d5dd296ea3f53d24d30
+freeze_sha256	9626fb64cd7e865b4e7678c6c21e0a2dd9e6d20b8b6e8e914ce282930243c9ae
 campaign_parent	-
 parent_freeze_revision	-
-protocol_sha256	-
-history_since	-
+protocol_sha256	c7ed30c6df6b64071ef654401e13cb78b6a08126360a20345d3cc92d6ae1d34f
+history_since	2026-10-10T15:15:00Z
 repository	buster14a/buster
 owner_login	davidgmbb
 owner_id	39247043
