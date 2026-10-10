@@ -44,8 +44,9 @@ def host():
     models = [line.partition(":")[2].strip() for line in raw.splitlines() if line.startswith("model name")]
     if not models or any("AMD Ryzen 7 9700X" in model for model in models):
         raise ValueError("diagnostic provider refuses the approved physical benchmark host")
-    if any(key.startswith("BQ_PREPARATION_") for key in os.environ):
-        raise ValueError("diagnostic provider refuses preparation admission")
+    if any(key.startswith("BQ_") and not (key == "BQ_REQUIRE_DISTINCT_GROUP" and value == "1")
+           for key, value in os.environ.items()):
+        raise ValueError("diagnostic provider refuses physical admission")
     return raw, models[0]
 
 
@@ -152,16 +153,45 @@ def corpus(args, cpuinfo, cpu_model):
     check_root(root)
     output_directory(output, False)
     baseline, candidate = binary(pathlib.Path(args.baseline)), binary(pathlib.Path(args.candidate))
+    case = os.environ.get("BUSTER_PREPARATION_DIAGNOSTIC_CORPUS_CASE", "regression")
+    if case not in ("regression", "invalid", "missing", "bad-exit", "partial-numeric", "inconsistent-regression"):
+        raise ValueError("unknown private diagnostic corpus case")
+    if case == "missing":
+        return 1
+    regression = case in ("regression", "invalid", "partial-numeric", "inconsistent-regression")
     profile = compiler_receipt.THROUGHPUT_PROFILE
     jobs = [(name, mode) for name in profile["workloads"] for mode in profile["modes"]]
-    comparisons = [{"name": name + "/" + mode, "medians": {},
-                    "tests": [{"metric": metric, "round": number, "median_ratio": 1.0, "regression": False}
+    source = "/* fixed diagnostic fixture */\nint main(void) { return 0; }\n"
+    comparisons = [{"name": name + "/" + mode,
+                    "medians": {"wall_seconds": [0.000001, 0.003] if regression else [2e-8, 2e-8],
+                                "peak_rss_bytes": [4096, 4096]},
+                    "tests": [{"metric": metric, "round": number,
+                               "median_ratio": 3000.0 if regression and metric == "wall_seconds" else 1.0,
+                               "ci_low": 3000.0 if regression and metric == "wall_seconds" else 1.0,
+                               "ci_high": 3000.0 if regression and metric == "wall_seconds" else 1.0,
+                               "baseline_relative_mad": 0.0, "candidate_relative_mad": 0.0,
+                               "margin_exceedances": 20 if regression and metric == "wall_seconds" else 0,
+                               "pairs": 20, "p_value": 2 ** -20 if regression and metric == "wall_seconds" else 1.0,
+                               "regression": regression and metric == "wall_seconds"}
                               for metric in ("wall_seconds", "peak_rss_bytes") for number in range(2)],
-                    "decision": "no substantial regression detected"} for name, mode in jobs]
-    summary = {"schema": 2, "guard_enabled": True, "comparisons": comparisons, "confirmed_regressions": 0,
-               "inconclusive_cases": 0, "valid": True}
-    metadata = {"schema": 2, "profile": "ci", "pairs_per_round": 20, "rounds": 2, "warmups": 2, "cpu": 2,
+                    "decision": "regression" if regression else "no substantial regression detected"} for name, mode in jobs]
+    summary = {"schema": 2, "guard_enabled": True, "family_alpha": 0.01, "per_test_alpha": 0.01 / 24,
+               "comparisons": comparisons, "confirmed_regressions": len(comparisons) if regression else 0,
+               "inconclusive_cases": 0, "valid": case != "invalid"}
+    if case == "partial-numeric":
+        comparisons[0]["medians"] = {}
+        comparisons[0]["tests"][0].pop("ci_low")
+    if case == "inconsistent-regression":
+        for cell in comparisons:
+            for test in cell["tests"]:
+                test["regression"] = False
+    metadata = {"schema": 2, "seed": 20260907, "profile": "ci", "pairs_per_round": 20, "rounds": 2, "warmups": 2, "cpu": 2,
+                "scale": 1, "input_schema": 1, "cache_policy": "warm-filesystem-new-process", "clock": "monotonic",
                 "workloads": list(profile["workloads"]), "host": {"cpu_model": cpu_model, **DIAGNOSTIC},
+                "jobs": [{"job": job, "name": name, "mode": mode, "artifact": "object",
+                          "source": str(output / "inputs" / (name + "-" + mode + ".c")),
+                          "sha256": hashlib.sha256(source.encode()).hexdigest(), "bytes": len(source.encode()),
+                          "physical_lines": 2, "defined_functions": 1} for job, (name, mode) in enumerate(jobs)],
                 "compiler_provenance": [dict(item, revision_label=revision)
                     for item, revision in zip((baseline, candidate), (args.baseline_id, args.candidate_id))]}
     write_json(output / "summary.json", summary)
@@ -180,7 +210,8 @@ def corpus(args, cpuinfo, cpu_model):
         for number in range(2):
             for pair in range(20):
                 for variant in range(2):
-                    row = [number, pair, pair % 2, variant, job, 2e-8, 0, 0, 4096,
+                    wall = (0.003 if variant else 0.000001) if regression else 2e-8
+                    row = [number, pair, pair % 2, variant, job, wall, 0, 0, 4096,
                            *["NA"] * 8, 24, len(source), 2, 1, digest, *["NA"] * 4]
                     if len(row) != len(RAW_HEADER):
                         raise ValueError("diagnostic corpus raw row shape changed")
@@ -194,7 +225,8 @@ def corpus(args, cpuinfo, cpu_model):
                     (output / "artifacts" / (identity + ".metrics")).write_text("wall_seconds=0.00000002\n")
         for repeat in range(2):
             for variant in range(2):
-                telemetry_writer.writerow([0, repeat, repeat % 2, variant, job, 2e-8, 0, 0, 4096,
+                wall = (0.003 if variant else 0.000001) if regression else 2e-8
+                telemetry_writer.writerow([0, repeat, repeat % 2, variant, job, wall, 0, 0, 4096,
                     *["NA"] * 8, 24, len(source), 2, 1, digest, *["NA"] * 4])
     (output / "samples.csv").write_text(sample_stream.getvalue())
     (output / "telemetry.csv").write_text(telemetry_stream.getvalue())
@@ -205,6 +237,12 @@ def corpus(args, cpuinfo, cpu_model):
     completion = f"schema=2 jobs={len(jobs)} pairs=20 rounds=2 guard=1\n"
     completion += "".join(hashlib.sha256((output / name).read_bytes()).hexdigest() + " " + name + "\n" for name in names)
     (output / "complete.txt").write_text(completion)
+    # Synthetic hosted contract data, never a measured timing. The actual
+    # provider charge exceeds its 1.44048s declared aggregate sample wall.
+    if regression:
+        import time
+        time.sleep(2)
+    return 1
 
 
 def main():
@@ -234,7 +272,7 @@ def main():
         if args.warmups != "2" or args.profile != "ci" or args.mode != "all" or args.pairs != "20" or \
                 args.timeout != "120" or not args.baseline_id or not args.candidate_id or args.repo_root or args.target_minutes:
             raise ValueError("diagnostic corpus fixed production argv changed")
-        corpus(args, cpuinfo, cpu_model)
+        return corpus(args, cpuinfo, cpu_model)
     return 0
 
 

@@ -47,7 +47,8 @@ parsing and lowering keep interning), the diagnostics and their messages, the
 file table, the pack changes and the metrics rows. Any string the phase arena
 owns is copied; a caller's path, a static spelling or a spelling-space pointer
 is left alone. The phase arena is then released back to its entry position.
-Size checks on every sealed structure fail the build when one changes shape.
+`BUSTER_CT_CHECK` size checks on the sealed `CPreprocessResult` and
+`CSourceMapRecovery` fail 64-bit builds when either changes shape.
 The lexer's diagnostic rows and messages leave its temporary diagnostic arena
 together for the same reason.
 
@@ -85,7 +86,7 @@ next phase or unit on that thread (see the same-thread rule in the
 
 | Defense | Where | Catches |
 |---|---|---|
-| Size checks on sealed structures | `c_source.c` | a new field crossing the seal without a rule |
+| Size checks on sealed structures | `BUSTER_CT_CHECK` in `c_source.c` (64-bit builds) | a new field crossing the seal without a rule |
 | Independent ownership walk | `c_test_preprocess_references_range` | any pointer of the result graph into the released range |
 | Release fill (`arena_test_fill_releases`) | `c_test_phase_arena_release`, `compiler_driver_test_released_phase_fill` | a surviving reader in builds without AddressSanitizer: output, diagnostics and object bytes must not change |
 | AddressSanitizer poisoning | `arena_release_to_position` | the first stale access, at its source |

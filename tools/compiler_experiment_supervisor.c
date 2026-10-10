@@ -21,6 +21,8 @@
 #include <unistd.h>
 #endif
 
+#include "compiler_experiment_cleanup_guard.c"
+
 #define BUSTER_EXPERIMENT_SUPERVISOR_MAX_CHILDREN 4096u
 #define BUSTER_EXPERIMENT_SUPERVISOR_MAX_CHILD_BYTES 65536u
 #define BUSTER_EXPERIMENT_SUPERVISOR_CLEANUP_US 30000000ull
@@ -28,6 +30,7 @@
 typedef struct CompilerExperimentSupervisor CompilerExperimentSupervisor;
 struct CompilerExperimentSupervisor
 {
+    CompilerExperimentCleanupLease cleanup_lease;
     String8 children_path;
     char8* child_bytes;
     u64* child_pids;
@@ -39,7 +42,25 @@ struct CompilerExperimentSupervisor
     s32 prior_subreaper;
     bool active;
     bool cleanup_failed;
+    bool physical_scope_tracked;
 };
+
+// The adopted execution-step owner releases only after every physical manager
+// scope in this process supplied its own terminal cleanup proof. Child workers
+// start a separate PID-scoped count; ProcessResult is never cleanup authority.
+BUSTER_GLOBAL_LOCAL u64 compiler_experiment_supervisor_scope_pid;
+BUSTER_GLOBAL_LOCAL u64 compiler_experiment_supervisor_physical_scopes;
+
+BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_scopes_quiet(void)
+{
+    bool result = false;
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    result = (!compiler_experiment_supervisor_scope_pid ||
+        compiler_experiment_supervisor_scope_pid == (u64)getpid()) &&
+        !compiler_experiment_supervisor_physical_scopes;
+#endif
+    return result;
+}
 
 // Complete parsing precedes any signalling; no partial/truncated list is used.
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_parse_children(String8 text, u64 owner, u64* pids, u64* count)
@@ -187,7 +208,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_begin(Arena* arena, Comp
         u64 deadline = os_now_microseconds() + BUSTER_EXPERIMENT_SUPERVISOR_CLEANUP_US;
         sigset_t blocked = {0}, prior_mask = {0};
         bool masked = sigfillset(&blocked) == 0 && sigprocmask(SIG_BLOCK, &blocked, &prior_mask) == 0;
-        result = masked && compiler_experiment_supervisor_single_thread(state->owner_pid) &&
+        result = compiler_experiment_cleanup_begin(arena, &state->cleanup_lease) && masked && compiler_experiment_supervisor_single_thread(state->owner_pid) &&
             compiler_experiment_supervisor_children(state, deadline) && !state->child_count &&
             compiler_experiment_supervisor_no_children(deadline) &&
             prctl(PR_GET_CHILD_SUBREAPER, &state->prior_subreaper, 0, 0, 0) == 0 &&
@@ -204,8 +225,22 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_begin(Arena* arena, Comp
             }
         }
         if (masked) result = sigprocmask(SIG_SETMASK, &prior_mask, 0) == 0 && result;
+        if (result && state->cleanup_lease.enabled)
+        {
+            if (compiler_experiment_supervisor_scope_pid != state->owner_pid)
+            {
+                compiler_experiment_supervisor_scope_pid = state->owner_pid;
+                compiler_experiment_supervisor_physical_scopes = 0;
+            }
+            compiler_experiment_supervisor_physical_scopes += 1;
+            state->physical_scope_tracked = true;
+        }
         // Never silently restore after uncertainty; retain active ownership.
-        if (!result) state->cleanup_failed = true;
+        if (!result)
+        {
+            state->cleanup_failed = true;
+            compiler_experiment_cleanup_latch(arena, S8("native-owner-entry-unproven"));
+        }
     }
 #else
     BUSTER_UNUSED(arena);
@@ -214,10 +249,11 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_begin(Arena* arena, Comp
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_end(Arena* arena, CompilerExperimentSupervisor* state)
+BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_end_known(Arena* arena, CompilerExperimentSupervisor* state, bool manager_cleanup_proven)
 {
     bool result = false;
     BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(manager_cleanup_proven);
 #if BUSTER_LINUX && !BUSTER_ANDROID
     if (state && state->active && !state->cleanup_failed && state->owner_pid == (u64)getpid())
     {
@@ -278,7 +314,37 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_end(Arena* arena, Compil
         if (!result) state->cleanup_failed = true;
     }
 #endif
+    if (state)
+    {
+        bool guarded = compiler_experiment_cleanup_finish(arena, &state->cleanup_lease, result && manager_cleanup_proven);
+        if (!guarded && state->cleanup_lease.enabled) state->cleanup_failed = true;
+        result = result && (!state->cleanup_lease.enabled || guarded);
+        if (result && state->physical_scope_tracked)
+        {
+            bool released = manager_cleanup_proven &&
+                compiler_experiment_supervisor_scope_pid == state->owner_pid &&
+                compiler_experiment_supervisor_physical_scopes > 0;
+            if (released)
+            {
+                compiler_experiment_supervisor_physical_scopes -= 1;
+                state->physical_scope_tracked = false;
+            }
+            else
+            {
+                result = false;
+                state->cleanup_failed = true;
+                compiler_experiment_cleanup_latch(arena, S8("native-manager-scope-proof-missing"));
+            }
+        }
+    }
     return result;
+}
+
+// Historical hosted self-tests do not hold a physical ACTIVE lease. Physical
+// callers must supply exact manager cleanup proof through *_end_known.
+BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_end(Arena* arena, CompilerExperimentSupervisor* state)
+{
+    return compiler_experiment_supervisor_end_known(arena, state, false);
 }
 
 #if BUSTER_LINUX && !BUSTER_ANDROID
@@ -371,7 +437,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_self_test(Arena* arena)
         result ? 1ull : 0ull, os_is_only_live_thread() ? 1ull : 0ull,
         compiler_experiment_supervisor_single_thread((u64)getpid()) ? 1ull : 0ull);
     int original_subreaper = -1;
-    bool flag_read = prctl(PR_GET_CHILD_SUBREAPER, &original_subreaper, 0, 0, 0) == 0;
+    bool physical = false;
+    bool fixture_host = compiler_experiment_cleanup_physical(&physical) && !physical;
+    bool flag_read = fixture_host && prctl(PR_GET_CHILD_SUBREAPER, &original_subreaper, 0, 0, 0) == 0;
     pid_t unrelated = flag_read ? fork() : -1;
     if (unrelated == 0)
     {
@@ -392,7 +460,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_self_test(Arena* arena)
         flag_read ? 1ull : 0ull, refused ? 1ull : 0ull, unrelated_live ? 1ull : 0ull,
         unrelated_reaped ? 1ull : 0ull, rejected.active ? 1ull : 0ull, result ? 1ull : 0ull);
     CompilerExperimentSupervisor supervisor = {0};
-    bool began = compiler_experiment_supervisor_begin(arena, &supervisor);
+    // result implies fixture_host: the physical host never reaches the durable guard,
+    // so a self-test there cannot latch host-wide UNKNOWN or leave ACTIVE behind.
+    bool began = result && fixture_host && compiler_experiment_supervisor_begin(arena, &supervisor);
     result = result && began;
     string_print(S8("COMPILER_EXPERIMENT_SUPERVISOR step=begin began={u64} active={u64} cleanup_failed={u64} children={u64}\n"),
         began ? 1ull : 0ull, supervisor.active ? 1ull : 0ull, supervisor.cleanup_failed ? 1ull : 0ull, supervisor.child_count);

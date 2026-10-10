@@ -1169,14 +1169,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_order_execution(UnitT
     for (u32 target_index = 0; target_index < target_count; target_index += 1)
     {
         TemporalArena temporary = arena_begin_temporal(arena);
-        bool host = target_index == BUSTER_ARRAY_LENGTH(targets);
-        String8 target = targets[target_index % BUSTER_ARRAY_LENGTH(targets)];
+        // Exercise the native host tools before generating both cross-target
+        // object sets. The native fixture performs filesystem-heavy compiler and
+        // archiver work, so running it first avoids the cross-target setup churn.
+        bool host = false;
+        u32 target_row = target_index;
 #if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+        host = target_index == 0;
+        if (host)
+        {
 #if BUSTER_CPU_ARCH_X86_64
-        if (host) target = targets[0];
+            target_row = 0;
 #else
-        if (host) target = targets[1];
+            target_row = 1;
 #endif
+        }
+        else
+        {
+            target_row -= 1;
+        }
+#endif
+        String8 target = targets[target_row % BUSTER_ARRAY_LENGTH(targets)];
+#if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
         String8 family = S8(BUSTER_HOST_C_COMPILER_ID);
         bool configured = !host || string_equal(family, S8("GNU")) || string_equal(family, S8("Clang"));
 #else
@@ -1186,9 +1200,35 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_order_execution(UnitT
         OsDirectoryCreateResult created = os_make_directory(root);
         bool prepared = configured && created.error.v == 0;
         BUSTER_TEST(arguments, prepared);
+        String8 archive_names[] = {S8("foo"), S8("bar"), S8("weak"), S8("strong")};
+        u32 member_indices[] = {1, 2, 8, 9};
         String8 sources[BUSTER_ARRAY_LENGTH(programs)] = {0};
         String8 objects[BUSTER_ARRAY_LENGTH(programs)] = {0};
         ObjectFile compiled_objects[BUSTER_ARRAY_LENGTH(programs)] = {0};
+#if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+        String8 archiver = host ? executable_resolve_in_path(arena, S8("ar")) : (String8){0};
+        if (host && prepared && !archiver.length)
+        {
+            String8 unresolved_archiver[] = {S8("ar")};
+            TestProcessObservation observation = {
+                .suite = S8("compiler-driver"),
+                .fixture = S8("library-order"),
+                .case_name = S8("GNU-archiver"),
+                .stage = S8("resolve archive tool"),
+                .tool_role = S8("GNU archiver"),
+                .expectation = S8("ar resolves from the captured PATH for independent GNU archive creation"),
+                .argv = BUSTER_ARRAY_TO_SLICE(unresolved_archiver),
+                .deadline_us = 30000000,
+                .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                .use_process_environment = true,
+                .new_process_group = true,
+                .search_path = true,
+                .observe_resources = true,
+            };
+            buster_test_process_failure_show(arguments, &observation);
+        }
+        if (host) { prepared = prepared && archiver.length != 0; BUSTER_TEST(arguments, prepared); }
+#endif
         for (u32 index = 0; prepared && index < BUSTER_ARRAY_LENGTH(programs); index += 1)
         {
             sources[index] = string_format_z(arena, S8("{S8}/input{u32}.c"), root, index);
@@ -1217,65 +1257,45 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_order_execution(UnitT
                     BUSTER_TEST_RAW(arguments, prepared, compiled.diagnostic);
                     compiled_objects[index] = compiled.object;
                 }
+#if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+                if (prepared && host)
+                {
+                    for (u32 archive_index = 0; archive_index < BUSTER_ARRAY_LENGTH(archive_names); archive_index += 1)
+                    {
+                        if (member_indices[archive_index] != index) { continue; }
+                        String8 archive = string_format_z(arena, S8("{S8}/lib{S8}.a"), root, archive_names[archive_index]);
+                        String8 command[] = {archiver, S8("rcs"), archive, objects[member_indices[archive_index]]};
+                        String8 case_name = string_format(arena, S8("target={S8}/host={u32}/lib{S8}.a"),
+                            target, (u32)host, archive_names[archive_index]);
+                        // Create each independent GNU archive as soon as its
+                        // member object exists, before launching the rest of the
+                        // host compiler subprocesses.
+                        prepared = compiler_driver_library_order_process(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command),
+                                                                         PROCESS_RESULT_SUCCESS, (String8){0}, S8("GNU archive creation"), case_name);
+                        BUSTER_TEST(arguments, prepared);
+                        break;
+                    }
+                }
+#endif
             }
         }
-        String8 archive_names[] = {S8("foo"), S8("bar"), S8("weak"), S8("strong")};
-        u32 member_indices[] = {1, 2, 8, 9};
-#if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
-        String8 archiver = host ? executable_resolve_in_path(arena, S8("ar")) : (String8){0};
-        if (host && prepared && !archiver.length)
-        {
-            String8 unresolved_archiver[] = {S8("ar")};
-            TestProcessObservation observation = {
-                .suite = S8("compiler-driver"),
-                .fixture = S8("library-order"),
-                .case_name = S8("GNU-archiver"),
-                .stage = S8("resolve archive tool"),
-                .tool_role = S8("GNU archiver"),
-                .expectation = S8("ar resolves from the captured PATH for independent GNU archive creation"),
-                .argv = BUSTER_ARRAY_TO_SLICE(unresolved_archiver),
-                .deadline_us = 30000000,
-                .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                .use_process_environment = true,
-                .new_process_group = true,
-                .search_path = true,
-                .observe_resources = true,
-            };
-            buster_test_process_failure_show(arguments, &observation);
-        }
-        if (host) { prepared = prepared && archiver.length != 0; BUSTER_TEST(arguments, prepared); }
-#endif
-        for (u32 index = 0; prepared && index < BUSTER_ARRAY_LENGTH(archive_names); index += 1)
+
+        for (u32 index = 0; prepared && !host && index < BUSTER_ARRAY_LENGTH(archive_names); index += 1)
         {
             String8 archive = string_format_z(arena, S8("{S8}/lib{S8}.a"), root, archive_names[index]);
-#if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
-            if (host)
+            // Nine members force the existing indexed state, with only the
+            // named provider eligible. The eight extras must stay out.
+            ObjectFile members[9] = {0};
+            members[0] = compiled_objects[member_indices[index]];
+            for (u32 unused = 1; unused < BUSTER_ARRAY_LENGTH(members); unused += 1)
             {
-                // Independently produced GNU archives exercise the consumer,
-                // alongside the target-independent indexed serializer below.
-                String8 command[] = {archiver, S8("rcs"), archive, objects[member_indices[index]]};
-                String8 case_name = string_format(arena, S8("target={S8}/host={u32}/lib{S8}.a"),
-                    target, (u32)host, archive_names[index]);
-                prepared = compiler_driver_library_order_process(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command),
-                                                                 PROCESS_RESULT_SUCCESS, (String8){0}, S8("GNU archive creation"), case_name);
+                ObjectSymbol* symbol = arena_allocate(arena, ObjectSymbol, 1);
+                *symbol = (ObjectSymbol){.name = string_format(arena, S8("library_unused_{u32}_{u32}"), index, unused),
+                    .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .size = 1, .global = true};
+                members[unused] = compiler_driver_archive_test_object(arena, compiled_objects[0].target, symbol, 1, 99);
             }
-            else
-#endif
-            {
-                // Nine members force the existing indexed state, with only
-                // the named provider eligible. The eight extras must stay out.
-                ObjectFile members[9] = {0};
-                members[0] = compiled_objects[member_indices[index]];
-                for (u32 unused = 1; unused < BUSTER_ARRAY_LENGTH(members); unused += 1)
-                {
-                    ObjectSymbol* symbol = arena_allocate(arena, ObjectSymbol, 1);
-                    *symbol = (ObjectSymbol){.name = string_format(arena, S8("library_unused_{u32}_{u32}"), index, unused),
-                        .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .size = 1, .global = true};
-                    members[unused] = compiler_driver_archive_test_object(arena, compiled_objects[0].target, symbol, 1, 99);
-                }
-                ByteSlice bytes = compiler_driver_archive_test_bytes(arena, members, BUSTER_ARRAY_LENGTH(members), 1);
-                prepared = file_write(archive, bytes);
-            }
+            ByteSlice bytes = compiler_driver_archive_test_bytes(arena, members, BUSTER_ARRAY_LENGTH(members), 1);
+            prepared = file_write(archive, bytes);
             BUSTER_TEST(arguments, prepared);
         }
         if (prepared)

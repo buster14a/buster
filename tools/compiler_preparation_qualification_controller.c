@@ -23,6 +23,7 @@ struct CompilerPreparationControllerResolved
     CompilerPreparationControllerTransport transport;
     CompilerPreparationAdmission admitted;
     CompilerSamplingControllerHost host;
+    CompilerExperimentJobClock job_clock;
     String8 workspace, driver, lab, python, protocol, claim, claim_record;
     bool valid;
 };
@@ -116,13 +117,14 @@ BUSTER_GLOBAL_LOCAL String8 compiler_preparation_controller_claim_record(Arena* 
            "request_head\t{S8}\npolicy_trusted_revision\t{S8}\nmeasurement_trusted_revision\t{S8}\n"
            "source_root\t{S8}\noutput_root\t{S8}\nevidence\t{S8}\ndriver\t{S8}\n"
            "request_sha256\t{S8}\nplan_transport_sha256\t{S8}\nallowlist_sha256\t{S8}\nfacts_sha256\t{S8}\nhistory_sha256\t{S8}\n"
-           "reservation_seconds\t5400\nworker_seconds\t5280\ntail_seconds\t120\nstate\tclaimed\n"),
+           "physical_job_clock_sha256\t{S8}\nreservation_seconds\t5400\nworker_seconds\t5280\ntail_seconds\t120\nstate\tclaimed\n"),
         admitted.freeze_revision, admitted.freeze_sha256,
         compiler_sampling_controller_fact(facts, S8("request_run_id")),
         compiler_sampling_controller_fact(facts, S8("executor_run_id")),
         compiler_sampling_controller_fact(facts, S8("request_head")), admitted.policy_trusted_revision, admitted.trusted_revision,
         admitted.plan.source_root, admitted.plan.output_root, resolved.options.evidence, resolved.driver,
-        hashes[0], hashes[1], hashes[2], hashes[3], hashes[4]);
+        hashes[0], hashes[1], hashes[2], hashes[3], hashes[4],
+        stage_object_sha256_bytes(arena, (u8*)resolved.job_clock.record.pointer, resolved.job_clock.record.length));
     return result;
 }
 
@@ -212,7 +214,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_resolve(Arena* arena,
         resolved.transport.bytes[4], resolved.transport.bytes[1], cleanup, workspace);
     bool valid = options.valid && resolved.transport.valid && resolved.admitted.valid &&
         compiler_preparation_controller_attempt(arena, resolved.transport, resolved.admitted) &&
-        compiler_preparation_controller_paths(arena, options, resolved.admitted.plan, &resolved);
+        compiler_preparation_controller_paths(arena, options, resolved.admitted.plan, &resolved) &&
+        compiler_experiment_job_clock_resolve(arena, S8("preparation"), resolved.admitted.policy_trusted_revision, &resolved.job_clock) &&
+        compiler_experiment_job_clock_remaining_us(resolved.job_clock, 5400000000ull, 5280000000ull);
     resolved.claim_record = valid ? compiler_preparation_controller_claim_record(arena, resolved) : (String8){0};
     resolved.host = compiler_sampling_controller_observed_host(arena);
     valid = valid && resolved.host.valid && compiler_preparation_controller_tools(arena, resolved);
@@ -249,7 +253,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_claim(Arena* arena,
         result = file_write(path_join(arena, resolved.claim, S8("claim.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(resolved.claim_record));
         OsDirectoryCreateResult evidence = result ? os_make_directory_exclusive(resolved.options.evidence) : (OsDirectoryCreateResult){0};
         result = result && evidence.created && !evidence.error.v &&
-            file_write(path_join(arena, resolved.options.evidence, S8("claim.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(resolved.claim_record));
+            file_write(path_join(arena, resolved.options.evidence, S8("claim.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(resolved.claim_record)) &&
+            file_write(path_join(arena, resolved.options.evidence, S8("physical-job-clock.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(resolved.job_clock.record));
         String8 names[] = {S8("request.txt"), S8("plan.tsv"), S8("allowlist.tsv"), S8("facts.tsv"), S8("history.tsv")};
         for (u64 i = 0; result && i < BUSTER_ARRAY_LENGTH(names); i += 1)
             result = file_write(path_join(arena, resolved.options.evidence, names[i]), BUSTER_SLICE_TO_BYTE_SLICE(resolved.transport.bytes[i]));
@@ -464,7 +469,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_worker(Arena* 
         CompilerSamplingController controller = {.arena = arena, .evidence = resolved.options.evidence,
             .started = os_now_microseconds(), .success = resolved.valid};
         controller.plan.source_root = resolved.admitted.plan.source_root;
-        controller.deadline = controller.started + BUSTER_PREPARATION_WORKER_SECONDS * 1000000ull;
+        controller.deadline = controller.started + compiler_experiment_job_clock_remaining_us(resolved.job_clock,
+            BUSTER_PREPARATION_PHYSICAL_SECONDS * 1000000ull, BUSTER_PREPARATION_WORKER_SECONDS * 1000000ull);
         string8_list_push(arena, &controller.phases, S8("stage\tphase\twall_us\texit_status\ttimed_out\tcleanup_failed\tcancelled\tstate\n"));
         CompilerSamplingSignalScope signals = {0};
         bool deferred = compiler_sampling_signals_begin(&signals);
@@ -570,24 +576,28 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_owned(Arena* a
     CompilerSamplingSignalScope signals = {0};
     bool deferred = contained && compiler_sampling_signals_begin(&signals);
     ProcessSpawnResult spawn = {0};
+    bool launch_attempted = false;
     ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
     ProcessGroupControlState control = {.cancellation_signal = &compiler_sampling_cancel_signal,
         .cancellation_escalated = &compiler_sampling_cancel_escalated};
     SliceString8 command = compiler_preparation_controller_owner_arguments(arena, resolved.driver, arguments);
     if (deferred && !compiler_sampling_controller_cancelled())
     {
+        launch_attempted = true;
         spawn = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
             (ProcessSpawnOptions){.use_process_environment = 1, .new_process_group = 1, .observe_resources = 1});
         if (spawn.handle)
         {
             spawn.process_group_control = &control;
-            u64 spent = os_now_microseconds() - started;
-            u64 limit = BUSTER_PREPARATION_WORKER_SECONDS * 1000000ull;
-            wait = os_process_wait_deadline(arena, spawn, spent < limit ? limit - spent : 1);
+            u64 remaining = compiler_experiment_job_clock_remaining_us(resolved.job_clock,
+                BUSTER_PREPARATION_PHYSICAL_SECONDS * 1000000ull, BUSTER_PREPARATION_WORKER_SECONDS * 1000000ull);
+            wait = os_process_wait_deadline(arena, spawn, remaining ? remaining : 1);
         }
     }
-    bool released = !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
-    bool cleanup = contained && released && compiler_experiment_supervisor_end(arena, &supervisor);
+    // A failed spawn left no manager (glibc reaps an exec-failed child); the supervisor still proves no children.
+    bool released = (!launch_attempted || !spawn.handle || wait.result != PROCESS_RESULT_UNKNOWN) &&
+        !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
+    bool cleanup = contained && compiler_experiment_supervisor_end_known(arena, &supervisor, released);
     bool cancelled = compiler_sampling_controller_cancelled();
     bool complete = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.platform_status && !wait.timed_out &&
         cleanup && !cancelled && !supervisor.signalled && !supervisor.reaped;
@@ -595,7 +605,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_owned(Arena* a
     complete = complete && restored;
     u64 publication_started = os_now_microseconds();
     u64 wall = publication_started - started;
-    bool within = wall <= BUSTER_PREPARATION_PHYSICAL_SECONDS * 1000000ull;
+    bool within = compiler_experiment_job_clock_remaining_us(resolved.job_clock,
+        BUSTER_PREPARATION_PHYSICAL_SECONDS * 1000000ull, BUSTER_PREPARATION_PHYSICAL_SECONDS * 1000000ull) != 0;
     String8 owner = string_format(arena,
         S8("schema\tbuster-compiler-preparation-owner-v1\nphase\tqualify\npacket\t0\nplan_sha256\t{S8}\n"
            "physical_packet_wall_us\t{u64}\nwall_scope\tentry-through-child-cleanup-before-terminal-publication\n"
@@ -613,14 +624,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_owned(Arena* a
            "scope\tentry-through-owner-publication\ninitial_scope_us\t{u64}\npublication_us\t{u64}\n"
            "observed_wall_us\t{u64}\nobservation_publication_us\tunavailable\nwithin_reservation\t{S8}\n"),
         stage_object_sha256_bytes(arena, (u8*)owner.pointer, owner.length), wall, observed_wall - wall, observed_wall,
-        observed_wall <= BUSTER_PREPARATION_PHYSICAL_SECONDS * 1000000ull ? S8("true") : S8("false"));
+        compiler_experiment_job_clock_remaining_us(resolved.job_clock, BUSTER_PREPARATION_PHYSICAL_SECONDS * 1000000ull,
+            BUSTER_PREPARATION_PHYSICAL_SECONDS * 1000000ull) ? S8("true") : S8("false"));
     bool publication_recorded = recorded &&
         file_write(path_join(arena, resolved.options.evidence, S8("owner-publication.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(publication)) &&
         file_write(path_join(arena, resolved.claim, S8("owner-publication.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(publication));
     // No successful return may exclude either receipt's publication from the
     // actual hard clock guard. The last observation receipt cannot self-time;
     // its tail remains explicitly unavailable, never an invented zero.
-    bool within_after_publication = os_now_microseconds() - started <= BUSTER_PREPARATION_PHYSICAL_SECONDS * 1000000ull;
+    bool within_after_publication = compiler_experiment_job_clock_remaining_us(resolved.job_clock,
+        BUSTER_PREPARATION_PHYSICAL_SECONDS * 1000000ull, BUSTER_PREPARATION_PHYSICAL_SECONDS * 1000000ull) != 0;
     if (claimed && !within_after_publication)
     {
         String8 failed = string_format(arena,
@@ -672,6 +685,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_worker_once_fixture(Are
         _exit(sent ? 0 : 7);
     }
     bool parent_won = false;
+    bool direct_child_quiet = child < 0;
     u8 ready = 0, child_won = 2;
     if (child > 1)
     {
@@ -684,6 +698,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_worker_once_fixture(Are
         parent_won = released && compiler_preparation_controller_claim_worker(arena, raced);
         bool got = released && poll(&event, 1, 5000) > 0 && read(report[0], &child_won, 1) == 1 && child_won <= 1;
         bool reaped = compiler_experiment_supervisor_fixture_reap(child, os_now_microseconds() + 5000000ull);
+        direct_child_quiet = reaped;
         result = result && got && reaped && ((parent_won ? 1u : 0u) + child_won == 1) &&
             !compiler_preparation_controller_claim_worker(arena, raced) &&
             string_equal(compiler_sampling_controller_read(arena,
@@ -695,7 +710,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_worker_once_fixture(Are
         if (report[i] >= 0) close(report[i]);
         if (release[i] >= 0) close(release[i]);
     }
-    bool quiet = began && compiler_experiment_supervisor_end(arena, &supervisor) &&
+    bool quiet = began && compiler_experiment_supervisor_end_known(arena, &supervisor, direct_child_quiet) &&
         !supervisor.signalled && !supervisor.reaped;
     return result && quiet;
 }
