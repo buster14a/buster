@@ -8173,19 +8173,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_scalar_local_locat
                 {
                     String8 description = string_format(temporary.arena, S8("{S8} {S8}.{S8}"), label, test_case->function,
                                                         test_case->locals[local]);
-                    if (string_equal(test_case->function, S8("branch_only")))
-                    {
-                        // The first complete stores are path-local, so this
-                        // bounded seed policy deliberately leaves the value
-                        // unavailable instead of exposing its entry stack bytes.
-                        BUSTER_TEST_RAW(arguments, !compiler_driver_test_debug_local_location(&built.object, test_case->function,
-                            test_case->locals[local], symbol->value, symbol->value + symbol->size, 0), description);
-                        continue;
-                    }
                     BUSTER_TEST_RAW(arguments, compiler_driver_test_debug_local_location(&built.object, test_case->function,
                                                                                          test_case->locals[local], symbol->value,
                                                                                          symbol->value + symbol->size, 0), description);
-                    if (string_equal(test_case->function, S8("deferred")) && string_equal(test_case->locals[local], S8("late")))
+                    // Both first writes sit after the entry block (#2717); the
+                    // location must start after them, not at function entry.
+                    if ((string_equal(test_case->function, S8("deferred")) && string_equal(test_case->locals[local], S8("late"))) ||
+                        string_equal(test_case->function, S8("branch_only")))
                     {
                         u64 first_begin = UINT64_MAX;
                         bool has_location = compiler_driver_test_debug_local_location(&built.object, test_case->function,

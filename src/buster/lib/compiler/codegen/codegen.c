@@ -2699,10 +2699,31 @@ BUSTER_GLOBAL_LOCAL bool codegen_debug_locations_reserve(CodegenModule* result, 
     return reserved;
 }
 
+// A range that continues the previous seed of the same local with the same
+// whole (non-piecewise) location extends that seed. Per-block ranges of one
+// frame home are mostly back-to-back, so this keeps them from multiplying
+// DWARF location-list entries and CodeView S_DEFRANGE_* records (#2717).
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_location_extend(CodegenModule* result, IrSymbolId symbol, IrLocalId local, u32 start, u32 end,
+                                                            DebugLocation location)
+{
+    DebugLocationSeed* last = result->debug_location_count ? result->debug_locations + result->debug_location_count - 1u : 0;
+    bool extended = last && last->function_symbol.value == symbol.value && last->local.value == local.value && last->end == start &&
+                    end > start && last->location.kind == location.kind && location.kind != DEBUG_LOCATION_PIECEWISE &&
+                    last->location.reg == location.reg && last->location.frame_offset == location.frame_offset &&
+                    last->location.constant == location.constant && !last->location.piece_count && !location.piece_count;
+    if (extended)
+    {
+        last->end = end;
+    }
+    return extended;
+}
+
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_location_append(CodegenModule* result, CodegenDebugLocationSink* sink, IrSymbolId symbol,
                                                             IrLocalId local, u32 start, u32 end, DebugLocation location)
 {
     bool appended = result && end > start;
+    bool extended = appended && codegen_canonical_location_extend(result, symbol, local, start, end, location);
+    appended = appended && !extended;
     if (appended && result->debug_location_count >= sink->capacity)
     {
         appended = codegen_debug_locations_reserve(result, sink, 1);
@@ -2718,7 +2739,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_location_append(CodegenModule* result
             .location = location,
         };
     }
-    return appended;
+    return appended || extended;
 }
 
 // Block IDs are graph identities, not an execution order. Keep the entry
