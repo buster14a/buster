@@ -55,6 +55,11 @@
   production `ui_core` and an inert renderer, with behavior controls for the box
   table. It is part of `test_all` and `test_units` when tests and libc are
   enabled; see [graphics/UI](../projects/graphics-ui.md).
+- A new compiler pass over every type, member or declaration needs a scaling
+  fixture in addition to its single-item correctness cases. The fixture runs
+  the same item at N and 16N copies and requires counted work to stay constant
+  or linear. Use `c_type_layout_test_scales` for semantic validation passes;
+  see [whole-unit pass scaling](frontend/semantic-validation.md#whole-unit-pass-scaling).
 - C frontend and driver fixtures live under `tests/` and use `.c`, `.h`, native
   object, archive, and shell-script inputs. Keep fixture paths relative to the
   repository root because tests intentionally exercise the real file loader.
@@ -186,6 +191,10 @@
   `tests/retired/github_runner_bridge_test.py.txt`, outside Python discovery,
   with the same dependency-only support identity. It is historical input,
   not executed bridge coverage; see `docs/ci-github-hosted-runners.md`.
+
+### Native investigation source-size comparison
+
+The optional `.github/workflows/native-investigation.yml` report uses the checked-out PR merge revision's first parent only after verifying `HEAD == GITHUB_SHA`, exactly two parents, and the event PR head as parent 2. It never reads `pull_request.base.sha`. Manual dispatch deliberately compares its exact selected revision with itself; that is a same-revision zero-delta report, not a branch-delta gate. `CurrentWorkflowPolicyTests` in `tools/ci_workflow_tools_test.py` executes the selector on a synthetic merge with an advanced first parent and rejects a changed checkout, a wrong head or parent shape, and unsupported events; `tools/ci_workflow_policy_test.py` loads that class.
 
 - The workflow-tools aggregate regression executes the actual `CI complete`
   shell body for all 633 shard outcomes. Git Bash on Windows has a 120-second
@@ -383,6 +392,41 @@
   native-success cases. The Python lifecycle and caller-clock controls use
   owned handles or finite fixture release markers; they do not claim
   CoreSimulator descendants are contained by a group.
+  Each Bash fixture owner gets a fresh token directory with private
+  release and lifetime FIFOs plus diagnostic completion markers. After all
+  setup helpers have finished, the owner opens its lifetime FIFO read/write
+  before publishing its registry entry and starts no child helpers afterward,
+  so only that owner keeps the writer open. The parent validates the token,
+  private path and FIFO inode, then opens a temporary read/write keeper and a
+  read-only observer and closes the keeper before a bounded timed read. Timeout
+  means the owner is alive; EOF with no bytes proves it exited, including when
+  SIGKILL interrupted its EXIT trap. Main lifecycle cases require exact owner
+  role/token counts and bounded lifetime EOF, without requiring EXIT markers
+  or acknowledgments from owners that may have been killed. Cooperative release
+  controls still require the exact marker and acknowledgment. Their reader case
+  keeps input open, verifies an idle empty-release poll plus a live-owner
+  timeout and no copy or acknowledgment, then requires a fresh line to reach
+  copied output within 0.5 seconds before release and EOF afterward.
+  Owner-validation failures print each registered role, token, marker state
+  and a bounded trace from its private directory. Trace records include Bash
+  version, event, status and elapsed seconds; they never contain console-line
+  contents. Owners use Bash's timed builtin read, and the fake tee copies the
+  line-oriented console fixture without a reader child.
+  The interrupted mock case keeps the verified GNU timeout helper's original
+  15-second outer cap. Its controller directly owns the Bash launcher with a
+  live Python Popen handle and waits up to 10 seconds, within that same absolute
+  cap, for the exact registered reader and producer rows. It sends TERM only to
+  that directly owned launcher child and waits for the launcher's actual status
+  143 under the shared cap. No registry PID or process group is a signal target.
+  The launcher's three-second launch deadline and one-second monitor-command
+  deadline are unchanged. Status 143 still requires the exact owner counts,
+  lifetime EOF/ACK evidence and absence of private stream paths. Direct
+  bridge-shell SIGTERM remains covered by
+  `lifecycle_capture_bridge_test.py`; this fixture exercises the launcher's
+  TERM trap and cleanup.
+  Cleanup shares a three-second lifetime EOF deadline and retains private
+  control state if any owner remains live. A legacy stale-ID control verifies
+  cleanup never treats recorded PID/PGID values as signal authority.
   The ten-minute hosted fixture job runs four independent signing, install,
   attached-monitor and shared-mobile groups concurrently. The attached group
   retains its capture/caller/mock sequence; the shared group retains its asset
@@ -682,6 +726,30 @@ matrix's GCC row is compile-only, so a green row alone does not certify this
 runtime workflow. Run the full registered suite explicitly; unrelated test
 failures remain failures and must not be hidden by this fixture repair.
 
+## External compiler-oracle qualification
+
+The registered function-parameter compatibility and type-specifier fixtures
+qualify the specific external-compiler rows they compare. A CAPABLE result
+requires the exact resolved compiler command and captured environment, a
+complete normal process wait with successful cleanup and capture, a silent
+successful known-valid probe, and the expected executable or object artifact.
+The fixture then runs the subject comparisons; any capable compiler that
+disagrees with Buster remains a failed assertion.
+
+An optional local compiler refusal is reported as NOT_RUN. It is explicit
+non-participation, never a passing assertion. In required CI, the same narrowly
+authenticated refusal is INCOMPLETE and adds a failed assertion, so
+ide test --ci=1 cannot accept that required reference obligation as complete.
+Other outcomes are failures: missing tools, an unauthenticated profile, an
+unhealthy control, altered or additional diagnostics, unexpected stdout or
+artifacts, abnormal exit, timeout, capture loss, or cleanup failure. A refusal
+qualifies only when its compiler/profile witness and known-valid control pass
+and the full normalized stderr, normal exit code, argv, and environment match
+the fixture's exact contract. The probes set LC_ALL=C in a per-child
+environment and disable diagnostic color, carets, and wrapping without changing
+the parent process environment. These dispositions do not weaken Buster's
+semantic or diagnostic assertions.
+
 ## Native differential matrix
 
 `build.c` exposes `test_differential` (implementation: `tools/differential.c`).
@@ -720,11 +788,14 @@ failure bundles. Cross-target compilation is not a behavioral pass.
 ## Executed DWARF lifetimes
 
 `tools/debug_info_lifetime_oracle.py` executes a Linux x86-64 DWARF fixture
-through GDB with Python support. It checks exact source breakpoints, live
-`x`/`y`, three loop/callee transitions, the caller frame, callee lexical scope,
-and a correct-value-to-unavailable transition under FAST and QUALITY. The loop
-index may be explicitly unavailable before its first certified use; the callee
-parameter is required after its use. Arbitrary lookup errors are failures.
+through GDB with Python support. It checks exact source breakpoints and exact
+live `x`/`y` values, three loop/callee transitions, the caller frame, and
+callee lexical scope under FAST and QUALITY. At later loop and caller stops,
+`x` may be explicitly unavailable or retain its correct value after its final
+source-level use; no unavailable `x` sample is required. Any available `x`
+value must be exact, and the callee must not expose `x`. The loop index may be
+explicitly unavailable before its first certified use; the callee parameter is
+required after its use. Arbitrary lookup errors are failures.
 
 On an authorized correctness host, run:
 
@@ -1048,7 +1119,7 @@ Repeated emission must be byte-identical. The consumed module SHA-256 and
 before/after artifact comparisons prove that Node receives the original bytes.
 Normal zero exit, empty stderr and the exact terminal summary are required
 through the existing bounded Node runner. Missing Node is reported as an
-execution skip, not an engine pass. The script is inline; frozen Wasm oracles,
+execution skip, not an engine pass; a Node that cannot load at all is one environment failure (see the cold-start section). The script is inline; frozen Wasm oracles,
 startup shims and support inventory stay untouched.
 
 ## Node-backed Wasm oracle deadlines
@@ -1090,7 +1161,9 @@ The first Node launch in a job pages the Node executable in from disk; every lat
 - It fails on a timeout, a nonzero exit, any stderr output or a missing marker.
 - Each oracle's deadline then measures a warm start plus the oracle's own work.
 
-This fixture accounts for a cold start the runner was charging to an oracle. It does not relax any oracle's deadline, retry or success rule. A test or module selection that skips the fixture gets the previous behavior.
+This fixture accounts for a cold start the runner was charging to an oracle. It does not relax any oracle's deadline, retry or success rule. A test or module selection that skips the fixture never probes, so every oracle runs as before.
+
+Node is probed once per driver run (#2027). The metamorphic module's `meta_context` resolves Node itself and does not share this verdict, so a broken Node can still cascade there. Every oracle resolves it through `compiler_driver_test_wasm_node_resolve`, which returns an empty path once the cold-start probe has cached an environment-failure verdict. Only the cold-start fixture probes; `compiler_driver_tests` is registered `PARALLEL_NONE`, so the verdict needs no synchronization. If the probe child exits by itself with a failure and its stderr is a dynamic-loader diagnostic (`error while loading shared libraries`, `Library not loaded`), the run prints one `ENVIRONMENT FAILURE` line, records one failed assertion, and every later resolution returns an empty path, so the oracles take their existing "Node is not installed" skip instead of failing about 76 times. A timeout, a missing marker, other stderr or any other nonzero exit is not classified: the probe fails alone and the oracles still run and report real Wasm regressions. `compiler_driver_test_wasm_node_policy` covers the classifier `compiler_driver_test_wasm_node_environment_failure`. To reproduce, put a `node` script that prints the loader message to stderr and exits 127 first on `PATH`.
 
 Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. The integer oracle's startup shim in `tools/` writes `WASM_NODE_READY startup_ms=<timestamp>` synchronously before loading the frozen semantic oracle, and a successful run must contain that first-line marker. The harness logs it with both attempts when applicable. Only a timeout with no observed stdout or stderr before this marker, successful process-tree cleanup, and no capture failure retries once in a fresh Node process. A second failure remains a failure. A hang after readiness, partial output, nonzero exit, launch failure, and a process that prints the terminal marker but remains alive all fail without retry. The latter is reported as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` exercises each boundary with native child controls.
 

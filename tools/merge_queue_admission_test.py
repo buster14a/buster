@@ -561,6 +561,28 @@ class CombinedTreeTests(unittest.TestCase):
             with self.assertRaisesRegex(gate.AdmissionError, "changed admission policy"):
                 gate.verify_trusted_policy(report, repo)
 
+    def test_current_native_declaration_predecessor_requires_new_authority(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            gate.git(repo, "init", "-b", "main")
+            gate.git(repo, "config", "user.name", "Queue fixture")
+            gate.git(repo, "config", "user.email", "queue@example.invalid")
+            (repo / "README.md").write_text("base\n")
+            gate.git(repo, "add", ".")
+            gate.git(repo, "commit", "-m", "base")
+            main = gate.git(repo, "rev-parse", "HEAD")
+            (repo / "docs").mkdir()
+            (repo / "docs/current-native-object-census-v1.json").write_text("new rebinding policy\n")
+            gate.git(repo, "add", ".")
+            gate.git(repo, "commit", "-m", "predecessor changes policy")
+            predecessor = gate.git(repo, "rev-parse", "HEAD")
+            report = dict(candidate(), policy_sha=main, base=predecessor,
+                          base_first_parents=[predecessor, main])
+            self.assertFalse(gate.check_current(report, main, report["head"]))
+            self.assertTrue(gate.check_current(report, predecessor, report["head"]))
+            with self.assertRaisesRegex(gate.AdmissionError, "changed admission policy"):
+                gate.verify_trusted_policy(report, repo)
+
 
 class OrchestrationTests(unittest.TestCase):
     def test_speculative_group_does_not_run_retirement_gate_or_collect_ci_early(self):
@@ -1227,6 +1249,88 @@ class ReconcileTests(unittest.TestCase):
             name = (ROOT / ".github/workflows" / filename).read_text().split("\n", 1)[0]
             self.assertIn("      - " + name.removeprefix("name: ") + "\n", text)
 
+
+
+class NoCodeResultsTests(unittest.TestCase):
+    def fixture(self):
+        rows, jobs = results()
+        for run in rows:
+            row = jobs[(run["id"], run["run_attempt"])][0]
+            if row["name"] != "CI complete":
+                row.update(conclusion="skipped", runner_id=0, steps=[])
+            jobs[(run["id"], run["run_attempt"])].append(
+                dict(row, id=row["id"] + 1000, name="No-code plan / Classify no-code changes",
+                     status="completed", conclusion="success", steps=[], runner_id=1))
+        return gate.latest_runs(rows, candidate()), jobs
+
+    def test_no_code_is_not_full_execution_evidence(self):
+        runs, jobs = self.fixture()
+        with self.assertRaises(gate.AdmissionError):
+            gate.check_results(runs, jobs, candidate())
+        evidence, pending = gate.check_results(runs, jobs, dict(candidate(), no_code=True))
+        self.assertFalse(pending)
+        self.assertEqual(sum(row["disposition"] == "not-applicable-no-code" for row in evidence), 4)
+
+    def test_missing_failed_cancelled_planner_or_workload_cannot_admit(self):
+        fixture = dict(candidate(), no_code=True)
+        for conclusion in ("failure", "cancelled", "skipped", None):
+            with self.subTest(planner=conclusion):
+                runs, jobs = self.fixture()
+                next(iter(jobs.values()))[-1]["conclusion"] = conclusion
+                with self.assertRaises(gate.AdmissionError):
+                    gate.check_results(runs, jobs, fixture)
+        runs, jobs = self.fixture()
+        next(iter(jobs.values())).pop()
+        # A missing planner cannot explain an omitted workload.
+        jobs[(2, 1)].pop()
+        with self.assertRaises(gate.AdmissionError):
+            gate.check_results(runs, jobs, fixture)
+        runs, jobs = self.fixture()
+        next(iter(jobs.values()))[0]["conclusion"] = "failure"
+        with self.assertRaises(gate.AdmissionError):
+            gate.check_results(runs, jobs, fixture)
+
+    def test_trusted_rollback_accepts_executed_work_and_never_calls_it_omitted(self):
+        rows, jobs = results()
+        for run in rows:
+            row = jobs[(run["id"], run["run_attempt"])][0]
+            jobs[(run["id"], run["run_attempt"])].append(
+                dict(row, id=row["id"] + 1000, name="No-code plan / Classify no-code changes",
+                     status="completed", conclusion="success", runner_id=1))
+        evidence, pending = gate.check_results(gate.latest_runs(rows, candidate()), jobs,
+                                               dict(candidate(), no_code=True))
+        self.assertFalse(pending)
+        self.assertTrue(all(row["disposition"] == "executed" for row in evidence))
+
+    def test_omitted_workflow_rejects_any_allocated_or_failed_workload(self):
+        for status, conclusion, runner, steps in (
+                ("completed", "failure", 2, []), ("completed", "success", 2, []),
+                ("completed", "skipped", 2, []), ("completed", "skipped", 0, [{"name": "work"}]),
+                ("queued", None, 0, [])):
+            runs, jobs = self.fixture()
+            jobs[(2, 1)].append({"id": 9000, "name": "Unexpected optional work", "status": status,
+                                 "conclusion": conclusion, "runner_id": runner, "steps": steps})
+            with self.subTest(status=status, conclusion=conclusion, runner=runner, steps=steps):
+                with self.assertRaises(gate.AdmissionError):
+                    gate.check_results(runs, jobs, dict(candidate(), no_code=True))
+
+    def test_native_adapter_rejects_stale_and_failed_plans(self):
+        fixture = candidate()
+        arguments = SimpleNamespace(repo_root=ROOT)
+        native = {"schema": "buster-ci-no-code-v1", "base": fixture["base"],
+                  "head": fixture["head"], "tested": fixture["head"], "policy": fixture["policy_sha"],
+                  "profile": "no-code", "no_code": True, "reason": "reviewed-prose-only"}
+        for mutation in ({"head": "c" * 40}, {"policy": "c" * 40},
+                         {"schema": "old"}, {"no_code": "true"}):
+            with self.subTest(mutation=mutation), patch.dict(gate.os.environ, {"BUSTER_CI_NO_CODE_DRIVER": "/trusted/driver"}), \
+                    patch.object(gate.subprocess, "run", return_value=SimpleNamespace(
+                        returncode=0, stdout=json.dumps(dict(native, **mutation)))):
+                with self.assertRaises(gate.AdmissionError):
+                    gate.trusted_no_code(arguments, fixture)
+        with patch.dict(gate.os.environ, {"BUSTER_CI_NO_CODE_DRIVER": "/trusted/driver"}), \
+                patch.object(gate.subprocess, "run", return_value=SimpleNamespace(returncode=1, stdout="")):
+            with self.assertRaises(gate.AdmissionError):
+                gate.trusted_no_code(arguments, fixture)
 
 if __name__ == "__main__":
     unittest.main()

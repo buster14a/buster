@@ -187,6 +187,18 @@ class ClassificationTests(unittest.TestCase):
         ])
         self.assertEqual(support_report.kind, "split-required")
 
+    def test_current_native_declaration_remains_a_separate_reviewed_policy(self):
+        path = "docs/current-native-object-census-v1.json"
+        self.assertEqual(integration.classify_paths([path]).kind, "policy")
+        reader = integration.classify_paths(["tools/native_retirement_contract.py"])
+        self.assertEqual(reader.kind, "bootstrap")
+        with self.assertRaises(integration.IntegrationError):
+            integration.enforce_classification(reader, "bootstrap", False)
+        combined = integration.classify_paths(["tools/native_retirement_contract.py", path])
+        self.assertEqual(combined.kind, "split-required")
+        with self.assertRaisesRegex(integration.IntegrationError, "split"):
+            integration.enforce_classification(combined, "bootstrap", True)
+
     def test_noncanonical_paths_fail_closed(self):
         for path in ("../policy", "/absolute", "a/../b"):
             with self.subTest(path=path), self.assertRaises(integration.IntegrationError):

@@ -253,6 +253,16 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_refusal_record(CompilerDriverRe
     return valid;
 }
 
+// Rewrites the second symbol of one fixed refusal member in place: the
+// "target" global becomes the requested type and section (0x11 is a global
+// OBJECT, 0x12 a global FUNC) and the machine matches the architecture row.
+BUSTER_GLOBAL_LOCAL void compiler_driver_archive_refusal_define_target(u8* payload, u32 arch, u8 information, u16 section)
+{
+    compiler_driver_archive_test_integer(payload + 18, arch ? 183 : 62, 2, false);
+    payload[156] = information;
+    compiler_driver_archive_test_integer(payload + 158, section, 2, false);
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_reserved_symbol_diagnostics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -285,7 +295,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_reserved_symbol_
             String8 compile[] = {S8("-target"), targets[arch], S8("-g0"), S8("-nostdinc"), S8("-c"), source, S8("-o"), root_object};
             CompilerDriverResult prepared = compiler_driver_execute_invocation(arena,
                 compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)));
-            if (BUSTER_REQUIRE(arguments, written && prepared.error == COMPILER_DRIVER_ERROR_NONE))
+            // The second root references the reserved symbol itself, so an
+            // archive can supply it only through a definition.
+            String8 target_source = string_format_z(arena, S8("{S8}/target-root.c"), root);
+            String8 target_root = string_format_z(arena, S8("{S8}/target-root.o"), root);
+            String8 target_program = S8("int target(void); int main(void) { return target(); }\n");
+            bool target_written = file_write(target_source, BUSTER_SLICE_TO_BYTE_SLICE(target_program));
+            BUSTER_TEST(arguments, target_written);
+            String8 target_compile[] = {S8("-target"), targets[arch], S8("-g0"), S8("-nostdinc"), S8("-c"), target_source, S8("-o"), target_root};
+            CompilerDriverResult target_prepared = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(target_compile)));
+            if (BUSTER_REQUIRE(arguments, written && prepared.error == COMPILER_DRIVER_ERROR_NONE && target_written &&
+                                          target_prepared.error == COMPILER_DRIVER_ERROR_NONE))
             {
                 for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
                 {
@@ -323,6 +344,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_reserved_symbol_
                             compiler_driver_archive_test_integer(archive_bytes.pointer + member_payload + 18, arch ? 183 : 62, 2, false);
                             if (member == 1) memcpy(archive_bytes.pointer + member_payload, bytes.pointer, bytes.length);
                         }
+                        // Unindexed candidates see member one's reserved global
+                        // "target" as a definition, so member zero's undefined
+                        // "target" would pull the refused member in for any
+                        // request, as a complete ranlib index would. Blank that
+                        // reference so the "safe" request still leaves the
+                        // invalid member unselected; the cases after this loop
+                        // cover selection through the reserved definition.
+                        if (!indexed) compiler_driver_archive_test_integer(archive_bytes.pointer + first_header + 60 + 152, 0, 4, false);
                         ObjectArchive eager = object_archive_read(arena, archive_bytes, target);
                         BUSTER_TEST(arguments, eager.error == OBJECT_ERROR_UNSUPPORTED_TARGET && eager.failed_member == 1 && eager.object_count == 1);
                         BUSTER_STRING_TEST(arguments, eager.diagnostic, string_format(arena, S8("member member1.o: {S8}"), rows[row].message));
@@ -375,6 +404,63 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_reserved_symbol_
                             }
                         }
                     }
+                    // Without a ranlib index, candidates come from the symbol
+                    // tables alone. A reserved-index global is a definition
+                    // there too: the member that defines the requested symbol
+                    // is selected in archive order and refused with
+                    // attribution, not skipped. Case 0 has the reserved
+                    // definition in the entry member of nine; case 1 puts it
+                    // in member zero ahead of an ordinary definition of the
+                    // same symbol in member one, which must not be picked.
+                    for (u32 order = 0; order < 2; order += 1)
+                    {
+                        u32 count = order ? 2 : 9;
+                        u32 reserved_member = order ? 0 : 1;
+                        ByteSlice raw = compiler_driver_archive_refusal_bytes(arena, 0, 0, count, false);
+                        for (u32 member = 0; member < count; member += 1)
+                        {
+                            u8* payload = raw.pointer + 8 + (u64)member * 692 + 60;
+                            compiler_driver_archive_test_integer(payload + 18, arch ? 183 : 62, 2, false);
+                        }
+                        if (order)
+                        {
+                            compiler_driver_archive_refusal_define_target(raw.pointer + 8 + 60, arch, 0x11, rows[row].section);
+                            compiler_driver_archive_refusal_define_target(raw.pointer + 8 + 692 + 60, arch, 0x12, 1);
+                        }
+                        else memcpy(raw.pointer + 8 + 692 + 60, bytes.pointer, bytes.length);
+                        String8 member_name = string_format(arena, S8("selected member member{u32}.o"), reserved_member);
+                        for (u32 large = 0; large < 2; large += 1)
+                        {
+                            ObjectArchive archive = object_archive_read_link(arena, raw, target);
+                            if (BUSTER_REQUIRE(arguments, archive.error == OBJECT_ERROR_NONE && archive.object_count == count))
+                            {
+                                ObjectSymbol request = {.name = S8("target"), .section = OBJECT_SECTION_UNDEFINED,
+                                    .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+                                ObjectFile selected[10] = {compiler_driver_archive_test_object(arena, target, &request, 1, 0)};
+                                u32 selected_count = 1;
+                                CompilerDriverArchiveState state = {0};
+                                if (large) state.arena = arena_create((ArenaCreation){.flags = {.no_pool = true}});
+                                compiler_driver_archive_extract(arena, &state, &archive, selected, &selected_count);
+                                BUSTER_TEST(arguments, archive.error == OBJECT_ERROR_UNSUPPORTED_TARGET && archive.failed_member == reserved_member &&
+                                    selected_count == 1);
+                                BUSTER_TEST(arguments, string_first_sequence(archive.diagnostic, rows[row].message) != BUSTER_STRING_NO_MATCH &&
+                                    string_first_sequence(archive.diagnostic, member_name) != BUSTER_STRING_NO_MATCH);
+                                if (state.arena) arena_destroy(state.arena, 1);
+                            }
+                        }
+                        String8 input = string_format_z(arena, S8("{S8}/target-input-{u32}.a"), root, order);
+                        BUSTER_TEST(arguments, file_write(input, raw));
+                        String8 output = string_format_z(arena, S8("{S8}/target-refused-{u32}-{u32}-{u32}"), root, arch, row, order);
+                        String8 command[] = {S8("-target"), targets[arch], S8("-g0"), S8("-o"), output, target_root, input};
+                        CompilerDriverResult rejected = compiler_driver_execute_invocation(arena,
+                            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                        BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_OBJECT && rejected.object_error == OBJECT_ERROR_UNSUPPORTED_TARGET &&
+                            !rejected.native_link.executable.length && compiler_driver_archive_refusal_record(&rejected));
+                        BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, input) != BUSTER_STRING_NO_MATCH &&
+                            string_first_sequence(rejected.diagnostic, rows[row].message) != BUSTER_STRING_NO_MATCH &&
+                            string_first_sequence(rejected.diagnostic, string_format(arena, S8("member{u32}.o"), reserved_member)) != BUSTER_STRING_NO_MATCH);
+                        BUSTER_TEST(arguments, !compiler_driver_archive_refusal_exists(output));
+                    }
                     BUSTER_TEST(arguments, !memcmp(bytes.pointer, unchanged.pointer, bytes.length));
                     scratch_end(temporary);
                 }
@@ -416,6 +502,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_aarch64_refusal_
     Arena* arena = arguments->arena;
     Target target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX};
     // Literal ABI names and words are independent of the reader's lookup.
+    // The descriptor rows 562..569 use words outside the AAELF64 sequence
+    // (adrp x1, ldr x0, add x1, blr x0); the exact words are read (#2582).
     struct
     {
         u32 type;
@@ -426,9 +514,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_aarch64_refusal_
         {280, UINT32_C(0x34000000), S8("R_AARCH64_CONDBR19")},
         {560, UINT32_C(0x58000000), S8("R_AARCH64_TLSDESC_LD_PREL19")},
         {561, UINT32_C(0x10000000), S8("R_AARCH64_TLSDESC_ADR_PREL21")},
-        {562, UINT32_C(0x90000000), S8("R_AARCH64_TLSDESC_ADR_PAGE21")},
+        {562, UINT32_C(0x90000001), S8("R_AARCH64_TLSDESC_ADR_PAGE21")},
         {563, UINT32_C(0xf9400000), S8("R_AARCH64_TLSDESC_LD64_LO12")},
-        {564, UINT32_C(0x91000000), S8("R_AARCH64_TLSDESC_ADD_LO12")},
+        {564, UINT32_C(0x91000021), S8("R_AARCH64_TLSDESC_ADD_LO12")},
         {565, UINT32_C(0xd2a00000), S8("R_AARCH64_TLSDESC_OFF_G1")},
         {566, UINT32_C(0xf2800000), S8("R_AARCH64_TLSDESC_OFF_G0_NC")},
         {567, UINT32_C(0xf9400000), S8("R_AARCH64_TLSDESC_LDR")},
@@ -500,6 +588,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_aarch64_refusal_
     } supported[] = {
         {311, UINT32_C(0x90000000), OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21},
         {312, UINT32_C(0xf9400000), OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12},
+        {562, UINT32_C(0x90000000), OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21},
+        {563, UINT32_C(0xf9400001), OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12},
+        {564, UINT32_C(0x91000000), OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12},
+        {569, UINT32_C(0xd63f0020), OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL},
     };
     for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(supported); row += 1)
     {

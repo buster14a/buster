@@ -186,7 +186,10 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         self.assertIn("inputs.cmake_profile", ci)
         self.assertIn("inputs.analyzer_comparison", ci)
         self.assertNotIn("vars.BUSTER_CMAKE_PROFILE", ci)
-        self.assertNotRegex(ci, r"(?m)^\s+(ref|repository):")
+        self.assertNotRegex(ci.split("\n  complete:", 1)[0], r"(?m)^\s+(ref|repository):")
+        completion = ci.split("\n  complete:", 1)[1]
+        self.assertIn("ref: main", completion)
+        self.assertIn("path: no-code-trusted", completion)
         audit = (ROOT / ".github/workflows/self-host-audit.yml").read_text()
         events = re.search(r"(?ms)^on:(.*?)(?=^[A-Za-z_][\w-]*:|\Z)", audit).group(1)
         self.assertEqual(tuple(line.rstrip() for line in events.splitlines()
@@ -195,6 +198,91 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         self.assertIn("github.event_name == 'push' && github.ref == 'refs/heads/main'", audit)
         self.assertIn("ref: ${{ github.sha }}", audit)
         self.assertIn("run-name: Main self-host audit ${{ github.sha }}", audit)
+
+    def test_native_investigation_source_size_base_uses_verified_merge_parent(self):
+        workflow = (ROOT / ".github/workflows/native-investigation.yml").read_text(encoding="utf-8")
+        self.assertNotIn("github.event.pull_request.base.sha", workflow)
+        self.assertIn("SOURCE_SIZE_PR_HEAD_REVISION: ${{ github.event.pull_request.head.sha }}", workflow)
+        self.assertIn('source_size --rev "$GITHUB_SHA" --base "$SOURCE_SIZE_BASE_REVISION"', workflow)
+        self.assertIn("workflow-dispatch-exact-head", workflow)
+
+        marker = "      - name: Resolve the source-size comparison base\n"
+        self.assertEqual(workflow.count(marker), 1)
+        step = workflow.split(marker, 1)[1].split("\n      - name: ", 1)[0]
+        run = re.search(r"(?ms)^        run: \|\n((?:^          .*(?:\n|$))*)", step)
+        self.assertIsNotNone(run, step)
+        script = textwrap.dedent(run.group(1))
+        git_exe = shutil.which("git")
+        bash = shutil.which("bash")
+        if os.name == "nt":
+            # Use Git Bash, not an unrelated WSL shell selected by PATH.
+            bash = next((str(parent / "bin/bash.exe")
+                         for parent in Path(git_exe).resolve().parents
+                         if git_exe and (parent / "bin/bash.exe").is_file()), None) if git_exe else None
+        if not git_exe or not bash:
+            self.skipTest("dynamic workflow selector regression requires Git and Bash; structural checks passed")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+
+            def git(*arguments):
+                result = subprocess.run([git_exe, *arguments], cwd=repository, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return result.stdout.strip()
+
+            git("init", "--quiet")
+            git("config", "user.name", "Native investigation workflow test")
+            git("config", "user.email", "native-investigation@example.invalid")
+
+            def commit(path, contents, message):
+                (repository / path).write_text(contents, encoding="utf-8")
+                git("add", path)
+                git("commit", "--quiet", "-m", message)
+                return git("rev-parse", "HEAD")
+
+            stale_base = commit("stale.txt", "stale\n", "stale event base")
+            actual_base = commit("main.txt", "main\n", "advanced merge base")
+            self.assertNotEqual(stale_base, actual_base)
+            git("checkout", "--quiet", "-b", "pr", stale_base)
+            pr_head = commit("pr.txt", "pr\n", "pull request head")
+            tree = git("rev-parse", f"{actual_base}^{{tree}}")
+            merge = git("commit-tree", tree, "-p", actual_base, "-p", pr_head, "-m", "synthetic PR merge")
+            git("checkout", "--quiet", "--detach", merge)
+
+            def select(event, revision, head):
+                output = repository / "selector-output.txt"
+                output.write_text("", encoding="utf-8")
+                environment = dict(os.environ, GITHUB_SHA=revision, GITHUB_OUTPUT="selector-output.txt",
+                                   SOURCE_SIZE_EVENT=event, SOURCE_SIZE_PR_HEAD_REVISION=head)
+                return subprocess.run([bash, "--noprofile", "--norc", "-c", script], cwd=repository,
+                                      env=environment, capture_output=True, text=True, timeout=30), output
+
+            result, output = select("pull_request", merge, pr_head)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f"mode=pull-request-first-parent\nbase_revision={actual_base}\n",
+                          output.read_text(encoding="utf-8"))
+            self.assertNotIn(stale_base, output.read_text(encoding="utf-8"))
+
+            wrong_parent, output = select("pull_request", merge, actual_base)
+            self.assertNotEqual(wrong_parent.returncode, 0, wrong_parent.stdout + wrong_parent.stderr)
+            self.assertNotIn("base_revision=", output.read_text(encoding="utf-8"))
+            wrong_checkout, output = select("pull_request", stale_base, pr_head)
+            self.assertNotEqual(wrong_checkout.returncode, 0, wrong_checkout.stdout + wrong_checkout.stderr)
+            self.assertNotIn("base_revision=", output.read_text(encoding="utf-8"))
+
+            git("checkout", "--quiet", "--detach", actual_base)
+            non_merge, output = select("pull_request", actual_base, pr_head)
+            self.assertNotEqual(non_merge.returncode, 0, non_merge.stdout + non_merge.stderr)
+            self.assertNotIn("base_revision=", output.read_text(encoding="utf-8"))
+            git("checkout", "--quiet", "--detach", merge)
+            unsupported, output = select("push", merge, "")
+            self.assertNotEqual(unsupported.returncode, 0, unsupported.stdout + unsupported.stderr)
+            self.assertNotIn("base_revision=", output.read_text(encoding="utf-8"))
+
+            dispatch, output = select("workflow_dispatch", merge, "")
+            self.assertEqual(dispatch.returncode, 0, dispatch.stdout + dispatch.stderr)
+            self.assertIn(f"mode=workflow-dispatch-exact-head\nbase_revision={merge}\n",
+                          output.read_text(encoding="utf-8"))
 
     def test_bootstrap_cancellation_is_isolated_by_workflow_and_event(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
@@ -273,7 +361,7 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
                     self.assertIn(report, (root / "summary").read_text())
 
     # The frozen policy keeps its historical byte identity. Retain its full
-    # gate contract here while allowing the complete repeated audit to finish.
+    # gate contract here and pin the measured job budget exactly (#3095).
     def test_bootstrap_keeps_every_native_gate_in_order(self):
         text = (ROOT / ".github/workflows/self-host-audit.yml").read_text()
         command_text = text[:text.index(
@@ -325,7 +413,7 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         self.assertNotIn("needs:", text)
         self.assertIn("name: Linux x86-64 bootstrap evidence", text)
         self.assertIn("runs-on: ubuntu-26.04", text)
-        self.assertRegex(text, r"(?m)^    timeout-minutes: 120$")
+        self.assertRegex(text, r"(?m)^    timeout-minutes: 30$")
         self.assertNotIn("secrets.", text)
         self.assertNotRegex(text, r"(?m)^\s*[^#\n]+: write$")
         artifact = text.split("      - name: Retain stage evidence even on failure", 1)[1]
@@ -339,12 +427,13 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         blocks = dict(re.findall(r"(?ms)^  (\w+):\n(.*?)(?=^  \w+:|\Z)",
                                  text.split("\njobs:\n", 1)[1]))
         desktop = blocks["test"].split("    steps:", 1)[0]
-        self.assertIn("needs: [queue_lint, reuse]", desktop)
+        self.assertIn("needs: [queue_lint, reuse, no_code_plan]", desktop)
         self.assertIn("github.event_name != 'merge_group' || needs.queue_lint.result == 'success'", desktop)
         self.assertNotIn("needs.lint", desktop)
-        self.assertIn("needs: reuse", blocks["native"])
-        for root in ("queue_lint", "reuse"):
-            self.assertNotRegex(blocks[root], r"(?m)^    needs:")
+        self.assertIn("needs: [reuse, no_code_plan]", blocks["native"])
+        self.assertIn("needs: no_code_plan", blocks["queue_lint"])
+        self.assertNotRegex(blocks["reuse"], r"(?m)^    needs:")
+        self.assertNotRegex(blocks["no_code_plan"], r"(?m)^    needs:")
         self.assertIn("github.event_name == 'merge_group'", blocks["queue_lint"])
         self.assertIn("github.event_name != 'merge_group'", blocks["lint"])
         self.assertEqual(blocks["lint"].split("    steps:\n", 1)[1],
@@ -353,26 +442,90 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         self.assertIn("github.event_name == 'merge_group' && needs.queue_lint.result || needs.lint.result", aggregate)
         self.assertIn("github.event_name == 'merge_group' && needs.lint.result || needs.queue_lint.result", aggregate)
 
+    def test_native_suites_are_independent_and_keep_all_three_unix_runners(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text()
+        desktop = text.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
+        native = text.split("\n  native:", 1)[1].split("\n  mobile:", 1)[0]
+        self.assertIn("needs: [reuse, no_code_plan]", native)
+        self.assertNotIn("needs: test", native)
+        self.assertNotIn("test_mode_matrix", desktop)
+        self.assertNotIn("test_differential", desktop.replace("test_differential --self-test", ""))
+        self.assertEqual(desktop.count("test_differential --self-test"), 1)
+        self.assertNotIn("test_all_combinations_ci", native)
+        self.assertIn("fail-fast: false", native)
+        self.assertNotIn("actions/download-artifact", native)
+        self.assertIn("BUSTER_CI_REQUIRED: modes differential", native)
+        entries = re.findall(r"(?m)^          - name: (.+)\n            runner: (.+)$", native)
+        self.assertEqual(entries, list(zip(_frozen_ci.github_ci_time.UNIX_NATIVE, (
+            "ubuntu-26.04", "ubuntu-26.04-arm", "macos-26"))))
+        for suite in ("modes", "differential"):
+            condition = re.search(r"id: " + suite + r"\n        if: (.+)", native).group(1)
+            self.assertIn("!cancelled()", condition)
+            self.assertIn("steps.checkout.outcome == 'success'", condition)
+            self.assertNotIn("steps.modes", condition)
+            self.assertNotIn("steps.combinations", condition)
+        self.assertEqual(native.count('"$driver" generate --cc clang --config Release --linker DEFAULT'), 2)
+        self.assertIn('if [[ ! -f build/CMakeCache.txt ]]; then', native)
+        self.assertIn('"$driver" test_differential --self-test', native)
+        self.assertIn('"$driver" test_differential --ide build/Release/ide '
+                      '--out "$RUNNER_TEMP/buster-ci/differential" --sanitize-oracle', native)
+        self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/program", native)
+        self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/subject.o", native)
+
+
     def test_independent_suites_are_not_guarded_by_prior_test_success(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         condition = re.search(r"id: modes\n        if: (.+)", text).group(1)
         self.assertIn("!cancelled()", condition)
         self.assertNotIn("steps.combinations_", condition)
         mobile = text.split("\n  mobile:", 1)[1].split("\n  complete:", 1)[0]
-        self.assertIn("needs: reuse", mobile)
+        self.assertIn("needs: [reuse, no_code_plan]", mobile)
         self.assertNotIn("needs: test", mobile)
-        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse]", text)
+        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse, no_code_plan]", text)
         self.assertIn("github.run_id", text.split("concurrency:", 1)[1].split("permissions:", 1)[0])
+
+    def test_actual_no_code_completion_requires_classification_and_all_omissions(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        aggregate = text.split("\n  complete:", 1)[1]
+        body = textwrap.dedent(aggregate.split("      - name: Require every shard\n", 1)[1]
+                               .split("        run: |\n", 1)[1])
+        spec = importlib.util.spec_from_file_location("no_code_admission", ROOT / "tools/ci_admission_test.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        bash = module.CIAdmissionTests().workflow_bash()
+        with tempfile.TemporaryDirectory() as temporary:
+            outcomes = ("LINT_RESULT", "INACTIVE_LINT_RESULT", "DESKTOP_RESULT", "NATIVE_RESULT",
+                        "MOBILE_RESULT", "UEFI_RESULT", "ANALYZER_RESULT", "REUSE_RESULT")
+            good = dict(os.environ, NO_CODE="true", NO_CODE_RESULT="success",
+                        NO_CODE_VERIFIED="success", REUSE_REQUESTED="false", REUSE_REVERIFIED="skipped",
+                        GITHUB_STEP_SUMMARY=str(Path(temporary) / "summary"))
+            good.update({name: "skipped" for name in outcomes})
+            def execute(environment):
+                return subprocess.run([bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", body],
+                                      env=environment, capture_output=True, text=True)
+            self.assertEqual(execute(good).returncode, 0)
+            for name in outcomes:
+                for value in ("success", "failure", "cancelled", ""):
+                    with self.subTest(obligation=name, value=value):
+                        self.assertNotEqual(execute(dict(good, **{name: value})).returncode, 0)
+            for name in ("NO_CODE_RESULT", "NO_CODE_VERIFIED"):
+                for value in ("failure", "cancelled", "skipped", ""):
+                    with self.subTest(classification=name, value=value):
+                        self.assertNotEqual(execute(dict(good, **{name: value})).returncode, 0)
+            for value in ("false", "", "TRUE", "unknown"):
+                self.assertNotEqual(execute(dict(good, NO_CODE=value)).returncode, 0)
+            self.assertNotEqual(execute(dict(good, REUSE_REQUESTED="true")).returncode, 0)
+            self.assertIn("no workload execution is claimed", (Path(temporary) / "summary").read_text(encoding="utf-8"))
 
     def test_actual_aggregate_rejects_missing_skipped_cancelled_and_failed_shards(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         aggregate = text.split("\n  complete:", 1)[1]
-        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse]", aggregate)
+        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse, no_code_plan]", aggregate)
         self.assertIn("always()", aggregate)
         # Execute the workflow's real shell body, not a Python copy of its
         # predicate. Exercise all 625 existing shard outcomes with UEFI/analyzer
         # green, then reject unavailable/unsuccessful UEFI and analyzer results.
-        body = aggregate.split("        run: |\n", 1)[1]
+        body = aggregate.split("      - name: Require every shard\n", 1)[1].split("        run: |\n", 1)[1]
         body = textwrap.dedent(body)
         with tempfile.TemporaryDirectory() as temporary:
             gate = Path(temporary) / "aggregate.sh"
@@ -476,6 +629,16 @@ class CurrentActionPinsTests(_frozen_actions.ActionPinsTest):
         self.assertIn("python3 tools/check_action_pins.py", github)
         self.assertIn("python3 -B tools/ci_workflow_policy_test.py", github)
         self.assertNotIn(".forgejo/", github)
+
+    def test_no_code_planner_has_one_exact_same_commit_reference(self):
+        pins = _frozen_actions.PINS
+        allowed = "./.github/workflows/ci-no-code-plan.yml"
+        self.assertEqual(pins.check_text("uses: " + allowed, "case.yml"), [])
+        for value in (allowed + "@main", allowed + "@" + "a" * 40,
+                      "./.github/workflows/../ci-no-code-plan.yml",
+                      "${{ inputs.no_code_workflow }}"):
+            with self.subTest(value=value):
+                self.assertTrue(pins.check_text("uses: " + value, "case.yml"))
 
     def test_buster_ci_uses_native_node24_artifact_action(self):
         github = (ROOT / ".github/workflows/ci.yml").read_text()

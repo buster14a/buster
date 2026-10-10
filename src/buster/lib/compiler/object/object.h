@@ -81,8 +81,9 @@ BUSTER_F_DECL String8 object_section_name_for_kind(ObjectSectionKind kind);
 BUSTER_F_DECL bool object_section_name_is_c_identifier(String8 name);
 BUSTER_F_DECL bool object_section_kind_can_be_named(ObjectSectionKind kind);
 BUSTER_F_DECL u32 object_section_default_alignment(ObjectSectionKind kind);
-// The GNU priority an ELF initializer array section's name spells, or
-// IR_INITIALIZER_PRIORITY_NONE; see the definition for `.preinit_array`.
+// The GNU priority an ELF initializer array section's name spells,
+// IR_INITIALIZER_PRIORITY_PREINIT for exactly `.preinit_array`, or
+// IR_INITIALIZER_PRIORITY_NONE.
 BUSTER_F_DECL u32 object_elf_initializer_section_priority(String8 name, ObjectSectionKind kind);
 bool object_mach_compact_decode(Arena* arena, ByteSlice text, u32 function_offset, u32 function_size, u32 encoding, Target target,
                                                   CodegenFunctionDescriptor* descriptor);
@@ -199,6 +200,26 @@ typedef enum ObjectRelocationKind
     // immediate of an ADR. It joins the ELF page family because the reader,
     // linkers and object_aarch64_elf_page_relocate treat it the same way.
     OBJECT_RELOCATION_AARCH64_ELF_ADR_PREL_LO21,
+    // R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21 (541) and
+    // R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC (542): initial-exec TLS, an ADRP of
+    // the page holding the symbol's thread-pointer-offset GOT slot and the 64-bit
+    // LDR of it. The reader keeps both instructions with zero immediates; a
+    // fixed-address executable relaxes the adjacent pair to MOVZ/MOVK of the
+    // offset (object_aarch64_elf_tls_ie_relax). These are not members of the
+    // ELF page family: nothing may resolve them as an ordinary page pair.
+    OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21,
+    OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12,
+    // R_AARCH64_TLSDESC_ADR_PAGE21 (562), R_AARCH64_TLSDESC_LD64_LO12 (563),
+    // R_AARCH64_TLSDESC_ADD_LO12 (564) and R_AARCH64_TLSDESC_CALL (569): the
+    // general-dynamic descriptor sequence `adrp x0` / `ldr Xt, [x0]` /
+    // `add x0, x0` / `blr Xt`. The reader keeps the words with zero
+    // immediates; a fixed-address executable relaxes the adjacent sequence
+    // to MOVZ/MOVK/NOP/NOP (object_aarch64_elf_tls_desc_relax). No other
+    // consumer resolves a descriptor.
+    OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21,
+    OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12,
+    OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12,
+    OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
@@ -216,6 +237,23 @@ BUSTER_F_DECL bool object_relocation_kind_is_tls(ObjectRelocationKind kind);
 // AArch64 ELF page-address kinds object_aarch64_elf_page_relocate accepts:
 // direct ADRP with ADD or scaled LD/ST, the GOT ADRP/LDR pair, and ADR.
 BUSTER_F_DECL bool object_relocation_kind_is_aarch64_elf_page(ObjectRelocationKind kind);
+// The two AArch64 ELF initial-exec TLS kinds (541/542).
+BUSTER_F_DECL bool object_relocation_kind_is_aarch64_elf_tls_ie(ObjectRelocationKind kind);
+// Rewrite one canonical TLSIE instruction for a fixed-address executable.
+// ADRP becomes `MOVZ Xd, #tprel[31:16], LSL #16` and the same-register
+// `LDR Xt, [Xt]` becomes `MOVK Xt, #tprel[15:0]`. Refused, with *patched
+// untouched, when the word is not exactly that instruction (XZR, a base that
+// differs from the destination, a nonzero offset) or tprel needs over 32 bits.
+BUSTER_F_DECL bool object_aarch64_elf_tls_ie_relax(ObjectRelocationKind kind, u32 word, u64 tprel, u32* patched);
+// The four AArch64 ELF TLS descriptor kinds (562/563/564/569).
+BUSTER_F_DECL bool object_relocation_kind_is_aarch64_elf_tls_desc(ObjectRelocationKind kind);
+// Rewrite one canonical TLSDESC instruction for a fixed-address executable,
+// as GNU ld and lld do: `adrp x0` becomes `MOVZ x0, #tprel[31:16], LSL #16`,
+// `ldr Xt, [x0]` becomes `MOVK x0, #tprel[15:0]`, and `add x0, x0, #0` and
+// `blr Xt` become NOP. Xt is x1..x30; the caller checks the LDR and BLR
+// name the same one. Refused, with *patched untouched, for any other word
+// or a tprel over 32 bits.
+BUSTER_F_DECL bool object_aarch64_elf_tls_desc_relax(ObjectRelocationKind kind, u32 word, u64 tprel, u32* patched);
 
 // Apply the ordinary Windows ARM64 PAGEBASE_REL21/PAGEOFFSET_12A contract to
 // one canonical instruction.  The reader removes COFF's inline addend; the
@@ -372,8 +410,11 @@ struct ObjectFile
     // The GNU `constructor(N)`/`destructor(N)` priority of every entry of
     // OBJECT_SECTION_INIT_ARRAY (index 0) and OBJECT_SECTION_FINI_ARRAY
     // (index 1): one u32 per OBJECT_INITIALIZER_ENTRY_SIZE bytes of that
-    // section, in slot order, ascending because the entries were sorted into
-    // it, with IR_INITIALIZER_PRIORITY_NONE for an attribute that named none.
+    // section, in slot order, ascending by order key because the entries were
+    // sorted into it, with IR_INITIALIZER_PRIORITY_NONE for an attribute that named none
+    // and IR_INITIALIZER_PRIORITY_PREINIT for an ELF `.preinit_array` entry,
+    // which sorts first (IR_INITIALIZER_PRIORITY_ORDER_KEY) and so is not
+    // ascending as a raw number.
     // This is what carries the priority past a model that has one section per
     // kind, in both directions: object_from_canonical_codegen_module records
     // what the attribute named and the ELF and COFF writers split the array

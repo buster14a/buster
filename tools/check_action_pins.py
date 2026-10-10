@@ -8,10 +8,14 @@ Run-script block contents are data and are skipped. The allowlist is updated
 only after source review, together with docs/ci-action-pins.md.
 """
 
+import hashlib
 import pathlib
 import re
 import sys
 
+
+MACHINE_REPORTER_REFERENCE = "buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768"
+MACHINE_REPORTER_BLOBS = {".github/actions/machine-specifications/action.yml":"ca7b8666a9cc5fedc1189fd09cc666863f90571a","tools/machine_specifications.c":"db34702e5adb3ddce3ab9c0dc0d93a4ef21c81ff"}
 
 APPROVED = {
     "buster14a/buster/.github/actions/machine-specifications": {"a36422384d0334a53d4be73bc306b97ccdba4768"},
@@ -25,6 +29,7 @@ APPROVED = {
 # GitHub binds this literal reusable workflow to the caller's own commit.
 # Local composite actions are allowed only by exact path and are scanned below.
 APPROVED_LOCAL_WORKFLOWS = {"./.github/workflows/throughput-real-source.yml"}
+APPROVED_CI_NO_CODE_WORKFLOW = "./.github/workflows/ci-no-code-plan.yml"
 # Keep the pinned apt qualification's frozen local-workflow contract intact.
 APPROVED_COMPILER_THROUGHPUT_WORKFLOW = "./.github/workflows/compiler-throughput.yml"
 APPROVED_LOCAL_ACTIONS = {"./.github/actions/native-artifact-upload"}
@@ -93,7 +98,7 @@ def check_text(text, path):
             value = action.group(1)
             if len(value) >= 2 and value[0] in "'\"" and value[-1] == value[0]:
                 value = value[1:-1]
-            if value not in APPROVED_LOCAL_WORKFLOWS | {APPROVED_COMPILER_THROUGHPUT_WORKFLOW} | APPROVED_LOCAL_ACTIONS:
+            if value not in APPROVED_LOCAL_WORKFLOWS | {APPROVED_COMPILER_THROUGHPUT_WORKFLOW, APPROVED_CI_NO_CODE_WORKFLOW} | APPROVED_LOCAL_ACTIONS:
                 match = re.fullmatch(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)@([0-9a-f]{40})", value)
                 if not match:
                     problem = "uses must contain a GitHub owner/repository action path and full lowercase commit SHA"
@@ -105,6 +110,112 @@ def check_text(text, path):
             errors.append(f"{path}:{number}: {problem}")
         elif not action and BLOCK.fullmatch(line):
             block_indent = indent
+    return errors
+
+
+
+def structure_lines(text):
+    """Existing restricted block YAML contract, excluding script/scalar data."""
+    result = []
+    block_indent = None
+    for raw in text.splitlines():
+        indent = len(raw) - len(raw.lstrip(" "))
+        if block_indent is not None and (not raw.strip() or indent > block_indent):
+            continue
+        block_indent = None
+        line = without_comment(raw)
+        if line.strip():
+            result.append(line)
+            if BLOCK.fullmatch(line):
+                block_indent = indent
+    return result
+
+
+def check_machine_reporting(text, path):
+    """Every runs-on job starts with the exact reviewed collector, never a name."""
+    errors = []
+    lines = structure_lines(text)
+    if "jobs:" not in lines:
+        return errors
+    jobs = {}
+    current = None
+    for line in lines[lines.index("jobs:") + 1:]:
+        header = re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)
+        if header:
+            current = jobs.setdefault(header.group(1), [])
+        elif line and not line.startswith(" "):
+            current = None
+        elif current is not None:
+            current.append(line)
+    for job, body in jobs.items():
+        prefix = f"{path}: job {job}: "
+        executing = any(line.startswith("    runs-on:") for line in body)
+        runnerless = any(line.startswith("    uses:") for line in body)
+        if executing == runnerless:
+            errors.append(prefix + "must be one runs-on job or one reusable-workflow caller")
+            continue
+        if runnerless:
+            if any(line.startswith("    steps:") for line in body):
+                errors.append(prefix + "runnerless caller cannot have steps or claim its own machine")
+            continue
+        if "    steps:" not in body:
+            errors.append(prefix + "executing job has no startup reporter")
+            continue
+        parts = []
+        current_step = None
+        for line in body[body.index("    steps:") + 1:]:
+            if line.startswith("      - "):
+                current_step = []
+                parts.append(current_step)
+            if current_step is not None:
+                current_step.append(line)
+        if not parts:
+            errors.append(prefix + "no executing steps")
+            continue
+        first = parts[0]
+        if (first[0] != "      - name: Machine specifications" or
+                "        uses: " + MACHINE_REPORTER_REFERENCE not in first or
+                "          requested-runner: >-" not in first or
+                any(line.startswith(("        if:", "        continue-on-error:", "        run:",
+                                     "          mode:", "        env:")) for line in first)):
+            errors.append(prefix + "first step must unconditionally invoke the reviewed startup reporter")
+        startup_count = 0
+        for index, step in enumerate(parts):
+            reporter = "        uses: " + MACHINE_REPORTER_REFERENCE in step
+            if reporter and not any(line in step for line in ("          mode: source", "          mode: retain")):
+                startup_count += 1
+                if index != 0:
+                    errors.append(prefix + "startup reporting must precede all work")
+            if reporter and any(line.startswith(("        env:", "        continue-on-error:")) for line in step):
+                errors.append(prefix + "reporter cannot override environment or ignore failure")
+            checkout = any(re.fullmatch(r"\s*(?:- )?uses: actions/checkout@[0-9a-f]{40}", line) for line in step)
+            if checkout:
+                following = parts[index + 1] if index + 1 < len(parts) else []
+                condition = [line for line in step if line.startswith("        if:")]
+                following_condition = [line for line in following if line.startswith("        if:")]
+                source_directory = next((line.strip().split(": ", 1)[1]
+                                         for line in step if line.startswith("          path: ")), ".")
+                if ("        uses: " + MACHINE_REPORTER_REFERENCE not in following or
+                        "          mode: source" not in following or
+                        "          source-directory: " + source_directory not in following or
+                        condition != following_condition):
+                    errors.append(prefix + "every checkout needs immediate matching actual-source reporting")
+        if startup_count != 1:
+            errors.append(prefix + "requires exactly one startup report")
+    return errors
+
+
+def check_machine_reporter_implementation(root):
+    errors = []
+    for relative, expected in MACHINE_REPORTER_BLOBS.items():
+        path = root / relative
+        try:
+            raw = path.read_bytes()
+            digest = hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest()
+            if digest != expected:
+                errors.append(f"{relative}: differs from reviewed reporter pin; refresh the immutable pin")
+        except OSError as error:
+            errors.append(f"{relative}: required reporter implementation is unavailable: {error}")
     return errors
 
 
@@ -121,9 +232,12 @@ def main(arguments):
         errors.append("no GitHub workflows found")
     for path in paths:
         try:
-            errors.extend(check_text(path.read_text(encoding="utf-8"), path))
+            text = path.read_text(encoding="utf-8")
+            errors.extend(check_text(text, path))
+            errors.extend(check_machine_reporting(text, path))
         except (OSError, UnicodeError) as error:
             errors.append(f"{path}: {error}")
+    errors.extend(check_machine_reporter_implementation(root))
     for error in errors:
         print(error, file=sys.stderr)
     if not errors:

@@ -1,4 +1,7 @@
 #include <buster/tests/compiler/codeview/codeview_test.h>
+#include <buster/lib/compiler/debug/debug.h>
+#include <buster/lib/compiler/frontend/c/c.h>
+#include <buster/lib/compiler/ir/ir.h>
 #if BUSTER_INCLUDE_TESTS
 
 
@@ -69,6 +72,171 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_global_linkage(UnitTestArgument
     BUSTER_TEST(arguments, valid && subsection == built.symbols.length);
     BUSTER_TEST(arguments, local_count == 1 && public_count == 1);
     BUSTER_TEST(arguments, built.relocation_count == 4);
+    return result;
+}
+
+// Internal-linkage functions are module-local procedures (S_LPROC32); the
+// record layout is otherwise identical, including the type index at +28.
+BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_procedure_linkage(UnitTestArguments* arguments)
+{
+    enum {TEST_LPROC32 = 0x110f, TEST_GPROC32 = 0x1110, TEST_PROCEDURE_NAME = 39, TEST_PROCEDURE_TYPE = 28};
+    UnitTestResult result = {0};
+    String8 path = S8("procedures.c");
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4},
+        {.kind = DEBUG_TYPE_FUNCTION, .return_type = 0},
+    };
+    DebugScope scopes[] = {
+        {.parent = DEBUG_ID_INVALID, .kind = DEBUG_SCOPE_FUNCTION},
+        {.parent = DEBUG_ID_INVALID, .kind = DEBUG_SCOPE_FUNCTION},
+        {.parent = DEBUG_ID_INVALID, .kind = DEBUG_SCOPE_FUNCTION},
+    };
+    DebugFunction model_functions[] = {
+        {.name = S8("hidden"), .symbol = {.value = 1}, .type = 1, .scope = 0, .code_size = 8, .is_internal = true},
+        {.name = S8("api"), .symbol = {.value = 2}, .type = 1, .scope = 1, .code_offset = 8, .code_size = 8},
+        {.name = S8("other_hidden"), .symbol = {.value = 3}, .type = 1, .scope = 2, .code_offset = 16, .code_size = 8, .is_internal = true},
+    };
+    DwarfFunction functions[] = {
+        {.name = S8("hidden"), .code_size = 8, .line = 1},
+        {.name = S8("api"), .code_offset = 8, .code_size = 8, .line = 2},
+        {.name = S8("other_hidden"), .code_offset = 16, .code_size = 8, .line = 3},
+    };
+    DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .functions = model_functions,
+                        .function_count = BUSTER_ARRAY_LENGTH(model_functions), .scopes = scopes, .scope_count = BUSTER_ARRAY_LENGTH(scopes),
+                        .valid = true};
+    CodeviewResult built = codeview_build(arguments->arena, (CodeviewInput){.model = &model, .file_paths = &path, .file_count = 1,
+        .functions = functions, .function_count = BUSTER_ARRAY_LENGTH(functions), .producer = S8("buster"), .machine = CODEVIEW_MACHINE_X64});
+    bool valid = built.valid && built.symbols.length >= 4 && codeview_test_u32(built.symbols.pointer) == CODEVIEW_TEST_SIGNATURE_C13;
+    u32 local_count = 0;
+    u32 public_count = 0;
+    u32 matching_types = 0;
+    u32 first_type = 0;
+    u64 subsection = 4;
+    while (valid && subsection + 8 <= built.symbols.length)
+    {
+        u32 kind = codeview_test_u32(built.symbols.pointer + subsection);
+        u32 length = codeview_test_u32(built.symbols.pointer + subsection + 4);
+        u64 payload = subsection + 8;
+        valid = length <= built.symbols.length - payload;
+        u64 cursor = payload;
+        while (valid && kind == CODEVIEW_TEST_SYMBOLS && cursor + 4 <= payload + length)
+        {
+            u16 record_length = codeview_test_u16(built.symbols.pointer + cursor);
+            u16 record_kind = codeview_test_u16(built.symbols.pointer + cursor + 2);
+            valid = record_length >= 2 && (u64)record_length + 2 <= payload + length - cursor;
+            if (valid && (record_kind == TEST_LPROC32 || record_kind == TEST_GPROC32))
+            {
+                u64 name = cursor + TEST_PROCEDURE_NAME;
+                u64 end = cursor + 2 + record_length;
+                valid = name < end;
+                if (valid)
+                {
+                    u64 name_end = name;
+                    while (name_end < end && built.symbols.pointer[name_end]) name_end += 1;
+                    String8 spelling = {.pointer = (char8*)built.symbols.pointer + name, .length = name_end - name};
+                    bool terminated = name_end < end;
+                    local_count += record_kind == TEST_LPROC32 && terminated &&
+                                   (string_equal(spelling, S8("hidden")) || string_equal(spelling, S8("other_hidden")));
+                    public_count += record_kind == TEST_GPROC32 && terminated && string_equal(spelling, S8("api"));
+                    u32 procedure_type = codeview_test_u32(built.symbols.pointer + cursor + TEST_PROCEDURE_TYPE);
+                    first_type = first_type ? first_type : procedure_type;
+                    matching_types += terminated && procedure_type != 0 && procedure_type == first_type;
+                }
+            }
+            cursor += (u64)record_length + 2;
+        }
+        valid = valid && (kind != CODEVIEW_TEST_SYMBOLS || cursor == payload + length);
+        subsection = payload + ((length + 3) & ~3u);
+    }
+    BUSTER_TEST(arguments, valid && subsection == built.symbols.length);
+    BUSTER_TEST(arguments, local_count == 2 && public_count == 1 && matching_types == 3);
+    return result;
+}
+
+// A function-scope static is an S_LDATA32 inside its procedure scope (between
+// the procedure record and its S_END), not a record of the module-level symbols
+// subsection (#2719).
+BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_function_static_scope(UnitTestArguments* arguments)
+{
+    enum {TEST_LDATA32 = 0x110c, TEST_GPROC32 = 0x1110, TEST_END = 0x0006, TEST_MAX_RECORDS = 16};
+    UnitTestResult result = {0};
+    String8 path = S8("statics.c");
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4},
+        {.kind = DEBUG_TYPE_FUNCTION, .return_type = 0},
+    };
+    DebugScope scopes[] = {
+        {.parent = DEBUG_ID_INVALID, .kind = DEBUG_SCOPE_LEXICAL},
+        {.parent = 0, .kind = DEBUG_SCOPE_FUNCTION},
+    };
+    DebugVariable variables[] = {
+        {.name = S8("table"), .linkage_name = S8("table"), .symbol = {.value = 5}, .type = 0, .kind = DEBUG_VARIABLE_GLOBAL, .is_internal = true},
+        {.name = S8("calls"), .linkage_name = S8(".L.counter.calls.2"), .symbol = {.value = 6}, .type = 0, .kind = DEBUG_VARIABLE_GLOBAL,
+         .is_internal = true, .is_static_local = true},
+    };
+    DebugFunction model_functions[] = {
+        {.name = S8("counter"), .symbol = {.value = 1}, .type = 1, .scope = 1, .code_size = 8, .static_start = 1, .static_count = 1},
+    };
+    DwarfFunction functions[] = {
+        {.name = S8("counter"), .code_size = 8, .line = 1},
+    };
+    DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .variables = variables,
+                        .variable_count = BUSTER_ARRAY_LENGTH(variables), .functions = model_functions,
+                        .function_count = BUSTER_ARRAY_LENGTH(model_functions), .scopes = scopes, .scope_count = BUSTER_ARRAY_LENGTH(scopes),
+                        .root_scope = 0, .valid = true};
+    CodeviewResult built = codeview_build(arguments->arena, (CodeviewInput){.model = &model, .file_paths = &path, .file_count = 1,
+        .functions = functions, .function_count = BUSTER_ARRAY_LENGTH(functions), .producer = S8("buster"), .machine = CODEVIEW_MACHINE_X64});
+    bool valid = built.valid && built.symbols.length >= 4 && codeview_test_u32(built.symbols.pointer) == CODEVIEW_TEST_SIGNATURE_C13;
+    u32 record_subsection[TEST_MAX_RECORDS] = {0};
+    u32 record_kind_at[TEST_MAX_RECORDS] = {0};
+    u32 record_count = 0;
+    u32 subsection_index = 0;
+    u64 subsection = 4;
+    while (valid && subsection + 8 <= built.symbols.length)
+    {
+        u32 kind = codeview_test_u32(built.symbols.pointer + subsection);
+        u32 length = codeview_test_u32(built.symbols.pointer + subsection + 4);
+        u64 payload = subsection + 8;
+        valid = length <= built.symbols.length - payload;
+        u64 cursor = payload;
+        while (valid && kind == CODEVIEW_TEST_SYMBOLS && cursor + 4 <= payload + length)
+        {
+            u16 record_length = codeview_test_u16(built.symbols.pointer + cursor);
+            valid = record_length >= 2 && (u64)record_length + 2 <= payload + length - cursor && record_count < TEST_MAX_RECORDS;
+            if (valid)
+            {
+                record_subsection[record_count] = subsection_index;
+                record_kind_at[record_count] = codeview_test_u16(built.symbols.pointer + cursor + 2);
+                record_count += 1;
+            }
+            cursor += (u64)record_length + 2;
+        }
+        subsection_index += kind == CODEVIEW_TEST_SYMBOLS;
+        subsection = payload + ((length + 3) & ~3u);
+    }
+    BUSTER_TEST(arguments, valid && subsection == built.symbols.length);
+    // The file-scope `table` and the static `calls` are both S_LDATA32; only
+    // `calls` follows the procedure record inside its subsection and scope.
+    u32 data_records = 0;
+    u32 scoped_sequences = 0;
+    u32 procedure_subsection = UINT32_MAX;
+    for (u32 index = 0; index < record_count; index += 1)
+    {
+        data_records += record_kind_at[index] == TEST_LDATA32;
+        bool procedure = record_kind_at[index] == TEST_GPROC32 && index + 2 < record_count;
+        if (procedure)
+        {
+            procedure_subsection = record_subsection[index];
+            scoped_sequences += record_kind_at[index + 1] == TEST_LDATA32 && record_kind_at[index + 2] == TEST_END &&
+                                record_subsection[index + 1] == procedure_subsection && record_subsection[index + 2] == procedure_subsection;
+        }
+    }
+    u32 data_outside_procedure = 0;
+    for (u32 index = 0; index < record_count; index += 1)
+    {
+        data_outside_procedure += record_kind_at[index] == TEST_LDATA32 && record_subsection[index] != procedure_subsection;
+    }
+    BUSTER_TEST(arguments, data_records == 2 && scoped_sequences == 1 && data_outside_procedure == 1);
     return result;
 }
 
@@ -390,6 +558,227 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_object_scope_placeholders(UnitT
     return result;
 }
 
+// One event of the nesting stream of a function's DEBUG_S_SYMBOLS records: a
+// procedure or block opening, a local, or the S_END that closes one.
+typedef struct CodeviewTestScopeEvent CodeviewTestScopeEvent;
+struct CodeviewTestScopeEvent
+{
+    u8 kind;
+    u8 reserved[7];
+    String8 name;
+};
+
+// Lexical blocks reach CodeView as S_BLOCK32 / S_END pairs nested under the
+// procedure, with each S_LOCAL inside the block that declares it (#2241). The
+// expected stream comes from the debug model's parent links, the same tree the
+// DWARF writer consumes, walked with an explicit stack; the actual stream is
+// read back from the record bytes.
+BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_lexical_block_nesting(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum
+    {
+        TEST_S_END = 0x0006,
+        TEST_S_BLOCK32 = 0x1103,
+        TEST_S_GPROC32 = 0x1110,
+        TEST_S_LOCAL = 0x113e,
+        TEST_EVENT_CAPACITY = 64,
+    };
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = S8("volatile int sink;\n"
+                        "int blocks(int n)\n"
+                        "{\n"
+                        "    int out = n;\n"
+                        "    {\n"
+                        "        int a = n + 1;\n"
+                        "        {\n"
+                        "            int deep = a + 2;\n"
+                        "            sink = deep;\n"
+                        "        }\n"
+                        "        sink = a;\n"
+                        "    }\n"
+                        "    {\n"
+                        "        int b = n + 3;\n"
+                        "        sink = b;\n"
+                        "    }\n"
+                        "    return out + sink;\n"
+                        "}\n");
+    CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("blocks.c"), tokens, syntax, target_native, (CIRLowerOptions){0});
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program);
+    if (lowered.program)
+    {
+        IrModule* module = &lowered.program->modules[0];
+        DebugFunctionSeed seed = {.name = S8("blocks"), .symbol = module->functions->symbol, .code_offset = 0x100, .code_size = 0x80};
+        DebugModel model = debug_model_build(temporary.arena, (DebugModelInput){
+                                                                  .program = lowered.program,
+                                                                  .module = module,
+                                                                  .functions = &seed,
+                                                                  .function_count = 1,
+                                                              });
+        BUSTER_TEST(arguments, model.valid && model.function_count == 1);
+        String8 path = S8("blocks.c");
+        DwarfFunction legacy = {.name = S8("blocks"), .code_offset = 0x100, .code_size = 0x80, .file = 0, .line = 2};
+        DwarfLineEntry line = {.code_offset = 0x100, .file = 0, .line = 2, .column = 1};
+        CodeviewResult built = codeview_build(temporary.arena, (CodeviewInput){.model = &model, .producer = S8("buster"), .file_paths = &path,
+            .functions = &legacy, .lines = &line, .file_count = 1, .function_count = 1, .line_count = 1, .machine = CODEVIEW_MACHINE_X64});
+        BUSTER_TEST(arguments, model.valid && built.valid);
+        if (model.valid && built.valid)
+        {
+            // Expected: preorder of the model's function scope. The program has
+            // one child per scope, so the order among siblings does not matter.
+            CodeviewTestScopeEvent* expected = arena_allocate(temporary.arena, CodeviewTestScopeEvent, TEST_EVENT_CAPACITY);
+            u32 expected_count = 0;
+            u32 expected_blocks = 0;
+            u32 expected_depth = 0;
+            u32 expected_maximum_depth = 0;
+            DebugScopeId* stack = arena_allocate(temporary.arena, DebugScopeId, model.scope_count + 1);
+            u32* next_candidate = arena_allocate(temporary.arena, u32, model.scope_count + 1);
+            u32 stack_count = 1;
+            stack[0] = model.functions[0].scope;
+            next_candidate[0] = 0;
+            expected[expected_count++] = (CodeviewTestScopeEvent){.kind = 'P'};
+            for (u32 variable = 0; variable < model.scopes[stack[0]].variable_count; variable += 1)
+            {
+                expected[expected_count++] = (CodeviewTestScopeEvent){
+                    .kind = 'L', .name = model.variables[model.scopes[stack[0]].variables[variable]].name};
+            }
+            while (stack_count && expected_count + 2 < TEST_EVENT_CAPACITY)
+            {
+                DebugScopeId current = stack[stack_count - 1];
+                u32* candidate = next_candidate + (stack_count - 1);
+                while (*candidate < model.scope_count && model.scopes[*candidate].parent != current)
+                {
+                    *candidate += 1;
+                }
+                if (*candidate < model.scope_count)
+                {
+                    DebugScopeId child = *candidate;
+                    *candidate += 1;
+                    expected[expected_count++] = (CodeviewTestScopeEvent){.kind = 'B'};
+                    for (u32 variable = 0; variable < model.scopes[child].variable_count; variable += 1)
+                    {
+                        if (expected_count + 2 < TEST_EVENT_CAPACITY)
+                        {
+                            expected[expected_count++] = (CodeviewTestScopeEvent){
+                                .kind = 'L', .name = model.variables[model.scopes[child].variables[variable]].name};
+                        }
+                    }
+                    stack[stack_count] = child;
+                    next_candidate[stack_count] = 0;
+                    stack_count += 1;
+                    expected_blocks += 1;
+                    expected_depth += 1;
+                    expected_maximum_depth = BUSTER_MAX(expected_maximum_depth, expected_depth);
+                }
+                else
+                {
+                    expected[expected_count++] = (CodeviewTestScopeEvent){.kind = 'E'};
+                    stack_count -= 1;
+                    expected_depth -= stack_count ? 1 : 0;
+                }
+            }
+            BUSTER_TEST(arguments, !stack_count && expected_count < TEST_EVENT_CAPACITY);
+
+            // Actual: walk the records inside the DEBUG_S_SYMBOLS subsections.
+            CodeviewTestScopeEvent actual[TEST_EVENT_CAPACITY] = {0};
+            u32 actual_count = 0;
+            u32 actual_depth = 0;
+            u32 actual_maximum_depth = 0;
+            u32 actual_blocks = 0;
+            u32 closes_without_open = 0;
+            u64 subsection_offset = 4;
+            while (subsection_offset + 8 <= built.symbols.length)
+            {
+                u32 subsection_kind = codeview_test_u32(built.symbols.pointer + subsection_offset);
+                u32 subsection_length = codeview_test_u32(built.symbols.pointer + subsection_offset + 4);
+                u64 payload = subsection_offset + 8;
+                if (!BUSTER_REQUIRE(arguments, subsection_length <= built.symbols.length - payload))
+                {
+                    break;
+                }
+                u64 record_offset = payload;
+                while (subsection_kind == CODEVIEW_TEST_SYMBOLS && record_offset + 4 <= payload + subsection_length)
+                {
+                    u8 const* record = built.symbols.pointer + record_offset;
+                    u16 kind = codeview_test_u16(record + 2);
+                    u32 record_size = (u32)codeview_test_u16(record) + 2;
+                    if (!BUSTER_REQUIRE(arguments, record_size >= 4 && record_offset + record_size <= payload + subsection_length))
+                    {
+                        break;
+                    }
+                    if ((kind == TEST_S_GPROC32 || kind == TEST_S_BLOCK32 || kind == TEST_S_LOCAL || kind == TEST_S_END) &&
+                        actual_count < TEST_EVENT_CAPACITY)
+                    {
+                        CodeviewTestScopeEvent* event = actual + actual_count++;
+                        event->kind = kind == TEST_S_GPROC32 ? 'P' : kind == TEST_S_BLOCK32 ? 'B' : kind == TEST_S_LOCAL ? 'L' : 'E';
+                        if (kind == TEST_S_LOCAL && record_size > 10)
+                        {
+                            // type (4) and flags (2) precede the name.
+                            u32 name_length = 0;
+                            while (10 + name_length < record_size && record[10 + name_length])
+                            {
+                                name_length += 1;
+                            }
+                            event->name = (String8){.pointer = (char8*)record + 10, .length = name_length};
+                        }
+                        if (kind == TEST_S_GPROC32 || kind == TEST_S_BLOCK32)
+                        {
+                            actual_depth += 1;
+                            actual_blocks += kind == TEST_S_BLOCK32;
+                            actual_maximum_depth = BUSTER_MAX(actual_maximum_depth, actual_depth);
+                        }
+                        else if (kind == TEST_S_END)
+                        {
+                            closes_without_open += !actual_depth;
+                            actual_depth -= actual_depth ? 1 : 0;
+                        }
+                    }
+                    record_offset += record_size;
+                }
+                subsection_offset = payload + (((u64)subsection_length + 3) & ~(u64)3);
+            }
+            BUSTER_TEST(arguments, !actual_depth && !closes_without_open);
+            // Two lexical scopes after merging siblings (top-level blocks, and
+            // the block nested in the first): block depth 2 under the procedure.
+            BUSTER_TEST(arguments, expected_blocks == 2 && actual_blocks == expected_blocks);
+            BUSTER_TEST(arguments, actual_maximum_depth == expected_maximum_depth + 1);
+            BUSTER_TEST(arguments, actual_count == expected_count);
+            for (u32 index = 0; index < actual_count && index < expected_count; index += 1)
+            {
+                BUSTER_TEST(arguments, actual[index].kind == expected[index].kind);
+                BUSTER_TEST(arguments, actual[index].kind != 'L' || string_equal(actual[index].name, expected[index].name));
+            }
+            // The innermost declaration sits at the deepest block, below the
+            // block that declares a, and the function's own locals stay at depth 1.
+            u32 depth = 0;
+            u32 deep_depth = 0;
+            u32 a_depth = 0;
+            u32 out_depth = 0;
+            for (u32 index = 0; index < actual_count; index += 1)
+            {
+                depth += actual[index].kind == 'P' || actual[index].kind == 'B';
+                depth -= actual[index].kind == 'E';
+                if (actual[index].kind == 'L')
+                {
+                    deep_depth = string_equal(actual[index].name, S8("deep")) ? depth : deep_depth;
+                    a_depth = string_equal(actual[index].name, S8("a")) ? depth : a_depth;
+                    out_depth = string_equal(actual[index].name, S8("out")) ? depth : out_depth;
+                }
+            }
+            BUSTER_TEST(arguments, out_depth == 1 && a_depth == 2 && deep_depth == 3);
+            if (arguments->show)
+            {
+                arguments->show(arguments, S8("CODEVIEW_LEXICAL_BLOCKS records={u32} blocks={u32} depth={u32}\n"), actual_count, actual_blocks,
+                                actual_maximum_depth);
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // Bit-field members and array sizes against CodeView's published encodings
 // (cvinfo.h; LLVM's CodeViewTypes.def), not against codeview.c's names
 // (#1440): a bit-field member's type is an LF_BITFIELD (0x1205) naming the
@@ -459,6 +848,12 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     UnitTestResult linkage = codeview_test_global_linkage(arguments);
     result.test_count += linkage.test_count;
     result.succeeded_test_count += linkage.succeeded_test_count;
+    UnitTestResult procedures = codeview_test_procedure_linkage(arguments);
+    result.test_count += procedures.test_count;
+    result.succeeded_test_count += procedures.succeeded_test_count;
+    UnitTestResult statics = codeview_test_function_static_scope(arguments);
+    result.test_count += statics.test_count;
+    result.succeeded_test_count += statics.succeeded_test_count;
     UnitTestResult geometry = codeview_test_bit_fields_and_arrays(arguments);
     result.test_count += geometry.test_count;
     result.succeeded_test_count += geometry.succeeded_test_count;
@@ -468,6 +863,9 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     UnitTestResult growth = codeview_test_scope_growth(arguments);
     result.test_count += growth.test_count;
     result.succeeded_test_count += growth.succeeded_test_count;
+    UnitTestResult lexical = codeview_test_lexical_block_nesting(arguments);
+    result.test_count += lexical.test_count;
+    result.succeeded_test_count += lexical.succeeded_test_count;
     String8 files[] = {
         S8_INITIALIZER("main.c"),
         S8_INITIALIZER("helper.h"),

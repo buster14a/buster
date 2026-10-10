@@ -36,6 +36,8 @@ typedef enum CIrVendorOperation
     C_IR_VENDOR_MASK_COPY,
     C_IR_VENDOR_MASK_TEST_ZERO,
     C_IR_VENDOR_SHUFFLE_DWORD,
+    C_IR_VENDOR_SHUFFLE_HALFWORD_HIGH,
+    C_IR_VENDOR_SHUFFLE_HALFWORD_LOW,
     C_IR_VENDOR_SHUFFLE_FLOAT,
     C_IR_VENDOR_BLEND_WORD,
     C_IR_VENDOR_SHIFT_BYTES_LEFT,
@@ -84,6 +86,8 @@ BUSTER_GLOBAL_LOCAL CIrVendorRule const c_ir_vendor_rules[] = {
     {S8_INITIALIZER("__builtin_ia32_kmovq"), {2, 2, 0}, C_IR_VENDOR_MASK_COPY, 1, 0, 0},
     {S8_INITIALIZER("__builtin_ia32_kortestzdi"), {8, 8, 0}, C_IR_VENDOR_MASK_TEST_ZERO, 2, 0, 0},
     {S8_INITIALIZER("__builtin_ia32_pshufd"), {32, 32, 0}, C_IR_VENDOR_SHUFFLE_DWORD, 2, 2, 256},
+    {S8_INITIALIZER("__builtin_ia32_pshufhw"), {64, 64, 0}, C_IR_VENDOR_SHUFFLE_HALFWORD_HIGH, 2, 2, 256},
+    {S8_INITIALIZER("__builtin_ia32_pshuflw"), {64, 64, 0}, C_IR_VENDOR_SHUFFLE_HALFWORD_LOW, 2, 2, 256},
     {S8_INITIALIZER("__builtin_ia32_shufps"), {80, 80, 0}, C_IR_VENDOR_SHUFFLE_FLOAT, 3, 3, 256},
     {S8_INITIALIZER("__builtin_ia32_pblendw128"), {64, 64, 0}, C_IR_VENDOR_BLEND_WORD, 3, 3, 256},
     {S8_INITIALIZER("__builtin_ia32_pslldqi128_byteshift"), {96, 96, 0}, C_IR_VENDOR_SHIFT_BYTES_LEFT, 2, 2, 256},
@@ -659,11 +663,15 @@ BUSTER_C_INTERNAL IrValueId c_ir_vendor_shuffle_bytes(CIntegerIrBuilder* builder
 BUSTER_C_INTERNAL IrValueId c_ir_vendor_fixed_shuffle(CIntegerIrBuilder* builder, IrValueId const* arguments, CIrVendorOperation operation,
                                                      u32 immediate, IrSourceRange source)
 {
+    bool halfword_shuffle = operation == C_IR_VENDOR_SHUFFLE_HALFWORD_HIGH || operation == C_IR_VENDOR_SHUFFLE_HALFWORD_LOW;
+    bool one_vector = operation == C_IR_VENDOR_SHUFFLE_DWORD || halfword_shuffle;
     u32 width = operation == C_IR_VENDOR_SHUFFLE_DWORD || operation == C_IR_VENDOR_SHUFFLE_FLOAT ? 32 :
-                operation == C_IR_VENDOR_BLEND_WORD ? 16 : operation == C_IR_VENDOR_INSERT_128 ? 64 : 8;
-    u32 count = operation == C_IR_VENDOR_ALIGN_BYTE ? 16 : operation == C_IR_VENDOR_BLEND_WORD ? 8 : 4;
+                operation == C_IR_VENDOR_BLEND_WORD || halfword_shuffle ? 16 :
+                operation == C_IR_VENDOR_INSERT_128 ? 64 : 8;
+    u32 count = operation == C_IR_VENDOR_ALIGN_BYTE ? 16 :
+                operation == C_IR_VENDOR_BLEND_WORD || halfword_shuffle ? 8 : 4;
     bool valid = c_ir_vendor_vector_shape(builder, arguments[0], width, count) &&
-                 (operation == C_IR_VENDOR_SHUFFLE_DWORD ||
+                 (one_vector ||
                   c_ir_vendor_vector_shape(builder, arguments[1], width, operation == C_IR_VENDOR_INSERT_128 ? 2 : count));
     IrTypeId output_type = valid ? builder->function->values[arguments[0].value].canonical_type : IR_TYPE_ID_INVALID;
     IrType* vector = ir_type_from_id(&builder->program->types, output_type);
@@ -675,6 +683,19 @@ BUSTER_C_INTERNAL IrValueId c_ir_vendor_fixed_shuffle(CIntegerIrBuilder* builder
         if (operation == C_IR_VENDOR_SHUFFLE_DWORD)
         {
             lanes[lane] = c_ir_vendor_extract(builder, arguments[0], (immediate >> (2 * lane)) & 3, source);
+        }
+        else if (halfword_shuffle)
+        {
+            u32 input_lane = lane;
+            if (operation == C_IR_VENDOR_SHUFFLE_HALFWORD_HIGH && lane >= 4)
+            {
+                input_lane = 4 + ((immediate >> (2 * (lane - 4))) & 3);
+            }
+            else if (operation == C_IR_VENDOR_SHUFFLE_HALFWORD_LOW && lane < 4)
+            {
+                input_lane = (immediate >> (2 * lane)) & 3;
+            }
+            lanes[lane] = c_ir_vendor_extract(builder, arguments[0], input_lane, source);
         }
         else if (operation == C_IR_VENDOR_SHUFFLE_FLOAT)
         {
@@ -862,6 +883,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_builtin(CIntegerIrBuilder* builder,
             break;
         }
         case C_IR_VENDOR_SHUFFLE_DWORD:
+        case C_IR_VENDOR_SHUFFLE_HALFWORD_HIGH:
+        case C_IR_VENDOR_SHUFFLE_HALFWORD_LOW:
         case C_IR_VENDOR_BLEND_WORD:
         case C_IR_VENDOR_ALIGN_BYTE:
         case C_IR_VENDOR_INSERT_128:

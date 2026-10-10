@@ -1,0 +1,11 @@
+schema	buster-main-sampling-admission-v1
+state	disabled
+freeze_revision	-
+freeze_sha256	-
+campaign_parent	-
+parent_freeze_revision	-
+protocol_sha256	-
+history_since	-
+repository	buster14a/buster
+owner_login	davidgmbb
+owner_id	39247043

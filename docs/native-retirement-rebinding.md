@@ -580,3 +580,105 @@ and generated-only candidates remain blocked.
 Install this compatibility bootstrap on main before relying on the exception.
 Landing it advances main, so existing attested heads need fresh trusted
 integration. Do not hand-edit generated artifacts or post replacement statuses.
+
+## Current-native reader bootstrap
+
+The separate `validate-current-shards` command reads diagnostic
+`current-native-v1` evidence. It preserves the frozen `full-census` schema-2
+entry points, four allocator identities, all 78,912 historical rows, the
+same-binary reference rule, archive replay, and performance acceptance.
+A successful current-native reader run always reports
+`acceptance_authorized=false` and `retirement_accepted=false`.
+No declaration file, receipt, producer label, or command-line flag changes
+that result in this bootstrap.
+
+The prospective declaration path
+`docs/current-native-object-census-v1.json` is reserved as reviewed policy.
+It is absent here. Combining its addition with trusted reader implementation
+is a split-required transition. A separately reviewed producer/profile policy
+and trusted writer must establish an acceptance entry point and externally
+authenticate hosted build/run provenance at exact heads before these diagnostics
+can support retirement acceptance. The old performance validator continues
+rejecting this profile; a performance successor requires separate review.
+
+The diagnostic population is 39,456 current-candidate FAST/QUALITY rows,
+19,728 historical reference groups, 411 subjects, twelve targets, two frontend
+lowerings and two PIC choices. Four shards select `group % 4`; current row
+numbers are `group * 2 + mode_index`. Each shard contains its full row map and
+only its selected observations. Source-authenticated controls and exclusions
+remain explicit records: 576 control rows plus 2,544 target-exclusion rows,
+leaving 36,336 executed candidate rows. The unchanged 192-entry frozen gap
+ledger is authenticated before projecting its 128 FAST/QUALITY obligations.
+Those obligations must succeed; they are not failure waivers.
+
+Version-3 `manifest.txt` uses the existing current support/input/dependency/
+environment fields, `profile=current-native-v1`, `rows=39456` and
+`reference_groups=19728`. `rows.tsv` retains `ROW_FIELDS`, with
+`argv_evidence=groups/<group>/<mode>.argv` and canonical sorted subjects.
+The copied support/applicability ledgers and every retained input must equal
+the current trusted validator checkout's bytes; historical approved ledger
+variants cannot stand in for current subjects. The copied policy, snapshot,
+resolved descriptor, materializer receipt and include closure must match that
+checkout's live generated authority.
+Historical compiler source identity is a separate dimension from the current
+input/include closure.
+
+`current-records.json` has schema
+`buster-current-native-observations-v1`, `candidate_records` and
+`reference_records`. Each record binds group/fixture/target/ABI/CPU/features/
+frontend/PIC/recipe/obligations, compiler identity and current closure digest.
+It contains exact SHA-256/byte/path descriptors for argv, a process receipt,
+object, and preprocessing argv/process. Process receipts bind invocation
+identity, compiler, closure and argv digest and retain separate raw stdout/
+stderr descriptors. The reader parses raw TARGET, CODEGEN, CODEGEN_VERIFY and
+candidate zero-record fallback census lines; producer valid flags are not
+accepted. It checks successful process status, zero fallback, copied reference
+count, nonempty relocatable object format/architecture and actual preprocessing
+stdout parity. A failed reference cannot be replaced by Clang object success.
+
+The reference revision is
+`034d33d738f819114f00ff1db671518e9201ff8b`, source tree
+`cfdcd084ba016be0899bd29e42057d3bf4cc0e97`, mode `none`, backend
+`historical-mir-stack-alias`. At that source NONE selects MIR_STACK.
+This is a historical count comparator, with the previous shared-frontend
+count oracle's limitations; it is not an independent direct emitter.
+Reference argv uses the frozen baseline spelling and permits machine fallback,
+but any observed fallback blocks the reader.
+
+Candidate revision/tree and both build-receipt digests are required caller
+inputs, separate from bundle claims:
+
+```sh
+python3 tools/native_retirement_contract.py validate-current-shards \
+  evidence/shard-0 evidence/shard-1 evidence/shard-2 evidence/shard-3 \
+  --candidate-revision <exact-candidate-sha> --candidate-tree <exact-tree-sha> \
+  --candidate-build-receipt-sha256 <trusted-hosted-receipt-sha256> \
+  --reference-build-receipt-sha256 <trusted-hosted-receipt-sha256> \
+  --out current-native-validation.json
+```
+
+`candidate-build.json` and `baseline-build.json` use
+`buster-current-native-hosted-build-v1`, with repository/provider, exact
+revision/tree, clean-source assertion, binary/builder/build-log/source-snapshot
+descriptors, full build argv, workflow revision/path and hosted run ID/attempt.
+Receipt digests bind those bytes to caller selections. This reader checks their
+internal bindings but does not authenticate the GitHub issuer or prove arbitrary
+binary bytes came from the claimed source. Its report explicitly labels
+`provenance_trust=caller-bound-hosted-receipt`; the future trusted writer
+must establish that external trust before acceptance.
+
+Preprocessing is a fixed projection of the exact compile argv: `-c` becomes
+`-E`; verbose, verification/fallback census flags and the object output pair
+are removed. Target/CPU/PIC/frontend/dialect/defines/include order/source remain
+bound. Actual retained stdout bytes must match between historical reference and
+both live modes. Differences in builtins or preprocessing block diagnostics
+until reviewed; the population is never reduced. These separate caller-bound
+preprocessing runs do not attest the object invocation's internal token stream.
+Object header checks establish format/architecture, while target ABI is bound
+through exact argv and compiler provenance.
+
+These diagnostics establish object/count evidence only. Current runtime
+differential validation against independent Clang O0/O2 programs remains a
+separate obligation. No current producer, reviewed profile declaration, generated
+binding, workflow guard/credential or performance policy changes land with
+this bootstrap.

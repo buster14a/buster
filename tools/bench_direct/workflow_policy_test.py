@@ -22,6 +22,7 @@ DIRECT = WORKFLOWS / "9700x-direct-bench.yml"
 DIRECT_REQUEST = WORKFLOWS / "9700x-direct-request.yml"
 COMPILER_REQUEST = WORKFLOWS / "9700x-compiler-request.yml"
 COMPILER_REPORT = WORKFLOWS / "9700x-compiler-report.yml"
+LIFECYCLE = WORKFLOWS / "9700x-lifecycle.yml"
 ACTIONLINT = ROOT / ".github" / "actionlint.yaml"
 BENCHMARKING = ROOT / "docs" / "agents" / "benchmarking.md"
 ADMISSION_GUIDE = ROOT / "benchmarks" / "9700x" / "ADMISSION.md"
@@ -68,7 +69,6 @@ DIRECT_AUTHORIZE_BLOCKS = (
         "        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
         "        with:",
         "          ref: ${{ github.sha }}",
-        "          sparse-checkout: tools/bench_direct",
         "          persist-credentials: false",
     ),
     (
@@ -95,7 +95,7 @@ DIRECT_AUTHORIZER_MARKERS = (
     'COMPARE_REQUEST = "benchmarks/9700x/compiler-compare.request"',
     "delta, problems = request_delta(head, request_commit, compared_parents)",
     "workloads, compare = workloads and fresh_workloads, compare and fresh_compare",
-    'f"request_head={head}\\ncompare={str(compare).lower()}\\nmerge_base={extra[\'merge_base\']}\\n"',
+    'f"request_head={head}\\ncompare={str(compare).lower()}\\nsampling_requested={str(sampling_requested).lower()}\\npreparation_requested={str(preparation_requested).lower()}\\nmerge_base={extra[\'merge_base\']}\\n"',
     '("comparison merge base", isinstance(base_sha, str) and bool(COMMIT.fullmatch(base_sha)) and base_sha != head)',
 )
 DIRECT_RUN_LINES = (
@@ -313,14 +313,14 @@ COMPILER_REQUEST_TRIGGER = (
 # the request bridge hold checks: write and never touch the 9700X.
 START_PULL_BLOCKS = (
     ("    needs: authorize", PULL_RUN_IF, "    runs-on: ubuntu-24.04", "    permissions:", "      actions: read",
-     "      checks: write", "      pull-requests: read", "    timeout-minutes: 25"),
+     "      checks: write", "      pull-requests: read", "    timeout-minutes: 5"),
     TRUSTED_TOOLS_CHECKOUT,
     ("          GH_TOKEN: ${{ github.token }}", "          BQ_MODE: pull"),
     ("        run: python3 -B tools/bench_direct/compiler_github.py start",),
 )
 START_COMPILER_BLOCKS = (
     ("    needs: authorize-compiler", COMPILER_RUN_IF, "    runs-on: ubuntu-24.04", "    permissions:",
-     "      actions: read", "      checks: write", "      contents: read", "    timeout-minutes: 25"),
+     "      actions: read", "      checks: write", "      contents: read", "    timeout-minutes: 5"),
     TRUSTED_TOOLS_CHECKOUT,
     ("          GH_TOKEN: ${{ github.token }}", "          BQ_MODE: main"),
     ("        run: python3 -B tools/bench_direct/compiler_github.py start",),
@@ -359,7 +359,8 @@ COMMENT_BLOCKS = (
 ANNOUNCE_BLOCKS = (
     ("    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && vars.BENCH_COMPILER_ENABLED == 'true' }}",
      "    runs-on: ubuntu-24.04", "    permissions:", "      checks: write", "    timeout-minutes: 3",
-     "    continue-on-error: true"),
+     "    concurrency:", "      group: buster-9700x-check-writer", "      cancel-in-progress: false",
+     "      queue: max", "    continue-on-error: true"),
     TRUSTED_TOOLS_CHECKOUT,
     ("          GH_TOKEN: ${{ github.token }}", "          BQ_REPOSITORY: ${{ github.repository }}",
      "          BQ_HEAD_COMMIT: ${{ github.sha }}", "          BQ_REQUEST_RUN_ID: ${{ github.run_id }}",
@@ -426,6 +427,85 @@ DOCUMENTATION_REQUIREMENTS = {
 }
 
 
+LIFECYCLE_EXPECTED = """name: 9700X terminal lifecycle recovery
+on:
+  workflow_run:
+    workflows: [9700X direct workload benchmark, 9700X compiler benchmark request]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Completed benchmark executor or failed main request run ID
+        required: true
+        type: string
+      run_attempt:
+        description: Exact completed run attempt
+        required: true
+        type: string
+permissions: {}
+concurrency:
+  group: buster-9700x-terminal-${{ github.event.workflow_run.id || inputs.run_id }}-${{ github.event.workflow_run.run_attempt || inputs.run_attempt }}
+  cancel-in-progress: false
+jobs:
+  reconcile:
+    name: Reconcile the exact completed benchmark attempt
+    if: ${{ github.repository == 'buster14a/buster' && ((github.event_name == 'workflow_run' && github.event.workflow_run.head_repository.full_name == github.repository && (github.event.workflow_run.path == '.github/workflows/9700x-direct-bench.yml' || (github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion != 'success'))) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == 'davidgmbb' && github.actor_id == '39247043' && github.triggering_actor == 'davidgmbb')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency:
+      group: buster-9700x-check-writer
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
+      - name: Check out the trusted lifecycle controller
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - name: Compile the trusted native controller
+        run: clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/lifecycle.c -lm -o "$RUNNER_TEMP/9700x-lifecycle"
+      - name: Reconcile terminal checks and record separate Actions costs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LC_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+          LC_ATTEMPT: ${{ github.event.workflow_run.run_attempt || inputs.run_attempt }}
+        shell: bash
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/9700x-lifecycle" recover "$LC_RUN_ID" "$LC_ATTEMPT" | tee "$RUNNER_TEMP/9700x-lifecycle.jsonl"
+      - name: Retain safe machine records
+        if: ${{ always() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}
+      - name: Retain bounded lifecycle observations
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: 9700x-lifecycle-${{ github.event.workflow_run.id || inputs.run_id }}-${{ github.event.workflow_run.run_attempt || inputs.run_attempt }}
+          path: |
+            ${{ runner.temp }}/9700x-lifecycle.jsonl
+            ${{ runner.temp }}/machine-specifications/
+          if-no-files-found: warn
+          retention-days: 90"""
+
+
 def main() -> int:
     errors: list[str] = []
     for path, markers in DOCUMENTATION_REQUIREMENTS.items():
@@ -443,11 +523,22 @@ def main() -> int:
     texts.update({path: path.read_text(encoding="utf-8")
                   for path in (*actions.rglob("*.yml"), *actions.rglob("*.yaml"))})
     check_runner_routes(errors, texts)
+    check_lifecycle(errors, texts.get(LIFECYCLE, ""))
     check_postmerge_diagnostics(errors)
     check_premerge_checks(errors)
     check_direct_workflow(errors)
+    check_sampling_path(errors)
+    check_preparation_path(errors)
     check_compiler_path(errors)
     return report(errors)
+
+
+def check_lifecycle(errors: list[str], workflow: str) -> None:
+    """Only exact completion callbacks or owner/main hosted attempt replay."""
+    active = "\n".join(line for line in workflow.splitlines()
+                       if line.strip() and not line.lstrip().startswith("#"))
+    if active != LIFECYCLE_EXPECTED:
+        errors.append("terminal lifecycle recovery must match the exact reviewed completion/replay hosted workflow")
 
 
 def trigger_block(workflow: str) -> tuple[str, ...]:
@@ -474,14 +565,133 @@ def check_runner_routes(errors: list[str], texts: dict[Path, str]) -> None:
             for marker in ("buster-zen5", "ryzen-9700x", "buster-9700x-service-dispatch", "self-hosted"):
                 if marker in active:
                     errors.append(f"unreviewed benchmark runner route {marker}: {path.name}")
-            if ".github/workflows/9700x-direct-bench.yml" in active:
+            if path != LIFECYCLE and ".github/workflows/9700x-direct-bench.yml" in active:
                 errors.append(f"direct benchmark cannot be called or dispatched indirectly: {path.name}")
         for name in ("9700X direct workload request", "9700X compiler benchmark request"):
-            if path not in (DIRECT, DIRECT_REQUEST, COMPILER_REQUEST) and name in active:
+            if path not in (DIRECT, DIRECT_REQUEST, COMPILER_REQUEST, LIFECYCLE) and name in active:
                 errors.append(f"only the direct workflow may follow the request workflow: {path.name}")
         if "pull_request_target" in active:
             errors.append(f"pull_request_target is forbidden repository-wide: {path.name}")
 
+
+
+def check_sampling_path(errors: list[str], direct: str | None = None) -> None:
+    """Experimental admission precedes physical assignment; no ordinary short route."""
+    direct = DIRECT.read_text(encoding="utf-8") if direct is None else direct
+    jobs = job_blocks(direct)
+    extra = (ATTEMPT_BINDING, REQUEST_BINDING, "github.run_attempt == 1",
+             "github.event.workflow_run.run_attempt == 1", "needs.authorize.outputs.sampling_admitted == 'true'")
+    condition = "    if: ${{ " + " && ".join((*DIRECT_TERMS, *extra)) + " }}"
+    physical_condition = condition[:-3] + " && needs.sampling-queue.result == 'success' }}"
+    publish_condition = condition.replace("${{ ", "${{ always() && ")
+    for name, expected in (("sampling-queue", condition), ("sampling", physical_condition),
+                           ("sampling-publish", publish_condition)):
+        job = jobs.get(name, [])
+        if not job or [line for line in job if line.startswith("    if:")] != [expected]:
+            errors.append(f"{name} lacks exact owner, every-attempt and native frozen admission")
+        if any("workflow_dispatch" in line or "secrets." in line or "environment:" in line for line in job):
+            errors.append(f"{name} contains unreviewed authority")
+    for name, command in (("sampling-queue", "sampling-queue"), ("sampling-publish", "sampling-publish")):
+        job = jobs.get(name, [])
+        if not contains_block(job, ("    concurrency:", "      group: buster-9700x-check-writer",
+                                    "      cancel-in-progress: false", "      queue: max")):
+            errors.append(f"{name} must retain the shared check writer queue")
+        if not contains_block(job, ("    permissions:", "      contents: read", "      actions: read",
+                                    "      pull-requests: read", "      checks: write")):
+            errors.append(f"{name} must keep writes at the hosted check boundary")
+        if "    runs-on: ubuntu-24.04" not in job or any("self-hosted" in line for line in job):
+            errors.append(f"{name} must be hosted only")
+        if f"        run: python3 -B tools/bench_direct/compiler_publish.py {command}" not in job:
+            errors.append(f"{name} must use the existing trusted publisher")
+        if "          ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}" not in job or \
+                "          persist-credentials: false" not in job:
+            errors.append(f"{name} must pin its reviewed consumer implementation")
+    physical = jobs.get("sampling", [])
+    if "    needs: [authorize, sampling-queue]" not in physical or not contains_block(physical, (
+            "    runs-on:", "      group: buster-9700x-service-dispatch",
+            "      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]")):
+        errors.append("sampling physical assignment must follow the hosted queue/admission")
+    if any(marker in line for line in physical for marker in (
+            "GH_TOKEN", "github.token", "permissions:", "sudo", "api.github.com", "curl ", "wget ", "ssh ")):
+        errors.append("sampling physical job carries a token, extra permissions or host mutation")
+    expected_script = [
+        "          set -euo pipefail",
+        "          trusted/build.sh compiler_profile_qualification --execute \\",
+        "            --phase \"$BQ_SAMPLING_PHASE\" --packet \"$BQ_SAMPLING_PACKET\" \\",
+        "            --trusted-root \"$PWD/trusted\" --cleanup-root \"$RUNNER_TEMP\" \\",
+        "            --evidence \"$RUNNER_TEMP/compiler-sampling-evidence\"",
+    ]
+    if run_scripts(physical) != [expected_script]:
+        errors.append("sampling must execute only the bounded native controller")
+    if "    timeout-minutes: ${{ fromJSON(needs.authorize.outputs.sampling_timeout_minutes) }}" not in physical:
+        errors.append("sampling timeout must come from the immutable native reservation")
+    if "          ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}" not in physical:
+        errors.append("sampling measurement implementation is not frozen")
+    for key in ("request", "freeze", "parent_freeze", "acquisition_plan", "allowlist", "facts", "history"):
+        expected = "      BQ_SAMPLING_" + key.upper() + "_DATA: ${{ needs.authorize.outputs.sampling_" + key + "_data }}"
+        if expected not in physical:
+            errors.append(f"sampling lacks bounded authenticated {key} data")
+    if any("compiler_compare.py" in line or "compiler-compare-v1" in line for line in physical):
+        errors.append("sampling cannot silently prepend an ordinary long comparison")
+
+
+def check_preparation_path(errors: list[str], direct: str | None = None) -> None:
+    """Experimental admission precedes physical assignment; no ordinary short route."""
+    direct = DIRECT.read_text(encoding="utf-8") if direct is None else direct
+    jobs = job_blocks(direct)
+    extra = (ATTEMPT_BINDING, REQUEST_BINDING, "github.run_attempt == 1",
+             "github.event.workflow_run.run_attempt == 1", "needs.authorize.outputs.preparation_admitted == 'true'")
+    condition = "    if: ${{ " + " && ".join((*DIRECT_TERMS, *extra)) + " }}"
+    physical_condition = condition[:-3] + " && needs.preparation-queue.result == 'success' }}"
+    publish_condition = condition.replace("${{ ", "${{ always() && ")
+    for name, expected in (("preparation-queue", condition), ("preparation", physical_condition),
+                           ("preparation-publish", publish_condition)):
+        job = jobs.get(name, [])
+        if not job or [line for line in job if line.startswith("    if:")] != [expected]:
+            errors.append(f"{name} lacks exact owner, every-attempt and native frozen admission")
+        if any("workflow_dispatch" in line or "secrets." in line or "environment:" in line for line in job):
+            errors.append(f"{name} contains unreviewed authority")
+    for name, command in (("preparation-queue", "preparation-queue"), ("preparation-publish", "preparation-publish")):
+        job = jobs.get(name, [])
+        if not contains_block(job, ("    concurrency:", "      group: buster-9700x-check-writer",
+                                    "      cancel-in-progress: false", "      queue: max")):
+            errors.append(f"{name} must retain the shared check writer queue")
+        if not contains_block(job, ("    permissions:", "      contents: read", "      actions: read",
+                                    "      pull-requests: read", "      checks: write")):
+            errors.append(f"{name} must keep writes at the hosted check boundary")
+        if "    runs-on: ubuntu-24.04" not in job or any("self-hosted" in line for line in job):
+            errors.append(f"{name} must be hosted only")
+        if f"        run: python3 -B tools/bench_direct/compiler_publish.py {command}" not in job:
+            errors.append(f"{name} must use the existing trusted publisher")
+        if "          ref: ${{ needs.authorize.outputs.preparation_trusted_revision }}" not in job or \
+                "          persist-credentials: false" not in job:
+            errors.append(f"{name} must pin its reviewed consumer implementation")
+    physical = jobs.get("preparation", [])
+    if "    needs: [authorize, preparation-queue]" not in physical or not contains_block(physical, (
+            "    runs-on:", "      group: buster-9700x-service-dispatch",
+            "      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]")):
+        errors.append("preparation physical assignment must follow the hosted queue/admission")
+    if any(marker in line for line in physical for marker in (
+            "GH_TOKEN", "github.token", "permissions:", "sudo", "api.github.com", "curl ", "wget ", "ssh ")):
+        errors.append("preparation physical job carries a token, extra permissions or host mutation")
+    expected_script = [
+        "          set -euo pipefail",
+        "          trusted/build.sh compiler_profile_qualification --execute-preparation \\",
+        "            --trusted-root \"$PWD/trusted\" --cleanup-root \"$RUNNER_TEMP\" \\",
+        "            --evidence \"$RUNNER_TEMP/compiler-preparation-evidence\"",
+    ]
+    if run_scripts(physical) != [expected_script]:
+        errors.append("preparation must execute only the bounded native controller")
+    if "    timeout-minutes: ${{ fromJSON(needs.authorize.outputs.preparation_timeout_minutes) }}" not in physical:
+        errors.append("preparation timeout must come from the immutable native reservation")
+    if "          ref: ${{ needs.authorize.outputs.preparation_trusted_revision }}" not in physical:
+        errors.append("preparation measurement implementation is not frozen")
+    for key in ("request", "plan", "allowlist", "facts", "history"):
+        expected = "      BQ_PREPARATION_" + key.upper() + "_DATA: ${{ needs.authorize.outputs.preparation_" + key + "_data }}"
+        if expected not in physical:
+            errors.append(f"preparation lacks bounded authenticated {key} data")
+    if any("compiler_compare.py" in line or "compiler-compare-v1" in line for line in physical):
+        errors.append("preparation cannot silently prepend an ordinary long comparison")
 
 def check_postmerge_diagnostics(errors: list[str], text: str | None = None) -> None:
     """RAD Debugger tests every triggering main SHA without a pre-merge path."""
@@ -523,10 +733,10 @@ def check_direct_workflow(errors: list[str]) -> None:
             errors.append(f"missing direct workload file: {path.relative_to(ROOT)}")
     if any(not path.is_file() for path in (DIRECT, DIRECT_REQUEST, authorizer, harness)):
         return
-    direct = DIRECT.read_text(encoding="utf-8")
+    direct = remove_reviewed_machine_steps(DIRECT.read_text(encoding="utf-8"))
     lines = direct.splitlines()
     jobs = job_blocks(direct)
-    if list(jobs) != ["authorize", "bench", "compare-pull", "start-pull", "publish-pull", "authorize-compiler",
+    if list(jobs) != ["authorize", "preparation-queue", "preparation", "preparation-publish", "sampling-queue", "sampling", "sampling-publish", "bench", "compare-pull", "start-pull", "publish-pull", "authorize-compiler",
                       "start-compiler", "compare", "publish-compiler", "comment-compiler"]:
         errors.append(f"direct workflow jobs must be authorize, bench, compare-pull, start-pull, publish-pull, "
                       f"authorize-compiler, start-compiler, compare, publish-compiler, comment-compiler: {list(jobs)}")
@@ -536,7 +746,7 @@ def check_direct_workflow(errors: list[str]) -> None:
     if trigger_block("\n".join(lines)) != DIRECT_TRIGGER:
         errors.append("direct workflow trigger must be exactly the reviewed workflow_run block")
     declarations = [line.rstrip() for line in lines if line.lstrip().startswith("permissions:")]
-    if declarations != ["permissions: {}"] + ["    permissions:"] * 7:
+    if declarations != ["permissions: {}"] + ["    permissions:"] * 11:
         errors.append("direct workflow must grant GITHUB_TOKEN permissions only to its hosted authorize, "
                       "start, publish and comment jobs")
 
@@ -545,9 +755,9 @@ def check_direct_workflow(errors: list[str]) -> None:
     for block in DIRECT_AUTHORIZE_BLOCKS:
         if not contains_block(authorize, block):
             errors.append(f"direct authorize job is missing exact block starting: {block[0].strip()}")
-    if len([line for line in authorize if "uses:" in line]) != 1 or \
-            len([line for line in authorize if "run:" in line]) != 1:
-        errors.append("direct authorize job must be one trusted checkout and one authorizer call")
+    if len([line for line in authorize if "uses:" in line]) != 2 or \
+            len([line for line in authorize if "run:" in line]) != 4:
+        errors.append("direct authorize job must contain only reviewed checkouts, the authorizer and native admission bootstrap")
     for marker in ("buster-zen5", "ryzen-9700x", "self-hosted", "workflow_run.head_branch", "path: candidate"):
         if any(marker in line for line in authorize):
             errors.append(f"direct authorize job must not use: {marker}")
@@ -555,7 +765,7 @@ def check_direct_workflow(errors: list[str]) -> None:
     for marker in DIRECT_AUTHORIZER_MARKERS:
         if marker not in source:
             errors.append(f"direct authorizer is missing check: {marker}")
-    if source.count("GITHUB_OUTPUT") != 1 or source.count("stream.write(") != 1:
+    if source.count("GITHUB_OUTPUT") != 1 or source.count("stream.write(") != 2:
         errors.append("direct authorizer must write its outputs once, after every check")
 
     for line in DIRECT_RUN_LINES:
@@ -583,7 +793,7 @@ def check_direct_workflow(errors: list[str]) -> None:
         if marker in direct:
             errors.append(f"direct workflow contains forbidden path: {marker}")
 
-    request = DIRECT_REQUEST.read_text(encoding="utf-8")
+    request = remove_reviewed_machine_steps(DIRECT_REQUEST.read_text(encoding="utf-8"))
     request_lines = request.splitlines()
     if "name: 9700X direct workload request" not in request_lines:
         errors.append("request workflow name must match the direct workflow's trigger")
@@ -605,6 +815,25 @@ def check_direct_workflow(errors: list[str]) -> None:
         errors.append("request workflow must not interpolate an expression inside a run script")
 
 
+def remove_reviewed_machine_steps(text: str) -> str:
+    """The separate startup policy verifies these read-only pinned C steps.
+    Strip only the reviewed literal reference before applying the unchanged
+    workload/checkouts/authority contract; never strip arbitrary uses or runs.
+    """
+    pin = "buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768"
+    pieces = re.split(r"(?=^      - (?:name|uses|id):)", text, flags=re.MULTILINE)
+    result = []
+    for piece in pieces:
+        if ("        uses: " + pin + "\n") in piece:
+            lines = piece.splitlines(keepends=True)
+            end = next((i for i, line in enumerate(lines)
+                        if i and line.strip() and not line.startswith("        ")), len(lines))
+            result.extend(lines[end:])
+        else:
+            result.append(piece)
+    return "".join(result)
+
+
 def check_compiler_path(errors: list[str]) -> None:
     """The landed-main comparison: trusted gate, unprivileged host, hosted publication."""
     authorizer = ROOT / "tools" / "bench_direct" / "authorize_compiler.py"
@@ -615,7 +844,7 @@ def check_compiler_path(errors: list[str]) -> None:
             errors.append(f"missing compiler comparison file: {path.relative_to(ROOT)}")
     if any(not path.is_file() for path in required):
         return
-    jobs = job_blocks(DIRECT.read_text(encoding="utf-8"))
+    jobs = job_blocks(remove_reviewed_machine_steps(DIRECT.read_text(encoding="utf-8")))
     authorize, compare, publish = (jobs.get(name, []) for name in ("authorize-compiler", "compare", "publish-compiler"))
     for name, job, condition in (("authorize-compiler", authorize, COMPILER_AUTHORIZE_IF),
                                  ("compare", compare, COMPILER_RUN_IF), ("publish-compiler", publish, COMPILER_PUBLISH_IF)):
@@ -686,13 +915,13 @@ def check_compiler_path(errors: list[str]) -> None:
             errors.append(f"pull publish job must not use: {marker}")
     check_visibility(errors, jobs)
 
-    request = COMPILER_REQUEST.read_text(encoding="utf-8")
+    request = remove_reviewed_machine_steps(COMPILER_REQUEST.read_text(encoding="utf-8"))
     request_lines = request.splitlines()
     if "name: 9700X compiler benchmark request" not in request_lines:
         errors.append("compiler request workflow name must match the direct workflow's trigger")
     if trigger_block("\n".join(request_lines)) != COMPILER_REQUEST_TRIGGER:
         errors.append("compiler request workflow trigger must be exactly the reviewed push-to-main block")
-    if not contains_block(DIRECT.read_text(encoding="utf-8").splitlines(), DIRECT_CONCURRENCY):
+    if not contains_block(remove_reviewed_machine_steps(DIRECT.read_text(encoding="utf-8")).splitlines(), DIRECT_CONCURRENCY):
         errors.append("direct workflow concurrency must never cancel a main measurement in progress")
     if [line.rstrip() for line in request_lines if line.lstrip().startswith("permissions:")] != \
             ["permissions: {}", "    permissions:"]:
@@ -731,6 +960,27 @@ def check_visibility(errors: list[str], jobs: dict[str, list[str]]) -> None:
                                             if name == "comment-compiler" else ("contents: write",))):
             if any(marker in line for line in job):
                 errors.append(f"{name} job must not use: {marker}")
+    # All hosted check writers share one short-lived retaining queue. This
+    # includes cross-attempt orphan reconciliation, so fresh-read/PATCH cannot
+    # race a newer start job. GitHub bounds queue:max at 100 pending jobs.
+    lock = (
+        "    concurrency:",
+        "      group: buster-9700x-check-writer",
+        "      cancel-in-progress: false",
+        "      queue: max",
+    )
+    for name in ("start-pull", "start-compiler", "publish-pull", "publish-compiler"):
+        if not contains_block(jobs.get(name, []), lock):
+            errors.append(f"{name} must serialize all hosted check writers without pending replacement")
+    request_jobs = job_blocks(COMPILER_REQUEST.read_text(encoding="utf-8"))
+    if not contains_block(request_jobs.get("announce", []), lock):
+        errors.append("request announce must share the hosted check writer retaining queue")
+    recovery_jobs = job_blocks(LIFECYCLE.read_text(encoding="utf-8"))
+    if not contains_block(recovery_jobs.get("reconcile", []), lock):
+        errors.append("terminal recovery must share the hosted check writer retaining queue")
+    writer = (ROOT / "tools" / "bench_direct" / "compiler_github.py").read_text(encoding="utf-8")
+    if any(marker in writer for marker in ("wait_for_host", "START_SECONDS", "POLL_SECONDS")):
+        errors.append("compiler check setup must not poll physical-runner scheduling")
     if [line for line in jobs.get("publish-compiler", []) if line.strip().startswith(("comment:", "head:"))] != \
             ["      comment: ${{ steps.publish.outputs.comment }}", "      head: ${{ steps.publish.outputs.head }}"]:
         errors.append("publish-compiler must expose exactly its comment entry and head outputs")
@@ -741,7 +991,7 @@ def check_visibility(errors: list[str], jobs: dict[str, list[str]]) -> None:
     if not COMPILER_REPORT.is_file():
         errors.append(f"missing report recovery workflow: {COMPILER_REPORT.relative_to(ROOT)}")
         return
-    report_text = COMPILER_REPORT.read_text(encoding="utf-8")
+    report_text = remove_reviewed_machine_steps(COMPILER_REPORT.read_text(encoding="utf-8"))
     lines = report_text.splitlines()
     if trigger_block(report_text) != REPORT_TRIGGER:
         errors.append("report recovery trigger must be exactly the reviewed workflow_dispatch block")

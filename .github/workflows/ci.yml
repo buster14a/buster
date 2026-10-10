@@ -48,17 +48,34 @@ env:
   BUSTER_CI_CONDITIONS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && '1' || '0' }}
 
 jobs:
+  no_code_plan:
+    name: No-code plan
+    if: ${{ github.server_url == 'https://github.com' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    uses: ./.github/workflows/ci-no-code-plan.yml
+
   lint:
-    if: ${{ github.event_name != 'merge_group' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    needs: no_code_plan
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.event_name != 'merge_group' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true') }}
     name: ${{ github.event_name != 'merge_group' && 'Workflow lint' || 'Ordinary lint (inactive)' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         id: checkout
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Retain actual job environment
         if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
         shell: bash
@@ -89,6 +106,7 @@ jobs:
           python3 -B tools/ci_checks_sample_test.py -v
           python3 -B tools/ci_checks_tools_test.py -v
           python3 -B tools/ci_job_environment_test.py -v
+          python3 -B tools/matrix_shard_test.py DraftMacosDeferralTests.test_every_step_after_checkout_skips_in_a_deferred_lane -v
           python3 -B tools/ci_ios_simulator_test.py -v
           python3 tools/ci_artifact_upload_test.py
           python3 tools/compiler_throughput_workflow_test.py
@@ -157,12 +175,19 @@ jobs:
           # Backticks delimit literal Markdown code in the summary.
           # shellcheck disable=SC2016
           printf '## Workflow lint\n\nResult: **%s**\n\nReproduce with the lint command in `.github/workflows/ci.yml`.\n' "$CI_RESULT" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}
       - name: Retain lint log
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: workflow-lint-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/machine-specifications/
             ${{ runner.temp }}/actionlint.log
             ${{ runner.temp }}/selected-go.json
             ${{ runner.temp }}/job-environment.json
@@ -170,19 +195,31 @@ jobs:
           retention-days: 7
 
   queue_lint:
+    needs: no_code_plan
     # Root job: skipped immediately outside the queue, with no lint dependency.
     # Explicit steps are kept equivalent by the policy regression. The pinned
     # actionlint and action-reference scanner do not support list aliases.
-    if: ${{ github.event_name == 'merge_group' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.event_name == 'merge_group' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true') }}
     name: ${{ github.event_name == 'merge_group' && 'Workflow lint' || 'Queue lint preflight (inactive)' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         id: checkout
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Retain actual job environment
         if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
         shell: bash
@@ -213,6 +250,7 @@ jobs:
           python3 -B tools/ci_checks_sample_test.py -v
           python3 -B tools/ci_checks_tools_test.py -v
           python3 -B tools/ci_job_environment_test.py -v
+          python3 -B tools/matrix_shard_test.py DraftMacosDeferralTests.test_every_step_after_checkout_skips_in_a_deferred_lane -v
           python3 -B tools/ci_ios_simulator_test.py -v
           python3 tools/ci_artifact_upload_test.py
           python3 tools/compiler_throughput_workflow_test.py
@@ -281,12 +319,19 @@ jobs:
           # Backticks delimit literal Markdown code in the summary.
           # shellcheck disable=SC2016
           printf '## Workflow lint\n\nResult: **%s**\n\nReproduce with the lint command in `.github/workflows/ci.yml`.\n' "$CI_RESULT" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}
       - name: Retain lint log
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: workflow-lint-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/machine-specifications/
             ${{ runner.temp }}/actionlint.log
             ${{ runner.temp }}/selected-go.json
             ${{ runner.temp }}/job-environment.json
@@ -307,10 +352,21 @@ jobs:
       receipt_digest: ${{ steps.admit.outputs.receipt_digest }}
       receipt: ${{ steps.admit.outputs.receipt }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         id: checkout
         with:
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Retain actual job environment
         if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
         shell: bash
@@ -324,6 +380,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tools/main_ci_reuse.py decide --output "$RUNNER_TEMP/main-ci-reuse.json"
+      - name: Retain machine records in existing evidence
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}
       - name: Retain main CI reuse decision
         id: retain
         if: always()
@@ -333,6 +395,7 @@ jobs:
           label_title: Main CI reuse
           name: main-ci-reuse-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/machine-specifications/
             ${{ runner.temp }}/main-ci-reuse.json
             ${{ runner.temp }}/job-environment.json
           if-no-files-found: error
@@ -341,7 +404,7 @@ jobs:
   test:
     # Ordinary desktop work has no full-lint ancestor. Queue work waits for
     # the event-specific lint preflight; main still waits for exact-SHA reuse.
-    needs: [queue_lint, reuse]
+    needs: [queue_lint, reuse, no_code_plan]
     env:
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
@@ -350,7 +413,7 @@ jobs:
       # captured in the event payload, so delayed and retried jobs use one value.
       # Every non-dispatch event and the default manual run stay uninstrumented.
       BUSTER_CMAKE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.cmake_profile && '1' || '0' }}
-    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name != 'merge_group' || needs.queue_lint.result == 'success') }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name != 'merge_group' || needs.queue_lint.result == 'success')) }}
     # The first attempt of a draft pull-request run defers scarce macOS
     # runners: the lane reports itself as a named Linux no-op. Merge groups,
     # main, tags, ready pull requests and "Re-run all jobs" run it in full.
@@ -407,6 +470,12 @@ jobs:
             clang_arch: aarch64
     runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && 'ubuntu-26.04' || matrix.runner }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && 'ubuntu-26.04' || matrix.runner }}
+          matrix-index: ${{ strategy.job-index }}
       # A macOS lane on a non-macOS runner is deferred; skipping checkout skips
       # every later step. The step fails unless deferral was authorized, and
       # CI complete accepts the no-op only for a first-attempt draft run.
@@ -433,6 +502,13 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Record actual checkout identity
+        if: ${{ !startsWith(matrix.runner, 'macos-') || runner.os == 'macOS' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Resolve exact Zig cache policy
         id: zig_cache_policy
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -816,6 +892,12 @@ jobs:
           set -euo pipefail
           "$BUSTER_CI_PYTHON" tools/ci_sanitize_logs.py --root "$RUNNER_TEMP/buster-ci"
 
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/buster-ci
       - name: Retain desktop logs
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         # The same-commit action uses actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a for both attempts.
@@ -833,10 +915,10 @@ jobs:
   # desktop platforms. Unix additionally reuses that fresh compiler for the
   # native differential corpus; Windows reports the mode gate independently.
   native:
-    needs: reuse
+    needs: [reuse, no_code_plan]
     env:
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
-    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && needs.reuse.outputs.reuse != 'true' }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && needs.reuse.outputs.reuse != 'true') }}
     # Draft pull-request deferral of macOS runners; see the desktop job.
     name: ${{ matrix.name }}${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && ' (deferred for draft PR)' || '' }}
     runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && 'ubuntu-26.04' || matrix.runner }}
@@ -877,6 +959,12 @@ jobs:
             vs_component: Microsoft.VisualStudio.Component.VC.Tools.ARM64
             clang_arch: aarch64
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && 'ubuntu-26.04' || matrix.runner }}
+          matrix-index: ${{ strategy.job-index }}
       - name: Defer macOS runner lane for draft pull request
         if: ${{ startsWith(matrix.runner, 'macos-') && runner.os != 'macOS' }}
         shell: bash
@@ -900,6 +988,19 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Record actual checkout identity
+        if: ${{ !startsWith(matrix.runner, 'macos-') || runner.os == 'macOS' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/buster-ci
       - name: Initialize native observation
         id: native_observation
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -1157,8 +1258,8 @@ jobs:
           retention-days: 7
 
   mobile:
-    needs: reuse
-    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && needs.reuse.outputs.reuse != 'true' }}
+    needs: [reuse, no_code_plan]
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && needs.reuse.outputs.reuse != 'true') }}
     # Draft pull-request deferral of macOS runners; see the desktop job.
     name: ${{ matrix.name }}${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && ' (deferred for draft PR)' || '' }}
     timeout-minutes: 300
@@ -1176,6 +1277,12 @@ jobs:
             arch: aarch64
     runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && 'ubuntu-26.04' || matrix.runner }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && 'ubuntu-26.04' || matrix.runner }}
+          matrix-index: ${{ strategy.job-index }}
       - name: Defer macOS runner lane for draft pull request
         if: ${{ startsWith(matrix.runner, 'macos-') && runner.os != 'macOS' }}
         shell: bash
@@ -1199,6 +1306,13 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Record actual checkout identity
+        if: ${{ !startsWith(matrix.runner, 'macos-') || runner.os == 'macOS' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Install coreutils
         if: ${{ matrix.os == 'ios' && steps.checkout.outcome == 'success' }}
         shell: bash
@@ -1319,6 +1433,12 @@ jobs:
           BUSTER_CI_REPRO: See docs/ci-github-actions.md for the matching mobile SDK and lifecycle commands.
         run: python3 tools/ci_summary.py
 
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/buster-ci
       - name: Retain mobile logs
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         # Loading a local action requires checkout, not successful build/test steps.
@@ -1334,16 +1454,27 @@ jobs:
           retention-days: 7
 
   uefi:
-    needs: reuse
+    needs: [reuse, no_code_plan]
     name: UEFI firmware boot
-    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && needs.reuse.outputs.reuse != 'true' }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && needs.reuse.outputs.reuse != 'true') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         id: checkout
         with:
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Retain actual job environment
         if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
         shell: bash
@@ -1399,6 +1530,12 @@ jobs:
           fi
           build/uefi-driver build --build-directory build/uefi-compiler --config Release -t ide -- -j2
           build/uefi-driver test_uefi build/uefi-compiler/Release/ide build/uefi
+      - name: Retain machine records in existing evidence
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: build/uefi
       - name: Retain firmware execution evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1415,17 +1552,28 @@ jobs:
           retention-days: 14
 
   analyzer:
-    needs: reuse
+    needs: [reuse, no_code_plan]
     name: Clang analyzer shards
-    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         id: checkout
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Retain actual job environment
         if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
         shell: bash
@@ -1509,6 +1657,12 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-analyzer"
           printf 'Full candidate analyzer validation and failure/coverage controls reused from the exact queue execution. Receipt digest: %s\n' "$SOURCE_RECEIPT_DIGEST" | tee "$RUNNER_TEMP/buster-analyzer/reuse.txt" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain machine records in existing evidence
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/buster-analyzer
       - name: Retain analyzer inventory, results and measurements
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1528,15 +1682,27 @@ jobs:
       contents: read
       actions: read
       checks: read
-    needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse]
+    needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse, no_code_plan]
     if: ${{ always() && github.server_url == 'https://github.com' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         id: checkout
         with:
+          fetch-depth: ${{ needs.no_code_plan.outputs.no_code == 'true' && '0' || '1' }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Retain actual job environment
         if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
         shell: bash
@@ -1544,8 +1710,53 @@ jobs:
           BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
           BUSTER_CI_RUNNER: ubuntu-26.04
         run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/job-environment.json"
+      - name: Check out trusted no-code completion policy
+        if: ${{ needs.no_code_plan.outputs.no_code == 'true' }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          path: no-code-trusted
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Record actual checkout identity
+        if: ${{ needs.no_code_plan.outputs.no_code == 'true' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: no-code-trusted
+          source-repository: ${{ github.repository }}
+      - name: Recompute exact no-code completion
+        id: no_code_verified
+        if: ${{ needs.no_code_plan.outputs.no_code == 'true' }}
+        shell: bash
+        env:
+          PLAN_RESULT: ${{ needs.no_code_plan.result }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          TESTED_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          test "$PLAN_RESULT" = success
+          policy=$(git -C no-code-trusted rev-parse HEAD)
+          git fetch --quiet --no-tags origin "$policy"
+          (
+            cd no-code-trusted
+            clang -Isrc -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/no-code-completion"
+          )
+          env -u GITHUB_OUTPUT "$RUNNER_TEMP/no-code-completion" ci_no_code --repo "$GITHUB_WORKSPACE" \
+            --base "$BASE_SHA" --head "$HEAD_SHA" --tested "$TESTED_SHA" \
+            --policy "$policy" --event "$EVENT_NAME" | tee "$RUNNER_TEMP/no-code-completion.json"
+          grep -Fq '"no_code":true' "$RUNNER_TEMP/no-code-completion.json"
+          {
+            echo '### Not applicable — no execution-affecting changes'
+            echo
+            cat "$RUNNER_TEMP/no-code-completion.json"
+            echo
+            echo 'This disposition is not compiler, test, native-retirement, benchmark, or full-result reuse evidence.'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Verify every desktop partition exists
-        if: ${{ needs.reuse.outputs.reuse != 'true' }}
+        if: ${{ needs.no_code_plan.outputs.no_code != 'true' && needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -1559,13 +1770,20 @@ jobs:
           SOURCE_RECEIPT_DIGEST: ${{ needs.reuse.outputs.receipt_digest }}
           SOURCE_RECEIPT: ${{ needs.reuse.outputs.receipt }}
         run: python3 -B tools/main_ci_reuse.py finish --expected-digest "$SOURCE_RECEIPT_DIGEST" --expected-receipt "$SOURCE_RECEIPT" --output "$RUNNER_TEMP/main-ci-reuse-finish.json"
-      - name: Retain desktop partition inventory
+      - name: Retain machine records in existing evidence
         if: ${{ always() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}
+      - name: Retain desktop partition inventory
+        if: ${{ always() && needs.no_code_plan.outputs.no_code != 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-partitions-${{ github.run_id }}-${{ github.run_attempt }}
           # Retain the reuse result on success AND failure; a failed result is not proof.
           path: |
+            ${{ runner.temp }}/machine-specifications/
             ${{ runner.temp }}/desktop-partitions.json
             ${{ runner.temp }}/main-ci-reuse-finish.json
             ${{ runner.temp }}/job-environment.json
@@ -1582,9 +1800,26 @@ jobs:
           MOBILE_RESULT: ${{ needs.mobile.result }}
           UEFI_RESULT: ${{ needs.uefi.result }}
           ANALYZER_RESULT: ${{ needs.analyzer.result }}
+          NO_CODE: ${{ needs.no_code_plan.outputs.no_code }}
+          NO_CODE_RESULT: ${{ needs.no_code_plan.result }}
+          NO_CODE_VERIFIED: ${{ steps.no_code_verified.outcome }}
+          REUSE_RESULT: ${{ needs.reuse.result }}
           REUSE_REQUESTED: ${{ needs.reuse.outputs.reuse }}
           REUSE_REVERIFIED: ${{ steps.reverified.outcome }}
         run: |
+          if [[ "${NO_CODE:-false}" == true ]]; then
+            if [[ "${NO_CODE_RESULT:-}" != success || "${NO_CODE_VERIFIED:-}" != success ||
+                  "$LINT_RESULT" != skipped || "$INACTIVE_LINT_RESULT" != skipped ||
+                  "$DESKTOP_RESULT" != skipped || "$NATIVE_RESULT" != skipped ||
+                  "$MOBILE_RESULT" != skipped || "$UEFI_RESULT" != skipped ||
+                  "$ANALYZER_RESULT" != skipped || "${REUSE_RESULT:-}" != skipped ||
+                  "$REUSE_REQUESTED" == true ]]; then
+              echo '::error::No-code completion requires trusted exact classification and every workload omitted.'
+              exit 1
+            fi
+            echo 'Not applicable — no execution-affecting changes; no workload execution is claimed.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           {
             printf '| Shards | Result |\n| --- | --- |\n| All desktop shards | %s |\n| All two mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT"
             printf '| All five native lanes | %s |\n' "$NATIVE_RESULT"

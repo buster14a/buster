@@ -50,8 +50,18 @@ fixture as well as compiling both architectures.
   Rejected neighbours cover byte-width bit counts, mismatched operand widths,
   and extra operands on `vzeroupper`, with no partial bytes.
   Matching native hosts execute optional instructions only when supported.
+- Selection emits canonical blocks in reverse postorder from the entry
+  (`machine_selection_canonical_layout`), not in IR creation order. The C
+  frontend creates a `for` step and an `if` join before the nested blocks that
+  reach them, and FAST/QUALITY read any jump to a lower block as a loop back
+  edge. Reverse postorder puts every reachable block after its dominators, so
+  only real back edges jump down. A conditional's first target follows its
+  source, and unreachable blocks keep canonical order at the end. Asm-goto
+  continuations move with their source block's expansion.
+  `machine_test_reverse_postorder_layout` checks that every reached block has a
+  lower predecessor.
 - Selection retains a canonical-block-to-MIR-entry projection when expansion
-  or entry-first layout changes block IDs. Parameter-edge splitting composes
+  or layout changes block IDs. Parameter-edge splitting composes
   that projection through its block renumbering before reclaiming scratch,
   including when the prior projection was identity. Module label-address initializers
   and label differences (`IrGlobalLabelDifference`, written into the data image by
@@ -146,6 +156,9 @@ fixture as well as compiling both architectures.
   Its validity ends at a nonentry block boundary unless an own spill certifies
   it again, and after the value's final operand or memory edit. This bounds
   suffix replay and prevents a loop back edge exposing a later owner's bytes.
+  A call row names no clobber mask, so replay retires every allocatable register
+  outside the callee-saved set at it (`codegen_machine_debug_row_clobbers`); the
+  value is then located in its spill home or unavailable (#3214).
   Certified registers retain their clobber tracking after the final operand;
   replay stops only when neither a register nor a recovery event can remain.
   An unshared home may retain a dead value. The independent dense test model
@@ -327,17 +340,23 @@ fixture as well as compiling both architectures.
   the defining row's slot address (`machine_x64_emit_exact_frame_address`,
   `machine_a64_emit_frame_address`). This is sound because a slot whose address
   a row takes keeps its own storage for the whole function.
-- FAST/QUALITY start a forward join's general block parameters in registers.
-  `machine_fast_parameter_contract` gives each non-pinned, non-mutable general
-  parameter a caller-saved (or already-saved) register when every predecessor
-  is scanned earlier and reaches the join through a single-target jump; the
-  contract promises it dirty. `machine_fast_conform_edge_parameters` then
+- FAST/QUALITY start a join's or loop header's general block parameters in
+  registers. `machine_fast_parameter_contract` gives each non-pinned,
+  non-mutable general parameter a caller-saved (or already-saved) register
+  when every predecessor reaches the block through a single-target jump and at
+  least one is scanned earlier; the contract promises it dirty. A back edge
+  conforms to that contract at its own terminator. `machine_fast_conform_edge_parameters` then
   publishes each edge's source into that register instead of storing the
   parameter home, so the home is written only if the join later evicts or
   carries the value. A lone general assignment publishes directly (copy,
-  reload or rematerialization) without the edge-copy temporary tile. Back,
-  switch and cold edges, vector/mask parameters and the slot-zero scratch keep
-  the memory form. The same contract also carries each live, escaping,
+  reload or rematerialization) without the edge-copy temporary tile. An edge
+  with several general assignments still stages its sources through the tile
+  for parallel-copy semantics, except a source with a rematerialization recipe
+  (constant or frame address): it reads no register, so it skips the capture
+  and rematerializes straight into its destination after the other sources
+  are staged (`MACHINE_FAST_EDGE_SOURCE_RECREATED`). Switch
+  and cold edges, vector/mask parameters and the slot-zero scratch keep the
+  memory form. Except at a loop header, the same contract also carries each live, escaping,
   immutable, non-pinned general value the designated predecessor holds dirty,
   in the register it already occupies; an edge that delivers it there keeps
   it across the parameter publication, and any other edge stores and reloads
@@ -350,6 +369,47 @@ fixture as well as compiling both architectures.
   last use and an edge whose terminator is at or after it skip the store when
   that use lies below the floor. A parameter-edge source whose copy found no
   register still stores, because that copy reloads its home.
+- The shared prepass also computes block live-out for every escaping,
+  non-rematerializable value (`machine_fast_value_liveness`, one bitset row
+  per block over a dense index of those values, solved by the same worklist
+  as frame-object closure). An edge-copy source starts live out of its
+  edge's source block. A boundary write-back, or an eviction past the
+  value's last textual use, skips the store when the value is not live out
+  of the block whose exit it conforms (`machine_fast_dead_out`). The decision
+  is per block, not per edge: one store at a conditional's terminator serves
+  both successors. Contract construction still carries a dirty value that is
+  dead in the join, because dropping it would force the store onto the
+  predecessor's other path. Functions with one block, or past
+  `MACHINE_FAST_LIVENESS_WORD_LIMIT` words per plane, keep the textual rules.
+- The prepass keeps block live-in from the same solve. An edge conform
+  leaves a value its destination does not read (`machine_fast_dead_in`)
+  dirty instead of storing it, unless it sits in a register the contract
+  claims. The value is still live out of the source only for the source's
+  other successors, or as this edge's own parameter source: another
+  successor's conform stores it at the same terminator point or carries it
+  dirty in its contract, so deferring never adds a store. A parameter source
+  the edge copy reloads from its home still stores first. Scan-time conforms
+  to a backward or cold successor read that successor's live-in;
+  switch, indirect and asm-goto dispatch conforms, which serve several
+  destinations, do not defer. On unity `ide.c` this removed about 33k
+  stores: values only a conditional's later-contracted successor reads, and
+  parameter-edge sources consumed by the publication.
+- FAST/QUALITY also drop the write-back of a strict SSA (immutable, unpinned)
+  value at a backward edge whose terminator has that single target, when the
+  value is defined in the header or in a block past the header's entry bypass.
+  The bypass, from `machine_fast_loop_floors`, is the header's lowest
+  predecessor that the entry reaches through lower blocks alone. Neither
+  definition dominates the header's entry, so the verifier's dominance rule
+  keeps the value from being live into it. A `for` step or join laid out ahead of the block that defines the
+  value it receives (a later block that dominates it) keeps the store.
+- FAST/QUALITY vacate a fixed or tied operand register by moving a live
+  occupant to a free register with one copy (`machine_fast_vacate`) instead
+  of storing it and reloading it at its next use. The free register excludes
+  the row's reservations (`row_reserved_mask`), active pins, unpaid
+  callee-saved registers, and physical registers an earlier row wrote that no
+  row has read yet (`physical_live_mask`: staged call arguments). A value
+  crossing the next call moves only into a paid callee-saved register. Dead,
+  rematerializable, or unplaceable occupants keep the eviction.
 - A FAST/QUALITY fixed physical destination evicts its current owner without a
   store when that owner's last use is the same row and it does not escape its
   block (or that use lies below the loop floor): a dying value staged into an argument or return register is consumed
@@ -767,7 +827,8 @@ fixture as well as compiling both architectures.
   relocation site distinguishes the index, value offset, or descriptor field.
   The thread-local model fixture requires zero fallback for admitted desktop
   targets, allocators, frontend forms and code models, and named refusal with
-  no artifact for effective AArch64 ELF PIC requests. Native hosts execute
+  no artifact for effective AArch64 ELF PIC requests (the TLSDESC model does
+  not exist yet; see the position-independent code bullets). Native hosts execute
   the supported models with separate definitions and live repeated accesses.
 - x86-64 i128 bitwise complement reads both frame-backed limbs and emits
   ordinary three-operand XOR64 rows against one all-ones constant. Each limb
@@ -812,8 +873,8 @@ fixture as well as compiling both architectures.
   both sides of a VLA, packed narrow arguments, split pairs, indirect large
   results, ninth floating arguments and variadics. The registered driver
   matrix retains both original over-aligned stack fixtures, all six AArch64
-  targets, allocator modes and frontend forms, with supported code models
-  and explicit AArch64 ELF PIC refusals. Native AArch64 desktop hosts also
+  targets, allocator modes and frontend forms, with every code model,
+  AArch64 ELF `-fPIC` included. Native AArch64 desktop hosts also
   link the independent host observer in both directions
   for FAST and QUALITY. The archived matrix additionally covered MIR-stack.
   Its direct NONE path stayed an object control: that reference failed
@@ -991,16 +1052,42 @@ fixture as well as compiling both architectures.
   with the function's own offset, because an FDE naming a preemptible function
   is the same PC-relative reference to an interposable symbol that `ld`
   refuses in the body.
-- On x86-64 ELF, `-fPIE`/`-fpie` request the same implemented PIC model
-  as `-fPIC`/`-fpic`; the last positive spelling wins. `-fno-pic` clears
-  that request, and `-fno-pie` cancels only a PIE spelling. Native AArch64
-  ELF C generation has no PIC reference model and the driver rejects an
-  effective positive request before mapping sources or publishing artifacts.
-  Default/cancelled generation and non-code actions remain supported.
-  Assembly and prebuilt inputs spell their own references. Mach-O/COFF models
-  and Wasm/eBPF compatibility behavior are unchanged; this partial #1289
-  boundary does not certify their PIC policy or the residual LLVM/direct
-  backend model paths.
+- On x86-64 and AArch64 ELF, `-fPIE`/`-fpie` request the same implemented PIC
+  model as `-fPIC`/`-fpic`; the last positive spelling wins. `-fno-pic` clears
+  that request, and `-fno-pie` cancels only a PIE spelling. Assembly and
+  prebuilt inputs spell their own references. Mach-O/COFF models and
+  Wasm/eBPF compatibility behavior are unchanged; the residual LLVM/direct
+  backend model paths stay open under #1289.
+- AArch64 ELF `-fPIC` (`MachineA64Selector.position_independent`, resolved in
+  codegen the way x86-64's is) replaces the canonical inline absolute literal
+  (`LDR literal; B; .quad`, whose `R_AARCH64_ABS64` in `.text` `ld.lld -shared`
+  rejects) in `MACHINE_A64_LEA_SYMBOL`. `machine_a64_symbol_reference` picks
+  the form with the x86-64 rule: `ir_symbol_is_interposable` (external or
+  imported linkage without hidden visibility, weak undefined included) gets
+  `MACHINE_SYMBOL_REFERENCE_GOT`, the ADRP + `LDR Xd, [Xd]` pair that reads
+  the address from the symbol's GOT slot (`R_AARCH64_ADR_GOT_PAGE`,
+  `R_AARCH64_LD64_GOT_LO12_NC`); every other symbol gets
+  `MACHINE_SYMBOL_REFERENCE_ELF_PAGE`, ADRP + ADD (`R_AARCH64_ADR_PREL_PG_HI21`,
+  `R_AARCH64_ADD_ABS_LO12_NC`). The encoder only tells the module layer which
+  half of the pair a call site is; `codegen_aarch64_page_relocation_kind` maps
+  the half and the recorded reference to the four `CODEGEN_MODULE_RELOCATION_AARCH64_ELF_*`
+  kinds and `object_relocation_kind_from_codegen` to the object kinds the
+  assembler and linkers already share. Direct calls keep `R_AARCH64_CALL26`,
+  `.eh_frame` function references are `R_AARCH64_PREL32` against `.text`, and
+  initialized pointers are `R_AARCH64_ABS64` in `.data`: constants with
+  relocations already live in writable data, so no `.data.rel.ro` split exists
+  and none is needed for `ld.lld -shared -z text`. Without `-fPIC` nothing
+  changes (objects are byte-identical). Thread-local access under this model
+  is refused by name -- selection fails with `thread-local access under
+  AArch64 ELF position-independent code (TLSDESC) is not implemented`, which
+  the driver reports as a code-generation refusal and publishes no output --
+  instead of emitting local-exec `TPREL` relocations a shared object cannot
+  hold. TLSDESC itself, Buster's own AArch64 `-shared` writer and hidden-visibility
+  attribute propagation (a hidden definition still uses the GOT form, as on
+  x86-64) remain open. The test hook is
+  `compiler_driver_test_aarch64_pic_outputs`, which reads the relocation kind
+  per symbol class from a Buster object; on a native Linux AArch64 host it
+  also links the object with `ld.lld -shared -z text`.
 - The built-in linker binds every name in its image: `PLT32` patches the same
   rel32 `PC32` does. The ELF reader preserves `GOTPCREL`, `GOTPCRELX`,
   `REX_GOTPCRELX` and `CODE_4_GOTPCRELX` as distinct relocation kinds.
@@ -1029,6 +1116,28 @@ remain source-declared. `machine_test_x64_inline_timestamps` checks exact
 instruction bytes, output registers, clobbers and rejected operand forms
 across native targets, frontend forms and allocator modes. Runtime availability
 and ordering of timestamp reads remain the caller's responsibility.
+
+The same vocabulary admits the unsuffixed and `w`/`l` port instructions
+(`in`, `inw`, `inl`, `out`, `outw`, `outl`, beside `inb`/`outb`), the
+floating-point environment instructions (`fnclex`, `fwait`, `fninit`, `fnstenv`,
+`fldenv`, `ldmxcsr`, `stmxcsr`) and `int`. The shared assembler folds a
+constant `int $3` onto the one-byte breakpoint (`CC`) as GNU as does, while any
+other constant keeps `CD ib` and a symbolic operand keeps its relocation.
+A multi-letter GNU constraint is a set of alternatives whose order is
+irrelevant (`c_semantic_asm_register_alternative`, shared with the
+`c_parse.c` semantic mirror). A set holding `r` or `g` selects the general
+register; otherwise exactly one fixed register letter (`a`, `b`, `c`, `d`, `S`,
+`D`) selects that register, so `am`/`ma` are RAX and `dN`/`Nd` are RDX. The
+other letters (`m`, `o`, `V`, and for inputs the immediate letters) are
+alternatives that are never selected. Sets with no register member, two fixed
+registers or an unknown letter stay refused; a lone `i` or `n` reports
+`unsupported asm input constraint`. This is not an alternative rescue: a set
+that selects a fixed register still conflicts with another operand or clobber
+pinned to the same register.
+`assembly_test_x64_breakpoint_and_fp_environment`,
+`machine_test_x64_inline_port_environment` and
+`c_test_inline_assembly_constraint_unions` hold the byte oracles (GNU as 2.47)
+and the neighbouring refusals; only unprivileged MXCSR/x87 round trips execute.
 
 ## Wide integer conversion rounding
 
@@ -1104,3 +1213,16 @@ independently, and that every payload byte arrives, including a read after GP
 exhaustion, in both compiler directions and every allocator/frontend
 combination. The retired direct emitter had no such path; current `none`
 selects MIR-stack.
+
+`va_arg` of a MEMORY-class struct, union or array aligned past sixteen bytes
+(`_Alignas(32)` or `_Alignas(64)`, any size from 32 bytes) takes the same
+overflow-only path: `machine_x64_va_arg_metadata` admits it through
+`machine_x64_va_arg_over_aligned_memory` (a single MEMORY part, a power-of-two
+alignment up to `MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT`), and the row
+rounds the cursor up to the alignment before the exact chunked copy. The
+verifier accepts that shape only for the x86-64 row that copies the record
+exactly (`wide_memory` in `machine_verify_function`); AArch64 and Win64 keep
+their sixteen-byte limit and an over-aligned scalar or vector still falls back
+with a structured refusal. `compiler_driver_test_sysv_packed_x87_overaligned_va_arg`
+covers 32- and 64-byte alignments, a 96-byte record, an odd overflow slot and
+`va_copy` in both compiler directions.

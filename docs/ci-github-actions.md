@@ -615,6 +615,48 @@ what was observed and cannot prove the cause of a later outage. The separate
 metadata and annotations even when the runner cannot finish cleanup. Keep
 failed-run elapsed time separate from successful-run performance in #709.
 
+## Machine specifications in every executing job (#2758)
+
+Every runner-backed job invokes the pinned shared machine-specifications action
+as its first step, before checkout or workload setup. It bootstraps only the tiny
+standalone C collector using preinstalled Clang; it does not build the project.
+The report appears immediately in the log and job summary. Later workload
+failure cannot erase it. Runnerless reusable-workflow callers report nothing;
+the called executing jobs report their own machines. A skipped job or a job
+cancelled before its first step has no report. Draft deferral jobs still execute
+on a real host, so they report that observed host before the deferral decision.
+
+The versioned JSON record is retained at
+`RUNNER_TEMP/buster-machine-specifications/report.json` and emitted in the log
+as `MACHINE_SPECIFICATIONS_JSON`. Existing evidence uploads also retain these
+JSON files where uploads already exist. Jobs with no existing upload retain the
+record in their log; no extra upload job is introduced. Each checkout appends
+an actual `git rev-parse HEAD` identity to `sources.jsonl` and the summary; event
+and workflow SHAs remain separate from those actual source identities. Host
+architecture describes the executing OS; process architecture describes the
+reporter executable. Neither describes an emulator guest or compiler target.
+Guest identity remains explicitly unknown until the workload provides it.
+
+Every record has the same allowlisted fields, each with value, status and reason.
+Memory/storage use bytes. Topology describes OS-visible cores/sockets, not a
+claim about the physical machine underneath a VM. Logical CPUs, affinity,
+process availability, cpusets and CPU-time quotas are distinct. Linux inspects
+visible cgroup v1/v2 membership and ancestor limits, keeping the smallest memory
+limit and CPU quota; hidden host ancestors remain unobservable. macOS available
+memory is explicitly a free-plus-inactive snapshot estimate. Windows pagefile
+capacity is not fabricated from commit capacity; inaccessible fields stay
+unknown. Dynamic or absent facts never become inferred zeroes. Unknown and
+partial fields are visible diagnostics, with safe escaping in all outputs.
+
+`tools/check_action_pins.py` and `tools/ci_job_environment_test.py` enforce startup order,
+exact implementation/pin identity, runnerless semantics and actual-checkout
+reporting for future jobs. Add the startup step and immediate checkout identity
+steps whenever adding an executing job. Do not add conditions or error suppression
+to the startup reporter. Update the pin, allowlist, implementation blob identities
+and approval guide together when changing the reporter. Its native self-tests run
+before collection on every executing platform. Collection overhead is recorded
+as `collection_elapsed_ms`; Actions step timings include compiler bootstrap.
+
 ## Durable hosted execution history
 
 [Hosted CI timing history](ci-timing-history.md) extends the existing operational
@@ -623,3 +665,87 @@ append-only data-branch retention, and advisory CPU-aware reports. It preserves
 `github_ci_time.py require-jobs`, existing queue/wait definitions and coverage.
 Its guide records schema, commands, raw metric boundaries, missing context,
 retention/recovery, statistical policy and outstanding live acceptance.
+
+## No-code classification and staged admission (#3107)
+
+The native build driver exposes `ci_no_code --repo PATH --base SHA --head SHA
+--tested SHA --policy SHA --event pull_request|merge_group`. Its deterministic
+`buster-ci-no-code-v1` record distinguishes `no-code` from `full`; it is a
+classification decision, never execution or coverage evidence. The PR head,
+event base, actual tested merge and independently trusted policy are separate
+identities. Merge groups are independently evaluated against their actual base
+and complete synthetic head.
+
+The initial exact allowlist is `README.md`, `docs/compiler-lifetime.md`,
+`docs/diagnostics.md`, and `docs/incremental-compilation.md`. Arbitrary Markdown,
+agent instructions, executable policy under docs, source, tests, fixtures,
+runtime assets, build inputs and workflow changes retain ordinary validation.
+Only regular mode-100644 blobs are eligible. Additions/deletions are supported;
+Git rename collapsing is disabled so both paths of a move are checked. Mode,
+type and gitlink changes always select full validation. A bounded Git capture
+failure, missing object, malformed raw diff or stale merge identity selects full
+validation with a reason. No comment/whitespace stripping is attempted.
+
+`./build.sh ci_no_code --self-test` exercises the raw parser. Hosted
+`No-code classifier controls` also exercises authentic Git PR/group graphs,
+mixed changes, a prose-only final commit on a code PR, and missing/stale objects.
+The immutable trusted-base reader is installed before automatic omission.
+During the transition it continues accepting genuinely executed legacy gates;
+once producers declare no-code plans, deliberately omitted gates must be skipped
+without runner allocation and their exact-attempt classifier must succeed. A
+trusted rollback or conservative full fallback may still execute the original
+gates; those are recorded as executed, never as omitted.
+Normal code changes still require every current gate. No-code records cannot
+substitute for native-retirement execution, benchmarks or full queue-to-main
+coverage. Explicit workflow dispatch continues to request normal/full work.
+
+### Automatic scheduling and required contexts
+
+Each independent automatic producer uses the same small reviewed reusable
+planner before any workload job or matrix is allocated. Only its trusted
+native `no_code=true` output permits omission. Unknown or incomplete source
+inputs select the normal path. The core aggregate independently recompiles the
+trusted main driver and rechecks the complete source identity before completing
+a no-code decision; all core workload results must be skipped. Failure,
+cancellation, missing results and unexpected execution cannot pass that route.
+There is no platform-shaped no-op replacement.
+
+| Required context | Prose-only PR | Prose-only merge group | Execution-affecting change |
+| --- | --- | --- | --- |
+| CI complete | Actual trusted completion and exact native reclassification | Same, independently bound to group base/head | Existing complete shard inventory and aggregate |
+| Canonical TCC bootstrap | Conditional job omission after trusted classification | Same; trusted admission verifies zero allocation | Canonical bootstrap and controls |
+| GPU Linux consumers | Conditional job omission; Metal also omitted | Same; no GPU allocations | Existing GPU consumer validation |
+| Benchmark service workflow policy | Conditional job omission | Same; no policy workload receipt | Original policy tests or strictly verified full reuse |
+| API migration policy | Conditional job omission | Same; no audit/test allocation | Existing compatibility audit and tests |
+| Native retirement merge admission | Readiness workload omitted after trusted classification | Trusted reconciler publishes exact no-code disposition | Existing trusted retirement gate/evidence |
+| Main integration admission | Readiness regression workload omitted after trusted classification | Trusted reconciler independently classifies, double-reads exact attempts and validates dispositions | Existing live ruleset, source, gate and attempt checks |
+
+The trusted reconciler accepts conditionally skipped independent jobs only
+after its own native no-code classification, with successful matching planner
+identity and a complete zero-allocation inventory. A failed or missing selected
+obligation cannot be explained by another job's deliberate omission. The
+fail-fast watcher defers conditional skips for trusted adjudication and reports
+no-code completion only from the exact reconciler receipt. It still cancels
+selected failures and rejects stale, failed or malformed evidence.
+
+Optional automatic group producers (Clang, raster, materializer, rebinding,
+Wasm and Pages), compiler throughput, and PR preflight regression tests use the
+same scheduling boundary. Trusted metadata-only conflict publication,
+reconciliation and lifecycle observation remain bookkeeping. Their runner
+counts and elapsed cost must be measured with the real acceptance run; native
+planning/driver compilation and completion are explicitly included in that cost.
+
+All seven live required context names and their integration binding stay
+unchanged. Non-strict freshness, ALLGREEN/MERGE, six build slots and one merge
+slot stay unchanged. Main pushes, schedules, releases and explicit diagnostic
+dispatches retain their existing full policies. To request full work explicitly,
+use the workflow's existing dispatch route; compiler-throughput requests retain
+their existing manual wrapper. Setting the trusted repository Actions variable
+`GH_ACTIONS_NO_CODE_ENABLED` to the literal `false` rolls automatic scheduling
+back to normal/full validation. This does not change repository protections.
+Missing trusted classifier installation also selects full work.
+
+No-code JSON and intentionally skipped jobs are not compiler/test results,
+native-retirement execution receipts, benchmark policy execution receipts, or
+queue-to-main full-coverage proof. Existing full-evidence readers retain their
+positive execution and step inventories and refuse omitted rows.

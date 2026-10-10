@@ -172,6 +172,12 @@ BUSTER_F_DECL void os_prefault_test_force_next(OsPrefaultResult result);
 BUSTER_F_DECL OsPrefaultTestCounters os_prefault_test_counters(void);
 
 #if BUSTER_INCLUDE_TESTS
+// The debugger-presence cache is one tri-state published after its probe:
+// 0 unprobed, 1 no debugger, 2 debugger. Reset returns it to unprobed so the
+// next is_debugger_present call probes again; State reads it without probing.
+BUSTER_F_DECL void os_debugger_state_test_reset(void);
+BUSTER_F_DECL u64 os_debugger_state_test_state(void);
+
 typedef enum OsProcessSpawnTestOperation
 {
     OS_PROCESS_SPAWN_TEST_FILE_ACTIONS_INIT,

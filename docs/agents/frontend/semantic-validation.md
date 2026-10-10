@@ -93,6 +93,30 @@ that list. `c_test_duplicate_parameter_names` checks syntax-only/lowering
 parity, both frontend forms and symbol/spelling lookup, and inspects the outer
 parameter names of nested block-local prototypes.
 
+File-scope object and function, block-scope and enumerator (file and block scope)
+redefinitions, and conflicting declarations (including the static/non-static
+linkage pair), name the entity and print the line and column of the earlier
+declaration, in the `(previous declaration at L:C)` form parameters use:
+`redefinition of 'x' (previous declaration at 1:5)`,
+`redefinition of enumerator 'RED' (previous declaration at 1:10)`. The site is the
+entity's first declaration (a prototype before the first definition, not the
+definition) mapped through the preprocessor source map, so `#line` and macro
+expansion sites read as the diagnostic's own do. When the earlier site is in
+another file than the diagnostic (an included header, or a `#line` that renamed
+the file) it is prefixed with that file's path (`previous declaration at
+header.h:1:5`). The diagnostic always sits at the later of the two declarations:
+file-scope enumerators are published after every object and function, so an
+enumerator declared first is compared by final token order with the entity found
+and, when that entity follows it, the error is `redefinition of 'A'` at the entity
+naming the enumerator as the previous site. The text is formatted only when the
+diagnostic is emitted. `c_test_redefinition_names_previous_site` checks the
+spellings and both orders; `compiler_driver_test_record_diagnostic_equivalence`
+pins them for syntax-only and object output, including a header-first case.
+Residue: the previous site is not yet the first definition, `duplicate member`
+and tag redefinitions carry no site, and a header included twice (or a macro
+expanded twice) maps both declarations to one source position, so the previous
+site equals the diagnostic's own (#1432).
+
 Windows target predefines in `c_source.c` normalize `__inline` and `__forceinline`
 to the function specifier `inline`, without injecting a storage class. UCRT-style
 `static __inline` and `extern __inline` declarations retain their source storage;
@@ -200,15 +224,99 @@ zero-byte products; existing static range-designator tests pin that extension.
 Record member sums and final alignment rounding remain the separate #1479
 follow-up; this bounded repair does not certify those operations.
 
+A static assertion that measured an oversized type folds a value from its
+saturated size, so the size error stands for it. The decision is local to the
+assertion: `c_parse_type_layout_core` counts answers past the limit in
+`CObjectSizeFacts`, and `c_parse_static_assert_check` and
+`c_parse_validate_deferred_assertions` suppress only an assertion whose own
+fold moved that count. Every other failing assertion is reported. An immediate
+failure gates the lowering constraints, so it requests the size validation and
+`c_analyze_semantics_core` runs it once at the end: no assertion validates or
+scans diagnostics itself. `c_test_array_object_size_limits` pins unrelated
+assertions before and after an oversized type in immediate, function-scope and
+deferred (enumerator, `_Generic`) forms, and
+`c_test_static_assert_object_size_scaling` bounds layout queries for 2,000
+failing assertions over 2,000 array types.
+
 The validation must not add whole-table layout solves per array. A pass solve
 copies and seeds the whole type table and stops once its own request resolves,
-and an inferred bound's layout is provisional, so it is never cached. Asking
+and an inferred bound's layout was provisional, so it was never cached. Asking
 each array in table order therefore cost one solve per array: self-hosting
 `ide.c` went from about 160 to about 34,000 solves (#2406's merge). An
 inferred bound is checked from its element layout and known count, which
 gives the same verdict. A single query for the call's last array then warms
 the cache for the explicit bounds. `c_type_layout_test_array_validation_solves`
 requires the solve count to stay constant as the number of arrays grows.
+
+## Whole-unit pass scaling
+
+`c_parse_validate_lowering_constraints` runs passes over every type, member,
+declaration, entity or bound. Any per-item query that can do whole-table work
+makes such a pass quadratic in the translation unit. Three kinds of query can:
+
+- **A layout miss.** `c_parse_type_layout` with the analysis machine is a
+  whole-table pass solve whenever the type is not yet committed to the
+  machine's layout cache.
+- **A protected TYPE query.** `c_parse_type_integer_constant_query_core` copies
+  the parameter, alignment and diagnostic rows, and solves layouts on a
+  private machine with no cache.
+- **An `offsetof` miss.** An idle machine replays committed member layouts;
+  an uncommitted or provisional layout still needs the whole-table pass.
+  Queries inside a live type machine retain ordered solves until #1247 makes
+  their evaluator reentries side-effect-free (#1297).
+
+Member-offset padding fixtures vary unrelated arrays, not aligned typedefs.
+The sparse type-alignment lookup still scans the alignment rows per query;
+that separate scaling axis remains outside the counted layout work (#1297).
+
+Scope lookups (`c_parse_scope_for_token`, the scope cursor) cost the scope
+depth, not the table. No pass scans all diagnostics, types or declarations per
+valid item.
+
+A layout that depends on an initializer-inferred bound is provisional while
+inference can still rewrite that bound. Once the validation's own inference
+loop finishes, the machine sets `inferred_bounds_final`. From then on, later
+writes only give a count to a bound that had none, so those layouts commit
+like any other. Before that, every `sizeof table` of an inferred array paid a
+whole-table solve at each use (#3096).
+
+| Pass | Per-item work | Whole-table work per item |
+|---|---|---|
+| `c_parse_validate_array_bound_syntax` | constant-expression syntax walk per bound | none; token walk |
+| `c_parse_infer_file_array_bounds`, local inference loop | initializer walk per unsized array | layouts and typed constants per element; run before `inferred_bounds_final` |
+| type-alignment entries, declaration alignment, `c_parse_validate_alignment_redeclarations` | `c_parse_validate_alignment_range` per specifier | a layout miss; a protected query for `_Alignof(x.m)` operands |
+| `c_parse_validate_array_object_sizes` | one layout per bound, one warm-up per call | a bound the layout pass cannot fold (`offsetof`, `_Alignof(x.m)`, `sizeof ident`) never commits, so each such array misses (#3113) |
+| `c_parse_validate_members`, `c_parse_validate_member_types` | alignment range per member; bound and unresolved width typed constants | a layout miss; uncommitted `offsetof` in a member bound (#1297) |
+| `c_parse_validate_deferred_assertions` | typed constant per deferred assertion | uncommitted `offsetof` (#1297); a protected query for `_Alignof(x.m)` |
+| `c_parse_validate_static_initializers` | expression queries and typed constants per initializer element | uncommitted `offsetof` (#1297); a protected query for `_Alignof(x.m)` |
+| variably modified objects | typed constant per array bound in an object's type | uncommitted `offsetof` in a bound (#1297) |
+| `c_parse_validate_array_strides` | element layout per array of an aligned type | a layout miss |
+| `c_parse_validate_array_bound_values` | typed constant per distinct bound | uncommitted `offsetof` in a bound (#1297) |
+| `c_parse_validate_alias_targets` | declaration-binding scan | none from the table; see #3114 for split declarator lists |
+
+The census found further costs that no layout counter sees; #3114 records them:
+
+- split declarator lists rescan the declaration per declarator;
+- protected queries copy rows that grow with the unit;
+- array-bound folding scans every enumerator for each bound identifier that
+  is not a constant entity.
+
+The duplicate-diagnostic scan in `c_parse_validate_array_object_sizes` costs
+O(diagnostics) per oversized array. That makes it quadratic only in the number
+of oversized arrays, and it runs only on the error path.
+
+`c_type_layout_test_scales` is the shared fixture helper. It compiles `count`
+copies of an item through `c_analyze_semantics_only` at 16 and 256 copies and
+requires:
+
+- pass solves to stay constant;
+- every other layout-work counter to grow at most linearly.
+
+`c_type_layout_test_validation_scaling` has one row per pass above that can
+reach a layout per item. Each row reaches its pass through an inferred-array
+`sizeof`, and those rows fail with `inferred_bounds_final` disabled.
+A new pass over every type, member or declaration needs a row in that fixture,
+or its own scaling fixture, in addition to single-item correctness cases.
 
 ## Lowering diagnostic inventory
 
@@ -416,6 +524,126 @@ preprocessed unit with `c_preprocess_release` before rewinding scratch, so the
 test-unit registry is unregistered and cannot retain destroyed arena pointers. Existing scratch-limit regressions cover checked plan refusal.
 The lexer diagnostic arena remains an optional optimization with a tested
 result-arena fallback; failure there retains the original lexical diagnostics.
+
+### Per-body validation scratch (#1256)
+
+`c_parse_validate_lowering_constraints` validates each function body in the
+thread's scratch arena between a body mark and its rewind. Those arrays are
+sized by the input (the body's tokens, scopes, labels, cases and asm operands,
+and the expressions and type table that constant, layout and typing queries
+reach), so one large body can need more than the arena's whole reservation.
+The contract is recoverable, not a preflight estimate:
+
+- While a body's guard is open (`c_parse_body_scratch_guard_begin` to
+  `c_parse_body_scratch_guard_end`), every allocation from the guarded arena
+  is either made by `c_parse_body_scratch_allocate`
+  (`C_PARSE_BODY_SCRATCH_ARRAY`) or preceded by `c_parse_body_scratch_fits`
+  for the bytes the caller then carves. Both are an O(1) overflow-checked test
+  of size plus alignment padding against the body's limit, which is the
+  arena's whole reservation; no headroom is held back for unchecked sites,
+  because there are none. Other arenas, and the guarded arena outside a body,
+  allocate exactly as `arena_allocate` does after one thread-local compare.
+- The first refusal marks the body exhausted and every later request of that
+  body is refused. Each family treats a zero pointer as "skip this work"
+  (an unanswered constant, layout or member query, an unbuilt cache table, a
+  failed evaluation). The caller drops the body's partial diagnostics back to
+  its mark, reports one `C function body is too large for semantic
+  validation` diagnostic naming the function, rewinds the scratch mark and
+  continues with the next body. Validation of later bodies, and their own
+  findings, is unchanged.
+- Sites that reach the guarded arena through generic `Arena*` parameters are
+  routed too: the body-scope, statement-end, label, switch, const-assignment
+  and asm tables; `c_space_local`, the integer evaluator
+  (`c_integer_expression_evaluate` and its `_with_features` core, whose
+  parse-side form links its token list over one guarded array instead of
+  running macro expansion without macros), `c_conditional_feature_operators`
+  and `c_include_name`; string-literal decoding and imaginary spellings;
+  `c_parse_constant_expression_evaluate`, `c_parse_typed_constant` and the
+  type-constant query machine; the layout attempts and ordered passes (the
+  agenda solver, which grows its tables as it discovers the closure, does not
+  run in the guarded arena); the member-type, member-offset and initializer
+  slot-cache searches; `c_parse_alignof_object_alignment` and the bit-field
+  width evaluation (whose two-entry diagnostic buffer is constant-size but is
+  routed so nothing bypasses the limit after a refusal); and parse-result
+  growth through `c_parse_arena_can_allocate`, which asks the guard before its
+  own reservation check so the refusal is the body's. Decimal spellings that
+  `string_format` used to put in scratch are formed on the stack
+  (`c_parse_space_decimal`), the type-constant query's call-arity probe forms
+  no message, and the private type model of
+  `c_parse_type_integer_constant_query_core` is guarded as described below.
+  The lazy position index is built before the first guard opens.
+- The type-constant query's private model (`CParseResult query`) lives in the
+  other scratch arena, or a private arena when the caller's arena is that one,
+  never the body's. While a body's guard is open,
+  `c_parse_body_scratch_model_begin` guards that model arena on the same body
+  under its own limit (its whole reservation, measured from its position when
+  the query opens it) and `c_parse_body_scratch_model_end` restores an
+  enclosing query's. The guard is keyed on both arenas and shares one
+  exhausted flag, so a model request past its limit exhausts the body. A query
+  that saw the body exhausted leaves its constant or member alignment
+  unanswered and forwards no width diagnostic. Each model-arena allocation is
+  checked by construction:
+  - the copy-on-first-append tables (types, array bounds, type alignments,
+    noreturn function types and deferred bit-field widths) and the aggregate
+    and definition slot tables grow only through
+    `c_parse_arena_can_allocate`, which asks the guard first;
+  - the type-identity answers (`c_parse_type_identity_record`) and builtin
+    call positions (`c_parse_position_index_append`; the query seals its
+    bfloat16 list at its count) use the guarded array and drop the row on a
+    refusal; string decoding and both evaluators already did;
+  - the member name index is not offered: the query clears `member_lookup`,
+    whose entries are shared with the caller, so an index built in the model
+    arena can no longer be left in the caller's lookup after the model is
+    rewound; member lookups in a query scan the record's members;
+  - every message `c_parse.c` forms goes through `c_parse_message`, which on
+    the model arena forms a fixed text and allocates nothing, and
+    `c_parse_assignment_conversion_type_name` forms no name there. No message
+    leaves the query except bit-field width texts: their copies use
+    `c_parse_message_copy` (checked for the copied length) and
+    `c_parse_bit_field_width_message` checks `2 * name + 256` bytes first,
+    which bounds its at most two copies of the name, two decimal magnitudes
+    and fixed text;
+  - the layout cache is unreachable: the query's machines carry none, and
+    its layout solves run with no machine.
+  The fixed parameter, alignment-specifier and diagnostic buffers stay in
+  their own arena sized exactly before the query starts, and the parse
+  machine's arrays are guarded on the body's arena.
+- Completeness is established by enumeration, not by a margin: the allocation
+  sites reachable from per-body validation were audited, and a local
+  instrumentation build that reported every allocation on the guarded arena
+  not made or pre-checked by the guard found none across `c_frontend_tests`,
+  `test_all`, the self-host stages and the large-body `_Generic` reproducer.
+  The same instrumentation on the query model arena reported the member index
+  and conversion type names, both removed above, and nothing else across the
+  unit tests and a corpus of 73 member-alignment query shapes in bodies
+  (casts, compound literals, string and wide literals, nested queries, vector
+  and bit-field operands and invalid operands). The unit tests themselves
+  make no type-constant query inside a body; the model fixture below is the
+  first. This is coverage evidence for an audited list, not a static proof
+  over every input: the model arena has no numeric maximum-live bound, only
+  the guard's checked limit, so a new site that allocates in a scratch arena
+  or a query model reachable from body validation must use the guard and
+  tolerate a zero result, and the families or model fixture is where its
+  exact-bound refusal belongs.
+
+`c_test_body_validation_scratch_exhaustion` and
+`c_test_body_validation_scratch_families` use the test seams
+(`c_test_body_validation_scratch_limit` and `c_test_body_validation_scratch_trace`)
+to record each checked request, cap the body exactly at the furthest end
+reached before a named site, and assert that site is the first refused and the
+function is reported once: the flat body's per-token arrays (and its one-byte
+boundary), the scope-pending stack's initial size and its geometric growth, the
+asm constraint, name and clobber tables, the statement-end table of the loop
+and jump checks, the untyped evaluator's token copy and linked token list, the
+typed evaluator of a long case label, and the inferred initializer's slot
+tables. Recovery fixtures refuse an earlier body (flat and evaluator) and check
+that a later invalid body still reports its own finding.
+`c_test_body_validation_type_query_model` caps the query model through
+`c_test_body_validation_model_limit` and reads the trace's `model` rows: a
+member-alignment case label in one body (`_Alignof(((const struct S*)&s)->m19)`)
+validates and lowers at its model peak and one byte past it, one byte short
+refuses a model row and reports that function once, the later bodies are
+still validated, and a later invalid body reports its own finding.
 
 ## Regression contract
 

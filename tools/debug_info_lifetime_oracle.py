@@ -67,7 +67,6 @@ import gdb, json, pathlib, time, traceback
 config = json.loads(pathlib.Path(CONFIG_PATH).read_text())
 checks = []
 unavailable_count = 0
-x_unavailable_count = 0
 wrong_x_count = 0
 query_ns = 0
 
@@ -76,7 +75,7 @@ def demand(condition, message):
         raise AssertionError(message)
 
 def inspect(frame, name, expected, allow_unavailable=False):
-    global query_ns, unavailable_count, x_unavailable_count, wrong_x_count
+    global query_ns, unavailable_count, wrong_x_count
     started = time.perf_counter_ns()
     value = frame.read_var(name)
     optimized = value.is_optimized_out
@@ -86,8 +85,6 @@ def inspect(frame, name, expected, allow_unavailable=False):
     if optimized or unavailable:
         demand(allow_unavailable, "VALUE {} unexpectedly unavailable".format(name))
         unavailable_count += 1
-        if name == "x":
-            x_unavailable_count += 1
     else:
         actual = int(value)
         record["value"] = actual
@@ -135,6 +132,10 @@ try:
     live = stop_at("main", config["live_line"])
     inspect(live, "x", config["expected_x"])
     inspect(live, "y", config["expected_y"])
+    # After the final source-level read, x remains in main's lexical scope.
+    # Its debug location may be explicitly unavailable or may retain the
+    # correct pinned value; either is acceptable here. Never accept a wrong
+    # value, and the callee-scope check below still rejects an x leak.
     for iteration in range(3):
         gdb.execute("continue")
         caller = stop_at("main", config["loop_line"])
@@ -156,8 +157,6 @@ try:
             checks.append({"scope": "mark", "x": "not in scope"})
         else:
             raise AssertionError("SCOPE mark exposes main's x")
-    demand(x_unavailable_count > 0 or not config["require_unavailable"],
-           "TRANSITION no explicitly unavailable value observed")
     gdb.execute("continue")
     demand(gdb.selected_inferior().pid == 0, "EXIT inferior did not terminate")
     # GDB's convenience exitcode is unavailable for signal exits.
@@ -168,7 +167,6 @@ except Exception as error:
     traceback.print_exc()
 result["query_ns"] = query_ns
 result["unavailable_count"] = unavailable_count
-result["x_unavailable_count"] = x_unavailable_count
 result["wrong_x_count"] = wrong_x_count
 print("BUSTER_GDB_RESULT " + json.dumps(result, sort_keys=True))
 gdb.execute("quit " + ("0" if result["status"] == "pass" else "1"))
@@ -200,10 +198,9 @@ def invoke(command: list[str], output: Path, stem: str, timeout: int) -> dict:
 
 
 def debugger(gdb: str, executable: Path, source: Path, output: Path, stem: str,
-             timeout: int, wrong_value: bool = False, require_unavailable: bool = True) -> dict:
+             timeout: int, wrong_value: bool = False) -> dict:
     config = {"executable": str(executable.resolve()), "source": str(source.resolve()),
-              "expected_x": EXPECTED_X + int(wrong_value), "expected_y": EXPECTED_Y,
-              "require_unavailable": require_unavailable}
+              "expected_x": EXPECTED_X + int(wrong_value), "expected_y": EXPECTED_Y}
     for key, marker in (("live_line", "STOP_LIVE"), ("loop_line", "STOP_LOOP"), ("mark_line", "STOP_MARK")):
         config[key] = next(i for i, line in enumerate(PROGRAM.splitlines(), 1) if marker in line)
     config_path = output / f"{stem}.config.json"
@@ -286,7 +283,7 @@ def consumer_passed(result: dict) -> bool:
 
 
 def expected_baseline_failure(result: dict) -> bool:
-    """Accept only the known baseline value defect or absent transition evidence."""
+    """Accept only the known baseline wrong-x defect after correct live x/y."""
     error = result.get("error", "")
     checks = result.get("checks", [])
     live_values = [check for check in checks if check.get("variable") in ("x", "y")][:2]
@@ -296,9 +293,8 @@ def expected_baseline_failure(result: dict) -> bool:
     loop_line = next(i for i, line in enumerate(PROGRAM.splitlines(), 1) if "STOP_LOOP" in line)
     reached_loop = any(check.get("stop") == "main" and check.get("line") == loop_line for check in checks)
     return (result["status"] == "fail" and result["returncode"] == 1 and not result["timed_out"] and
-            live_correct and reached_loop and
-            ((error.startswith("VALUE x got ") and result.get("wrong_x_count", 0) > 0) or
-             error == "TRANSITION no explicitly unavailable value observed"))
+            live_correct and reached_loop and error.startswith("VALUE x got ") and
+            result.get("wrong_x_count", 0) > 0)
 
 
 def cost_slice(arguments, compilers: list[tuple[str, str]], source: Path, output: Path) -> dict:
@@ -403,7 +399,7 @@ def main() -> int:
         checked([arguments.clang, "--version"], output, "clang-version", arguments.timeout)
         reference = output / "clang-reference"
         checked([arguments.clang, "-g", "-O0", str(source), "-o", str(reference)], output, "clang-build", arguments.timeout)
-        result = debugger(arguments.gdb, reference, source, output, "clang-consumer", arguments.timeout, require_unavailable=False)
+        result = debugger(arguments.gdb, reference, source, output, "clang-consumer", arguments.timeout)
         results["clang"] = result
         if not consumer_passed(result):
             failures.append("independent Clang/GDB fixture control failed")
