@@ -127,6 +127,16 @@ COMPILER_BENCHMARK_CHECKS = {
     "9700X compiler benchmark": ("buster-9700x-compiler-main-v1", "9700x-compiler-request.yml", "push"),
     "9700X compiler benchmark (pull request)": ("buster-9700x-compiler-pr-v1", "9700x-direct-request.yml", "pull_request"),
 }
+COMPILER_BENCHMARK_DISPLAY_JOBS = {
+    "main": ("start-compiler", "Show the main commit comparison check"),
+    "pull": ("start-pull", "Show the pull request comparison check"),
+}
+COMPILER_BENCHMARK_CURRENT_DISPLAY_STEP = "Adopt the exact attempt check in one pass"
+COMPILER_BENCHMARK_LEGACY_RUNNING_DISPLAY_STEP = "Queue the check and mark it running when the 9700X starts"
+COMPILER_BENCHMARK_DISPLAY_STEPS = (
+    COMPILER_BENCHMARK_CURRENT_DISPLAY_STEP,
+    COMPILER_BENCHMARK_LEGACY_RUNNING_DISPLAY_STEP,
+)
 COMPILER_BENCHMARK_WORKFLOW = ".github/workflows/9700x-direct-bench.yml"
 BENCHMARK_MAINTAINER = {"login": "davidgmbb", "id": 39247043}
 GITHUB_ACTIONS_APP_ID = 15368
@@ -719,7 +729,7 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
             raise ValueError("Compiler benchmark announcement identity is invalid")
         publisher, publisher_path = request, request_path
         writer_specs = [("Show the queued compiler benchmark check", "Check out the trusted check writer",
-                         "Create the queued check")]
+                         ("Create the queued check",))]
     else:
         if publisher_link is not None:
             publisher_id = int(publisher_link[1])
@@ -735,12 +745,12 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
                 publisher.get("head_branch") != "main" or publisher["repository"]["id"] != request["repository"]["id"]:
             raise ValueError("Compiler benchmark publisher is not a same-repository trusted main run")
         pull = event == "pull_request"
-        writer_specs = [("Show the pull request comparison check" if pull else "Show the main commit comparison check",
-                         "Check out the trusted check writer", "Queue the check and mark it running when the 9700X starts")]
+        writer_name = COMPILER_BENCHMARK_DISPLAY_JOBS["pull" if pull else "main"][1]
+        writer_specs = [(writer_name, "Check out the trusted check writer", COMPILER_BENCHMARK_DISPLAY_STEPS)]
         if check.get("status") == "completed":
             writer_specs.append(("Publish the pull request compiler benchmark check" if pull else
                                  "Publish the compiler benchmark check", "Check out the trusted publisher",
-                                 "Validate the evidence and publish the check"))
+                                 ("Validate the evidence and publish the check",)))
     batch = read_metadata(publisher_path + "/jobs?per_page=100")
     rows = batch.get("jobs") if isinstance(batch, dict) else None
     if not isinstance(rows, list) or type(batch.get("total_count")) is not int or \
@@ -751,7 +761,7 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
     if not all(type(identity) is int and identity > 0 for identity in ids) or len(set(ids)) != len(ids):
         raise ValueError("Compiler benchmark publisher job IDs are invalid or duplicated")
     proved = []
-    for writer_name, checkout_step, write_step in writer_specs:
+    for writer_name, checkout_step, write_steps in writer_specs:
         writers = [row for row in rows if row.get("name") == writer_name]
         if len(writers) > 1:
             raise ValueError("Compiler benchmark trusted writer is duplicated")
@@ -760,12 +770,19 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
             steps = writer.get("steps")
             valid = (type(writer.get("run_id")) is int and writer["run_id"] == publisher["id"] and
                      type(writer.get("run_attempt")) is int and writer["run_attempt"] == publisher["run_attempt"] and
-                     writer.get("head_sha") == publisher["head_sha"] and isinstance(steps, list))
-            for name, statuses in ((checkout_step, ("completed",)), (write_step, ("in_progress", "completed"))):
-                found = [step for step in steps if isinstance(step, dict) and step.get("name") == name] if valid else []
-                valid = (len(found) == 1 and found[0].get("status") in statuses and
-                         (name != checkout_step or found[0].get("conclusion") == "success") and
-                         found[0].get("conclusion") != "skipped")
+                     writer.get("head_sha") == publisher["head_sha"] and
+                     writer.get("status") in ("in_progress", "completed") and isinstance(steps, list))
+            checkout_steps = ([step for step in steps if isinstance(step, dict) and
+                               step.get("name") == checkout_step] if valid else [])
+            valid = (len(checkout_steps) == 1 and checkout_steps[0].get("status") == "completed" and
+                     checkout_steps[0].get("conclusion") == "success")
+            write_matches = ([step for step in steps if isinstance(step, dict) and
+                              step.get("name") in write_steps] if valid else [])
+            valid = (len(write_matches) == 1 and
+                     ((write_matches[0].get("status") == "completed" and
+                       write_matches[0].get("conclusion") == "success") or
+                      (write_matches[0].get("status") == "in_progress" and
+                       write_matches[0].get("conclusion") is None)))
             if valid:
                 proved.append(writer)
     if not proved:
