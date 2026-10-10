@@ -21205,10 +21205,10 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
         // CPython's configure probes it for HAVE_BUILTIN_ATOMIC and most Linux
         // userland reaches for it in preference to the C11 one.
         predefined_function_name |= string_starts_with_sequence(spelling, S8("__atomic_"));
-        // Admit only the implemented legacy full barrier and NAND spellings.
-        predefined_function_name |= string_equal(spelling, S8("__sync_synchronize")) ||
-                                    string_equal(spelling, S8("__sync_fetch_and_nand")) ||
-                                    string_equal(spelling, S8("__sync_nand_and_fetch"));
+        // Admit only the implemented legacy `__sync_*` spellings: the full
+        // barrier, the read-modify-write pairs, compare-and-swap and the lock
+        // pair.  Sized `_1`..`_16` forms are not implemented.
+        predefined_function_name |= string_equal(spelling, S8("__sync_synchronize")) || c_ir_atomic_builtin_spelling(spelling).sequential;
         // GNU's complex part operators are spelled as identifiers but name no
         // entity; the expression walker consumes them as prefix operators.
         predefined_function_name |= string_equal(spelling, S8("__real__")) || string_equal(spelling, S8("__real")) ||
@@ -32471,7 +32471,16 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         u32 maximum = UINT32_MAX;
         switch (builtin)
         {
-        case C_SYMBOL_BUILTIN_ATOMIC: minimum = maximum = c_semantic_atomic_builtin_arity(c_ir_atomic_builtin_spelling(name)); break;
+        case C_SYMBOL_BUILTIN_ATOMIC:
+        {
+            // GNU documents trailing "protected variable" arguments for the
+            // legacy `__sync_*` family only: they are parsed and typed but
+            // never evaluated, as GCC does.
+            CIrAtomicBuiltinSpelling atomic_arity = c_ir_atomic_builtin_spelling(name);
+            minimum = c_semantic_atomic_builtin_arity(atomic_arity);
+            maximum = atomic_arity.sequential ? UINT32_MAX : minimum;
+        }
+        break;
         case C_SYMBOL_BUILTIN_EXPECT: minimum = 2; break;
         case C_SYMBOL_BUILTIN_MEMORY: minimum = maximum = c_semantic_memory_builtin_arity(name); break;
         case C_SYMBOL_BUILTIN_OVERFLOW: minimum = maximum = 3; break;

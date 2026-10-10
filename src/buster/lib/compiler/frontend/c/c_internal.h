@@ -1668,6 +1668,11 @@ typedef enum CIrAtomicBuiltin
     // boolean, and the store of zero that releases it again.
     C_IR_ATOMIC_BUILTIN_TEST_AND_SET,
     C_IR_ATOMIC_BUILTIN_CLEAR,
+    // GCC's legacy compare-and-swap pair.  Both take the expected value by
+    // value, not through a pointer: `val` answers the previous contents and
+    // `bool` answers whether they matched.
+    C_IR_ATOMIC_BUILTIN_SYNC_BOOL_COMPARE_AND_SWAP,
+    C_IR_ATOMIC_BUILTIN_SYNC_VAL_COMPARE_AND_SWAP,
     C_IR_ATOMIC_BUILTIN_COUNT,
 } CIrAtomicBuiltin;
 
@@ -1680,6 +1685,9 @@ struct CIrAtomicBuiltinSpelling
     bool new_value;
     bool generic;
     bool sequential;
+    // `__sync_lock_test_and_set` is an acquire barrier and `__sync_lock_release`
+    // a release one; every other `__sync_*` spelling is a full barrier.
+    bool lock;
 };
 
 BUSTER_C_EXTERN CIrAtomicBuiltinSpelling c_ir_atomic_builtin_spelling(String8 name);

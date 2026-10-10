@@ -2639,6 +2639,9 @@ struct CIrPreparedCall
     // The legacy `__sync_*` family has sequentially-consistent ordering in
     // the spelling and therefore no explicit memory-order argument.
     bool builtin_atomic_sequential;
+    // `__sync_lock_test_and_set` and `__sync_lock_release` are acquire and
+    // release barriers rather than full ones.
+    bool builtin_atomic_lock;
     bool builtin_identity;
     bool builtin_constant_p;
     bool builtin_choose_expr;
@@ -3040,7 +3043,11 @@ BUSTER_C_SHARED u32 c_semantic_atomic_builtin_arity(CIrAtomicBuiltinSpelling spe
     }
     else if (spelling.sequential)
     {
-        expected_count = 2;
+        expected_count = spelling.builtin == C_IR_ATOMIC_BUILTIN_CLEAR ? 1
+                         : spelling.builtin == C_IR_ATOMIC_BUILTIN_SYNC_BOOL_COMPARE_AND_SWAP ||
+                                 spelling.builtin == C_IR_ATOMIC_BUILTIN_SYNC_VAL_COMPARE_AND_SWAP
+                             ? 3
+                             : 2;
     }
     else if (spelling.gnu)
     {
@@ -3064,6 +3071,7 @@ BUSTER_C_SHARED CIrAtomicBuiltinSpelling c_ir_atomic_builtin_spelling(String8 na
         bool new_value;
         bool generic;
         bool sequential;
+        bool lock;
     } mappings[] = {
         {
             S8("__c11_atomic_load"),
@@ -3145,6 +3153,21 @@ BUSTER_C_SHARED CIrAtomicBuiltinSpelling c_ir_atomic_builtin_spelling(String8 na
         {S8("__atomic_nand_fetch"), C_IR_ATOMIC_BUILTIN_FETCH_NAND, true, true},
         {S8("__sync_fetch_and_nand"), C_IR_ATOMIC_BUILTIN_FETCH_NAND, true, false, false, true},
         {S8("__sync_nand_and_fetch"), C_IR_ATOMIC_BUILTIN_FETCH_NAND, true, true, false, true},
+        {S8("__sync_fetch_and_add"), C_IR_ATOMIC_BUILTIN_FETCH_ADD, true, false, false, true},
+        {S8("__sync_fetch_and_sub"), C_IR_ATOMIC_BUILTIN_FETCH_SUBTRACT, true, false, false, true},
+        {S8("__sync_fetch_and_or"), C_IR_ATOMIC_BUILTIN_FETCH_OR, true, false, false, true},
+        {S8("__sync_fetch_and_and"), C_IR_ATOMIC_BUILTIN_FETCH_AND, true, false, false, true},
+        {S8("__sync_fetch_and_xor"), C_IR_ATOMIC_BUILTIN_FETCH_XOR, true, false, false, true},
+        {S8("__sync_add_and_fetch"), C_IR_ATOMIC_BUILTIN_FETCH_ADD, true, true, false, true},
+        {S8("__sync_sub_and_fetch"), C_IR_ATOMIC_BUILTIN_FETCH_SUBTRACT, true, true, false, true},
+        {S8("__sync_or_and_fetch"), C_IR_ATOMIC_BUILTIN_FETCH_OR, true, true, false, true},
+        {S8("__sync_and_and_fetch"), C_IR_ATOMIC_BUILTIN_FETCH_AND, true, true, false, true},
+        {S8("__sync_xor_and_fetch"), C_IR_ATOMIC_BUILTIN_FETCH_XOR, true, true, false, true},
+        {S8("__sync_bool_compare_and_swap"), C_IR_ATOMIC_BUILTIN_SYNC_BOOL_COMPARE_AND_SWAP, true, false, false, true},
+        {S8("__sync_val_compare_and_swap"), C_IR_ATOMIC_BUILTIN_SYNC_VAL_COMPARE_AND_SWAP, true, false, false, true},
+        // GCC documents these two as acquire and release barriers, not full ones.
+        {S8("__sync_lock_test_and_set"), C_IR_ATOMIC_BUILTIN_EXCHANGE, true, false, false, true, true},
+        {S8("__sync_lock_release"), C_IR_ATOMIC_BUILTIN_CLEAR, true, false, false, true, true},
         // GNU's compare-exchange takes a `weak` flag the C11 spelling puts in
         // the name. A strong exchange satisfies a weak request -- weak only
         // permits a spurious failure -- so the flag is read and discarded, and
@@ -3169,6 +3192,7 @@ BUSTER_C_SHARED CIrAtomicBuiltinSpelling c_ir_atomic_builtin_spelling(String8 na
                 .new_value = mappings[index].new_value,
                 .generic = mappings[index].generic,
                 .sequential = mappings[index].sequential,
+                .lock = mappings[index].lock,
             };
         }
     }
@@ -23158,7 +23182,12 @@ BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_chained(CIntegerIrBuilder*
 
 BUSTER_C_INTERNAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out);
 
-BUSTER_C_INTERNAL bool c_ir_call_arguments(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32* starts, u32* ends, u32 capacity, u32* count_out)
+// Splits the call's top-level arguments. With `count_extra`, arguments past
+// `capacity` are counted but not recorded: GNU's `__sync_*` builtins accept
+// trailing arguments that are never evaluated, so only the leading ones are
+// needed. Without it, more than `capacity` arguments is a failure.
+BUSTER_C_INTERNAL bool c_ir_call_arguments_counted(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32* starts, u32* ends, u32 capacity,
+                                                   u32* count_out, bool count_extra)
 {
     u32 count = 0;
     u32 start = call->open_index + 1;
@@ -23201,17 +23230,25 @@ BUSTER_C_INTERNAL bool c_ir_call_arguments(CIntegerIrBuilder* builder, CIrPrepar
         {
             continue;
         }
-        if (start == index || count >= capacity)
+        if (start == index || (count >= capacity && !count_extra))
         {
             return false;
         }
-        starts[count] = start;
-        ends[count] = index;
+        if (count < capacity)
+        {
+            starts[count] = start;
+            ends[count] = index;
+        }
         count += 1;
         start = index + 1;
     }
     *count_out = count;
     return true;
+}
+
+BUSTER_C_INTERNAL bool c_ir_call_arguments(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32* starts, u32* ends, u32 capacity, u32* count_out)
+{
+    return c_ir_call_arguments_counted(builder, call, starts, ends, capacity, count_out, false);
 }
 
 // The first top-level comma of [index, end), or end. Groups are hopped over
@@ -24226,6 +24263,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             .builtin_atomic_new_value = atomic_spelling.new_value,
             .builtin_atomic_generic = atomic_spelling.generic,
             .builtin_atomic_sequential = atomic_spelling.sequential,
+            .builtin_atomic_lock = atomic_spelling.lock,
             .builtin_strlen = builtin_strlen,
             .builtin_clear_cache = builtin_clear_cache,
             .builtin_prefetch = builtin_prefetch,
@@ -25110,14 +25148,20 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             u32 argument_count = 0;
             u32 expected_count = c_semantic_atomic_builtin_arity((CIrAtomicBuiltinSpelling){
                 .builtin = selected->builtin_atomic, .gnu = selected->builtin_atomic_gnu,
-                .generic = selected->builtin_atomic_generic, .sequential = selected->builtin_atomic_sequential});
+                .generic = selected->builtin_atomic_generic, .sequential = selected->builtin_atomic_sequential,
+                .lock = selected->builtin_atomic_lock});
             IrSourceRange source = c_ir_token_source_range(builder, token);
             // `__sync_synchronize()` is the one atomic builtin with an empty
             // argument list, which the argument scan reports as malformed.
             bool empty_arguments = selected->open_index + 1 == selected->close_index;
+            // GNU documents trailing "protected variable" arguments for the
+            // legacy `__sync_*` family only; GCC parses them and never
+            // evaluates them, and neither does this lowering.
+            bool trailing_arguments = selected->builtin_atomic_sequential;
             if (empty_arguments ? expected_count != 0
-                                : (!c_ir_call_arguments(builder, selected, starts, ends, BUSTER_ARRAY_LENGTH(starts), &argument_count) ||
-                                   argument_count != expected_count))
+                                : (!c_ir_call_arguments_counted(builder, selected, starts, ends, BUSTER_ARRAY_LENGTH(starts), &argument_count,
+                                                                trailing_arguments) ||
+                                   (trailing_arguments ? argument_count < expected_count : argument_count != expected_count)))
             {
                 return false;
             }
@@ -25287,6 +25331,50 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 builder->failure_message = S8("C IR lowering does not yet support atomic wide floating-point builtins");
                 return false;
             }
+            // GCC documents the legacy family for "any scalar type that is 1,
+            // 2, 4 or 8 bytes in size other than _Bool"; measured with GCC
+            // 13.3, it refuses a _Bool object for the read-modify-write
+            // builtins and accepts it for compare-and-swap and the lock pair.
+            bool sync_modify = selected->builtin_atomic_sequential &&
+                               (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_ADD || selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_SUBTRACT ||
+                                selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_AND || selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_OR ||
+                                selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_XOR || selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_NAND);
+            if (selected->builtin_atomic_sequential && !(unqualified->kind == IR_TYPE_INTEGER || unqualified->kind == IR_TYPE_BOOLEAN ||
+                                                         unqualified->kind == IR_TYPE_ENUM || pointer_value))
+            {
+                builder->failure_token_index = selected->token_index;
+                builder->failure_message = S8("__sync builtins require an integer or pointer object");
+                return false;
+            }
+            if (sync_modify && unqualified->kind == IR_TYPE_BOOLEAN)
+            {
+                builder->failure_token_index = selected->token_index;
+                builder->failure_message = S8("__sync read-modify-write builtins do not accept a _Bool object");
+                return false;
+            }
+            // Canonical atomic arithmetic and bitwise operations are integer
+            // operations: a pointer or enumeration object takes them through
+            // the unsigned integer view of its storage (GNU's pointer offsets
+            // are unscaled bytes). An enumeration exchange takes the view too,
+            // since canonical exchange admits only integer, boolean and
+            // pointer values.
+            bool enum_value = unqualified->kind == IR_TYPE_ENUM;
+            bool pointer_view = (sync_modify && (pointer_value || enum_value)) ||
+                                (selected->builtin_atomic_sequential && selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_EXCHANGE && enum_value);
+            // The unsigned integer type that views a _Bool or enumeration
+            // object's storage for the legacy compare-and-swap.
+            IrTypeId cas_view_type = IR_TYPE_ID_INVALID;
+            if (!pointer_value && unqualified->kind != IR_TYPE_INTEGER && selected->builtin_atomic_sequential &&
+                (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SYNC_BOOL_COMPARE_AND_SWAP ||
+                 selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SYNC_VAL_COMPARE_AND_SWAP) &&
+                atomic_width <= 8)
+            {
+                cas_view_type = c_ir_unsigned_type_of_size(builder, atomic_width);
+                if (cas_view_type.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+            }
             // The success order is the last argument for every shape except a
             // compare-exchange, which carries a failure order behind it.
             u32 order_index = expected_count ? expected_count - 1 : 0;
@@ -25297,6 +25385,10 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 order_index = expected_count - 2;
             }
             IrMemoryOrder order = selected->builtin_atomic_sequential ? IR_MEMORY_ORDER_SEQUENTIAL : IR_MEMORY_ORDER_RELAXED;
+            if (selected->builtin_atomic_lock)
+            {
+                order = selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_CLEAR ? IR_MEMORY_ORDER_RELEASE : IR_MEMORY_ORDER_ACQUIRE;
+            }
             if (!selected->builtin_atomic_sequential && selected->builtin_atomic != C_IR_ATOMIC_BUILTIN_INIT &&
                 !c_ir_atomic_memory_order(builder, starts[order_index], ends[order_index], &order))
             {
@@ -25328,7 +25420,95 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                                                                  starts[1], ends[1], false);
                 }
             }
-            if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG ||
+            if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SYNC_BOOL_COMPARE_AND_SWAP ||
+                selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SYNC_VAL_COMPARE_AND_SWAP)
+            {
+                // GCC's legacy compare-and-swap takes the expected and new
+                // values by value.  Each is lowered once, in argument order,
+                // and the expected value is parked in the call state across
+                // the second request.  Floating-point and aggregate objects
+                // are not valid operands of the legacy family, nor is an object
+                // wider than eight bytes: the by-value operands have no
+                // 16-byte lowering on any target, whatever its cmpxchg16b
+                // support.
+                bool integral = unqualified->kind == IR_TYPE_INTEGER || unqualified->kind == IR_TYPE_BOOLEAN ||
+                                unqualified->kind == IR_TYPE_ENUM || pointer_value;
+                if (!integral || atomic_width > 8)
+                {
+                    builder->failure_token_index = selected->token_index;
+                    builder->failure_message = S8("__sync compare-and-swap requires an integer or pointer object of at most 8 bytes");
+                    return false;
+                }
+                if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_PLACE)
+                {
+                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_EXPECTED_PLACE, starts[1], ends[1],
+                                                                 false);
+                }
+                if (!child_success)
+                {
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
+                }
+                if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_EXPECTED_PLACE)
+                {
+                    IrValueId expected_value = c_ir_emit_cast(builder, child_value, value_type_id, source);
+                    if (cas_view_type.value != IR_ID_UNDERLYING_INVALID && expected_value.value != IR_ID_UNDERLYING_INVALID)
+                    {
+                        expected_value = c_ir_emit_cast(builder, expected_value, cas_view_type, source);
+                    }
+                    if (expected_value.value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        return false;
+                    }
+                    frame->as.prepared_call.state->first = expected_value;
+                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_DESIRED, starts[2], ends[2], false);
+                }
+                IrValueId expected = frame->as.prepared_call.state->first;
+                IrValueId desired = c_ir_emit_cast(builder, child_value, value_type_id, source);
+                if (cas_view_type.value != IR_ID_UNDERLYING_INVALID && desired.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    desired = c_ir_emit_cast(builder, desired, cas_view_type, source);
+                }
+                // A _Bool or enumeration object is exchanged through the
+                // unsigned integer view of its storage: canonical
+                // compare-exchange admits only integer and pointer values.
+                IrTypeId cas_type = cas_view_type.value != IR_ID_UNDERLYING_INVALID ? cas_view_type : value_type_id;
+                IrValueId cas_place = cas_view_type.value != IR_ID_UNDERLYING_INVALID && desired.value != IR_ID_UNDERLYING_INVALID
+                                          ? c_ir_atomic_aggregate_bits_place(builder, place, atomic_type, cas_view_type, source)
+                                          : place;
+                if (desired.value == IR_ID_UNDERLYING_INVALID || cas_place.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+                IrValueId observed = c_ir_add_result(builder, cas_type);
+                IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_ATOMIC_COMPARE_EXCHANGE, cas_type);
+                instruction.operands = arena_allocate(builder->arena, IrValueId, 3);
+                instruction.operands[0] = cas_place;
+                instruction.operands[1] = expected;
+                instruction.operands[2] = desired;
+                instruction.operand_count = 3;
+                instruction.memory_order = (u8)IR_MEMORY_ORDER_SEQUENTIAL;
+                instruction.failure_memory_order = (u8)IR_MEMORY_ORDER_SEQUENTIAL;
+                instruction.result = observed;
+                c_ir_append_instruction(builder, instruction, source);
+                if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SYNC_VAL_COMPARE_AND_SWAP)
+                {
+                    selected->result = cas_view_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, observed, value_type_id, source) : observed;
+                    if (selected->result.value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    selected->result = c_ir_emit_binary_value(builder, observed, expected, builder->bool_type,
+                                                              pointer_value ? IR_BINARY_POINTER_EQUAL : IR_BINARY_INTEGER_EQUAL, source);
+                    if (selected->result.value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        return false;
+                    }
+                }
+            }
+            else if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG ||
                 selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_WEAK)
             {
                 IrMemoryOrder failure_order = IR_MEMORY_ORDER_COUNT;
@@ -25526,7 +25706,24 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 {
                     return false;
                 }
-                IrValueId flag = c_ir_emit_integer_value_typed(builder, clearing ? 0u : 1u, false, token, value_type_id);
+                // A pointer or enumeration object is cleared through the
+                // unsigned integer view of its storage: canonical constants
+                // are integer or boolean values, never pointers, and an
+                // enumeration store of one would need an enum constant.
+                IrTypeId flag_type = value_type_id;
+                IrValueId flag_place = place;
+                if (clearing && (pointer_value || enum_value))
+                {
+                    flag_type = c_ir_unsigned_type_of_size(builder, atomic_width);
+                    flag_place = flag_type.value != IR_ID_UNDERLYING_INVALID
+                                     ? c_ir_atomic_aggregate_bits_place(builder, place, atomic_type, flag_type, source)
+                                     : IR_VALUE_ID_INVALID;
+                    if (flag_place.value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        return false;
+                    }
+                }
+                IrValueId flag = c_ir_emit_integer_value_typed(builder, clearing ? 0u : 1u, false, token, flag_type);
                 if (flag.value == IR_ID_UNDERLYING_INVALID)
                 {
                     return false;
@@ -25535,11 +25732,21 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 IrInstruction instruction = c_ir_instruction_initialize(clearing ? IR_OPCODE_ATOMIC_STORE : IR_OPCODE_ATOMIC_READ_MODIFY_WRITE,
                                                                         clearing ? builder->void_type : value_type_id);
                 instruction.operands = arena_allocate(builder->arena, IrValueId, 2);
-                instruction.operands[0] = place;
+                instruction.operands[0] = flag_place;
                 instruction.operands[1] = flag;
                 instruction.operand_count = 2;
                 instruction.memory_order = (u8)order;
-                if (clearing)
+                if (clearing && wide_atomic_runtime)
+                {
+                    // Without cmpxchg16b a sixteen-byte store is the libatomic
+                    // helper, exactly as `__atomic_store_n` lowers it.
+                    if (!c_ir_emit_wide_atomic_runtime_store(builder, place, atomic_type, flag, source, order))
+                    {
+                        return false;
+                    }
+                    selected->result = c_ir_emit_integer_value(builder, 0, false, token);
+                }
+                else if (clearing)
                 {
                     c_ir_append_instruction(builder, instruction, instruction_source);
                     selected->result = c_ir_emit_integer_value(builder, 0, false, token);
@@ -25675,9 +25882,10 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 // two *bytes* in clang and gcc alike, measured 2026-08-30, so
                 // the GNU spelling deliberately skips the scaling below and
                 // recomputes its answer as an integer.
-                bool pointer_arithmetic = pointer_value &&
+                bool pointer_arithmetic = pointer_value && !pointer_view &&
                                           (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_ADD ||
                                            selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_SUBTRACT);
+                IrTypeId pointer_view_type = pointer_view ? c_ir_unsigned_type_of_size(builder, atomic_width) : IR_TYPE_ID_INVALID;
                 // The scaling below turns an element count into a byte count
                 // for the instruction; `__atomic_add_fetch` has to re-apply the
                 // operation to the value the caller wrote, so the operand is
@@ -25704,9 +25912,22 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                         value = c_ir_emit_binary_value(builder, value, scale, builder->ptrdiff_type, IR_BINARY_INTEGER_MULTIPLY, source);
                     }
                 }
+                else if (pointer_view)
+                {
+                    // GNU's legacy operand is a plain integer byte count or
+                    // mask; it is converted to the object's width, not scaled.
+                    value = pointer_view_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, value, pointer_view_type, source)
+                                                                               : IR_VALUE_ID_INVALID;
+                    operand_value = value;
+                }
                 else if (!selected->builtin_atomic_generic)
                 {
                     value = c_ir_emit_cast(builder, value, value_type_id, source);
+                    // The `*_fetch` recomputation combines this operand with the
+                    // previous value, and canonical binary operations take two
+                    // operands of one type: an `int` literal against an unsigned
+                    // or enumeration object would otherwise fail validation.
+                    operand_value = value;
                 }
                 if (value.value == IR_ID_UNDERLYING_INVALID)
                 {
@@ -25790,6 +26011,15 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                             return false;
                         }
                     }
+                    if (pointer_view)
+                    {
+                        operation_type = pointer_view_type;
+                        operation_place = c_ir_atomic_aggregate_bits_place(builder, place, atomic_type, operation_type, source);
+                        if (operation_place.value == IR_ID_UNDERLYING_INVALID)
+                        {
+                            return false;
+                        }
+                    }
                     if (wide_atomic_runtime && !aggregate_value)
                     {
                         operation_type = wide_atomic_runtime_type;
@@ -25864,10 +26094,13 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                         // is what the reference compilers emit too, and is
                         // correct without a second atomic access because the
                         // operation is a pure function of the two operands.
-                        IrTypeId recompute_type = pointer_value ? builder->ptrdiff_type : value_type_id;
+                        // A pointer taken through the integer view already has
+                        // both operands in that type.
+                        bool recompute_cast = pointer_value && !pointer_view;
+                        IrTypeId recompute_type = pointer_view ? pointer_view_type : (pointer_value ? builder->ptrdiff_type : value_type_id);
                         IrValueId recompute_values[2] = {
-                            pointer_value ? c_ir_emit_cast(builder, previous, recompute_type, source) : previous,
-                            pointer_value ? c_ir_emit_cast(builder, operand_value, recompute_type, source) : operand_value,
+                            recompute_cast ? c_ir_emit_cast(builder, previous, recompute_type, source) : previous,
+                            recompute_cast ? c_ir_emit_cast(builder, operand_value, recompute_type, source) : operand_value,
                         };
                         if (recompute_values[0].value == IR_ID_UNDERLYING_INVALID ||
                             recompute_values[1].value == IR_ID_UNDERLYING_INVALID)

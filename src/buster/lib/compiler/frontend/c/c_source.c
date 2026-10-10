@@ -4288,6 +4288,20 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__sync_synchronize"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__sync_fetch_and_nand"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__sync_nand_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_add"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_sub"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_or"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_and"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_xor"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_add_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_sub_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_or_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_and_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_xor_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_bool_compare_and_swap"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_val_compare_and_swap"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_lock_test_and_set"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_lock_release"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__atomic_load"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__atomic_store"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__atomic_exchange"), C_SYMBOL_BUILTIN_ATOMIC },
@@ -12810,7 +12824,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
             C_DEFINE_TYPE_MACRO("__pie__", level);
         }
     }
-    // __GCC_HAVE_SYNC_COMPARE_AND_SWAP_* has no matching __sync compare-and-swap builtins,
+    // __GCC_HAVE_SYNC_COMPARE_AND_SWAP_* is not defined: the generic __sync compare-and-swap
+    // builtins exist but their sized `_1`..`_16` forms do not (#1394),
     // __SIZEOF_FLOAT128__ is unmodeled, __SEG_FS/__SEG_GS have no keywords,
     // and __PRAGMA_REDEFINE_EXTNAME is an unimplemented pragma.
     C_DEFINE_TYPE_MACRO("__SIZE_TYPE__", unsigned_pointer_type);
