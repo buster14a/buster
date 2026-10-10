@@ -35196,6 +35196,7 @@ BUSTER_C_INTERNAL bool c_parse_vendor_generic_category(CParseResult* result, Tar
     else if (builtin.category == C_VENDOR_GENERIC_CATEGORY_INTEGER_OR_FLOAT) valid &= integer || floating;
     else if (builtin.category == C_VENDOR_GENERIC_CATEGORY_INTEGER_FLOAT_OR_POINTER)
         valid &= integer || floating || value.kind == C_TYPE_POINTER;
+    else if (builtin.category == C_VENDOR_GENERIC_CATEGORY_FLOAT) valid &= floating;
     if (builtin.operation == C_VENDOR_GENERIC_NONDETERMINISTIC_VALUE)
         valid &= integer || floating;
     if (builtin.operation == C_VENDOR_GENERIC_PMULHUW128_SIGNATURE)
@@ -35322,6 +35323,38 @@ BUSTER_C_INTERNAL void c_parse_validate_storage_half_casts(CTypeParseMachine* ma
 
 // This pass includes globals and unevaluated expressions, and runs even when
 // an earlier enum/initializer diagnostic has made ordinary lowering impossible.
+BUSTER_C_INTERNAL String8 c_parse_vendor_fixed_argument_message(CTypeParseMachine* machine, CParseResult* result,
+                                                               CPreprocessResult preprocess, CScopeId scope, CSymbolBuiltin kind,
+                                                               String8 name, CVendorBuiltin signature, u32 argument,
+                                                               CTypeId const* types, u32 const* starts, u32 const* ends)
+{
+    String8 message = {0};
+    CTypeId expected = c_semantic_vendor_builtin_type(result, preprocess.target, signature.types[argument + 1]);
+    bool compatible = c_parse_vendor_argument_compatible(machine, result, preprocess, scope, expected, types[argument],
+                                                           starts[argument], ends[argument]);
+    if (kind == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT && argument == 0)
+    {
+        CType vector = result->types[types[0].value];
+        IrType element = c_parse_constant_scalar_type(result, preprocess.target, vector.element_type);
+        CIrSse2ImmediateShiftBuiltin shift = {0};
+        compatible = c_semantic_sse2_immediate_shift_builtin(name, &shift) &&
+            vector.kind == C_TYPE_VECTOR && vector.vector_byte_size == 16 &&
+            element.kind == IR_TYPE_INTEGER && element.bit_width == shift.lane_width;
+    }
+    if (!compatible)
+        message = c_parse_message(result->arena, S8("argument {u32} of {S8} has an incompatible type"), argument + 1, name);
+    if (!message.length && (signature.constant_arguments & (1u << argument)))
+    {
+        CIntegerConstant constant = c_parse_type_integer_constant(machine->scratch_arena, preprocess, result, scope,
+                                                                   starts[argument], ends[argument]);
+        u64 limit = c_semantic_vendor_immediate_limit(name, argument);
+        if (!c_parse_vendor_immediate_permitted(preprocess.target, signature.types[argument + 1].kind, constant, limit))
+            message = c_parse_message(result->arena, S8("argument {u32} of {S8} requires an integer constant{S8}"),
+                argument + 1, name, limit ? S8(" in the permitted range") : (String8){0});
+    }
+    return message;
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* machine, CParseResult* result,
                                                             CPreprocessResult preprocess)
 {
@@ -35382,6 +35415,7 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
         }
         String8 message = {0};
         u32 location = close;
+        u32 typed = 0;
         CVendorBuiltin signature = {0};
         CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
         bool fixed = kind != C_SYMBOL_BUILTIN_VENDOR_GENERIC ||
@@ -35408,35 +35442,43 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
                                               starts[argument], ends[argument], &type);
             bool representation = !fixed && generic.operation == C_VENDOR_GENERIC_BIT_CAST;
             types[argument] = type_argument || representation ? type : c_parse_auto_decay_type(result, type);
+            typed = argument + 1;
             location = starts[argument];
             if (types[argument].value >= result->type_count)
                 message = c_parse_message(result->arena, S8("argument {u32} of {S8} requires {S8}"), argument + 1, name,
                                           type_argument ? S8("a complete type name") : S8("a valid value expression"));
             if (fixed && !message.length)
+                message = c_parse_vendor_fixed_argument_message(machine, result, preprocess, scope, kind, name, signature,
+                                                                argument, types, starts, ends);
+        }
+        // Clang 23 headers spell the LLVM 23.1.2 contract of a few pinned
+        // names; a call rejected by the pinned contract may match it instead.
+        // When both reject it, the contract matching more arguments reports.
+        CVendorBuiltin alternate = {0};
+        if (fixed && message.length && count == signature.parameter_count && count <= BUSTER_ARRAY_LENGTH(types) &&
+            c_vendor_builtin_lookup_alternate(preprocess.target, name, &alternate) && alternate.parameter_count == count)
+        {
+            String8 alternate_message = {0};
+            u32 alternate_location = close;
+            for (u32 argument = 0; argument < count && !alternate_message.length; argument += 1)
             {
-                CTypeId expected = c_semantic_vendor_builtin_type(result, preprocess.target, signature.types[argument + 1]);
-                bool compatible = c_parse_vendor_argument_compatible(machine, result, preprocess, scope, expected, types[argument],
-                                                                       starts[argument], ends[argument]);
-                if (kind == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT && argument == 0)
+                alternate_location = starts[argument];
+                if (argument >= typed)
                 {
-                    CType vector = result->types[types[0].value];
-                    IrType element = c_parse_constant_scalar_type(result, preprocess.target, vector.element_type);
-                    CIrSse2ImmediateShiftBuiltin shift = {0};
-                    compatible = c_semantic_sse2_immediate_shift_builtin(name, &shift) &&
-                        vector.kind == C_TYPE_VECTOR && vector.vector_byte_size == 16 &&
-                        element.kind == IR_TYPE_INTEGER && element.bit_width == shift.lane_width;
+                    CTypeId type = C_TYPE_ID_INVALID;
+                    c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope,
+                                                  starts[argument], ends[argument], &type);
+                    types[argument] = c_parse_auto_decay_type(result, type);
                 }
-                if (!compatible)
-                    message = c_parse_message(result->arena, S8("argument {u32} of {S8} has an incompatible type"), argument + 1, name);
-                if (!message.length && (signature.constant_arguments & (1u << argument)))
-                {
-                    CIntegerConstant constant = c_parse_type_integer_constant(machine->scratch_arena, preprocess, result, scope,
-                                                                               starts[argument], ends[argument]);
-                    u64 limit = c_semantic_vendor_immediate_limit(name, argument);
-                    if (!c_parse_vendor_immediate_permitted(preprocess.target, signature.types[argument + 1].kind, constant, limit))
-                        message = c_parse_message(result->arena, S8("argument {u32} of {S8} requires an integer constant{S8}"),
-                            argument + 1, name, limit ? S8(" in the permitted range") : (String8){0});
-                }
+                alternate_message = types[argument].value < result->type_count
+                    ? c_parse_vendor_fixed_argument_message(machine, result, preprocess, scope, kind, name, alternate,
+                                                            argument, types, starts, ends)
+                    : c_parse_message(result->arena, S8("argument {u32} of {S8} requires a valid value expression"), argument + 1, name);
+            }
+            if (!alternate_message.length || alternate_location > location)
+            {
+                message = alternate_message;
+                location = alternate_location;
             }
         }
         if (!fixed && !message.length)
@@ -35534,9 +35576,11 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
             {
                 if (!c_parse_vendor_generic_category(result, preprocess.target, types[0], generic))
                     message = c_parse_message(result->arena, S8("{S8} has an invalid scalar or vector operand type"), name);
-                if (!message.length && generic.same_type_operands &&
-                    !c_parse_types_compatible(machine->scratch_arena, result, preprocess, types[0], types[1]))
-                    message = c_parse_message(result->arena, S8("{S8} requires operands of the same unqualified type"), name);
+                for (u32 argument = 1; argument < count && argument < BUSTER_ARRAY_LENGTH(types) && generic.same_type_operands && !message.length; argument += 1)
+                {
+                    if (!c_parse_types_compatible(machine->scratch_arena, result, preprocess, types[0], types[argument]))
+                        message = c_parse_message(result->arena, S8("{S8} requires operands of the same unqualified type"), name);
+                }
             }
         }
         if (message.length)

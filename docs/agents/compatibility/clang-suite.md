@@ -150,6 +150,14 @@ lowering budget skips known `sizeof`, `_Alignof` and `typeof` operands, but
 `_Generic` evaluation-context classification is not complete. This admission
 does not grant F16C intrinsic, promotion or ABI coverage.
 
+Clang 23.1.2's full `<immintrin.h>` also spells LLVM 23 contracts for builtins
+whose pinned LLVM 21 parameter types changed, plus new bmac and elementwise
+builtins. The frontend admits those through a hand-written LLVM 23.1.2
+supplement (see the [frontend guide](../frontend.md)) without changing the
+pinned generated metadata. With it, the stock-header gate passes for the whole
+header at `-march=znver5` and the downstream baseline, runtime and object gates
+run.
+
 This is a family slice of [#2405](https://github.com/buster14a/buster/issues/2405)
 and [#2290](https://github.com/buster14a/buster/issues/2290), not the exhaustive
 public-API census, a general immediate-domain oracle, or a completed Zen 5

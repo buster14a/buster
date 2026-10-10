@@ -675,6 +675,30 @@ stays false and reached calls retain the existing unsupported-lowering refusal.
 valid and invalid shapes, unevaluated/unused calls, target refusal, and all
 three frontend forms.
 
+Clang 23.1.2 changed the parameter types of 65 other pinned x86 builtins and
+added new ones that its `<immintrin.h>` spells. `c_vendor_builtin.c.in` keeps
+a hand-written LLVM 23.1.2 supplement beside the generated LLVM 21.1.8 tables,
+whose metadata and provenance stay untouched. For a changed name (PAVGB/W,
+PMULHUW256/512, PSADBW, the immediate byte shifts and the VNNI dot products)
+`c_parse_validate_vendor_builtin_calls` tries the pinned contract first and
+then the LLVM 23 one. A call must match one whole contract; mixing the two is
+rejected, and the contract that matched more arguments reports the diagnostic.
+The call keeps its pinned result type, which those headers always cast. When
+lowering a supported changed builtin, an operand of the other contract is a
+same-size vector of another lane shape. It is reinterpreted bitwise, as a C
+vector cast would be, through `c_ir_vendor_argument_value`. The
+`__builtin_ia32_bmac*16x16x16_*` names exist only in the supplement and take
+their type from it. The LLVM 23 generic
+`__builtin_elementwise_{fma,sqrt,fshl,fshr,clzg,bitreverse}` contracts accept
+scalars or vectors with the floating/integer category and same-type operands
+of Clang's SemaChecking. Apart from the already lowered byte shifts, all of
+this is signature admission only: `__has_builtin` stays false and reached
+calls receive the unsupported-builtin refusal.
+`compiler_driver_test_llvm23_header_contracts` covers both contracts, mixed
+and invalid calls in unused and unevaluated contexts, reached refusals and
+off-target unavailability in all three frontend forms.
+`c_test_vendor_immediate_byte_shifts` runs LLVM 23 `char`-lane byte shifts.
+
 The five preexisting SSE2 scalar-count shift spellings accept ordinary `int`
 arguments. Both operands are evaluated once, including count copy conversion;
 the emitted scalar shifts use a bounded count. Logical shifts choose zero

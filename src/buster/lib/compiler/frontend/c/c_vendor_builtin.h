@@ -24,6 +24,9 @@ struct CVendorBuiltin
 
 BUSTER_C_EXTERN bool c_vendor_builtin_spelling(String8 name);
 BUSTER_C_EXTERN bool c_vendor_builtin_lookup(Target target, String8 name, CVendorBuiltin* signature);
+// The LLVM 23.1.2 contract of a pinned name whose parameter types changed
+// there. Callers try it only after the pinned contract rejects a call.
+BUSTER_C_EXTERN bool c_vendor_builtin_lookup_alternate(Target target, String8 name, CVendorBuiltin* signature);
 
 // Custom generic builtins have grammar and type rules, not a void(...) C
 // prototype. These operation descriptors share the exact spelling and arity
@@ -50,6 +53,12 @@ typedef enum CVendorGenericOperation
     C_VENDOR_GENERIC_REDUCE_OR,
     C_VENDOR_GENERIC_SHUFFLE_VECTOR,
     C_VENDOR_GENERIC_PMULHUW128_SIGNATURE,
+    C_VENDOR_GENERIC_ELEMENTWISE_BITREVERSE,
+    C_VENDOR_GENERIC_ELEMENTWISE_CLZG,
+    C_VENDOR_GENERIC_ELEMENTWISE_FMA,
+    C_VENDOR_GENERIC_ELEMENTWISE_FSHL,
+    C_VENDOR_GENERIC_ELEMENTWISE_FSHR,
+    C_VENDOR_GENERIC_ELEMENTWISE_SQRT,
 } CVendorGenericOperation;
 
 typedef enum CVendorGenericCategory
@@ -59,6 +68,7 @@ typedef enum CVendorGenericCategory
     C_VENDOR_GENERIC_CATEGORY_SIGNED_INTEGER_OR_FLOAT,
     C_VENDOR_GENERIC_CATEGORY_INTEGER_OR_FLOAT,
     C_VENDOR_GENERIC_CATEGORY_INTEGER_FLOAT_OR_POINTER,
+    C_VENDOR_GENERIC_CATEGORY_FLOAT,
 } CVendorGenericCategory;
 
 typedef enum CVendorGenericResult

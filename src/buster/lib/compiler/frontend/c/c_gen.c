@@ -23964,6 +23964,32 @@ BUSTER_C_INTERNAL IrTypeId c_ir_vendor_signature_type(CIntegerIrBuilder* builder
 
 // Queries suspend through the existing query machine when an operand needs a
 // nested answer; they never evaluate the source argument or recurse on input.
+// A fixed-signature operand converts to its parameter type. A call admitted
+// by the LLVM 23.1.2 contract passes a same-size vector of another lane shape
+// (char lanes for a long long byte shift); like a C vector cast, that operand
+// is reinterpreted bitwise rather than converted lane by lane.
+BUSTER_C_INTERNAL IrValueId c_ir_vendor_argument_value(CIntegerIrBuilder* builder, IrValueId value, IrTypeId type, IrSourceRange source)
+{
+    IrValueId result;
+    IrType* expected = ir_type_from_id(&builder->program->types, type);
+    IrTypeId actual_type = value.value < builder->function->value_count ? builder->function->values[value.value].canonical_type : IR_TYPE_ID_INVALID;
+    IrType* actual = ir_type_from_id(&builder->program->types, actual_type);
+    bool reinterpret = expected && actual && actual_type.value != type.value && expected->kind == IR_TYPE_VECTOR &&
+        actual->kind == IR_TYPE_VECTOR && expected->layout.resolved && actual->layout.resolved &&
+        expected->layout.size == actual->layout.size && expected->element_count != actual->element_count;
+    if (reinterpret)
+    {
+        IrValueId loaded = builder->function->values[value.value].category == IR_VALUE_PLACE
+            ? c_ir_emit_load_place_raw(builder, value, actual_type, source) : value;
+        result = loaded.value == IR_ID_UNDERLYING_INVALID ? loaded : c_ir_emit_representation_alias_conversion(builder, loaded, type, source);
+    }
+    else
+    {
+        result = c_ir_emit_cast(builder, value, type, source);
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_ir_vendor_result_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 close, IrTypeId* type_out)
 {
     String8 name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start]);
@@ -26580,8 +26606,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     value = c_ir_emit_load_place_raw(builder, value, builder->function->values[value.value].canonical_type,
                                                      c_ir_token_source_range(builder, token));
                 if (fixed)
-                    value = c_ir_emit_cast(builder, value, c_ir_vendor_signature_type(builder, signature.types[argument + 1]),
-                                           c_ir_token_source_range(builder, token));
+                    value = c_ir_vendor_argument_value(builder, value, c_ir_vendor_signature_type(builder, signature.types[argument + 1]),
+                                                       c_ir_token_source_range(builder, token));
                 if (value.value == IR_ID_UNDERLYING_INVALID) return C_IR_PREPARED_CALL_STEP_FAILED;
                 selected->arguments[argument] = value;
                 frame->as.prepared_call.state->argument_index += 1;
