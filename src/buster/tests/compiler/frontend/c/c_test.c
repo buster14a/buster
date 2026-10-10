@@ -112,6 +112,473 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_reservation_failures(UnitTest
     return result;
 }
 
+// Per-body validation scratch guard (#1256). Every array a function body's
+// validation sizes by the body goes through c_parse_body_scratch_allocate; a
+// request past the body's limit is refused, the body is reported once, and
+// validation continues with the next body. The seams cap the guard's view of
+// the scratch arena per body and record each request it checks, so these
+// fixtures pick a cap from a real run's own requests and exhaust exactly the
+// allocation site they name: the per-token arrays of a flat body, the
+// geometric growth of the scope-pending stack of a deeply nested body, and
+// the operand and name tables of a large inline-assembly statement.
+#define C_TEST_BODY_SCRATCH_TRACE_CAPACITY (1u << 16)
+#define C_TEST_BODY_SCRATCH_MESSAGES 4
+#define C_TEST_BODY_SCRATCH_NESTING 200
+#define C_TEST_BODY_SCRATCH_ASM_OPERANDS 160
+
+typedef struct CTestBodyScratchRun CTestBodyScratchRun;
+struct CTestBodyScratchRun
+{
+    String8 messages[C_TEST_BODY_SCRATCH_MESSAGES];
+    u32 diagnostic_count;
+    u32 trace_count;
+    bool lowered;
+};
+
+BUSTER_GLOBAL_LOCAL CTestBodyScratchRun c_test_body_scratch_run(UnitTestArguments* arguments, String8 source, u64 cap,
+                                                                CTestBodyScratchRequest* trace)
+{
+    CTestBodyScratchRun run = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessOptions options = {.source_path = S8("body-scratch.c"), .target = target_native, .data_layout = target_data_layout(target_native)};
+    c_test_body_validation_scratch_limit(cap);
+    c_test_body_validation_scratch_trace(trace, C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source, options);
+    CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, options.source_path, preprocess, syntax, target_native, (CIRLowerOptions){0});
+    run.trace_count = c_test_body_validation_scratch_trace_count();
+    c_test_body_validation_scratch_trace(0, 0);
+    c_test_body_validation_scratch_limit(0);
+    run.diagnostic_count = (u32)preprocess.error_count + (u32)lowered.diagnostic_count;
+    run.lowered = !preprocess.error_count && !lowered.diagnostic_count && lowered.canonical_ir_certified && lowered.program;
+    for (u32 index = 0; lowered.diagnostics && index < lowered.diagnostic_count && index < C_TEST_BODY_SCRATCH_MESSAGES; index += 1)
+    {
+        run.messages[index] = string_duplicate_arena(arguments->arena, lowered.diagnostics[index].message, false);
+    }
+    c_preprocess_release(&preprocess);
+    scratch_end(temporary);
+    return run;
+}
+
+// The trace row that opens body `body` (its separator), or `count`.
+BUSTER_GLOBAL_LOCAL u32 c_test_body_scratch_body_start(CTestBodyScratchRequest const* trace, u32 count, u32 body)
+{
+    u32 seen = 0;
+    u32 row = 0;
+    while (row < count && !(trace[row].element_size == 0 && seen++ == body))
+    {
+        row += 1;
+    }
+    return row;
+}
+
+// The furthest end any request of body `body` reached before row `limit`
+// (exclusive; UINT32_MAX for the whole body).
+BUSTER_GLOBAL_LOCAL u64 c_test_body_scratch_peak(CTestBodyScratchRequest const* trace, u32 count, u32 body, u32 limit)
+{
+    u64 peak = 0;
+    for (u32 row = c_test_body_scratch_body_start(trace, count, body) + 1; row < count && row < limit && trace[row].element_size; row += 1)
+    {
+        peak = BUSTER_MAX(peak, trace[row].end);
+    }
+    return peak;
+}
+
+// The first row of body `body` requesting `count` elements of `element_size`, or UINT32_MAX.
+BUSTER_GLOBAL_LOCAL u32 c_test_body_scratch_find(CTestBodyScratchRequest const* trace, u32 count, u32 body, u64 element_size, u64 elements)
+{
+    u32 found = UINT32_MAX;
+    for (u32 row = c_test_body_scratch_body_start(trace, count, body) + 1; found == UINT32_MAX && row < count && trace[row].element_size; row += 1)
+    {
+        found = trace[row].element_size == element_size && trace[row].count == elements ? row : found;
+    }
+    return found;
+}
+
+// The first refused row of the trace, or UINT32_MAX.
+BUSTER_GLOBAL_LOCAL u32 c_test_body_scratch_refused(CTestBodyScratchRequest const* trace, u32 count)
+{
+    u32 found = UINT32_MAX;
+    for (u32 row = 0; found == UINT32_MAX && row < count; row += 1)
+    {
+        found = trace[row].element_size && trace[row].end == UINT64_MAX ? row : found;
+    }
+    return found;
+}
+
+// Diagnostic `index` of the run is the "too large" report naming `function`.
+BUSTER_GLOBAL_LOCAL bool c_test_body_scratch_reported(UnitTestArguments* arguments, CTestBodyScratchRun const* run, u32 index, String8 function)
+{
+    String8 message = index < C_TEST_BODY_SCRATCH_MESSAGES ? run->messages[index] : (String8){0};
+    String8 expected = string_format(arguments->arena, S8("in function '{S8}': C function body is too large for semantic validation"), function);
+    return string_equal(message, expected);
+}
+
+// Runs `source` uncapped, then capped so the request at `row` of body `body`
+// is the first that cannot fit, and checks that exactly that request is
+// refused and the function is reported once.
+BUSTER_GLOBAL_LOCAL void c_test_body_scratch_refuse_at(UnitTestArguments* arguments, UnitTestResult* outer_result, String8 source,
+                                                       CTestBodyScratchRequest* trace, u32 trace_count, u32 body, u32 row, String8 function)
+{
+    UnitTestResult result = {0};
+    if (BUSTER_REQUIRE(arguments, row < trace_count))
+    {
+        CTestBodyScratchRequest target = trace[row];
+        u64 cap = c_test_body_scratch_peak(trace, trace_count, body, row);
+        BUSTER_TEST(arguments, target.end > cap);
+        CTestBodyScratchRun capped = c_test_body_scratch_run(arguments, source, cap, trace);
+        u32 refused = c_test_body_scratch_refused(trace, capped.trace_count);
+        BUSTER_TEST(arguments, !capped.lowered && capped.diagnostic_count == 1 && c_test_body_scratch_reported(arguments, &capped, 0, function));
+        if (BUSTER_REQUIRE(arguments, refused < capped.trace_count))
+        {
+            BUSTER_TEST(arguments, refused == row && trace[refused].element_size == target.element_size && trace[refused].count == target.count);
+        }
+    }
+    outer_result->test_count += result.test_count;
+    outer_result->succeeded_test_count += result.succeeded_test_count;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_validation_scratch_exhaustion(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CTestBodyScratchRequest* trace = arena_allocate(arguments->arena, CTestBodyScratchRequest, C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+    String8 statements[64];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(statements); index += 1)
+    {
+        statements[index] = S8("x += 1;");
+    }
+    String8 flat_body = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(statements), false);
+    // (d) The flat body at its boundary: its own peak fits, one byte less does not.
+    String8 flat = string_format(arguments->arena, S8("static int id(int x){{return x;} int main(void){{int x=0;{S8}return id(x);}"), flat_body);
+    CTestBodyScratchRun open = c_test_body_scratch_run(arguments, flat, 0, trace);
+    BUSTER_TEST(arguments, open.lowered && open.trace_count < C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+    u64 flat_peak = c_test_body_scratch_peak(trace, open.trace_count, 1, UINT32_MAX);
+    BUSTER_TEST(arguments, flat_peak != 0);
+    CTestBodyScratchRun fits = c_test_body_scratch_run(arguments, flat, flat_peak, trace);
+    BUSTER_TEST(arguments, fits.lowered && c_test_body_scratch_refused(trace, fits.trace_count) == UINT32_MAX);
+    CTestBodyScratchRun short_by_one = c_test_body_scratch_run(arguments, flat, flat_peak - 1, trace);
+    BUSTER_TEST(arguments, !short_by_one.lowered && short_by_one.diagnostic_count == 1 && c_test_body_scratch_reported(arguments, &short_by_one, 0, S8("main")));
+    // The per-token arrays: the flag array after the expression-query memo.
+    open = c_test_body_scratch_run(arguments, flat, 0, trace);
+    c_test_body_scratch_refuse_at(arguments, &result, flat, trace, open.trace_count, 1, c_test_body_scratch_body_start(trace, open.trace_count, 1) + 2,
+                                  S8("main"));
+
+    // (a) Deeply nested scopes: each level holds a leaf block before the
+    // block that nests the next level, so the scope walk keeps one pending
+    // leaf per level and grows its stack past the initial 64 entries. The cap
+    // admits every per-token array and the initial stack; the growth is
+    // refused.
+    {
+        String8 parts[2 * C_TEST_BODY_SCRATCH_NESTING + 2];
+        parts[0] = S8("int main(void){int x=0;");
+        for (u32 level = 0; level < C_TEST_BODY_SCRATCH_NESTING; level += 1)
+        {
+            parts[1 + level] = string_format(arguments->arena, S8("{{int b{u32}=x; x+=b{u32};} {{int a{u32}=x; x+=a{u32};"), level, level, level, level);
+            parts[1 + C_TEST_BODY_SCRATCH_NESTING + level] = S8("}");
+        }
+        parts[1 + 2 * C_TEST_BODY_SCRATCH_NESTING] = S8("return x;}");
+        String8 nested = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+        CTestBodyScratchRun nested_open = c_test_body_scratch_run(arguments, nested, 0, trace);
+        BUSTER_TEST(arguments, nested_open.lowered && nested_open.trace_count < C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+        // The first growth doubles 64 pending scopes of three u32 each.
+        u32 growth = c_test_body_scratch_find(trace, nested_open.trace_count, 0, sizeof(u32), 128 * 3);
+        BUSTER_TEST(arguments, growth != UINT32_MAX && c_test_body_scratch_find(trace, nested_open.trace_count, 0, sizeof(u32), 256 * 3) != UINT32_MAX);
+        c_test_body_scratch_refuse_at(arguments, &result, nested, trace, nested_open.trace_count, 0, growth, S8("main"));
+    }
+
+    // (b) A large inline-assembly statement: the constraint and operand
+    // tables and the operand-name table, each sized by the statement, are
+    // refused in turn.
+    {
+        String8 parts[C_TEST_BODY_SCRATCH_ASM_OPERANDS + 2];
+        parts[0] = S8("int main(void){int a=1; __asm__ volatile(\"\" : : ");
+        for (u32 operand = 0; operand < C_TEST_BODY_SCRATCH_ASM_OPERANDS; operand += 1)
+        {
+            parts[1 + operand] = string_format(arguments->arena, S8("{S8}[o{u32}] \"m\"(a)"), operand ? S8(", ") : S8(""), operand);
+        }
+        parts[1 + C_TEST_BODY_SCRATCH_ASM_OPERANDS] = S8(" : \"memory\", \"cc\"); return a;}");
+        String8 assembly = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+        CTestBodyScratchRun assembly_open = c_test_body_scratch_run(arguments, assembly, 0, trace);
+        BUSTER_TEST(arguments, assembly_open.lowered && assembly_open.trace_count < C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+        // From `(` to `)`: the template, two colons, each `[name] "m" (a)`
+        // (seven tokens) and the comma between operands, then the clobber
+        // colon and two clobbers with their comma.
+        u64 span = 3 + 8 * (u64)C_TEST_BODY_SCRATCH_ASM_OPERANDS - 1 + 4 + 1;
+        u32 constraints = c_test_body_scratch_find(trace, assembly_open.trace_count, 0, sizeof(u64), span);
+        u32 names = c_test_body_scratch_find(trace, assembly_open.trace_count, 0, sizeof(String8), span);
+        BUSTER_TEST(arguments, constraints != UINT32_MAX && names != UINT32_MAX && names > constraints);
+        c_test_body_scratch_refuse_at(arguments, &result, assembly, trace, assembly_open.trace_count, 0, constraints, S8("main"));
+        assembly_open = c_test_body_scratch_run(arguments, assembly, 0, trace);
+        c_test_body_scratch_refuse_at(arguments, &result, assembly, trace, assembly_open.trace_count, 0, names, S8("main"));
+    }
+
+    // (c) Recovery: an exhausted body is reported once and validation goes on
+    // with every later body, which still reports its own findings.
+    {
+        String8 recovering = string_format(arguments->arena,
+            S8("static int big(int x){{{S8}return x;} static int fine(int x){{return x+1;} int main(void){{return big(1)+fine(2);}"), flat_body);
+        CTestBodyScratchRun recovering_open = c_test_body_scratch_run(arguments, recovering, 0, trace);
+        BUSTER_TEST(arguments, recovering_open.lowered);
+        u64 big_peak = c_test_body_scratch_peak(trace, recovering_open.trace_count, 0, UINT32_MAX);
+        u64 later_peak = BUSTER_MAX(c_test_body_scratch_peak(trace, recovering_open.trace_count, 1, UINT32_MAX),
+                                    c_test_body_scratch_peak(trace, recovering_open.trace_count, 2, UINT32_MAX));
+        BUSTER_TEST(arguments, later_peak && later_peak < big_peak);
+        CTestBodyScratchRun recovered = c_test_body_scratch_run(arguments, recovering, later_peak, trace);
+        BUSTER_TEST(arguments, !recovered.lowered && recovered.diagnostic_count == 1 && c_test_body_scratch_reported(arguments, &recovered, 0, S8("big")));
+        BUSTER_TEST(arguments, c_test_body_scratch_body_start(trace, recovered.trace_count, 2) < recovered.trace_count);
+        String8 invalid_later = string_format(arguments->arena,
+            S8("static int big(int x){{{S8}return x;} static void bad(void){{break;} int main(void){{bad(); return big(1);}"), flat_body);
+        CTestBodyScratchRun invalid_open = c_test_body_scratch_run(arguments, invalid_later, 0, trace);
+        BUSTER_TEST(arguments, invalid_open.diagnostic_count == 1 &&
+                                   string_first_sequence(invalid_open.messages[0], S8("in function 'bad'")) == 0);
+        u64 invalid_later_peak = BUSTER_MAX(c_test_body_scratch_peak(trace, invalid_open.trace_count, 1, UINT32_MAX),
+                                            c_test_body_scratch_peak(trace, invalid_open.trace_count, 2, UINT32_MAX));
+        BUSTER_TEST(arguments, invalid_later_peak && invalid_later_peak < c_test_body_scratch_peak(trace, invalid_open.trace_count, 0, UINT32_MAX));
+        CTestBodyScratchRun both = c_test_body_scratch_run(arguments, invalid_later, invalid_later_peak, trace);
+        BUSTER_TEST(arguments, both.diagnostic_count == 2 && c_test_body_scratch_reported(arguments, &both, 0, S8("big")) &&
+                                   string_equal(both.messages[1], invalid_open.messages[0]));
+    }
+    return result;
+}
+
+// The first row of body `body` requesting `elements` elements of any size
+// after row `after` (exclusive), or UINT32_MAX. Families whose element types
+// are private to the parser are found by their exact, input-derived counts.
+BUSTER_GLOBAL_LOCAL u32 c_test_body_scratch_find_count(CTestBodyScratchRequest const* trace, u32 count, u32 body, u32 after, u64 elements)
+{
+    u32 found = UINT32_MAX;
+    u32 first = BUSTER_MAX(c_test_body_scratch_body_start(trace, count, body) + 1, after + 1);
+    for (u32 row = first; found == UINT32_MAX && row < count && trace[row].element_size; row += 1)
+    {
+        found = trace[row].count == elements ? row : found;
+    }
+    return found;
+}
+
+// A source of `count` copies of `piece` joined after `head` and before `tail`.
+BUSTER_GLOBAL_LOCAL String8 c_test_body_scratch_repeat(Arena* arena, String8 head, String8 piece, u32 count, String8 tail)
+{
+    String8 result = head;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        result = string_format(arena, S8("{S8}{S8}"), result, piece);
+    }
+    return string_format(arena, S8("{S8}{S8}"), result, tail);
+}
+
+// The families the flat, nested and assembly fixtures above leave out, each
+// refused at its exact bound (#1256): the scope walk's initial pending stack,
+// the untyped constant evaluator a vector_size operand reaches (its token
+// copy, then the linked token list it evaluates), the typed constant
+// evaluator of a long case label, the statement-end table of the loop and
+// jump checks, the clobber table of an inline-assembly statement, and the
+// slot table of an inferred initializer. The evaluator is also refused with
+// a later invalid body, which still reports its own finding.
+#define C_TEST_BODY_SCRATCH_EVALUATOR_TERMS 40
+#define C_TEST_BODY_SCRATCH_CASE_TERMS 30
+// Two named clobbers and sixteen numbered registers, valid on x86-64
+// (xmm0..xmm15) and AArch64 (x0..x15).
+#define C_TEST_BODY_SCRATCH_CLOBBERS 18
+#define C_TEST_BODY_SCRATCH_MEMBERS 37
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_validation_scratch_families(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CTestBodyScratchRequest* trace = arena_allocate(arguments->arena, CTestBodyScratchRequest, C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+
+    // Scope: the walk's initial pending stack holds 64 scopes of three u32.
+    {
+        String8 scoped = S8("int main(void){int x=0; {int a=x; x+=a;} {int b=x; x+=b;} return x;}");
+        CTestBodyScratchRun open = c_test_body_scratch_run(arguments, scoped, 0, trace);
+        BUSTER_TEST(arguments, open.lowered);
+        u32 stack = c_test_body_scratch_find(trace, open.trace_count, 0, sizeof(u32), 64 * 3);
+        c_test_body_scratch_refuse_at(arguments, &result, scoped, trace, open.trace_count, 0, stack, S8("main"));
+    }
+
+    // Evaluator: `16 + 0*1 + ...` has 1 + 4 * terms tokens. The evaluator
+    // copies them into twice as many plus one, and later links one node per
+    // token; that list is the third request of exactly that many elements
+    // (after the wrapped and transformed copies).
+    {
+        u64 tokens = 1 + 4 * (u64)C_TEST_BODY_SCRATCH_EVALUATOR_TERMS;
+        String8 operand = c_test_body_scratch_repeat(arguments->arena, S8("16"), S8(" + 0*1"), C_TEST_BODY_SCRATCH_EVALUATOR_TERMS, S8(""));
+        String8 evaluator = string_format(arguments->arena,
+            S8("int main(void){{int x=1; int s=(int)sizeof(int __attribute__((vector_size({S8})))); return x+s;}"), operand);
+        CTestBodyScratchRun open = c_test_body_scratch_run(arguments, evaluator, 0, trace);
+        BUSTER_TEST(arguments, open.lowered);
+        u32 copy = c_test_body_scratch_find(trace, open.trace_count, 0, sizeof(CToken), tokens * 2 + 1);
+        u32 wrapped = c_test_body_scratch_find_count(trace, open.trace_count, 0, copy, tokens);
+        u32 transformed = wrapped < open.trace_count ? c_test_body_scratch_find_count(trace, open.trace_count, 0, wrapped, tokens) : UINT32_MAX;
+        u32 nodes = transformed < open.trace_count ? c_test_body_scratch_find_count(trace, open.trace_count, 0, transformed, tokens) : UINT32_MAX;
+        BUSTER_TEST(arguments, copy < wrapped && wrapped < transformed && transformed < nodes && nodes < open.trace_count);
+        c_test_body_scratch_refuse_at(arguments, &result, evaluator, trace, open.trace_count, 0, copy, S8("main"));
+        open = c_test_body_scratch_run(arguments, evaluator, 0, trace);
+        c_test_body_scratch_refuse_at(arguments, &result, evaluator, trace, open.trace_count, 0, nodes, S8("main"));
+
+        // Recovery: the same refusal in an earlier body, then a later body
+        // whose own finding is still reported after the exhaustion report.
+        String8 recovering = string_format(arguments->arena,
+            S8("static int big(void){{int s=(int)sizeof(int __attribute__((vector_size({S8})))); return s;} static void bad(void){{break;} "
+               "int main(void){{bad(); return big();}"), operand);
+        CTestBodyScratchRun recovering_open = c_test_body_scratch_run(arguments, recovering, 0, trace);
+        BUSTER_TEST(arguments, recovering_open.diagnostic_count == 1 && string_first_sequence(recovering_open.messages[0], S8("in function 'bad'")) == 0);
+        u32 big_copy = c_test_body_scratch_find(trace, recovering_open.trace_count, 0, sizeof(CToken), tokens * 2 + 1);
+        u64 cap = c_test_body_scratch_peak(trace, recovering_open.trace_count, 0, big_copy);
+        u64 later_peak = BUSTER_MAX(c_test_body_scratch_peak(trace, recovering_open.trace_count, 1, UINT32_MAX),
+                                    c_test_body_scratch_peak(trace, recovering_open.trace_count, 2, UINT32_MAX));
+        BUSTER_TEST(arguments, big_copy < recovering_open.trace_count && later_peak <= cap && trace[big_copy].end > cap);
+        String8 bad_message = recovering_open.messages[0];
+        CTestBodyScratchRun recovered = c_test_body_scratch_run(arguments, recovering, cap, trace);
+        BUSTER_TEST(arguments, c_test_body_scratch_refused(trace, recovered.trace_count) == big_copy);
+        BUSTER_TEST(arguments, recovered.diagnostic_count == 2 && c_test_body_scratch_reported(arguments, &recovered, 0, S8("big")) &&
+                                   string_equal(recovered.messages[1], bad_message));
+    }
+
+    // Typed constants: a case label of 1 + 4 * terms tokens takes one task
+    // per token plus one.
+    {
+        u64 tokens = 1 + 4 * (u64)C_TEST_BODY_SCRATCH_CASE_TERMS;
+        String8 label = c_test_body_scratch_repeat(arguments->arena, S8("1"), S8(" + 0*1"), C_TEST_BODY_SCRATCH_CASE_TERMS, S8(""));
+        String8 cases = string_format(arguments->arena,
+            S8("int main(void){{int x=1; switch (x) {{case {S8}: x=2; break; case 3: x=4; break; default: break;} return x;}"), label);
+        CTestBodyScratchRun open = c_test_body_scratch_run(arguments, cases, 0, trace);
+        BUSTER_TEST(arguments, open.lowered);
+        u32 tasks = c_test_body_scratch_find_count(trace, open.trace_count, 0, 0, tokens + 1);
+        c_test_body_scratch_refuse_at(arguments, &result, cases, trace, open.trace_count, 0, tasks, S8("main"));
+    }
+
+    // Loops: the statement-end table's pending stack holds two entries per
+    // body token plus two; the body's first request names its token count.
+    {
+        String8 loops = S8("int main(void){int x=1; for (int i=0; i<3; i++) {while (x<10) {x++; if (x==5) break;} do {x--;} while (x>7);} "
+                           "return x;}");
+        CTestBodyScratchRun open = c_test_body_scratch_run(arguments, loops, 0, trace);
+        BUSTER_TEST(arguments, open.lowered);
+        u32 first = c_test_body_scratch_body_start(trace, open.trace_count, 0) + 1;
+        u64 body_tokens = first < open.trace_count ? trace[first].count : 0;
+        u32 pending = c_test_body_scratch_find(trace, open.trace_count, 0, sizeof(u32), (body_tokens + 1) * 2);
+        c_test_body_scratch_refuse_at(arguments, &result, loops, trace, open.trace_count, 0, pending, S8("main"));
+    }
+
+    // Assembly: the clobber table spans the third colon and the clobber
+    // list. Clobbers must be distinct and valid for the target, so the list
+    // is `"memory", "cc"` and then numbered vector or general registers.
+    {
+        String8 clobbers = S8("\"memory\", \"cc\"");
+        String8 register_prefix = target_native.cpu_arch == CPU_ARCH_X86_64 ? S8("xmm") : S8("x");
+        for (u32 clobber = 2; clobber < C_TEST_BODY_SCRATCH_CLOBBERS; clobber += 1)
+        {
+            clobbers = string_format(arguments->arena, S8("{S8}, \"{S8}{u32}\""), clobbers, register_prefix, clobber - 2);
+        }
+        String8 assembly = string_format(arguments->arena, S8("int main(void){{int a=1; __asm__ volatile(\"nop\" : : : {S8}); return a;}"), clobbers);
+        CTestBodyScratchRun open = c_test_body_scratch_run(arguments, assembly, 0, trace);
+        BUSTER_TEST(arguments, open.lowered);
+        u32 table = c_test_body_scratch_find(trace, open.trace_count, 0, sizeof(String8), 2 * (u64)C_TEST_BODY_SCRATCH_CLOBBERS);
+        c_test_body_scratch_refuse_at(arguments, &result, assembly, trace, open.trace_count, 0, table, S8("main"));
+    }
+
+    // Initializers: inferring `struct S a[]` builds one slot table per
+    // record, two rows of one u32 per member.
+    {
+        String8 members = S8("int m0;");
+        for (u32 member = 1; member < C_TEST_BODY_SCRATCH_MEMBERS; member += 1)
+        {
+            members = string_format(arguments->arena, S8("{S8} int m{u32};"), members, member);
+        }
+        String8 initializers = string_format(arguments->arena,
+            S8("struct S {{{S8}}; int main(void){{struct S a[] = {{{{1, 2}, {{3, 4}}}; return a[1].m1;}"), members);
+        CTestBodyScratchRun open = c_test_body_scratch_run(arguments, initializers, 0, trace);
+        BUSTER_TEST(arguments, open.lowered);
+        u32 slots = c_test_body_scratch_find(trace, open.trace_count, 0, sizeof(u32), C_TEST_BODY_SCRATCH_MEMBERS);
+        c_test_body_scratch_refuse_at(arguments, &result, initializers, trace, open.trace_count, 0, slots, S8("main"));
+        open = c_test_body_scratch_run(arguments, initializers, 0, trace);
+        c_test_body_scratch_refuse_at(arguments, &result, initializers, trace, open.trace_count, 0, slots + 1, S8("main"));
+    }
+    return result;
+}
+
+// The furthest end a model row of body `body` reached, and the first such row
+// (`first`, UINT32_MAX when the body made no type-constant query).
+BUSTER_GLOBAL_LOCAL u64 c_test_body_scratch_model_peak(CTestBodyScratchRequest const* trace, u32 count, u32 body, u32* first)
+{
+    u64 peak = 0;
+    *first = UINT32_MAX;
+    for (u32 row = c_test_body_scratch_body_start(trace, count, body) + 1; row < count && trace[row].element_size; row += 1)
+    {
+        if (trace[row].model)
+        {
+            peak = BUSTER_MAX(peak, trace[row].end);
+            *first = BUSTER_MIN(*first, row);
+        }
+    }
+    return peak;
+}
+
+BUSTER_GLOBAL_LOCAL CTestBodyScratchRun c_test_body_scratch_model_run(UnitTestArguments* arguments, String8 source, u64 model_cap,
+                                                                      CTestBodyScratchRequest* trace)
+{
+    c_test_body_validation_model_limit(model_cap);
+    CTestBodyScratchRun run = c_test_body_scratch_run(arguments, source, 0, trace);
+    c_test_body_validation_model_limit(0);
+    return run;
+}
+
+// The private model of c_parse_type_integer_constant_query_core (#1256): a
+// member alignment query in a case label copies the type table into its own
+// arena and adds the cast's pointer type there. That model arena is guarded
+// on the body under its own limit, so the query's model rows (the trace's
+// `model` rows) are checked like the body's scratch: at the furthest end they
+// reach the body validates and lowers, one byte less refuses the query, and
+// the function is reported once while every later body is still validated.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_validation_type_query_model(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CTestBodyScratchRequest* trace = arena_allocate(arguments->arena, CTestBodyScratchRequest, C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+    String8 members = S8("");
+    for (u32 index = 0; index < 20; index += 1)
+    {
+        members = string_format(arguments->arena, S8("{S8}int m{u32}; "), members, index);
+    }
+    String8 head = string_format(arguments->arena, S8("struct S {{ char c; long long m; {S8}}; "
+        "static int big(void){{struct S s = {{0}; int x = 0; switch (x) {{ case _Alignof(((const struct S*)&s)->m19): x = 1; break; "
+        "default: break; } return x + s.m19;} "), members);
+    String8 query = string_format(arguments->arena, S8("{S8}static int fine(int x){{return x+1;} int main(void){{return big()+fine(2);}"), head);
+    CTestBodyScratchRun open = c_test_body_scratch_model_run(arguments, query, 0, trace);
+    BUSTER_TEST(arguments, open.lowered && open.trace_count < C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+    u32 first = UINT32_MAX;
+    u64 peak = c_test_body_scratch_model_peak(trace, open.trace_count, 0, &first);
+    // The query reached its model: the guard checked rows in its arena.
+    BUSTER_TEST(arguments, peak != 0 && first < open.trace_count);
+    u32 later_first = UINT32_MAX;
+    c_test_body_scratch_model_peak(trace, open.trace_count, 1, &later_first);
+    BUSTER_TEST(arguments, later_first == UINT32_MAX);
+    CTestBodyScratchRun fits = c_test_body_scratch_model_run(arguments, query, peak, trace);
+    BUSTER_TEST(arguments, fits.lowered && c_test_body_scratch_refused(trace, fits.trace_count) == UINT32_MAX);
+    CTestBodyScratchRun spare = c_test_body_scratch_model_run(arguments, query, peak + 1, trace);
+    BUSTER_TEST(arguments, spare.lowered && c_test_body_scratch_refused(trace, spare.trace_count) == UINT32_MAX);
+    CTestBodyScratchRun short_by_one = c_test_body_scratch_model_run(arguments, query, peak - 1, trace);
+    u32 refused = c_test_body_scratch_refused(trace, short_by_one.trace_count);
+    BUSTER_TEST(arguments, !short_by_one.lowered && short_by_one.diagnostic_count == 1 &&
+                               c_test_body_scratch_reported(arguments, &short_by_one, 0, S8("big")));
+    if (BUSTER_REQUIRE(arguments, refused < short_by_one.trace_count))
+    {
+        BUSTER_TEST(arguments, trace[refused].model && refused < c_test_body_scratch_body_start(trace, short_by_one.trace_count, 1));
+    }
+    // Recovery: the bodies after the refused one are validated, and a later
+    // invalid body still reports its own finding. Its unit has other
+    // function types, so its query's model has its own peak.
+    BUSTER_TEST(arguments, c_test_body_scratch_body_start(trace, short_by_one.trace_count, 2) < short_by_one.trace_count);
+    String8 invalid_later = string_format(arguments->arena, S8("{S8}static void bad(void){{break;} int main(void){{bad(); return big();}"), head);
+    CTestBodyScratchRun invalid_open = c_test_body_scratch_model_run(arguments, invalid_later, 0, trace);
+    BUSTER_TEST(arguments, invalid_open.diagnostic_count == 1 && string_first_sequence(invalid_open.messages[0], S8("in function 'bad'")) == 0);
+    u64 invalid_peak = c_test_body_scratch_model_peak(trace, invalid_open.trace_count, 0, &first);
+    BUSTER_TEST(arguments, invalid_peak != 0);
+    CTestBodyScratchRun both = c_test_body_scratch_model_run(arguments, invalid_later, invalid_peak - 1, trace);
+    BUSTER_TEST(arguments, both.diagnostic_count == 2 && c_test_body_scratch_reported(arguments, &both, 0, S8("big")) &&
+                               string_equal(both.messages[1], invalid_open.messages[0]));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_lower_capacity_plan(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -60321,6 +60788,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration_file_scope_name);
     C_TEST_FIXTURE(arguments, c_test_block_type_name_attributes);
     C_TEST_FIXTURE(arguments, c_test_body_scope_map);
+    C_TEST_FIXTURE(arguments, c_test_body_validation_scratch_exhaustion);
+    C_TEST_FIXTURE(arguments, c_test_body_validation_scratch_families);
+    C_TEST_FIXTURE(arguments, c_test_body_validation_type_query_model);
     C_TEST_FIXTURE(arguments, c_test_bool_bit_field_loads);
     C_TEST_FIXTURE(arguments, c_test_brace_designators);
     C_TEST_FIXTURE(arguments, c_test_braced_string_initializers);

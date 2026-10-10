@@ -88,7 +88,10 @@
 //   c_include_suppressed                       and #ifndef guard identity
 //   c_preprocess_command_operations,           ordered command-line macro
 //   c_preprocess_define_directive              operations and shared #define
-//                                              parsing
+//                                              parsing; forced_includes
+//                                              (-include) run as a synthetic
+//                                              `<command-line>` frame above
+//                                              the root frame
 //   c_preprocess_respell_token,                final-stream rewrites: C23 and
 //   c_preprocess_respell_identifiers,          UCN respellings, GNU `member:`
 //   c_preprocess_rewrite_obsolete_designators, as `.member =`, and block-
@@ -589,8 +592,14 @@ BUSTER_C_SHARED CSpellingSpace c_space_local(Arena* arena, u64 capacity)
     };
     C_CENSUS_PHASE_RECORD(TEMP_SPACES, 1);
     C_CENSUS_PHASE_RECORD(TEMP_SPACE_BYTES, space.capacity);
-    space.base = arena_allocate(arena, char8, space.capacity);
-    memcpy(c_space_allocate(&space, C_SPELLING_PRELUDE_LENGTH), C_SPELLING_PRELUDE_TEXT, C_SPELLING_PRELUDE_LENGTH);
+    // Guarded while a function body is validated (#1256): a miss returns a
+    // space with no base and no capacity, which the caller must not write.
+    space.base = C_PARSE_BODY_SCRATCH_ARRAY(arena, char8, space.capacity);
+    space.capacity = space.base ? space.capacity : 0;
+    if (space.base)
+    {
+        memcpy(c_space_allocate(&space, C_SPELLING_PRELUDE_LENGTH), C_SPELLING_PRELUDE_TEXT, C_SPELLING_PRELUDE_LENGTH);
+    }
     return space;
 }
 
@@ -8413,11 +8422,12 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
             }
             argument_count += 1;
         }
-        if (!close)
+        // Guarded while a function body is validated (#1256).
+        CToken* arguments = close ? C_PARSE_BODY_SCRATCH_ARRAY(arena, CToken, argument_count) : 0;
+        if (!arguments)
         {
             return false;
         }
-        CToken* arguments = arena_allocate(arena, CToken, argument_count);
         u32 argument_index = 0;
         bool literal_header = open->next && open->next->token.no_expand;
         for (scan = open->next; scan != close; scan = scan->next)
@@ -8499,7 +8509,10 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     IR_SEMANTIC_RECORD(PREPROCESSOR_EVALUATIONS, 1);
     bool valid = true;
     char8 const* base = space->base;
-    CPpToken* transformed = arena_allocate(arena, CPpToken, token_count);
+    // Guarded while a function body is validated (#1256): a miss fails the
+    // evaluation, and the body reports its exhaustion.
+    CPpToken* transformed = C_PARSE_BODY_SCRATCH_ARRAY(arena, CPpToken, token_count);
+    valid = transformed != 0;
     u32 transformed_count = 0;
     for (u32 token_index = 0; valid && token_index < token_count; token_index += 1)
     {
@@ -8539,12 +8552,32 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     CPreprocessTokenNode* first_expanded = 0;
     CPreprocessTokenNode* last_expanded = 0;
     u64 expanded_count = 0;
-    if (valid)
+    if (valid && preprocessor_arithmetic)
     {
         CMacroExpansionStorage expansion_storage = {0};
         valid = c_preprocess_expand(arena, &expansion_storage, space, symbols, first_macro, 0, 0, stamps, transformed, transformed_count, &first_expanded,
                                     &last_expanded, &expanded_count, expansion_limit, result, 0);
         c_macro_expansion_storage_destroy(&expansion_storage, result->detail);
+    }
+    else if (valid)
+    {
+        // A parse-side query has no macro table and no pragma context, so
+        // expansion would copy every token through unchanged; the list is
+        // linked over one guarded array instead (#1256). The one token that
+        // expansion would diagnose there, a stray `__VA_OPT__`, fails the
+        // evaluation as that diagnostic does for every parse-side caller.
+        CPreprocessTokenNode* nodes = C_PARSE_BODY_SCRATCH_ARRAY(arena, CPreprocessTokenNode, transformed_count);
+        valid = nodes != 0;
+        for (u32 token_index = 0; valid && token_index < transformed_count; token_index += 1)
+        {
+            valid = !c_macro_is_va_opt(transformed[token_index].token);
+            nodes[token_index] = (CPreprocessTokenNode){
+                .token = transformed[token_index],
+                .next = token_index + 1 < transformed_count ? nodes + token_index + 1 : 0,
+            };
+        }
+        first_expanded = valid && transformed_count ? nodes : 0;
+        expanded_count = transformed_count;
     }
     if (valid)
     {
@@ -8552,9 +8585,10 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     }
     if (valid)
     {
-        u64* values = arena_allocate(arena, u64, expanded_count + 1);
-        u8* value_flags = arena_allocate(arena, u8, expanded_count + 1);
-        CConditionalOperator* operations = arena_allocate(arena, CConditionalOperator, expanded_count + 1);
+        u64* values = C_PARSE_BODY_SCRATCH_ARRAY(arena, u64, expanded_count + 1);
+        u8* value_flags = C_PARSE_BODY_SCRATCH_ARRAY(arena, u8, expanded_count + 1);
+        CConditionalOperator* operations = C_PARSE_BODY_SCRATCH_ARRAY(arena, CConditionalOperator, expanded_count + 1);
+        valid = values && value_flags && operations;
         u32 value_count = 0;
         u32 operation_count = 0;
         bool expect_operand = true;
@@ -8730,14 +8764,17 @@ BUSTER_C_SHARED bool c_integer_expression_evaluate(Arena* arena, char8 const* sp
     CSpellingSpace view = {
         .base = (char8*)spelling_base,
     };
-    CPpToken* wrapped = arena_allocate(arena, CPpToken, token_count);
-    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    // Guarded while a function body is validated (#1256): a miss fails the
+    // evaluation, and the body reports its exhaustion.
+    CPpToken* wrapped = C_PARSE_BODY_SCRATCH_ARRAY(arena, CPpToken, token_count);
+    for (u32 token_index = 0; wrapped && token_index < token_count; token_index += 1)
     {
         wrapped[token_index] = (CPpToken){
             .token = tokens[token_index],
         };
     }
-    return c_integer_expression_evaluate_with_features(arena, &view, 0, 0, 0, wrapped, token_count, expansion_limit, false, result, 0, 0, (String8){0},
+    return wrapped &&
+           c_integer_expression_evaluate_with_features(arena, &view, 0, 0, 0, wrapped, token_count, expansion_limit, false, result, 0, 0, (String8){0},
                                                        (CIncludeSearchOrigin){0}, value_out);
 }
 
@@ -11154,6 +11191,7 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
     }
     else if (token_count >= 3 && c_token_is_punctuator(&tokens[0], C_PUNCTUATOR_LESS) && c_token_is_punctuator(&tokens[token_count - 1], C_PUNCTUATOR_GREATER))
     {
+        bool named = true;
         u64 end = (u64)tokens[0].offset + 1;
         for (u32 index = 1; preserve_characters && index < token_count; index += 1)
         {
@@ -11178,9 +11216,11 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
             {
                 length += c_token_length(base, tokens[index]);
             }
-            char8* name = arena_allocate(arena, char8, length + 1);
+            // Guarded while a function body is validated (#1256): a miss
+            // leaves the name unrecognized.
+            char8* name = C_PARSE_BODY_SCRATCH_ARRAY(arena, char8, length + 1);
             u64 output = 0;
-            for (u32 index = 1; index + 1 < token_count; index += 1)
+            for (u32 index = 1; name && index + 1 < token_count; index += 1)
             {
                 String8 spelling = c_token_spelling(base, tokens[index]);
                 if (spelling.length)
@@ -11189,14 +11229,18 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
                 }
                 output += spelling.length;
             }
-            name[output] = 0;
+            if (name)
+            {
+                name[output] = 0;
+            }
+            named = name != 0;
             *name_out = (String8){
                 .pointer = name,
                 .length = output,
             };
         }
         *quoted_out = false;
-        recognized = true;
+        recognized = named;
     }
     return recognized;
 }
@@ -12596,7 +12640,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     c_symbols_intern_tokens(symbol_table, root_lex.spelling_base, root_lex.tokens, root_lex.token_shapes, root_lex.token_count);
     CPpClassMasks root_class_masks;
     c_pp_class_masks_build(arena, &root_class_masks, root_lex.token_shapes, root_lex.token_count);
-    result.diagnostic_capacity = BUSTER_MIN(source.length + options.macro_operation_count + options.definition_count + 1, UINT64_C(64));
+    result.diagnostic_capacity = BUSTER_MIN(source.length + options.macro_operation_count + options.definition_count + options.forced_include_count + 1, UINT64_C(64));
     C_DIAGNOSTIC_RESERVATION_CENSUS(PREPROCESS, result.diagnostic_capacity);
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
     CMacro* first_macro = 0;
@@ -13362,6 +13406,50 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     if (!options.already_preprocessed)
     {
         c_preprocess_command_operations(arena, space, symbol_table, options, &first_macro, &last_macro, &result);
+        if (options.forced_include_count)
+        {
+            // `-include FILE` runs as `#include "FILE"` lines of a synthetic
+            // file that sits above the root frame, so the primary source's
+            // line numbers and __FILE__ never see it. The quote lookup starts
+            // from the synthetic path's directory, which is the working
+            // directory, and then walks the -I chain: GCC's order.
+            String8 forced_text = {0};
+            for (u32 forced_index = 0; forced_index < options.forced_include_count; forced_index += 1)
+            {
+                forced_text = forced_index ? string_format(arena, S8("{S8}#include \"{S8}\"\n"), forced_text, options.forced_includes[forced_index])
+                                           : string_format(arena, S8("#include \"{S8}\"\n"), options.forced_includes[forced_index]);
+            }
+            CLexResult forced_lex = c_lex_space(arena, space, forced_text, false, result.dialect);
+            for (u64 diagnostic_index = 0; diagnostic_index < forced_lex.diagnostic_count; diagnostic_index += 1)
+            {
+                c_preprocess_diagnostic_copy(arena, &result, forced_lex.diagnostics[diagnostic_index]);
+            }
+            c_symbols_intern_tokens(symbol_table, forced_lex.spelling_base, forced_lex.tokens, forced_lex.token_shapes, forced_lex.token_count);
+            CPreprocessSourceFrame* forced_frame = arena_allocate(arena, CPreprocessSourceFrame, 1);
+            *forced_frame = (CPreprocessSourceFrame){
+                .previous = &root_frame,
+                .lex = forced_lex,
+                .path = S8("<command-line>"),
+                .identity = c_include_file_identity(S8("<command-line>"), (FileIdentity){0}),
+                .logical_path = S8("<command-line>"),
+                .line_start = true,
+            };
+            c_pp_class_masks_build(arena, &forced_frame->class_masks, forced_lex.token_shapes, forced_lex.token_count);
+            forced_frame->map_entry = map.count;
+            c_source_map_append(&map, (IrSourceRegion){
+                                          .start = forced_lex.translated_offset,
+                                          .source = UINT32_MAX,
+                                          .checkpoints = forced_lex.checkpoints,
+                                          .checkpoint_offsets = forced_lex.checkpoint_offsets,
+                                          .checkpoint_pages = forced_lex.checkpoint_pages,
+                                          .checkpoint_page_count = forced_lex.checkpoint_page_count,
+                                          .checkpoint_count = forced_lex.checkpoint_count,
+                                          .base = forced_lex.translated_offset,
+                                          .kind = IR_SOURCE_REGION_TEXT,
+                                      });
+            c_source_map_name(&map, forced_frame->path, forced_frame->logical_path);
+            source_frame = forced_frame;
+        }
     }
     CIncludeFileTable include_files = {
         .arena = arena,
