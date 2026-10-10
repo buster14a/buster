@@ -21061,7 +21061,19 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
         : string_equal(link_name, S8("pow")) || string_equal(link_name, S8("powf")) || string_equal(link_name, S8("fmod")) || string_equal(link_name, S8("fmodf"))
             ? 2
             : 1;
-    if (argument_count != expected_count)
+    // eBPF has no floating point or libm to import, and Wasm64 lowers no
+    // long double; refuse those calls instead of emitting an import the
+    // target cannot satisfy (#1394).
+    bool libm_refused = libm.arity && (builder->target.cpu_arch == CPU_ARCH_BPFEL ||
+                                       (builder->target.cpu_arch == CPU_ARCH_WASM64 && libm.argument_kind == C_TYPE_LONG_DOUBLE));
+    if (libm_refused)
+    {
+        builder->failure_message = string_format(builder->arena, S8("'__builtin_{S8}' is not supported on {S8}: {S8}"), link_name,
+                                                 builder->target.cpu_arch == CPU_ARCH_BPFEL ? S8("eBPF") : S8("Wasm64"),
+                                                 builder->target.cpu_arch == CPU_ARCH_BPFEL ? S8("the target has no floating point or libm")
+                                                                                            : S8("the target lowers no long double"));
+    }
+    if (argument_count != expected_count || libm_refused)
     {
         return IR_VALUE_ID_INVALID;
     }

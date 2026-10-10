@@ -259,6 +259,31 @@ translation-unit declaration and otherwise import the standard prototype from
 `c_test_gnu_library_builtins_runtime` checks all of these against exact oracles
 in every native allocator mode and both frontend forms.
 
+The libm-backed rounding, fused-multiply-add and scaling builtins (#1394) are
+`__builtin_{trunc,rint,nearbyint,fma,ldexp,lround,llround}` with `f`, plain and
+`l` spellings (21 names). They are runtime calls: `c_ir_emit_math_call` converts
+each argument once and imports the libm symbol of the same name without the
+`__builtin_` prefix (`trunc`, `lroundl`, ...), and nothing is constant folded,
+including in static initializers. `c_math_libm_shapes` in `c_source.c` is the one
+table of arity, floating type, result type and `int` exponent (`ldexp`) that
+lowering, the sizeof/expression typing in `c_gen.c`/`c_parse.c` and the arity
+check share via `c_semantic_math_libm_shape`; `lround`/`llround` answer the
+target's `long`/`long long` (32-bit `long` on Windows) and the `l` forms use the
+target's long double (x87 on x86-64 Linux/macOS, binary64 on Windows and Apple
+AArch64, binary128 on Linux/Android AArch64). Availability, also the
+`__has_builtin` answer (`c_conditional_builtin_supported`):
+
+| Target | float and double spellings | `l` spellings |
+|---|---|---|
+| x86-64 and AArch64, every OS | supported | supported |
+| Wasm64 | supported (unresolved libm import) | refused: "lowers no long double" diagnostic, `__has_builtin` 0 |
+| eBPF | refused: "no floating point or libm" diagnostic, `__has_builtin` 0 | refused, `__has_builtin` 0 |
+
+`c_test_libm_rounding_builtins_lowering` proves this per target without running:
+certified, validated canonical IR, the expected import symbols with the target's
+long double and `long` types, successful object writing, and the two refusals.
+`c_test_generic_float_builtins_runtime` runs the values on x86-64 Linux only.
+
 ## Target ABI predefined macros
 
 The prelude exposes C library typedef identities, rather than choosing a

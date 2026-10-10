@@ -8147,13 +8147,6 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_pow",           "__builtin_powf",
         "__builtin_prefetch",
         "__builtin_round",         "__builtin_roundf",
-        "__builtin_trunc", "__builtin_truncf", "__builtin_truncl",
-        "__builtin_rint", "__builtin_rintf", "__builtin_rintl",
-        "__builtin_nearbyint", "__builtin_nearbyintf", "__builtin_nearbyintl",
-        "__builtin_fma", "__builtin_fmaf", "__builtin_fmal",
-        "__builtin_ldexp", "__builtin_ldexpf", "__builtin_ldexpl",
-        "__builtin_lround", "__builtin_lroundf", "__builtin_lroundl",
-        "__builtin_llround", "__builtin_llroundf", "__builtin_llroundl",
         "__builtin_inf",           "__builtin_inff", "__builtin_nan", "__builtin_nanf", "__builtin_huge_val", "__builtin_isnan", "__builtin_isnanf",
         "__builtin_isinf_sign",
         "__builtin_isinf",         "__builtin_isinff", "__builtin_isfinite",
@@ -8209,6 +8202,10 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
                  ((builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC) &&
                   c_semantic_vendor_builtin_supported((Target){.cpu_arch = cpu_arch}, name)) ||
                  (builtin == C_SYMBOL_BUILTIN_COMPLEX && (native || cpu_arch == CPU_ARCH_WASM64)) ||
+                 // The libm rounding/fma/ldexp calls are floating imports: eBPF has
+                 // no floating point, and Wasm64 lowers no long double (#1394).
+                 (builtin == C_SYMBOL_BUILTIN_MATH && c_semantic_math_libm_shape(name).arity &&
+                  (native || (cpu_arch == CPU_ARCH_WASM64 && c_semantic_math_libm_shape(name).argument_kind != C_TYPE_LONG_DOUBLE))) ||
                  (builtin == C_SYMBOL_BUILTIN_RETURN_ADDRESS && native && os != OPERATING_SYSTEM_WINDOWS);
     }
 
