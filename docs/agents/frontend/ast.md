@@ -847,4 +847,32 @@ the same way and diagnostic only:
   A/A control itself exceeded its ±0.5% bound.
 - **Decision.** Fusion does not ship. The token array and the array build stay.
 
+For the split's [diagnostic probe](#declaration-split-from-the-tree)
+(`c_parser_tree_probe`), these budgets were declared before its measured runs.
+The probe classifies identifier lanes from their interned ids instead of
+asking the word table and the `return` id through the token predicates. The
+input and flags are the same as for the declaration split, and the four
+Callgrind arms (`--cache-sim=no --branch-sim=no`) are counted on tests-off
+`-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `f86d65f9`, which the candidate branches from. The budgets:
+- correctness:
+  - the probe stays a superset of the tokens the walker validates, so
+    `c_ast_split_cases` still reaches its `diagnostic` fallbacks (`0x`,
+    `long long long`) and the corpus differential keeps 0 differences above
+    its floors;
+  - the self-host unity input still takes the split whole, with no fallback;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- the probe's own effect (C against B): `c_parser_tree_probe`'s call-site
+  inclusive cost falls by at least 25%, and the whole compile costs fewer
+  instructions.
+- the default path (D against A): the probe does not run there, so the
+  difference stays within ±0.05% Ir.
+- adoption of the hook as the default: unchanged from stage 1, with
+  acceptance on the Zen 5 route (#2761).
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
