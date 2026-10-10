@@ -915,14 +915,17 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_free_edge_register(MachineFastState* state,
 // Publishes a general-only edge's parameters as a register parallel move.
 // `captured` holds each source's register, `MACHINE_FAST_EDGE_SOURCE_RECREATED`
 // for a constant or frame address, or UINT32_MAX for a source only its home
-// holds; `targets` holds each parameter's register or UINT32_MAX for a home. Order: homes from source registers store straight
-// from them; homes from memory or recreated sources stage through
-// `free_register`; register targets then copy in dependency order, a cycle
-// saving one target's old value in `free_register` first; and register
-// targets of memory or recreated sources load or rematerialize last, once
-// no remaining copy reads them. A pinned target that is not a contract
-// register also stores its home, as the staged form did. This replaces the
-// tile's store and load per resident source.
+// holds; `targets` holds each parameter's register or UINT32_MAX for a
+// home. Homes are written before memory sources are read, so the caller
+// never passes an edge with both: a home can be another copy's source.
+// Order: homes from source registers store straight from them, and homes
+// from recreated sources rematerialize through `free_register`; register
+// targets then copy in dependency order, a cycle saving one target's old
+// value in `free_register` first; and register targets of memory or
+// recreated sources load or rematerialize last, once no remaining copy
+// reads them. A pinned target that is not a contract register also stores
+// its home, as the staged form did. This replaces the tile's store and load
+// per resident source.
 BUSTER_GLOBAL_LOCAL void machine_fast_publish_edge_parallel(MachineFastState* state, MachineBuilderStream* stream, MachinePoint point,
                                                             MachineEdge const* edge, u32 const* captured, u32 const* targets, u32 copy_count,
                                                             u32 free_register, u32 const* contract_owner, u64 contract_held)
@@ -1116,6 +1119,8 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
     // so the captured registers still hold their sources either way.
     u32* targets = arena_allocate(temporary.arena, u32, copy_count);
     bool general = !direct;
+    bool homes = false;
+    bool memory_sources = false;
     u64 sources = 0;
     u64 written = 0;
     for (u32 copy_index = 0; copy_index < copy_count; copy_index += 1)
@@ -1123,9 +1128,16 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         u32 destination_value = state->function->block_parameters[destination->parameter_offset + copy_index].virtual_register;
         general = general && state->function->virtual_registers[destination_value].register_class == MACHINE_REGISTER_CLASS_GENERAL;
         targets[copy_index] = machine_fast_edge_parameter_target(state, destination, contract_owner, contract_held, destination_value);
+        homes = homes || targets[copy_index] == UINT32_MAX;
+        memory_sources = memory_sources || captured[copy_index] == UINT32_MAX;
         written |= targets[copy_index] != UINT32_MAX ? machine_fast_lane(targets[copy_index]) : 0u;
         sources |= captured[copy_index] < MACHINE_FAST_EDGE_SOURCE_RECREATED ? machine_fast_lane(captured[copy_index]) : 0u;
     }
+    // A parameter home can also be a source's home (a loop header's
+    // parameter feeding another parameter), and the parallel publication
+    // stores homes before it reloads memory sources; an edge with both
+    // keeps the staged form, which reads every source before writing.
+    general = general && !(homes && memory_sources);
     u32 free_register = general ? machine_fast_free_edge_register(state, terminator_index, sources | written | kept) : UINT32_MAX;
     bool parallel = free_register != UINT32_MAX;
     u32 temporary_offset = 0;
