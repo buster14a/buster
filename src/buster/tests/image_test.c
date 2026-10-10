@@ -1208,7 +1208,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult image_test_png_inflate_paths(UnitTestArgument
         for (u32 row = 0; row < IMAGE_TEST_PNG_PATHS_HEIGHT; row += 1)
         {
             u8* line = filtered + row * (IMAGE_TEST_PNG_PATHS_ROW_BYTES + 1u) + 1u;
-            u8 const* above = line - (IMAGE_TEST_PNG_PATHS_ROW_BYTES + 1u);
+            // Row 0 has no row above; forming a pointer before filtered would be undefined.
+            u8 const* above = row ? line - (IMAGE_TEST_PNG_PATHS_ROW_BYTES + 1u) : line;
             for (u32 index = 0; index < IMAGE_TEST_PNG_PATHS_ROW_BYTES; index += 1)
             {
                 random = random * UINT32_C(1664525) + UINT32_C(1013904223);
