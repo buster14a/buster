@@ -2475,7 +2475,7 @@ BUSTER_C_INTERNAL bool c_parse_forward_type_query_bit_field_width_diagnostics(Ar
 BUSTER_C_INTERNAL String8 c_parse_bit_field_width_message(Arena* arena, CPreprocessResult preprocess, CParseResult* result, String8 name, CTypeId type_id,
                                                           CIntegerConstant width);
 BUSTER_C_INTERNAL u32 c_parse_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
-BUSTER_C_INTERNAL bool c_parse_type_constant_vector_argument_supported(CParseResult* result, CPreprocessResult preprocess, u32 index, u32 end);
+BUSTER_C_INTERNAL bool c_parse_type_constant_vector_argument_supported(CPreprocessResult preprocess, u32 index, u32 end);
 
 BUSTER_C_INTERNAL bool c_parse_machineless_sizeof_operand_layout(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                                    u32 start, u32 end, u64* size_out, u32* alignment_out);
@@ -6588,7 +6588,7 @@ BUSTER_C_INTERNAL CEnumMember const* c_parse_pending_enum_member(CPreprocessResu
         for (u32 index = result->enum_member_count; !found && index > first; index -= 1)
         {
             CEnumMember const* member = result->enum_members + index - 1;
-            if (member->token_index < token_index && member->enum_type.value < result->type_count &&
+            if (!member->is_prototype_scope && member->token_index < token_index && member->enum_type.value < result->type_count &&
                 result->types[member->enum_type.value].tag_scope.value == scope.value &&
                 (token.symbol && member->symbol ? member->symbol == token.symbol : string_equal(member->name, name)))
             {
@@ -13135,24 +13135,11 @@ BUSTER_C_INTERNAL u32 c_parse_bit_field_colon(CPreprocessResult preprocess, u32 
 // tag, and a brace-enclosed body. `end_out` receives the index of the closing
 // brace. The members inside that body are declarations, so every scan that
 // classifies identifiers as uses has to step over the whole group.
-BUSTER_C_INTERNAL bool c_parse_aggregate_definition_at(CPreprocessResult preprocess, u32 index, u32 end, u32* end_out)
+BUSTER_C_INTERNAL bool c_parse_matching_brace(CPreprocessResult preprocess, u32 open, u32 end, u32* close_out)
 {
-    if (index + 1 >= end || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER ||
-        !c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index], C_PARSE_AGGREGATE_KEYWORDS))
-    {
-        return false;
-    }
-    u32 open = index + 1;
-    if (open < end && preprocess.tokens[open].kind == C_TOKEN_IDENTIFIER)
-    {
-        open += 1;
-    }
-    if (open >= end || !c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_BRACE))
-    {
-        return false;
-    }
+    bool found = false;
     u32 depth = 0;
-    for (u32 scan = open; scan < end; scan += 1)
+    for (u32 scan = open; scan < end && !found; scan += 1)
     {
         if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_LEFT_BRACE))
         {
@@ -13163,12 +13150,95 @@ BUSTER_C_INTERNAL bool c_parse_aggregate_definition_at(CPreprocessResult preproc
             depth -= 1;
             if (!depth)
             {
-                *end_out = scan;
-                return true;
+                *close_out = scan;
+                found = true;
             }
         }
     }
-    return false;
+    return found;
+}
+
+BUSTER_C_INTERNAL bool c_parse_aggregate_definition_at(CPreprocessResult preprocess, u32 index, u32 end, u32* end_out)
+{
+    bool found = false;
+    if (index + 1 < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
+        c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index], C_PARSE_AGGREGATE_KEYWORDS))
+    {
+        u32 open = index + 1;
+        if (open < end && preprocess.tokens[open].kind == C_TOKEN_IDENTIFIER)
+        {
+            open += 1;
+        }
+        found = open < end && c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_BRACE) &&
+                c_parse_matching_brace(preprocess, open, end, end_out);
+    }
+    return found;
+}
+
+// A definition's braces, as c_parse_aggregate_definition_at finds them, and
+// also an enum's fixed underlying type (`enum : char {`, `enum E : char {`).
+// An opaque `enum E : char` has no body and is not a definition. Attributes
+// between the keyword and the body are not recognized: the expression parser
+// reads such a type name with the wrong layout (a packed enum as four bytes),
+// so it stays a refusal rather than a silently wrong size (#1615).
+// `*open_out` is the opening brace and `*close_out` the closing one, the pair
+// every registered definition keys on.
+BUSTER_C_INTERNAL bool c_parse_type_definition_at(CPreprocessResult preprocess, u32 index, u32 end, u32* open_out, u32* close_out)
+{
+    bool found = false;
+    if (index + 1 < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
+        c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index], C_PARSE_AGGREGATE_KEYWORDS))
+    {
+        bool is_enum = c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[index], C_SYMBOL_WELL_KNOWN_ENUM);
+        u32 open = index + 1;
+        if (open < end && preprocess.tokens[open].kind == C_TOKEN_IDENTIFIER)
+        {
+            open += 1;
+        }
+        if (is_enum && open < end && c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_COLON))
+        {
+            u32 depth = 0;
+            for (open += 1; open < end && (depth || !c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_BRACE)); open += 1)
+            {
+                CToken token = preprocess.tokens[open];
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    depth += 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && depth)
+                {
+                    depth -= 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON) ||
+                         c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+                {
+                    open = end;
+                }
+            }
+        }
+        found = open < end && c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_BRACE) &&
+                c_parse_matching_brace(preprocess, open, end, close_out);
+        *open_out = open;
+    }
+    return found;
+}
+
+// A definition with attributes between its keyword and its body, which
+// c_parse_type_definition_at does not take: `enum __attribute__((packed)) {`.
+BUSTER_C_INTERNAL bool c_parse_attributed_definition_at(CPreprocessResult preprocess, u32 index, u32 end)
+{
+    bool attributed = false;
+    if (index + 1 < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
+        c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index], C_PARSE_AGGREGATE_KEYWORDS))
+    {
+        u32 body = c_parse_skip_attributes(preprocess, index + 1, end);
+        if (body != index + 1)
+        {
+            body += body < end && preprocess.tokens[body].kind == C_TOKEN_IDENTIFIER;
+            attributed = body < end && c_token_is_punctuator(&preprocess.tokens[body], C_PUNCTUATOR_LEFT_BRACE);
+        }
+    }
+    return attributed;
 }
 
 // Whether a type already carries the aggregate definition whose body opens at
@@ -13912,7 +13982,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_apply_vector_attribute(CParseResult* result, C
             {
                 break;
             }
-            if (result->protected_type_constant_query && !c_parse_type_constant_vector_argument_supported(result, preprocess, index, end))
+            if (result->protected_type_constant_query && !c_parse_type_constant_vector_argument_supported(preprocess, index, end))
             {
                 unsupported = true;
                 break;
@@ -13934,7 +14004,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_apply_vector_attribute(CParseResult* result, C
             {
                 continue;
             }
-            if (result->protected_type_constant_query && !c_parse_type_constant_vector_argument_supported(result, preprocess, index, end))
+            if (result->protected_type_constant_query && !c_parse_type_constant_vector_argument_supported(preprocess, index, end))
             {
                 unsupported = true;
                 break;
@@ -16672,13 +16742,32 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
         u32 declarator_start = frame->start;
         CTypeId type = C_TYPE_ID_INVALID;
         u32 definition_end = 0;
-        if (c_parse_aggregate_definition_at(*frame->preprocess, frame->start, frame->end, &definition_end))
+        u32 open = 0;
+        // A body reached again, after an initializer's type name registered it
+        // at its source point, is that same type: `sizeof(const enum E { A })`
+        // is read once to declare `A` and again to evaluate. Qualifiers and
+        // attributes ahead of the keyword are stepped over.
+        u32 definition_keyword = frame->start;
+        while (definition_keyword < frame->end && frame->preprocess->tokens[definition_keyword].kind == C_TOKEN_IDENTIFIER)
         {
-            u32 open = frame->start + 1;
-            if (frame->preprocess->tokens[open].kind == C_TOKEN_IDENTIFIER)
+            u32 decorated = c_parse_skip_alignment_specifiers(*frame->preprocess, definition_keyword, frame->end);
+            decorated = c_parse_skip_attributes(*frame->preprocess, decorated, frame->end);
+            CType qualifiers = {0};
+            if (decorated != definition_keyword)
             {
-                open += 1;
+                definition_keyword = decorated;
             }
+            else if (c_parse_type_qualifier_word_token(*frame->preprocess, frame->preprocess->tokens[definition_keyword], &qualifiers))
+            {
+                definition_keyword += 1;
+            }
+            else
+            {
+                break;
+            }
+        }
+        if (c_parse_type_definition_at(*frame->preprocess, definition_keyword, frame->end, &open, &definition_end))
+        {
             for (u32 index = c_parse_definition_scan_start(result, open + 1); index < result->type_count && type.value == C_ID_UNDERLYING_INVALID;
                  index += 1)
             {
@@ -17955,10 +18044,10 @@ BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type_core(CParseResult* resul
                 // has defined it; this walk cannot define one, so it reads
                 // the row by where its body opens.
                 u32 definition_close = 0;
+                u32 body_open = 0;
                 if (tag_kind != C_TYPE_INVALID && !result->protected_type_constant_query &&
-                    c_parse_aggregate_definition_at(preprocess, tag_index, base_end, &definition_close))
+                    c_parse_type_definition_at(preprocess, tag_index, base_end, &body_open, &definition_close))
                 {
-                    u32 body_open = tag_index + 1 + (preprocess.tokens[tag_index + 1].kind == C_TOKEN_IDENTIFIER ? 1 : 0);
                     for (u32 row = c_parse_definition_scan_start(result, body_open + 1); row < result->type_count && type.value == C_ID_UNDERLYING_INVALID;
                          row += 1)
                     {
@@ -21976,15 +22065,33 @@ BUSTER_C_INTERNAL u32 c_parse_builtin_offsetof_end(CPreprocessResult preprocess,
 // but a subscript is an ordinary expression -- `a[g]`, `a[n + g]` -- whose
 // identifiers resolve in `scope` like any other, so lowering finds a runtime
 // index through the entity use, scope-correctly.  A nested offsetof group is
-// stepped over whole, as the callers do for the outer one.
+// stepped over whole, as the callers do for the outer one.  A braced record
+// body in the type name is not an expression: its array bounds belong to the
+// record's own scope, where an enumerator it defines (`struct{enum{Q=3}e;
+// char c[Q];}`) shadows the enclosing `Q`, so nothing inside those braces is
+// bound. Braces met inside a subscript belong to its expression (a compound
+// literal, `a[(int){g}]`) and are bound as usual.
 BUSTER_C_INTERNAL void c_parse_bind_offsetof_index_uses(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 open, u32 end)
 {
     u32 group_end = c_parse_builtin_offsetof_end(preprocess, open, end);
     u32 bracket_depth = 0;
+    u32 brace_depth = 0;
     for (u32 index = open + 1; index < group_end; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        if (!bracket_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            brace_depth += 1;
+        }
+        else if (!bracket_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            brace_depth -= brace_depth != 0;
+        }
+        else if (brace_depth)
+        {
+            // Record body: bound by the type-name definition, not here.
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
         {
             bracket_depth += 1;
         }
@@ -22673,8 +22780,58 @@ BUSTER_C_INTERNAL bool c_parse_auto_initializer_type(CTypeParseMachine* machine,
 BUSTER_C_INTERNAL bool c_parse_statement_expression_at(CPreprocessResult preprocess, u32 index, u32 end, u32* body_start, u32* body_end,
                                                          u32* group_end);
 
-BUSTER_C_INTERNAL void c_parse_bind_auto_initializer_identifiers(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
-                                                                    u32 start, u32 end)
+// An enum, struct or union definition in an initializer's type name declares
+// its tag and enumerators at its own source point, in the enclosing block
+// (C17 6.2.1p4 and 6.7.2.2p3): `int n = sizeof(struct { enum { A = 3 } e;
+// char c[A]; });` sizes `c` with that `A`, and `A` stays in scope after the
+// declarator. Register the definition, publish its enumerators into `scope`,
+// then bind the array bounds of a record's members against them, so the
+// bound reads the inner name and not an outer one. Uses earlier in the
+// initializer are already bound to the outer name. `index` is the keyword,
+// `open` and `close` its braces. An enum is published only as a type name,
+// directly after `(` and any qualifiers (`(const volatile enum { A = 1 })`),
+// the form every other producer handles; a record is registered once, so a
+// definition reached again publishes nothing twice.
+BUSTER_C_INTERNAL void c_parse_define_initializer_type(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess,
+                                                         CScopeId scope, u32 declaration_index, u32 initializer_start, u32 index, u32 open, u32 close)
+{
+    u32 declarator_start = index;
+    if (c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[index], C_SYMBOL_WELL_KNOWN_ENUM))
+    {
+        CType qualifiers = {0};
+        u32 before = index;
+        while (before > initializer_start && preprocess.tokens[before - 1].kind == C_TOKEN_IDENTIFIER &&
+               c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[before - 1], &qualifiers))
+        {
+            before -= 1;
+        }
+        if (before > initializer_start && c_token_is_punctuator(&preprocess.tokens[before - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            // The returned type names its exact member range, so an enum
+            // an earlier walk registered is still published here.
+            CTypeId enumeration = c_parse_scalar_type_in_scope(machine, result, preprocess, scope, index, close + 1, &declarator_start);
+            if (enumeration.value < result->type_count && result->types[enumeration.value].kind == C_TYPE_ENUM)
+            {
+                CType const* enumeration_type = result->types + enumeration.value;
+                c_parse_publish_enum_members(result, preprocess, scope, declaration_index, enumeration_type->enum_member_start,
+                                             enumeration_type->enum_member_start + enumeration_type->enum_member_count);
+            }
+        }
+    }
+    else
+    {
+        if (!c_parse_aggregate_definition_registered(result, open))
+        {
+            u32 enum_member_start = result->enum_member_count;
+            c_parse_scalar_type_in_scope(machine, result, preprocess, scope, index, close + 1, &declarator_start);
+            c_parse_publish_enum_members(result, preprocess, scope, declaration_index, enum_member_start, result->enum_member_count);
+        }
+        c_parse_bind_array_bound_identifiers(machine, arena, result, preprocess, scope, declaration_index, open + 1, close, true);
+    }
+}
+
+BUSTER_C_INTERNAL void c_parse_bind_auto_initializer_identifiers(CTypeParseMachine* machine, u32 declaration_index, Arena* arena, CParseResult* result,
+                                                                    CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end)
 {
     u32 attribute_resume = UINT32_MAX;
     for (u32 use_index = start; use_index < end; use_index += 1)
@@ -22690,6 +22847,17 @@ BUSTER_C_INTERNAL void c_parse_bind_auto_initializer_identifiers(Arena* arena, C
         if (c_parse_statement_expression_at(preprocess, use_index, end, &statement_body_start, &statement_body_end, &statement_group_end))
         {
             use_index = statement_group_end;
+            continue;
+        }
+        // A definition declares its names, it does not use them. Without a
+        // machine (a parameter's array bound) nothing is defined here.
+        u32 definition_open = 0;
+        u32 definition_end = 0;
+        if (machine && c_parse_type_definition_at(preprocess, use_index, end, &definition_open, &definition_end))
+        {
+            c_parse_define_initializer_type(machine, arena, result, preprocess, scope, declaration_index, start, use_index, definition_open,
+                                            definition_end);
+            use_index = definition_end;
             continue;
         }
         u32 attribute_end = c_parse_gnu_attribute_names_end(preprocess, use_index, end, &attribute_resume);
@@ -23074,7 +23242,7 @@ BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CPrepr
     for (u32 member_index = member_start; member_index < member_end; member_index += 1)
     {
         CEnumMember* member = &result->enum_members[member_index];
-        if (member->is_published)
+        if (member->is_published || member->is_prototype_scope)
         {
             continue;
         }
@@ -23209,7 +23377,11 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             return false;
         }
         u32 diagnostic_checkpoint = result->diagnostic_count;
-        c_parse_bind_auto_initializer_identifiers(arena, result, preprocess, scope, auto_info.initializer_start, auto_info.initializer_end);
+        // A type its initializer defines is declared here, so an enumerator
+        // it names is in scope for the rest of the block, as Clang does for
+        // C23 auto and GNU __auto_type alike (#3252).
+        c_parse_bind_auto_initializer_identifiers(machine, declaration_index, arena, result, preprocess, scope,
+                                                  auto_info.initializer_start, auto_info.initializer_end);
         CTypeId inferred = C_TYPE_ID_INVALID;
         if (!c_parse_auto_initializer_type(machine, arena, preprocess, result, scope, auto_info.initializer_start, auto_info.initializer_end, &inferred))
         {
@@ -23777,25 +23949,6 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         c_parse_scope_add_entity(result, scope, entity, declared_symbol);
         c_parse_bind_array_bound_identifiers(machine, arena, result, preprocess, scope, declaration_index, segment_start, suffix_end, false);
         u32 initializer_start = suffix_end < segment_end ? suffix_end + 1 : segment_end;
-        if (is_constexpr)
-        {
-            CDeclaration local_declaration = {
-                .name = c_token_spelling(preprocess.spelling_base, name),
-                .location = c_preprocess_token_site(&preprocess, name),
-                .token_start = segment_start,
-                .token_count = segment_end - segment_start,
-                .type = type,
-                .scope = scope,
-                .kind = C_DECLARATION_OBJECT,
-                .is_definition = initializer_start < segment_end,
-                .is_constexpr = true,
-            };
-            c_parse_validate_constexpr_declaration(machine, arena, result, preprocess, &local_declaration);
-            if (initializer_start < segment_end)
-            {
-                c_parse_validate_constexpr_initializer(machine, arena, result, preprocess, scope, entity, initializer_start, segment_end);
-            }
-        }
         if (initializer_start < segment_end && type.value < result->type_count && result->types[type.value].kind == C_TYPE_ARRAY)
         {
             CType array_type = result->types[type.value];
@@ -23816,12 +23969,13 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 }
             }
         }
-        CTypeKind initializer_kind = type.value < result->type_count ? result->types[type.value].kind : C_TYPE_INVALID;
-        // For-declaration constraints differ between C17 and C23; keep that
-        // separate path out of this ordinary block-initializer producer.
-        bool scalar_initializer = !is_for_initializer && !is_auto_type && !is_constexpr &&
-            (c_parse_expression_real_kind(initializer_kind) || c_type_kind_is_complex(initializer_kind) ||
-             initializer_kind == C_TYPE_POINTER || initializer_kind == C_TYPE_NULLPTR);
+        // A type defined in the initializer declares its tags and enumerators
+        // here, in a pre-C23 `for` declaration and a C23 `constexpr` one too,
+        // as Clang does (#3252). C17 6.8.5p3 is read, like Clang, as limiting
+        // the declarators, not the initializer's type names; the specifiers'
+        // own definitions stay refused (#2392). An auto initializer defines
+        // its types on its own path.
+        bool defines_types = !is_auto_type;
         u32 attribute_resume = UINT32_MAX;
         for (u32 use_index = initializer_start; use_index < segment_end; use_index += 1)
         {
@@ -23845,28 +23999,28 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             // is a compound literal, and reading `_f` as a use of an undeclared
             // name is how a libc's type punning failed here while the same
             // expression in a return statement compiled.
+            u32 aggregate_open = 0;
             u32 aggregate_end = 0;
-            if (c_parse_aggregate_definition_at(preprocess, use_index, segment_end, &aggregate_end))
+            if (c_parse_type_definition_at(preprocess, use_index, segment_end, &aggregate_open, &aggregate_end))
             {
-                // A direct enum type name introduces ordinary identifiers
-                // here, before its operand and the next comma declarator.
-                // Keep earlier initializer uses bound before publication.
-                if (scalar_initializer && use.kind == C_TOKEN_IDENTIFIER &&
-                    c_token_is_well_known(preprocess.spelling_base, use, C_SYMBOL_WELL_KNOWN_ENUM) &&
-                    use_index > initializer_start &&
-                    c_token_is_punctuator(&preprocess.tokens[use_index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                // Its enumerators are in scope from here, before the operand
+                // and the next comma declarator, while earlier uses stay bound.
+                if (defines_types)
                 {
-                    u32 expression_declarator_start = use_index;
-                    CTypeId enumeration = c_parse_scalar_type_in_scope(machine, result, preprocess, scope, use_index, aggregate_end + 1,
-                                                                        &expression_declarator_start);
-                    if (enumeration.value < result->type_count && result->types[enumeration.value].kind == C_TYPE_ENUM)
-                    {
-                        CType const* enumeration_type = result->types + enumeration.value;
-                        c_parse_publish_enum_members(result, preprocess, scope, declaration_index, enumeration_type->enum_member_start,
-                                                     enumeration_type->enum_member_start + enumeration_type->enum_member_count);
-                    }
+                    c_parse_define_initializer_type(machine, arena, result, preprocess, scope, declaration_index, initializer_start, use_index,
+                                                    aggregate_open, aggregate_end);
                 }
                 use_index = aggregate_end;
+                continue;
+            }
+            if (defines_types && c_parse_attributed_definition_at(preprocess, use_index, segment_end))
+            {
+                // Reading its body as uses would bind an enumerator to an
+                // outer name of the same spelling, and the expression parser
+                // sizes such a type wrongly; refuse it rather than miscompile.
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, use), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                   S8("a type definition with attributes in an initializer is not supported"));
+                use_index = c_parse_skip_attributes(preprocess, use_index + 1, segment_end) - 1;
                 continue;
             }
             u32 attribute_end = c_parse_gnu_attribute_names_end(preprocess, use_index, segment_end, &attribute_resume);
@@ -23882,7 +24036,17 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 u32 builtin_depth = 0;
                 for (use_index += 1; use_index < segment_end; use_index += 1)
                 {
-                    if (c_token_is_punctuator(&preprocess.tokens[use_index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    // The type operand may define a record whose enumerators
+                    // bound its own members, so it is defined here too.
+                    u32 operand_open = 0;
+                    u32 operand_end = 0;
+                    if (defines_types && c_parse_type_definition_at(preprocess, use_index, segment_end, &operand_open, &operand_end))
+                    {
+                        c_parse_define_initializer_type(machine, arena, result, preprocess, scope, declaration_index, initializer_start, use_index,
+                                                        operand_open, operand_end);
+                        use_index = operand_end;
+                    }
+                    else if (c_token_is_punctuator(&preprocess.tokens[use_index], C_PUNCTUATOR_LEFT_PARENTHESIS))
                     {
                         builtin_depth += 1;
                     }
@@ -23909,6 +24073,27 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 !c_parse_identifier_is_bound(result, use_index))
             {
                 c_parse_bind_identifier(arena, result, preprocess, scope, use_index);
+            }
+        }
+        // Validated once the initializer's own type definitions are
+        // published, so a constant it reads binds them, not an outer name.
+        if (is_constexpr)
+        {
+            CDeclaration local_declaration = {
+                .name = c_token_spelling(preprocess.spelling_base, name),
+                .location = c_preprocess_token_site(&preprocess, name),
+                .token_start = segment_start,
+                .token_count = segment_end - segment_start,
+                .type = type,
+                .scope = scope,
+                .kind = C_DECLARATION_OBJECT,
+                .is_definition = initializer_start < segment_end,
+                .is_constexpr = true,
+            };
+            c_parse_validate_constexpr_declaration(machine, arena, result, preprocess, &local_declaration);
+            if (initializer_start < segment_end)
+            {
+                c_parse_validate_constexpr_initializer(machine, arena, result, preprocess, scope, entity, initializer_start, segment_end);
             }
         }
         segment_start = segment_end + 1;
@@ -24018,10 +24203,29 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_list_parameter_declarations(CType
     }
 }
 
+// Words that put a parenthesis after them without naming a declarator: the
+// operator and attribute groups (and the GNU `__builtin_*` family) that can
+// open at the top of a declaration.
+BUSTER_GLOBAL_LOCAL bool c_parse_operator_group_word(String8 word)
+{
+    String8 words[] = {
+        S8("sizeof"), S8("_Alignof"), S8("alignof"), S8("__alignof__"), S8("__alignof"), S8("_Countof"), S8("typeof"),
+        S8("typeof_unqual"), S8("__typeof__"), S8("__typeof"), S8("_Atomic"), S8("_Alignas"), S8("alignas"), S8("_Static_assert"),
+        S8("static_assert"), S8("_Generic"), S8("__attribute__"), S8("__attribute"), S8("__declspec"), S8("__asm__"), S8("__asm"),
+        S8("asm"), S8("_BitInt"), S8("_Pragma"),
+    };
+    bool found = string_starts_with_sequence(word, S8("__builtin_"));
+    for (u32 index = 0; !found && index < BUSTER_ARRAY_LENGTH(words); index += 1)
+    {
+        found = string_equal(word, words[index]);
+    }
+    return found;
+}
+
 BUSTER_C_INTERNAL void c_parse_bind_function_static_asserts(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
                                                               CPreprocessResult preprocess, CDeclaration* declaration);
 BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
-                                                            CScopeId root_scope, u32 start, u32 end);
+                                                            CScopeId root_scope, u32 start, u32 end, bool is_file_scope);
 
 BUSTER_C_SHARED bool c_parse_label_address_prefix_proven(CPreprocessResult const* preprocess, u32 body_start, u32 index)
 {
@@ -25340,7 +25544,7 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
         c_parse_bind_function_static_asserts(machine, result_arena, result, preprocess, declaration);
         // After the walk above, because it needs the block scopes that walk creates.
         c_parse_bind_expression_aggregates(machine, result, preprocess, declaration->scope, declaration->body_start,
-                                           declaration->body_start + declaration->body_token_count);
+                                           declaration->body_start + declaration->body_token_count, false);
     }
 }
 
@@ -25795,36 +25999,117 @@ BUSTER_C_SHARED CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId 
 // defined inside the initializer of a file-scope object. Left unregistered,
 // the sizeof fold has no type to resolve and the whole initializer is refused.
 BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
-                                                            CScopeId root_scope, u32 start, u32 end)
+                                                            CScopeId root_scope, u32 start, u32 end, bool is_file_scope)
 {
     u32 body_end = end;
     if (body_end > preprocess.token_count)
     {
         body_end = (u32)preprocess.token_count;
     }
+    // One bit per open parenthesis, indexed by its depth. A file-scope
+    // definition that sits inside a function declarator's parameter list --
+    // `int (*p)(int [sizeof(enum { R = 2 })])` -- declares its names in that
+    // prototype's scope, not the file's (C17 6.2.1p4). Such a list opens right
+    // after a `(*...)` declarator group. The open depth cannot exceed the
+    // range's token count, so the two bit arrays are sized for that and
+    // nesting has no limit; `open_lists` counts the set parameter bits.
+    TemporalArena temporary = scratch_begin(&result->arena, 1);
+    u64* parameter_parentheses = 0;
+    u64* group_parentheses = 0;
+    if (is_file_scope)
+    {
+        u32 word_count = (body_end > start ? (body_end - start) / 64 : 0) + 1;
+        parameter_parentheses = arena_allocate(temporary.arena, u64, word_count);
+        group_parentheses = arena_allocate(temporary.arena, u64, word_count);
+    }
+    u32 parenthesis_depth = 0;
+    u32 open_lists = 0;
+    u32 group_close = UINT32_MAX;
+    // A parenthesis that follows a declarator name (`typedef int F(...)`)
+    // opens a parameter list too, but only before the declaration's own
+    // initializer and never after an operator keyword such as `sizeof`.
+    u32 brace_depth = 0;
+    u32 nesting = 0;
+    bool initializer_seen = false;
     for (u32 index = start; index + 2 < body_end; index += 1)
     {
-        if (!c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        bool is_open = c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        if (is_file_scope && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            nesting += 1;
+        }
+        else if (is_file_scope && nesting && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_BRACKET))
+        {
+            nesting -= 1;
+        }
+        if (is_file_scope && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE))
+        {
+            brace_depth += 1;
+        }
+        else if (is_file_scope && brace_depth && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            brace_depth -= 1;
+        }
+        else if (is_file_scope && !brace_depth && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_ASSIGN))
+        {
+            initializer_seen = true;
+        }
+        if (is_file_scope && !is_open && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            group_close = UINT32_MAX;
+            if (parenthesis_depth)
+            {
+                parenthesis_depth -= 1;
+                u64 bit = (u64)1 << (parenthesis_depth & 63);
+                group_close = (group_parentheses[parenthesis_depth / 64] & bit) ? index : UINT32_MAX;
+                open_lists -= (parameter_parentheses[parenthesis_depth / 64] & bit) != 0;
+                parameter_parentheses[parenthesis_depth / 64] &= ~bit;
+                group_parentheses[parenthesis_depth / 64] &= ~bit;
+            }
+            nesting -= nesting ? 1 : 0;
+        }
+        if (!is_open)
         {
             continue;
+        }
+        if (is_file_scope)
+        {
+            // A declarator name opens a parameter list only at the top of the
+            // declaration: nothing is open (so no attribute, `typeof`,
+            // `_Alignas` or other operator group encloses it) and the
+            // initializer has not started. A parenthesised name, `(F)(...)`,
+            // opens one the same way. Inside a list every nested group is
+            // still in that prototype's scope, so the mark is the OR of the
+            // open lists.
+            bool after_name = !nesting && !initializer_seen && index > start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
+                              !c_parse_operator_group_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]));
+            bool names_declarator = !nesting && !initializer_seen && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER &&
+                                    c_token_is_punctuator(&preprocess.tokens[index + 2], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            bool opens_list = (index > start && group_close == index - 1) || after_name;
+            bool opens_group = c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR) ||
+                               c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_CARET) || names_declarator;
+            u64 bit = (u64)1 << (parenthesis_depth & 63);
+            parameter_parentheses[parenthesis_depth / 64] |= opens_list ? bit : 0;
+            group_parentheses[parenthesis_depth / 64] |= opens_group ? bit : 0;
+            open_lists += opens_list;
+            parenthesis_depth += 1;
+            nesting += 1;
         }
         u32 keyword = index + 1;
         CType qualifiers = {0};
         while (keyword < body_end && c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[keyword], &qualifiers)) keyword += 1;
         // Qualified record type names also own member declarator brackets.
-        // Keep the existing enum publication path and storage syntax intact.
+        // Keep the existing enum publication path and storage syntax intact
+        // in a body; a file-scope initializer has no other producer.
         if (keyword != index + 1 && (keyword >= body_end ||
             !c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[keyword],
-                C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION)))) continue;
+                C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) |
+                    (is_file_scope ? C_SYMBOL_WELL_KNOWN_BIT(ENUM) : 0)))) continue;
+        u32 open = 0;
         u32 close = 0;
-        if (!c_parse_aggregate_definition_at(preprocess, keyword, body_end, &close))
+        if (!c_parse_type_definition_at(preprocess, keyword, body_end, &open, &close))
         {
             continue;
-        }
-        u32 open = keyword + 1;
-        if (preprocess.tokens[open].kind == C_TOKEN_IDENTIFIER)
-        {
-            open += 1;
         }
         if (c_parse_aggregate_definition_registered(result, open))
         {
@@ -25833,9 +26118,289 @@ BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* mac
         }
         u32 declarator_start = 0;
         CScopeId scope = c_parse_scope_for_token(result, root_scope, keyword);
+        u32 enum_member_start = result->enum_member_count;
         c_parse_scalar_type_in_scope(machine, result, preprocess, scope, keyword, close + 1, &declarator_start);
+        for (u32 member_index = enum_member_start; is_file_scope && member_index < result->enum_member_count; member_index += 1)
+        {
+            result->enum_members[member_index].is_prototype_scope = open_lists != 0;
+            result->enum_members[member_index].is_expression_defined = open_lists == 0;
+        }
         index = close;
     }
+    scratch_end(temporary);
+}
+
+// An enumerator's scope begins just after its own definition (C17 6.2.1p7),
+// but the file-scope publication runs after every declaration, so a use of an
+// expression-defined enumerator before that definition would still resolve.
+// Scan the file-scope declarations, and the headers of function definitions
+// (a body's own binding already refuses it), for an identifier that resolves
+// to such an enumerator at a later token, and diagnose it as undeclared, as
+// GCC and Clang do.
+//
+// Each open delimiter records whether it encloses an expression: a `[`; a
+// parenthesis after an operator word such as `sizeof`, `_Alignas` or
+// `typeof`; an attribute's argument list; and every delimiter opened inside
+// an expression. An initializer at depth 0, an enumerator value after `=`
+// and a bit-field width after `:` in a body are expressions until the next
+// separator. Inside an expression every identifier is a use except a member
+// name after `.` or `->` and a tag after `struct`, `union` or `enum`.
+// Outside one, a token is read as a use by what precedes it; these are not
+// uses: a member selection; a tag; a declarator after a type word or `*`; a
+// name after the `)` that closes an operator group such as `_Atomic(int)` or
+// `__attribute__((...))`; a name after a list separator at depth 0 or in a
+// record body; an attribute name; a `__builtin_offsetof` member designator;
+// and an identifier-list parameter. A declarator inside a parenthesised list
+// is a parameter, so it shadows the enumerator for the rest of that list
+// (`void f(int R, int a[R]);`), and a parenthesis inside an expression that
+// starts with a declaration specifier is such a list or a cast's type, not an
+// expression. The open delimiters and the shadows are stacks
+// bounded by the declaration's token count, so nesting has no limit and the
+// scan stays linear.
+enum
+{
+    C_PARSE_EARLY_USE_EXPRESSION = 1u << 0,
+    C_PARSE_EARLY_USE_CLAUSE = 1u << 1,
+    C_PARSE_EARLY_USE_ATTRIBUTE = 1u << 2,
+    C_PARSE_EARLY_USE_DESIGNATOR = 1u << 3,
+};
+
+BUSTER_GLOBAL_LOCAL bool c_parse_early_use_word_in(String8 word, String8 const* words, u32 count)
+{
+    bool found = false;
+    for (u32 index = 0; !found && index < count; index += 1)
+    {
+        found = string_equal(word, words[index]);
+    }
+    return found;
+}
+
+// Whether `token` can begin a parameter declaration or a type name: a type
+// or qualifier keyword, a tag keyword, a typedef name, `...` or the `)` of an
+// empty list.
+BUSTER_GLOBAL_LOCAL bool c_parse_early_use_declaration_start(CParseResult* result, CPreprocessResult const* preprocess, CToken token)
+{
+    bool start = c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_ELLIPSIS);
+    if (!start && token.kind == C_TOKEN_IDENTIFIER)
+    {
+        CType qualifiers = {0};
+        String8 word = c_token_spelling(preprocess->spelling_base, token);
+        CEntityId named = c_parse_lookup_typedef_name_token(result, preprocess->spelling_base, token, false);
+        start = c_parse_type_word_for_dialect_token(*preprocess, token) || c_parse_type_qualifier_word_token(*preprocess, token, &qualifiers) ||
+                string_equal(word, S8("struct")) || string_equal(word, S8("union")) || string_equal(word, S8("enum")) ||
+                string_equal(word, S8("register")) ||
+                (named.value < result->entity_count && result->entities[named.value].kind == C_ENTITY_TYPEDEF);
+    }
+    return start;
+}
+
+BUSTER_GLOBAL_LOCAL void c_parse_diagnose_early_expression_enum_uses(CParseResult* result, Arena* arena, CPreprocessResult const* preprocess)
+{
+    String8 const attribute_words[] = {S8("__attribute__"), S8("__attribute"), S8("__declspec"), S8("__asm__"), S8("__asm"), S8("asm")};
+    String8 const tag_words[] = {S8("struct"), S8("union"), S8("enum")};
+    bool any_expression_enum = false;
+    for (u32 member_index = 0; !any_expression_enum && member_index < result->enum_member_count; member_index += 1)
+    {
+        any_expression_enum = result->enum_members[member_index].is_expression_defined && result->enum_members[member_index].is_published;
+    }
+    u32 stack_capacity = 1;
+    for (u32 declaration_index = 0; any_expression_enum && declaration_index < result->declaration_count; declaration_index += 1)
+    {
+        u32 token_count = result->declarations[declaration_index].token_count;
+        stack_capacity = token_count >= stack_capacity ? token_count + 1 : stack_capacity;
+    }
+    TemporalArena temporary = scratch_begin(&arena, 1);
+    u32* open_tokens = any_expression_enum ? arena_allocate(temporary.arena, u32, stack_capacity) : 0;
+    u8* open_flags = any_expression_enum ? arena_allocate(temporary.arena, u8, stack_capacity) : 0;
+    u32* shadow_entities = any_expression_enum ? arena_allocate(temporary.arena, u32, stack_capacity) : 0;
+    u32* shadow_depths = any_expression_enum ? arena_allocate(temporary.arena, u32, stack_capacity) : 0;
+    for (u32 declaration_index = 0; any_expression_enum && declaration_index < result->declaration_count; declaration_index += 1)
+    {
+        CDeclaration const* declaration = result->declarations + declaration_index;
+        u32 end = declaration->token_start + declaration->token_count;
+        // A function definition's header ends where its body begins.
+        bool is_function_definition = declaration->kind == C_DECLARATION_FUNCTION && declaration->is_definition;
+        if (is_function_definition)
+        {
+            end = declaration->body_start > declaration->token_start && declaration->body_start < end ? declaration->body_start : declaration->token_start;
+        }
+        u32 identifier_list_end = declaration->identifier_list_start + declaration->identifier_list_token_count;
+        u32 depth = 0;
+        u32 shadow_count = 0;
+        u32 last_closed_open = UINT32_MAX;
+        bool initializer_seen = false;
+        for (u32 index = declaration->token_start; index < end && index < preprocess->token_count; index += 1)
+        {
+            CToken token = preprocess->tokens[index];
+            bool has_previous = index > declaration->token_start;
+            CToken previous = has_previous ? preprocess->tokens[index - 1] : (CToken){0};
+            String8 previous_word = has_previous && previous.kind == C_TOKEN_IDENTIFIER ? c_token_spelling(preprocess->spelling_base, previous) : (String8){0};
+            u8 top = depth ? open_flags[depth - 1] : 0;
+            bool in_expression = depth ? (top & (C_PARSE_EARLY_USE_EXPRESSION | C_PARSE_EARLY_USE_CLAUSE)) != 0 : initializer_seen;
+            bool is_parenthesis = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS);
+            if (is_parenthesis || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+            {
+                bool in_attribute = depth && (top & C_PARSE_EARLY_USE_ATTRIBUTE) && !(top & C_PARSE_EARLY_USE_EXPRESSION);
+                // A record or enum body opened inside an expression still
+                // declares members and enumerators: `sizeof(struct{int a,R;})`.
+                bool tag_head = previous_word.length && c_parse_early_use_word_in(previous_word, tag_words, BUSTER_ARRAY_LENGTH(tag_words));
+                tag_head |= previous.kind == C_TOKEN_IDENTIFIER && index >= declaration->token_start + 2 &&
+                            preprocess->tokens[index - 2].kind == C_TOKEN_IDENTIFIER &&
+                            c_parse_early_use_word_in(c_token_spelling(preprocess->spelling_base, preprocess->tokens[index - 2]), tag_words,
+                                                      BUSTER_ARRAY_LENGTH(tag_words));
+                tag_head |= c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_PARENTHESIS) && last_closed_open >= declaration->token_start + 2 &&
+                            last_closed_open < index && preprocess->tokens[last_closed_open - 1].kind == C_TOKEN_IDENTIFIER &&
+                            preprocess->tokens[last_closed_open - 2].kind == C_TOKEN_IDENTIFIER &&
+                            c_parse_early_use_word_in(c_token_spelling(preprocess->spelling_base, preprocess->tokens[last_closed_open - 1]), attribute_words,
+                                                      BUSTER_ARRAY_LENGTH(attribute_words)) &&
+                            c_parse_early_use_word_in(c_token_spelling(preprocess->spelling_base, preprocess->tokens[last_closed_open - 2]), tag_words,
+                                                      BUSTER_ARRAY_LENGTH(tag_words));
+                u8 flags = in_expression && !(tag_head && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE)) ? C_PARSE_EARLY_USE_EXPRESSION : 0;
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+                {
+                    flags = C_PARSE_EARLY_USE_EXPRESSION;
+                }
+                else if (is_parenthesis && string_equal(previous_word, S8("__builtin_offsetof")))
+                {
+                    // A type name and a member designator, even inside an
+                    // expression; a subscript in the designator is one again.
+                    flags = C_PARSE_EARLY_USE_DESIGNATOR;
+                }
+                else if (is_parenthesis && in_expression && !(previous_word.length && c_parse_operator_group_word(previous_word)) &&
+                         index + 1 < end && c_parse_early_use_declaration_start(result, preprocess, preprocess->tokens[index + 1]))
+                {
+                    // A parenthesis inside a type name that starts with a
+                    // declaration specifier is a prototype's parameter list
+                    // (`sizeof(int (*)(int R, int a[R]))`) or a cast's type:
+                    // its declarators are names, not uses.
+                    flags = 0;
+                }
+                else if (is_parenthesis && !in_expression)
+                {
+                    if (previous_word.length && c_parse_early_use_word_in(previous_word, attribute_words, BUSTER_ARRAY_LENGTH(attribute_words)))
+                    {
+                        flags = C_PARSE_EARLY_USE_ATTRIBUTE;
+                    }
+                    else if (in_attribute && c_token_is_punctuator(&previous, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        flags = C_PARSE_EARLY_USE_ATTRIBUTE;
+                    }
+                    else if (in_attribute && previous.kind == C_TOKEN_IDENTIFIER)
+                    {
+                        flags = C_PARSE_EARLY_USE_EXPRESSION;
+                    }
+                    else if (previous_word.length && c_parse_operator_group_word(previous_word))
+                    {
+                        flags = C_PARSE_EARLY_USE_EXPRESSION;
+                    }
+                }
+                open_tokens[depth] = index;
+                open_flags[depth] = flags;
+                depth += depth + 1 < stack_capacity;
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                     c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+            {
+                depth -= depth != 0;
+                last_closed_open = open_tokens[depth];
+                while (shadow_count && shadow_depths[shadow_count - 1] > depth)
+                {
+                    shadow_count -= 1;
+                }
+            }
+            else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
+            {
+                initializer_seen = true;
+            }
+            else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+            {
+                initializer_seen = false;
+            }
+            else if (depth && !(top & C_PARSE_EARLY_USE_EXPRESSION) && c_token_is_punctuator(&preprocess->tokens[open_tokens[depth - 1]], C_PUNCTUATOR_LEFT_BRACE) &&
+                     (c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN) || c_token_is_punctuator(&token, C_PUNCTUATOR_COLON)))
+            {
+                // An enumerator value or a bit-field width.
+                open_flags[depth - 1] |= C_PARSE_EARLY_USE_CLAUSE;
+            }
+            else if (depth && (c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA) || c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON)))
+            {
+                open_flags[depth - 1] &= (u8)~C_PARSE_EARLY_USE_CLAUSE;
+            }
+            if (token.kind != C_TOKEN_IDENTIFIER || !has_previous)
+            {
+                continue;
+            }
+            bool member_name = c_token_is_punctuator(&previous, C_PUNCTUATOR_DOT) || c_token_is_punctuator(&previous, C_PUNCTUATOR_ARROW);
+            bool tag_name = previous_word.length && c_parse_early_use_word_in(previous_word, tag_words, BUSTER_ARRAY_LENGTH(tag_words));
+            bool named_elsewhere = member_name || tag_name || (depth && (top & C_PARSE_EARLY_USE_DESIGNATOR)) ||
+                                   (depth && !in_expression && (top & C_PARSE_EARLY_USE_ATTRIBUTE)) ||
+                                   (is_function_definition && index >= declaration->identifier_list_start && index < identifier_list_end);
+            CToken const* innermost = depth ? &preprocess->tokens[open_tokens[depth - 1]] : 0;
+            bool in_record_body = innermost && c_token_is_punctuator(innermost, C_PUNCTUATOR_LEFT_BRACE) && !in_expression;
+            bool in_parameter_list = innermost && c_token_is_punctuator(innermost, C_PUNCTUATOR_LEFT_PARENTHESIS) && !in_expression;
+            bool use = false;
+            if (in_expression)
+            {
+                use = true;
+            }
+            else if (previous.kind == C_TOKEN_IDENTIFIER)
+            {
+                use = c_parse_operator_group_word(previous_word);
+            }
+            else if (c_token_is_punctuator(&previous, C_PUNCTUATOR_COMMA))
+            {
+                use = depth && !in_record_body;
+            }
+            else if (c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            {
+                use = !(last_closed_open > declaration->token_start && last_closed_open < end &&
+                        preprocess->tokens[last_closed_open - 1].kind == C_TOKEN_IDENTIFIER &&
+                        c_parse_operator_group_word(c_token_spelling(preprocess->spelling_base, preprocess->tokens[last_closed_open - 1])));
+            }
+            else
+            {
+                use = previous.kind == C_TOKEN_PUNCTUATOR && !c_token_is_punctuator(&previous, C_PUNCTUATOR_STAR) &&
+                      !c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_BRACKET) && !c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_BRACE) &&
+                      !c_token_is_punctuator(&previous, C_PUNCTUATOR_SEMICOLON);
+            }
+            use = use && !named_elsewhere;
+            bool declares_parameter = !use && !named_elsewhere && in_parameter_list;
+            if (!use && !declares_parameter)
+            {
+                continue;
+            }
+            CEntityId entity = c_parse_lookup_entity_token(result, preprocess->spelling_base,
+                                                           (CScopeId){
+                                                               .value = 0,
+                                                           },
+                                                           &token);
+            CEnumMember const* member = 0;
+            if (entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_ENUMERATOR &&
+                result->entities[entity.value].enum_member_plus_one)
+            {
+                member = result->enum_members + result->entities[entity.value].enum_member_plus_one - 1;
+            }
+            bool later_definition = member && member->is_expression_defined && member->token_index > index;
+            bool shadowed = false;
+            for (u32 shadow_index = 0; later_definition && use && !shadowed && shadow_index < shadow_count; shadow_index += 1)
+            {
+                shadowed = shadow_entities[shadow_index] == entity.value;
+            }
+            if (later_definition && declares_parameter && shadow_count + 1 < stack_capacity)
+            {
+                shadow_entities[shadow_count] = entity.value;
+                shadow_depths[shadow_count] = depth;
+                shadow_count += 1;
+            }
+            if (later_definition && use && !shadowed)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(preprocess, token), C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+                                   string_format(arena, S8("use of undeclared identifier '{S8}' (its enumerator is defined later)"),
+                                                 c_token_spelling(preprocess->spelling_base, token)));
+            }
+        }
+    }
+    scratch_end(temporary);
 }
 
 BUSTER_C_INTERNAL void c_parse_bind_function_static_asserts(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
@@ -28706,18 +29271,22 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_typed_integer_constant(CTypeParseMach
 
 // The legacy vector-size folder can reenter machineless type reading through
 // sizeof/casts in its argument. Protected queries admit only its literal fast
-// path; prepared vector types remain ordinary published rows to read.
-BUSTER_C_INTERNAL bool c_parse_type_constant_vector_argument_supported(CParseResult* result, CPreprocessResult preprocess, u32 index, u32 end)
+// path; prepared vector types remain ordinary published rows to read. The
+// literal form is exactly `( NUMBER )`, and a `)` two tokens after the `(`
+// with a number between them is necessarily its match, so the shape is read
+// from the tokens directly: no position index is needed, which matters on the
+// unindexed path of c_parse_apply_vector_attribute.
+BUSTER_C_INTERNAL bool c_parse_type_constant_vector_argument_supported(CPreprocessResult preprocess, u32 index, u32 end)
 {
-    u32 close = index + 1 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)
-        ? c_parse_matching_delimiter_indexed(result, preprocess, index + 1) : UINT32_MAX;
     u32 value = 0;
-    bool supported = index + 3 < end && close == index + 3 && preprocess.tokens[index + 2].kind == C_TOKEN_PREPROCESSING_NUMBER &&
+    bool supported = index + 3 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        preprocess.tokens[index + 2].kind == C_TOKEN_PREPROCESSING_NUMBER &&
+        c_token_is_punctuator(&preprocess.tokens[index + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
         c_parse_attribute_unsigned(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 2]), &value) && value;
     return supported;
 }
 
-BUSTER_C_INTERNAL bool c_parse_type_constant_vector_arguments_supported(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end,
+BUSTER_C_INTERNAL bool c_parse_type_constant_vector_arguments_supported(CPreprocessResult preprocess, u32 start, u32 end,
                                                                          bool sizeof_expression_query)
 {
     bool supported = true;
@@ -28745,7 +29314,7 @@ BUSTER_C_INTERNAL bool c_parse_type_constant_vector_arguments_supported(CParseRe
             CToken token = preprocess.tokens[attribute];
             if (token.kind == C_TOKEN_IDENTIFIER && c_parse_vector_size_word(c_token_spelling(preprocess.spelling_base, token)))
             {
-                supported = c_parse_type_constant_vector_argument_supported(result, preprocess, attribute, after);
+                supported = c_parse_type_constant_vector_argument_supported(preprocess, attribute, after);
             }
         }
         index = after;
@@ -28921,7 +29490,7 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
             query.expression_scalar_types = scalar_types;
             CTypeLayoutStatistics statistics = {0};
             query.type_layout_statistics = &statistics;
-            bool supported = c_parse_type_constant_vector_arguments_supported(&query, preprocess, start, end, sizeof_expression_query);
+            bool supported = c_parse_type_constant_vector_arguments_supported(preprocess, start, end, sizeof_expression_query);
             bool single = end == start + 1;
             u32 capacity = single || !supported ? 0 : end - start + 16;
             // Guarded while a function body is validated (#1256): a refused
@@ -35647,6 +36216,24 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             .is_identifier_list_definition = is_identifier_list_definition,
             .is_declarator_continuation = syntax_declaration->is_declarator_continuation,
         };
+        // A file-scope declaration's initializer, array bound or static
+        // assertion may define a type the same way a function body's
+        // expression does, and nothing else walks it. The definition's
+        // enumerators are file-scope names (C17 6.2.1p4) published with the
+        // others after this loop. Walking before the declaration's own type
+        // is parsed, in source order between declarations, lets a later
+        // enumerator's value -- in this declaration or a following one --
+        // use an earlier one through pending lookup. This runs ahead of the
+        // array-bound inference below because a bound may be the sizeof of
+        // such a definition.
+        if (declaration->kind != C_DECLARATION_FUNCTION)
+        {
+            c_parse_bind_expression_aggregates(&machine, &result, preprocess,
+                                               (CScopeId){
+                                                   .value = 0,
+                                               },
+                                               declaration->token_start, declaration->token_start + declaration->token_count, true);
+        }
         if (!static_assertion && !global_assembly)
         {
             // Declarators split out of one list share the specifiers the first
@@ -35981,6 +36568,10 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         for (u32 member_index = 0; member_index < result.enum_member_count; member_index += 1)
         {
             CEnumMember* member = &result.enum_members[member_index];
+            if (member->is_prototype_scope)
+            {
+                continue;
+            }
             u32 member_symbol = c_parse_symbol_or_intern(&result, member->symbol, member->name);
             CEntityId prior_entity = c_parse_lookup_entity_symbol(&result,
                                                                   (CScopeId){
@@ -36021,23 +36612,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             member->is_published = true;
         }
     }
-    // A file-scope declaration's initializer may define an aggregate the same
-    // way a function body's expression does, and nothing else walks it. This
-    // runs ahead of the array-bound inference below because a bound may be the
-    // sizeof of such a definition.
-    for (u32 declaration_index = 0; declaration_index < result.declaration_count; declaration_index += 1)
-    {
-        CDeclaration* declaration = &result.declarations[declaration_index];
-        if (declaration->kind == C_DECLARATION_FUNCTION)
-        {
-            continue;
-        }
-        c_parse_bind_expression_aggregates(&machine, &result, preprocess,
-                                           (CScopeId){
-                                               .value = 0,
-                                           },
-                                           declaration->token_start, declaration->token_start + declaration->token_count);
-    }
+    c_parse_diagnose_early_expression_enum_uses(&result, arena, &preprocess);
     for (u32 declaration_index = 0; declaration_index < result.declaration_count; declaration_index += 1)
     {
         CDeclaration* declaration = &result.declarations[declaration_index];
@@ -36170,7 +36745,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                 }
                 if (bound.token_start < bound_end)
                 {
-                    c_parse_bind_auto_initializer_identifiers(arena, &result, preprocess, scope, bound.token_start, (u32)bound_end);
+                    c_parse_bind_auto_initializer_identifiers(0, C_ID_UNDERLYING_INVALID, arena, &result, preprocess, scope, bound.token_start,
+                                                              (u32)bound_end);
                 }
             }
             if (!parameter->name.length)
