@@ -14,6 +14,9 @@
 // ebpf_initialize_symbols seeds the dense key domain; ebpf_add_symbol_record
 // publishes stable record indices, and ebpf_symbol_by_key also serves ELF
 // relocation resolution. Symbol rows retain insertion order through emission.
+// Symbol rows also index their defining function/global record, so call and
+// global references resolve in O(1) (ebpf_function_for_symbol,
+// ebpf_global_for_symbol); ebpf_string_find searches only its function's range.
 // Kernel verifier rules the emitter must satisfy itself: the 512-byte frame
 // (ebpf_fe_allocate), no instruction unreachable from the entry
 // (ebpf_fe_reachable_blocks), width-aligned stack accesses even for packed
@@ -64,6 +67,10 @@ struct EbpfSymbolRecord
     u64 value;
     u64 size;
     u32 key;
+    // Zero means absent; otherwise the defining function/global record index
+    // + 1. Duplicate definitions fail collection, so each is unique per key.
+    u32 function_index;
+    u32 global_index;
     u32 section_index;
     u32 elf_index;
     u8 binding;
@@ -81,6 +88,10 @@ struct EbpfFunctionRecord
     EbpfSection* section;
     u64 offset;
     u64 size;
+    // This function's string records: contiguous in context->strings and
+    // ascending by instruction, because ebpf_collect_strings walks in order.
+    u32 string_first;
+    u32 string_count;
     bool is_program;
 };
 
@@ -901,41 +912,53 @@ static IrType* ebpf_fe_value_type(EbpfFunctionEmitter* emitter, IrValueId value)
     return result;
 }
 
-static EbpfStringRecord* ebpf_string_find(EbpfContext* context, IrFunction* function, IrInstructionId instruction)
+// Binary search within the function's own ascending string range.
+static EbpfStringRecord* ebpf_string_find(EbpfContext* context, EbpfFunctionRecord* function, IrInstructionId instruction)
 {
-    for (u32 index = 0; index < context->string_count; index += 1)
+    EbpfStringRecord* result = 0;
+    u32 low = function->string_first;
+    u32 high = function->string_first + function->string_count;
+    while (low < high)
     {
-        EbpfStringRecord* record = context->strings + index;
-        if (record->function == function && record->instruction.value == instruction.value)
+        u32 middle = low + (high - low) / 2;
+        EbpfStringRecord* record = context->strings + middle;
+        if (record->instruction.value < instruction.value)
         {
-            return record;
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
         }
     }
-    return 0;
+    if (low < function->string_first + function->string_count && context->strings[low].instruction.value == instruction.value &&
+        context->strings[low].function == function->function)
+    {
+        result = context->strings + low;
+    }
+    return result;
 }
 
 static EbpfFunctionRecord* ebpf_function_for_symbol(EbpfContext* context, IrSymbolId symbol)
 {
-    for (u32 index = 0; index < context->function_count; index += 1)
+    EbpfFunctionRecord* result = 0;
+    EbpfSymbolRecord* record = ebpf_symbol_by_key(context, ebpf_ir_symbol_key(context, symbol));
+    if (record && record->function_index && record->function_index - 1 < context->function_count)
     {
-        if (context->functions[index].function->symbol.value == symbol.value)
-        {
-            return context->functions + index;
-        }
+        result = context->functions + record->function_index - 1;
     }
-    return 0;
+    return result;
 }
 
 static EbpfGlobalRecord* ebpf_global_for_symbol(EbpfContext* context, IrSymbolId symbol)
 {
-    for (u32 index = 0; index < context->global_count; index += 1)
+    EbpfGlobalRecord* result = 0;
+    EbpfSymbolRecord* record = ebpf_symbol_by_key(context, ebpf_ir_symbol_key(context, symbol));
+    if (record && record->global_index && record->global_index - 1 < context->global_count)
     {
-        if (context->globals[index].global->symbol.value == symbol.value)
-        {
-            return context->globals + index;
-        }
+        result = context->globals + record->global_index - 1;
     }
-    return 0;
+    return result;
 }
 
 // Normalization rewrites only `reg`. Any scratch register could hold a live
@@ -1087,7 +1110,7 @@ static void ebpf_fe_emit_value(EbpfFunctionEmitter* emitter, u8 destination, IrV
     break;
     case IR_OPCODE_CONSTANT_STRING:
     {
-        EbpfStringRecord* string = ebpf_string_find(emitter->context, emitter->function, ir_instruction_self_id(emitter->function, definition));
+        EbpfStringRecord* string = ebpf_string_find(emitter->context, emitter->record, ir_instruction_self_id(emitter->function, definition));
         if (!string)
         {
             ebpf_fail(emitter->context, EBPF_ERROR_IR_VALIDATION, ebpf_s8("missing eBPF string literal record"), emitter->function, 0,
@@ -2493,6 +2516,7 @@ static bool ebpf_collect_functions(EbpfContext* context)
             }
             symbol_record->defined = true;
             symbol_record->section = section;
+            symbol_record->function_index = context->function_count + 1;
             ebpf_vector_reserve(context->arena, (void**)&context->functions, &context->function_capacity, context->function_count + 1,
                                 sizeof(*context->functions));
             context->functions[context->function_count++] =
@@ -2721,6 +2745,7 @@ static bool ebpf_collect_global(EbpfContext* context, IrGlobal* global)
     }
     symbol_record->defined = true;
     symbol_record->section = section;
+    symbol_record->global_index = context->global_count;
     symbol_record->value = offset;
     symbol_record->size = size;
     context->stats.global_count += 1;
@@ -2760,6 +2785,14 @@ static bool ebpf_collect_strings(EbpfContext* context)
             {
                 continue;
             }
+            // ebpf_collect_functions recorded every lowered function.
+            EbpfFunctionRecord* record = ebpf_function_for_symbol(context, function->symbol);
+            if (!record || record->function != function)
+            {
+                ebpf_fail(context, EBPF_ERROR_IR_VALIDATION, ebpf_s8("missing eBPF function record"), function, 0, 0, function->symbol);
+                return false;
+            }
+            record->string_first = context->string_count;
             for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
             {
                 IrInstruction* instruction = function->instructions + instruction_index;
@@ -2799,6 +2832,7 @@ static bool ebpf_collect_strings(EbpfContext* context)
                                        .offset = offset, .symbol_key = key};
                 context->stats.data_bytes += literal.length + 1;
             }
+            record->string_count = context->string_count - record->string_first;
         }
     }
     return true;
