@@ -1375,14 +1375,20 @@ against a defined thread-local symbol with a 32-bit offset. A missing,
 repeated, overlapping, reordered or split step fails the link before the
 image is written, as `link.relocation` naming the symbol and the relocation
 that could not start or complete its sequence. Non-adjacent schedules are
-refused rather than relaxed. The other descriptor forms (560/561 and the
+refused rather than relaxed; Clang 18 at `-O2` already separates an IE ADRP
+from its LDR, so such an initial-exec object fails to link today. The other descriptor forms (560/561 and the
 565-568 `OFF_G1`/`OFF_G0_NC`/`LDR`/`ADD` sequence), the dynamic
 `R_AARCH64_TLSDESC` 1031, and TLS owned by a loader or shared library are
 still refused by name. The tests (the "initial-exec TLS (#2582)" and "TLS
 descriptors (#2582)" blocks of `object_tests`,
 `link_test_aarch64_tls_initial_exec_relaxation` and
-`link_test_aarch64_tls_descriptor_relaxation`) check encodings only;
-executing a Clang-built object is left to the hosted AArch64 leg.
+`link_test_aarch64_tls_descriptor_relaxation`) check encodings only.
+`compiler_driver_test_aarch64_elf_tlsdesc` runs on Linux AArch64 hosts: the
+configured host compiler builds `fixtures/aarch64_elf_tlsdesc.c` with `-fPIC
+-ftls-model=global-dynamic` at `-O0` and `-O2`, Buster links it with a
+Buster-compiled main defining the other thread-local, and the test checks
+every descriptor appears relaxed and the image prints the same values as a
+host-linked control.
 
 ## Pass-through options
 
