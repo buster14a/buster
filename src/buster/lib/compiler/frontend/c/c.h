@@ -595,6 +595,11 @@ struct CPreprocessOptions
     String8* undefinitions;
     String8* include_paths;
     String8* system_include_paths;
+    // `-include FILE` names in command-line order. The preprocessor processes
+    // them as `#include "FILE"` lines of a synthetic `<command-line>` file
+    // that precedes the primary source, after command-line macros and without
+    // shifting the primary source's lines or __FILE__.
+    String8* forced_includes;
     String8 source_path;
     // Identity of the descriptor that supplied source, when available.
     // In-memory callers retain the path namespace by leaving this invalid.
@@ -606,6 +611,7 @@ struct CPreprocessOptions
     u32 undefinition_count;
     u32 include_path_count;
     u32 system_include_path_count;
+    u32 forced_include_count;
     u32 expansion_limit;
     u32 include_depth_limit;
     CPreprocessDialect dialect;

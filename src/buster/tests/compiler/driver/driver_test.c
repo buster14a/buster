@@ -13,6 +13,8 @@
 // against native host-linked controls, including each scaled low12 form.
 // compiler_driver_test_aarch64_elf_tlsdesc runs foreign TLSDESC objects relaxed
 // to local-exec, against a host-linked control (#2582).
+// compiler_driver_test_aarch64_elf_tls_initial_exec runs a foreign -O2
+// initial-exec object whose pairs are non-adjacent the same way (#2582).
 // compiler_driver_test_cached_plan_lanes owns prepared-key reuse across gangs;
 // compiler_driver_test_unit_batches owns failed-cohort recovery and exact output.
 // compiler_driver_test_native_frame_vectors compiles its matrix on a lane gang
@@ -885,6 +887,134 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_run_cc(UnitTestArguments* argument
     return succeeded;
 }
 #endif
+
+#if !BUSTER_ANDROID && !BUSTER_IOS
+// Whether `text` holds `needle`; keeps the -include assertions one line each.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_contains(String8 text, String8 needle)
+{
+    return string_first_sequence(text, needle) != BUSTER_STRING_NO_MATCH;
+}
+#endif
+
+// `-include FILE` of #1418: both spellings, command-line order, -D visibility
+// inside the header, the primary file's own line numbers, and refusals.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_forced_include(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    String8 first_header = buster_test_temporary_path(arguments->arena, S8("forced-first"), S8(".h"));
+    String8 second_header = buster_test_temporary_path(arguments->arena, S8("forced-second"), S8(".h"));
+    String8 defined_header = buster_test_temporary_path(arguments->arena, S8("forced-defined"), S8(".h"));
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("forced-source"), S8(".c"));
+    u64 directory_length = first_header.length;
+    while (directory_length && first_header.pointer[directory_length - 1] != '/')
+    {
+        directory_length -= 1;
+    }
+    String8 header_directory = string_slice(first_header, 0, directory_length ? directory_length - 1 : 0);
+    String8 first_text = S8("#define FROM_FIRST 20\nint first_line = __LINE__;\n");
+    String8 second_text = S8("int second_value = FROM_FIRST + 1;\n");
+    String8 defined_text = S8("int defined_value = FROM_COMMAND;\n");
+    String8 source = S8("int source_line = __LINE__;\nchar const* source_file = __FILE__;\n#warning source-warning\n"
+                        "int use_first = FROM_FIRST;\n");
+    if (BUSTER_REQUIRE(arguments, file_write(first_header, BUSTER_SLICE_TO_BYTE_SLICE(first_text)) &&
+                                      file_write(second_header, BUSTER_SLICE_TO_BYTE_SLICE(second_text)) &&
+                                      file_write(defined_header, BUSTER_SLICE_TO_BYTE_SLICE(defined_text)) &&
+                                      file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 output = {0};
+        String8 error = {0};
+        // Absolute path, separate spelling: the macro is visible to the source.
+        String8 separate[] = {S8("-E"), S8("-include"), first_header, source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(separate), &output, &error));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int use_first = 20;")));
+        // The header's own lines are its own, and the primary file's lines and
+        // __FILE__ are unchanged by the synthetic prologue.
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int first_line = 2;")));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int source_line = 1;")));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, string_format(arguments->arena, S8("source_file = \"{S8}\""), source_path)));
+        // A diagnostic in the primary file keeps its real line (#warning is line 3).
+        BUSTER_TEST(arguments, compiler_driver_test_contains(error, source_path));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(error, S8(":3:")));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(error, S8("source-warning")));
+
+        // Joined spelling; a -D value reaches the header, which runs after the
+        // command-line macros.
+        String8 joined_option = string_format(arguments->arena, S8("-include{S8}"), defined_header);
+        String8 joined[] = {S8("-E"), S8("-DFROM_COMMAND=33"), joined_option, source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(joined), &output, &error));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int defined_value = 33;")));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int source_line = 1;")));
+
+        // Command-line order: the second header needs the first one's macro.
+        String8 ordered[] = {S8("-E"), S8("-include"), first_header, S8("-include"), second_header, source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(ordered), &output, &error));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int second_value = 20 + 1;")));
+        String8 reversed[] = {S8("-E"), S8("-include"), second_header, S8("-include"), first_header, source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(reversed), &output, &error));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int second_value = FROM_FIRST + 1;")));
+
+        // A relative name is looked up from the working directory first (the
+        // repository root here), then through -I. The header is an existing
+        // fixture, so the native-retirement inventory stays unchanged.
+        String8 relative_source = buster_test_temporary_path(arguments->arena, S8("forced-relative"), S8(".c"));
+        String8 relative_text = S8("int relative_value = INCLUDED_VALUE;\n");
+        if (BUSTER_REQUIRE(arguments, file_write(relative_source, BUSTER_SLICE_TO_BYTE_SLICE(relative_text))))
+        {
+            String8 relative[] = {S8("-E"), S8("-include"), S8("tests/basic_c_include.h"), relative_source};
+            BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(relative), &output, &error));
+            BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int relative_value = 37;")));
+            String8 through_include[] = {S8("-E"), S8("-I"), header_directory, S8("-include"), string_slice(first_header, header_directory.length + 1, first_header.length),
+                                         relative_source};
+            BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(through_include), &output, &error));
+            BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int first_line = 2;")));
+        }
+
+        // Every translation unit gets the prologue.
+        String8 second_source = buster_test_temporary_path(arguments->arena, S8("forced-second-source"), S8(".c"));
+        String8 second_source_text = S8("int again = FROM_FIRST;\n");
+        if (BUSTER_REQUIRE(arguments, file_write(second_source, BUSTER_SLICE_TO_BYTE_SLICE(second_source_text))))
+        {
+            String8 compile_two[] = {S8("-fsyntax-only"), S8("-w"), S8("-include"), first_header, source_path, second_source};
+            BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_two), &output, &error));
+            String8 compile_one_plain[] = {S8("-fsyntax-only"), S8("-w"), source_path, second_source};
+            BUSTER_TEST(arguments, !compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_one_plain), &output, &error));
+        }
+
+        // A missing file is a diagnostic that names it, and the build fails.
+        String8 missing[] = {S8("-E"), S8("-include"), S8("forced-no-such-header.h"), source_path};
+        BUSTER_TEST(arguments, !compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing), &output, &error));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(error, S8("forced-no-such-header.h")));
+        String8 missing_compile[] = {S8("-fsyntax-only"), S8("-includeforced-no-such-header.h"), source_path};
+        BUSTER_TEST(arguments, !compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing_compile), &output, &error));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(error, S8("forced-no-such-header.h")));
+    }
+
+    // Other -include-* and -i* options are not -include.
+    String8 refused[] = {S8("-include-pch"), S8("-iprefix"), S8("-include-pch=x"), S8("-idirafter")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
+    {
+        String8 command_line[] = {refused[index], S8("source.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command_line));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        BUSTER_TEST(arguments, invocation.forced_include_count == 0);
+    }
+    String8 missing_value[] = {S8("source.c"), S8("-include")};
+    CompilerDriverInvocation missing_invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing_value));
+    BUSTER_TEST(arguments, missing_invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    String8 accepted[] = {S8("-include"), S8("a.h"), S8("-includeb.h"), S8("source.c")};
+    CompilerDriverInvocation accepted_invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(accepted));
+    BUSTER_TEST(arguments, accepted_invocation.error == COMPILER_DRIVER_ERROR_NONE && accepted_invocation.forced_include_count == 2);
+    if (accepted_invocation.forced_include_count == 2)
+    {
+        BUSTER_STRING_TEST(arguments, accepted_invocation.forced_includes[0], S8("a.h"));
+        BUSTER_STRING_TEST(arguments, accepted_invocation.forced_includes[1], S8("b.h"));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
 
 // GCC/Clang spellings of #1418: the x86-64 psABI levels, -fno-strict-overflow,
 // -w and the --version/-dumpversion/-dumpmachine queries.
@@ -5271,6 +5401,190 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_elf_tlsdesc(Unit
             BUSTER_TEST(arguments, os_file_delete(object_path));
         }
         arena_set_position(arena, scope.position);
+    }
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// A foreign compiler's optimized initial-exec TLS (#2582) must relax and
+// execute in a fixed-address Buster executable even when the compiler
+// schedules other instructions between the ADRP and LDR halves. The host
+// compiler builds aarch64_elf_tls_initial_exec.c at -O2 with
+// -ftls-model=initial-exec; the test pairs each 542 LDR with its 541 ADRP in
+// the object and requires at least one pair to enclose other words (GCC fuses
+// the halves into one pattern, so only a non-GNU compiler is held to that).
+// In the Buster image every pair must appear as `movz xN, #hi, lsl #16`, the
+// enclosed words unchanged, and `movk xN, #lo`; a host-linked control and the
+// Buster image must print the same values.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_elf_tls_initial_exec(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && BUSTER_CPU_ARCH_AARCH64 && !BUSTER_ANDROID
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 const fixture = S8("src/buster/tests/compiler/driver/fixtures/aarch64_elf_tls_initial_exec.c");
+    String8 const main_fixture = S8("src/buster/tests/compiler/driver/fixtures/aarch64_elf_tls_initial_exec_main.c");
+    String8 const expected_output = S8("TLS_IE_RUNTIME mix=64 stored=180 total=150 weighted=339\n");
+    ProcessSpawnOptions spawn_options = {.use_process_environment = true, .search_path = true,
+        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)};
+    String8 object_path = buster_test_temporary_path(arena, S8("buster-aarch64-elf-tls-ie"), S8(".o"));
+    String8 control_path = buster_test_temporary_path(arena, S8("buster-aarch64-elf-tls-ie-control"), S8(""));
+    String8 output_path = buster_test_temporary_path(arena, S8("buster-aarch64-elf-tls-ie-native"), S8(""));
+    String8 command[12];
+    u32 count = 0;
+    command[count++] = S8(BUSTER_HOST_C_COMPILER);
+    if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+    command[count++] = S8("-O2");
+    command[count++] = S8("-fno-pie");
+    command[count++] = S8("-ftls-model=initial-exec");
+    command[count++] = S8("-c");
+    command[count++] = fixture;
+    command[count++] = S8("-o");
+    command[count++] = object_path;
+    ProcessSpawnResult compiler = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0}, spawn_options);
+    ProcessWaitResult compiled = compiler.handle ? os_process_wait_deadline(arena, compiler, 30000000) : (ProcessWaitResult){0};
+    bool compile_ok = compiler.handle && !compiled.timed_out && compiled.result == PROCESS_RESULT_SUCCESS;
+    String8 compile_error = BYTE_SLICE_TO_STRING(8, compiled.streams[STANDARD_STREAM_ERROR]);
+    BUSTER_TEST_RAW(arguments, compile_ok, compile_error.length ? compile_error : S8("host compiler did not run"));
+    if (compile_ok)
+    {
+        // The host toolchain links and runs the same object first, so an
+        // import failure cannot hide a fixture or host problem.
+        count = 0;
+        command[count++] = S8(BUSTER_HOST_C_COMPILER);
+        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+        command[count++] = S8("-no-pie");
+        command[count++] = main_fixture;
+        command[count++] = object_path;
+        command[count++] = S8("-o");
+        command[count++] = control_path;
+        ProcessSpawnResult host_link = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0}, spawn_options);
+        ProcessWaitResult host_linked = host_link.handle ? os_process_wait_deadline(arena, host_link, 30000000) : (ProcessWaitResult){0};
+        bool control_ok = host_link.handle && !host_linked.timed_out && host_linked.result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST(arguments, control_ok);
+        if (control_ok)
+        {
+            String8 run_control[] = {control_path};
+            ProcessSpawnResult control = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_control), (SliceString8){0}, (SliceString8){0}, spawn_options);
+            ProcessWaitResult control_ran = control.handle ? os_process_wait_deadline(arena, control, 30000000) : (ProcessWaitResult){0};
+            control_ok = control.handle && !control_ran.timed_out && control_ran.result == PROCESS_RESULT_SUCCESS &&
+                         string_equal(BYTE_SLICE_TO_STRING(8, control_ran.streams[STANDARD_STREAM_OUTPUT]), expected_output);
+            BUSTER_TEST(arguments, control_ok);
+            BUSTER_TEST(arguments, os_file_delete(control_path));
+        }
+        // Pair each LDR with the nearest preceding ADRP of the same section,
+        // register, symbol and addend, as the linker does.
+        ByteSlice bytes = file_read(arena, object_path, (FileReadOptions){0});
+        ObjectFile imported = object_read(arena, bytes, (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX});
+        u32 adrp_sites = 0;
+        u32 pair_count = 0;
+        u32 nonadjacent = 0;
+        u64 widest_gap = 0;
+        u32* pair_first = 0;
+        u32* pair_last = 0;
+        if (BUSTER_REQUIRE(arguments, imported.error == OBJECT_ERROR_NONE))
+        {
+            pair_first = arena_allocate(arena, u32, imported.relocation_count + 1);
+            pair_last = arena_allocate(arena, u32, imported.relocation_count + 1);
+            for (u32 index = 0; index < imported.relocation_count; index += 1)
+            {
+                ObjectRelocation* load = imported.relocations + index;
+                adrp_sites += load->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21;
+                if (load->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12)
+                {
+                    ByteSlice data = imported.sections[load->section].data;
+                    u32 partner = UINT32_MAX;
+                    for (u32 candidate = 0; candidate < imported.relocation_count; candidate += 1)
+                    {
+                        ObjectRelocation* page = imported.relocations + candidate;
+                        if (page->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21 && page->section == load->section &&
+                            page->symbol == load->symbol && page->addend == load->addend && page->offset < load->offset &&
+                            (compiler_driver_test_pe_read_u32(data, page->offset) & 31) == (compiler_driver_test_pe_read_u32(data, load->offset) & 31) &&
+                            (partner == UINT32_MAX || page->offset > imported.relocations[partner].offset))
+                        {
+                            partner = candidate;
+                        }
+                    }
+                    if (partner != UINT32_MAX)
+                    {
+                        u64 gap = load->offset - imported.relocations[partner].offset;
+                        pair_first[pair_count] = partner;
+                        pair_last[pair_count] = index;
+                        pair_count += 1;
+                        nonadjacent += gap > 4;
+                        widest_gap = gap > widest_gap ? gap : widest_gap;
+                    }
+                }
+            }
+        }
+        bool fused = string_equal(S8(BUSTER_HOST_C_COMPILER_ID), S8("GNU"));
+        BUSTER_TEST(arguments, pair_count >= 3 && adrp_sites == pair_count);
+        BUSTER_TEST_RAW(arguments, fused || nonadjacent >= 1,
+                        string_format(arena, S8("host compiler {S8} emitted {u32} initial-exec pairs, none with words between the halves; "
+                                                "aarch64_elf_tls_initial_exec.c no longer exercises the non-adjacent relaxation"),
+                                      S8(BUSTER_HOST_C_COMPILER), pair_count));
+        String8 link_command[] = {main_fixture, object_path, S8("-o"), output_path};
+        CompilerDriverResult linked = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+        BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+        if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            // Find each pair's window in the image: MOVZ xN, #hi, LSL #16, the
+            // enclosed object words unchanged (a word the object relocates is
+            // not compared), then MOVK xN, #lo. Variant I places the block
+            // after the 16-byte TCB, so the offset is at least 16 and fits in
+            // MOVK's half.
+            ByteSlice image = file_read(arena, output_path, (FileReadOptions){0});
+            ByteSlice text = compiler_driver_test_elf_section(image, S8(".text"));
+            u32 relaxed = 0;
+            for (u32 pair = 0; pair < pair_count; pair += 1)
+            {
+                ObjectRelocation* page = imported.relocations + pair_first[pair];
+                ObjectRelocation* load = imported.relocations + pair_last[pair];
+                ByteSlice data = imported.sections[load->section].data;
+                u32 reg = compiler_driver_test_pe_read_u32(data, load->offset) & 31;
+                u64 span = load->offset - page->offset;
+                bool found = false;
+                for (u64 offset = 0; !found && offset + span + 4 <= text.length; offset += 4)
+                {
+                    u32 high = compiler_driver_test_pe_read_u32(text, offset);
+                    u32 low = compiler_driver_test_pe_read_u32(text, offset + span);
+                    u32 tprel = (((high >> 5) & 0xffff) << 16) | ((low >> 5) & 0xffff);
+                    bool match = (high & UINT32_C(0xffe0001f)) == (UINT32_C(0xd2a00000) | reg) &&
+                                 (low & UINT32_C(0xffe0001f)) == (UINT32_C(0xf2800000) | reg) && tprel >= 16 && tprel < 0x10000;
+                    for (u64 word = 4; match && word < span; word += 4)
+                    {
+                        bool relocated = false;
+                        for (u32 index = 0; index < imported.relocation_count; index += 1)
+                        {
+                            relocated = relocated || (imported.relocations[index].section == load->section &&
+                                                      imported.relocations[index].offset == page->offset + word);
+                        }
+                        match = relocated || compiler_driver_test_pe_read_u32(text, offset + word) == compiler_driver_test_pe_read_u32(data, page->offset + word);
+                    }
+                    found = match;
+                }
+                relaxed += found;
+            }
+            BUSTER_TEST(arguments, relaxed == pair_count);
+            String8 run_native[] = {output_path};
+            ProcessSpawnResult native = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_native), (SliceString8){0}, (SliceString8){0}, spawn_options);
+            ProcessWaitResult native_ran = native.handle ? os_process_wait_deadline(arena, native, 30000000) : (ProcessWaitResult){0};
+            String8 observed = BYTE_SLICE_TO_STRING(8, native_ran.streams[STANDARD_STREAM_OUTPUT]);
+            bool executed = native.handle && !native_ran.timed_out && native_ran.result == PROCESS_RESULT_SUCCESS;
+            BUSTER_TEST_RAW(arguments, executed && string_equal(observed, expected_output), observed);
+            if (executed && control_ok && relaxed == pair_count)
+            {
+                arguments->show(arguments, string_format(arena,
+                    S8("AARCH64_ELF_TLS_IE_NATIVE_V1 compiler={S8} pairs={u32} nonadjacent={u32} widest_gap_bytes={u64} host_control=pass buster=pass\n"),
+                    S8(BUSTER_HOST_C_COMPILER), pair_count, nonadjacent, widest_gap));
+            }
+            BUSTER_TEST(arguments, os_file_delete(output_path));
+        }
+        BUSTER_TEST(arguments, os_file_delete(object_path));
     }
     scratch_end(temporary);
 #else
@@ -29193,6 +29507,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_diagnostic_streams);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_warning_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_gcc_spellings);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_forced_include);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_pack_state);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_batch);
@@ -29239,6 +29554,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_coff_section_alignment);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_elf_ldst);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_elf_tlsdesc);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_elf_tls_initial_exec);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_write_limits);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);

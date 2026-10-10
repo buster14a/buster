@@ -108,6 +108,14 @@
 // TLS exports reuse link_elf_thread_local_offset and packed loaded section indices;
 // their dynamic symbols carry STT_TLS offsets rather than image addresses.
 //
+// AArch64 fixed-address TLS relaxation (link_aarch64_tls_relax): sites are
+// heap-sorted by section and offset; an initial-exec ADRP/LDR pair may have
+// unrelated instructions between the halves and is matched by register
+// (link_aarch64_tls_pending_drain reports an unpaired ADRP), while a TLS
+// descriptor sequence must still be four adjacent words. Each enclosed word
+// must match a link_aarch64_inert_forms row that names no field equal to the
+// pair's register (link_aarch64_tls_ie_gap_inert).
+//
 // Linux x86-64 fixed-address imported function pointers use loader-filled
 // GOT address slots and R_X86_64_64 literals. A direct PC32/PC64/ABS32 address
 // instead needs a canonical PLT value in its undefined STT_FUNC .dynsym;
@@ -8803,12 +8811,15 @@ enum
 {
     LINK_TLS_SITE_OFFSET_BITS = 48,
     LINK_AARCH64_TLS_SEQUENCE_MAX = 4,
+    LINK_AARCH64_TLS_REGISTER_COUNT = 32,
 };
 
 // The AArch64 sequences a fixed-address executable relaxes to local-exec,
-// each a run of relocations on consecutive words in this order: initial-exec
-// ADRP/LDR, and the general-dynamic descriptor ADRP/LDR/ADD/BLR. The names
-// are the AAELF64 spellings a refused link reports.
+// each a relocation run in this order: initial-exec ADRP/LDR, and the
+// general-dynamic descriptor ADRP/LDR/ADD/BLR. Only the descriptor run must
+// sit on consecutive words; the initial-exec pair is matched by register in
+// link_aarch64_tls_relax. The names are the AAELF64 spellings a refused link
+// reports.
 typedef struct LinkAarch64TlsSequence LinkAarch64TlsSequence;
 struct LinkAarch64TlsSequence
 {
@@ -8874,16 +8885,239 @@ BUSTER_GLOBAL_LOCAL void link_tls_site_sift(LinkTlsSite* sites, u32 count, u32 r
     }
 }
 
+// Fail if an initial-exec ADRP is still waiting for its LDR: *failed names
+// that ADRP. Empties the table either way, so the next section starts clean.
+BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_pending_drain(u32* pending, LinkTlsSite const* sites, u32* failed)
+{
+    bool clear = true;
+    for (u32 reg = 0; reg < LINK_AARCH64_TLS_REGISTER_COUNT; reg += 1)
+    {
+        if (pending[reg] != UINT32_MAX)
+        {
+            *failed = clear ? sites[pending[reg]].relocation : *failed;
+            clear = false;
+            pending[reg] = UINT32_MAX;
+        }
+    }
+    return clear;
+}
+
+// The words a non-adjacent initial-exec pair may enclose. The rewrite turns
+// `adrp xN` into `movz xN` and leaves the later `ldr xN, [xN]` to complete the
+// value with `movk`, so every word between the halves must neither read nor
+// write xN and must fall through to the next word. A word is accepted only if
+// it matches one of these rows and none of the general-register fields the
+// row names equals N; anything else (branches, system and exception
+// instructions, unlisted or unallocated encodings) refuses the link. The
+// rows are the Arm ARM A64 encoding classes Clang and GCC schedule between
+// the halves, narrowed to their allocated size/opc/option combinations. A
+// field holding 31 is SP or XZR, never xN: the reader limits N to x0..x30.
+// FP/SIMD loads and stores name only their base (and index) as general
+// registers; their Rt/Rt2 are vector registers. Writeback forms write Rn,
+// which the same field check covers.
+enum
+{
+    LINK_AARCH64_FIELD_RT = 1 << 0,  // Rd/Rt, bits 4:0
+    LINK_AARCH64_FIELD_RN = 1 << 1,  // Rn, bits 9:5
+    LINK_AARCH64_FIELD_RT2 = 1 << 2, // Rt2/Ra, bits 14:10
+    LINK_AARCH64_FIELD_RM = 1 << 3,  // Rm, bits 20:16
+    LINK_AARCH64_FIELD_COUNT = 4,
+    // Logical immediate: N:immr:imms must be an allocated bitmask.
+    LINK_AARCH64_FORM_BITMASK = 1 << 4,
+    // The most words a pair may enclose; the scan is O(gap) per pair.
+    LINK_AARCH64_TLS_IE_GAP_MAX = 64,
+};
+
+typedef struct LinkAarch64InertForm LinkAarch64InertForm;
+struct LinkAarch64InertForm
+{
+    u32 mask;
+    u32 value;
+    u32 fields;
+};
+
+#define LINK_AARCH64_GPR_TWO (LINK_AARCH64_FIELD_RT | LINK_AARCH64_FIELD_RN)
+#define LINK_AARCH64_GPR_THREE (LINK_AARCH64_FIELD_RT | LINK_AARCH64_FIELD_RN | LINK_AARCH64_FIELD_RM)
+#define LINK_AARCH64_GPR_PAIR (LINK_AARCH64_FIELD_RT | LINK_AARCH64_FIELD_RN | LINK_AARCH64_FIELD_RT2)
+#define LINK_AARCH64_GPR_FOUR (LINK_AARCH64_GPR_THREE | LINK_AARCH64_FIELD_RT2)
+#define LINK_AARCH64_FP_INDEX (LINK_AARCH64_FIELD_RN | LINK_AARCH64_FIELD_RM)
+
+static u8 const link_aarch64_field_shifts[LINK_AARCH64_FIELD_COUNT] = {0, 5, 10, 16};
+
+static LinkAarch64InertForm const link_aarch64_inert_forms[] = {
+    // Load/store register, GPR (V=0), per addressing mode: opc 0x (STR*/LDR*
+    // of every size), size 0x opc 1x (LDRSB/LDRSH), size 10 opc 10 (LDRSW).
+    // Unsigned immediate.
+    {0x3F800000, 0x39000000, LINK_AARCH64_GPR_TWO},
+    {0xBF800000, 0x39800000, LINK_AARCH64_GPR_TWO},
+    {0xFFC00000, 0xB9800000, LINK_AARCH64_GPR_TWO},
+    // Unscaled immediate (LDUR/STUR): bit 21 and bits 11:10 clear.
+    {0x3FA00C00, 0x38000000, LINK_AARCH64_GPR_TWO},
+    {0xBFA00C00, 0x38800000, LINK_AARCH64_GPR_TWO},
+    {0xFFE00C00, 0xB8800000, LINK_AARCH64_GPR_TWO},
+    // Post-index (bits 11:10 = 01).
+    {0x3FA00C00, 0x38000400, LINK_AARCH64_GPR_TWO},
+    {0xBFA00C00, 0x38800400, LINK_AARCH64_GPR_TWO},
+    {0xFFE00C00, 0xB8800400, LINK_AARCH64_GPR_TWO},
+    // Pre-index (bits 11:10 = 11).
+    {0x3FA00C00, 0x38000C00, LINK_AARCH64_GPR_TWO},
+    {0xBFA00C00, 0x38800C00, LINK_AARCH64_GPR_TWO},
+    {0xFFE00C00, 0xB8800C00, LINK_AARCH64_GPR_TWO},
+    // Register offset (bit 21 set, bits 11:10 = 10, option<1> set).
+    {0x3FA04C00, 0x38204800, LINK_AARCH64_GPR_THREE},
+    {0xBFA04C00, 0x38A04800, LINK_AARCH64_GPR_THREE},
+    {0xFFE04C00, 0xB8A04800, LINK_AARCH64_GPR_THREE},
+    // Load/store register, FP/SIMD (V=1): opc 0x (B/H/S/D) and size 00 opc 1x
+    // (Q), in the same five modes.
+    {0x3F800000, 0x3D000000, LINK_AARCH64_FIELD_RN},
+    {0xFF800000, 0x3D800000, LINK_AARCH64_FIELD_RN},
+    {0x3FA00C00, 0x3C000000, LINK_AARCH64_FIELD_RN},
+    {0xFFA00C00, 0x3C800000, LINK_AARCH64_FIELD_RN},
+    {0x3FA00C00, 0x3C000400, LINK_AARCH64_FIELD_RN},
+    {0xFFA00C00, 0x3C800400, LINK_AARCH64_FIELD_RN},
+    {0x3FA00C00, 0x3C000C00, LINK_AARCH64_FIELD_RN},
+    {0xFFA00C00, 0x3C800C00, LINK_AARCH64_FIELD_RN},
+    {0x3FA04C00, 0x3C204800, LINK_AARCH64_FP_INDEX},
+    {0xFFA04C00, 0x3CA04800, LINK_AARCH64_FP_INDEX},
+    // Load/store pair, GPR: opc x0 (32/64-bit LDP/STP/LDNP/STNP) in the
+    // no-allocate, post-index, offset and pre-index modes (bits 25:23), and
+    // LDPSW (opc 01, L=1) in the last three.
+    {0x7F800000, 0x28000000, LINK_AARCH64_GPR_PAIR},
+    {0x7F800000, 0x28800000, LINK_AARCH64_GPR_PAIR},
+    {0x7F800000, 0x29000000, LINK_AARCH64_GPR_PAIR},
+    {0x7F800000, 0x29800000, LINK_AARCH64_GPR_PAIR},
+    {0xFFC00000, 0x68C00000, LINK_AARCH64_GPR_PAIR},
+    {0xFFC00000, 0x69400000, LINK_AARCH64_GPR_PAIR},
+    {0xFFC00000, 0x69C00000, LINK_AARCH64_GPR_PAIR},
+    // Load/store pair, FP/SIMD: opc 0x (S/D) and 10 (Q), the same four modes.
+    {0xBF800000, 0x2C000000, LINK_AARCH64_FIELD_RN},
+    {0xBF800000, 0x2C800000, LINK_AARCH64_FIELD_RN},
+    {0xBF800000, 0x2D000000, LINK_AARCH64_FIELD_RN},
+    {0xBF800000, 0x2D800000, LINK_AARCH64_FIELD_RN},
+    {0xFF800000, 0xAC000000, LINK_AARCH64_FIELD_RN},
+    {0xFF800000, 0xAC800000, LINK_AARCH64_FIELD_RN},
+    {0xFF800000, 0xAD000000, LINK_AARCH64_FIELD_RN},
+    {0xFF800000, 0xAD800000, LINK_AARCH64_FIELD_RN},
+    // ADD/ADDS/SUB/SUBS (immediate), with the CMP/CMN/MOV-to-SP aliases.
+    {0x1F800000, 0x11000000, LINK_AARCH64_GPR_TWO},
+    // ADD/SUB (shifted register): shift != 11, and imm6<5> clear for W.
+    {0x9FA00000, 0x8B000000, LINK_AARCH64_GPR_THREE},
+    {0x9FE00000, 0x8B800000, LINK_AARCH64_GPR_THREE},
+    {0x9FA08000, 0x0B000000, LINK_AARCH64_GPR_THREE},
+    {0x9FE08000, 0x0B800000, LINK_AARCH64_GPR_THREE},
+    // ADD/SUB (extended register): opt 00, imm3 0..4.
+    {0x1FE01000, 0x0B200000, LINK_AARCH64_GPR_THREE},
+    {0x1FE01C00, 0x0B201000, LINK_AARCH64_GPR_THREE},
+    // AND/BIC/ORR/ORN/EOR/EON/ANDS/BICS (shifted register), with the MOV,
+    // MVN and TST aliases: imm6<5> clear for W.
+    {0x9F000000, 0x8A000000, LINK_AARCH64_GPR_THREE},
+    {0x9F008000, 0x0A000000, LINK_AARCH64_GPR_THREE},
+    // AND/ORR/EOR/ANDS (immediate): N clear for W, and an allocated bitmask.
+    {0x9F800000, 0x92000000, LINK_AARCH64_GPR_TWO | LINK_AARCH64_FORM_BITMASK},
+    {0x9FC00000, 0x12000000, LINK_AARCH64_GPR_TWO | LINK_AARCH64_FORM_BITMASK},
+    // MOVN/MOVZ/MOVK: opc != 01, and hw<1> clear for W.
+    {0xFF800000, 0x92800000, LINK_AARCH64_FIELD_RT},
+    {0xDF800000, 0xD2800000, LINK_AARCH64_FIELD_RT},
+    {0xFFC00000, 0x12800000, LINK_AARCH64_FIELD_RT},
+    {0xDFC00000, 0x52800000, LINK_AARCH64_FIELD_RT},
+    // ADR/ADRP.
+    {0x1F000000, 0x10000000, LINK_AARCH64_FIELD_RT},
+    // SBFM/BFM/UBFM, with the LSL/LSR/ASR/SXT*/UXT*/BFI/UBFX aliases:
+    // opc != 11, N equal to sf, and immr<5>/imms<5> clear for W.
+    {0xDFC00000, 0x93400000, LINK_AARCH64_GPR_TWO},
+    {0xFFC00000, 0xD3400000, LINK_AARCH64_GPR_TWO},
+    {0xDFE08000, 0x13000000, LINK_AARCH64_GPR_TWO},
+    {0xFFE08000, 0x53000000, LINK_AARCH64_GPR_TWO},
+    // UDIV/SDIV, then LSLV/LSRV/ASRV/RORV (data-processing, two source).
+    {0x7FE0F800, 0x1AC00800, LINK_AARCH64_GPR_THREE},
+    {0x7FE0F000, 0x1AC02000, LINK_AARCH64_GPR_THREE},
+    // MADD/MSUB (MUL/MNEG), SMADDL/SMSUBL/UMADDL/UMSUBL, then SMULH/UMULH.
+    {0x7FE00000, 0x1B000000, LINK_AARCH64_GPR_FOUR},
+    {0xFF600000, 0x9B200000, LINK_AARCH64_GPR_FOUR},
+    {0xFF608000, 0x9B400000, LINK_AARCH64_GPR_FOUR},
+    // CSEL/CSINC/CSINV/CSNEG, with the CSET/CINC/CNEG aliases: S clear and
+    // op2<1> clear.
+    {0x3FE00800, 0x1A800000, LINK_AARCH64_GPR_THREE},
+    // MRS Xt, TPIDR_EL0 only.
+    {0xFFFFFFE0, 0xD53BD040, LINK_AARCH64_FIELD_RT},
+    // NOP.
+    {0xFFFFFFFF, 0xD503201F, 0},
+};
+
+// DecodeBitMasks: N:NOT(imms) needs a set bit above bit 0, and imms must not
+// select every bit of the element; anything else is UNDEFINED.
+BUSTER_GLOBAL_LOCAL bool link_aarch64_bitmask_allocated(u32 word)
+{
+    u32 imms = (word >> 10) & 63;
+    u32 pattern = (((word >> 22) & 1) << 6) | (~imms & 63);
+    u32 length = 0;
+    for (u32 bit = 1; bit < 7; bit += 1)
+    {
+        length = ((pattern >> bit) & 1) ? bit : length;
+    }
+    u32 levels = (UINT32_C(1) << length) - 1;
+    return length != 0 && (imms & levels) != levels;
+}
+
+// Whether `word` provably falls through without reading or writing xN
+// (N in 0..30), per link_aarch64_inert_forms. A word several rows match must
+// leave the register alone under every one of them.
+BUSTER_GLOBAL_LOCAL bool link_aarch64_word_leaves_register(u32 word, u32 reg)
+{
+    bool matched = false;
+    bool touches = false;
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(link_aarch64_inert_forms); row += 1)
+    {
+        LinkAarch64InertForm const* form = &link_aarch64_inert_forms[row];
+        if ((word & form->mask) == form->value)
+        {
+            matched = true;
+            touches = touches || ((form->fields & LINK_AARCH64_FORM_BITMASK) && !link_aarch64_bitmask_allocated(word));
+            for (u32 field = 0; field < LINK_AARCH64_FIELD_COUNT; field += 1)
+            {
+                touches = touches || (((form->fields >> field) & 1) && ((word >> link_aarch64_field_shifts[field]) & 31) == reg);
+            }
+        }
+    }
+    return matched && !touches;
+}
+
+// Every word strictly between an initial-exec ADRP at byte offset `first` and
+// its LDR at `last` in one section must leave xN alone and fall through, and
+// there may be at most LINK_AARCH64_TLS_IE_GAP_MAX of them.
+BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_ie_gap_inert(u8 const* data, u64 first, u64 last, u32 reg)
+{
+    bool inert = last > first && (last - first) / 4 - 1 <= LINK_AARCH64_TLS_IE_GAP_MAX;
+    for (u64 offset = first + 4; inert && offset < last; offset += 4)
+    {
+        inert = link_aarch64_word_leaves_register(link_read_u32(data, offset), reg);
+    }
+    return inert;
+}
+
 // Rewrite every AArch64 initial-exec pair and descriptor sequence into
-// local-exec form. Sites are sorted by section and offset, then consumed one
-// whole sequence at a time: the site that starts it picks the sequence, and
-// each later step must sit exactly four bytes after the previous one in the
-// same section, have the next kind, and name the same symbol and addend.
-// Registers must agree (one register for an IE pair; the LDR and BLR of a
-// descriptor share the scratch register). Every site is consumed exactly
-// once, so a repeated, missing, misplaced, overlapping or out-of-order step
-// fails the whole link, before anything is written, and *failed names the
-// relocation that could not start or complete a sequence.
+// local-exec form. Sites are sorted by section and offset (an in-place heap
+// sort, so no recursion and O(n log n)), then scanned once in that order.
+// A descriptor sequence stays strictly adjacent: the site that starts it picks
+// the sequence, and each later step must sit exactly four bytes after the
+// previous one in the same section, have the next kind, and name the same
+// symbol and addend; the LDR and BLR share the scratch register.
+// An initial-exec pair may be scheduled apart (Clang 18 -O2 slides loads
+// between the halves). Each section keeps a table of 32 pending ADRPs keyed
+// by destination register. A GOTTPREL ADRP fills its register's slot (a slot
+// already full means the older ADRP can never be paired, so the link fails);
+// a GOTTPREL LDR takes the slot of its base register, which is also its
+// destination, and must find an ADRP there naming the same symbol and
+// addend. That ADRP is the nearest preceding one for the register, and each
+// is consumed once. An ADRP left over at the end of its section, or an LDR
+// with no partner, fails the whole link. Every word between the halves must
+// be one link_aarch64_tls_ie_gap_inert proves leaves the register alone and
+// falls through, at most LINK_AARCH64_TLS_IE_GAP_MAX of them, so the scan is
+// O(n + total gap) for n sites.
+// Every site is consumed exactly once and all words are computed before any
+// is written, so a repeated, missing, misplaced or mismatched step fails the
+// whole link with the output untouched; *failed names the relocation that
+// could not start or complete a sequence.
 BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_relax(Arena* arena, ObjectFile* object, u8* bytes, u64 const* section_offsets, u32* failed)
 {
     u32 count = 0;
@@ -8929,45 +9163,105 @@ BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_relax(Arena* arena, ObjectFile* object
     }
     // Validate and compute every replacement word first; write only once the
     // whole object relaxes.
+    u32 pending[LINK_AARCH64_TLS_REGISTER_COUNT];
+    for (u32 reg = 0; reg < LINK_AARCH64_TLS_REGISTER_COUNT; reg += 1)
+    {
+        pending[reg] = UINT32_MAX;
+    }
+    u64 pending_section = UINT64_MAX;
     u32 cursor = 0;
     while (valid && cursor < site_count)
     {
         ObjectRelocation* first = &object->relocations[sites[cursor].relocation];
-        LinkAarch64TlsSequence const* sequence = 0;
-        for (u32 candidate = 0; candidate < BUSTER_ARRAY_LENGTH(link_aarch64_tls_sequences); candidate += 1)
+        u64 section = sites[cursor].key >> LINK_TLS_SITE_OFFSET_BITS;
+        if (section != pending_section)
         {
-            sequence = link_aarch64_tls_sequences[candidate].kinds[0] == first->kind ? &link_aarch64_tls_sequences[candidate] : sequence;
+            valid = link_aarch64_tls_pending_drain(pending, sites, failed);
+            pending_section = section;
         }
-        u32 length = sequence ? sequence->length : 0;
-        u64 tprel = 0;
-        valid = length && length <= site_count - cursor &&
-                link_aarch64_elf_tprel_offset(object, &object->symbols[first->symbol], first->addend, UINT32_MAX, &tprel);
-        u32 original[LINK_AARCH64_TLS_SEQUENCE_MAX] = {0};
-        for (u32 step = 0; valid && step < length; step += 1)
+        if (!valid)
         {
-            ObjectRelocation* relocation = &object->relocations[sites[cursor + step].relocation];
-            original[step] = link_read_u32(object->sections[relocation->section].data.pointer, relocation->offset);
-            valid = relocation->kind == sequence->kinds[step] && sites[cursor + step].key == sites[cursor].key + (u64)step * 4 &&
-                    relocation->symbol == first->symbol && relocation->addend == first->addend &&
-                    (object_aarch64_elf_tls_ie_relax(relocation->kind, original[step], tprel, &words[cursor + step]) ||
-                     object_aarch64_elf_tls_desc_relax(relocation->kind, original[step], tprel, &words[cursor + step]));
+            cursor = site_count;
         }
-        if (valid && object_relocation_kind_is_aarch64_elf_tls_ie(first->kind))
+        else if (first->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21)
         {
-            valid = (words[cursor] & 31) == (words[cursor + 1] & 31);
+            // Keep the original word until the LDR supplies the offset; a
+            // zero offset here only proves it is the ADRP the reader accepts.
+            u32 original = link_read_u32(object->sections[first->section].data.pointer, first->offset);
+            u32 checked = 0;
+            valid = object_aarch64_elf_tls_ie_relax(first->kind, original, 0, &checked) && pending[original & 31] == UINT32_MAX;
+            if (valid)
+            {
+                words[cursor] = original;
+                pending[original & 31] = cursor;
+                cursor += 1;
+            }
+            else
+            {
+                *failed = sites[cursor].relocation;
+            }
         }
-        else if (valid)
+        else if (first->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12)
         {
-            valid = (original[1] & 31) == ((original[3] >> 5) & 31);
-        }
-        if (valid)
-        {
-            cursor += length;
+            u32 original = link_read_u32(object->sections[first->section].data.pointer, first->offset);
+            u32 checked = 0;
+            u32 partner = UINT32_MAX;
+            u64 tprel = 0;
+            valid = object_aarch64_elf_tls_ie_relax(first->kind, original, 0, &checked);
+            partner = valid ? pending[(original >> 5) & 31] : UINT32_MAX;
+            valid = valid && partner != UINT32_MAX && object->relocations[sites[partner].relocation].symbol == first->symbol &&
+                    object->relocations[sites[partner].relocation].addend == first->addend &&
+                    link_aarch64_tls_ie_gap_inert(object->sections[first->section].data.pointer, object->relocations[sites[partner].relocation].offset,
+                                                  first->offset, original & 31) &&
+                    link_aarch64_elf_tprel_offset(object, &object->symbols[first->symbol], first->addend, UINT32_MAX, &tprel) &&
+                    object_aarch64_elf_tls_ie_relax(OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21, words[partner], tprel, &words[partner]) &&
+                    object_aarch64_elf_tls_ie_relax(first->kind, original, tprel, &words[cursor]);
+            if (valid)
+            {
+                pending[(original >> 5) & 31] = UINT32_MAX;
+                cursor += 1;
+            }
+            else
+            {
+                *failed = sites[cursor].relocation;
+            }
         }
         else
         {
-            *failed = sites[cursor].relocation;
+            // Both initial-exec kinds took the branches above, so only a
+            // descriptor sequence can start here.
+            LinkAarch64TlsSequence const* sequence = 0;
+            for (u32 candidate = 0; candidate < BUSTER_ARRAY_LENGTH(link_aarch64_tls_sequences); candidate += 1)
+            {
+                sequence = link_aarch64_tls_sequences[candidate].kinds[0] == first->kind ? &link_aarch64_tls_sequences[candidate] : sequence;
+            }
+            u32 length = sequence ? sequence->length : 0;
+            u64 tprel = 0;
+            valid = length && length <= site_count - cursor &&
+                    link_aarch64_elf_tprel_offset(object, &object->symbols[first->symbol], first->addend, UINT32_MAX, &tprel);
+            u32 original[LINK_AARCH64_TLS_SEQUENCE_MAX] = {0};
+            for (u32 step = 0; valid && step < length; step += 1)
+            {
+                ObjectRelocation* relocation = &object->relocations[sites[cursor + step].relocation];
+                original[step] = link_read_u32(object->sections[relocation->section].data.pointer, relocation->offset);
+                valid = relocation->kind == sequence->kinds[step] && sites[cursor + step].key == sites[cursor].key + (u64)step * 4 &&
+                        relocation->symbol == first->symbol && relocation->addend == first->addend &&
+                        object_aarch64_elf_tls_desc_relax(relocation->kind, original[step], tprel, &words[cursor + step]);
+            }
+            valid = valid && (original[1] & 31) == ((original[3] >> 5) & 31);
+            if (valid)
+            {
+                cursor += length;
+            }
+            else
+            {
+                *failed = sites[cursor].relocation;
+            }
         }
+    }
+    if (valid)
+    {
+        valid = link_aarch64_tls_pending_drain(pending, sites, failed);
     }
     for (u32 index = 0; valid && index < site_count; index += 1)
     {

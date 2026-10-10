@@ -229,6 +229,16 @@ the int-returning count family. Lowering is `(x ^ s) - s` with `s = x >> (w - 1)
 Constant folding shares the integer-builtin fold and leaves the most negative
 value unfolded. Wrong arity or a non-arithmetic argument is a diagnostic.
 
+`__builtin_dynamic_object_size` (#1394) is a conservative alias of
+`__builtin_object_size`: `c_symbol_predefined` maps both spellings to
+`C_SYMBOL_BUILTIN_OBJECT_SIZE`, so they share operand admission, diagnostics
+and lowering, and `__has_builtin` answers 1 for both. The answer is always the
+compile-time `object_size` value (a known size, or `(size_t)-1`/`0` for an
+unknown object), which GCC documents as a valid result. There is no runtime
+allocation tracking: the extra precision GCC and Clang can give a size known
+only at run time (a `malloc` argument, a variable-length array) is not
+provided. `c_test_dynamic_object_size` compares both spellings' lowered IR.
+
 `__builtin_parity`/`l`/`ll` share the popcount operand policy and lower to
 `popcount(x) & 1`. `__builtin_bswap16/32/64` take and return `unsigned short`,
 `unsigned int` and `unsigned long long` (`c_semantic_byte_swap_kind`) and lower
