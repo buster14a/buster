@@ -61892,11 +61892,12 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_variadic_va_opt);
     C_TEST_FIXTURE(arguments, c_test_vector_subscript_conditional_type);
     C_TEST_FIXTURE(arguments, c_test_vendor_builtin_admission);
-    C_TEST_FIXTURE(arguments, c_test_vendor_storage_half_admission);
     C_TEST_FIXTURE(arguments, c_test_vendor_fixed_lane_selection);
     C_TEST_FIXTURE(arguments, c_test_vendor_halfword_shuffles);
     C_TEST_FIXTURE(arguments, c_test_vendor_immediate_byte_shifts);
+    C_TEST_FIXTURE(arguments, c_test_vendor_lzcnt);
     C_TEST_FIXTURE(arguments, c_test_vendor_sse2_shift_counts);
+    C_TEST_FIXTURE(arguments, c_test_vendor_storage_half_admission);
     C_TEST_FIXTURE(arguments, c_test_vendor_tzcnt);
     C_TEST_FIXTURE(arguments, c_test_vla_row_places);
     C_TEST_FIXTURE(arguments, c_test_void_function_pointer_policy);
