@@ -39572,10 +39572,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_literal_expression_queries(UnitTestArg
 // default path does not, so every source compiles to the same object by
 // default, under the pilot, and under the pilot with the interning window
 // shut, at `-g0` and `-g`. The second source defines aggregates inside body
-// type names, which the declaration pass leaves to the machine; their member
-// rows must still follow the aggregate's row, or lowering resolves the
-// aggregate a pass earlier and the `-g` type entries come out in another
-// order (#3102).
+// type names. The declaration pass registers them before the window opens, so
+// their member rows already follow the aggregate's row; were one defined
+// inside the window, interning a member's row would make lowering resolve the
+// aggregate a pass earlier and the `-g` type entries would come out in another
+// order, which CTypeInterning.suspended guards against (#3102).
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
