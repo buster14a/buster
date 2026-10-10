@@ -177,7 +177,7 @@ jobs:
           path: .tools/tinycc
           persist-credentials: false
       - name: Record actual checkout identity 2
-        if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' }}
+        if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' || steps.verify.outputs.utility_requested == 'true' }}
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           mode: source
@@ -254,11 +254,22 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the frozen utility implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.authorize.outputs.utility_trusted_revision }}
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Fetch the pinned utility bootstrap compiler
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -266,6 +277,12 @@ jobs:
           ref: 0fb54300b56512754221d80adda85ddb9815bceb
           path: .tools/tinycc
           persist-credentials: false
+      - name: Record actual checkout identity 4
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: ${{ github.repository }}
       - name: Install the pinned utility bootstrap compiler
         working-directory: .tools/tinycc
         shell: bash
@@ -345,6 +362,11 @@ jobs:
       BQ_UTILITY_FACTS_DATA: ${{ needs.authorize.outputs.utility_facts_data }}
       BQ_UTILITY_HISTORY_DATA: ${{ needs.authorize.outputs.utility_history_data }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
       - name: Refuse retained native cleanup uncertainty
         shell: bash
         run: |
@@ -360,6 +382,12 @@ jobs:
           ref: ${{ needs.authorize.outputs.utility_trusted_revision }}
           path: trusted
           persist-credentials: false
+      - name: Record actual checkout identity 3
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: trusted
+          source-repository: ${{ github.repository }}
       - name: Observe the actual physical job start
         shell: bash
         env:
@@ -435,11 +463,22 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the frozen utility implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.authorize.outputs.utility_trusted_revision }}
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Fetch the pinned utility bootstrap compiler
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -447,6 +486,12 @@ jobs:
           ref: 0fb54300b56512754221d80adda85ddb9815bceb
           path: .tools/tinycc
           persist-credentials: false
+      - name: Record actual checkout identity 4
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: ${{ github.repository }}
       - name: Install the pinned utility bootstrap compiler
         working-directory: .tools/tinycc
         shell: bash
@@ -1409,6 +1454,12 @@ jobs:
           ref: 0fb54300b56512754221d80adda85ddb9815bceb
           path: .tools/tinycc
           persist-credentials: false
+      - name: Record actual checkout identity 4
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: ${{ github.repository }}
       - name: Install the pinned MAIN policy bootstrap compiler
         working-directory: .tools/tinycc
         shell: bash
@@ -1705,6 +1756,12 @@ jobs:
           ref: 0fb54300b56512754221d80adda85ddb9815bceb
           path: .tools/tinycc
           persist-credentials: false
+      - name: Record actual checkout identity 4
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: ${{ github.repository }}
       - name: Install the pinned MAIN policy bootstrap compiler
         working-directory: .tools/tinycc
         shell: bash
