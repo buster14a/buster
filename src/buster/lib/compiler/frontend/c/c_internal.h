@@ -1610,12 +1610,15 @@ struct CAstTypeAnswer
     CAstTypeStatus status;
     // The CAstKind of the node the range mapped to (answer or decline).
     u32 node_kind;
-    // [replay_start, replay_end), when not empty, is a checked cast's
-    // string-literal operand, whose typing the answer must replay exactly as
-    // the machine's operand task would (c_parse_expression_tree_query).
+    // [replay_start, replay_end), when not empty, is a string-literal token
+    // whose typing the answer must replay exactly as the machine's task would
+    // (c_parse_expression_tree_query): a checked cast's operand, or with
+    // replay_answer the queried literal itself, whose replayed row is the
+    // answer (`type` is invalid until the replay).
     u32 replay_start;
     u32 replay_end;
     bool nonplace_projection;
+    bool replay_answer;
 };
 
 BUSTER_C_EXTERN void c_ast_types_bodies_prepare(CTypeParseMachine* machine, CParseResult const* result);

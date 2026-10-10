@@ -23,12 +23,14 @@
 // array operand that decays, a pointer conditional, a qualified operand losing
 // its qualifiers without a recorded unqualified row, and a cast or compound
 // literal to any other type name (a qualified typedef, a tag, another
-// declarator). The one exception is a replay: a checked query of a cast whose
-// operand is one string-literal token, perhaps parenthesized as `S8()` writes
-// it, where the machine also types the literal and appends its array row.
-// The answer then carries that token
-// (CAstTypeAnswer.replay_*), and c_parse_expression_tree_query makes exactly the
-// machine's operand task: the memo probe and, on a miss, the string leaf.
+// declarator). The exceptions are replays of one string-literal token, whose
+// array row the machine appends. A checked query of a cast whose operand is
+// that token, perhaps parenthesized as `S8()` writes it, types the literal
+// too; and a query of the token alone, perhaps parenthesized as `S8()`'s
+// `BUSTER_ARRAY_LENGTH` writes it, is the literal. The answer then carries
+// that token (CAstTypeAnswer.replay_*), and c_parse_expression_tree_query makes
+// exactly the machine's task: the memo probe and, on a miss, the string leaf.
+// For the token alone the replay's row is the answer (replay_answer).
 //
 // Ownership and lifetime. A caller that built the tree (the driver's
 // -fc-ast-pilot) passes it in CParserResult.ast; c_analyze_semantics_core puts
@@ -105,6 +107,9 @@
 //   CHARACTER    machine's literal path calls; it returns an immutable scalar
 //                row and appends none while every scalar row is published
 //                (c_ast_types_scalars_published).
+//   STRING       one token: never accepted (its machine answer appends the
+//                literal's array row), but a query of it alone replays the
+//                machine's leaf call, whose row is the answer.
 //   MEMBER,      a struct or union member through c_parse_member_type (which
 //   MEMBER_ARROW also searches anonymous members), as c_parse_direct_expression_postfix
 //                does, over a base of a kind listed here before CALL (the
@@ -212,6 +217,11 @@
 // call (c_parse_expression_tree_query). The node is never SAFE through it: a
 // parent's machine run would type the literal too.
 #define C_AST_TYPE_FLAG_REPLAY (1u << 5)
+// A string literal of one token. It is not ACCEPTED, since its machine answer
+// appends its array row, so every parent declines it; a query of the node
+// alone is answered by replaying the machine's leaf call, whose row is the
+// answer (CAstTypeAnswer.replay_answer).
+#define C_AST_TYPE_FLAG_STRING (1u << 6)
 
 // INIT_DECLARATOR's presence bit for an initializer, its last child (c_ast.h).
 #define C_AST_TYPE_INIT_DECLARATOR_INITIALIZER (1u << 2)
@@ -1449,6 +1459,11 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_node(CAstTypeBody* body, CTypeParseMac
         c_ast_types_literal(body, machine, preprocess, node, relative, C_TOKEN_CHARACTER_LITERAL);
     }
     break;
+    case C_AST_STRING:
+    {
+        body->flags[relative] = body->ast->data[node] == 1 ? C_AST_TYPE_FLAG_STRING : 0;
+    }
+    break;
     case C_AST_MEMBER:
     {
         c_ast_types_member(body, machine, preprocess, node, relative, false);
@@ -1801,8 +1816,9 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
             u32 flags = body->flags[relative];
             u32 node = body->begin + relative;
             bool checked = machine->validate_expression_constraints;
-            bool replay = checked && !(flags & C_AST_TYPE_FLAG_SAFE) && (flags & C_AST_TYPE_FLAG_REPLAY);
-            bool vouched = (flags & C_AST_TYPE_FLAG_ACCEPTED) && (!checked || (flags & C_AST_TYPE_FLAG_SAFE) || replay) &&
+            bool string = (flags & C_AST_TYPE_FLAG_STRING) != 0;
+            bool replay = string || (checked && !(flags & C_AST_TYPE_FLAG_SAFE) && (flags & C_AST_TYPE_FLAG_REPLAY));
+            bool vouched = (string || ((flags & C_AST_TYPE_FLAG_ACCEPTED) && (!checked || (flags & C_AST_TYPE_FLAG_SAFE) || replay))) &&
                            !c_parse_pending_enum_possible(result) && c_parse_type_identity_sites_absent(result, start, end);
             if (vouched && (flags & C_AST_TYPE_FLAG_LOOKUP_BELOW))
             {
@@ -1815,9 +1831,13 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
                 answer.status = C_AST_TYPE_ANSWER;
                 answer.type = body->types[relative];
                 answer.nonplace_projection = (flags & C_AST_TYPE_FLAG_NONPLACE) != 0;
-                // The literal operand's token (C_AST_TYPE_FLAG_REPLAY).
-                answer.replay_start = replay ? body->ast->tokens[node - 1] : 0;
-                answer.replay_end = replay ? body->ast->tokens[node - 1] + 1 : 0;
+                // The literal operand's token (C_AST_TYPE_FLAG_REPLAY), or the
+                // literal's own (C_AST_TYPE_FLAG_STRING), whose replay types
+                // the answer.
+                u32 literal = string ? node : node - 1;
+                answer.replay_start = replay ? body->ast->tokens[literal] : 0;
+                answer.replay_end = replay ? body->ast->tokens[literal] + 1 : 0;
+                answer.replay_answer = string;
                 WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_ANSWERS, 1);
             }
             else
@@ -2158,6 +2178,7 @@ CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult prepro
             probe.kind = answer.type.value < result->type_count ? result->types[answer.type.value].kind : C_TYPE_INVALID;
             probe.nonplace_projection = answer.nonplace_projection;
             probe.replay = answer.replay_end > answer.replay_start;
+            probe.replay_answer = answer.replay_answer;
         }
         c_ast_types_body_end(&machine);
         result->expression_scalar_types = previous_scalars;
