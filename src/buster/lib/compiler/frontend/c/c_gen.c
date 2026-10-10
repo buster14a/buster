@@ -2731,6 +2731,13 @@ BUSTER_C_SHARED String8 c_ir_math_builtin_link_name(String8 name)
         {S8("__builtin_fmodf"), S8("fmodf")},   {S8("__builtin_fmod"), S8("fmod")},   {S8("__builtin_cosf"), S8("cosf")},   {S8("__builtin_cos"), S8("cos")},
         {S8("__builtin_acosf"), S8("acosf")},   {S8("__builtin_acos"), S8("acos")},   {S8("__builtin_fabsf"), S8("fabsf")}, {S8("__builtin_fabs"), S8("fabs")},
         {S8("__builtin_roundf"), S8("roundf")}, {S8("__builtin_round"), S8("round")},
+        {S8("__builtin_truncf"), S8("truncf")}, {S8("__builtin_trunc"), S8("trunc")}, {S8("__builtin_truncl"), S8("truncl")},
+        {S8("__builtin_rintf"), S8("rintf")}, {S8("__builtin_rint"), S8("rint")}, {S8("__builtin_rintl"), S8("rintl")},
+        {S8("__builtin_nearbyintf"), S8("nearbyintf")}, {S8("__builtin_nearbyint"), S8("nearbyint")}, {S8("__builtin_nearbyintl"), S8("nearbyintl")},
+        {S8("__builtin_fmaf"), S8("fmaf")}, {S8("__builtin_fma"), S8("fma")}, {S8("__builtin_fmal"), S8("fmal")},
+        {S8("__builtin_ldexpf"), S8("ldexpf")}, {S8("__builtin_ldexp"), S8("ldexp")}, {S8("__builtin_ldexpl"), S8("ldexpl")},
+        {S8("__builtin_lroundf"), S8("lroundf")}, {S8("__builtin_lround"), S8("lround")}, {S8("__builtin_lroundl"), S8("lroundl")},
+        {S8("__builtin_llroundf"), S8("llroundf")}, {S8("__builtin_llround"), S8("llround")}, {S8("__builtin_llroundl"), S8("llroundl")},
         {S8("__builtin_fabsl"), S8("fabsl")},
         {S8("__builtin_copysignf"), S8("copysignf")}, {S8("__builtin_copysign"), S8("copysign")}, {S8("__builtin_copysignl"), S8("copysignl")},
         {S8("__builtin_fmaxf"), S8("fmaxf")},   {S8("__builtin_fmax"), S8("fmax")},   {S8("__builtin_fmaxl"), S8("fmaxl")},
@@ -2821,9 +2828,9 @@ BUSTER_C_INTERNAL CIrMemoryBuiltin c_ir_memory_builtin(String8 name)
     return result;
 }
 
-// The typed GNU checked-arithmetic builtins. The spelling fixes both the
-// operation and the one operand type; `__builtin_*_overflow` without a type
-// letter is generic and is not in this table.
+// The GNU checked-arithmetic builtins. A typed spelling fixes both the
+// operation and the one operand type; the generic `__builtin_*_overflow`
+// spellings carry C_TYPE_INVALID and take their types from the arguments.
 typedef struct CIrOverflowBuiltin CIrOverflowBuiltin;
 struct CIrOverflowBuiltin
 {
@@ -2851,6 +2858,11 @@ BUSTER_C_INTERNAL CIrOverflowBuiltin const c_ir_overflow_builtins[] = {
     {S8_INITIALIZER("__builtin_umul_overflow"), IR_BINARY_INTEGER_MULTIPLY, C_TYPE_UNSIGNED_INT},
     {S8_INITIALIZER("__builtin_umull_overflow"), IR_BINARY_INTEGER_MULTIPLY, C_TYPE_UNSIGNED_LONG},
     {S8_INITIALIZER("__builtin_umulll_overflow"), IR_BINARY_INTEGER_MULTIPLY, C_TYPE_UNSIGNED_LONG_LONG},
+    // Generic: the operand kind is C_TYPE_INVALID because the argument types
+    // select the lowering (c_ir_emit_generic_overflow_builtin).
+    {S8_INITIALIZER("__builtin_add_overflow"), IR_BINARY_INTEGER_ADD, C_TYPE_INVALID},
+    {S8_INITIALIZER("__builtin_sub_overflow"), IR_BINARY_INTEGER_SUBTRACT, C_TYPE_INVALID},
+    {S8_INITIALIZER("__builtin_mul_overflow"), IR_BINARY_INTEGER_MULTIPLY, C_TYPE_INVALID},
 };
 
 #define C_IR_OVERFLOW_BUILTIN_NONE UINT32_MAX
@@ -2866,6 +2878,14 @@ BUSTER_C_INTERNAL u32 c_ir_overflow_builtin(String8 name)
         }
     }
     return result;
+}
+
+// Whether the spelling is a generic `__builtin_{add,sub,mul}_overflow`, whose
+// operands and result may each be any integer type.
+BUSTER_C_SHARED bool c_semantic_overflow_builtin_generic(String8 name)
+{
+    u32 index = c_ir_overflow_builtin(name);
+    return index != C_IR_OVERFLOW_BUILTIN_NONE && c_ir_overflow_builtins[index].operand_kind == C_TYPE_INVALID;
 }
 
 // The argument count of a library-shaped memory or string builtin, or zero
@@ -20142,20 +20162,25 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_bool_not(CIntegerIrBuilder* builder, CToke
 //   * multiply: the magnitudes' product is checked by dividing it back, and a
 //     signed product must then also fit below 2^(w-1), or reach it exactly
 //     when the signs differ.
-BUSTER_C_INTERNAL IrValueId c_ir_emit_overflow_builtin(CIntegerIrBuilder* builder, CToken token, CIrOverflowBuiltin builtin, IrValueId* arguments,
-                                                         u32 argument_count)
+// Multiply is limited to widths of at most 64 bits (the signed bound is a u64
+// constant); add and subtract also serve 128 bits.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_typed_overflow_builtin(CIntegerIrBuilder* builder, CToken token, CIrOverflowBuiltin builtin, IrValueId* arguments,
+                                                               u32 argument_count)
 {
     IrValueId result = IR_VALUE_ID_INVALID;
     IrSourceRange source = c_ir_token_source_range(builder, token);
-    bool is_signed = builtin.operand_kind == C_TYPE_INT || builtin.operand_kind == C_TYPE_LONG || builtin.operand_kind == C_TYPE_LONG_LONG;
+    bool is_signed = builtin.operand_kind == C_TYPE_INT || builtin.operand_kind == C_TYPE_LONG || builtin.operand_kind == C_TYPE_LONG_LONG ||
+                     builtin.operand_kind == C_TYPE_INT128;
     CTypeKind unsigned_kind = builtin.operand_kind == C_TYPE_INT || builtin.operand_kind == C_TYPE_UNSIGNED_INT   ? C_TYPE_UNSIGNED_INT
                               : builtin.operand_kind == C_TYPE_LONG || builtin.operand_kind == C_TYPE_UNSIGNED_LONG ? C_TYPE_UNSIGNED_LONG
+                              : builtin.operand_kind == C_TYPE_INT128 || builtin.operand_kind == C_TYPE_UNSIGNED_INT128 ? C_TYPE_UNSIGNED_INT128
                                                                                                                     : C_TYPE_UNSIGNED_LONG_LONG;
-    IrTypeId operand_type = builder->scalar_types[builtin.operand_kind];
-    IrTypeId unsigned_type = builder->scalar_types[unsigned_kind];
+    IrTypeId operand_type = c_ir_builder_scalar_type(builder, builtin.operand_kind);
+    IrTypeId unsigned_type = c_ir_builder_scalar_type(builder, unsigned_kind);
     IrType* unsigned_info = ir_type_from_id(&builder->program->types, unsigned_type);
     IrTypeId result_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, operand_type);
     if (argument_count == 3 && unsigned_info && unsigned_info->kind == IR_TYPE_INTEGER && unsigned_info->bit_width &&
+        (unsigned_info->bit_width <= 64 || builtin.operation != IR_BINARY_INTEGER_MULTIPLY) &&
         result_pointer_type.value != IR_ID_UNDERLYING_INVALID)
     {
         u32 width = unsigned_info->bit_width;
@@ -20257,6 +20282,144 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_overflow_builtin(CIntegerIrBuilder* builde
         }
     }
     return result;
+}
+
+// The generic `__builtin_{add,sub,mul}_overflow(a, b, r)`: `a` and `b` are any
+// integer types and `r` points at any non-const integer type, with nothing
+// converted to a common type. The exact result is computed in a signed type
+// wide enough to hold it, the low bits are stored through `r`, and the call
+// answers whether the exact value lies outside the result type's range.
+//
+// Let n(T) be the bits a signed type needs to hold every value of T: its width
+// when signed, one more when unsigned (a _Bool counts as 2). Add and subtract
+// need max(n(a), n(b)) + 1 bits, multiply n(a) + n(b), one fewer unless both
+// are signed (only two signed minima multiply to a positive power of two that
+// needs the extra bit), and the result type's range must fit too, so the limits
+// below are representable. Then:
+//   * all three types share one signedness, neither operand is wider than the
+//     result, and the result is 32, 64 or 128 bits (128 only for add and
+//     subtract): the typed lowering at the result type, because widening
+//     preserves both operands exactly and it needs no wider arithmetic;
+//   * otherwise, at most 64 bits: signed 64-bit arithmetic; at most 128 bits:
+//     signed 128-bit arithmetic (x86-64 and AArch64 only);
+//   * anything else is refused with a diagnostic. In practice that is multiply
+//     with a 128-bit operand or result, mixed signedness at 128 bits, and
+//     128-bit add or subtract that must also narrow or change signedness.
+// Stored bits are the exact value converted to the result type (sign extended
+// or truncated, whatever the result's signedness); a _Bool result keeps bit 0.
+// The range test is a pair of signed comparisons against the result type's
+// minimum and maximum, and is skipped when the result type is as wide as the
+// working type, where every exact value fits.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_generic_overflow_builtin(CIntegerIrBuilder* builder, CToken token, CIrOverflowBuiltin builtin, IrValueId* arguments,
+                                                                 u32 argument_count)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrSourceRange source = c_ir_token_source_range(builder, token);
+    IrType* types[3] = {0, 0, 0};
+    if (argument_count == 3 && arguments[2].value < builder->function->value_count &&
+        ir_type_from_id(&builder->program->types, builder->function->values[arguments[2].value].canonical_type) &&
+        ir_type_from_id(&builder->program->types, builder->function->values[arguments[2].value].canonical_type)->kind == IR_TYPE_ARRAY)
+    {
+        arguments[2] = c_ir_decay_array_value_if_needed(builder, arguments[2], source);
+    }
+    for (u32 index = 0; index < 3 && argument_count == 3; index += 1)
+    {
+        types[index] = arguments[index].value < builder->function->value_count ? c_ir_value_type(builder, builder->function->values + arguments[index].value) : 0;
+    }
+    IrTypeId pointee_id = types[2] && types[2]->kind == IR_TYPE_POINTER ? types[2]->element_type : IR_TYPE_ID_INVALID;
+    IrType* pointee = ir_type_from_id(&builder->program->types, pointee_id);
+    IrType* shapes[3] = {types[0], types[1], pointee};
+    bool integers = argument_count == 3 && pointee != 0;
+    for (u32 index = 0; index < 3 && integers; index += 1)
+    {
+        integers = shapes[index] && (shapes[index]->kind == IR_TYPE_INTEGER || shapes[index]->kind == IR_TYPE_BOOLEAN) &&
+                   shapes[index]->bit_width >= 1 && shapes[index]->bit_width <= 128;
+    }
+    // A refused shape leaves every width zero, so only the first branch below
+    // can take it.
+    bool is_boolean = integers && pointee->kind == IR_TYPE_BOOLEAN;
+    bool is_multiply = builtin.operation == IR_BINARY_INTEGER_MULTIPLY;
+    u32 width_left = integers ? types[0]->bit_width : 0;
+    u32 width_right = integers ? types[1]->bit_width : 0;
+    u32 width_result = integers ? pointee->bit_width : 0;
+    bool signed_left = integers && types[0]->kind == IR_TYPE_INTEGER && types[0]->is_signed;
+    bool signed_right = integers && types[1]->kind == IR_TYPE_INTEGER && types[1]->is_signed;
+    bool signed_result = integers && !is_boolean && pointee->is_signed;
+    u32 need_left = width_left + (signed_left ? 0u : 1u);
+    u32 need_right = width_right + (signed_right ? 0u : 1u);
+    u32 need_result = is_boolean ? 2u : width_result + (signed_result ? 0u : 1u);
+    u32 need = is_multiply ? need_left + need_right - (signed_left && signed_right ? 0u : 1u) : (need_left > need_right ? need_left : need_right) + 1;
+    need = need > need_result ? need : need_result;
+    bool same_kind = integers && !is_boolean && signed_left == signed_result && signed_right == signed_result && width_left <= width_result && width_right <= width_result &&
+                     (width_result == 32 || width_result == 64 || (width_result == 128 && !is_multiply)) &&
+                     !pointee->is_volatile && !pointee->is_atomic;
+    if (!integers)
+    {
+        builder->failure_message = S8("__builtin_*_overflow requires two integer operands and a pointer to an integer result");
+    }
+    else if (same_kind)
+    {
+        CIrOverflowBuiltin typed = builtin;
+        typed.operand_kind = width_result == 128 ? (signed_result ? C_TYPE_INT128 : C_TYPE_UNSIGNED_INT128)
+                             : width_result == 64 ? (signed_result ? C_TYPE_LONG_LONG : C_TYPE_UNSIGNED_LONG_LONG)
+                                                  : (signed_result ? C_TYPE_INT : C_TYPE_UNSIGNED_INT);
+        result = c_ir_emit_typed_overflow_builtin(builder, token, typed, arguments, argument_count);
+    }
+    else if (need > 128 || (need > 64 && builder->target.cpu_arch != CPU_ARCH_X86_64 && builder->target.cpu_arch != CPU_ARCH_AARCH64))
+    {
+        builder->failure_message = S8("unsupported operand widths for __builtin_*_overflow");
+    }
+    else
+    {
+        u32 width = need <= 64 ? 64 : 128;
+        IrTypeId wide = c_ir_builder_scalar_type(builder, width == 64 ? C_TYPE_LONG_LONG : C_TYPE_INT128);
+        IrType* wide_info = ir_type_from_id(&builder->program->types, wide);
+        IrValueId left = wide_info && wide_info->bit_width == width ? c_ir_emit_cast(builder, arguments[0], wide, source) : IR_VALUE_ID_INVALID;
+        IrValueId right = left.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, arguments[1], wide, source) : IR_VALUE_ID_INVALID;
+        IrValueId exact = right.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, left, right, wide, builtin.operation, source) : IR_VALUE_ID_INVALID;
+        IrValueId one = exact.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_integer_value_typed(builder, 1, false, token, wide) : IR_VALUE_ID_INVALID;
+        IrValueId zero = one.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_integer_value_typed(builder, 0, false, token, wide) : IR_VALUE_ID_INVALID;
+        IrValueId kept = zero.value != IR_ID_UNDERLYING_INVALID
+                             ? (is_boolean ? c_ir_emit_binary_value(builder, exact, one, wide, IR_BINARY_INTEGER_BITWISE_AND, source) : exact)
+                             : IR_VALUE_ID_INVALID;
+        IrValueId stored = kept.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, kept, pointee_id, source) : IR_VALUE_ID_INVALID;
+        // The limits of the result type, as values of the working type.
+        IrValueId lowest = zero;
+        IrValueId highest = one;
+        bool bounded = stored.value != IR_ID_UNDERLYING_INVALID;
+        if (bounded && !is_boolean && !(signed_result && width_result >= width))
+        {
+            IrValueId shift = c_ir_emit_integer_value_typed(builder, signed_result ? width_result - 1 : width_result, false, token, wide);
+            IrValueId top = shift.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, one, shift, wide, IR_BINARY_SHIFT_LEFT, source) : IR_VALUE_ID_INVALID;
+            highest = top.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, top, one, wide, IR_BINARY_INTEGER_SUBTRACT, source) : IR_VALUE_ID_INVALID;
+            lowest = signed_result && top.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, zero, top, wide, IR_BINARY_INTEGER_SUBTRACT, source) : zero;
+        }
+        IrValueId overflow = IR_VALUE_ID_INVALID;
+        if (bounded && signed_result && width_result >= width)
+        {
+            // The working type is the result type: nothing can be out of range.
+            overflow = c_ir_emit_binary_value(builder, zero, zero, builder->bool_type, IR_BINARY_INTEGER_NOT_EQUAL, source);
+        }
+        else if (bounded && highest.value != IR_ID_UNDERLYING_INVALID && lowest.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrValueId below = c_ir_emit_binary_value(builder, exact, lowest, builder->bool_type, IR_BINARY_SIGNED_LESS, source);
+            IrValueId above = below.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, exact, highest, builder->bool_type, IR_BINARY_SIGNED_GREATER, source) : IR_VALUE_ID_INVALID;
+            overflow = above.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, below, above, builder->bool_type, IR_BINARY_BOOLEAN_OR, source) : IR_VALUE_ID_INVALID;
+        }
+        IrValueId place = overflow.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, arguments[2], source) : IR_VALUE_ID_INVALID;
+        if (place.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, place, pointee_id, stored, source))
+        {
+            result = overflow;
+        }
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_overflow_builtin(CIntegerIrBuilder* builder, CToken token, CIrOverflowBuiltin builtin, IrValueId* arguments,
+                                                         u32 argument_count)
+{
+    return builtin.operand_kind == C_TYPE_INVALID ? c_ir_emit_generic_overflow_builtin(builder, token, builtin, arguments, argument_count)
+                                                  : c_ir_emit_typed_overflow_builtin(builder, token, builtin, arguments, argument_count);
 }
 
 // The stored bits of a floating value that signbit, isnormal, fpclassify and
@@ -21070,25 +21233,45 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
                    ? IR_VALUE_ID_INVALID
                    : c_ir_emit_binary_value(builder, positive_s32, signed_negative, builder->s32_type, IR_BINARY_INTEGER_ADD, source);
     }
+    // The libm rounding, fma and ldexp family carries its parameter and
+    // result types in the shape table: ldexp's exponent is an `int` and
+    // lround/llround answer `long`/`long long`.
+    CMathLibmShape libm = c_semantic_math_libm_shape(link_name);
     u32 expected_count =
-        string_equal(link_name, S8("pow")) || string_equal(link_name, S8("powf")) || string_equal(link_name, S8("fmod")) || string_equal(link_name, S8("fmodf"))
+        libm.arity ? libm.arity
+        : string_equal(link_name, S8("pow")) || string_equal(link_name, S8("powf")) || string_equal(link_name, S8("fmod")) || string_equal(link_name, S8("fmodf"))
             ? 2
             : 1;
-    if (argument_count != expected_count)
+    // eBPF has no floating point or libm to import, and Wasm64 lowers no
+    // long double; refuse those calls instead of emitting an import the
+    // target cannot satisfy (#1394).
+    bool libm_refused = libm.arity && (builder->target.cpu_arch == CPU_ARCH_BPFEL ||
+                                       (builder->target.cpu_arch == CPU_ARCH_WASM64 && libm.argument_kind == C_TYPE_LONG_DOUBLE));
+    if (libm_refused)
+    {
+        builder->failure_message = string_format(builder->arena, S8("'__builtin_{S8}' is not supported on {S8}: {S8}"), link_name,
+                                                 builder->target.cpu_arch == CPU_ARCH_BPFEL ? S8("eBPF") : S8("Wasm64"),
+                                                 builder->target.cpu_arch == CPU_ARCH_BPFEL ? S8("the target has no floating point or libm")
+                                                                                            : S8("the target lowers no long double"));
+    }
+    if (argument_count != expected_count || libm_refused)
     {
         return IR_VALUE_ID_INVALID;
     }
-    IrTypeId value_type = string_ends_with_sequence(link_name, S8("f")) ? builder->f32_type : builder->f64_type;
+    IrTypeId value_type = libm.arity ? c_ir_builder_scalar_type(builder, libm.argument_kind)
+                          : string_ends_with_sequence(link_name, S8("f")) ? builder->f32_type : builder->f64_type;
+    IrTypeId result_type = libm.arity ? c_ir_builder_scalar_type(builder, libm.result_kind) : value_type;
     IrSourceRange source = c_ir_token_source_range(builder, token);
     IrTypeId* parameter_types = arena_allocate(builder->arena, IrTypeId, argument_count);
     for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
     {
-        arguments[argument_index] = c_ir_emit_cast(builder, arguments[argument_index], value_type, source);
+        IrTypeId parameter_type = libm.integer_second && argument_index == 1 ? builder->s32_type : value_type;
+        arguments[argument_index] = c_ir_emit_cast(builder, arguments[argument_index], parameter_type, source);
         if (arguments[argument_index].value == IR_ID_UNDERLYING_INVALID)
         {
             return IR_VALUE_ID_INVALID;
         }
-        parameter_types[argument_index] = value_type;
+        parameter_types[argument_index] = parameter_type;
     }
     IrSymbolId symbol = IR_SYMBOL_ID_INVALID;
     IrTypeId function_type = IR_TYPE_ID_INVALID;
@@ -21108,7 +21291,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
                                                                   .name = S8("C math function"),
                                                                   .parameter_types = parameter_types,
                                                                   .element_type = IR_TYPE_ID_INVALID,
-                                                                  .return_type = value_type,
+                                                                  .return_type = result_type,
                                                                       .layout =
                                                                       {
                                                                           .size = builder->program->data_layout.pointer.size,
@@ -21138,7 +21321,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
     reference.symbol = symbol;
     reference.result = reference_result;
     c_ir_append_instruction(builder, reference, reference_source);
-    IrValueId result = c_ir_add_result(builder, value_type);
+    IrValueId result = c_ir_add_result(builder, result_type);
     IrValueId* operands = arena_allocate(builder->arena, IrValueId, argument_count + 1);
     operands[0] = reference_result;
     for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
@@ -21146,7 +21329,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
         operands[argument_index + 1] = arguments[argument_index];
     }
     IrSourceRange call_source = source;
-    IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, value_type);
+    IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, result_type);
     call.operands = operands;
     call.operand_count = argument_count + 1;
     call.symbol = symbol;
@@ -33115,7 +33298,9 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
                          string_equal(math_link_name, S8("isinf")) || string_equal(math_link_name, S8("isinff")) ||
                          string_equal(math_link_name, S8("isinf_sign")) || string_equal(math_link_name, S8("isfinite")) ||
                          string_starts_with_sequence(math_link_name, S8("signbit")) || c_ir_math_builtin_is_generic_int(math_link_name);
-        *type_out = predicate ? builder->s32_type : c_ir_math_suffix_type(builder, math_link_name);
+        CMathLibmShape libm = c_semantic_math_libm_shape(math_link_name);
+        *type_out = predicate ? builder->s32_type : libm.arity ? c_ir_builder_scalar_type(builder, libm.result_kind)
+                                                              : c_ir_math_suffix_type(builder, math_link_name);
         return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
     }
 
@@ -59541,23 +59726,16 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* buil
     if (constant_resolved &&
         typed_value.kind == C_IR_CONSTANT_INTEGER)
     {
-        if (typed_value.integer_high && builder->oversized_array_bound_token_plus_one && bound.token_start < preprocess.token_count)
-        {
-            // This evaluator also serves alignment/designator queries. Only a
-            // retained array-bound row owns an object-size diagnostic here.
-            bool array_bound = false;
-            for (u32 index = 0; !array_bound && index < parse.array_bound_count; index += 1)
-            {
-                CArrayBound candidate = parse.array_bounds[index];
-                array_bound = candidate.token_start == bound.token_start && candidate.token_count == bound.token_count;
-            }
-            if (array_bound && (!*builder->oversized_array_bound_token_plus_one || bound.token_start + 1 < *builder->oversized_array_bound_token_plus_one))
-            {
-                *builder->oversized_array_bound_token_plus_one = bound.token_start + 1;
-            }
-        }
-        *count_out = typed_value.integer;
-        return !typed_value.integer_high;
+        // A count above u64 saturates instead of failing: a zero-size element
+        // makes the object zero bytes whatever the count (GNU empty records and
+        // zero-length arrays, as Clang accepts them), and any other element
+        // fails the object-size check of the array-type constructors, which
+        // report the written bound. A negative wide value is no count at all.
+        IrType* value_type = ir_type_from_id(&program->types, typed_value.type);
+        bool wide_negative = typed_value.integer_high && value_type && value_type->is_signed && (typed_value.integer_high >> 63);
+        bool saturated = typed_value.integer_high && !wide_negative;
+        *count_out = saturated ? UINT64_MAX : typed_value.integer;
+        return !typed_value.integer_high || saturated;
     }
     CToken* tokens = arena_allocate(arena, CToken, bound.token_count * 2 + 1);
     u32 token_count = 0;

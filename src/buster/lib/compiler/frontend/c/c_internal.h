@@ -768,6 +768,16 @@ BUSTER_C_EXTERN CTypeKind c_semantic_uint64_kind(Target target);
 BUSTER_C_EXTERN CTypeKind c_semantic_byte_swap_kind(Target target, CSymbolBuiltin builtin, String8 spelling);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_builtin_fold_kind(Target target, CSymbolBuiltin builtin, String8 spelling);
 BUSTER_C_EXTERN bool c_semantic_integer_builtin_fold(CSymbolBuiltin builtin, u32 width, u64 bits, u64* answer_out);
+typedef struct CMathLibmShape
+{
+    String8 link_name;
+    u32 arity;
+    CTypeKind argument_kind;
+    CTypeKind result_kind;
+    bool integer_second;
+} CMathLibmShape;
+
+BUSTER_C_EXTERN CMathLibmShape c_semantic_math_libm_shape(String8 name);
 BUSTER_C_EXTERN bool c_semantic_math_link_is_long_double(String8 link_name);
 
 struct CSymbolTable
@@ -1714,6 +1724,7 @@ BUSTER_C_EXTERN String8 c_semantic_asm_x87_operands_message(u64 const* constrain
 
 BUSTER_C_EXTERN String8 c_ir_math_builtin_link_name(String8 name);
 BUSTER_C_EXTERN u32 c_semantic_memory_builtin_arity(String8 name);
+BUSTER_C_EXTERN bool c_semantic_overflow_builtin_generic(String8 name);
 
 typedef enum CIrSimdArgument
 {
