@@ -28504,10 +28504,31 @@ BUSTER_C_INTERNAL bool c_parser_tree_return_operand(CPreprocessResult const* pre
 // cannot report: a number whose fact converted as an integer (its flags are
 // read by ordinal, as c_number_fact reads them), and an identifier that is
 // not a type word or lies inside a specifier run already validated.
+//
+// An identifier lane is classified from its interned id with the answers
+// c_parse_type_word_for_dialect_token and c_token_is_well_known give for it:
+// every type word and `return` is interned into the predefined range, so an
+// id above predefined_limit is neither, on one compare, and one inside it
+// reads the word_bits row under the dialect's mask, hoisted out of the loop.
+// Only an uninterned token, or a stream without a symbol table, asks the two
+// predicates, so the candidates are the same tokens either way.
 BUSTER_C_INTERNAL bool c_parser_tree_probe(Arena* arena, CPreprocessResult const* preprocess, CNumberFacts const* facts)
 {
     CParserResult probe = {.number_facts = facts, .diagnostic_capacity = 1};
     CTokenShape const* token_shapes = c_preprocess_token_shapes(preprocess);
+    CToken const* tokens = preprocess->tokens;
+    CSymbolTable const* symbols = preprocess->symbols;
+    u16 const* word_bits = symbols ? symbols->word_bits : 0;
+    u32 predefined_limit = symbols ? symbols->predefined_limit : 0;
+    u16 type_mask = C_WORD_TYPE;
+    if (c_preprocess_dialect_is_gnu(preprocess->dialect))
+    {
+        type_mask |= C_WORD_AUTO_TYPE | C_WORD_TYPEOF;
+    }
+    if (c_preprocess_dialect_is_c23(preprocess->dialect))
+    {
+        type_mask |= C_WORD_TYPEOF | C_WORD_CONSTEXPR | C_WORD_TYPEOF_UNQUAL;
+    }
     u32 token_count = (u32)preprocess->token_count;
     u32 validated_end = 0;
     bool missing = false;
@@ -28537,12 +28558,24 @@ BUSTER_C_INTERNAL bool c_parser_tree_probe(Arena* arena, CPreprocessResult const
         for (Mask64 lanes = identifiers; lanes; lanes = mask64_and(lanes, lanes - 1))
         {
             u32 index = base + mask64_first_set(lanes);
-            CToken token = preprocess->tokens[index];
-            if (index >= validated_end && c_parse_type_word_for_dialect_token(*preprocess, token))
+            u32 symbol = tokens[index].symbol;
+            bool type_word;
+            bool is_return;
+            if (symbol && word_bits)
+            {
+                type_word = symbol <= predefined_limit && (word_bits[symbol] & type_mask) != 0;
+                is_return = symbol == (u32)C_SYMBOL_WELL_KNOWN_RETURN;
+            }
+            else
+            {
+                type_word = c_parse_type_word_for_dialect_token(*preprocess, tokens[index]);
+                is_return = c_token_is_well_known(preprocess->spelling_base, tokens[index], C_SYMBOL_WELL_KNOWN_RETURN);
+            }
+            if (type_word && index >= validated_end)
             {
                 c_parser_validate_type_specifiers(arena, &probe, preprocess, index, &validated_end);
             }
-            if (c_token_is_well_known(preprocess->spelling_base, token, C_SYMBOL_WELL_KNOWN_RETURN))
+            if (is_return)
             {
                 missing |= c_parser_tree_return_operand(preprocess, token_shapes, index);
             }
