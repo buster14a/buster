@@ -340,7 +340,7 @@ unchanged.
   6,612 bodies receive a query that the literal fast path does not answer, and
   90% of the typed body expression nodes lie inside some queried node's
   subtree. The pass is made cheaper per node instead (audit
-  `2026-10-10T…`, below):
+  [`2026-10-10T203657Z`](../../performance-audits/2026-10-10T203657Z.md)):
   - one table load classifies a node's kind;
   - only the arrays that are read before they are written are cleared;
   - `c_ast_types_member_lookup` remembers, for the length of one pass, a member
@@ -1055,5 +1055,16 @@ The base is main `f38a7716`, which the candidate branches from. The budgets:
 - **Performance acceptance.** Hosted counts are diagnostic. No 9700X
   comparison is requested for this change, so Zen 5 validation stays
   incomplete (#2761) and the hook stays opt-in.
+
+The cheaper pass's hosted census is
+[`2026-10-10T203657Z`](../../performance-audits/2026-10-10T203657Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. The typer's counters are identical in B and C,
+  and the objects of all four arms are identical.
+- `c_ast_types_type_body` falls from 359.7 M to 322.4 M Ir (−10.4%), and the
+  pilot's compile by 36.5 M (−0.39%).
+- The memo answers 58% of the pass's member lookups.
+- The default path is within +0.006%.
+- Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
