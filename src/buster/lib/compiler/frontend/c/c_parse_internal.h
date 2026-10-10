@@ -26,17 +26,22 @@ BUSTER_F_DECL void c_test_aggregate_lookup_rollback(CParseResult* result, CParse
 // sites a multi-million-token body exhausts on the real arena. Zero restores
 // the arena's real remaining capacity.
 BUSTER_F_DECL void c_test_body_validation_scratch_limit(u64 bytes);
+// The same cap for the private model arena of each type-constant query a body
+// makes, measured from the model arena's position when the query opens it.
+BUSTER_F_DECL void c_test_body_validation_model_limit(u64 bytes);
 // Records, on the calling thread, every request the guard checks into
 // `entries` until `capacity` are held (zero capacity stops recording). Each
 // body opens with a separator row (element_size 0); a request row holds its
 // element size and count and the byte offset its end reaches past the body's
-// starting position, or UINT64_MAX for the request the guard refused.
+// starting position (past the query's model position for a `model` row), or
+// UINT64_MAX for the request the guard refused.
 typedef struct CTestBodyScratchRequest CTestBodyScratchRequest;
 struct CTestBodyScratchRequest
 {
     u64 element_size;
     u64 count;
     u64 end;
+    bool model;
 };
 BUSTER_F_DECL void c_test_body_validation_scratch_trace(CTestBodyScratchRequest* entries, u32 capacity);
 BUSTER_F_DECL u32 c_test_body_validation_scratch_trace_count(void);

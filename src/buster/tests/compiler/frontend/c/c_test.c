@@ -497,6 +497,88 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_validation_scratch_families(UnitT
     return result;
 }
 
+// The furthest end a model row of body `body` reached, and the first such row
+// (`first`, UINT32_MAX when the body made no type-constant query).
+BUSTER_GLOBAL_LOCAL u64 c_test_body_scratch_model_peak(CTestBodyScratchRequest const* trace, u32 count, u32 body, u32* first)
+{
+    u64 peak = 0;
+    *first = UINT32_MAX;
+    for (u32 row = c_test_body_scratch_body_start(trace, count, body) + 1; row < count && trace[row].element_size; row += 1)
+    {
+        if (trace[row].model)
+        {
+            peak = BUSTER_MAX(peak, trace[row].end);
+            *first = BUSTER_MIN(*first, row);
+        }
+    }
+    return peak;
+}
+
+BUSTER_GLOBAL_LOCAL CTestBodyScratchRun c_test_body_scratch_model_run(UnitTestArguments* arguments, String8 source, u64 model_cap,
+                                                                      CTestBodyScratchRequest* trace)
+{
+    c_test_body_validation_model_limit(model_cap);
+    CTestBodyScratchRun run = c_test_body_scratch_run(arguments, source, 0, trace);
+    c_test_body_validation_model_limit(0);
+    return run;
+}
+
+// The private model of c_parse_type_integer_constant_query_core (#1256): a
+// member alignment query in a case label copies the type table into its own
+// arena and adds the cast's pointer type there. That model arena is guarded
+// on the body under its own limit, so the query's model rows (the trace's
+// `model` rows) are checked like the body's scratch: at the furthest end they
+// reach the body validates and lowers, one byte less refuses the query, and
+// the function is reported once while every later body is still validated.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_validation_type_query_model(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CTestBodyScratchRequest* trace = arena_allocate(arguments->arena, CTestBodyScratchRequest, C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+    String8 members = S8("");
+    for (u32 index = 0; index < 20; index += 1)
+    {
+        members = string_format(arguments->arena, S8("{S8}int m{u32}; "), members, index);
+    }
+    String8 head = string_format(arguments->arena, S8("struct S {{ char c; long long m; {S8}}; "
+        "static int big(void){{struct S s = {{0}; int x = 0; switch (x) {{ case _Alignof(((const struct S*)&s)->m19): x = 1; break; "
+        "default: break; } return x + s.m19;} "), members);
+    String8 query = string_format(arguments->arena, S8("{S8}static int fine(int x){{return x+1;} int main(void){{return big()+fine(2);}"), head);
+    CTestBodyScratchRun open = c_test_body_scratch_model_run(arguments, query, 0, trace);
+    BUSTER_TEST(arguments, open.lowered && open.trace_count < C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+    u32 first = UINT32_MAX;
+    u64 peak = c_test_body_scratch_model_peak(trace, open.trace_count, 0, &first);
+    // The query reached its model: the guard checked rows in its arena.
+    BUSTER_TEST(arguments, peak != 0 && first < open.trace_count);
+    u32 later_first = UINT32_MAX;
+    c_test_body_scratch_model_peak(trace, open.trace_count, 1, &later_first);
+    BUSTER_TEST(arguments, later_first == UINT32_MAX);
+    CTestBodyScratchRun fits = c_test_body_scratch_model_run(arguments, query, peak, trace);
+    BUSTER_TEST(arguments, fits.lowered && c_test_body_scratch_refused(trace, fits.trace_count) == UINT32_MAX);
+    CTestBodyScratchRun spare = c_test_body_scratch_model_run(arguments, query, peak + 1, trace);
+    BUSTER_TEST(arguments, spare.lowered && c_test_body_scratch_refused(trace, spare.trace_count) == UINT32_MAX);
+    CTestBodyScratchRun short_by_one = c_test_body_scratch_model_run(arguments, query, peak - 1, trace);
+    u32 refused = c_test_body_scratch_refused(trace, short_by_one.trace_count);
+    BUSTER_TEST(arguments, !short_by_one.lowered && short_by_one.diagnostic_count == 1 &&
+                               c_test_body_scratch_reported(arguments, &short_by_one, 0, S8("big")));
+    if (BUSTER_REQUIRE(arguments, refused < short_by_one.trace_count))
+    {
+        BUSTER_TEST(arguments, trace[refused].model && refused < c_test_body_scratch_body_start(trace, short_by_one.trace_count, 1));
+    }
+    // Recovery: the bodies after the refused one are validated, and a later
+    // invalid body still reports its own finding. Its unit has other
+    // function types, so its query's model has its own peak.
+    BUSTER_TEST(arguments, c_test_body_scratch_body_start(trace, short_by_one.trace_count, 2) < short_by_one.trace_count);
+    String8 invalid_later = string_format(arguments->arena, S8("{S8}static void bad(void){{break;} int main(void){{bad(); return big();}"), head);
+    CTestBodyScratchRun invalid_open = c_test_body_scratch_model_run(arguments, invalid_later, 0, trace);
+    BUSTER_TEST(arguments, invalid_open.diagnostic_count == 1 && string_first_sequence(invalid_open.messages[0], S8("in function 'bad'")) == 0);
+    u64 invalid_peak = c_test_body_scratch_model_peak(trace, invalid_open.trace_count, 0, &first);
+    BUSTER_TEST(arguments, invalid_peak != 0);
+    CTestBodyScratchRun both = c_test_body_scratch_model_run(arguments, invalid_later, invalid_peak - 1, trace);
+    BUSTER_TEST(arguments, both.diagnostic_count == 2 && c_test_body_scratch_reported(arguments, &both, 0, S8("big")) &&
+                               string_equal(both.messages[1], invalid_open.messages[0]));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_lower_capacity_plan(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -59328,6 +59410,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_body_scope_map);
     C_TEST_FIXTURE(arguments, c_test_body_validation_scratch_exhaustion);
     C_TEST_FIXTURE(arguments, c_test_body_validation_scratch_families);
+    C_TEST_FIXTURE(arguments, c_test_body_validation_type_query_model);
     C_TEST_FIXTURE(arguments, c_test_bool_bit_field_loads);
     C_TEST_FIXTURE(arguments, c_test_brace_designators);
     C_TEST_FIXTURE(arguments, c_test_braced_string_initializers);
