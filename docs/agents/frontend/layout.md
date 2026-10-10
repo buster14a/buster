@@ -712,12 +712,22 @@ reached-type hash set grow with the promoted search; small searches use stack
 storage. Repeated aggregates are marked on dequeue, preserving breadth-first
 order and the first offset path without clearing a byte per type-table row.
 
-Parser and lowering walks require a nonnegative integer index with no remaining
-high limb after conversion to its actual type. Floating results, malformed dot
-separators and offsets beyond the target's `size_t` range are refused. Promoted
-member sums, index products and accumulated sums are checked before arithmetic.
-Issue #1570 remains open for a shared parser/lowering designator authority;
-the two walks now share these admission and arithmetic bounds.
+Both walks drive one designator walker, `COffsetofWalk` (declared in
+`c_internal.h`, defined beside `c_ir_constant_offsetof_attempt`).
+`c_offsetof_walk_next` owns the grammar `member ( '[' index ']' | '.' member )*`
+and yields MEMBER, INDEX or END steps. `c_offsetof_walk_member` and
+`c_offsetof_walk_index` own the arithmetic. An index must be an integer or
+boolean of at most 128 bits whose converted value is nonnegative and fits in
+64 bits. Member sums, index products and accumulated offsets are checked
+against the target's `size_t`. Floating indices, malformed separators and
+overflow are refused, never wrapped.
+
+Each phase keeps only what its type system owns: member lookup
+(`c_parse_constant_member_offset` or `c_ir_promoted_member_path`, both refusing
+bit-fields and promoting through anonymous members), element sizes, and the
+evaluation of index expressions. One layout authority for those answers is
+#1247's scope. GCC and Clang instead wrap negative and out-of-range constant
+indices; Buster's refusal is the #1570 range-check contract.
 
 `c_test_offsetof_members` pins direct and anonymous member offsets, a nested
 anonymous struct within a union, and an anonymous array element through
