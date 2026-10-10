@@ -4977,6 +4977,97 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
     return result;
 }
 
+// Declarators wrapped in redundant parentheses (GitHub #3215). The split read
+// `int ((*pq))(int) = f;` as a function and `int (gd(int a)) { ... }` with
+// the declaration after it as one object, so both programs failed with an
+// undeclared name. Each compiles to the same object with and without
+// -fc-ast-pilot, which publishes the split from the tree for all but the
+// shapes it still refuses (an attribute list opening a group, a variadic list
+// inside one), and each program's main returns 0.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_groups(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        bool published;
+    } const cases[] = {
+        {S8("int f(int x) { return x + 1; }\nint ((*pq))(int) = f;\nint main(void) { return pq(1) - 2; }\n"), true},
+        {S8("int (__attribute__((unused)) (*pq))(int) = 0;\nint main(void) { return pq != 0; }\n"), false},
+        {S8("int (gd(int a)) { return a; }\nint zz;\nint main(void) { return gd(0) + zz; }\n"), true},
+        {S8("int (x);\nint ((y))[3];\nvoid ((h))(void) {}\nint main(void) { h(); return x + y[2] + (int)sizeof(y) - 12; }\n"), true},
+        {S8("typedef int T;\nT ((t))[2];\nT ((*tp))(T);\nstatic T id(T v) { return v; }\n"
+            "int a, ((b)), (c)[2], ((*d))(void), (e(void)), (((*g)));\nint e(void) { return 0; }\n"
+            "int main(void) { tp = id; return a + b + c[1] + (d != 0) + e() + (g != 0) + t[1] + tp(0) + (int)sizeof(t) - 8; }\n"),
+         true},
+        {S8("int (gv(int a, ...)) { return a; }\nint main(void) { return gv(0, 1, 2); }\n"), false},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_unique_path(arena, S8("buster-redundant-declarator-groups"), S8(".c"));
+#if !BUSTER_IOS
+        String8 object = buster_test_temporary_unique_path(arena, S8("buster-redundant-declarator-groups"), S8(".o"));
+#endif
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[case_index].source))))
+        {
+#if !BUSTER_IOS
+            ByteSlice reference = {0};
+#endif
+            for (u32 pilot = 0; pilot < 2; pilot += 1)
+            {
+                String8 label = string_format(arena, S8("redundant declarator groups case {u32}, pilot {u32}"), case_index, pilot);
+                String8 syntax_command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), S8("-fsyntax-only"), input};
+                CompilerDriverResult syntax = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8){syntax_command + !pilot, BUSTER_ARRAY_LENGTH(syntax_command) - !pilot}));
+                BUSTER_TEST_RAW(arguments, syntax.error == COMPILER_DRIVER_ERROR_NONE, string_format(arena, S8("{S8}: {S8}"), label, syntax.diagnostic));
+#if !BUSTER_IOS
+                String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), S8("-g0"), S8("-c"), S8("-o"), object, input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8){command + !pilot, BUSTER_ARRAY_LENGTH(command) - !pilot}));
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, string_format(arena, S8("{S8}: {S8}"), label, compiled.diagnostic));
+                BUSTER_TEST_RAW(arguments, !pilot || (compiled.c_ast.split.units == (u64)cases[case_index].published &&
+                                                      compiled.c_ast.split.fallbacks == (u64)!cases[case_index].published),
+                                label);
+                ByteSlice bytes = file_read(arena, object, (FileReadOptions){0});
+                if (BUSTER_REQUIRE(arguments, bytes.pointer && bytes.length))
+                {
+                    reference = pilot ? reference : bytes;
+                    BUSTER_TEST_RAW(arguments, bytes.length == reference.length && memory_compare(bytes.pointer, reference.pointer, bytes.length), label);
+                }
+#endif
+            }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+            String8 output = buster_test_temporary_unique_path(arena, S8("buster-redundant-declarator-groups-run"), S8(".exe"));
+            String8 link_command[] = {S8("-nostdinc"), S8("-o"), output, input};
+            CompilerDriverResult linked = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+            BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+            if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                    string_format(arena, S8("redundant declarator groups case {u32}: status={u32} timed_out={u32}"), case_index,
+                                                  execution.platform_status, (u32)execution.timed_out));
+                }
+                BUSTER_TEST(arguments, os_file_delete(output));
+            }
+#endif
+        }
+        BUSTER_TEST(arguments, os_file_delete(input));
+#if !BUSTER_IOS
+        BUSTER_TEST(arguments, os_file_delete(object));
+#endif
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // Rejected wide escapes must leave both absent and existing output paths
 // untouched. Exercise the production driver, not only decoder descriptors.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_hexadecimal_output(UnitTestArguments* arguments)
@@ -24939,7 +25030,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integers(
                             }
                             BUSTER_TEST(arguments, os_file_delete(output));
                         }
-                        os_file_delete(output);
+                        BUSTER_TEST(arguments, os_file_delete(output));
                         BUSTER_TEST(arguments, os_file_delete(input));
                     }
                     scratch_end(temporary);
@@ -25037,7 +25128,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integers(
                         BUSTER_TEST_RAW(arguments, stats.valid && stats.kind == OS_FILE_KIND_MISSING, rejected[row].source);
                     }
                 }
-                os_file_delete(output);
+                BUSTER_TEST(arguments, os_file_delete(output));
                 os_file_delete(input);
                 scratch_end(temporary);
             }
@@ -25198,7 +25289,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integer_n
                             }
                             BUSTER_TEST(arguments, os_file_delete(output));
                         }
-                        os_file_delete(output);
+                        BUSTER_TEST(arguments, os_file_delete(output));
                     }
                 }
             }
@@ -25277,7 +25368,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integer_n
                             BUSTER_TEST(arguments, os_file_delete(output));
                         }
                     }
-                    os_file_delete(output);
+                    BUSTER_TEST(arguments, os_file_delete(output));
                 }
             }
         }
@@ -25586,7 +25677,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_addresses
                         }
                         BUSTER_TEST(arguments, os_file_delete(output));
                     }
-                    os_file_delete(output);
+                    BUSTER_TEST(arguments, os_file_delete(output));
                     BUSTER_TEST(arguments, os_file_delete(input));
                 }
                 scratch_end(temporary);
@@ -25616,7 +25707,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_addresses
                 BUSTER_TEST_RAW(arguments, refused.error != COMPILER_DRIVER_ERROR_NONE && !refused.has_object, rejected[row]);
                 BUSTER_TEST_RAW(arguments, refused.diagnostic.length != 0, rejected[row]);
                 BUSTER_TEST_RAW(arguments, file_read(arena, output, (FileReadOptions){0}).length == 0, rejected[row]);
-                os_file_delete(output);
+                BUSTER_TEST(arguments, os_file_delete(output));
                 BUSTER_TEST(arguments, os_file_delete(input));
             }
             scratch_end(temporary);
@@ -25843,7 +25934,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(Un
                             }
                             BUSTER_TEST(arguments, os_file_delete(output));
                         }
-                        os_file_delete(output);
+                        BUSTER_TEST(arguments, os_file_delete(output));
                     }
                 }
             }
@@ -25923,7 +26014,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(Un
                             BUSTER_TEST(arguments, os_file_delete(output));
                         }
                     }
-                    os_file_delete(output);
+                    BUSTER_TEST(arguments, os_file_delete(output));
                 }
             }
         }
@@ -26114,7 +26205,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_guard(Uni
                     BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, refusal) != BUSTER_STRING_NO_MATCH);
                     BUSTER_TEST(arguments, file_read(arena, output, (FileReadOptions){0}).length == 0);
                 }
-                os_file_delete(output);
+                BUSTER_TEST(arguments, os_file_delete(output));
                 os_file_delete(input);
                 scratch_end(temporary);
             }
@@ -30247,6 +30338,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_ownership);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_c_ast_pilot);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_redundant_declarator_groups);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_void_function_pointer_roundtrip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_shared_ifunc_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_function_alignment_and_weakref);

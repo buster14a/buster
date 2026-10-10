@@ -570,10 +570,13 @@ fixed number of node and token reads; nothing recurses.
 - **Names.** A record's name is its declarator's `DECLARATOR_NAME`. The
   record is a function when the first derivation above that name is a
   `DECLARATOR_FUNCTION`; its parameter list then gives the identifier-list
-  range, when the name stands in no group. Group boundaries are where a suffix
-  derivation's inner declarator is a pointer. A declaration without a
-  declarator takes the last name outside every delimiter, else the first name
-  inside one, which is what the walker does.
+  range, when no `(` is written before the name. Group boundaries are where a
+  suffix derivation's inner declarator is a pointer. Redundant parentheses
+  leave no node, so the split counts the `(` written before the name; more
+  than the boundaries is a redundant group, which the walker reads the same
+  way (below). A declaration without a declarator takes the last name outside
+  every delimiter, else the first name inside one, which is what the walker
+  does.
 - **Punctuation.** The `)` before a body's `{`, the `,` before a later
   declarator, the `=` before an initializer and the final `;` have no nodes.
   Each is read as the token next to an anchor, and that read also checks that
@@ -601,21 +604,24 @@ two cases:
    here states what it reads.** `CParserTreeFallback` names each case:
    - `specifiers`: a parenthesized specifier (`typeof`, `_Atomic(T)`,
      `_Alignas`, `_BitInt`), or an enum's fixed type;
-   - `declarator`: redundant parentheses, which is
-     [#3215](https://github.com/buster14a/buster/issues/3215)'s family and
-     where the walker misreads; attributes on a pointer or opening a group; or
-     a function returning a function or an array;
+   - `declarator`: a redundant group after a typedef or tag name, or after a
+     keyword other than a type or qualifier word, where the walker reads the
+     group as a parameter list (it reads `T (x)` as a function `T`); attributes
+     on a pointer or opening a group; or a function returning a function or an
+     array;
    - `old_style`: an old-style declaration list;
    - `tokens`: a comma operator in an initializer, where the walker splits a
-     list, or a token next to an anchor that is not the required one;
+     list, a token next to an anchor that is not the required one, or a
+     variadic list inside a redundant group (`int (gv(int, ...))`), since the
+     walker reads `...` only before the declarator's last `)`;
    - `assertion`: a file-scope assertion whose condition holds a comma or an
      initializer list, or a body assertion with no message or behind an
      attribute list.
 
 A fallback discards everything derived and returns `c_parse_ast`'s result, so
-the records, the diagnostics and #3215's rejections are always the walker's.
-Neither #3215 nor #3143 is changed by this split. Where the walker's reading
-is wrong but the split can state it, the split reproduces it instead.
+the records and the diagnostics are always the walker's, and #3143 is not
+changed by this split. Where the walker's reading is wrong but the split can
+state it, the split reproduces it instead.
 A declaration is a typedef or constexpr only through its own top-level
 specifiers. The walker counts a `typedef` or `constexpr` word only outside
 every delimiter and before the first top-level `=` or `,`. The split counts a
@@ -624,13 +630,30 @@ initializer, such as a statement expression's `typedef` or a C23 constexpr
 compound literal, marks neither the declaration nor its later declarators
 ([#3310](https://github.com/buster14a/buster/issues/3310)).
 
-`c_ast_test_split` runs one shape per fallback reason, both #3215 inputs
-included, in every layout. It requires the walker's result and the named
-reason. The [corpus differential](#corpus-differential) compares every
-record. On the self-host unity input the split publishes all 15,476 records
+**Redundant groups ([#3215](https://github.com/buster14a/buster/issues/3215)).**
+The walker used to classify a parenthesized declarator by the token after its
+outermost group and to require a `*` before a nested one. So it read
+`int ((*pq))(int) = f;` as a function, merged `int (gd(int a)) { ... } int zz;`
+into one object, and dropped `int ((x))[3];` and `void ((h))(void) {}`.
+Now it walks out from the name instead
+(`c_parse_parenthesized_declarator_is_function`): a `(` makes a function, a
+`[` an array, and a `)` closes a group that is a pointer when it holds a `*`
+and is redundant otherwise. A name whose own list sits inside the group,
+`(gd(int a))`, is a function, but only when the group follows a type or
+qualifier word, a punctuator or nothing (`c_parse_declarator_group_may_open`).
+After a typedef or tag name the walker still reads a single group as that
+name's parameter list, as before. The type parser
+(`c_type_parse_parenthesized_step`) nests a group that opens a group holding
+the name. The split publishes every redundant group the walker reads this way,
+and refuses the rest as above.
+
+`c_ast_test_split` runs one shape per fallback reason in every layout, and
+both #3215 inputs and the other redundant shapes on the published side. It
+requires the walker's result and the named reason. The [corpus differential](#corpus-differential) compares every
+record. On the self-host unity input the split publishes all 15,593 records
 and 33 body assertions, with no fallback. The fixtures that fall back are the
-parenthesized specifiers, the fixed-type enums and a few attributed or
-redundant declarators.
+parenthesized specifiers, the fixed-type enums and a few attributed
+declarators.
 
 ## Corpus differential
 
@@ -654,6 +677,11 @@ declaration-split misreads the differential found
 [#3156](https://github.com/buster14a/buster/pull/3156) and are agreement
 constructs now: a file-scope plain `asm("...")`, attribute lists before or
 opening a parenthesized pointer declarator, and a C23 opaque `enum E : T;`.
+The redundant-parenthesis misreads it found
+([#3215](https://github.com/buster14a/buster/issues/3215)) are agreement
+constructs too, beside the other redundant shapes: objects and functions in
+one or more groups, a definition whose list sits inside its group, groups in a
+declarator list, after a typedef name and in parameters.
 The tree also rejects syntax errors that today's `-fsyntax-only` accepts
 ([#3143](https://github.com/buster14a/buster/issues/3143)).
 

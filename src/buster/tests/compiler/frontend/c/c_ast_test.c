@@ -2360,6 +2360,17 @@ BUSTER_GLOBAL_LOCAL CAstCorpusConstruct const c_ast_corpus_constructs[] = {
     {S8_INITIALIZER("int a, __attribute__((x)) b __attribute__((y)); int c, __attribute__((x)) d __attribute__((y)) = 1, __attribute__((z)) *e;"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("int (__attribute__((unused)) pa); int (__attribute__((x)) pf)(void); int (__attribute__((x)) pr)[3]; int (__attribute__((x)) (pq))(int);"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("int (__attribute__((x)) fd)(void) { return 0; } int pt, (__attribute__((y)) pu) = 1;"), C_PREPROCESS_DIALECT_GNU17},
+    // #3215: declarators in redundant groups, which the walker walks out of
+    // to the derivation nearest the name: objects, functions, a definition
+    // whose list sits inside the group, groups in a list and after a typedef
+    // name, and pointers inside and outside the groups.
+    {S8_INITIALIZER("int f(int x) { return x + 1; } int ((*pq))(int) = f; int (gd(int a)) { return a; } int zz;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int (x); int ((x2))[3]; void ((h))(void) {} void ((h2))(void); int ((x3)) = 1; int (((*p3)))(int); int (*(f3))(int);"),
+     C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int a, ((b)), (c)[2], ((*d))(void), (e(void)), (((*g))); int (gd2(int a)), zz2; int (*(g3(int a)))(void) { return 0; }"),
+     C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("typedef int T; T ((t))[2]; T ((*tp))(T); T (*(tq))(int); void pf(int ((a))[3], int ((*cb))(int)) { } void pg(T (a)) { }"),
+     C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("typedef int (__attribute__((x)) TF)(int); TF tf; typedef int (__attribute__((x)) TA)[2]; TA ta; void (*(__attribute__((x)) hf))(void);"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("struct S5 { int a, __attribute__((x)) b __attribute__((y)); int c : 2, __attribute__((x)) d : 3 __attribute__((y)); int (__attribute__((x)) m)[2]; };"), C_PREPROCESS_DIALECT_GNU17},
     // Body _Static_assert notes (c_parse_ast_from_tree): noted when the
@@ -3843,9 +3854,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
 
 // c_parse_ast_from_tree on one shape per fallback reason, and on shapes it
 // publishes itself, in every layout: the result is always c_parse_ast's, and
-// the statistics name the reason. Both #3215 shapes are among them: the
-// walker misreads their redundant parentheses, so the split leaves them to it
-// rather than publishing the grammar's reading.
+// the statistics name the reason. The #3215 shapes are among the published
+// ones; a redundant group after a tag or typedef name is not, because the
+// walker still reads it as that name's parameter list.
 typedef struct CAstSplitCase CAstSplitCase;
 struct CAstSplitCase
 {
@@ -3884,12 +3895,17 @@ BUSTER_GLOBAL_LOCAL CAstSplitCase const c_ast_split_cases[] = {
     {S8_INITIALIZER("_Alignas(8) int a;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_SPECIFIERS},
     {S8_INITIALIZER("__typeof__(1) t;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_SPECIFIERS},
     {S8_INITIALIZER("enum E : int { A };"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_SPECIFIERS},
-    // #3215: c_parse_ast reads the first as a function declaration and the
-    // second as one object declaration over both lines.
-    {S8_INITIALIZER("int f(int x) { return x + 1; } int ((*pq))(int) = f;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DECLARATOR},
-    {S8_INITIALIZER("int (gd(int a)) { return a; } int zz;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DECLARATOR},
-    {S8_INITIALIZER("int (x);"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DECLARATOR},
+    // #3215: redundant groups, published since the walker walks out of them.
+    {S8_INITIALIZER("int f(int x) { return x + 1; } int ((*pq))(int) = f;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 0},
+    {S8_INITIALIZER("int (gd(int a)) { return a; } int zz;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 0},
+    {S8_INITIALIZER("int (x); int ((y))[3]; void ((h))(void) {}"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 0},
+    // After a tag or typedef name the walker reads a redundant group that
+    // does not open on `*` or `(` as that name's parameter list (#3368).
+    {S8_INITIALIZER("struct P { int a; }; struct P (pg(void)) { struct P r = {0}; return r; }"), C_PREPROCESS_DIALECT_GNU17,
+     C_PARSER_TREE_FALLBACK_DECLARATOR},
     {S8_INITIALIZER("int * __attribute__((x)) p;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DECLARATOR},
+    // The walker reads `...` only before the declarator's last `)`.
+    {S8_INITIALIZER("int (gv(int a, ...)) { return a; }"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_TOKENS},
     {S8_INITIALIZER("int k(a) int a; { return a; }"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_OLD_STYLE},
     {S8_INITIALIZER("int e = (1, 2);"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_TOKENS},
     {S8_INITIALIZER("int h8(void) [[deprecated]];"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_TOKENS},
