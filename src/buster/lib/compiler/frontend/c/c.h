@@ -1439,9 +1439,8 @@ struct CAstTypeStatistics
     u64 misses;
     u64 gated;
     // Queries that re-typed a node declined for want of a row the body had
-    // not interned yet, the nodes they re-typed, and the answers among them.
+    // not interned yet, and the answers among them.
     u64 late_checks;
-    u64 late_nodes;
     u64 late_answers;
 };
 

@@ -298,7 +298,7 @@ Under `-v` the driver prints four rows with the other verbose counters:
   the tree> declines=<queries that mapped to a node the typer does not vouch
   for> misses=<queries that mapped to no node> gated=<queries met in a machine
   state the typer leaves alone> late_checks=<queries that re-typed a late
-  node> late_nodes=<nodes they re-typed> late_answers=<answers among them>`
+  node> late_answers=<answers among them>`
 - `C_AST_SPLIT units=<units whose records the tree split published>
   records=<records it published> assertions=<body _Static_assert ranges it
   published> fallbacks=<units it handed to c_parse_ast's walker>

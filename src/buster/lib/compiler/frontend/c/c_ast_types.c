@@ -80,12 +80,11 @@
 //
 // Late rows. A body's `&` and casts mostly read rows its own queries intern,
 // after the eager pass has run. A node declined only for a missing interned
-// row is marked C_AST_TYPE_FLAG_LATE, and every typed node above one
-// C_AST_TYPE_FLAG_LATE_BELOW. A query that maps to a marked node first
-// re-types the marked nodes of its subtree in index order with the same rules
-// (c_ast_types_retype): a row that exists now is the one the machine would
-// find instead of appending. The marks stay, because a rollback may take a
-// late row back.
+// row is marked C_AST_TYPE_FLAG_LATE, and a query that maps to it re-types it
+// with its own rule first (c_ast_types_retype): a row that exists now is the
+// one the machine would find instead of appending. The result is not kept,
+// because a rollback may take the row back. Its ancestors keep their eager
+// result.
 //
 // The query. c_parse_expression_type_query reads the per-body memo first and
 // asks this file only on a miss, before the literal fast path and the machine
@@ -192,8 +191,9 @@
 //   c_ast_types_cast,                             rows
 //   c_ast_types_compound_literal,
 //   c_ast_types_address, c_ast_types_mark_late
-//   c_ast_types_retype                           late rows, re-typed at a query
-//   c_ast_types_locate, c_ast_types_answer       query lookup and the decision
+//   c_ast_types_retype                           a late node, re-typed at a query
+//   c_ast_types_locate, c_ast_types_answer,      query lookup and the decision
+//   c_ast_types_vouched
 //   c_ast_types_lookups_agree                    query-scope name checks
 //   c_ast_types_publish                          machine state after an answer
 //   c_ast_types_verify_*, c_test_*               the differential (tests builds),
@@ -231,9 +231,6 @@
 // later. The mark is sticky, and the query re-types the node then
 // (c_ast_types_retype).
 #define C_AST_TYPE_FLAG_LATE (1u << 6)
-// A node whose subtree holds a C_AST_TYPE_FLAG_LATE node below it.
-#define C_AST_TYPE_FLAG_LATE_BELOW (1u << 7)
-#define C_AST_TYPE_FLAG_LATE_MARKS (C_AST_TYPE_FLAG_LATE | C_AST_TYPE_FLAG_LATE_BELOW)
 
 // INIT_DECLARATOR's presence bit for an initializer, its last child (c_ast.h).
 #define C_AST_TYPE_INIT_DECLARATOR_INITIALIZER (1u << 2)
@@ -1465,11 +1462,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_size_query(CAstTypeBody* body, CPreprocessR
     }
 }
 
-// Inlined at both callers: the eager pass calls it once per node, and paid
-// about 40 M instructions on the unity self-host for an out-of-line call when
-// c_ast_types_retype became its second caller.
-BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_ast_types_type_node(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess, u32 node,
-                                                             u32 relative)
+BUSTER_GLOBAL_LOCAL void c_ast_types_type_node(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess, u32 node, u32 relative)
 {
     u32 kind = body->ast->kinds[node];
     switch (kind)
@@ -1571,17 +1564,12 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_ast_types_type_node(CAstTypeBody* body,
     }
 }
 
-// The eager pass: one forward loop, children before parents. A typed node
-// whose subtree holds a late node is marked C_AST_TYPE_FLAG_LATE_BELOW; in
-// postorder that holds when the newest late node starts at or after the
-// node's subtree.
+// The eager pass: one forward loop, children before parents.
 BUSTER_GLOBAL_LOCAL void c_ast_types_type_body(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess)
 {
     CAst const* ast = body->ast;
     u32 visited = 0;
     u32 accepted = 0;
-    // The newest late node's relative index + 1, 0 for none.
-    u32 late_newest = 0;
     for (u32 node = body->begin; node <= body->node; node += 1)
     {
         u32 relative = node - body->begin;
@@ -1608,9 +1596,6 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_body(CAstTypeBody* body, CTypeParseMac
                 body->start_head[first - body->token_start] = relative + 1;
                 c_ast_types_type_node(body, machine, preprocess, node, relative);
                 accepted += (body->flags[relative] & C_AST_TYPE_FLAG_ACCEPTED) != 0;
-                bool late = (body->flags[relative] & C_AST_TYPE_FLAG_LATE) != 0;
-                body->flags[relative] |= !late && late_newest > c_ast_subtree_begin(ast, node) - body->begin ? C_AST_TYPE_FLAG_LATE_BELOW : 0;
-                late_newest = late ? relative + 1 : late_newest;
             }
         }
     }
@@ -1619,33 +1604,42 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_body(CAstTypeBody* body, CTypeParseMac
     WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_NODES, visited);
 }
 
-// Re-types, in index order, the nodes of `node`'s subtree that carry a late
-// mark, at a query: the rows the eager pass missed may exist by now, and a row
-// that does is exactly the one the machine's run would find instead of
-// appending it. Every other node of the subtree reads no late row, so its
-// eager result stands. The marks stay, because a speculative rollback may
-// take a late row back; every query that reaches a marked node re-types it.
-// The rules write only the region's arrays, as an initializer's typing does
-// at its first query.
-BUSTER_GLOBAL_LOCAL void c_ast_types_retype(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess, u32 node)
+// Re-types a late node at a query: the row the eager pass missed may exist by
+// now, and a row that does is exactly the one the machine's run would find
+// instead of appending it. Its operands read no late row, so their eager
+// results stand. Only the three late kinds' rules run here; calling
+// c_ast_types_type_node from a second site took the per-kind rules out of
+// line in the eager loop, 30 to 70 M instructions on the unity self-host. The
+// query puts the node's flags back afterwards (c_ast_types_answer), so every
+// query that reaches it re-types it against the live rows.
+BUSTER_GLOBAL_LOCAL void c_ast_types_retype(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node)
 {
-    u32 last = node - body->begin;
-    u32 retyped = 0;
-    for (u32 relative = c_ast_subtree_begin(body->ast, node) - body->begin; relative <= last; relative += 1)
+    u32 relative = node - body->begin;
+    body->types[relative] = C_TYPE_ID_INVALID;
+    body->flags[relative] = 0;
+    switch (body->ast->kinds[node])
     {
-        u32 marks = body->flags[relative] & C_AST_TYPE_FLAG_LATE_MARKS;
-        if (marks)
-        {
-            body->types[relative] = C_TYPE_ID_INVALID;
-            body->flags[relative] = 0;
-            body->widths[relative] = 0;
-            c_ast_types_type_node(body, machine, preprocess, body->begin + relative, relative);
-            body->flags[relative] |= (u8)marks;
-            retyped += 1;
-        }
+    case C_AST_ADDRESS:
+    {
+        c_ast_types_address(body, preprocess, relative);
+    }
+    break;
+    case C_AST_CAST:
+    {
+        c_ast_types_cast(body, preprocess, node, relative);
+    }
+    break;
+    case C_AST_COMPOUND_LITERAL:
+    {
+        c_ast_types_compound_literal(body, preprocess, node, relative);
+    }
+    break;
+    default:
+    {
+    }
+    break;
     }
     body->statistics->late_checks += 1;
-    body->statistics->late_nodes += retyped;
 }
 
 // Whether the typer may type now: a tree index, an idle machine and the
@@ -1844,6 +1838,24 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_agree(CAstTypeBody const* body, CPr
     return agree;
 }
 
+// Whether the node may answer the query: accepted, checked-safe or replayed
+// under constraint checks, no half-parsed enumerator list, no type identity
+// site in the range, and every name it rests on resolving as it did.
+// *replay_out says whether a checked answer replays a string operand.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_vouched(CAstTypeBody const* body, CPreprocessResult const* preprocess, CParseResult* result,
+                                                           CScopeId scope, u32 node, u32 flags, bool checked, u32 start, u32 end, bool* replay_out)
+{
+    bool replay = checked && !(flags & C_AST_TYPE_FLAG_SAFE) && (flags & C_AST_TYPE_FLAG_REPLAY);
+    bool vouched = (flags & C_AST_TYPE_FLAG_ACCEPTED) && (!checked || (flags & C_AST_TYPE_FLAG_SAFE) || replay) &&
+                   !c_parse_pending_enum_possible(result) && c_parse_type_identity_sites_absent(result, start, end);
+    if (vouched && (flags & C_AST_TYPE_FLAG_LOOKUP_BELOW))
+    {
+        vouched = c_ast_types_lookups_agree(body, preprocess, result, scope, node);
+    }
+    *replay_out = replay;
+    return vouched;
+}
+
 BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                   u32 start, u32 end)
 {
@@ -1876,24 +1888,26 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
         else
         {
             u32 node = body->begin + relative;
-            if (body->flags[relative] & C_AST_TYPE_FLAG_LATE_MARKS)
-            {
-                c_ast_types_retype(body, machine, preprocess, node);
-            }
             u32 flags = body->flags[relative];
             bool checked = machine->validate_expression_constraints;
-            bool replay = checked && !(flags & C_AST_TYPE_FLAG_SAFE) && (flags & C_AST_TYPE_FLAG_REPLAY);
-            bool vouched = (flags & C_AST_TYPE_FLAG_ACCEPTED) && (!checked || (flags & C_AST_TYPE_FLAG_SAFE) || replay) &&
-                           !c_parse_pending_enum_possible(result) && c_parse_type_identity_sites_absent(result, start, end);
-            if (vouched && (flags & C_AST_TYPE_FLAG_LOOKUP_BELOW))
+            bool replay = false;
+            bool vouched = c_ast_types_vouched(body, preprocess, result, scope, node, flags, checked, start, end, &replay);
+            // A late node is declined outside a re-check, so only a declined
+            // node's query pays for the test. The re-check's flags go back at
+            // once: a rollback may take the row back, and the next query
+            // re-types the node against the live rows.
+            if (!vouched && (flags & C_AST_TYPE_FLAG_LATE))
             {
-                vouched = c_ast_types_lookups_agree(body, preprocess, result, scope, node);
+                c_ast_types_retype(body, preprocess, node);
+                flags = body->flags[relative];
+                vouched = c_ast_types_vouched(body, preprocess, result, scope, node, flags, checked, start, end, &replay);
+                body->flags[relative] = C_AST_TYPE_FLAG_LATE;
+                body->statistics->late_answers += vouched;
             }
             answer.node_kind = body->ast->kinds[node];
             if (vouched)
             {
                 body->statistics->answers += 1;
-                body->statistics->late_answers += (flags & C_AST_TYPE_FLAG_LATE_MARKS) != 0;
                 answer.status = C_AST_TYPE_ANSWER;
                 answer.type = body->types[relative];
                 answer.nonplace_projection = (flags & C_AST_TYPE_FLAG_NONPLACE) != 0;
