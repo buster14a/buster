@@ -10152,6 +10152,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_object_size_limits(UnitTestArgum
         S8("int keep = 7;\nstruct S { int v[4611686018427387904ULL]; };"),
         S8("int keep = 7;\nint f(void) { char local[18446744073709551615ULL]; return local[0]; }"),
         S8("int keep = 7;\ntypedef char Grid[4294967296ULL][4294967296ULL];"),
+        S8("int keep = 7;\nchar big[1ULL<<40][1ULL<<40];"),
         S8("int keep = 7;\nvoid f(int a[2305843009213693952ULL]);"),
         S8("int keep = 7;\nint (*pointer)[2305843009213693952ULL];"),
         S8("int keep = 7;\ntypedef int Big[2305843009213693952ULL];"),
@@ -10168,6 +10169,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_object_size_limits(UnitTestArgum
         S8("int keep = 7;\nchar big[(unsigned __int128)0xffffffffffffffffULL + 1];"),
         S8("int keep = 7;\ntypedef unsigned __int128 U; char big[(U)0xffffffffffffffffULL + 1];"),
         S8("int keep = 7;\nchar big[((unsigned __int128)1 << 64) + 1];"),
+        S8("int keep = 7;\nchar big[(unsigned __int128)1 << 70];"),
+        S8("int keep = 7;\nint f(void) { char local[(unsigned __int128)1 << 64]; return local[0]; }"),
     };
     CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_C17};
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
@@ -10313,6 +10316,51 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_object_size_limits(UnitTestArgum
                             diagnostic.location.line == 2 && diagnostic.location.column == located[case_index].column;
                     }
                     BUSTER_TEST_RAW(arguments, located_diagnostic && !lowered.canonical_ir_certified, source);
+                    c_test_scratch_end(temporary);
+                }
+            }
+        }
+        // A zero-size GNU element makes the object zero bytes whatever its
+        // count, even one past u64, as Clang accepts it (#1479). Every shape
+        // is accepted by parsing, folding and lowering; sizeof is zero.
+        {
+            String8 zero_size[] = {
+                S8("struct E {}; struct E a[1ULL<<40][1ULL<<40]; _Static_assert(sizeof(a) == 0, \"\");"),
+                S8("struct E {}; typedef struct E T[1ULL<<40][1ULL<<40]; _Static_assert(sizeof(T) == 0, \"\"); T *pointer;"),
+                S8("int a[1ULL<<40][1ULL<<40][0]; _Static_assert(sizeof(a) == 0, \"\");"),
+                S8("struct E {}; struct E a[18446744073709551615ULL]; _Static_assert(sizeof(a) == 0, \"\");"),
+                S8("struct E {}; int f(void) { struct E a[1ULL<<40][1ULL<<40]; struct E* p = &a[5][7]; return sizeof(a) == 0 && p == &a[5][7] ? 0 : 1; }"),
+            };
+            String8 zero_size_wide[] = {
+                S8("struct E {}; struct E a[(__int128)1 << 64]; _Static_assert(sizeof(a) == 0, \"\");"),
+                S8("struct E {}; typedef struct E T[(unsigned __int128)1 << 64]; _Static_assert(sizeof(T) == 0, \"\");"),
+                S8("typedef int T[(unsigned __int128)1 << 70][0]; _Static_assert(sizeof(T) == 0, \"\");"),
+                S8("struct E {}; struct E a[(unsigned __int128)1 << 64][2]; _Static_assert(sizeof(a) == 0, \"\");"),
+                S8("struct E {}; int f(void) { struct E a[(unsigned __int128)1 << 64]; return (int)sizeof(a); }"),
+                S8("struct E {}; struct S { struct E e[(unsigned __int128)1 << 65]; int x; }; _Static_assert(sizeof(struct S) == 4, \"\");"),
+            };
+            u32 zero_size_count = (u32)BUSTER_ARRAY_LENGTH(zero_size) + (layout.has_128_bit_integer ? (u32)BUSTER_ARRAY_LENGTH(zero_size_wide) : 0);
+            for (u32 case_index = 0; case_index < zero_size_count; case_index += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(0, 0);
+                    String8 source = case_index < BUSTER_ARRAY_LENGTH(zero_size) ? zero_size[case_index]
+                        : zero_size_wide[case_index - BUSTER_ARRAY_LENGTH(zero_size)];
+                    // The Microsoft ABI gives an empty record one byte, so only
+                    // the zero-length-array shapes are zero-size there.
+                    bool empty_record = string_first_sequence(source, S8("struct E {}")) != BUSTER_STRING_NO_MATCH;
+                    if (!empty_record || target.os != OPERATING_SYSTEM_WINDOWS)
+                    {
+                        CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                            (CPreprocessOptions){.target = target, .data_layout = layout, .dialect = C_PREPROCESS_DIALECT_GNU17});
+                        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                        CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("zero-size-array.c"), tokens, syntax, target,
+                            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && semantic.diagnostic_count == 0, source);
+                        BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0 && lowered.canonical_ir_certified && lowered.program != 0, source);
+                    }
                     c_test_scratch_end(temporary);
                 }
             }
