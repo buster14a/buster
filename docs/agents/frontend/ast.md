@@ -8,11 +8,14 @@ appends a complete syntax tree as it goes. The tree covers declarations and
 declarators, statements, expressions, initializers and designators,
 attributes, assembly and the supported GNU/C23 forms, function bodies
 included. **Status: pilot.** The default pipeline does not build it. The
-opt-in [driver hook](#driver-pilot-hook) builds it, and then semantic analysis
-reads it for one job: the [tree expression typer](#tree-expression-typer)
-answers function-body expression-type queries from it. Otherwise
-`c_parse_ast`, `c_analyze_semantics_only` and `c_lower_to_ir_with_options`
-still rediscover syntax from token ranges, as described in the
+opt-in [driver hook](#driver-pilot-hook) builds it, and two consumers read it:
+- the [declaration split](#declaration-split-from-the-tree) publishes
+  `c_parse_ast`'s top-level records from its declaration nodes;
+- the [tree expression typer](#tree-expression-typer) answers function-body
+  expression-type queries during semantic analysis.
+
+Otherwise `c_analyze_semantics_only` and `c_lower_to_ir_with_options` still
+rediscover syntax from token ranges, as described in the
 [foundations guide](foundations.md). The consumer map below lists which
 walkers this tree is meant to retire, and what has to be shown before any of
 them move.
@@ -186,10 +189,12 @@ The tree accepts two attribute placements that need node slots of their own:
 
 `ide cc -fc-ast-pilot[=implicit|hybrid|explicit]` (see the
 [driver guide](../driver.md)) is off by default. When given, the C compile path
-calls `c_ast_build` after `c_preprocess` succeeds and before `c_parse_ast`,
-inside the existing parse phase boundary, so the build's time is part of
-`parse_ns` and of the `parse` phase in `-fmetrics-out`. The bare flag is the
-implicit layout. The tree lives in the unit's arena. The driver hands it to
+calls `c_ast_build` after `c_preprocess` succeeds, inside the existing parse
+phase boundary, so the build's time is part of `parse_ns` and of the `parse`
+phase in `-fmetrics-out`. The bare flag is the implicit layout. The tree lives
+in the unit's arena. The driver then takes the unit's declaration records from
+`c_parse_ast_from_tree` in place of `c_parse_ast`
+([declaration split](#declaration-split-from-the-tree)), and hands the tree to
 semantic analysis in `CParserResult.ast`, where the
 [tree expression typer](#tree-expression-typer) reads it; nothing else does.
 The object, every diagnostic and every later stage are unchanged. The driver has no phase arena to lend (`c_preprocess` is not
@@ -198,7 +203,7 @@ not complete fails the unit with the parse error class; its diagnostic is
 published exactly as a `c_parse_ast` diagnostic is. `-E` and assembly inputs
 never reach the hook.
 
-Under `-v` the driver prints three rows with the other verbose counters:
+Under `-v` the driver prints four rows with the other verbose counters:
 
 - `C_AST nodes=<n> tokens=<parser tokens> build_ns=<c_ast_build wall time>
   retained_bytes=<> transient_high_water=<> sealed_copy_bytes=<>
@@ -212,9 +217,14 @@ Under `-v` the driver prints three rows with the other verbose counters:
   queries answered from the tree> declines=<queries that mapped to a node the
   typer does not vouch for> misses=<queries that mapped to no node>
   gated=<queries met in a machine state the typer leaves alone>`
+- `C_AST_SPLIT units=<units whose records the tree split published>
+  records=<records it published> assertions=<body _Static_assert ranges it
+  published> fallbacks=<units it handed to c_parse_ast's walker>
+  reason=<CParserTreeFallback of the last fallback> fallback_token=<the first
+  token of the declaration that caused it>`
 
 The second row's passes run only under `-v`; they are diagnostic. The third
-row counts what the typer did during analysis; it times nothing. Each feeds a
+and fourth rows count what the typer and the split did; they time nothing. Each feeds a
 counter that is printed (`walk_steps`, `scan_calls`, `child_entries`), so the
 compiler cannot drop the measured loop. Both rows use the driver's own clock
 and are summed over the inputs of one invocation; the layout is the
@@ -309,6 +319,83 @@ misses on a private machine, with and without constraint checks. The
 The default stays off: hosted measurements are diagnostic, and adoption needs
 the Zen 5 route ([measurement plan](#measurement-plan)).
 
+## Declaration split from the tree
+
+`c_parse_ast_from_tree` (`c_parse.c`, after `c_parse_ast`) publishes the
+`CParserResult` that `c_parse_ast_run` would publish for the same unit. It
+covers every `CParserDeclaration` field, each function body's `_Static_assert`
+ranges (`CParserStaticAssert`), the initializer and assertion expression
+ranges, and the number facts. It reads them from the tree's declaration nodes
+instead of rediscovering them from tokens. The driver uses it under
+`-fc-ast-pilot`. Every rule is an explicit loop over a postorder range or a
+fixed number of node and token reads; nothing recurses.
+
+- **Split.** The external declarations are the `TRANSLATION_UNIT`'s children,
+  and each one's anchor is its first token. So one declaration ends where the
+  next begins, and the last ends at the end-of-file anchor. A `DECLARATION`
+  gives one record per `INIT_DECLARATOR`, or one record when it has none. Like
+  the walker, it splits a list into one segment per declarator, and the
+  segments share the specifiers. A `FUNCTION_DEFINITION`, a file-scope
+  `STATIC_ASSERT`, an `ASM_TOP_LEVEL` and an `EMPTY_DECLARATION` give one
+  record each.
+- **Names.** A record's name is its declarator's `DECLARATOR_NAME`. The
+  record is a function when the first derivation above that name is a
+  `DECLARATOR_FUNCTION`; its parameter list then gives the identifier-list
+  range, when the name stands in no group. Group boundaries are where a suffix
+  derivation's inner declarator is a pointer. A declaration without a
+  declarator takes the last name outside every delimiter, else the first name
+  inside one, which is what the walker does.
+- **Punctuation.** The `)` before a body's `{`, the `,` before a later
+  declarator, the `=` before an initializer and the final `;` have no nodes.
+  Each is read as the token next to an anchor, and that read also checks that
+  the token is the one the shape requires.
+- **Body assertions.** The walker opens a frame at each `{` that is outside
+  parentheses and brackets, and notes every statement that begins with
+  `_Static_assert`. The tree side notes a `STATIC_ASSERT` that is an item of a
+  `COMPOUND_STATEMENT` or `MEMBER_LIST` and is joined to the body only through
+  braces. A statement expression, a type name, a parameter or a `for` header
+  reaches it through parentheses instead. A sub-statement of a label, `case`
+  or control statement begins with its keyword, so it is not noted.
+
+The token walker stays the authority, and the whole unit falls back to it in
+two cases:
+1. **The walker would report a diagnostic.** A probe runs the walker's own
+   validators over every token: integer spelling, type-specifier runs and the
+   missing return operand. It reads the shape sidecar in 64-token windows. The
+   walker validates a subset of those tokens, so a clean probe means a clean
+   walk.
+2. **The walker would read a shape differently from the grammar, or no rule
+   here states what it reads.** `CParserTreeFallback` names each case:
+   - `specifiers`: a parenthesized specifier (`typeof`, `_Atomic(T)`,
+     `_Alignas`, `_BitInt`), or an enum's fixed type;
+   - `declarator`: redundant parentheses, which is
+     [#3215](https://github.com/buster14a/buster/issues/3215)'s family and
+     where the walker misreads; attributes on a pointer or opening a group; or
+     a function returning a function or an array;
+   - `old_style`: an old-style declaration list;
+   - `tokens`: a comma operator in an initializer, where the walker splits a
+     list, or a token next to an anchor that is not the required one;
+   - `assertion`: a file-scope assertion whose condition holds a comma or an
+     initializer list, or a body assertion with no message or behind an
+     attribute list.
+
+A fallback discards everything derived and returns `c_parse_ast`'s result, so
+the records, the diagnostics and #3215's rejections are always the walker's.
+Neither #3215 nor #3143 is changed by this split. Where the walker's reading
+is wrong but the split can state it, the split reproduces it instead. For
+example, a `typedef` or `constexpr` word anywhere outside the body marks the
+whole declaration ([#3310](https://github.com/buster14a/buster/issues/3310)).
+The `typedef` and `constexpr` words are collected once per unit, so only a
+declaration that holds one outside its top-level specifiers is scanned whole.
+
+`c_ast_test_split` runs one shape per fallback reason, both #3215 inputs
+included, in every layout. It requires the walker's result and the named
+reason. The [corpus differential](#corpus-differential) compares every
+record. On the self-host unity input the split publishes all 15,476 records
+and 33 body assertions, with no fallback. The fixtures that fall back are the
+parenthesized specifiers, the fixed-type enums and a few attributed or
+redundant declarators.
+
 ## Corpus differential
 
 `c_ast_test_corpus` (`c_ast_tests`; like `c_test.c`'s fixture suites it does not run on Android or iOS, whose test runs carry no repository tree) builds every `tests/**/*.c` file the
@@ -334,6 +421,17 @@ opening a parenthesized pointer declarator, and a C23 opaque `enum E : T;`.
 The tree also rejects syntax errors that today's `-fsyntax-only` accepts
 ([#3143](https://github.com/buster14a/buster/issues/3143)).
 
+Every input whose tree builds also checks the
+[declaration split](#declaration-split-from-the-tree) (`c_ast_corpus_split`).
+The records `c_parse_ast_from_tree` publishes must equal `c_parse_ast`'s:
+the same count, every `CParserDeclaration` field of every record, each
+record's body assertion ranges, and the diagnostics. A unit the split hands to
+the walker is compared too. To keep a split that always falls back from
+passing, there are floors on the records it publishes itself: about 6,100
+from the fixtures and constructs, and about 15,900 with the frontend sources.
+Each of the four frontend sources must take the split whole. Today the
+comparison covers about 16,400 records with 0 differences.
+
 Every input whose tree builds and whose declarations `c_parse_ast` accepts
 also checks the [tree expression typer](#tree-expression-typer)
 (`c_ast_corpus_types`). Semantic analysis runs three times on it: without the
@@ -357,23 +455,31 @@ These token walkers currently rediscover structure that the tree records once.
 A row may be retired only when its consumer reads nodes and the corresponding
 differential tests pass.
 
-| Current owner | Rediscovers | Tree replacement |
-|---|---|---|
-| `c_parse_ast_run`, `c_parser_parse_function_body`, `c_parser_parse_declaration_expression` | declaration split, declarator name, body range, static-assert ranges | `DECLARATION`, `FUNCTION_DEFINITION`, `INIT_DECLARATOR`, `STATIC_ASSERT` |
-| `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items |
-| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` |
-| `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder |
-| `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes |
-| `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots |
-| `c_ir_predict_expression_type*`, `c_ir_query_*` | type-name probes, operand types over token ranges | `TYPE_NAME` / `CAST` / `SIZEOF_*` nodes plus retained semantic facts |
-| `c_ir_build_delimiter_index`, `CTokenPositionIndex` matching delimiters | bracket matching for every structural query | subtree extents |
+| Current owner | Rediscovers | Tree replacement | Status |
+|---|---|---|---|
+| `c_parse_ast_run`, `c_parser_parse_function_body`, `c_parser_parse_declaration_expression` | declaration split, declarator name, body range, static-assert ranges | `DECLARATION`, `FUNCTION_DEFINITION`, `INIT_DECLARATOR`, `STATIC_ASSERT` | Retired under `-fc-ast-pilot` by the [declaration split](#declaration-split-from-the-tree). The walker stays the default path and the per-unit fallback. |
+| `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Not migrated. |
+| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Not migrated. |
+| `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
+| `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Not migrated. |
+| `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | Not migrated. |
+| `c_ir_predict_expression_type*`, `c_ir_query_*` | type-name probes, operand types over token ranges | `TYPE_NAME` / `CAST` / `SIZEOF_*` nodes plus retained semantic facts | Not migrated. |
+| `c_ir_build_delimiter_index`, `CTokenPositionIndex` matching delimiters | bracket matching for every structural query | subtree extents | Not migrated. |
+
+Under `-fc-ast-pilot`, the first row's three walkers no longer run for a unit
+whose records the split publishes. Their consumer, semantic analysis's
+declaration loop, reads records that come from `DECLARATION`,
+`FUNCTION_DEFINITION`, `INIT_DECLARATOR` and `STATIC_ASSERT` nodes, and the
+field-by-field differential passes. The row is not retired by default: the
+walker still runs without the flag and for every unit the split hands back.
+Deleting it waits on the hook becoming the default.
 
 The [tree expression typer](#tree-expression-typer) is the first consumer of
 the fourth row's replacement. Under `-fc-ast-pilot` it answers most of semantic
 analysis's body expression-type queries from expression nodes, operators
 included. The machine still answers the rest: every shape whose answer
-appends a type row, and every query outside a typed body. So no row is
-retired yet.
+appends a type row, and every query outside a typed body. So that row is not
+retired.
 
 ## Measurement plan
 
@@ -467,5 +573,47 @@ the same way and diagnostic only:
 - In bodies the machine still answers mostly shapes that append rows: casts to
   primitive or pointer type names, `&` and string literals. Outside bodies
   and misses are the other large items.
+
+For the [declaration split](#declaration-split-from-the-tree), these budgets
+were declared before its measured runs. The input and flags are the same as
+for stage 2, and the four Callgrind arms are counted on tests-off
+`-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `14544ffe`, which the candidate branches from. The budgets:
+- correctness:
+  - 0 differences over the corpus and the frontend sources;
+  - a one-off field-by-field comparison on the self-host unity input, also
+    with 0 differences;
+  - identical diagnostics with and without the flag;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- coverage: the self-host unity input takes the split whole, with no
+  fallback.
+- the split's own effect (C against B): the split, with its probe and scratch
+  charged, costs fewer instructions than `c_parse_ast` does on the same unit
+  in B. The whole compile also costs fewer instructions.
+- the default path (D against A): the split adds no work there, so the
+  difference stays within ±0.05% Ir.
+- adoption of the hook as the default: unchanged from stage 1. Hosted
+  instruction counts can show only its instruction half; wall time, `-c` and
+  RSS acceptance remain with the Zen 5 route.
+
+The declaration split's hosted census is
+[`2026-10-09T225734Z`](../../performance-audits/2026-10-09T225734Z.md). It was
+taken in the same way and is diagnostic only:
+- Every budget passes except adoption. Objects are byte-identical across the
+  four arms.
+- The split's call costs 457.8 M Ir against the walker's 796.1 M. Both
+  figures include the 292.7 M of number facts that both build.
+- The whole compile drops by 3.47% (C against B). The pilot is now a 6.43%
+  instruction gain against default.
+- The default path is +0.025%: `c_number_facts_build` is no longer inlined
+  into `c_parse_ast_run`.
+- The parse phase's paired wall time drops by 41 ms in the median. The whole
+  compile's wall time is lost in host noise.
+- Acceptance stays with Zen 5 (#2761), so the default stays off.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
