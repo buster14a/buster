@@ -146,3 +146,4 @@ request: PR #3157 issue #2717 final default -g scalar location candidate after d
 # request: PR #3157 issue #2717 remove analyzer dead store; compare the final exact PR head
 request: PR #3157 issue #2717 guard optional published CFG; compare the final exact PR head
 request: PR #3157 issue #2717 ready-head Apple/macOS/iOS CI and fresh compiler-compare-v1 after marker-only push from ee52b190; source-identical code
+request: PR #3321 issue #3102 owner-requested exact-head comparison after the readiness hold; tree typer stage 3 with type-row interning narrowed to opt-in -fc-ast-pilot (default compile path interns nothing); merge of current main f6e8d25ffd1768a37107dccf1bfe4f8bc56a0667; fresh compiler-compare-v1 and throughput-corpus-v2 qualification
