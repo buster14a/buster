@@ -736,6 +736,7 @@ BUSTER_C_INTERNAL String8 c_ir_scalar_type_name(CTypeKind kind)
     case C_TYPE_STRUCT:
     case C_TYPE_UNION:
     case C_TYPE_ENUM:
+    case C_TYPE_FP16_STORAGE:
     case C_TYPE_COUNT:
         return (String8){0};
     }
@@ -867,6 +868,7 @@ BUSTER_C_SHARED bool c_ir_scalar_type_properties(Target target, CTypeKind kind, 
     case C_TYPE_STRUCT:
     case C_TYPE_UNION:
     case C_TYPE_ENUM:
+    case C_TYPE_FP16_STORAGE:
     case C_TYPE_COUNT:
         return false;
     }
@@ -23962,6 +23964,32 @@ BUSTER_C_INTERNAL IrTypeId c_ir_vendor_signature_type(CIntegerIrBuilder* builder
 
 // Queries suspend through the existing query machine when an operand needs a
 // nested answer; they never evaluate the source argument or recurse on input.
+// A fixed-signature operand converts to its parameter type. A call admitted
+// by the LLVM 23.1.2 contract passes a same-size vector of another lane shape
+// (char lanes for a long long byte shift); like a C vector cast, that operand
+// is reinterpreted bitwise rather than converted lane by lane.
+BUSTER_C_INTERNAL IrValueId c_ir_vendor_argument_value(CIntegerIrBuilder* builder, IrValueId value, IrTypeId type, IrSourceRange source)
+{
+    IrValueId result;
+    IrType* expected = ir_type_from_id(&builder->program->types, type);
+    IrTypeId actual_type = value.value < builder->function->value_count ? builder->function->values[value.value].canonical_type : IR_TYPE_ID_INVALID;
+    IrType* actual = ir_type_from_id(&builder->program->types, actual_type);
+    bool reinterpret = expected && actual && actual_type.value != type.value && expected->kind == IR_TYPE_VECTOR &&
+        actual->kind == IR_TYPE_VECTOR && expected->layout.resolved && actual->layout.resolved &&
+        expected->layout.size == actual->layout.size && expected->element_count != actual->element_count;
+    if (reinterpret)
+    {
+        IrValueId loaded = builder->function->values[value.value].category == IR_VALUE_PLACE
+            ? c_ir_emit_load_place_raw(builder, value, actual_type, source) : value;
+        result = loaded.value == IR_ID_UNDERLYING_INVALID ? loaded : c_ir_emit_representation_alias_conversion(builder, loaded, type, source);
+    }
+    else
+    {
+        result = c_ir_emit_cast(builder, value, type, source);
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_ir_vendor_result_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 close, IrTypeId* type_out)
 {
     String8 name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start]);
@@ -23969,7 +23997,8 @@ BUSTER_C_INTERNAL bool c_ir_vendor_result_type_attempt(CIntegerIrBuilder* builde
     CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
     IrTypeId type = IR_TYPE_ID_INVALID;
     bool valid = true;
-    if (c_semantic_vendor_builtin_signature(builder->target, name, &signature))
+    bool operand_signature = generic.operation == C_VENDOR_GENERIC_PMULHUW128_SIGNATURE;
+    if (!operand_signature && c_semantic_vendor_builtin_signature(builder->target, name, &signature))
         type = c_ir_vendor_signature_type(builder, signature.types[0]);
     else if (generic.operation)
     {
@@ -23986,7 +24015,16 @@ BUSTER_C_INTERNAL bool c_ir_vendor_result_type_attempt(CIntegerIrBuilder* builde
         if (valid && generic.type_arguments)
         {
             u32 selected = generic.type_arguments == 2 ? 1 : 0;
-            valid = c_ir_query_type_name(builder, starts[selected], ends[selected], true, &type);
+            bool storage_half = generic.operation == C_VENDOR_GENERIC_BIT_CAST &&
+                c_semantic_vendor_storage_half_argument(builder->preprocess, starts[0], ends[0]);
+            if (storage_half)
+            {
+                builder->failure_message = S8("__builtin_bit_cast destination __fp16 has no canonical implementation");
+                builder->failure_token_index = starts[0];
+                valid = false;
+            }
+            else
+                valid = c_ir_query_type_name(builder, starts[selected], ends[selected], true, &type);
         }
         else if (valid)
         {
@@ -26568,8 +26606,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     value = c_ir_emit_load_place_raw(builder, value, builder->function->values[value.value].canonical_type,
                                                      c_ir_token_source_range(builder, token));
                 if (fixed)
-                    value = c_ir_emit_cast(builder, value, c_ir_vendor_signature_type(builder, signature.types[argument + 1]),
-                                           c_ir_token_source_range(builder, token));
+                    value = c_ir_vendor_argument_value(builder, value, c_ir_vendor_signature_type(builder, signature.types[argument + 1]),
+                                                       c_ir_token_source_range(builder, token));
                 if (value.value == IR_ID_UNDERLYING_INVALID) return C_IR_PREPARED_CALL_STEP_FAILED;
                 selected->arguments[argument] = value;
                 frame->as.prepared_call.state->argument_index += 1;
@@ -60294,8 +60332,100 @@ struct CIrVendorFunctionBudget
     u64 instructions;
     u64 values;
     u64 blocks;
+    String8 failure_message;
+    u32 failure_token_index;
     bool valid;
 };
+
+BUSTER_C_INTERNAL bool c_ir_vendor_budget_type_is_variably_modified(CIntegerIrBuilder* builder, IrTypeId type)
+{
+    bool variable = false;
+    u32 remaining = builder->program->types.count;
+    while (!variable && remaining && type.value < builder->program->types.count)
+    {
+        variable = c_ir_vla_array_type(builder, type) != 0;
+        if (!variable)
+        {
+            IrType* value = ir_type_from_id(&builder->program->types, type);
+            if (!value || (value->kind != IR_TYPE_ARRAY && value->kind != IR_TYPE_POINTER)) break;
+            type = value->element_type;
+        }
+        remaining -= 1;
+    }
+    return variable;
+}
+
+BUSTER_C_INTERNAL bool c_ir_vendor_budget_operand_requires_evaluation(CIntegerIrBuilder* builder, u32 operator_index, u32 operand_end,
+                                                                       bool typeof_operand)
+{
+    bool requires_evaluation = false;
+    u32 operand_start = operator_index + 1;
+    bool has_array_suffix = false;
+    bool has_call = false;
+    for (u32 index = operand_start; index < operand_end; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        has_array_suffix |= c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET);
+        has_call |= token.kind == C_TOKEN_IDENTIFIER && index + 1 < operand_end &&
+                    c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+    }
+    if (has_array_suffix)
+    {
+        for (u32 bound_index = 0; !requires_evaluation && bound_index < builder->parse.array_bound_count; bound_index += 1)
+        {
+            CArrayBound bound = builder->parse.array_bounds[bound_index];
+            bool variable_bound = bound.is_star || (bound.token_count && !bound.has_inferred_count);
+            u64 bound_end = (u64)bound.token_start + bound.token_count;
+            bool inside_operand = bound.token_start >= operand_start && bound_end <= operand_end;
+            requires_evaluation = variable_bound && inside_operand;
+        }
+    }
+    if (!requires_evaluation && (has_array_suffix || has_call))
+    {
+        IrTypeId type = IR_TYPE_ID_INVALID;
+        bool type_resolved = false;
+        if (typeof_operand)
+        {
+            type = c_ir_type_name(builder, operator_index, operand_end);
+            type_resolved = type.value != IR_ID_UNDERLYING_INVALID;
+        }
+        else if (operand_start < operand_end && c_token_is_punctuator(&builder->preprocess.tokens[operand_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, operand_start, operand_end,
+                C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            if (close + 1 == operand_end)
+            {
+                type = c_ir_type_name(builder, operand_start + 1, close);
+                type_resolved = type.value != IR_ID_UNDERLYING_INVALID;
+            }
+        }
+        if (!type_resolved)
+        {
+            u32 expression_start = operand_start;
+            u32 expression_end = operand_end;
+            if (expression_start < expression_end &&
+                c_token_is_punctuator(&builder->preprocess.tokens[expression_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                u32 close = c_ir_matching_delimiter_cached(builder, expression_start, expression_end,
+                    C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                if (close + 1 == expression_end)
+                {
+                    expression_start += 1;
+                    expression_end = close;
+                }
+            }
+            CIrQueryFrame operand_type = {0};
+            bool queried = c_ir_query_execute(builder,
+                (CIrQueryFrame){.start = expression_start, .end = expression_end, .kind = C_IR_QUERY_FRAME_OPERAND_TYPE},
+                &operand_type);
+            type_resolved = queried && operand_type.success;
+            if (type_resolved) type = operand_type.result_type;
+            requires_evaluation = !type_resolved && has_array_suffix && has_call;
+        }
+        requires_evaluation |= type_resolved && c_ir_vendor_budget_type_is_variably_modified(builder, type);
+    }
+    return requires_evaluation;
+}
 
 // Source tokens size the ordinary body. Implemented intrinsic expansions add
 // their own proven rows/blocks. Extra joins may ask SSA to create an incomplete
@@ -60308,6 +60438,35 @@ BUSTER_C_INTERNAL CIrVendorFunctionBudget c_ir_vendor_function_budget(CIntegerIr
     for (u32 index = declaration.token_start; total.valid && index + 1 < end; index += 1)
     {
         CToken token = builder->preprocess.tokens[index];
+        if (builder->parse.storage_half_spelling_present && token.kind == C_TOKEN_IDENTIFIER)
+        {
+            String8 word = c_token_spelling(builder->preprocess.spelling_base, token);
+            bool typeof_operand = string_equal(word, S8("typeof")) || string_equal(word, S8("__typeof")) ||
+                                 string_equal(word, S8("__typeof__")) || string_equal(word, S8("typeof_unqual"));
+            bool sizeof_operand = c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(SIZEOF));
+            bool alignof_operand = c_token_in_well_known_set(builder->preprocess.spelling_base, token,
+                C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU_ALT));
+            if (typeof_operand || sizeof_operand || alignof_operand)
+            {
+                u32 operand_end = c_ir_unevaluated_operand_end(builder, index + 1, end);
+                bool evaluated_vla = operand_end > index &&
+                    (typeof_operand || sizeof_operand) &&
+                    c_ir_vendor_budget_operand_requires_evaluation(builder, index, operand_end, typeof_operand);
+                if (operand_end > index && !evaluated_vla)
+                {
+                    index = operand_end - 1;
+                    continue;
+                }
+            }
+        }
+        if (builder->parse.storage_half_cast_calls &&
+            (builder->parse.storage_half_cast_calls[index / 8] & (u8)(1u << (index & 7))))
+        {
+            total.valid = false;
+            total.failure_message = S8("__fp16 cast expression has no canonical implementation");
+            total.failure_token_index = index;
+            continue;
+        }
         if (token.kind != C_TOKEN_IDENTIFIER ||
             !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
         String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
@@ -60322,7 +60481,34 @@ BUSTER_C_INTERNAL CIrVendorFunctionBudget c_ir_vendor_function_budget(CIntegerIr
             u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end,
                 C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             IrTypeId type = IR_TYPE_ID_INVALID;
-            total.valid = close < end && c_ir_vendor_result_type(builder, index, close, &type);
+            bool bare_storage_half_bitcast = close < end && generic.operation == C_VENDOR_GENERIC_BIT_CAST &&
+                c_semantic_vendor_storage_half_argument(builder->preprocess, index + 2,
+                    c_parse_constraint_expression_end(&builder->parse, builder->preprocess, index + 2, close));
+            bool storage_half_bitcast = generic.operation == C_VENDOR_GENERIC_BIT_CAST && close < end &&
+                ((builder->parse.storage_half_bitcast_calls &&
+                  (builder->parse.storage_half_bitcast_calls[index / 8] & (u8)(1u << (index & 7)))) ||
+                 bare_storage_half_bitcast);
+            bool storage_half_convertvector = generic.operation == C_VENDOR_GENERIC_CONVERT_VECTOR && close < end &&
+                builder->parse.storage_half_convertvector_calls &&
+                (builder->parse.storage_half_convertvector_calls[index / 8] & (u8)(1u << (index & 7)));
+            if (storage_half_bitcast)
+            {
+                total.valid = false;
+                total.failure_message = bare_storage_half_bitcast ?
+                    S8("__builtin_bit_cast destination __fp16 has no canonical implementation") :
+                    S8("storage-half value bitcast has no canonical implementation");
+                total.failure_token_index = index + 2;
+            }
+            else if (storage_half_convertvector)
+            {
+                total.valid = false;
+                total.failure_message = S8("__fp16 vector conversion has no canonical implementation");
+                total.failure_token_index = index;
+            }
+            else
+            {
+                total.valid = close < end && c_ir_vendor_result_type(builder, index, close, &type);
+            }
             IrType* result = total.valid ? ir_type_from_id(&builder->program->types, type) : 0;
             u64 lanes = result && result->kind == IR_TYPE_VECTOR ? result->element_count : 1;
             u64 rows = generic.operation == C_VENDOR_GENERIC_BIT_CAST ? 16 :
@@ -63126,9 +63312,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         {
             scratch_end(lowering_temporary);
             *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
-                .message = function_reservation_error.length ? function_reservation_error :
+                .message = vendor_budget.failure_message.length ? vendor_budget.failure_message :
+                           function_reservation_error.length ? function_reservation_error :
                            scratch_fits ? S8("C function body is too large to lower") : S8("C function lowering scratch reservation exceeded"),
-                .location = c_preprocess_site_location(&preprocess, declaration.location),
+                .location = vendor_budget.failure_message.length && vendor_budget.failure_token_index < preprocess.token_count
+                    ? c_preprocess_token_location(&preprocess, preprocess.tokens[vendor_budget.failure_token_index])
+                    : c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
             module->rejected_function_count += 1;

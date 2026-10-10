@@ -1,5 +1,60 @@
-// Native Clang-corpus parser/checker negative controls, included after the
-// production helpers by clang_suite.c. No external compiler work in self-tests.
+// Native Clang-corpus parser/checker controls, included after production helpers
+// by clang_suite.c. Self-tests exercise ledger, preprocessing, and disassembly
+// validation without launching external compilers.
+
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_self_test(Arena* arena)
+{
+    String8 baseline = S8("/tmp/clang-lzcnt-baseline: file format elf64-x86-64\n"
+                          "0000000000001000 <zen5_lzcnt_probe_u16_macro>:\n"
+                          "1000: retq\n"
+                          "0000000000001001 <zen5_lzcnt_probe_u32_function>:\n"
+                          "1001: callq 2000 <__lzcnt32>\n"
+                          "0000000000001002 <zen5_lzcnt_probe_u32_alias>:\n"
+                          "1002: bsrq %rdi, %rax\n"
+                          "0000000000001003 <zen5_lzcnt_probe_u64_macro>:\n"
+                          "1003: retq\n"
+                          "0000000000001004 <zen5_lzcnt_probe_u64_alias>:\n"
+                          "1004: retq\n");
+    String8 native = S8("/tmp/clang-lzcnt-znver5.o: file format elf64-x86-64\n"
+                        "0000000000001000 <zen5_lzcnt_probe_u16_macro>:\n"
+                        "1000: lzcntw %ax, %ax\n"
+                        "0000000000001001 <zen5_lzcnt_probe_u32_function>:\n"
+                        "1001: lzcntl %edi, %eax\n"
+                        "0000000000001002 <zen5_lzcnt_probe_u32_alias>:\n"
+                        "1002: lzcntl %edi, %eax\n"
+                        "0000000000001003 <zen5_lzcnt_probe_u64_macro>:\n"
+                        "1003: lzcntq %rdi, %rax\n"
+                        "0000000000001004 <zen5_lzcnt_probe_u64_alias>:\n"
+                        "1004: lzcntq %rdi, %rax\n");
+    String8 missing_probe = S8("0000000000001000 <zen5_lzcnt_probe_u16_macro>:\n"
+                               "1000: retq\n"
+                               "0000000000001001 <zen5_lzcnt_probe_u32_function>:\n"
+                               "1001: lzcntl %edi, %eax\n"
+                               "0000000000001002 <zen5_lzcnt_probe_u32_alias>:\n"
+                               "1002: lzcntl %edi, %eax\n"
+                               "0000000000001003 <zen5_lzcnt_probe_u64_macro>:\n"
+                               "1003: lzcntq %rdi, %rax\n"
+                               "0000000000001004 <zen5_lzcnt_probe_u64_alias>:\n"
+                               "1004: lzcntq %rdi, %rax\n");
+    String8 outside = S8("0000000000001000 <main>:\n"
+                         "1000: lzcntl %edi, %eax\n");
+    bool banner_safe = clang_suite_intrinsics_disassembly_has_lzcnt(baseline, BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID);
+    bool probes_present = clang_suite_intrinsics_disassembly_has_lzcnt(baseline, BUSTER_CLANG_SUITE_LZCNT_POLICY_PROBES_ONLY);
+    bool all_native_present = clang_suite_intrinsics_disassembly_has_lzcnt(native, BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH);
+    bool baseline_instruction_rejected = !clang_suite_intrinsics_disassembly_has_lzcnt(native, BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID);
+    bool missing_probe_rejected = !clang_suite_intrinsics_disassembly_has_lzcnt(missing_probe,
+                                                                               BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH);
+    String8 outside_complete = string_format(arena, S8("{S8}{S8}"), baseline, outside);
+    bool outside_rejected = !clang_suite_intrinsics_disassembly_has_lzcnt(outside_complete, BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID);
+    bool empty_rejected = !clang_suite_intrinsics_disassembly_has_lzcnt((String8){0}, BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID);
+    bool result = banner_safe && probes_present && all_native_present && baseline_instruction_rejected &&
+                  missing_probe_rejected && outside_rejected && empty_rejected;
+    if (!result)
+    {
+        string_print(S8("error: intrinsic disassembly self-test failed\n"));
+    }
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL bool clang_suite_smoke_self_test(Arena* arena)
 {
@@ -138,7 +193,7 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_self_test(Arena* arena)
         valid = clang_suite_inventory(arena, changed, &inventory) && inventory.files == 7 && valid;
     }
     String8 duplicated = string_format(arena, S8("{S8}{S8}"), raw, raw);
-    valid = !clang_suite_inventory(arena, duplicated, &inventory) && clang_suite_smoke_self_test(arena) && valid;
+    valid = !clang_suite_inventory(arena, duplicated, &inventory) && clang_suite_smoke_self_test(arena) && clang_suite_intrinsics_self_test(arena) && valid;
     string_print(S8("CLANG_SUITE_SELF_TEST status={S8}\n"), valid ? S8("pass") : S8("fail"));
     return valid;
 }

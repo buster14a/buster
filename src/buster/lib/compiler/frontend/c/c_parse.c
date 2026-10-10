@@ -2070,6 +2070,7 @@ BUSTER_C_SHARED bool c_parse_builtin_type_layout(Target target, CTypeKind kind, 
         size = layout.unsigned_integer.size;
         alignment = layout.unsigned_integer.alignment;
         break;
+    case C_TYPE_FP16_STORAGE:
     case C_TYPE_FLOAT16:
     case C_TYPE_BFLOAT16:
     {
@@ -6487,6 +6488,7 @@ BUSTER_C_INTERNAL CTypeKind c_parse_expression_unsigned_kind(CTypeKind kind)
     case C_TYPE_FUNCTION:
     case C_TYPE_STRUCT:
     case C_TYPE_UNION:
+    case C_TYPE_FP16_STORAGE:
     case C_TYPE_COUNT:
         return C_TYPE_INVALID;
     }
@@ -7131,7 +7133,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPre
 
 BUSTER_C_SHARED bool c_parse_expression_real_kind(CTypeKind kind)
 {
-    bool result = c_parse_expression_integer_kind(kind) || kind == C_TYPE_FLOAT16 || kind == C_TYPE_BFLOAT16 || kind == C_TYPE_FLOAT ||
+    bool result = c_parse_expression_integer_kind(kind) || kind == C_TYPE_FP16_STORAGE || kind == C_TYPE_FLOAT16 || kind == C_TYPE_BFLOAT16 || kind == C_TYPE_FLOAT ||
                   kind == C_TYPE_DOUBLE || kind == C_TYPE_LONG_DOUBLE;
     return result;
 }
@@ -12548,7 +12550,7 @@ BUSTER_C_INTERNAL bool c_parse_type_word(String8 spelling)
     {
         return string_equal(spelling, S8("signed")) || string_equal(spelling, S8("double")) || string_equal(spelling, S8("extern")) ||
                string_equal(spelling, S8("static")) || string_equal(spelling, S8("inline")) || string_equal(spelling, S8("struct")) ||
-               string_equal(spelling, S8("__bf16"));
+               string_equal(spelling, S8("__bf16")) || string_equal(spelling, S8("__fp16"));
     }
     case 7:
     {
@@ -12733,11 +12735,11 @@ BUSTER_C_INTERNAL bool c_parse_float16_specifier_valid(bool seen_void, bool seen
 }
 
 BUSTER_GLOBAL_LOCAL bool c_parse_primitive_specifiers_valid(bool seen_void, bool seen_va_list, bool seen_bool, bool seen_char,
-    bool seen_short, bool seen_int, bool seen_signed, bool seen_unsigned, bool seen_float16, bool seen_bfloat16, bool seen_float, bool seen_double,
+    bool seen_short, bool seen_int, bool seen_signed, bool seen_unsigned, bool seen_float16, bool seen_fp16, bool seen_bfloat16, bool seen_float, bool seen_double,
     bool seen_int128, bool seen_complex, bool seen_imaginary, u32 long_count, bool duplicate)
 {
     u32 primary_count = (u32)seen_void + (u32)seen_va_list + (u32)seen_bool + (u32)seen_char +
-                        (u32)seen_float16 + (u32)seen_bfloat16 + (u32)seen_float + (u32)seen_double + (u32)seen_int128;
+                        (u32)seen_float16 + (u32)seen_fp16 + (u32)seen_bfloat16 + (u32)seen_float + (u32)seen_double + (u32)seen_int128;
     bool valid = !duplicate && !seen_imaginary && !(seen_signed && seen_unsigned) && long_count <= 2 && primary_count <= 1;
     if (seen_void || seen_va_list || seen_bool)
     {
@@ -12747,9 +12749,10 @@ BUSTER_GLOBAL_LOCAL bool c_parse_primitive_specifiers_valid(bool seen_void, bool
     {
         valid &= !seen_short && !seen_int && !seen_complex && long_count == 0;
     }
-    else if (seen_float16 || seen_bfloat16)
+    else if (seen_float16 || seen_fp16 || seen_bfloat16)
     {
         valid &= !seen_bfloat16 || !seen_complex;
+        valid &= !seen_fp16 || !seen_complex;
         valid &= c_parse_float16_specifier_valid(seen_void, seen_bool, seen_char, seen_short, seen_int, seen_signed,
             seen_unsigned, seen_int128, seen_float, seen_double, seen_va_list, long_count);
     }
@@ -12795,6 +12798,7 @@ BUSTER_C_INLINE BUSTER_INLINE CParsePrimitiveSpelling c_parse_primitive_type_sca
     bool seen_unsigned = false;
     bool seen_float = false;
     bool seen_float16 = false;
+    bool seen_fp16 = false;
     bool seen_bfloat16 = false;
     bool seen_double = false;
     bool seen_int128 = false;
@@ -12911,6 +12915,12 @@ BUSTER_C_INLINE BUSTER_INLINE CParsePrimitiveSpelling c_parse_primitive_type_sca
             seen_float16 = true;
             seen_type = true;
         }
+        else if (string_equal(spelling, S8("__fp16")))
+        {
+            duplicate |= seen_fp16;
+            seen_fp16 = true;
+            seen_type = true;
+        }
         else if (string_equal(spelling, S8("__bf16")))
         {
             duplicate |= seen_bfloat16;
@@ -12954,7 +12964,7 @@ BUSTER_C_INLINE BUSTER_INLINE CParsePrimitiveSpelling c_parse_primitive_type_sca
         index += 1;
     }
     bool valid_specifiers = c_parse_primitive_specifiers_valid(seen_void, seen_va_list, seen_bool, seen_char, seen_short,
-        seen_int, seen_signed, seen_unsigned, seen_float16, seen_bfloat16, seen_float, seen_double, seen_int128, seen_complex, seen_imaginary,
+        seen_int, seen_signed, seen_unsigned, seen_float16, seen_fp16, seen_bfloat16, seen_float, seen_double, seen_int128, seen_complex, seen_imaginary,
         long_count, duplicate);
     if (seen_type && valid_specifiers)
     {
@@ -12969,7 +12979,7 @@ BUSTER_C_INLINE BUSTER_INLINE CParsePrimitiveSpelling c_parse_primitive_type_sca
         }
         else if (seen_va_list)
         {
-            bool invalid = seen_void || seen_bool || seen_char || seen_short || seen_int || seen_signed || seen_unsigned || seen_float || seen_float16 ||
+            bool invalid = seen_void || seen_bool || seen_char || seen_short || seen_int || seen_signed || seen_unsigned || seen_float || seen_float16 || seen_fp16 ||
                              seen_double || seen_int128 || seen_complex || seen_imaginary || long_count;
             type.kind = invalid ? C_TYPE_INVALID : C_TYPE_VA_LIST;
         }
@@ -12988,6 +12998,10 @@ BUSTER_C_INLINE BUSTER_INLINE CParsePrimitiveSpelling c_parse_primitive_type_sca
         else if (seen_bfloat16)
         {
             type.kind = C_TYPE_BFLOAT16;
+        }
+        else if (seen_fp16)
+        {
+            type.kind = C_TYPE_FP16_STORAGE;
         }
         else if (seen_float16)
         {
@@ -14076,6 +14090,7 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
     bool seen_unsigned = false;
     bool seen_float = false;
     bool seen_float16 = false;
+    bool seen_fp16 = false;
     bool seen_bfloat16 = false;
     bool seen_double = false;
     bool seen_int128 = false;
@@ -14187,6 +14202,12 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
             seen_float16 = true;
             seen_type = true;
         }
+        else if (string_equal(spelling, S8("__fp16")))
+        {
+            duplicate |= seen_fp16;
+            seen_fp16 = true;
+            seen_type = true;
+        }
         else if (string_equal(spelling, S8("__bf16")))
         {
             duplicate |= seen_bfloat16;
@@ -14215,7 +14236,7 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
     }
     *declarator_start = index;
     bool valid_specifiers = c_parse_primitive_specifiers_valid(seen_void, seen_va_list, seen_bool, seen_char, seen_short,
-        seen_int, seen_signed, seen_unsigned, seen_float16, seen_bfloat16, seen_float, seen_double, seen_int128, seen_complex, seen_imaginary,
+        seen_int, seen_signed, seen_unsigned, seen_float16, seen_fp16, seen_bfloat16, seen_float, seen_double, seen_int128, seen_complex, seen_imaginary,
         long_count, duplicate);
     *invalid_specifier = seen_type && !valid_specifiers ? first_type : UINT32_MAX;
     CTypeKind result;
@@ -14229,7 +14250,7 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
     }
     else if (seen_va_list)
     {
-        bool invalid = seen_void || seen_bool || seen_char || seen_short || seen_int || seen_signed || seen_unsigned || seen_float || seen_float16 ||
+        bool invalid = seen_void || seen_bool || seen_char || seen_short || seen_int || seen_signed || seen_unsigned || seen_float || seen_float16 || seen_fp16 ||
                          seen_bfloat16 || seen_double || seen_int128 || seen_complex || seen_imaginary || long_count;
         result = invalid ? C_TYPE_INVALID : C_TYPE_VA_LIST;
     }
@@ -14238,6 +14259,10 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
         result = seen_bfloat16 ? C_TYPE_INVALID
                                : c_parse_complex_kind(seen_float16, seen_float, seen_double, seen_bool, seen_char, seen_short, seen_int, seen_signed,
                                                       seen_unsigned, seen_int128, long_count);
+    }
+    else if (seen_fp16)
+    {
+        result = C_TYPE_FP16_STORAGE;
     }
     else if (seen_float16)
     {
@@ -14437,11 +14462,24 @@ BUSTER_C_INTERNAL CTypeId c_parse_apply_vector_attribute(CParseResult* result, C
     if (!unsupported && vector_byte_size)
     {
         // GNU's vector_size accepts integer and floating elements, including
-        // `_Float16` used by Clang's AVX512 intrinsic declarations.
+        // `_Float16` and Clang's storage-only `__fp16` vector aliases.
         CTypeKind base_kind = base.value < result->type_count ? result->types[base.value].kind : C_TYPE_INVALID;
-        bool arithmetic = (base_kind >= C_TYPE_CHAR && base_kind <= C_TYPE_UNSIGNED_INT128) || base_kind == C_TYPE_FLOAT16 || base_kind == C_TYPE_BFLOAT16 ||
-                          base_kind == C_TYPE_FLOAT || base_kind == C_TYPE_DOUBLE;
-        type = arithmetic ? c_parse_add_type(result, (CType){
+        bool arithmetic = (base_kind >= C_TYPE_CHAR && base_kind <= C_TYPE_UNSIGNED_INT128) || base_kind == C_TYPE_FP16_STORAGE ||
+                          base_kind == C_TYPE_FLOAT16 || base_kind == C_TYPE_BFLOAT16 || base_kind == C_TYPE_FLOAT || base_kind == C_TYPE_DOUBLE;
+        bool supported = arithmetic;
+        if (base_kind == C_TYPE_FP16_STORAGE)
+        {
+            u64 element_size = 0, vector_elements = 0, storage_size = 0;
+            u32 element_alignment = 0, vector_alignment = 0;
+            supported = c_parse_builtin_type_layout(preprocess.target, base_kind, &element_size, &element_alignment) &&
+                        c_vector_type_layout(preprocess.target, element_size, vector_byte_size, &vector_elements, &storage_size, &vector_alignment);
+            if (!supported)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]),
+                    C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, S8("__fp16 vector_size requires complete two-byte elements"));
+            }
+        }
+        type = supported ? c_parse_add_type(result, (CType){
             .element_type = base,
             .return_type = C_TYPE_ID_INVALID,
             .array_bound = C_ARRAY_BOUND_INVALID,
@@ -15211,11 +15249,15 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
                 frame->declarator_end = ends[selected ^ 1];
                 frame->inner_close = ends[selected];
                 frame->specifier_index = starts[selected];
-                frame->stage = builtin.type_arguments ? C_TYPE_PARSE_STAGE_VENDOR_TYPE : C_TYPE_PARSE_STAGE_VENDOR_VALUE;
+                bool storage_half = builtin.operation == C_VENDOR_GENERIC_BIT_CAST &&
+                    c_semantic_vendor_storage_half_argument(*frame->preprocess, starts[0], ends[0]);
+                frame->stage = storage_half ? C_TYPE_PARSE_STAGE_VENDOR_OPERAND :
+                    builtin.type_arguments ? C_TYPE_PARSE_STAGE_VENDOR_TYPE : C_TYPE_PARSE_STAGE_VENDOR_VALUE;
+                if (storage_half) frame->type = c_parse_expression_scalar_type(frame->result, C_TYPE_FP16_STORAGE);
                 if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                     .result = frame->result, .preprocess = frame->preprocess, .arena = frame->arena, .scope = frame->scope,
-                    .start = starts[selected], .end = ends[selected],
-                    .kind = builtin.type_arguments ? C_TYPE_PARSE_FRAME_SCALAR : C_TYPE_PARSE_FRAME_SIZEOF}))
+                    .start = starts[storage_half ? 1 : selected], .end = ends[storage_half ? 1 : selected],
+                    .kind = !storage_half && builtin.type_arguments ? C_TYPE_PARSE_FRAME_SCALAR : C_TYPE_PARSE_FRAME_SIZEOF}))
                     c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
             }
             else
@@ -19170,6 +19212,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
             case C_TYPE_STRUCT:
             case C_TYPE_UNION:
             case C_TYPE_ENUM:
+            case C_TYPE_FP16_STORAGE:
             case C_TYPE_COUNT:
             {
                 break;
@@ -20874,6 +20917,7 @@ BUSTER_C_INTERNAL CTypeSelfVerdict c_parse_types_self_compatible(CParseResult* r
         case C_TYPE_LONG_DOUBLE_COMPLEX:
         case C_TYPE_VA_LIST:
         case C_TYPE_NULLPTR:
+        case C_TYPE_FP16_STORAGE:
         case C_TYPE_COUNT:
         {
             verdict = C_TYPE_SELF_COMPATIBLE;
@@ -21180,6 +21224,7 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
         case C_TYPE_LONG_DOUBLE_COMPLEX:
         case C_TYPE_VA_LIST:
         case C_TYPE_NULLPTR:
+        case C_TYPE_FP16_STORAGE:
         case C_TYPE_COUNT:
         {
             break;
@@ -22418,6 +22463,46 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
         bool unmodeled_builtin_type = builtin_prefix && !builtin_called;
         predefined_function_name |= builtin_prefix && !unmodeled_builtin_type;
         predefined_function_name |= builtin_called && c_vendor_builtin_spelling(spelling);
+        bool storage_type_member = token_index >= 3 &&
+            (c_token_is_punctuator(&preprocess.tokens[token_index - 3], C_PUNCTUATOR_DOT) ||
+             c_token_is_punctuator(&preprocess.tokens[token_index - 3], C_PUNCTUATOR_ARROW));
+        bool storage_type_slot = !storage_type_member && token_index >= 2 && token_index + 1 < preprocess.token_count &&
+            c_semantic_vendor_storage_half_argument(preprocess, token_index, token_index + 1) &&
+            c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+            string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index - 2]), S8("__builtin_bit_cast")) &&
+            c_token_is_punctuator(&preprocess.tokens[token_index + 1], C_PUNCTUATOR_COMMA);
+        bool storage_type_name_group = false;
+        if (string_equal(spelling, S8("__fp16")))
+        {
+            u32 type_start = token_index;
+            u32 type_end = token_index + 1;
+            while (type_start > 0)
+            {
+                String8 previous = c_token_spelling(preprocess.spelling_base, preprocess.tokens[type_start - 1]);
+                bool qualifier = string_equal(previous, S8("const")) || string_equal(previous, S8("__const")) ||
+                    string_equal(previous, S8("__const__")) || string_equal(previous, S8("volatile")) ||
+                    string_equal(previous, S8("__volatile")) || string_equal(previous, S8("__volatile__")) ||
+                    string_equal(previous, S8("restrict")) || string_equal(previous, S8("__restrict")) ||
+                    string_equal(previous, S8("__restrict__"));
+                if (!qualifier) break;
+                type_start -= 1;
+            }
+            while (type_end < preprocess.token_count)
+            {
+                String8 next = c_token_spelling(preprocess.spelling_base, preprocess.tokens[type_end]);
+                bool qualifier = string_equal(next, S8("const")) || string_equal(next, S8("__const")) ||
+                    string_equal(next, S8("__const__")) || string_equal(next, S8("volatile")) ||
+                    string_equal(next, S8("__volatile")) || string_equal(next, S8("__volatile__")) ||
+                    string_equal(next, S8("restrict")) || string_equal(next, S8("__restrict")) ||
+                    string_equal(next, S8("__restrict__"));
+                if (!qualifier) break;
+                type_end += 1;
+            }
+            storage_type_name_group = type_start > 0 && type_end < preprocess.token_count &&
+                c_token_is_punctuator(&preprocess.tokens[type_start - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                c_token_is_punctuator(&preprocess.tokens[type_end], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        }
+        predefined_function_name |= storage_type_slot || storage_type_name_group;
         predefined_function_name |= string_starts_with_sequence(spelling, S8("__c11_atomic_"));
         // The GNU spelling of the same family, which takes ordinary pointers.
         // CPython's configure probes it for HAVE_BUILTIN_ATOMIC and most Linux
@@ -31712,6 +31797,7 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_type_name(Arena* arena, 
         case C_TYPE_INT128: name = S8("__int128"); break;
         case C_TYPE_UNSIGNED_INT128: name = S8("unsigned __int128"); break;
         case C_TYPE_FLOAT16: name = S8("_Float16"); break;
+        case C_TYPE_FP16_STORAGE: name = S8("__fp16"); break;
         case C_TYPE_BFLOAT16: name = S8("__bf16"); break;
         case C_TYPE_FLOAT: name = S8("float"); break;
         case C_TYPE_DOUBLE: name = S8("double"); break;
@@ -35039,12 +35125,16 @@ BUSTER_C_INTERNAL void c_parse_validate_register_addresses(CParseResult* result,
     }
 }
 
+BUSTER_C_INTERNAL void c_parse_validate_storage_half_casts(CTypeParseMachine* machine, CParseResult* result,
+                                                            CPreprocessResult preprocess);
+
 // Result typing also serves unevaluated expressions and file-scope constant
 // queries. Check transform calls independently of function-body emission so
 // sizeof, generic controllers, and declarator expressions obey the signature.
 BUSTER_C_INTERNAL void c_parse_validate_integer_transform_calls(CTypeParseMachine* machine, CParseResult* result,
                                                                  CPreprocessResult preprocess)
 {
+    c_parse_validate_storage_half_casts(machine, result, preprocess);
     u64 mark = machine->scratch_arena->position;
     u32 end = (u32)preprocess.token_count;
     CParseCandidates calls = c_parse_call_candidates(preprocess);
@@ -35184,13 +35274,165 @@ BUSTER_C_INTERNAL bool c_parse_vendor_generic_category(CParseResult* result, Tar
     else if (builtin.category == C_VENDOR_GENERIC_CATEGORY_INTEGER_OR_FLOAT) valid &= integer || floating;
     else if (builtin.category == C_VENDOR_GENERIC_CATEGORY_INTEGER_FLOAT_OR_POINTER)
         valid &= integer || floating || value.kind == C_TYPE_POINTER;
+    else if (builtin.category == C_VENDOR_GENERIC_CATEGORY_FLOAT) valid &= floating;
     if (builtin.operation == C_VENDOR_GENERIC_NONDETERMINISTIC_VALUE)
         valid &= integer || floating;
+    if (builtin.operation == C_VENDOR_GENERIC_PMULHUW128_SIGNATURE)
+    {
+        CType vector = type.value < result->type_count ? result->types[type.value] : (CType){0};
+        CTypeKind element = vector.element_type.value < result->type_count ?
+            result->types[vector.element_type.value].kind : C_TYPE_INVALID;
+        u64 element_size = 0;
+        u32 element_alignment = 0;
+        bool element_layout = c_parse_builtin_type_layout(target, element, &element_size, &element_alignment);
+        valid &= target.cpu_arch == CPU_ARCH_X86_64 && vector.kind == C_TYPE_VECTOR && vector.is_complete &&
+            vector.vector_byte_size == 16 && (element == C_TYPE_SHORT || element == C_TYPE_UNSIGNED_SHORT) &&
+            element_layout && element_size == 2;
+    }
     return valid;
+}
+
+BUSTER_C_INTERNAL bool c_parse_type_is_storage_half_value(CParseResult* result, CTypeId type_id)
+{
+    bool storage_half = false;
+    CTypeId unqualified = result && type_id.value < result->type_count ? c_parse_unqualified_type(result, type_id) : C_TYPE_ID_INVALID;
+    if (result && unqualified.value < result->type_count)
+    {
+        CType type = result->types[unqualified.value];
+        storage_half = type.kind == C_TYPE_FP16_STORAGE;
+        if (type.kind == C_TYPE_VECTOR && type.element_type.value < result->type_count)
+        {
+            CTypeId element = c_parse_unqualified_type(result, type.element_type);
+            storage_half |= element.value < result->type_count &&
+                            result->types[element.value].kind == C_TYPE_FP16_STORAGE;
+        }
+    }
+    return storage_half;
+}
+
+BUSTER_C_INTERNAL bool c_parse_storage_half_call_set(CParseResult* result, CPreprocessResult preprocess,
+                                                       u32 token_index, u8** calls)
+{
+    bool valid = result && result->arena && calls && token_index < preprocess.token_count &&
+                 preprocess.token_count <= UINT32_MAX;
+    if (valid && !*calls)
+    {
+        u64 token_bytes = preprocess.token_count / 8 + 1;
+        *calls = arena_allocate_zeroed(result->arena, u8, token_bytes);
+        valid = *calls != 0;
+    }
+    if (valid)
+    {
+        (*calls)[token_index / 8] |= (u8)(1u << (token_index & 7));
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_parse_storage_half_cast_operand_start(CToken token)
+{
+    bool valid = token.kind == C_TOKEN_IDENTIFIER || token.kind == C_TOKEN_PREPROCESSING_NUMBER ||
+                 token.kind == C_TOKEN_CHARACTER_LITERAL || token.kind == C_TOKEN_STRING_LITERAL;
+    if (token.kind == C_TOKEN_PUNCTUATOR)
+    {
+        valid = token.punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || token.punctuator == C_PUNCTUATOR_LEFT_BRACE ||
+                token.punctuator == C_PUNCTUATOR_AMPERSAND || token.punctuator == C_PUNCTUATOR_STAR ||
+                token.punctuator == C_PUNCTUATOR_PLUS || token.punctuator == C_PUNCTUATOR_MINUS ||
+                token.punctuator == C_PUNCTUATOR_TILDE || token.punctuator == C_PUNCTUATOR_EXCLAMATION ||
+                token.punctuator == C_PUNCTUATOR_PLUS_PLUS || token.punctuator == C_PUNCTUATOR_MINUS_MINUS;
+    }
+    return valid;
+}
+
+// Record only casts whose type-name reader resolves to the storage-half
+// scalar type. The lowering budget consumes this fact only for reachable
+// bodies and skips the known unevaluated operand forms.
+BUSTER_C_INTERNAL void c_parse_validate_storage_half_casts(CTypeParseMachine* machine, CParseResult* result,
+                                                            CPreprocessResult preprocess)
+{
+    bool has_storage_half = false;
+    for (u32 index = 0; index < preprocess.token_count && !has_storage_half; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        has_storage_half = token.kind == C_TOKEN_IDENTIFIER &&
+            string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__fp16"));
+    }
+    result->storage_half_spelling_present = has_storage_half;
+    if (has_storage_half)
+    {
+        u32 end = (u32)preprocess.token_count;
+        for (u32 open = 0; open + 2 < end; open += 1)
+        {
+            if (!c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, open);
+            if (close <= open + 1 || close + 1 >= end ||
+                !c_parse_storage_half_cast_operand_start(preprocess.tokens[close + 1])) continue;
+            u32 type_start = open + 1;
+            u32 type_token = type_start;
+            while (type_token < close && preprocess.tokens[type_token].kind == C_TOKEN_IDENTIFIER)
+            {
+                String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[type_token]);
+                bool qualifier = string_equal(spelling, S8("const")) || string_equal(spelling, S8("volatile")) ||
+                    string_equal(spelling, S8("restrict")) || string_equal(spelling, S8("__restrict")) ||
+                    string_equal(spelling, S8("__restrict__"));
+                if (string_equal(spelling, S8("__fp16"))) break;
+                if (!qualifier) break;
+                type_token += 1;
+            }
+            if (type_token < close &&
+                string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[type_token]), S8("__fp16")))
+            {
+                CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, open);
+                CTypeId type = c_parse_identity_type_name(machine, result, preprocess, scope, type_start, close);
+                CTypeId unqualified = type.value < result->type_count ? c_parse_unqualified_type(result, type) : C_TYPE_ID_INVALID;
+                bool storage_half_scalar = unqualified.value < result->type_count &&
+                    result->types[unqualified.value].kind == C_TYPE_FP16_STORAGE;
+                if (storage_half_scalar &&
+                    !c_parse_storage_half_call_set(result, preprocess, open, &result->storage_half_cast_calls))
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[open]),
+                                       C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                       S8("insufficient memory for storage-half expression validation"));
+                }
+            }
+        }
+    }
+    return;
 }
 
 // This pass includes globals and unevaluated expressions, and runs even when
 // an earlier enum/initializer diagnostic has made ordinary lowering impossible.
+BUSTER_C_INTERNAL String8 c_parse_vendor_fixed_argument_message(CTypeParseMachine* machine, CParseResult* result,
+                                                               CPreprocessResult preprocess, CScopeId scope, CSymbolBuiltin kind,
+                                                               String8 name, CVendorBuiltin signature, u32 argument,
+                                                               CTypeId const* types, u32 const* starts, u32 const* ends)
+{
+    String8 message = {0};
+    CTypeId expected = c_semantic_vendor_builtin_type(result, preprocess.target, signature.types[argument + 1]);
+    bool compatible = c_parse_vendor_argument_compatible(machine, result, preprocess, scope, expected, types[argument],
+                                                           starts[argument], ends[argument]);
+    if (kind == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT && argument == 0)
+    {
+        CType vector = result->types[types[0].value];
+        IrType element = c_parse_constant_scalar_type(result, preprocess.target, vector.element_type);
+        CIrSse2ImmediateShiftBuiltin shift = {0};
+        compatible = c_semantic_sse2_immediate_shift_builtin(name, &shift) &&
+            vector.kind == C_TYPE_VECTOR && vector.vector_byte_size == 16 &&
+            element.kind == IR_TYPE_INTEGER && element.bit_width == shift.lane_width;
+    }
+    if (!compatible)
+        message = c_parse_message(result->arena, S8("argument {u32} of {S8} has an incompatible type"), argument + 1, name);
+    if (!message.length && (signature.constant_arguments & (1u << argument)))
+    {
+        CIntegerConstant constant = c_parse_type_integer_constant(machine->scratch_arena, preprocess, result, scope,
+                                                                   starts[argument], ends[argument]);
+        u64 limit = c_semantic_vendor_immediate_limit(name, argument);
+        if (!c_parse_vendor_immediate_permitted(preprocess.target, signature.types[argument + 1].kind, constant, limit))
+            message = c_parse_message(result->arena, S8("argument {u32} of {S8} requires an integer constant{S8}"),
+                argument + 1, name, limit ? S8(" in the permitted range") : (String8){0});
+    }
+    return message;
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* machine, CParseResult* result,
                                                             CPreprocessResult preprocess)
 {
@@ -35251,9 +35493,11 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
         }
         String8 message = {0};
         u32 location = close;
+        u32 typed = 0;
         CVendorBuiltin signature = {0};
         CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
-        bool fixed = kind != C_SYMBOL_BUILTIN_VENDOR_GENERIC;
+        bool fixed = kind != C_SYMBOL_BUILTIN_VENDOR_GENERIC ||
+            (generic.operation == C_VENDOR_GENERIC_PMULHUW128_SIGNATURE && preprocess.target.cpu_arch != CPU_ARCH_X86_64);
         bool found = !fixed || c_semantic_vendor_builtin_signature(preprocess.target, name, &signature);
         u32 minimum = fixed ? signature.parameter_count : generic.minimum_arguments;
         u32 maximum = fixed ? minimum : generic.maximum_arguments == UINT8_MAX ? UINT32_MAX : generic.maximum_arguments;
@@ -35267,41 +35511,52 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
             bool type_argument = !fixed && argument < 8 && (generic.type_arguments & (1u << argument));
             CTypeId type = C_TYPE_ID_INVALID;
             if (type_argument)
-                type = c_parse_identity_type_name(machine, result, preprocess, scope, starts[argument], ends[argument]);
+                type = generic.operation == C_VENDOR_GENERIC_BIT_CAST && argument == 0 &&
+                    c_semantic_vendor_storage_half_argument(preprocess, starts[argument], ends[argument])
+                    ? c_parse_expression_scalar_type(result, C_TYPE_FP16_STORAGE)
+                    : c_parse_identity_type_name(machine, result, preprocess, scope, starts[argument], ends[argument]);
             else
                 c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope,
                                               starts[argument], ends[argument], &type);
             bool representation = !fixed && generic.operation == C_VENDOR_GENERIC_BIT_CAST;
             types[argument] = type_argument || representation ? type : c_parse_auto_decay_type(result, type);
+            typed = argument + 1;
             location = starts[argument];
             if (types[argument].value >= result->type_count)
                 message = c_parse_message(result->arena, S8("argument {u32} of {S8} requires {S8}"), argument + 1, name,
                                           type_argument ? S8("a complete type name") : S8("a valid value expression"));
             if (fixed && !message.length)
+                message = c_parse_vendor_fixed_argument_message(machine, result, preprocess, scope, kind, name, signature,
+                                                                argument, types, starts, ends);
+        }
+        // Clang 23 headers spell the LLVM 23.1.2 contract of a few pinned
+        // names; a call rejected by the pinned contract may match it instead.
+        // When both reject it, the contract matching more arguments reports.
+        CVendorBuiltin alternate = {0};
+        if (fixed && message.length && count == signature.parameter_count && count <= BUSTER_ARRAY_LENGTH(types) &&
+            c_vendor_builtin_lookup_alternate(preprocess.target, name, &alternate) && alternate.parameter_count == count)
+        {
+            String8 alternate_message = {0};
+            u32 alternate_location = close;
+            for (u32 argument = 0; argument < count && !alternate_message.length; argument += 1)
             {
-                CTypeId expected = c_semantic_vendor_builtin_type(result, preprocess.target, signature.types[argument + 1]);
-                bool compatible = c_parse_vendor_argument_compatible(machine, result, preprocess, scope, expected, types[argument],
-                                                                       starts[argument], ends[argument]);
-                if (kind == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT && argument == 0)
+                alternate_location = starts[argument];
+                if (argument >= typed)
                 {
-                    CType vector = result->types[types[0].value];
-                    IrType element = c_parse_constant_scalar_type(result, preprocess.target, vector.element_type);
-                    CIrSse2ImmediateShiftBuiltin shift = {0};
-                    compatible = c_semantic_sse2_immediate_shift_builtin(name, &shift) &&
-                        vector.kind == C_TYPE_VECTOR && vector.vector_byte_size == 16 &&
-                        element.kind == IR_TYPE_INTEGER && element.bit_width == shift.lane_width;
+                    CTypeId type = C_TYPE_ID_INVALID;
+                    c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope,
+                                                  starts[argument], ends[argument], &type);
+                    types[argument] = c_parse_auto_decay_type(result, type);
                 }
-                if (!compatible)
-                    message = c_parse_message(result->arena, S8("argument {u32} of {S8} has an incompatible type"), argument + 1, name);
-                if (!message.length && (signature.constant_arguments & (1u << argument)))
-                {
-                    CIntegerConstant constant = c_parse_type_integer_constant(machine->scratch_arena, preprocess, result, scope,
-                                                                               starts[argument], ends[argument]);
-                    u64 limit = c_semantic_vendor_immediate_limit(name, argument);
-                    if (!c_parse_vendor_immediate_permitted(preprocess.target, signature.types[argument + 1].kind, constant, limit))
-                        message = c_parse_message(result->arena, S8("argument {u32} of {S8} requires an integer constant{S8}"),
-                            argument + 1, name, limit ? S8(" in the permitted range") : (String8){0});
-                }
+                alternate_message = types[argument].value < result->type_count
+                    ? c_parse_vendor_fixed_argument_message(machine, result, preprocess, scope, kind, name, alternate,
+                                                            argument, types, starts, ends)
+                    : c_parse_message(result->arena, S8("argument {u32} of {S8} requires a valid value expression"), argument + 1, name);
+            }
+            if (!alternate_message.length || alternate_location > location)
+            {
+                message = alternate_message;
+                location = alternate_location;
             }
         }
         if (!fixed && !message.length)
@@ -35316,18 +35571,38 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
                 if (!complete || !to_size || to_size != from_size || result->types[types[0].value].kind == C_TYPE_FUNCTION ||
                     result->types[types[1].value].kind == C_TYPE_FUNCTION)
                     message = c_parse_message(result->arena, S8("{S8} requires complete value types with equal storage sizes"), name);
+                else if ((c_parse_type_is_storage_half_value(result, types[0]) ||
+                          c_parse_type_is_storage_half_value(result, types[1])) &&
+                         !c_parse_storage_half_call_set(result, preprocess, index, &result->storage_half_bitcast_calls))
+                {
+                    location = index;
+                    message = S8("insufficient memory for storage-half builtin validation");
+                }
             }
             else if (operation == C_VENDOR_GENERIC_CONVERT_VECTOR)
             {
-                CType from = result->types[types[0].value], to = result->types[types[1].value];
+                CType from = types[0].value < result->type_count ? result->types[types[0].value] : (CType){0};
+                CType to = types[1].value < result->type_count ? result->types[types[1].value] : (CType){0};
+                CTypeKind from_element = from.element_type.value < result->type_count ? result->types[from.element_type.value].kind : C_TYPE_INVALID;
+                CTypeKind to_element = to.element_type.value < result->type_count ? result->types[to.element_type.value].kind : C_TYPE_INVALID;
                 u64 from_size = 0, to_size = 0;
                 u32 alignment = 0;
-                bool vectors = from.kind == C_TYPE_VECTOR && to.kind == C_TYPE_VECTOR &&
-                    from.element_type.value < result->type_count && to.element_type.value < result->type_count &&
-                    c_parse_builtin_type_layout(preprocess.target, result->types[from.element_type.value].kind, &from_size, &alignment) &&
-                    c_parse_builtin_type_layout(preprocess.target, result->types[to.element_type.value].kind, &to_size, &alignment);
-                if (!vectors || !from_size || !to_size || from.vector_byte_size / from_size != to.vector_byte_size / to_size)
-                    message = c_parse_message(result->arena, S8("{S8} requires two vector types with the same lane count"), name);
+                bool vectors = from.kind == C_TYPE_VECTOR && to.kind == C_TYPE_VECTOR && from.is_complete && to.is_complete &&
+                    from_element != C_TYPE_INVALID && to_element != C_TYPE_INVALID &&
+                    c_parse_builtin_type_layout(preprocess.target, from_element, &from_size, &alignment) &&
+                    c_parse_builtin_type_layout(preprocess.target, to_element, &to_size, &alignment) &&
+                    from_size && to_size && from.vector_byte_size % from_size == 0 && to.vector_byte_size % to_size == 0;
+                bool same_lanes = vectors && from.vector_byte_size / from_size == to.vector_byte_size / to_size;
+                bool storage_half_conversion = (from_element != C_TYPE_FP16_STORAGE && to_element != C_TYPE_FP16_STORAGE) ||
+                    (from_element == C_TYPE_FP16_STORAGE && to_element == C_TYPE_FLOAT);
+                if (!vectors || !same_lanes || !storage_half_conversion)
+                    message = c_parse_message(result->arena, S8("{S8} requires complete arithmetic vector types with the same lane count"), name);
+                else if (from_element == C_TYPE_FP16_STORAGE && to_element == C_TYPE_FLOAT &&
+                         !c_parse_storage_half_call_set(result, preprocess, index, &result->storage_half_convertvector_calls))
+                {
+                    location = index;
+                    message = S8("insufficient memory for storage-half builtin validation");
+                }
             }
             else if (operation == C_VENDOR_GENERIC_SHUFFLE_VECTOR)
             {
@@ -35379,9 +35654,11 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
             {
                 if (!c_parse_vendor_generic_category(result, preprocess.target, types[0], generic))
                     message = c_parse_message(result->arena, S8("{S8} has an invalid scalar or vector operand type"), name);
-                if (!message.length && generic.same_type_operands &&
-                    !c_parse_types_compatible(machine->scratch_arena, result, preprocess, types[0], types[1]))
-                    message = c_parse_message(result->arena, S8("{S8} requires operands of the same unqualified type"), name);
+                for (u32 argument = 1; argument < count && argument < BUSTER_ARRAY_LENGTH(types) && generic.same_type_operands && !message.length; argument += 1)
+                {
+                    if (!c_parse_types_compatible(machine->scratch_arena, result, preprocess, types[0], types[argument]))
+                        message = c_parse_message(result->arena, S8("{S8} requires operands of the same unqualified type"), name);
+                }
             }
         }
         if (message.length)
@@ -37211,10 +37488,209 @@ BUSTER_C_INTERNAL void c_parse_validate_array_bound_values(CTypeParseMachine* ma
     }
 }
 
+typedef struct CTypeStorageHalfParentEdge CTypeStorageHalfParentEdge;
+struct CTypeStorageHalfParentEdge
+{
+    u32 parent;
+    u32 next;
+};
+
+// Build reverse edges only when the preprocessed unit actually contains
+// storage-half. Each type is enqueued at most once, with no recursive depth
+// limit or repeated per-entity graph walk.
+BUSTER_C_INTERNAL u8* c_parse_storage_half_type_bitmap(CTypeParseMachine* machine, CParseResult* result,
+                                                        CPreprocessResult preprocess)
+{
+    u8* storage_half_types = 0;
+    u32 storage_half_token = UINT32_MAX;
+    if (result->storage_half_spelling_present)
+    {
+        for (u32 index = 0; index < preprocess.token_count && storage_half_token == UINT32_MAX; index += 1)
+        {
+            CToken token = preprocess.tokens[index];
+            if (token.kind == C_TOKEN_IDENTIFIER &&
+                string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__fp16")))
+            {
+                storage_half_token = index;
+            }
+        }
+    }
+    if (storage_half_token != UINT32_MAX)
+    {
+        u64 parent_edge_count = 0;
+        bool valid = result->type_count != 0;
+        for (u32 type_index = 0; valid && type_index < result->type_count; type_index += 1)
+        {
+            CType type = result->types[type_index];
+            u64 edges = 0;
+            if (type.kind == C_TYPE_VECTOR || type.kind == C_TYPE_POINTER || type.kind == C_TYPE_ARRAY)
+            {
+                valid = type.element_type.value < result->type_count;
+                edges += valid ? 1 : 0;
+            }
+            else if (type.kind == C_TYPE_FUNCTION)
+            {
+                valid = type.return_type.value < result->type_count &&
+                    type.parameter_start <= result->parameter_count &&
+                    type.parameter_count <= result->parameter_count - type.parameter_start;
+                edges += valid ? (u64)type.parameter_count + 1 : 0;
+            }
+            else if (type.has_unqualified_type)
+            {
+                valid = type.unqualified_type.value < result->type_count;
+                edges += valid ? 1 : 0;
+            }
+            valid &= edges <= UINT32_MAX && parent_edge_count <= (u64)UINT32_MAX - edges;
+            if (valid) parent_edge_count += edges;
+        }
+        if (valid)
+        {
+            u32* parent_heads = arena_allocate(machine->scratch_arena, u32, result->type_count);
+            CTypeStorageHalfParentEdge* parent_edges = parent_edge_count ?
+                arena_allocate(machine->scratch_arena, CTypeStorageHalfParentEdge, (u32)parent_edge_count) : 0;
+            u32* pending = arena_allocate(machine->scratch_arena, u32, result->type_count);
+            u8* marked = arena_allocate_zeroed(machine->scratch_arena, u8, result->type_count);
+            valid = parent_heads && (!parent_edge_count || parent_edges) && pending && marked;
+            if (valid)
+            {
+                memset(parent_heads, 0xff, sizeof(*parent_heads) * (u64)result->type_count);
+                u32 edge_cursor = 0;
+                for (u32 type_index = 0; type_index < result->type_count; type_index += 1)
+                {
+                    CType type = result->types[type_index];
+                    CTypeId children[2] = {C_TYPE_ID_INVALID, C_TYPE_ID_INVALID};
+                    u32 child_count = 0;
+                    if (type.kind == C_TYPE_VECTOR || type.kind == C_TYPE_POINTER || type.kind == C_TYPE_ARRAY)
+                    {
+                        children[child_count++] = type.element_type;
+                    }
+                    else if (type.kind == C_TYPE_FUNCTION)
+                    {
+                        children[child_count++] = type.return_type;
+                        for (u32 parameter_index = 0; parameter_index < type.parameter_count; parameter_index += 1)
+                        {
+                            CParameter parameter = result->parameters[type.parameter_start + parameter_index];
+                            CTypeId child = parameter.type;
+                            if (child.value < result->type_count && edge_cursor < parent_edge_count)
+                            {
+                                parent_edges[edge_cursor] = (CTypeStorageHalfParentEdge){.parent = type_index, .next = parent_heads[child.value]};
+                                parent_heads[child.value] = edge_cursor++;
+                            }
+                            else
+                            {
+                                valid = false;
+                            }
+                        }
+                    }
+                    else if (type.has_unqualified_type)
+                    {
+                        children[child_count++] = type.unqualified_type;
+                    }
+                    for (u32 child_index = 0; child_index < child_count; child_index += 1)
+                    {
+                        CTypeId child = children[child_index];
+                        if (child.value < result->type_count && edge_cursor < parent_edge_count)
+                        {
+                            parent_edges[edge_cursor] = (CTypeStorageHalfParentEdge){.parent = type_index, .next = parent_heads[child.value]};
+                            parent_heads[child.value] = edge_cursor++;
+                        }
+                        else
+                        {
+                            valid = false;
+                        }
+                    }
+                }
+                valid &= edge_cursor == parent_edge_count;
+                u32 pending_count = 0;
+                for (u32 type_index = 0; valid && type_index < result->type_count; type_index += 1)
+                {
+                    if (result->types[type_index].kind == C_TYPE_FP16_STORAGE)
+                    {
+                        marked[type_index] = 1;
+                        pending[pending_count++] = type_index;
+                    }
+                }
+                valid &= pending_count != 0;
+                for (u32 cursor = 0; valid && parent_edge_count && cursor < pending_count; cursor += 1)
+                {
+                    u32 child = pending[cursor];
+                    for (u32 edge = parent_heads[child]; edge != UINT32_MAX; edge = parent_edges[edge].next)
+                    {
+                        u32 parent = parent_edges[edge].parent;
+                        if (!marked[parent])
+                        {
+                            marked[parent] = 1;
+                            pending[pending_count++] = parent;
+                        }
+                    }
+                }
+                if (valid) storage_half_types = marked;
+            }
+        }
+        if (!storage_half_types)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[storage_half_token]),
+                               C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                               S8("storage-half declaration validation could not build a complete type graph"));
+        }
+    }
+    return storage_half_types;
+}
+
+BUSTER_C_INTERNAL bool c_parse_type_is_storage_half_vector(CParseResult* result, CTypeId type_id)
+{
+    bool valid = false;
+    if (result && type_id.value < result->type_count)
+    {
+        CTypeId unqualified = c_parse_unqualified_type(result, type_id);
+        if (unqualified.value < result->type_count)
+        {
+            CType type = result->types[unqualified.value];
+            valid = type.kind == C_TYPE_VECTOR && type.element_type.value < result->type_count &&
+                    result->types[type.element_type.value].kind == C_TYPE_FP16_STORAGE && type.is_complete;
+        }
+    }
+    return valid;
+}
+
+// This frontend admits Clang's storage-only half as a vector element for
+// unused header bodies. It does not define ordinary object or ABI behavior.
+BUSTER_C_INTERNAL void c_parse_validate_storage_half_declarations(CTypeParseMachine* machine, CParseResult* result,
+                                                                   CPreprocessResult preprocess)
+{
+    u8* storage_half_types = c_parse_storage_half_type_bitmap(machine, result, preprocess);
+    if (storage_half_types)
+    {
+        String8 message = S8("__fp16 storage objects, members, parameters, and function results have no implementation");
+        for (u32 index = 0; index < result->entity_count; index += 1)
+        {
+            CEntity entity = result->entities[index];
+            bool uses_half = entity.type.value < result->type_count && storage_half_types[entity.type.value];
+            bool vector_typedef = entity.kind == C_ENTITY_TYPEDEF && c_parse_type_is_storage_half_vector(result, entity.type);
+            if (uses_half && !vector_typedef)
+            {
+                c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, entity.location),
+                                   C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, message);
+            }
+        }
+        for (u32 index = 0; index < result->member_count; index += 1)
+        {
+            CMember member = result->members[index];
+            if (member.type.value < result->type_count && storage_half_types[member.type.value])
+            {
+                c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, member.location),
+                                   C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, message);
+            }
+        }
+    }
+    return;
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                                CPreprocessResult preprocess)
 {
     c_parse_index_declarations(result, arena);
+    c_parse_validate_storage_half_declarations(machine, result, preprocess);
     c_parse_validate_array_bound_syntax(machine, result, preprocess);
     CTypeId scalar_types[C_TYPE_COUNT];
     memset(scalar_types, 0xff, sizeof(scalar_types));
