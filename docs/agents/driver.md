@@ -1053,7 +1053,10 @@ linked object. An unindexed ELF member counts every global with a non-zero secti
 index, reserved `SHN_ABS`, `SHN_COMMON` and `SHN_XINDEX` included, as a definition,
 exactly as a ranlib index does. The member is selected in archive order and the full
 reader refuses it with member and symbol attribution; the link does not report an
-unattributed unresolved symbol or fall through to a later member.
+unattributed unresolved symbol or fall through to a later member. Unindexed Mach-O
+and COFF members count their forms of the same definitions -- external `N_ABS`,
+`N_INDR` and `IMAGE_SYM_ABSOLUTE` symbols, and commons (an undefined external with a
+non-zero value) -- the same way (#1243).
 
 `compiler_driver_archive_test_lazy` exercises all three object formats, 32/64-bit
 GNU and BSD indexes, BSD extended names, unindexed input, transitive dependencies,
