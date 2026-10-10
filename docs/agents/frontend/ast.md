@@ -939,6 +939,18 @@ default). The base is main `f38a7716`, which the candidate branches from.
   diagnostic; Zen 5 acceptance (#2761) stays incomplete, and no benchmark
   request is made for this slice.
 
+The late rows' hosted census is
+[`2026-10-10T210452Z`](../../performance-audits/2026-10-10T210452Z.md), taken
+the same way and diagnostic only:
+- Correctness, object identity, coverage (2,571 late answers) and the default
+  path (−0.006%, `-c` −0.005%) pass.
+- The pilot budget fails: C − B is +0.30 M (+0.003%). The machine runs the
+  re-checks replace cost about 1,900 instructions each, 4.86 M in all, and
+  the query function's code layout moved by more than that. Re-typing the
+  ancestors too cost 30 to 70 M in the eager loop for 171 more answers, so
+  only the late node is re-checked.
+- Zen 5 acceptance (#2761) stays incomplete, and the hook stays opt-in.
+
 For the in-place columns ([storage](#storage-and-lifetime)), these budgets were
 declared before the measured runs, on the same input and flags, with stage 2's
 four arms (A base default, B base with `-fc-ast-pilot`, C candidate with it,
