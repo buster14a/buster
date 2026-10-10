@@ -2039,10 +2039,10 @@ enum
     // the host headers exist.
     C_AST_CORPUS_TYPE_ANSWER_FLOOR = 47000,
     C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR = 290000,
-    // Of those, answers from a node re-typed at its query once the row it
-    // missed existed (C_AST_TYPE_FLAG_LATE): about 1,330 in the fixtures, and
-    // about 3,700 with the frontend's own sources.
-    C_AST_CORPUS_TYPE_LATE_ANSWER_FLOOR = 1000,
+    // Of those, answers from a node re-checked at its query once the row it
+    // missed existed (C_AST_TYPE_FLAG_LATE): about 580 in the fixtures, and
+    // about 1,740 with the frontend's own sources.
+    C_AST_CORPUS_TYPE_LATE_ANSWER_FLOOR = 450,
     // Designator probes the const-assignment walk skipped in the fixtures,
     // each checked against the machine: about 1,400 (1,370 for
     // aarch64-windows).
@@ -3555,6 +3555,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_oracle(UnitTestArguments* argument
 // that is no expression node misses. The corpus half of the contract (every
 // tree answer equals the machine's, and no diagnostic changes) is
 // c_ast_corpus_types.
+// What a case's late arm gives: the body typed before its queries minted
+// any interned row, the query asked once they exist (C_AST_TYPE_FLAG_LATE).
+typedef enum CAstTypeLate
+{
+    // The same answer as with the rows in place, without a re-check.
+    C_AST_TYPE_LATE_SAME,
+    // The same answer, from a re-check.
+    C_AST_TYPE_LATE_ANSWERED,
+    // A decline: an ancestor of a late node keeps its eager result.
+    C_AST_TYPE_LATE_DECLINED,
+    // The same answer without constraint checks; with them a late operand
+    // is not safe, so its parent declines.
+    C_AST_TYPE_LATE_CHECKED_DECLINED,
+} CAstTypeLate;
+
 typedef struct CAstTypeCase CAstTypeCase;
 struct CAstTypeCase
 {
@@ -3575,11 +3590,9 @@ struct CAstTypeCase
     // With constraint checks the answer replays the machine's typing of a
     // cast's string-literal operand.
     bool replayed;
-    // The body's eager pass, run before its queries minted the rows the
-    // answer reads, declines the node for want of them, and the query
-    // re-types it once they exist (C_AST_TYPE_FLAG_LATE). Every body case is
-    // also asked that way and must end as it does with the rows in place.
-    bool late;
+    // Every body case is also asked over a body typed before its queries
+    // minted the interned rows (CAstTypeLate).
+    CAstTypeLate late;
 };
 
 BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
@@ -3647,10 +3660,11 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     // their rows: `&` and a cast to primitive specifier words or a typedef
     // name under plain `*`s (CTypeInterning).
     {S8_INITIALIZER("int* f(int a) { return &a; }"), S8_INITIALIZER("&"), 0, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER, false,
-     C_TYPE_INVALID, false, true},
+     C_TYPE_INVALID, false, C_AST_TYPE_LATE_ANSWERED},
     {S8_INITIALIZER("struct S { int a; }; int* f(struct S* p) { return &p->a; }"), S8_INITIALIZER("&"), 0, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
-     C_TYPE_POINTER, false, C_TYPE_INVALID, false, true},
-    {S8_INITIALIZER("int f(int* p) { return *&p[1]; }"), S8_INITIALIZER("*"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+     C_TYPE_POINTER, false, C_TYPE_INVALID, false, C_AST_TYPE_LATE_ANSWERED},
+    {S8_INITIALIZER("int f(int* p) { return *&p[1]; }"), S8_INITIALIZER("*"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT, false, C_TYPE_INVALID,
+     false, C_AST_TYPE_LATE_DECLINED},
     {S8_INITIALIZER("long f(int a) { return (long)a; }"), S8_INITIALIZER("("), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
     {S8_INITIALIZER("unsigned char f(int a) { return (unsigned char)a; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER,
      C_TYPE_UNSIGNED_CHAR},
@@ -3659,25 +3673,29 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     {S8_INITIALIZER("typedef int T; T* f(void* p) { return (T*)p; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
     {S8_INITIALIZER("typedef int T; T** f(void* p) { return (T**)p; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
     // Late rows: the second `&a` and the second cast are typed before the
-    // first's query mints the row they read, so they are re-typed at their
-    // own query. So are the parents of a late node: a dereference, a cast
-    // over it and a comparison of two.
+    // first's query mints the row they read, so they are re-checked at their
+    // own query. The parents of a late node keep their eager result: a
+    // dereference and a comparison decline, and a cast over one is safe
+    // under constraint checks only when the operand is.
     {S8_INITIALIZER("int** f(int* a) { int** q = &a; return &a; }"), S8_INITIALIZER("&"), 1, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER, false,
-     C_TYPE_INVALID, false, true},
+     C_TYPE_INVALID, false, C_AST_TYPE_LATE_ANSWERED},
     {S8_INITIALIZER("char** f(void* p) { char** q = (char**)p; return (char**)p; }"), S8_INITIALIZER("("), 2, 6, C_TEST_AST_TYPE_PROBE_ANSWER,
-     C_TYPE_POINTER, false, C_TYPE_INVALID, false, true},
+     C_TYPE_POINTER, false, C_TYPE_INVALID, false, C_AST_TYPE_LATE_ANSWERED},
     {S8_INITIALIZER("short f(void* p) { return *(short*)p; }"), S8_INITIALIZER("*"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_SHORT, false,
-     C_TYPE_INVALID, false, true},
+     C_TYPE_INVALID, false, C_AST_TYPE_LATE_DECLINED},
     {S8_INITIALIZER("int f(int a) { return *&a; }"), S8_INITIALIZER("*"), 0, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT, false, C_TYPE_INVALID,
-     false, true},
+     false, C_AST_TYPE_LATE_DECLINED},
     {S8_INITIALIZER("void* f(int a) { return (void*)&a; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER, false,
-     C_TYPE_INVALID, false, true},
+     C_TYPE_INVALID, false, C_AST_TYPE_LATE_CHECKED_DECLINED},
     {S8_INITIALIZER("int f(int a, int b) { return &a == &b; }"), S8_INITIALIZER("&"), 0, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT, false,
-     C_TYPE_INVALID, false, true},
-    {S8_INITIALIZER("long f(int a) { return a + (long)a; }"), S8_INITIALIZER("a"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+     C_TYPE_INVALID, false, C_AST_TYPE_LATE_DECLINED},
+    {S8_INITIALIZER("long f(int a) { return a + (long)a; }"), S8_INITIALIZER("a"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, false,
+     C_TYPE_INVALID, false, C_AST_TYPE_LATE_DECLINED},
     {S8_INITIALIZER("int f(void) { return (int){7}; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
-    {S8_INITIALIZER("typedef long L; L f(int a) { return (L)&a; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
-    {S8_INITIALIZER("int f(int* p, int a) { return &p ? a : 0; }"), S8_INITIALIZER("&"), 0, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("typedef long L; L f(int a) { return (L)&a; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, false,
+     C_TYPE_INVALID, false, C_AST_TYPE_LATE_CHECKED_DECLINED},
+    {S8_INITIALIZER("int f(int* p, int a) { return &p ? a : 0; }"), S8_INITIALIZER("&"), 0, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT, false,
+     C_TYPE_INVALID, false, C_AST_TYPE_LATE_CHECKED_DECLINED},
     // A cast of one string literal: with constraint checks the machine types
     // the literal too, appending its array row, so the answer replays that.
     {S8_INITIALIZER("typedef char C; C* f(void) { return (C*)\"text\"; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER,
@@ -3793,16 +3811,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
                                               type_case->source, checked, probe.status, (u32)probe.kind, (u32)probe.replay, status, (u32)kind,
                                               (u32)replay));
                 BUSTER_TEST(arguments, !probe.nonplace_projection);
-                bool late_answered = probe.late_answers != 0 && probe.late_checks != 0;
+                bool late_declined = type_case->late == C_AST_TYPE_LATE_DECLINED || (checked && type_case->late == C_AST_TYPE_LATE_CHECKED_DECLINED);
+                bool late_answered = type_case->late == C_AST_TYPE_LATE_ANSWERED;
+                bool late_same = probe.late_status == probe.status && probe.late_kind == probe.kind && probe.late_replay == probe.replay;
+                bool late_decline = probe.late_status == C_TEST_AST_TYPE_PROBE_DECLINE && probe.late_kind == C_TYPE_INVALID;
                 BUSTER_TEST_RAW(arguments,
-                                probe.late_status == probe.status && probe.late_kind == probe.kind && probe.late_replay == probe.replay &&
-                                    (!type_case->late || late_answered),
+                                (late_declined ? late_decline : late_same) && (!late_answered || (probe.late_answers != 0 && probe.late_checks != 0)),
                                 string_format(temporary.arena,
                                               S8("{S8} (checked {u32}, late): status {u32} kind {u32} replay {u32} answers {u64}, expected status {u32} "
                                                  "kind {u32} replay {u32}{S8}"),
                                               type_case->source, checked, probe.late_status, (u32)probe.late_kind, (u32)probe.late_replay,
                                               probe.late_answers, probe.status, (u32)probe.kind, (u32)probe.replay,
-                                              type_case->late ? S8(", re-typed") : S8("")));
+                                              late_declined   ? S8(", late arm declining")
+                                              : late_answered ? S8(", re-checked")
+                                                              : S8("")));
             }
         }
         c_ast_release(&built.ast);

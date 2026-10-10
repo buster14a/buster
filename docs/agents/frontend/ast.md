@@ -469,32 +469,32 @@ the first `&a` of a body interns `int *`, and every later `&b` of an `int`
 could read it. Interning the declarations' rows earlier would reorder the `-g`
 type entries ([Interned rows](#interned-rows)), so the typer checks again at
 the query instead:
-- **Marks.** A node declined only because an interned row it reads did not
+- **The mark.** A node declined only because an interned row it reads did not
   exist is marked `C_AST_TYPE_FLAG_LATE`: an `&` over an accepted operand, and
   a cast or compound literal whose primitive row or a `*` level's row was
-  missing. Every typed node whose subtree holds a late node is marked
-  `C_AST_TYPE_FLAG_LATE_BELOW`. In postorder that holds when the newest late
-  node is inside the node's subtree, so the pass keeps one index for it.
-  Initializers read no interned row, so they are never marked.
-- **The re-check.** When a query's range maps to a marked node,
-  `c_ast_types_retype` re-types, in index order, the marked nodes of its
-  subtree with the same rules, before the answer is decided. The unmarked
-  nodes read no late row, so their eager results stand. A row that exists now
-  is the one the machine's run would find instead of appending it, so the
-  answer's run appends nothing, as for any accepted node. A row still missing
-  leaves the node declined.
-- **Marks stay.** A speculative rollback can take a late row back, so the
-  marks are never cleared: every query that reaches a marked node re-types it
-  against the live interning log.
+  missing. Initializers read no interned row, so they are never marked.
+- **The re-check.** When a query maps to a node that the decision declines
+  and that carries the mark, `c_ast_types_retype` runs that kind's own rule
+  again, and the decision is repeated. A row that exists now is the one the
+  machine's run would find instead of appending it, so the answer's run
+  appends nothing, as for any accepted node. A row still missing leaves the
+  node declined. Only declined queries pay for the test.
+- **Nothing is kept.** The node's flags go back to the mark at once, because
+  a speculative rollback can take a late row back. Every query that reaches
+  the node re-checks it against the live interning log.
+- **Ancestors keep their eager result.** Re-typing them needed a second
+  caller of `c_ast_types_type_node`, and the optimizer then moved the
+  per-kind rules out of line in the eager loop, which cost 30 to 70 M
+  instructions on the unity self-host for 171 more answers.
 
 Nothing is interned earlier and nothing is appended, so the type tables, the
 diagnostics and the `-c` objects (`-g0` and `-g`) are those of the pilot
-without the re-check. `c_ast_test_types` asks every body case a second time
-over a body typed with the interning log hidden, as if no query had minted a
-row yet, and requires the same answer; the cases marked `late` must be
-answered by a re-check. The corpus gate counts late answers against a floor
-(`C_AST_CORPUS_TYPE_LATE_ANSWER_FLOOR`), and each is verified against the
-machine.
+without the re-check. `c_ast_test_types` asks every body case a second time,
+over a body typed with the interning log hidden as if no query had minted a
+row yet, and requires the same answer, a re-checked answer for the cases
+marked late, or a decline for the ancestors of a late node. The corpus gate
+counts late answers against a floor (`C_AST_CORPUS_TYPE_LATE_ANSWER_FLOOR`),
+and verifies each against the machine.
 
 ### Interned rows
 
