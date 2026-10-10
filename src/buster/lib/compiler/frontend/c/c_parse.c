@@ -28222,8 +28222,13 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_typed_integer_constant(CTypeParseMach
 // path; prepared vector types remain ordinary published rows to read.
 BUSTER_C_INTERNAL bool c_parse_type_constant_vector_argument_supported(CParseResult* result, CPreprocessResult preprocess, u32 index, u32 end)
 {
-    u32 close = index + 1 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)
-        ? c_parse_matching_delimiter_indexed(result, preprocess, index + 1) : UINT32_MAX;
+    // c_parse_apply_vector_attribute also asks from its scan, which runs
+    // without a position index.
+    bool open = index + 1 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+    u32 close = !open                  ? UINT32_MAX
+                : result->position_index ? c_parse_matching_delimiter_indexed(result, preprocess, index + 1)
+                                         : c_parse_matching_delimiter(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                                      C_PUNCTUATOR_RIGHT_PARENTHESIS);
     u32 value = 0;
     bool supported = index + 3 < end && close == index + 3 && preprocess.tokens[index + 2].kind == C_TOKEN_PREPROCESSING_NUMBER &&
         c_parse_attribute_unsigned(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 2]), &value) && value;
