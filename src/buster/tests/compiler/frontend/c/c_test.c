@@ -21461,8 +21461,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_classify_type(UnitTestArgument
         "int counter(void)\n{\n    int x = 3;\n    int class = __builtin_classify_type(x++) + __builtin_classify_type(sink());\n"
         "    switch (class)\n    {\n    case __builtin_classify_type(1) + __builtin_classify_type(sink()): return x;\n"
         "    default: return 100;\n    }\n}\n"
-        "int main(void)\n{\n    int x = 7;\n    volatile int sequence = 0;\n    int error = 0;\n"
+        "static int bumps;\nstatic int bump(void)\n{\n    bumps += 1;\n    return 1;\n}\n"
+        "int main(void)\n{\n    int x = 7;\n    volatile int sequence = 0;\n    _Atomic int atomic = 0;\n    int error = 0;\n"
         "    error |= __builtin_classify_type(x++) != 1;\n    error |= __builtin_classify_type(sequence++) != 1;\n"
+        "    error |= __builtin_classify_type(x ? bump() : bump()) != 1;\n    error |= __builtin_classify_type(x && bump()) != 1;\n"
+        "    error |= __builtin_classify_type((bump(), 1.0)) != 8;\n    error |= __builtin_classify_type(x ? (void)bump() : (void)bump()) != 0;\n"
+        "    error |= __builtin_classify_type(atomic) != 1;\n    error |= bumps != 0;\n"
         "    error |= x != 7 || sequence != 0;\n    error |= static_class != 8 || sizeof(bounded) != 5 * sizeof(int);\n"
         "    error |= counter() != 3;\n    return error;\n}\n");
     Target targets[] = {
