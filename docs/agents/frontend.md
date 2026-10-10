@@ -239,6 +239,22 @@ allocation tracking: the extra precision GCC and Clang can give a size known
 only at run time (a `malloc` argument, a variable-length array) is not
 provided. `c_test_dynamic_object_size` compares both spellings' lowered IR.
 
+`__builtin_classify_type(expression)` (#1394) answers Clang's type class as an
+`int` integer constant expression, usable in `_Static_assert`, static
+initializers, array bounds and `case` labels. The operand is only typed, never
+evaluated: prepared-call discovery skips it, so no call, increment or other
+side effect inside it is emitted, including inside `?:`, `&&` and comma
+operands. It undergoes lvalue conversion and array/function decay
+(`c_parse_classify_type_builtin`, recorded as a type-identity answer like
+`__builtin_types_compatible_p`). The classes are `void` 0; every integer type,
+`char` and enum 1; `_Bool` 4; pointer, decayed array or function and string
+literal 5; real floating 8; complex 9; struct 12; union 13; GNU vector 19
+(`c_parse_classify_type_value`). Three types are refused with a diagnostic
+rather than given a guessed class: `nullptr_t` (Clang answers -1), `va_list`
+(its class depends on the target ABI), and `_BitInt` (Clang's 18), which the
+frontend does not model. `c_test_builtin_classify_type` covers every class,
+the static contexts, arity and unevaluated operands at run time.
+
 `__builtin_parity`/`l`/`ll` share the popcount operand policy and lower to
 `popcount(x) & 1`. `__builtin_bswap16/32/64` take and return `unsigned short`,
 `unsigned int` and `unsigned long long` (`c_semantic_byte_swap_kind`) and lower

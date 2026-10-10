@@ -1233,7 +1233,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sync_builtins_wide_no_cx16(UnitTestArg
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_runtime_index(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 source = S8("typedef unsigned long long U64;\ntypedef struct Inner { int a; short pad[3]; } Inner;\ntypedef struct User { char head[24]; U64 u_debugreg[8]; Inner inner[4]; int m[3][5]; } User;\nint gidx = 3;\nstatic int sidx = 2;\nint* gp = &gidx;\nstatic int calls;\nstatic int next(int v) { calls += 1; return v; }\nenum { E1 = 1 };\nstatic U64 param_shadows(int gidx) { return __builtin_offsetof(User, u_debugreg[gidx]); }\nstatic U64 block_shadow_ends(void)\n{\n    { int sidx = 1; (void)sidx; }\n    return __builtin_offsetof(User, u_debugreg[sidx]);\n}\nstatic U64 loop_shadow_ends(void)\n{\n    for (int gidx = 0; gidx < 1; gidx += 1) { }\n    return __builtin_offsetof(User, u_debugreg[gidx]);\n}\nint main(void)\n{\n    int failed = 0;\n    for (int n = 0; n < 8; n += 1)\n    {\n        U64 offset = __builtin_offsetof(User, u_debugreg[n]);\n        failed |= offset != 24 + 8 * (U64)n;\n    }\n    volatile unsigned char k = 3;\n    failed |= __builtin_offsetof(User, inner[k]) != __builtin_offsetof(User, inner) + 3 * sizeof(Inner);\n    failed |= 2 * __builtin_offsetof(User, u_debugreg[k - 1]) + 1 != 2 * (24 + 16) + 1;\n    failed |= __builtin_offsetof(User, u_debugreg[gidx]) != 24 + 8 * 3;\n    failed |= __builtin_offsetof(User, inner[sidx]) != __builtin_offsetof(User, inner) + 2 * sizeof(Inner);\n    failed |= __builtin_offsetof(User, u_debugreg[*gp]) != 24 + 8 * 3;\n    failed |= __builtin_offsetof(User, m[1][gidx]) != __builtin_offsetof(User, m) + 5 * sizeof(int) + 3 * sizeof(int);\n    failed |= __builtin_offsetof(User, u_debugreg[E1 + k]) != 24 + 8 * 4;\n    failed |= __builtin_offsetof(User, u_debugreg[(gidx, k)]) != 24 + 8 * 3;\n    failed |= __builtin_offsetof(User, u_debugreg[gidx ? k : 0]) != 24 + 8 * 3;\n    failed |= param_shadows(5) != 24 + 8 * 5;\n    failed |= block_shadow_ends() != 24 + 8 * 2;\n    failed |= loop_shadow_ends() != 24 + 8 * 3;\n    failed |= calls != 0;\n    failed |= __builtin_offsetof(User, inner[1].pad) != __builtin_offsetof(User, inner) + sizeof(Inner) + 4;\n    return failed;\n}\n");
+    String8 source = S8("typedef unsigned long long U64;\ntypedef struct Inner { int a; short pad[3]; } Inner;\ntypedef struct User { char head[24]; U64 u_debugreg[8]; Inner inner[4]; int m[3][5]; } User;\nint gidx = 3;\nstatic int sidx = 2;\nint* gp = &gidx;\nstatic int calls;\nstatic int next(int v) { calls += 1; return v; }\nenum { E1 = 1 };\nstatic U64 param_shadows(int gidx) { return __builtin_offsetof(User, u_debugreg[gidx]); }\nstatic U64 block_shadow_ends(void)\n{\n    { int sidx = 1; (void)sidx; }\n    return __builtin_offsetof(User, u_debugreg[sidx]);\n}\nstatic U64 loop_shadow_ends(void)\n{\n    for (int gidx = 0; gidx < 1; gidx += 1) { }\n    return __builtin_offsetof(User, u_debugreg[gidx]);\n}\nint main(void)\n{\n    int failed = 0;\n    for (int n = 0; n < 8; n += 1)\n    {\n        U64 offset = __builtin_offsetof(User, u_debugreg[n]);\n        failed |= offset != 24 + 8 * (U64)n;\n    }\n    volatile unsigned char k = 3;\n    failed |= __builtin_offsetof(User, inner[k]) != __builtin_offsetof(User, inner) + 3 * sizeof(Inner);\n    failed |= 2 * __builtin_offsetof(User, u_debugreg[k - 1]) + 1 != 2 * (24 + 16) + 1;\n    failed |= __builtin_offsetof(User, u_debugreg[gidx]) != 24 + 8 * 3;\n    failed |= __builtin_offsetof(User, inner[sidx]) != __builtin_offsetof(User, inner) + 2 * sizeof(Inner);\n    failed |= __builtin_offsetof(User, u_debugreg[*gp]) != 24 + 8 * 3;\n    failed |= __builtin_offsetof(User, m[1][gidx]) != __builtin_offsetof(User, m) + 5 * sizeof(int) + 3 * sizeof(int);\n    failed |= __builtin_offsetof(User, u_debugreg[E1 + k]) != 24 + 8 * 4;\n    failed |= __builtin_offsetof(User, u_debugreg[(gidx, k)]) != 24 + 8 * 3;\n    failed |= __builtin_offsetof(User, u_debugreg[gidx ? k : 0]) != 24 + 8 * 3;\n    failed |= __builtin_offsetof(User, u_debugreg[(int){gidx}]) != 24 + 8 * 3;\n    failed |= param_shadows(5) != 24 + 8 * 5;\n    failed |= block_shadow_ends() != 24 + 8 * 2;\n    failed |= loop_shadow_ends() != 24 + 8 * 3;\n    failed |= calls != 0;\n    failed |= __builtin_offsetof(User, inner[1].pad) != __builtin_offsetof(User, inner) + sizeof(Inner) + 4;\n    return failed;\n}\n");
     Target targets[] = {
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
@@ -9990,6 +9990,328 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_enum_runtime(UnitTestArgume
     return result;
 }
 
+// One enum-scope fixture through the parser and both canonical frontend forms.
+// An accepted source publishes each enumerator exactly once and lowers to valid
+// IR. A refused one is diagnosed once for a clash (prefix only, so the message
+// may gain detail) and otherwise at least once as `kind`, and never lowers.
+BUSTER_GLOBAL_LOCAL void c_test_enum_scope_case(UnitTestArguments* arguments, UnitTestResult* outer_result, String8 source,
+                                                 CPreprocessDialect dialect, Target target, bool disable_direct_ssa, bool accepted,
+                                                 CDiagnosticKind kind)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+        .target = target, .data_layout = target_data_layout(target), .dialect = dialect,
+    });
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0, source);
+    BUSTER_TEST_RAW(arguments, accepted ? parse.diagnostic_count == 0 : parse.diagnostic_count != 0, source);
+    if (accepted && parse.diagnostic_count == 0)
+    {
+        BUSTER_TEST(arguments, parse.entity_count <= parse.entity_capacity);
+        for (u32 member_index = 0; member_index < parse.enum_member_count; member_index += 1)
+        {
+            CEnumMember const* member = parse.enum_members + member_index;
+            // A name defined in a function declarator's parameter list lives in
+            // that prototype's scope and is never an entity of the file.
+            BUSTER_TEST_RAW(arguments, member->is_published != member->is_prototype_scope, source);
+            u32 publications = 0;
+            for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+            {
+                CEntity const* entity = parse.entities + entity_index;
+                publications += entity->kind == C_ENTITY_ENUMERATOR && entity->enum_member_plus_one == member_index + 1;
+            }
+            BUSTER_TEST_RAW(arguments, publications == (member->is_prototype_scope ? 0 : 1), source);
+        }
+    }
+    if (!accepted)
+    {
+        u32 matching = 0;
+        for (u32 diagnostic = 0; diagnostic < parse.diagnostic_count; diagnostic += 1)
+        {
+            if (parse.diagnostics[diagnostic].kind == kind)
+            {
+                matching += 1;
+                if (kind == C_DIAGNOSTIC_REDEFINITION)
+                {
+                    BUSTER_TEST_RAW(arguments, string_starts_with_sequence(parse.diagnostics[diagnostic].message, S8("redefinition of")), source);
+                }
+            }
+        }
+        BUSTER_TEST_RAW(arguments, kind == C_DIAGNOSTIC_REDEFINITION ? matching == 1 : matching != 0, source);
+    }
+    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-scope.c"), tokens, parse, target,
+                                                        (CIRLowerOptions){.disable_direct_ssa = disable_direct_ssa});
+    if (accepted)
+    {
+        BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0, source);
+        if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count))
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+        }
+    }
+    else
+    {
+        BUSTER_TEST_RAW(arguments, lowered.program == 0, source);
+    }
+    scratch_end(temporary);
+    outer_result->test_count += result.test_count;
+    outer_result->succeeded_test_count += result.succeeded_test_count;
+}
+
+// The enumerators of an enum defined in an expression's type name at file
+// scope -- `unsigned long n = sizeof(enum { R = 2 });`, an array bound, a
+// member bound, a static assertion -- enter file scope at that declaration
+// (C17 6.2.1p4 and 6.7.2.2p3), exactly once, and a clash with another
+// enumerator is a constraint violation reported once (#1615).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_expression_enum_scope(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
+        S8("_Static_assert(sizeof(enum{R=2})==4,\"type\");_Static_assert(R==2,\"member\");int main(void){return R-2;}"),
+        S8("int a[sizeof(enum{R=2})];int b[R];_Static_assert(sizeof b==2*sizeof(int),\"bound\");int main(void){return 0;}"),
+        S8("struct T{char c[sizeof(enum{R=2})];char d[R];};_Static_assert(sizeof(struct T)==6,\"member\");int main(void){return R-2;}"),
+        S8("unsigned long x=sizeof(enum{R=2}),z=R;int main(void){return (int)z-2;}"),
+        S8("unsigned long x=sizeof(enum{R=2,S=R+1});int y=S;int main(void){return y-3;}"),
+        S8("unsigned long x=sizeof(enum T{R=2});enum T t=R;int main(void){return (int)t-2;}"),
+        S8("unsigned long x=(unsigned long)(enum{R=2})1;int y=R;int main(void){return y-2;}"),
+        S8("unsigned long x=sizeof(struct{enum{R=2}e;});int y=R;int main(void){return y-2;}"),
+        S8("unsigned long n=sizeof(struct{enum{A=3}e;char c[A];});_Static_assert(A==3,\"inner\");int main(void){return (int)n-8;}"),
+        S8("unsigned long n=sizeof(union{enum{A=3}e;char c[A];});int main(void){return (int)n-4+A-3;}"),
+        S8("int a[sizeof(struct{enum{R=2}e;char c[R];})];int main(void){return (int)sizeof a/(int)sizeof(int)-8+R-2;}"),
+        S8("unsigned long x=sizeof(enum{R=2});int g(void){return R;}int main(void){return g()-2;}"),
+        S8("unsigned long x=sizeof(enum{R=2});int g(void){int R=5;return R;}int main(void){return g()-5+R-2;}"),
+        S8("static const int n=sizeof(enum{R=2});static const int m=R;int main(void){return n+m-6;}"),
+        S8("unsigned long x=sizeof(enum{A=1}),y=sizeof(enum{B=A+1});int main(void){return A+B-3;}"),
+        // A definition in a function declarator's parameter list is in that
+        // prototype's scope (C17 6.2.1p4), so it neither clashes with nor
+        // reaches the file.
+        S8("enum{R=1};int (*p)(int [sizeof(enum{R=2})]);int main(void){return R-1;}"),
+        S8("struct S{void (*f)(int a[sizeof(enum{R=2})]);};enum{R=5};int main(void){return R-5;}"),
+        S8("enum{R=1};unsigned long n=sizeof(void(*)(int[sizeof(enum{R=2})]));int main(void){return R-1;}"),
+        S8("enum{R=1};struct S{char c[sizeof(int(*)(int a[sizeof(enum{R=2})]))];};int main(void){return R-1;}"),
+        S8("enum{R=1};typedef int (*F)(int [sizeof(enum{R=2})]);enum{S=R+1};int main(void){return S-2;}"),
+        S8("enum{R=1};typedef int F(int a[sizeof(enum{R=2})]);int main(void){return R-1;}"),
+        S8("enum{R=1};int g(int a[sizeof(enum{R=2})]);int main(void){return R-1;}"),
+        // An attribute or operator group around the definition is not a
+        // parameter list.
+        S8("int x __attribute__((aligned(sizeof(enum{R=2}))));int y=R;int main(void){return y-2;}"),
+        S8("char a[__alignof__(enum{R=2})];int y=R;int main(void){return y-2;}"),
+        S8("_Static_assert(__builtin_types_compatible_p(enum{R=2},int)+1,\"x\");int y=R;int main(void){return y-2;}"),
+        S8("typedef int (F)(enum{A=1} x);enum{A=2};int main(void){return A-2;}"),
+        // Source order: a later enumerator's value, in this declaration or a
+        // following one, reads the one the type name defined.
+        S8("_Static_assert(sizeof(enum{R=2})==4,\"x\");enum{S=R+1};int main(void){return S-3;}"),
+        S8("int a=sizeof(enum{R=2});enum{S=R+1};int main(void){return S-3;}"),
+        S8("struct{char c[sizeof(enum{R=2})];enum{S=R+1}e;}v;int main(void){return S-3;}"),
+        // Qualified and fixed-underlying-type names publish too.
+        S8("unsigned long x=sizeof(const enum{R=2});int y=R;int main(void){return y-2;}"),
+        S8("unsigned long x=sizeof(const enum E{R=2});enum E e=R;int main(void){return (int)e-2;}"),
+        // A member or a local of the same spelling is not a use of the
+        // enumerator, and a use after the definition still binds it.
+        S8("struct S{int a,R;};unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
+        S8("int f(void){int R=5;return R;}unsigned long x=sizeof(enum{R=2});int main(void){return f()-5+R-2;}"),
+        // A declarator after an operator group, a member in a parenthesised
+        // record body and a prototype parameter are not uses either.
+        S8("struct S{_Atomic(int) R;};unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
+        S8("struct S{int __attribute__((aligned(4))) R;};unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
+        S8("void f(int R,int a[R]);unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
+        S8("typedef __typeof__(sizeof(struct{int a,R;})) T;unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
+        // A tag, a pointer member after a bit-field, an offsetof member
+        // designator, an attribute name, and the parameters of a function
+        // definition's header, prototype or identifier list are not uses.
+        S8("struct R{int x;};void f(struct R*p);unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
+        S8("struct S{int a:2,*R;};unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
+        S8("struct S{int a,R;};unsigned long o=__builtin_offsetof(struct S,R);unsigned long x=sizeof(enum{R=2});int main(void){return (int)o-4+R-2;}"),
+        S8("int v __attribute__((aligned(4)));unsigned long x=sizeof(enum{aligned=2});int main(void){return aligned-2;}"),
+        S8("int f(int R,int a[R]){return a[0]-R;}unsigned long x=sizeof(enum{R=2});int main(void){return R-2;}"),
+        S8("int g(R)int R;{return R;}unsigned long x=sizeof(enum{R=2});int main(void){return g(2)-R;}"),
+        // A prototype inside a type name in an expression declares its
+        // parameters too.
+        // (sizeof of such a type name does not evaluate yet: #3324.)
+        S8("typedef __typeof__(int (*)(int R,int a[R])) F;unsigned long y=sizeof(enum{R=2});int main(void){return R-2;}"),
+        S8("typedef __typeof__(void (*)(int R)) G;unsigned long y=sizeof(enum{R=2});int main(void){return R-2;}"),
+    };
+    String8 rejected[] = {
+        S8("enum{R=9};unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
+        S8("unsigned long x=sizeof(enum{R=2});unsigned long y=sizeof(enum{R=3});int main(void){return 0;}"),
+        S8("enum{A=100};unsigned long n=sizeof(struct{enum{A=3}e;char c[A];});int main(void){return 0;}"),
+        S8("unsigned long x=sizeof(enum{R=2});enum{R=3};int main(void){return 0;}"),
+        S8("int R;unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
+        S8("unsigned long x=sizeof(struct{enum{A=1}e;})+sizeof(struct{enum{A=2}e;});int main(void){return 0;}"),
+        S8("enum{R=1};_Static_assert(sizeof(enum{R=2})==4,\"clash\");int main(void){return 0;}"),
+        S8("unsigned long x=sizeof(enum{R=2});typedef int R;int main(void){return 0;}"),
+        // A prototype-scope name does not leak to the file.
+        S8("int (*p)(int [sizeof(enum{R=2})]);int main(void){return R;}"),
+        // The scope of an enumerator begins after its definition (C17
+        // 6.2.1p7): GCC and Clang diagnose each of these as undeclared.
+        S8("int y=R;unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
+        S8("unsigned long x=R+sizeof(enum{R=2});int main(void){return 0;}"),
+        S8("int a[R];int b[sizeof(enum{R=2})];int main(void){return 0;}"),
+        S8("_Static_assert(R==2,\"early\");unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
+        // An operand of `*`, a bound or a parameter tag name in a prototype,
+        // a function definition's header, an alignment, a bit-field width
+        // and an enumerator value are uses too.
+        S8("int y=2*R;unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
+        S8("int a[2*R];int b[sizeof(enum{R=2})];int main(void){return 0;}"),
+        S8("struct R{int x;};void f(struct R*p,int a[sizeof(R)]);unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
+        S8("int f(int a[sizeof(R)]){return 0;}unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
+        S8("_Alignas(2*R) char c;unsigned long x=sizeof(enum{R=4});int main(void){return 0;}"),
+        S8("struct S{int b:1*R;};unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
+        S8("enum{A=2*R};unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
+        // A cast operand and a bound in a nested prototype that names no
+        // parameter R are uses.
+        S8("unsigned long x=sizeof((int)R);unsigned long y=sizeof(enum{R=2});int main(void){return 0;}"),
+        S8("unsigned long x=sizeof(int (*)(int a[R]));unsigned long y=sizeof(enum{R=2});int main(void){return 0;}"),
+    };
+    CDiagnosticKind rejected_kinds[] = {
+        C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION,
+        C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION,
+        C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+        C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+        C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+        C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+        C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+    };
+    Target targets[] = {target_native, target_native, target_native};
+    targets[0].cpu_arch = CPU_ARCH_X86_64;
+    targets[0].os = OPERATING_SYSTEM_LINUX;
+    targets[1].cpu_arch = CPU_ARCH_AARCH64;
+    targets[1].os = OPERATING_SYSTEM_LINUX;
+    targets[2].cpu_arch = CPU_ARCH_X86_64;
+    targets[2].os = OPERATING_SYSTEM_WINDOWS;
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(sources); fixture += 1)
+            {
+                c_test_enum_scope_case(arguments, &result, sources[fixture], C_PREPROCESS_DIALECT_C17, targets[target_index], form != 0, true, C_DIAGNOSTIC_REDEFINITION);
+            }
+            for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(rejected); fixture += 1)
+            {
+                c_test_enum_scope_case(arguments, &result, rejected[fixture], C_PREPROCESS_DIALECT_C17, targets[target_index], form != 0, false, rejected_kinds[fixture]);
+            }
+        }
+    }
+    // Many expression enums in one file: every enumerator is published once,
+    // so the entity table is never asked for a second slot per name.
+    TemporalArena stress_scratch = scratch_begin(0, 0);
+    u32 stress_count = 256;
+    u64 stress_capacity = BUSTER_KB(32);
+    char8* stress_buffer = arena_allocate(stress_scratch.arena, char8, stress_capacity);
+    u64 stress_length = 0;
+    for (u32 index = 0; index < stress_count; index += 1)
+    {
+        c_test_append_source(stress_buffer, stress_capacity, &stress_length,
+                             string_format(stress_scratch.arena, S8("unsigned long x{u32}=sizeof(enum{{E{u32}={u32},F{u32}=E{u32}+1}});\n"), index, index, index, index, index));
+    }
+    c_test_append_source(stress_buffer, stress_capacity, &stress_length, S8("int main(void){return E255+F255-511;}\n"));
+    c_test_enum_scope_case(arguments, &result, (String8){.pointer = stress_buffer, .length = stress_length}, C_PREPROCESS_DIALECT_C17, target_native, false, true,
+                           C_DIAGNOSTIC_REDEFINITION);
+    scratch_end(stress_scratch);
+    // A function body's earlier use is refused when the body lowers, not at
+    // parse: the file-scope scan leaves bodies to their own binding.
+    {
+        TemporalArena body_scratch = scratch_begin(0, 0);
+        String8 body_source = S8("int f(void){return R;}unsigned long x=sizeof(enum{R=2});int main(void){return 0;}");
+        CPreprocessResult body_tokens = c_preprocess(body_scratch.arena, body_source, (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_C17,
+        });
+        CParseResult body_parse = c_parse(body_scratch.arena, body_tokens);
+        CIRLowerResult body_lowered = c_lower_to_ir_with_options(body_scratch.arena, S8("early-body-use.c"), body_tokens, body_parse, target_native,
+                                                                 (CIRLowerOptions){0});
+        BUSTER_TEST_RAW(arguments, body_parse.diagnostic_count != 0 || (body_lowered.diagnostic_count != 0 && body_lowered.program == 0), body_source);
+        scratch_end(body_scratch);
+    }
+    // Prototype-scope classification has no nesting limit: a definition 100
+    // parentheses deep inside a parameter list is still that prototype's.
+    TemporalArena deep_scratch = scratch_begin(0, 0);
+    u32 deep_levels = 100;
+    for (u32 variant = 0; variant < 2; variant += 1)
+    {
+        u64 deep_capacity = BUSTER_KB(4);
+        char8* deep_buffer = arena_allocate(deep_scratch.arena, char8, deep_capacity);
+        u64 deep_length = 0;
+        c_test_append_source(deep_buffer, deep_capacity, &deep_length, variant ? S8("int (*p)(int [") : S8("enum{R=1};int (*p)(int ["));
+        for (u32 level = 0; level < deep_levels; level += 1)
+        {
+            c_test_append_source(deep_buffer, deep_capacity, &deep_length, S8("("));
+        }
+        c_test_append_source(deep_buffer, deep_capacity, &deep_length, S8("sizeof(enum{R=2})"));
+        for (u32 level = 0; level < deep_levels; level += 1)
+        {
+            c_test_append_source(deep_buffer, deep_capacity, &deep_length, S8(")"));
+        }
+        c_test_append_source(deep_buffer, deep_capacity, &deep_length, variant ? S8("]);int main(void){return R;}\n") : S8("]);int main(void){return R-1;}\n"));
+        c_test_enum_scope_case(arguments, &result, (String8){.pointer = deep_buffer, .length = deep_length}, C_PREPROCESS_DIALECT_C17, target_native, false,
+                               variant == 0, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER);
+    }
+    scratch_end(deep_scratch);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_expression_enum_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_text = S8(
+        "unsigned long a=sizeof(enum{R=2,S=R+1});"
+        "unsigned long b=sizeof(struct{enum{A=3}e;char c[A];});"
+        "unsigned long c=sizeof(union{enum{B=5}e;char c[B];});"
+        "int d[sizeof(enum{Q=2})];int f[Q];"
+        "struct T{char c[sizeof(enum{M=2})];char d[M];};"
+        "unsigned long g=sizeof(enum Tag{G=7});enum Tag h=G;"
+        "enum{Pr=1};int (*pf)(int [sizeof(enum{Pr=2})]);struct PS{void (*f)(int a[sizeof(enum{Pr=3})]);};"
+        "_Static_assert(sizeof(enum{O1=2})==4,\"order\");enum{O2=O1+1};struct Q{char c[sizeof(enum{O3=2})];enum{O4=O3+1}e;};"
+        "unsigned long k=sizeof(const enum{Kc=6});"
+        "int prototype(void){return Pr!=1||O2!=3||O4!=3||Kc!=6||k!=4;}"
+        "int scalars(void){return a!=4||R!=2||S!=3||b!=8||A!=3||c!=8||B!=5;}"
+        "int bounds(void){return sizeof f!=2*sizeof(int)||sizeof(d)!=4*sizeof(int)||sizeof(struct T)!=6||M!=2;}"
+        "int tagged(void){return g!=4||h!=G||G!=7;}"
+        "int shadow(void){int R=9;{int S=R+1;return R!=9||S!=10;}}"
+        "int main(void){return prototype()||scalars()||bounds()||tagged()||shadow();}");
+    String8 source = buster_test_temporary_path(arguments->arena, S8("file-scope-expression-enum-runtime"), S8(".c"));
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("file-scope-expression-enum-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=c17"), modes[mode], frontends[form],
+                                     S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("file-scope expression enum {S8} {S8}: status={u32} timed_out={u32}"),
+                                          modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // Scalar initializer bindings follow lexical declaration points; later comma
 // declarators see the enum without rebinding earlier operands (C17 6.2.1).
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_scope(UnitTestArguments* arguments)
@@ -10006,6 +10328,31 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_scope(UnitTestArgumen
         S8("int main(void){int x=(enum Tag{E=2})E;enum Tag object=E;return x!=2||object!=2;}"),
         S8("int main(void){static int x=(enum{E=2})E;return x!=2||E!=2;}"),
         S8("int main(void){int x=(enum{A=1})A+(enum{B=A+1})B;return x!=3||A!=1||B!=2;}"),
+        S8("int main(void){int a[2]={(int)sizeof(enum{K=4}),K};return a[0]-4+a[1]-4;}"),
+        S8("struct S{int a;};int main(void){struct S s={(int)sizeof(enum{K=4})};return s.a-4+K-4;}"),
+        S8("int main(void){int a[]={(int)sizeof(enum{K=4}),0};_Static_assert(sizeof a==2*sizeof(int),\"count\");return a[0]-4+K-4;}"),
+        S8("int main(void){int a[]={(int)sizeof(enum{K=4}),0};{int b[1]={(int)sizeof(enum{K=5})};_Static_assert(K==5,\"inner\");(void)b;}"
+           "_Static_assert(K==4,\"outer\");return a[0]-4;}"),
+        S8("int main(void){int n=(int)sizeof(struct{enum{A=3}e;char c[A];});_Static_assert(A==3,\"member\");return n-8;}"),
+        S8("enum{A=100};int main(void){int n=(int)sizeof(struct{enum{A=3}e;char c[A];});_Static_assert(A==3,\"inner\");return n-8;}"),
+        S8("enum{A=100};int main(void){int n=(int)sizeof(union{enum{A=3}e;char c[A];}),m=A;return n-4+m-3;}"),
+        S8("enum{A=100};int main(void){{int n=(int)sizeof(struct{enum{A=5}e;char c[A];});if(n!=12)return 1;}"
+           "_Static_assert(A==100,\"outer\");return A-100;}"),
+        S8("int main(void){int n=(int)sizeof(struct T{enum{A=3}e;});struct T t={A};return n-4+(int)t.e-3;}"),
+        S8("int main(void){int x=({struct{enum{A=3}e;char c[A];}v;(int)sizeof v;});return x-8;}"),
+        S8("int main(void){static int n=sizeof(struct{enum{A=3}e;char c[A];});return n-8+A-3;}"),
+        S8("int main(void){int n=(int)sizeof(struct{struct{enum{A=3}e;char c[A];}in;char d[A+1];});return n-12+A-3;}"),
+        S8("int main(void){int n=(int)sizeof(struct{enum{A=3,B=A+1}e;char c[B];});return n-8+B-4;}"),
+        S8("int main(void){int a[2]={(int)sizeof(struct{enum{K=4}e;char c[K];}),K};return a[0]-8+a[1]-4;}"),
+        // Qualified, fixed-underlying-type and offsetof-operand definitions
+        // declare their names at their own point too.
+        S8("enum{A=100};int main(void){int n=(int)sizeof(const enum{A=1});return n-4+A-1;}"),
+        S8("enum{A=100};int main(void){int n=(int)sizeof(volatile enum{A=1});return n-4+A-1;}"),
+        S8("enum{A=100};int main(void){int n=(int)sizeof(const enum E{A=1});return n-4+A-1+(int)sizeof(enum E)-4;}"),
+        S8("enum{A=100};int main(void){int n=(int)sizeof(enum:char{A=1});return n-1+A-1;}"),
+        S8("enum{A=100};int main(void){int n=(int)sizeof(enum E:short{A=1});return n-2+A-1;}"),
+        S8("enum{A=100};int main(void){int n=(int)sizeof(const struct S{enum{A=3}e;char c[A];});return n-8+A-3;}"),
+        S8("enum{A=100};int main(void){long n=__builtin_offsetof(struct{enum{A=3}e;char c[A];char d;},d);return (int)n-7+A-3;}"),
     };
     String8 rejected[] = {
         S8("int main(void){int x=E+(enum{E=2})E;return x;}"),
@@ -10014,11 +10361,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_scope(UnitTestArgumen
         S8("int main(void){int x=(enum{E=2})0,E=0;return x+E;}"),
         S8("int main(void){int x=(enum{E=2})0+(enum{E=3})0;return x;}"),
         S8("int main(void){int x=(enum{A=1})0+B+(enum{B=2})0;return x;}"),
+        S8("int main(void){enum{A=100};int n=(int)sizeof(struct{enum{A=3}e;char c[A];});return n;}"),
+        S8("int main(void){int n=(int)sizeof(struct{enum{A=3}e;}),m=(int)sizeof(struct{enum{A=4}e;});return n+m;}"),
+        S8("int main(void){int a[2]={(int)sizeof(enum{K=4}),(int)sizeof(enum{K=5})};return a[0];}"),
+        S8("int main(void){{int x=(int)sizeof(struct{enum{A=3}e;});(void)x;}return A;}"),
+        S8("int main(void){int x=A+(int)sizeof(struct{enum{A=3}e;});return x;}"),
+        S8("enum{A=100};int main(void){int n=(int)sizeof(const enum{A=1});enum{A=2};return n;}"),
+        // Attributes between the keyword and the body are refused, never read
+        // with an outer enumerator of the same name.
+        S8("enum{A=100};int main(void){int n=(int)sizeof(enum __attribute__((packed)){A=1});return A-1;}"),
+        S8("enum{A=100};int main(void){int n=(int)sizeof(struct __attribute__((packed)) S{enum{A=3}e;char c[A];});return n;}"),
     };
     CDiagnosticKind rejection_kinds[] = {
         C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
         C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION,
         C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+        C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION,
+        C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+        C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
     };
     Target targets[] = {target_native, target_native, target_native};
     targets[0].cpu_arch = CPU_ARCH_X86_64;
@@ -10109,6 +10469,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_scope(UnitTestArgumen
                 scratch_end(temporary);
             }
         }
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            // GNU __auto_type defines the types of its initializer at its own
+            // point, and so do C23 auto and constexpr and the for declaration
+            // in every dialect (#3252).
+            String8 gnu_sources[] = {
+                S8("int main(void){__auto_type z=sizeof(enum{K=4});return K-4+(int)z-(int)sizeof(int);}"),
+                S8("enum{A=100};int main(void){__auto_type n=sizeof(struct{enum{A=3}e;char c[A];});return (int)n-8+A-3;}"),
+            };
+            String8 gnu_rejected[] = {
+                S8("int main(void){__auto_type n=sizeof(struct{enum{A=3}e;});__auto_type m=sizeof(struct{enum{A=4}e;});return (int)(n+m);}"),
+                S8("int main(void){__auto_type z=K+(int)sizeof(enum{K=4});return z;}"),
+            };
+            CDiagnosticKind gnu_kinds[] = {C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER};
+            for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(gnu_sources); fixture += 1)
+            {
+                c_test_enum_scope_case(arguments, &result, gnu_sources[fixture], C_PREPROCESS_DIALECT_GNU17, targets[target_index], form != 0, true,
+                                       C_DIAGNOSTIC_REDEFINITION);
+            }
+            for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(gnu_rejected); fixture += 1)
+            {
+                c_test_enum_scope_case(arguments, &result, gnu_rejected[fixture], C_PREPROCESS_DIALECT_GNU17, targets[target_index], form != 0, false,
+                                       gnu_kinds[fixture]);
+            }
+            String8 c23_sources[] = {
+                S8("int main(void){int s=0;for(int i=(int)sizeof(enum{K=4});i<6;i++)s+=K;return s-8;}"),
+                S8("int main(void){int s=0;for(int i=0,j=(int)sizeof(enum{K=4});i<1;i++)s+=j+K;return s-8;}"),
+                S8("int main(void){int s=0;for(int i=(int)sizeof(struct{enum{A=3}e;char c[A];});i<9;i++)s+=A;return s-3;}"),
+            };
+            for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(c23_sources); fixture += 1)
+            {
+                c_test_enum_scope_case(arguments, &result, c23_sources[fixture], C_PREPROCESS_DIALECT_C23, targets[target_index], form != 0, true,
+                                       C_DIAGNOSTIC_REDEFINITION);
+            }
+            c_test_enum_scope_case(arguments, &result, S8("int main(void){for(int i=(int)sizeof(enum{K=4});i<1;i++);return K;}"), C_PREPROCESS_DIALECT_C23,
+                                   targets[target_index], form != 0, false, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER);
+            // A pre-C23 `for` initializer and a C23 `auto` or `constexpr`
+            // initializer publish their definitions at their own point, as
+            // Clang does (#3252): the names bind the inner enumerator in the
+            // loop or the rest of the block, never an outer one, and end with
+            // the loop.
+            String8 for_sources[] = {
+                S8("enum{A=100};int main(void){int s=0;for(int i=(int)sizeof(struct{enum{A=3}e;char c[A];});i<9;i++)s+=A;return s-3;}"),
+                S8("int main(void){int s=0;for(int i=(int)sizeof(enum{K=4});i<6;i++)s+=K;return s-8;}"),
+                S8("int main(void){int s=0;for(int a[sizeof(enum{K=4})],i=0;i<1;i++)s=(int)sizeof a+K;return s-20;}"),
+            };
+            for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(for_sources); fixture += 1)
+            {
+                c_test_enum_scope_case(arguments, &result, for_sources[fixture], C_PREPROCESS_DIALECT_GNU17, targets[target_index], form != 0, true,
+                                       C_DIAGNOSTIC_REDEFINITION);
+                c_test_enum_scope_case(arguments, &result, for_sources[fixture], C_PREPROCESS_DIALECT_C17, targets[target_index], form != 0, true,
+                                       C_DIAGNOSTIC_REDEFINITION);
+            }
+            c_test_enum_scope_case(arguments, &result, S8("int main(void){for(int i=(int)sizeof(enum{K=4});i<1;i++);return K;}"), C_PREPROCESS_DIALECT_GNU17,
+                                   targets[target_index], form != 0, false, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER);
+            String8 c23_initializer_sources[] = {
+                S8("enum{A=100};int main(void){auto n=sizeof(struct{enum{A=3}e;char c[A];});return (int)n-8+A-3;}"),
+                S8("enum{A=100};int main(void){constexpr int n=sizeof(struct{enum{A=3}e;char c[A];});return n-8+A-3;}"),
+                S8("int main(void){constexpr int n=sizeof(enum{K=4});return n-4+K-4;}"),
+            };
+            for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(c23_initializer_sources); fixture += 1)
+            {
+                c_test_enum_scope_case(arguments, &result, c23_initializer_sources[fixture], C_PREPROCESS_DIALECT_C23, targets[target_index], form != 0,
+                                       true, C_DIAGNOSTIC_REDEFINITION);
+            }
+        }
     }
     return result;
 }
@@ -10129,7 +10555,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_runtime(UnitTestArgum
         "static int tagged(void){int x=(enum Tag{E=2})E;enum Tag object=E;return x!=2||object!=2;}"
         "static int stored(void){static int x=(enum{E=2})E;return x!=2||E!=2;}"
         "static int multiple(void){int x=(enum{A=1})A+(enum{B=A+1})B;return x!=3||A!=1||B!=2;}"
-        "int main(void){return sizes()||cast()||literal()||later()||order()||bound()||shadow()||tagged()||stored()||multiple();}");
+        "static int aggregate(void){int a[2]={(int)sizeof(enum{K=4}),K};struct S{int m;}s={(int)sizeof(enum{L=6})};"
+        "return a[0]!=4||a[1]!=4||s.m!=4||K!=4||L!=6;}"
+        "static int inferred(void){int a[]={(int)sizeof(enum{K=4}),K,0};return sizeof a!=3*sizeof(int)||a[1]!=4||K!=4;}"
+        "static int record(void){int n=(int)sizeof(struct{enum{A=3}e;char c[A];});return n!=8||A!=3;}"
+        "static int outer_name(void){int n=(int)sizeof(struct{enum{Q=6}e;char c[Q];});return n!=12||Q!=6;}"
+        "static int qualified(void){int n=(int)sizeof(const enum{Qa=1});int m=(int)sizeof(enum:char{Qb=2});return n!=4||m!=1||Qa!=1||Qb!=2;}"
+        "static int outer_enum(void){int n=(int)sizeof(const struct{enum{Q=5}e;char c[Q];});return n!=12||Q!=5;}"
+        "static int offset(void){long n=__builtin_offsetof(struct{enum{Q=3}e;char c[Q];char d;},d);return n!=7||Q!=3;}"
+        "static int record_shadow(void){int inner=0;{int n=(int)sizeof(struct{enum{Q=6}e;char c[Q];});inner=n+Q;}return inner!=18||Q!=1;}"
+        "int main(void){return sizes()||cast()||literal()||later()||order()||bound()||shadow()||tagged()||stored()||multiple()||aggregate()||"
+        "inferred()||record()||outer_name()||record_shadow()||qualified()||outer_enum()||offset();}");
     String8 source = buster_test_temporary_path(arguments->arena, S8("initializer-enum-runtime"), S8(".c"));
     String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
@@ -22070,6 +22506,163 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_infinity(UnitTestArguments* ar
     return result;
 }
 
+// __builtin_classify_type answers Clang's type class from the unevaluated,
+// decayed operand type as an int constant. _BitInt is not modeled by the
+// frontend type system; nullptr_t (C_TYPE_NULLPTR) is modeled but deliberately
+// refused, so neither has a row here.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_classify_type(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "#if !__has_builtin(__builtin_classify_type)\n#error classify type is implemented\n#endif\n"
+        "typedef int V4 __attribute__((vector_size(16)));\n"
+        "enum Color { Red };\nstruct Pair { int a; int b; };\nunion Word { int i; float f; };\n"
+        "extern void sink(void);\nextern int array[3];\nextern const volatile int qualified;\n"
+        "_Static_assert(__builtin_classify_type(sink()) == 0, \"void\");\n"
+        "_Static_assert(__builtin_classify_type(1) == 1, \"int\");\n"
+        "_Static_assert(__builtin_classify_type('a') == 1, \"char\");\n"
+        "_Static_assert(__builtin_classify_type(1ull) == 1, \"unsigned long long\");\n"
+        "_Static_assert(__builtin_classify_type((__int128)1) == 1, \"int128\");\n"
+        "_Static_assert(__builtin_classify_type(Red) == 1, \"enumerator\");\n"
+        "_Static_assert(__builtin_classify_type((enum Color)0) == 1, \"enum\");\n"
+        "_Static_assert(__builtin_classify_type(qualified) == 1, \"qualified int\");\n"
+        "_Static_assert(__builtin_classify_type((_Bool)1) == 4, \"bool\");\n"
+        "_Static_assert(__builtin_classify_type((void*)0) == 5, \"pointer\");\n"
+        "_Static_assert(__builtin_classify_type(array) == 5, \"array decay\");\n"
+        "_Static_assert(__builtin_classify_type(sink) == 5, \"function decay\");\n"
+        "_Static_assert(__builtin_classify_type(\"text\") == 5, \"string literal\");\n"
+        "_Static_assert(__builtin_classify_type(1.0f) == 8, \"float\");\n"
+        "_Static_assert(__builtin_classify_type(1.0) == 8, \"double\");\n"
+        "_Static_assert(__builtin_classify_type(1.0L) == 8, \"long double\");\n"
+        "_Static_assert(__builtin_classify_type(1.0if) == 9, \"complex\");\n"
+        "_Static_assert(__builtin_classify_type(*(struct Pair*)0) == 12, \"struct\");\n"
+        "_Static_assert(__builtin_classify_type(*(union Word*)0) == 13, \"union\");\n"
+        "_Static_assert(__builtin_classify_type(*(V4*)0) == 19, \"vector\");\n"
+        "static int static_class = __builtin_classify_type(1.0);\n"
+        "static int bounded[__builtin_classify_type((void*)0)];\n"
+        "int counter(void)\n{\n    int x = 3;\n    int class = __builtin_classify_type(x++) + __builtin_classify_type(sink());\n"
+        "    switch (class)\n    {\n    case __builtin_classify_type(1) + __builtin_classify_type(sink()): return x;\n"
+        "    default: return 100;\n    }\n}\n"
+        "static int bumps;\nstatic int bump(void)\n{\n    bumps += 1;\n    return 1;\n}\n"
+        "int main(void)\n{\n    int x = 7;\n    volatile int sequence = 0;\n    _Atomic int atomic = 0;\n    int error = 0;\n"
+        "    error |= __builtin_classify_type(x++) != 1;\n    error |= __builtin_classify_type(sequence++) != 1;\n"
+        "    error |= __builtin_classify_type(x ? bump() : bump()) != 1;\n    error |= __builtin_classify_type(x && bump()) != 1;\n"
+        "    error |= __builtin_classify_type((bump(), 1.0)) != 8;\n    error |= __builtin_classify_type(x ? (void)bump() : (void)bump()) != 0;\n"
+        "    error |= __builtin_classify_type(atomic) != 1;\n    error |= bumps != 0;\n"
+        "    error |= x != 7 || sequence != 0;\n    error |= static_class != 8 || sizeof(bounded) != 5 * sizeof(int);\n"
+        "    error |= counter() != 3;\n    return error;\n}\n");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("builtin-classify-type.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            bool accepted = preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0;
+            BUSTER_TEST_RAW(arguments, accepted, string_format(temporary.arena,
+                S8("classify type target={u32} form={u32}: first diagnostic {S8}"), target_index, form,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            if (accepted && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                IrGlobal* initialized = c_test_find_ir_global(module, lowered.program, S8("static_class"));
+                BUSTER_TEST(arguments, initialized && initialized->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER &&
+                    initialized->initializer_bits == 8);
+                IrFunction* function = c_test_find_ir_function(module, S8("counter"));
+                if (BUSTER_REQUIRE(arguments, function != 0))
+                {
+                    // The operands are unevaluated: no call and no increment.
+                    BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    String8 invalid[] = {
+        S8("int bad(void) { return __builtin_classify_type(); }"),
+        S8("int bad(void) { return __builtin_classify_type(1, 2); }"),
+        S8("static int bad = __builtin_classify_type();"),
+        S8("_Static_assert(__builtin_classify_type() == 1, \"arity\");"),
+        S8("_Static_assert(__builtin_classify_type(1, 2) == 1, \"arity\");"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = targets[0];
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[index],
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("builtin-classify-type-invalid.c"), preprocess, syntax, target,
+            (CIRLowerOptions){0});
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0, invalid[index]);
+        BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0, invalid[index]);
+        BUSTER_TEST(arguments, !lowered.canonical_ir_certified && lowered.program == 0);
+        scratch_end(temporary);
+    }
+    {
+        // va_list's class depends on the target ABI, so the function that
+        // asks for it fails to lower with a diagnostic naming the builtin.
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = targets[0];
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, S8("int bad(__builtin_va_list list) { return __builtin_classify_type(list); }"),
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("builtin-classify-type-va-list.c"), preprocess, syntax, target,
+            (CIRLowerOptions){0});
+        bool named = false;
+        for (u64 index = 0; index < lowered.diagnostic_count; index += 1)
+        {
+            named |= string_first_sequence(lowered.diagnostics[index].message, S8("__builtin_classify_type")) != BUSTER_STRING_NO_MATCH;
+        }
+        BUSTER_TEST(arguments, lowered.diagnostic_count != 0 && named && !lowered.canonical_ir_certified);
+        scratch_end(temporary);
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 path = buster_test_temporary_path(arguments->arena, S8("builtin-classify-type-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("builtin-classify-type-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fregister-allocator=fast"),
+#if BUSTER_CPU_ARCH_X86_64
+                S8("-mattr=+sse2,+cx16"),
+#endif
+                form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#endif
+    return result;
+}
+
 // GNU vector subscripts are scalar lanes even inside conditional expressions.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vector_subscript_conditional_type(UnitTestArguments* arguments)
 {
@@ -23078,6 +23671,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__atomic_test_and_set"), native_targets},
         {S8("__atomic_clear"), native_targets},
         {S8("__builtin_types_compatible_p"), all_targets},
+        {S8("__builtin_classify_type"), all_targets},
         {S8("__builtin_choose_expr"), all_targets},
         {S8("__builtin_expect"), all_targets},
         {S8("__builtin_memcpy"), all_targets},
@@ -60710,6 +61304,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_brace_designators);
     C_TEST_FIXTURE(arguments, c_test_braced_string_initializers);
     C_TEST_FIXTURE(arguments, c_test_braced_string_runtime);
+    C_TEST_FIXTURE(arguments, c_test_builtin_classify_type);
     C_TEST_FIXTURE(arguments, c_test_builtin_infinity);
     C_TEST_FIXTURE(arguments, c_test_c23_attribute_noreturn);
     C_TEST_FIXTURE(arguments, c_test_c23_attribute_positions);
@@ -60793,6 +61388,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_ext80_big_live_limbs);
     C_TEST_FIXTURE(arguments, c_test_extension_constants);
     C_TEST_FIXTURE(arguments, c_test_file_scope_declaration_order);
+    C_TEST_FIXTURE(arguments, c_test_file_scope_expression_enum_runtime);
+    C_TEST_FIXTURE(arguments, c_test_file_scope_expression_enum_scope);
     C_TEST_FIXTURE(arguments, c_test_file_tls_dialect);
     C_TEST_FIXTURE(arguments, c_test_file_tls_dialect_runtime);
     C_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
