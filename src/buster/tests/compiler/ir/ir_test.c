@@ -1947,6 +1947,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, defaults_program->inline_options.tiny);
             BUSTER_TEST(arguments, defaults_program->inline_options.max_callee_instructions == IR_INLINE_TINY_INSTRUCTIONS);
             BUSTER_TEST(arguments, defaults_program->inline_options.max_function_growth == IR_INLINE_FUNCTION_GROWTH);
+            BUSTER_TEST(arguments, IR_INLINE_FUNCTION_GROWTH == 2048u);
             BUSTER_TEST(arguments, defaults_program->inline_options.max_module_growth == IR_INLINE_MODULE_GROWTH);
             BUSTER_TEST(arguments, defaults_program->inline_options.max_call_sites == IR_INLINE_CALL_SITES);
             BUSTER_TEST(arguments, defaults_module->inline_complete);
