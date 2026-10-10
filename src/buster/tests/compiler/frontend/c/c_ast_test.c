@@ -3577,6 +3577,10 @@ struct CAstTypeCase
     // With constraint checks the answer replays the machine's typing of a
     // cast's string-literal operand.
     bool replayed;
+    // The range is one string-literal token, perhaps parenthesized: with or
+    // without constraint checks the answer is the row its replay appends, so
+    // the probe, which does not replay, reports no type.
+    bool replay_answer;
 };
 
 BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
@@ -3697,16 +3701,25 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
      C_TYPE_LONG_LONG},
     {S8_INITIALIZER("char* f(void) { return (char*)\"a\" \"b\"; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER,
      true},
+    // One string-literal token alone, bare or parenthesized (`S8()`'s
+    // `BUSTER_ARRAY_LENGTH` subscripts `(("text"))[0]`): the answer is the
+    // array row the replay of the machine's leaf appends.
+    {S8_INITIALIZER("char const* f(void) { return \"text\"; }"), S8_INITIALIZER("\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID,
+     false, C_TYPE_INVALID, false, true},
+    {S8_INITIALIZER("char const* f(void) { return ((\"text\")); }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID,
+     false, C_TYPE_INVALID, false, true},
+    {S8_INITIALIZER("unsigned short const* f(void) { return u\"text\"; }"), S8_INITIALIZER("u\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
     // Declined: whatever would make the machine append a type row (a
     // qualified member, a string, a cast to a type name with a qualified
     // typedef, a tag, a qualified or restrict pointer or a declarator other
     // than `*`, an array operand of `+`, a pointer conditional), a builtin
     // call, a parenthesized callee, and a conditional whose middle operand
     // holds an assignment, which the machine splits there instead. A string
-    // literal is answered by the literal path, not the tree.
+    // literal of several tokens is left to the machine.
     {S8_INITIALIZER("struct S { int a; }; int f(struct S const* p) { return p->a; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_DECLINE,
      C_TYPE_INVALID},
-    {S8_INITIALIZER("char const* f(void) { return \"text\"; }"), S8_INITIALIZER("\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("char const* f(void) { return \"te\" \"xt\"; }"), S8_INITIALIZER("\"te\""), 0, 2, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
     {S8_INITIALIZER("typedef int T; T const* f(void* p) { return (const T*)p; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_DECLINE,
      C_TYPE_INVALID},
     {S8_INITIALIZER("struct S; struct S* f(void* p) { return (struct S*)p; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_DECLINE,
@@ -3740,10 +3753,11 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     {S8_INITIALIZER("typedef struct P { int x; } P; P f = (P){1};"), S8_INITIALIZER("("), 0, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_STRUCT},
     {S8_INITIALIZER("struct S { int a; int b; } f = { .a = 1, .b = sizeof(int) };"), S8_INITIALIZER("sizeof"), 0, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
      C_TYPE_UNSIGNED_LONG, false, C_TYPE_UNSIGNED_LONG_LONG},
-    // Declined or missed there as in a body: `&` and a string literal append
-    // rows, and a designator is no expression.
+    // Declined or missed there as in a body: `&` appends a row, and a
+    // designator is no expression. A lone string literal is replayed.
     {S8_INITIALIZER("int g; int* f = &g;"), S8_INITIALIZER("&"), 0, 2, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
-    {S8_INITIALIZER("char const* f = \"text\";"), S8_INITIALIZER("\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("char const* f = \"text\";"), S8_INITIALIZER("\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID, false,
+     C_TYPE_INVALID, false, true},
     {S8_INITIALIZER("struct S { int a; } f = { .a = 1 };"), S8_INITIALIZER("."), 0, 2, C_TEST_AST_TYPE_PROBE_MISS, C_TYPE_INVALID},
 };
 
@@ -3786,8 +3800,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
                 bool llp64 = target_uses_llp64_data_model(preprocess.target) && type_case->llp64_kind != C_TYPE_INVALID;
                 u32 status = declined ? C_TEST_AST_TYPE_PROBE_DECLINE : type_case->status;
                 CTypeKind kind = declined ? C_TYPE_INVALID : llp64 ? type_case->llp64_kind : type_case->kind;
-                bool replay = checked && type_case->replayed;
-                BUSTER_TEST_RAW(arguments, probe.status == status && probe.kind == kind && probe.nodes_typed > 0 && probe.replay == replay,
+                bool replay = (checked && type_case->replayed) || type_case->replay_answer;
+                BUSTER_TEST_RAW(arguments, probe.status == status && probe.kind == kind && probe.nodes_typed > 0 && probe.replay == replay &&
+                                               probe.replay_answer == type_case->replay_answer,
                                 string_format(temporary.arena,
                                               S8("{S8} (checked {u32}): status {u32} kind {u32} replay {u32}, expected status {u32} kind {u32} replay {u32}"),
                                               type_case->source, checked, probe.status, (u32)probe.kind, (u32)probe.replay, status, (u32)kind,
