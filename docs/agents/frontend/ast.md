@@ -12,7 +12,7 @@ opt-in [driver hook](#driver-pilot-hook) builds it, and two consumers read it:
 - the [declaration split](#declaration-split-from-the-tree) publishes
   `c_parse_ast`'s top-level records from its declaration nodes;
 - the [tree expression typer](#tree-expression-typer) answers function-body
-  expression-type queries during semantic analysis.
+  and file-scope initializer expression-type queries during semantic analysis.
 
 Otherwise `c_analyze_semantics_only` and `c_lower_to_ir_with_options` still
 rediscover syntax from token ranges, as described in the
@@ -254,11 +254,12 @@ Under `-v` the driver prints four rows with the other verbose counters:
   scan_ns=<one linear pass over the kinds column> children_ns=<c_ast_children
   over every node into a scratch buffer> child_entries=<sum of child counts>
   scan_calls=<CALL nodes the scan counted>`
-- `C_AST_TYPES bodies=<function bodies typed> nodes_typed=<expression nodes
-  the eager pass visited> nodes_accepted=<those it gave a type> answers=<type
-  queries answered from the tree> declines=<queries that mapped to a node the
-  typer does not vouch for> misses=<queries that mapped to no node>
-  gated=<queries met in a machine state the typer leaves alone>`
+- `C_AST_TYPES bodies=<function bodies typed> initializers=<file-scope
+  initializers a query had typed> nodes_typed=<expression nodes the eager pass visited>
+  nodes_accepted=<those it gave a type> answers=<type queries answered from
+  the tree> declines=<queries that mapped to a node the typer does not vouch
+  for> misses=<queries that mapped to no node> gated=<queries met in a machine
+  state the typer leaves alone>`
 - `C_AST_SPLIT units=<units whose records the tree split published>
   records=<records it published> assertions=<body _Static_assert ranges it
   published> fallbacks=<units it handed to c_parse_ast's walker>
@@ -276,22 +277,43 @@ evidence.
 ## Tree expression typer
 
 `c_ast_types.c` answers semantic analysis's expression-type queries in function
-bodies from the tree, in place of the speculative type machine
-(`CTypeParseMachine` in `c_parse.c`). Stage 1 covers names, literals and
-postfix chains; stage 2 adds the operators. It runs only when the caller
-supplies a tree in `CParserResult.ast`, which today only the
-[driver hook](#driver-pilot-hook) does; without one, analysis is unchanged.
+bodies and in file-scope initializers from the tree, in place of the
+speculative type machine (`CTypeParseMachine` in `c_parse.c`). Stage 1 covers
+names, literals and postfix chains; stage 2 adds the operators; stage 3 adds
+file-scope initializers. It runs only when the caller supplies a tree in
+`CParserResult.ast`, which today only the [driver hook](#driver-pilot-hook)
+does; without one, analysis is unchanged.
 
 - **When it types.** `c_parse_validate_lowering_constraints` indexes the
-  tree's top-level function definitions once (`c_ast_types_bodies_prepare`).
-  Before each body's validator families run, `c_ast_types_body_begin` makes one
-  forward pass over the body's node interval. Children come before parents, so
-  each expression node's operands are already typed when the node is reached.
-  The pass records each node's token span and, for the accepted kinds, its
-  type, whether it is safe under constraint checks, and the bit-field width of
-  a member. A node is accepted only when every operand the machine types for
-  it is accepted. Its arrays live in the machine's scratch arena above the
-  body's validation mark and are released with the rest of the body's scratch.
+  tree's top-level function definitions and declarations once
+  (`c_ast_types_bodies_prepare`). Before each body's validator families run,
+  `c_ast_types_body_begin` makes one forward pass over the body's node
+  interval. Children come before parents, so each expression node's operands
+  are already typed when the node is reached. The pass records each node's
+  token span and, for the accepted kinds, its type, whether it is safe under
+  constraint checks, and the bit-field width of a member. A node is accepted
+  only when every operand the machine types for it is accepted. Its arrays
+  live in the machine's scratch arena above the body's validation mark and are
+  released with the rest of the body's scratch.
+- **File-scope initializers.** `c_parse_validate_static_initializers` made
+  nearly all of the queries outside a typed body: 77,545 of 79,035 on the unity
+  self-host, at about 190 M machine Ir, against at most 3 M for any other
+  validator (audit `2026-10-09T213311Z`). Before it validates a file-scope
+  object's initializer, `c_ast_types_initializer_begin` reserves the arrays
+  for that initializer's subtree, over the initializer's tokens, and they are
+  released afterwards. The subtree is typed the same way, but only when the
+  first query that the literal fast path does not answer reaches it. Until
+  then a lone literal keeps the literal path (`c_ast_types_waiting`). That
+  matters: 61 of the self-host's 2,777 initializers are numeric tables that
+  are only asked about lone literals, and they hold 551,736 of the 736,333
+  expression nodes. Typing them all cost more than the machine runs it
+  removed. The binder records no identifier use outside bodies. Where it recorded none, the machine resolves an identifier, and a
+  cast's or compound literal's typedef name, by spelling in the query's scope,
+  so the pass does the same lookup in the file scope. Each such node keeps the
+  entity it found and carries the lookup mark, so the query repeats the lookup
+  in its own scope (`c_ast_types_lookups_agree`). The kinds and rules are the
+  bodies'. There is no memo at file scope, so an answer publishes only the
+  machine state.
 - **When it answers.** `c_parse_expression_type_query` reads the per-body memo
   first. On a miss it asks the typer, which maps the range to a node (after
   stripping balanced outer parentheses, as the machine does). It answers only
@@ -306,8 +328,9 @@ supplies a tree in `CParserResult.ast`, which today only the
   - over a `_Generic` or `__builtin_types_compatible_p` site;
   - while an enumerator list is half parsed;
   - when, in the query's scope, a callee or a cast's typedef name somewhere in
-    the subtree resolves to an entity other than the one the binder bound
-    (`c_ast_types_lookups_agree`).
+    the subtree resolves to an entity other than the one the binder bound, or,
+    in an initializer, an unbound name resolves to an entity other than the one
+    the pass found (`c_ast_types_lookups_agree`).
 - **What it accepts.** Each answer is a row that already exists: an entity's,
   member's, element's, return or typedef type, an operand's own row, or an
   immutable scalar row. The rules are the machine's own functions, shared
@@ -352,6 +375,23 @@ supplies a tree in `CParserResult.ast`, which today only the
   scalar.
 - **Authority.** The machine remains the only producer of diagnostics. A query
   the typer declines, misses or leaves alone runs the machine as before.
+- **Designator probes.** Nearly every miss was one of two designator probes
+  from `c_parse_validate_const_assignments`, 64,905 of 65,070 on the unity
+  self-host (about 56 M machine Ir):
+  - the lone `{` or `,` that its member walk takes for the base of the
+    `.name` designator after it;
+  - the `.name` chain that its assignment walk takes for the place before a
+    designator's `=`.
+
+  No expression starts with these tokens. The machine's direct reader stops at
+  the first one, so it fails without a diagnostic, a constraint, a new row or a
+  memo entry, and the walk reads only that failure. The walk therefore no
+  longer asks (`c_parse_designator_probe`), with or without a tree, so this is
+  a deliberate change to the default path as well. In verify mode the machine
+  answers each skipped probe anyway, and the probe must fail and leave the
+  diagnostics and table sizes as they were. A `[index]` designator, and a
+  probe range that starts at a `{` but runs on (`{ .a` before `.a.b`), still
+  run the machine.
 
 `rederive.tree_type_{answers,declines,misses,nodes}` in the work ledger and the
 `C_AST_TYPES` row under `-v` count its work. `c_ast_test_types` probes each
@@ -481,8 +521,11 @@ tree, with it, and with it in verify mode (`c_test_ast_type_verify_set`), where
 the type machine also answers every query the tree answered. The first two
 runs must end with the same diagnostics and the same type-table sizes. Every
 tree answer must match the machine's in validity, structural type, constraint,
-nonplace fact, diagnostics and table growth. The fixtures give about 56,000
-checked answers, and the hosted frontend sources about 246,600 more.
+nonplace fact, diagnostics and table growth. The fixtures give about 56,100
+checked answers, and the hosted frontend sources about 264,200 more. Verify
+mode also has the machine answer every designator probe the const-assignment
+walk skips (about 1,400 in the fixtures, 27,600 in all), and each must fail
+without a diagnostic or a new table row.
 
 The compiler sources are preprocessed against the host's C library, so the
 differential also covers glibc's headers. It caught `__float128`, which glibc
@@ -518,10 +561,10 @@ Deleting it waits on the hook becoming the default.
 
 The [tree expression typer](#tree-expression-typer) is the first consumer of
 the fourth row's replacement. Under `-fc-ast-pilot` it answers most of semantic
-analysis's body expression-type queries from expression nodes, operators
-included. The machine still answers the rest: every shape whose answer
-appends a type row, and every query outside a typed body. So that row is not
-retired.
+analysis's body and file-scope initializer expression-type queries from
+expression nodes, operators included. The machine still answers the rest: every
+shape whose answer appends a type row, and every query outside a typed body or
+initializer. So that row is not retired.
 
 ## Measurement plan
 
@@ -615,6 +658,23 @@ the same way and diagnostic only:
 - In bodies the machine still answers mostly shapes that append rows: casts to
   primitive or pointer type names, `&` and string literals. Outside bodies
   and misses are the other large items.
+
+For stage 3, which types file-scope initializers and skips the designator
+probes, these budgets were declared before its measured runs. They use the
+same input, flags and four arms as stage 2, with the base at main `14544ffe`,
+which already carries stage 2:
+- correctness: as for stage 2, and every skipped designator probe, over the
+  corpus and the self-host input, must also fail on the machine without a
+  diagnostic or a new table row.
+- the default path (D against A): the probe skip is the one intended change.
+  D must run fewer instructions than A, and its machine runs from queries
+  must fall by the skipped probes and by nothing else.
+- the initializer typer's own effect: C against B, less the default path's
+  D against A, must be fewer instructions, with the initializer passes and
+  their lookups charged, and fewer machine runs from queries outside typed
+  bodies.
+- adoption of the hook as the default: unchanged from stage 1. Only its
+  instruction half can be checked on this host.
 
 For the [declaration split](#declaration-split-from-the-tree), these budgets
 were declared before its measured runs. The input and flags are the same as

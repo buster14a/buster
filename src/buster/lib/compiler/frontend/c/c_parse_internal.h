@@ -108,6 +108,10 @@ struct CTestAstTypeVerify
 {
     u64 compared;
     u64 mismatches;
+    // Designator probes the const-assignment walk skipped, which the machine
+    // answered too, and those it did not fail cleanly.
+    u64 probes;
+    u64 probe_mismatches;
     u64 reason_counts[C_TEST_AST_TYPE_MISMATCH_REASONS];
     CTestAstTypeMismatch first[C_TEST_AST_TYPE_MISMATCH_KEPT];
     u32 first_count;
