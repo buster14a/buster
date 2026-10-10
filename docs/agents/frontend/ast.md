@@ -440,9 +440,9 @@ unchanged.
   `C_AST_TYPE_STRING`, off the path ordinary answers take.
   `c_parse_expression_tree_string_answer` then makes the machine's root task:
   - it strips the parentheses;
-  - it probes the memo for the token and, on a miss, calls the string leaf
-    with the query's arena;
-  - it rewinds the machine's scratch arena.
+  - it probes the memo for the token and, on a miss, calls the string leaf;
+  - it rewinds the machine's scratch arena, which the leaf uses here, as in
+    the cast replay.
 
   The replayed row is the answer. A leaf that fails is undone, and the query
   runs the machine.
@@ -1063,11 +1063,12 @@ diagnostic only:
   26 M of the 43.2 M is the literal's decode, which a replay must repeat.
 - **Correctness.** 0 verify mismatches. Objects are byte-identical at `-g0`
   and `-g` across the four arms.
-- **Ship.** C against B is −13.30 M (−0.140%). Machine runs from validation
+- **Ship.** C against B is −11.17 M (−0.118%). Machine runs from validation
   queries fall from 55,593 to 38,724.
-- **Default path.** −0.062% on `-fsyntax-only`, outside the band on the
-  cheaper side, and −0.024% on `-c`. The work is unchanged; the difference
-  is the query function's own code, compiled again.
+- **Default path.** −0.041% on `-fsyntax-only` and −0.015% on `-c`. A version
+  that added a parameter to the query's tree turn missed the band at −0.062%;
+  the work was unchanged, but the query function compiled differently, so the
+  shipped version keeps base's signature.
 - **History.** The first two versions lost instructions: tests on the path
   every answer takes cost more than the replay saves. The shipped version
   keeps the string case off that path.

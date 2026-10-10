@@ -8284,12 +8284,15 @@ BUSTER_C_INTERNAL void c_parse_expression_tree_replay(CTypeParseMachine* machine
 // parenthesized (C_AST_TYPE_STRING from c_ast_types_answer): the machine's
 // root SIZEOF task strips the parentheses, consults the per-body memo for the
 // token under the query's scope and flags and, when the memo does not hold
-// it, hands it to c_parse_expression_leaf_without_cast with the query's arena,
-// which appends the literal's array row and bound; the frame's completion
-// rewinds the machine's scratch arena. That row is the answer. A leaf that
-// fails is undone, as the machine's rollback undoes it, and the invalid type
-// returned leaves the query to the machine, which fails the same way.
-BUSTER_C_INTERNAL CTypeId c_parse_expression_tree_string(CTypeParseMachine* machine, Arena* arena, CPreprocessResult const* preprocess, CParseResult* result,
+// it, hands it to c_parse_expression_leaf_without_cast, which appends the
+// literal's array row and bound. That row is the answer. The leaf takes scratch
+// only to decode a wide literal, into the query's arena; here, as in
+// c_parse_expression_tree_replay, the decode goes to the machine's scratch,
+// rewound as the frame's completion rewinds it, so the query function keeps
+// its signature. A leaf that fails is undone, as the machine's rollback undoes
+// it, and the invalid type returned leaves the query to the machine, which
+// fails the same way.
+BUSTER_C_INTERNAL CTypeId c_parse_expression_tree_string(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result,
                                                           CScopeId scope, u32 flags, CAstTypeAnswer tree)
 {
     CTypeId type = C_TYPE_ID_INVALID;
@@ -8307,15 +8310,13 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_tree_string(CTypeParseMachine* mach
     {
         Arena* scratch = machine->scratch_arena;
         u64 scratch_mark = scratch->position;
-        u64 arena_mark = arena->position;
         u32 type_count = result->type_count;
         u32 array_bound_count = result->array_bound_count;
-        type = c_parse_expression_leaf_without_cast(arena, *preprocess, result, scope, tree.replay_start, tree.replay_end);
+        type = c_parse_expression_leaf_without_cast(scratch, *preprocess, result, scope, tree.replay_start, tree.replay_end);
         if (type.value >= result->type_count)
         {
             result->type_count = type_count;
             result->array_bound_count = array_bound_count;
-            arena_set_position(arena, arena_mark);
         }
         if (scratch->position != scratch_mark)
         {
@@ -8329,9 +8330,9 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_tree_string(CTypeParseMachine* mach
 // outside it so the common answer path stays as it was. The replay types the
 // answer, so it runs first; the mutation limit and the verify mark are taken
 // before it, where the machine's checkpoint takes them.
-BUSTER_C_INTERNAL bool c_parse_expression_tree_string_answer(CTypeParseMachine* machine, Arena* arena, CPreprocessResult const* preprocess,
-                                                             CParseResult* result, CScopeId scope, u32 end, u32 slot, u32 flags, CAstTypeAnswer tree,
-                                                             CTypeId* type_out, CAstTypePending* pending)
+BUSTER_C_INTERNAL bool c_parse_expression_tree_string_answer(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result,
+                                                             CScopeId scope, u32 end, u32 slot, u32 flags, CAstTypeAnswer tree, CTypeId* type_out,
+                                                             CAstTypePending* pending)
 {
     u32 type_limit = result->type_count;
 #if BUSTER_INCLUDE_TESTS
@@ -8339,7 +8340,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_tree_string_answer(CTypeParseMachine* 
 #else
     BUSTER_UNUSED(pending);
 #endif
-    tree.type = c_parse_expression_tree_string(machine, arena, preprocess, result, scope, flags, tree);
+    tree.type = c_parse_expression_tree_string(machine, preprocess, result, scope, flags, tree);
     tree.status = C_AST_TYPE_ANSWER;
     tree.replay_start = 0;
     tree.replay_end = 0;
@@ -8375,15 +8376,14 @@ BUSTER_C_INTERNAL bool c_parse_expression_tree_string_answer(CTypeParseMachine* 
 // (c_parse_expression_tree_replay), and a string literal's answer is its own
 // replay (c_parse_expression_tree_string_answer), which may fail and leave
 // the query to the machine.
-BUSTER_C_INTERNAL bool c_parse_expression_tree_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult const* preprocess, CParseResult* result,
-                                                       CScopeId scope, u32 start, u32 end, u32 slot, u32 flags, CTypeId* type_out,
-                                                       CAstTypePending* pending)
+BUSTER_C_INTERNAL bool c_parse_expression_tree_query(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
+                                                       u32 start, u32 end, u32 slot, u32 flags, CTypeId* type_out, CAstTypePending* pending)
 {
     CAstTypeAnswer tree = c_ast_types_answer(machine, preprocess, result, scope, start, end);
     bool answered = tree.status == C_AST_TYPE_ANSWER;
     if (tree.status == C_AST_TYPE_STRING)
     {
-        answered = c_parse_expression_tree_string_answer(machine, arena, preprocess, result, scope, end, slot, flags, tree, type_out, pending);
+        answered = c_parse_expression_tree_string_answer(machine, preprocess, result, scope, end, slot, flags, tree, type_out, pending);
     }
 #if BUSTER_INCLUDE_TESTS
     else if (answered && c_ast_types_verifying())
@@ -8471,7 +8471,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
         valid = true;
     }
     else if (machine->ast_types && !(literal && c_ast_types_waiting(machine)) &&
-             c_parse_expression_tree_query(machine, arena, &preprocess, result, scope, start, end, slot, flags, type_out, pending_out))
+             c_parse_expression_tree_query(machine, &preprocess, result, scope, start, end, slot, flags, type_out, pending_out))
     {
         valid = true;
     }
