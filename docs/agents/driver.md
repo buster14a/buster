@@ -1379,25 +1379,50 @@ must name the same symbol and addend. Each ADRP is consumed by exactly one
 LDR; a second ADRP for a register that is still pending, an LDR without a
 partner, two LDRs sharing one ADRP, a register, symbol or addend mismatch, or
 an ADRP left unpaired at the end of its section refuses the link. The sort is
-O(n log n) and the pairing scan O(n). All of it runs against a defined
-thread-local symbol with a 32-bit offset and fails the link before the image
-is written, as `link.relocation` naming the symbol and the relocation that
-could not start or complete its sequence. The relaxation does not check that
-intervening instructions leave the register alone, and it does not need to.
-Every ADRP for one symbol and addend becomes the same `movz Xn, #hi` and every
-matching LDR the same `movk Xn, #lo`. On any path where the original LDR read
-the page an ADRP for that symbol left in `Xn`, the relaxed `movk` therefore
-completes the offset that a `movz` put there. That holds even if the pairing
-does not match the control flow. The only extra assumption is that no
-other instruction reads that GOT page address, which no compiler emits. TLS
-descriptors stay strictly adjacent.
-The other descriptor forms (560/561 and the
-565-568 `OFF_G1`/`OFF_G0_NC`/`LDR`/`ADD` sequence), the dynamic
+O(n log n). The halves may enclose at most `LINK_AARCH64_TLS_IE_GAP_MAX` (64)
+words, and every one of them must be proven harmless for `xN` or the link is
+refused: it must match a row of `link_aarch64_inert_forms` (load/store
+register in its unsigned-immediate, unscaled, pre/post-index and
+register-offset forms, GPR and FP/SIMD; load/store pair; ADD/SUB immediate,
+shifted and extended register; logical shifted register and immediate, the
+latter with an allocated bitmask; MOVN/MOVZ/MOVK; ADR/ADRP; SBFM/BFM/UBFM;
+UDIV/SDIV and variable shifts; MADD/MSUB and the long and high multiplies;
+CSEL/CSINC/CSINV/CSNEG; `mrs Xt, TPIDR_EL0`; NOP), each narrowed to its
+allocated size/opc/option combinations, and none of the general-register
+fields that row names (Rt/Rd, Rn, Rt2/Ra, Rm; FP/SIMD data registers are not
+general registers, a writeback base is) may equal N. Field value 31 is SP or
+XZR and never N, since the reader limits N to x0..x30. Branches of every
+kind, exception, barrier and other system instructions, any other MRS or MSR,
+and any unlisted or unallocated word refuse the link
+(`link_aarch64_tls_ie_gap_inert`). The pairing scan is therefore O(n + total
+gap). All of it runs against a defined thread-local symbol with a 32-bit
+offset and fails the link before the image is written, as `link.relocation` naming the symbol and the relocation that
+could not start or complete its sequence. The enforced contract is that,
+along the straight-line words from the ADRP to its LDR, nothing observes the
+GOT page the ADRP produced or replaces it before the LDR consumes it, so the
+`movz`/`movk` pair computes the offset the original pair loaded. A branch
+from elsewhere into those words is outside what the linker can see; it is
+safe whenever the incoming path, as the original LDR requires, carries the
+page from a GOTTPREL ADRP of the same symbol and addend, because every such
+ADRP becomes the same `movz Xn, #hi` and every matching LDR the same
+`movk Xn, #lo`. The register-overlap forms the architecture calls CONSTRAINED
+UNPREDICTABLE (for example a writeback base equal to its transfer register)
+are accepted only when none of their registers is N; their permitted
+behaviors change only the named registers or raise UNDEFINED at that word.
+TLS descriptors stay strictly adjacent. The other descriptor forms (560/561
+and the 565-568 `OFF_G1`/`OFF_G0_NC`/`LDR`/`ADD` sequence), the dynamic
 `R_AARCH64_TLSDESC` 1031, and TLS owned by a loader or shared library are
 still refused by name. The tests (the "initial-exec TLS (#2582)" and "TLS
 descriptors (#2582)" blocks of `object_tests`,
 `link_test_aarch64_tls_initial_exec_relaxation` and
-`link_test_aarch64_tls_descriptor_relaxation`) check encodings only.
+`link_test_aarch64_tls_descriptor_relaxation`) check encodings, including
+adversarial reads, writes, base uses, branches, unrecognized words and
+oversized gaps between non-adjacent halves.
+`compiler_driver_test_aarch64_elf_tls_initial_exec` runs only on Linux
+AArch64 hosts: it compiles `fixtures/aarch64_elf_tls_initial_exec.c` with the
+host compiler at `-O2 -ftls-model=initial-exec`, requires a non-adjacent
+541/542 pair in the object, links it with Buster, checks the relaxed
+`movz`/`movk` words and compares the output with a host-linked control.
 `compiler_driver_test_aarch64_elf_tlsdesc` runs on Linux AArch64 hosts: the
 configured host compiler builds `fixtures/aarch64_elf_tlsdesc.c` with `-fPIC
 -ftls-model=global-dynamic` at `-O0` and `-O2`, Buster links it with a

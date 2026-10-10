@@ -4091,6 +4091,63 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_tls_initial_exec_relaxation
         }
         scratch_end(temporary);
     }
+    {
+        // Every word Clang and GCC schedule between the halves that leaves x9
+        // alone is accepted and kept: mrs x8, TPIDR_EL0; ldr w10, [x0];
+        // adrp x12; ldp w10, w11, [x0]; madd w8, w11, w10, w8; add x13, x0,
+        // #16; str x10, [sp, #8]; ldr d9, [x0] (an FP register numbered 9);
+        // ldr x10, [x13], #8; csel x10, x10, x13, eq; lsr x13, x10, #4;
+        // and x10, x10, #0xff; nop.
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 const gap[] = {UINT32_C(0xd53bd048), UINT32_C(0xb940000a), UINT32_C(0x9000000c), UINT32_C(0x29402c0a), UINT32_C(0x1b0a2168),
+                           UINT32_C(0x9100400d), UINT32_C(0xf90007ea), UINT32_C(0xfd400009), UINT32_C(0xf84085aa), UINT32_C(0x9a8d014a),
+                           UINT32_C(0xd344fd4d), UINT32_C(0x92401d4a), UINT32_C(0xd503201f)};
+        u32 text[BUSTER_ARRAY_LENGTH(gap) + 3];
+        text[0] = UINT32_C(0x90000009);
+        memcpy(text + 1, gap, sizeof(gap));
+        text[BUSTER_ARRAY_LENGTH(gap) + 1] = UINT32_C(0xf9400129);
+        text[BUSTER_ARRAY_LENGTH(gap) + 2] = UINT32_C(0xd65f03c0);
+        LinkTestTlsIeSite sites[] = {{LINK_TEST_TLS_IE_HIGH, 0, 1, 0}, {LINK_TEST_TLS_IE_LOW, (u32)(BUSTER_ARRAY_LENGTH(gap) + 1) * 4, 1, 0}};
+        u64 text_offset = 0;
+        NativeExecutableLinkResult linked = link_test_aarch64_tls_ie_link(temporary.arena, text, (u32)BUSTER_ARRAY_LENGTH(text), sites, 2, &text_offset);
+        if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE && text_offset && text_offset + sizeof(text) <= linked.executable.length))
+        {
+            BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, text_offset) == UINT32_C(0xd2a00029));
+            for (u32 word = 0; word < BUSTER_ARRAY_LENGTH(gap); word += 1)
+            {
+                BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, text_offset + (word + 1) * 4) == gap[word]);
+            }
+            BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, text_offset + (BUSTER_ARRAY_LENGTH(gap) + 1) * 4) ==
+                                       (UINT32_C(0xf2800000) | (0x1244u << 5) | 9));
+        }
+        scratch_end(temporary);
+    }
+    {
+        // The halves may enclose at most 64 words (LINK_AARCH64_TLS_IE_GAP_MAX):
+        // 64 NOPs relax, 65 refuse.
+        for (u32 gap = 64; gap <= 65; gap += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u32 text[68];
+            text[0] = UINT32_C(0x90000009);
+            for (u32 word = 1; word <= gap; word += 1)
+            {
+                text[word] = UINT32_C(0xd503201f);
+            }
+            text[gap + 1] = UINT32_C(0xf9400129);
+            text[gap + 2] = UINT32_C(0xd65f03c0);
+            LinkTestTlsIeSite sites[] = {{LINK_TEST_TLS_IE_HIGH, 0, 1, 0}, {LINK_TEST_TLS_IE_LOW, (gap + 1) * 4, 1, 0}};
+            u64 text_offset = 0;
+            NativeExecutableLinkResult linked = link_test_aarch64_tls_ie_link(temporary.arena, text, gap + 3, sites, 2, &text_offset);
+            BUSTER_TEST(arguments, (linked.error == LINK_ERROR_NONE) == (gap == 64));
+            if (linked.error == LINK_ERROR_NONE && text_offset && text_offset + (gap + 2) * 4 <= linked.executable.length)
+            {
+                BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, text_offset + (gap + 1) * 4) ==
+                                           (UINT32_C(0xf2800000) | (0x1244u << 5) | 9));
+            }
+            scratch_end(temporary);
+        }
+    }
     // Everything that is not the exact pair is refused instead of leaving a
     // GOT load or a half-rewritten sequence behind.
     enum
@@ -4137,6 +4194,39 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_tls_initial_exec_relaxation
         {{0x90000002, 0xd2a00002, 0xf9400042, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 2, 0}}, 2},
         // HIGH at 0 and LOW at 4 for x1, plus a second LOW at 8 reusing the MOVZ.
         {{0x90000001, 0xf9400021, 0xf9400021, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 4, 1, 0}, {IE_L, 8, 1, 0}}, 3},
+        // `adrp x11` / X / `ldr x11, [x11]` with a matching pair, where X would
+        // observe or replace the GOT page in x11 or leave the straight line:
+        // add x9, x11, #0 reads it; mov x11, #1 and ldr x11, [x0] write it.
+        {{0x9000000b, 0x91000169, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xd280002b, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xf940000b, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        // x11 as a load base, a pre-index writeback base, an LDP Rt2, a MADD
+        // addend, a register-offset index, and an FP load base.
+        {{0x9000000b, 0xb940016a, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xf8008d6a, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xa9402c0a, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0x9b022c2a, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xf86b680a, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xfd400160, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        // Branches that name no x11: b, bl, b.eq, cbz x10, tbz x10, br x10,
+        // blr x10, ret.
+        {{0x9000000b, 0x14000000, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0x94000000, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0x54000000, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xb400000a, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0x3600000a, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xd61f0140, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xd63f0140, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xd65f03c0, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        // System and exception words: svc #0, msr TPIDR_EL0, x8, mrs x8,
+        // NZCV, dmb ish; and udf #0 and an unallocated logical-immediate
+        // bitmask (and x10, x0 with N=1, imms=111111).
+        {{0x9000000b, 0xd4000001, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xd51bd048, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xd53b4208, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xd5033bbf, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0x00000000, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0x9240fc0a, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
     {
