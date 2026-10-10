@@ -578,4 +578,19 @@ The first measured runs failed the default-path budget at +0.21% on
 `-fsyntax-only`, and the string literal path was the cause. It was dropped,
 and the budgets above apply unchanged to what remains.
 
+Stage 3's hosted census is
+[`2026-10-10T014058Z`](../../performance-audits/2026-10-10T014058Z.md), taken
+the same way and diagnostic only:
+- Every budget passes. The default path is −0.064% on `-fsyntax-only` and
+  −0.114% on `-c`, and the type table at the end of body validation shrinks
+  from 190,076 to 133,389 rows.
+- Stage 3 removes 0.72% of the pilot's instructions. Machine runs from queries
+  fall from 205,248 to 179,293. Most of the gain is the replay of `S8()`'s
+  `(char8*)("text")` casts.
+- Turning the hook on is now a 3.76% instruction gain against default.
+  Acceptance stays with Zen 5 (#2761), so the default stays off.
+- In bodies the machine still answers string literals (10,940 queries), `&`
+  and `*` levels whose pointer row is minted later in the same body (about
+  3,600), and checked casts over a declined or unsafe operand (about 850).
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
