@@ -76,7 +76,10 @@ SHA = re.compile(r"[0-9a-f]{40}\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 MAX_PAGES = 20
 POLICY_PATHS = (
+    "docs/current-native-object-census-v1.json",
     "tools/merge_queue_admission.py",
+    "tools/ci_no_code.c",
+    ".github/workflows/ci-no-code-plan.yml",
     "tools/native_retirement_merge_gate.py",
     "tools/native_retirement_integration.py",
     "tools/native_retirement_contract.py",
@@ -238,10 +241,31 @@ def check_results(runs: dict, jobs: dict, candidate: dict,
         require(job.get("head_sha") == candidate["head"], context + ": job SHA mismatch")
         require(job.get("run_id") == run["id"] and
                 job.get("run_attempt") == run["run_attempt"], context + ": job attempt mismatch")
-        require(job.get("status") == "completed" and job.get("conclusion") == "success",
-                context + ": required job did not succeed")
+        no_code = candidate.get("no_code") is True
+        plans = [row for row in jobs.get(key, [])
+                 if row.get("name") == "No-code plan / Classify no-code changes"]
+        omitted = (no_code and bool(plans) and context != "CI complete" and
+                   job.get("conclusion") == "skipped")
+        expected = "skipped" if omitted else "success"
+        require(job.get("status") == "completed" and job.get("conclusion") == expected,
+                context + ": required job did not succeed" if not no_code else
+                context + ": no-code disposition differs from trusted classification")
+        if no_code and plans:
+            require(len(plans) == 1 and plans[0].get("status") == "completed" and
+                    plans[0].get("conclusion") == "success" and
+                    plans[0].get("head_sha") == candidate["head"] and
+                    plans[0].get("run_id") == run["id"] and
+                    plans[0].get("run_attempt") == run["run_attempt"],
+                    context + ": missing exact-attempt classification")
+            if expected == "skipped":
+                for row in jobs.get(key, []):
+                    if row.get("name") != "No-code plan / Classify no-code changes":
+                        require(row.get("status") == "completed" and row.get("conclusion") == "skipped" and
+                                not row.get("runner_id") and not row.get("steps"),
+                                context + ": no-code workload was selected or allocated a runner")
         evidence.append({"context": context, "workflow": filename, "run_id": run["id"],
-                         "run_attempt": run["run_attempt"], "job_id": job["id"]})
+                         "run_attempt": run["run_attempt"], "job_id": job["id"],
+                         **({"disposition": "not-applicable-no-code" if omitted else "executed"} if no_code else {})})
     return evidence, pending
 
 
@@ -446,7 +470,35 @@ def collect(api: GitHub, candidate: dict, checks: dict = CHECKS) -> tuple[list, 
     return check_results(runs, jobs, candidate, checks)
 
 
+def trusted_no_code(arguments, candidate: dict) -> dict | None:
+    """Native classification from independently checked-out main; never candidate Python."""
+    driver = os.environ.get("BUSTER_CI_NO_CODE_DRIVER", "")
+    report = None
+    if driver:
+        result = subprocess.run([
+            driver, "ci_no_code", "--repo", str(arguments.repo_root),
+            "--base", candidate["base"], "--head", candidate["head"],
+            "--tested", candidate["head"], "--policy", candidate["policy_sha"],
+            "--event", "merge_group",
+        ], capture_output=True, text=True, check=False, timeout=240,
+            env={key: value for key, value in os.environ.items() if key != "GITHUB_OUTPUT"})
+        require(result.returncode == 0, "trusted no-code classifier failed; not admitted")
+        plan = json.loads(result.stdout)
+        require(plan.get("schema") == "buster-ci-no-code-v1" and
+                plan.get("base") == candidate["base"] and plan.get("head") == candidate["head"] and
+                plan.get("tested") == candidate["head"] and plan.get("policy") == candidate["policy_sha"] and
+                type(plan.get("no_code")) is bool, "stale or malformed no-code plan")
+        if plan["no_code"]:
+            require(plan.get("profile") == "no-code" and plan.get("reason") == "reviewed-prose-only",
+                    "invalid no-code reason")
+            report = dict(plan, mode="no-code", status="admitted")
+    return report
+
+
 def retirement_admission(arguments, candidate: dict) -> dict:
+    no_code = trusted_no_code(arguments, candidate)
+    if no_code is not None:
+        return no_code
     native_gate = arguments.repo_root / "tools/native_retirement_merge_gate.py"
     require(native_gate.is_file(), "#925/#927 native-retirement admission must land before queue activation")
     # The trusted gate resolves the PR's writer attestation and proves full-tree
@@ -568,11 +620,12 @@ def evaluate(api: GitHub, arguments, candidate: dict) -> tuple[str, object]:
         # the ephemeral reconstruction job (#1893).
         ruleset_before = live_ruleset(api, arguments.repository)
         checks = required_checks(retirement, ruleset_before)
-        evidence, detail = collect(api, candidate, checks)
+        evidence_candidate = dict(candidate, no_code=retirement.get("mode") == "no-code")
+        evidence, detail = collect(api, evidence_candidate, checks)
         if not detail:
             # An older successful attempt must not hide a rerun started during
             # collection; that rerun's own completion event reconciles again.
-            repeated, detail = collect(api, candidate, checks)
+            repeated, detail = collect(api, evidence_candidate, checks)
             if not detail and repeated != evidence:
                 detail = ["required workflow attempts changed during collection"]
             if not detail:

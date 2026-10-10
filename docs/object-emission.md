@@ -146,25 +146,44 @@ independently produces the conditional-branch refusal input.
 ## ELF64 import semantics
 
 `object_read_elf64` accepts allocated PROGBITS/NOBITS payloads, supported
-unwind records and init/fini arrays. Existing preinit records are admitted into
-the initializer model; `.preinit_array` names receive priority zero. The current
-runtime control checks a preinit entry before a constructor in the same image.
-It does not establish a distinct loader-facing preinit phase. The
-[ELF initialization contract](https://gabi.xinuos.com/v42/elf/08-dynamic.html#initialization-and-termination-functions)
-requires executable preinit entries to run before dependency constructors and
-prohibits them in shared objects. That phase, section-type-independent ordering
-and the shared-object prohibition remain open under
-[#1243](https://github.com/buster14a/buster/issues/1243).
+unwind records and init/fini arrays. Exactly the section named `.preinit_array`
+(of type `SHT_PREINIT_ARRAY` or `SHT_PROGBITS`) is a preinit array, as for `ld`
+and `lld`; it takes `IR_INITIALIZER_PRIORITY_PREINIT`, which
+`IR_INITIALIZER_PRIORITY_ORDER_KEY` sorts ahead of every constructor priority,
+a dependency's `constructor(0)` included, whatever the input order. The sentinel
+exists only in `ObjectFile.initializer_priorities` of ELF objects; the COFF
+writer spells it as priority zero and Mach-O states no priorities, so it never
+reaches either as a name or a number. A `.preinit_array.5` or a type-16 section
+of another name is ordinary data, as the host linkers leave it, and the
+assembler refuses a `@preinit_array` section of another name. A preinit entry
+in a `-shared` output is refused with a named diagnostic, as `ld` does.
+
+The linker still folds the preinit entries, sorted first, into `DT_INIT_ARRAY`
+rather than emitting a `DT_PREINIT_ARRAY` the loader runs before the
+constructors of dependencies; that loader-facing phase remains open under
+[#1243](https://github.com/buster14a/buster/issues/1243). See the
+[ELF initialization contract](https://gabi.xinuos.com/v42/elf/08-dynamic.html#initialization-and-termination-functions).
 
 The bounded refusal repair for #1243 rejects unsupported allocated section
 types, legacy `.ctors`/`.dtors` and their priority families, `.init`/`.fini`
 fragments, and exception tables the reader previously discarded. An unsupported
 allocated note is refused too; its contract must be understood before it can be dropped.
-One canonical GNU property note is understood: the optional x86 IBT/SHSTK or
-AArch64 BTI/PAC/GCS `FEATURE_1_AND` record. Its output feature intersection is
-zero because Buster's generated code does not assert those features, so this
-note is omitted. Unknown bits, additional properties, required ISA properties,
-other note formats, and unsupported flags/alignment are refused.
+The GNU property section is understood as a bounded walk. It is a sequence of
+`NT_GNU_PROPERTY_TYPE_0` notes (owner `GNU`, eight-byte padding), and each
+descriptor is a sequence of properties whose headers and padded data must lie
+inside their descriptor and section. A section may hold several notes; GCC
+writes a `FEATURE_1_AND` note beside the `*_USED` note under
+`-fcf-protection=full`. Two kinds of record are dropped: the optional x86 IBT/SHSTK or
+AArch64 BTI/PAC/GCS `FEATURE_1_AND` record, whose output feature intersection is
+zero because Buster's generated code does not assert those features, and on
+x86-64 the informational `GNU_PROPERTY_X86_ISA_1_USED` (`0xc0010002`) and
+`GNU_PROPERTY_X86_FEATURE_2_USED` (`0xc0010001`) records, which a linker drops
+whenever any input lacks them. The binutils 2.47 assembler writes the `*_USED` records by default
+([#3175](https://github.com/buster14a/buster/issues/3175)). Unknown bits in `FEATURE_1_AND`, any other
+property type (including `GNU_PROPERTY_X86_ISA_1_NEEDED` and other required
+records), a property size other than four, truncated or overlong note and
+property sizes, trailing bytes, other note formats, and unsupported
+flags/alignment are refused.
 Unallocated unknown metadata and unsupported debug section types retain their
 skip policy. Supported DWARF payloads still pass through without DIE decoding.
 
@@ -188,10 +207,14 @@ architectures. `compiler_driver_elf_semantic_tests` imports host-compiled inputs
 on Linux x86-64/AArch64, checks attributable refusal and no artifact, and requires
 the host linker/runtime to preserve each input's meaning. A same-image
 preinit/constructor control continues to link and run through both linkers, as
-does a canonical optional GNU property control. It does not cover dependency
-constructor ordering, preinit section types with other names, or preinit in a
-shared output. Raw note controls cover every known feature combination,
-unknown/required properties, malformed shape, and payload bounds.
+does a canonical optional GNU property control. `compiler_driver_elf_preinit_tests`
+covers a preinit entry against a dependency's `constructor(0)` in both link
+orders, the data-only sections above and the shared-output refusal, against
+the host linker; `link_test` and `object_test` cover the merge order and the
+writer mappings. Raw note controls cover every known feature combination,
+unknown/required properties, malformed shape, and payload bounds;
+`object_test_elf_property_note_walk` adds multi-note and `*_USED` sections and
+truncated or overlong `descsz`/`datasz` values on both architectures.
 
 ## The work ledger: `ObjectWriteStatistics`
 
@@ -368,7 +391,9 @@ their section-base/public-function identities. The same original text bytes
 must survive both paths. This control does not use the production object
 reader, writer or symbol planner as its metadata oracle.
 
-#1281 remains open: this slice does not qualify its x86/debug-anchor,
-constructor priority, weak/hidden binding, PLT/TLS, assembly-dialect or own-
-assembler acceptance rows. Actual qualification still requires source review
+#1281 remains open: this slice does not qualify the AArch64 debug-anchor,
+PLT/TLS or own-assembler rows. The x86-64 ELF listing rows (weak and hidden
+binding, constructor priority, PLT calls, section-symbol anchors, TLS
+general-dynamic padding, and the `-S -masm=att` refusal) are described in
+[the driver guide](agents/driver.md) and qualified by their own tests. Actual qualification still requires source review
 and fresh hosted results at the published repair head.

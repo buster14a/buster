@@ -19,11 +19,17 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  no_code_plan:
+    name: No-code plan
+    if: ${{ github.server_url == 'https://github.com' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    uses: ./.github/workflows/ci-no-code-plan.yml
+
   # The macOS leg lives in throughput-harness-macos.yml with a path filter
   # (#1825), so the Linux comparison below never waits for a macOS runner.
   # Keep its Unix harness step identical to this one.
   harness:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    needs: no_code_plan
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true') }}
     strategy:
       fail-fast: false
       matrix:
@@ -31,10 +37,22 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ${{ matrix.os }}
+          matrix-index: ${{ strategy.job-index }}
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Native harness tests (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -81,6 +99,12 @@ jobs:
           mkdir -p build
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build
           ./build/build bench_throughput self-test --sanitize
+      - name: Retain machine records in existing evidence
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: build/throughput-tool-tests
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -94,11 +118,16 @@ jobs:
           if-no-files-found: warn
 
   regression-guard:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true') }}
     runs-on: ubuntu-26.04
-    needs: harness
+    needs: [harness, no_code_plan]
     timeout-minutes: 35
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       # Neither fork code nor compiler output receives credentials or a shared
       # cache. Both compilers are built sequentially, before any measurement.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -106,11 +135,23 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha || inputs.baseline_ref || github.sha }}
           path: baseline
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: baseline
+          source-repository: ${{ github.repository }}
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: candidate
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate
+          source-repository: ${{ github.repository }}
       - name: Record checked-out revisions
         shell: bash
         run: |
@@ -134,6 +175,12 @@ jobs:
           else
             printf 'Benchmark incomplete. Inspect the build and compiler logs; no performance verdict was produced.\n' >> "$GITHUB_STEP_SUMMARY"
           fi
+      - name: Retain machine records in existing evidence
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: candidate/build/throughput-ci-results
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -148,19 +195,30 @@ jobs:
           if-no-files-found: warn
 
   direct-ssa-census:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true') }}
     runs-on: ubuntu-26.04
-    needs: harness
+    needs: [harness, no_code_plan]
     timeout-minutes: 35
     env:
       BUSTER_TEST_JOBS: '2'
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       # Diagnostic-only compiler, isolated from the uninstrumented timing job.
       # #497's registered geometric work budgets are compiled out otherwise.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Install existing Linux linker dependency
         shell: bash
         run: |
@@ -230,25 +288,24 @@ jobs:
             ./build/Release/ide cc -v -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -O3 "$selection" -emit-llvm -c src/buster/apps/ide/ide.c -o "direct-ssa-census-evidence/tiny-$mode.bc" > "direct-ssa-census-evidence/tiny-$mode.stdout.log" 2> "direct-ssa-census-evidence/tiny-$mode.stderr.log"
             llvm-dis-18 "direct-ssa-census-evidence/tiny-$mode.bc" -o "direct-ssa-census-evidence/tiny-$mode.ll"
           done
-          python3 - <<'PY'
-          import json
-          import pathlib
-          import re
-          root = pathlib.Path("direct-ssa-census-evidence")
-          texts = {mode: (root / f"tiny-{mode}.ll").read_text() for mode in ("off", "on")}
-          records = []
-          for name in ("c_ir_field_index_bucket", "machine_x64_reject"):
-              symbol = rf'@"?{re.escape(name)}"?\s*\('
-              counts = {mode: len(re.findall(r"\bcall\b[^\n]*" + symbol, text)) for mode, text in texts.items()}
-              definitions = {mode: len(re.findall(r"^define\b[^\n]*" + symbol, text, re.MULTILINE)) for mode, text in texts.items()}
-              record = {"helper": name, "calls": counts, "definitions": definitions}
-              records.append(record)
-              print("INLINE_PRODUCTION_CALLS " + json.dumps(record, sort_keys=True), flush=True)
-              if counts["off"] == 0 or counts["on"] >= counts["off"] or any(value != 1 for value in definitions.values()):
-                  raise SystemExit("production helper calls did not decrease with callable definitions retained")
-          (root / "production-tiny-helper-calls.json").write_text(json.dumps(records, sort_keys=True, indent=2) + "\n")
-          PY
-          grep '^IR_INLINE ' direct-ssa-census-evidence/tiny-*.stdout.log
+          records='['
+          for helper in c_ir_field_index_bucket machine_x64_reject; do
+            call_pattern="(^|[[:space:]])(musttail[[:space:]]+|tail[[:space:]]+|notail[[:space:]]+)?call[[:space:]].*@\"?${helper}\"?[[:space:]]*\\("
+            definition_pattern="^define[[:space:]].*@\"?${helper}\"?[[:space:]]*\\("
+            off_calls=$(grep -Ec "$call_pattern" direct-ssa-census-evidence/tiny-off.ll || true)
+            on_calls=$(grep -Ec "$call_pattern" direct-ssa-census-evidence/tiny-on.ll || true)
+            off_definitions=$(grep -Ec "$definition_pattern" direct-ssa-census-evidence/tiny-off.ll || true)
+            on_definitions=$(grep -Ec "$definition_pattern" direct-ssa-census-evidence/tiny-on.ll || true)
+            record=$(printf '{"helper":"%s","calls":{"off":%s,"on":%s},"definitions":{"off":%s,"on":%s}}' "$helper" "$off_calls" "$on_calls" "$off_definitions" "$on_definitions")
+            printf 'INLINE_PRODUCTION_CALLS %s\n' "$record"
+            if [[ "$records" != "[" ]]; then records+=','; fi
+            records+="$record"
+            if (( off_calls == 0 || on_calls >= off_calls || off_definitions != 1 || on_definitions != 1 )); then
+              printf 'production helper calls did not decrease with callable definitions retained: %s\n' "$record" >&2
+              exit 1
+            fi
+          done
+          printf '%s]\n' "$records" > direct-ssa-census-evidence/production-tiny-helper-calls.json          grep '^IR_INLINE ' direct-ssa-census-evidence/tiny-*.stdout.log
           sha256sum direct-ssa-census-evidence/tiny-*.bc direct-ssa-census-evidence/tiny-*.ll > direct-ssa-census-evidence/tiny-inputs.sha256
       - name: Report census scope without a performance verdict
         if: always()
@@ -265,6 +322,12 @@ jobs:
           if [[ "$DIRECT_RESULT" != success || "$REFERENCE_RESULT" != success || "$TINY_RESULT" == failure ]]; then
             grep -nE -m 20 'error|ir.inline-required|validation' direct-ssa-census-evidence/*.stderr.log || true
           fi
+      - name: Retain machine records in existing evidence
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: direct-ssa-census-evidence
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

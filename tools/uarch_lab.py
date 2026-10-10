@@ -620,6 +620,18 @@ def phase_ns_series(records, phase):
     return values if values and all(valid_ns(value) for value in values) else None
 
 
+def counter_median_text(dicts, key, unit):
+    """Median of a producer-declared byte counter as report text, or an
+    explicit NA with the valid-sample coverage: like phase_ns_series, a median
+    needs a valid value in every record, so absent or malformed telemetry is
+    never printed as 0 and a partial population is never padded or shrunk. A
+    declared 0 is a real value."""
+    values = [item.get(key) for item in dicts]
+    if values and all(valid_ns(value) for value in values):
+        return fmt(statistics.median(values))
+    return "NA (%d of %d %s)" % (sum(valid_ns(value) for value in values), len(values), unit)
+
+
 def parse_report(text):
     """`perf report --stdio` -> {event: [(percent, self_percent|None, entry)]}.
 
@@ -1999,12 +2011,11 @@ def timed_phase_lines(directory, good, findings):
         rows.append([phase, fmt(ratio(medians[phase], 1e6), ",.2f"), percent(ratio(medians[phase], total))] if series else
                     [phase, "NA (%d of %d records)" % (sum(valid_ns(record.get(phase + "_ns")) for record in records), len(records)), "NA"])
     rows.append(["input total", fmt(ratio(total, 1e6), ",.2f"), "100.0%"])
-    headers = [run["metrics"]["header"] for run in good if run["metrics"]["header"]]
     lines = ["", "Per-phase median over %d `-fmetrics-out` records:" % len(records), ""] + table(["phase", "median ms", "share of input"], rows)
     lines += ["", "- arena peak median %s bytes; arena retained median %s; peak RSS median %s bytes" % (
-        fmt(statistics.median(record.get("arena_peak_bytes", 0) for record in records)),
-        fmt(statistics.median(record.get("arena_retained_bytes", 0) for record in records)),
-        fmt(statistics.median(header.get("peak_rss_bytes", 0) for header in headers) if headers else None))]
+        counter_median_text(records, "arena_peak_bytes", "records"),
+        counter_median_text(records, "arena_retained_bytes", "records"),
+        counter_median_text([run["metrics"]["header"] for run in good], "peak_rss_bytes", "runs"))]
     available = [phase for phase in PHASES if medians[phase] is not None]
     slowest = max(available, key=lambda phase: medians[phase]) if available else None
     if slowest:
@@ -2894,13 +2905,16 @@ def compare_checks(pairs):
 def compare_labs(arguments, output, cpu, extra):
     """{variant key: Lab} with each variant's directory DIR/a, DIR/b."""
     labs = {}
+    canonical_inline_pair = getattr(arguments, "canonical_inline_pair", False)
     for key, role in VARIANTS:
         ide = os.path.abspath(getattr(arguments, role))
         if not os.path.isfile(ide):
             sys.exit("uarch_lab: no %s binary at %s" % (role, ide))
-        lab = Lab(os.path.join(output, key), arguments.perf, cpu, ide, arguments.repo_root, extra, arguments.sudo, arguments.fresh_copy)
+        variant_extra = (["-fcanonical-inline"] if canonical_inline_pair and key == "b" else
+                         [] if canonical_inline_pair else extra)
+        lab = Lab(os.path.join(output, key), arguments.perf, cpu, ide, arguments.repo_root, variant_extra, arguments.sudo, arguments.fresh_copy)
         lab.meta["config"] = {"command": shell_join(lab.workload("OUT")), "cpu": cpu, "perf": arguments.perf, "repo_root": lab.repo_root,
-                              "ide": ide, "role": role, "fresh_copy": arguments.fresh_copy}
+                              "ide": ide, "role": role, "extra": variant_extra, "fresh_copy": arguments.fresh_copy}
         lab.save_meta()
         labs[key] = lab
     return labs
@@ -2989,6 +3003,8 @@ def command_compare(arguments):
         sys.exit("uarch_lab: taskset not found (pass --cpu -1 to run unpinned)")
     cpu = arguments.cpu if arguments.cpu is not None and arguments.cpu >= 0 else None
     extra = arguments.extra[1:] if arguments.extra[:1] == ["--"] else arguments.extra
+    if arguments.canonical_inline_pair and extra:
+        sys.exit("uarch_lab: --canonical-inline-pair does not accept extra compile arguments")
     steps = [step for step in (arguments.profile_steps or "").replace(" ", "").split(",") if step]
     if arguments.sudo and "ibs" not in steps:
         steps.append("ibs")
@@ -3014,6 +3030,8 @@ def command_compare(arguments):
                        "cpu": cpu, "perf": arguments.perf, "pairs": arguments.pairs, "target_minutes": arguments.target_minutes,
                        "warmups": arguments.warmups, "seed": arguments.seed, "profile_steps": steps, "sudo": arguments.sudo,
                        "require_identical_output": arguments.require_identical_output, "extra": extra,
+                       "canonical_inline_pair": arguments.canonical_inline_pair,
+                       "extra_by_variant": {"a": [], "b": ["-fcanonical-inline"]} if arguments.canonical_inline_pair else {"a": extra, "b": extra},
                        "fresh_copy": arguments.fresh_copy, "min_effect_percent": arguments.min_effect},
             "variants": {key: {"role": role, "ide": labs[key].ide, "sha256": sha256_file(labs[key].ide),
                                "size_bytes": os.path.getsize(labs[key].ide)} for key, role in VARIANTS}}
@@ -3979,6 +3997,8 @@ def main(argv=None):
                          help="practical floor in percent: faster/slower only when the whole 95%% CI lies beyond it (default %(default)s)")
     compare.add_argument("--no-fresh-copy", dest="fresh_copy", action="store_false",
                          help="run each binary in place instead of a fresh copy per run (the setting that showed a 0.5%% A/A bias in LAB3)")
+    compare.add_argument("--canonical-inline-pair", action="store_true",
+                         help="fixed issue #48 acceptance pair: A omits -fcanonical-inline, B passes it")
     compare.add_argument("extra", nargs=argparse.REMAINDER, help="-- extra compile arguments")
     retire = commands.add_parser("retirement", help="historical #512 native-retirement v1 gate (archived compilers required): compare per allocator mode plus generated-program "
                                  "runtime, judged against the #511 limits (retirement.md, retirement.json)")

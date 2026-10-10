@@ -1,0 +1,83 @@
+{
+  "created_at": "2026-10-09T13:10:16.542383+00:00",
+  "repository": "Ubuntu noble snapshot20260828 signed APT index",
+  "scope": "New cloud-local build-tool recovery; no project source or old capture reconstruction",
+  "packages": [
+    {
+      "package": "cmake-data",
+      "version": "3.28.3-1build7",
+      "filename": "cmake-data_3.28.3-1build7_all.deb",
+      "bytes": 2154936,
+      "sha256": "20a3b644211ce82f35c24f1f5052199adeb0ac159978a8740fd6c0959611557f",
+      "signed_package_index_match": true
+    },
+    {
+      "package": "cmake",
+      "version": "3.28.3-1build7",
+      "filename": "cmake_3.28.3-1build7_amd64.deb",
+      "bytes": 11190006,
+      "sha256": "4b0a7f8c0daf27b26b46997d994ae5d1ee7a3d11dfcda9f7627bb1462c162295",
+      "signed_package_index_match": true
+    },
+    {
+      "package": "libjsoncpp25",
+      "version": "1.9.5-6build1",
+      "filename": "libjsoncpp25_1.9.5-6build1_amd64.deb",
+      "bytes": 82754,
+      "sha256": "8efea5b75952f3ad1c40e6b5b31de687c297ea29f87f8b63efebb55e13467211",
+      "signed_package_index_match": true
+    },
+    {
+      "package": "librhash0",
+      "version": "1.4.3-3build1",
+      "filename": "librhash0_1.4.3-3build1_amd64.deb",
+      "bytes": 128748,
+      "sha256": "e9ee69963ff1a56378b9c5ffdd21ea0feaec9647c522349b7612b25103490528",
+      "signed_package_index_match": true
+    },
+    {
+      "package": "libuv1t64",
+      "version": "1.48.0-1.1build1",
+      "filename": "libuv1t64_1.48.0-1.1build1_amd64.deb",
+      "bytes": 97288,
+      "sha256": "72a1856b30af1e533494ab90742a2446f4491b15ddebcade6661a6e8d61b4359",
+      "signed_package_index_match": true
+    },
+    {
+      "package": "mold",
+      "version": "2.30.0+dfsg-1build1",
+      "filename": "mold_2.30.0+dfsg-1build1_amd64.deb",
+      "bytes": 2528802,
+      "sha256": "6427745eaedb5349a276a9d127cb697edf8c82140a93bd0f338e94dab27947e1",
+      "signed_package_index_match": true
+    },
+    {
+      "package": "ninja-build",
+      "version": "1.11.1-2",
+      "filename": "ninja-build_1.11.1-2_amd64.deb",
+      "bytes": 128926,
+      "sha256": "6a17f76a0f75586f1292f6c61a9b07fd0dec963baf6a102b17673f601c6b323a",
+      "signed_package_index_match": true
+    }
+  ],
+  "versions": {
+    "cmake": {
+      "exit": 0,
+      "stdout": "cmake version 3.28.3\n\nCMake suite maintained and supported by Kitware (kitware.com/cmake).\n",
+      "stderr": "",
+      "binary_sha256": "1c5227af4edd22d8d689def545e18ee458260c0fd579eba2187967f38817e638"
+    },
+    "ninja": {
+      "exit": 0,
+      "stdout": "1.11.1\n",
+      "stderr": "",
+      "binary_sha256": "5965527e09fe2b3787772aa4f711d6a36b393e7f2fcaa744a7a96c5a4ddf59cb"
+    },
+    "mold": {
+      "exit": 0,
+      "stdout": "mold 2.30.0 (compatible with GNU ld)\n",
+      "stderr": "",
+      "binary_sha256": "9e23dde239d96e75691c107d0f387039aae7698ca73defec6080ada0eb920723"
+    }
+  }
+}

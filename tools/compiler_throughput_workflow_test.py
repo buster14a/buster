@@ -93,12 +93,31 @@ class CompilerThroughputWorkflowTest(unittest.TestCase):
             WORKFLOWS / "merge-queue-reconcile.yml",
             WORKFLOWS / "pages.yml",
         }
+        check_writers = {
+            WORKFLOWS / "9700x-direct-bench.yml": {"start-pull", "publish-pull", "start-compiler", "publish-compiler",
+                                                     "sampling-queue", "sampling-publish",
+                                                     "preparation-queue", "preparation-publish"},
+            WORKFLOWS / "9700x-compiler-request.yml": {"announce"},
+            WORKFLOWS / "9700x-lifecycle.yml": {"reconcile"},
+        }
+        reviewed.update(check_writers)
         queued = {path for path in WORKFLOWS.glob("*.yml")
                   if re.search(r"^\s+queue:", path.read_text(), re.MULTILINE)}
         self.assertEqual(queued, reviewed)
         for path in reviewed:
             with self.subTest(workflow=path.name):
                 text = path.read_text()
+                if path in check_writers:
+                    jobs = dict(re.findall(r"^  ([a-z0-9_-]+):\n(.*?)(?=^  [a-z0-9_-]+:|\Z)",
+                                           top_level_section(text, "jobs"), re.MULTILINE | re.DOTALL))
+                    locked = {name for name, block in jobs.items() if re.search(r"^      queue:", block, re.MULTILINE)}
+                    self.assertEqual(locked, check_writers[path])
+                    expected = ("    concurrency:\n      group: buster-9700x-check-writer\n"
+                                "      cancel-in-progress: false\n      queue: max\n")
+                    for name in locked:
+                        self.assertIn(expected, jobs[name])
+                    self.assertEqual(len(re.findall(r"^\s+queue:", text, re.MULTILINE)), len(locked))
+                    continue
                 concurrency = top_level_section(text, "concurrency")
                 self.assertIn("  queue: max\n", concurrency)
                 self.assertIn("  cancel-in-progress: false\n", concurrency)

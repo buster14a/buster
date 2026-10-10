@@ -76,7 +76,7 @@
 //                                              evaluator
 //   c_conditional_* ,                          #if evaluation including
 //   c_integer_expression_evaluate              __has_* feature tests
-//   c_preprocess_pragma_*,                     pragmas: once, pack, push/pop
+//   c_preprocess_pragma_*,                     pragmas: once, pack, GCC visibility, push/pop
 //   c_preprocess_expansion_pragma              macro effects at the rescan cursor
 //   COutputSpacingBlock,                      optional expanded-line text
 //   c_preprocess_process_expanded_line         boundaries and output materialization
@@ -88,7 +88,10 @@
 //   c_include_suppressed                       and #ifndef guard identity
 //   c_preprocess_command_operations,           ordered command-line macro
 //   c_preprocess_define_directive              operations and shared #define
-//                                              parsing
+//                                              parsing; forced_includes
+//                                              (-include) run as a synthetic
+//                                              `<command-line>` frame above
+//                                              the root frame
 //   c_preprocess_respell_token,                final-stream rewrites: C23 and
 //   c_preprocess_respell_identifiers,          UCN respellings, GNU `member:`
 //   c_preprocess_rewrite_obsolete_designators, as `.member =`, and block-
@@ -589,8 +592,14 @@ BUSTER_C_SHARED CSpellingSpace c_space_local(Arena* arena, u64 capacity)
     };
     C_CENSUS_PHASE_RECORD(TEMP_SPACES, 1);
     C_CENSUS_PHASE_RECORD(TEMP_SPACE_BYTES, space.capacity);
-    space.base = arena_allocate(arena, char8, space.capacity);
-    memcpy(c_space_allocate(&space, C_SPELLING_PRELUDE_LENGTH), C_SPELLING_PRELUDE_TEXT, C_SPELLING_PRELUDE_LENGTH);
+    // Guarded while a function body is validated (#1256): a miss returns a
+    // space with no base and no capacity, which the caller must not write.
+    space.base = C_PARSE_BODY_SCRATCH_ARRAY(arena, char8, space.capacity);
+    space.capacity = space.base ? space.capacity : 0;
+    if (space.base)
+    {
+        memcpy(c_space_allocate(&space, C_SPELLING_PRELUDE_LENGTH), C_SPELLING_PRELUDE_TEXT, C_SPELLING_PRELUDE_LENGTH);
+    }
     return space;
 }
 
@@ -4238,7 +4247,9 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_constant_p"), C_SYMBOL_BUILTIN_CONSTANT_P },
     { S8_INITIALIZER("__builtin_choose_expr"), C_SYMBOL_BUILTIN_CHOOSE_EXPR },
     { S8_INITIALIZER("__builtin_types_compatible_p"), C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P },
+    { S8_INITIALIZER("__builtin_classify_type"), C_SYMBOL_BUILTIN_CLASSIFY_TYPE },
     { S8_INITIALIZER("__builtin_object_size"), C_SYMBOL_BUILTIN_OBJECT_SIZE },
+    { S8_INITIALIZER("__builtin_dynamic_object_size"), C_SYMBOL_BUILTIN_OBJECT_SIZE },
     { S8_INITIALIZER("__builtin_assume_aligned"), C_SYMBOL_BUILTIN_ASSUME_ALIGNED },
     { S8_INITIALIZER("__builtin_debugtrap"), C_SYMBOL_BUILTIN_DEBUGTRAP },
     { S8_INITIALIZER("__builtin_trap"), C_SYMBOL_BUILTIN_DEBUGTRAP },
@@ -4288,6 +4299,20 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__sync_synchronize"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__sync_fetch_and_nand"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__sync_nand_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_add"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_sub"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_or"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_and"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_xor"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_add_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_sub_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_or_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_and_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_xor_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_bool_compare_and_swap"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_val_compare_and_swap"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_lock_test_and_set"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_lock_release"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__atomic_load"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__atomic_store"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__atomic_exchange"), C_SYMBOL_BUILTIN_ATOMIC },
@@ -4345,6 +4370,27 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_powil"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_roundf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_round"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_truncf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_trunc"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_truncl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_rintf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_rint"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_rintl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_nearbyintf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_nearbyint"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_nearbyintl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fmaf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fma"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fmal"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_ldexpf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_ldexp"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_ldexpl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_lroundf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_lround"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_lroundl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_llroundf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_llround"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_llroundl"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_inf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_inff"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_nanf"), C_SYMBOL_BUILTIN_MATH },
@@ -4396,6 +4442,11 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_ctz"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
     { S8_INITIALIZER("__builtin_ctzl"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
     { S8_INITIALIZER("__builtin_ctzll"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
+    // abs/labs/llabs take and return the signed type their suffix names, so
+    // unlike the count family the C result type is not int.
+    { S8_INITIALIZER("__builtin_abs"), C_SYMBOL_BUILTIN_ABSOLUTE_VALUE },
+    { S8_INITIALIZER("__builtin_labs"), C_SYMBOL_BUILTIN_ABSOLUTE_VALUE },
+    { S8_INITIALIZER("__builtin_llabs"), C_SYMBOL_BUILTIN_ABSOLUTE_VALUE },
     { S8_INITIALIZER("__builtin_ffs"), C_SYMBOL_BUILTIN_FIND_FIRST_SET },
     { S8_INITIALIZER("__builtin_ffsl"), C_SYMBOL_BUILTIN_FIND_FIRST_SET },
     { S8_INITIALIZER("__builtin_ffsll"), C_SYMBOL_BUILTIN_FIND_FIRST_SET },
@@ -4420,6 +4471,11 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_umul_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
     { S8_INITIALIZER("__builtin_umull_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
     { S8_INITIALIZER("__builtin_umulll_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    // The generic forms take any two integer operands and any integer result
+    // pointer; c_ir_emit_overflow_builtin documents what they lower.
+    { S8_INITIALIZER("__builtin_add_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_sub_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_mul_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
     { S8_INITIALIZER("__builtin_popcount"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     { S8_INITIALIZER("__builtin_popcountl"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     { S8_INITIALIZER("__builtin_popcountll"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
@@ -4522,6 +4578,20 @@ CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String
     {
         result = string_ends_with_sequence(spelling, S8("ll")) ? C_TYPE_LONG_LONG :
                  string_ends_with_sequence(spelling, S8("l")) ? C_TYPE_LONG : C_TYPE_INT;
+    }
+    return result;
+}
+
+// The signed parameter and result type of __builtin_abs/labs/llabs, or
+// C_TYPE_INVALID for any other builtin. CTypeKind retains the target's long
+// data model.
+CTypeKind c_semantic_absolute_value_kind(CSymbolBuiltin builtin, String8 spelling)
+{
+    CTypeKind result = C_TYPE_INVALID;
+    if (builtin == C_SYMBOL_BUILTIN_ABSOLUTE_VALUE)
+    {
+        result = string_equal(spelling, S8("__builtin_llabs")) ? C_TYPE_LONG_LONG :
+                 string_equal(spelling, S8("__builtin_labs")) ? C_TYPE_LONG : C_TYPE_INT;
     }
     return result;
 }
@@ -4635,6 +4705,10 @@ CTypeKind c_semantic_integer_builtin_fold_kind(Target target, CSymbolBuiltin bui
     {
         result = c_semantic_integer_count_parameter_kind(builtin, spelling);
     }
+    if (result == C_TYPE_INVALID)
+    {
+        result = c_semantic_absolute_value_kind(builtin, spelling);
+    }
     if (result == C_TYPE_INVALID && builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET)
     {
         result = string_ends_with_sequence(spelling, S8("ll")) ? C_TYPE_LONG_LONG :
@@ -4675,6 +4749,15 @@ bool c_semantic_integer_builtin_fold(CSymbolBuiltin builtin, u32 width, u64 bits
         case C_SYMBOL_BUILTIN_FIND_FIRST_SET: answer = bits ? trailing_zeros + 1 : 0; break;
         case C_SYMBOL_BUILTIN_POPULATION_COUNT: answer = population; break;
         case C_SYMBOL_BUILTIN_PARITY: answer = population & 1; break;
+        case C_SYMBOL_BUILTIN_ABSOLUTE_VALUE:
+        {
+            // The most negative value has no positive counterpart and wraps
+            // to itself under -fwrapv, as the (x ^ s) - s lowering and GCC's
+            // static-initializer fold both do.
+            u64 sign = UINT64_C(1) << (width - 1);
+            answer = bits & sign ? (0 - bits) & mask : bits;
+            break;
+        }
         case C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS:
         {
             // Leading bits equal to the sign bit, not counting the sign bit.
@@ -4699,12 +4782,58 @@ bool c_semantic_integer_builtin_fold(CSymbolBuiltin builtin, u32 width, u64 bits
     return known;
 }
 
-// The math builtins whose result is long double, by link name. A bare `l`
-// suffix test is wrong: ceil and huge_val end in `l` but return double.
+// The libm-backed rounding, fused-multiply-add and scaling builtins, one row
+// per link name. `argument_kind` is the floating type of every floating
+// parameter, `result_kind` the call's type, and `integer_second` marks the
+// `int` second parameter of ldexp. The call lowers to a runtime libm import.
+BUSTER_GLOBAL_LOCAL CMathLibmShape const c_math_libm_shapes[] = {
+    {S8_INITIALIZER("truncf"), 1, C_TYPE_FLOAT, C_TYPE_FLOAT, false},
+    {S8_INITIALIZER("trunc"), 1, C_TYPE_DOUBLE, C_TYPE_DOUBLE, false},
+    {S8_INITIALIZER("truncl"), 1, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_DOUBLE, false},
+    {S8_INITIALIZER("rintf"), 1, C_TYPE_FLOAT, C_TYPE_FLOAT, false},
+    {S8_INITIALIZER("rint"), 1, C_TYPE_DOUBLE, C_TYPE_DOUBLE, false},
+    {S8_INITIALIZER("rintl"), 1, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_DOUBLE, false},
+    {S8_INITIALIZER("nearbyintf"), 1, C_TYPE_FLOAT, C_TYPE_FLOAT, false},
+    {S8_INITIALIZER("nearbyint"), 1, C_TYPE_DOUBLE, C_TYPE_DOUBLE, false},
+    {S8_INITIALIZER("nearbyintl"), 1, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_DOUBLE, false},
+    {S8_INITIALIZER("fmaf"), 3, C_TYPE_FLOAT, C_TYPE_FLOAT, false},
+    {S8_INITIALIZER("fma"), 3, C_TYPE_DOUBLE, C_TYPE_DOUBLE, false},
+    {S8_INITIALIZER("fmal"), 3, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_DOUBLE, false},
+    {S8_INITIALIZER("ldexpf"), 2, C_TYPE_FLOAT, C_TYPE_FLOAT, true},
+    {S8_INITIALIZER("ldexp"), 2, C_TYPE_DOUBLE, C_TYPE_DOUBLE, true},
+    {S8_INITIALIZER("ldexpl"), 2, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_DOUBLE, true},
+    {S8_INITIALIZER("lroundf"), 1, C_TYPE_FLOAT, C_TYPE_LONG, false},
+    {S8_INITIALIZER("lround"), 1, C_TYPE_DOUBLE, C_TYPE_LONG, false},
+    {S8_INITIALIZER("lroundl"), 1, C_TYPE_LONG_DOUBLE, C_TYPE_LONG, false},
+    {S8_INITIALIZER("llroundf"), 1, C_TYPE_FLOAT, C_TYPE_LONG_LONG, false},
+    {S8_INITIALIZER("llround"), 1, C_TYPE_DOUBLE, C_TYPE_LONG_LONG, false},
+    {S8_INITIALIZER("llroundl"), 1, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_LONG, false},
+};
+
+// The libm shape of a math builtin named by its link name or its
+// `__builtin_` spelling; `arity` is zero when it is not one of those.
+CMathLibmShape c_semantic_math_libm_shape(String8 name)
+{
+    String8 link_name = string_starts_with_sequence(name, S8("__builtin_")) ? string_slice(name, 10, name.length) : name;
+    CMathLibmShape result = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_math_libm_shapes) && !result.arity; index += 1)
+    {
+        if (string_equal(link_name, c_math_libm_shapes[index].link_name))
+        {
+            result = c_math_libm_shapes[index];
+        }
+    }
+    return result;
+}
+
+// The math builtins whose floating operand is long double, by link name. A
+// bare `l` suffix test is wrong: ceil and huge_val end in `l` but return double.
 bool c_semantic_math_link_is_long_double(String8 link_name)
 {
+    CMathLibmShape libm = c_semantic_math_libm_shape(link_name);
     return string_equal(link_name, S8("fabsl")) || string_equal(link_name, S8("fmaxl")) || string_equal(link_name, S8("fminl")) ||
-           string_equal(link_name, S8("powil")) || string_equal(link_name, S8("copysignl")) || string_equal(link_name, S8("signbitl"));
+           string_equal(link_name, S8("powil")) || string_equal(link_name, S8("copysignl")) || string_equal(link_name, S8("signbitl")) ||
+           (libm.arity && libm.argument_kind == C_TYPE_LONG_DOUBLE);
 }
 
 // One probe entry of the intern table. The identity of a name is its first
@@ -5082,6 +5211,8 @@ BUSTER_C_SHARED String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_
     [C_SYMBOL_WELL_KNOWN_DESTRUCTOR_GNU] = S8_INITIALIZER("__destructor__"),
     [C_SYMBOL_WELL_KNOWN_RETURNS_TWICE] = S8_INITIALIZER("returns_twice"),
     [C_SYMBOL_WELL_KNOWN_RETURNS_TWICE_GNU] = S8_INITIALIZER("__returns_twice__"),
+    [C_SYMBOL_WELL_KNOWN_VISIBILITY] = S8_INITIALIZER("visibility"),
+    [C_SYMBOL_WELL_KNOWN_VISIBILITY_GNU] = S8_INITIALIZER("__visibility__"),
     [C_SYMBOL_WELL_KNOWN_EXTENSION] = S8_INITIALIZER("__extension__"),
     [C_SYMBOL_WELL_KNOWN_DECLSPEC] = S8_INITIALIZER("__declspec"),
     [C_SYMBOL_WELL_KNOWN_REGISTER] = S8_INITIALIZER("register"),
@@ -7992,7 +8123,9 @@ BUSTER_C_INTERNAL u32 c_include_name_token_count(CToken* tokens, u32 token_count
 BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu_arch, OperatingSystem os)
 {
     static char const* supported[] = {
-        "__builtin___clear_cache", "__builtin_acos",
+        "__builtin___clear_cache", "__builtin_abs",
+        "__builtin_labs",          "__builtin_llabs",
+        "__builtin_acos",
         "__builtin_acosf",         "__builtin_ceil",
         "__builtin_ceilf",         "__builtin_clrsb",
         "__builtin_clrsbl",        "__builtin_clrsbll",
@@ -8022,6 +8155,9 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_umul_overflow",
         "__builtin_umull_overflow",
         "__builtin_umulll_overflow",
+        "__builtin_add_overflow",
+        "__builtin_sub_overflow",
+        "__builtin_mul_overflow",
         "__builtin_popcount",      "__builtin_popcountl",
         "__builtin_popcountll",
         "__builtin_parity",        "__builtin_parityl",
@@ -8030,7 +8166,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_copysign",      "__builtin_copysignf",
         "__builtin_copysignl",
         "__builtin_assume_aligned", "__builtin_choose_expr",
-        "__builtin_constant_p",    "__builtin_object_size",
+        "__builtin_constant_p",    "__builtin_object_size", "__builtin_dynamic_object_size",
         "__builtin_expect",        "__builtin_expect_with_probability",
         "__builtin_fabs",          "__builtin_fabsf",
         "__builtin_fabsl",
@@ -8061,7 +8197,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_ia32_pslldi128", "__builtin_ia32_psllqi128",
         "__builtin_ia32_psradi128", "__builtin_ia32_psrldi128",
         "__builtin_ia32_psrlqi128",
-        "__builtin_types_compatible_p", "__builtin_offsetof",
+        "__builtin_types_compatible_p", "__builtin_classify_type", "__builtin_offsetof",
         "__builtin_unreachable",   "__builtin_frame_address",
         "__builtin_alloca",
         "__builtin_c23_va_start",
@@ -8099,6 +8235,10 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
                  ((builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC) &&
                   c_semantic_vendor_builtin_supported((Target){.cpu_arch = cpu_arch}, name)) ||
                  (builtin == C_SYMBOL_BUILTIN_COMPLEX && (native || cpu_arch == CPU_ARCH_WASM64)) ||
+                 // The libm rounding/fma/ldexp calls are floating imports: eBPF has
+                 // no floating point, and Wasm64 lowers no long double (#1394).
+                 (builtin == C_SYMBOL_BUILTIN_MATH && c_semantic_math_libm_shape(name).arity &&
+                  (native || (cpu_arch == CPU_ARCH_WASM64 && c_semantic_math_libm_shape(name).argument_kind != C_TYPE_LONG_DOUBLE))) ||
                  (builtin == C_SYMBOL_BUILTIN_RETURN_ADDRESS && native && os != OPERATING_SYSTEM_WINDOWS);
     }
 
@@ -8110,6 +8250,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
 // The selected target matters: the COFF writer cannot preserve weak
 // definitions, and UEFI images refuse lifecycle registrations even though a
 // UEFI relocatable object can carry their arrays. Keep those answers false.
+// `visibility` is claimed only where an ELF object records it.
 BUSTER_C_INTERNAL bool c_conditional_attribute_supported(char8 const* base, CToken token, Target target)
 {
     String8 name = c_token_spelling(base, token);
@@ -8124,6 +8265,13 @@ BUSTER_C_INTERNAL bool c_conditional_attribute_supported(char8 const* base, CTok
         if (target.os != OPERATING_SYSTEM_UEFI)
         {
             binding_words |= C_ATTRIBUTE_WORDS_CONSTRUCTOR | C_ATTRIBUTE_WORDS_DESTRUCTOR;
+        }
+        // Only the ELF writer turns IrSymbol.is_hidden into st_other; Mach-O
+        // and COFF objects drop it, so the query stays false there.
+        if (target.os != OPERATING_SYSTEM_WINDOWS && target.os != OPERATING_SYSTEM_UEFI && target.os != OPERATING_SYSTEM_MACOS &&
+            target.os != OPERATING_SYSTEM_IOS)
+        {
+            binding_words |= C_ATTRIBUTE_WORDS_VISIBILITY;
         }
     }
     return c_parse_packed_word(name) || c_parse_aligned_attribute_word(name) || c_parse_vector_size_word(name) ||
@@ -8274,11 +8422,12 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
             }
             argument_count += 1;
         }
-        if (!close)
+        // Guarded while a function body is validated (#1256).
+        CToken* arguments = close ? C_PARSE_BODY_SCRATCH_ARRAY(arena, CToken, argument_count) : 0;
+        if (!arguments)
         {
             return false;
         }
-        CToken* arguments = arena_allocate(arena, CToken, argument_count);
         u32 argument_index = 0;
         bool literal_header = open->next && open->next->token.no_expand;
         for (scan = open->next; scan != close; scan = scan->next)
@@ -8360,7 +8509,10 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     IR_SEMANTIC_RECORD(PREPROCESSOR_EVALUATIONS, 1);
     bool valid = true;
     char8 const* base = space->base;
-    CPpToken* transformed = arena_allocate(arena, CPpToken, token_count);
+    // Guarded while a function body is validated (#1256): a miss fails the
+    // evaluation, and the body reports its exhaustion.
+    CPpToken* transformed = C_PARSE_BODY_SCRATCH_ARRAY(arena, CPpToken, token_count);
+    valid = transformed != 0;
     u32 transformed_count = 0;
     for (u32 token_index = 0; valid && token_index < token_count; token_index += 1)
     {
@@ -8400,12 +8552,32 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     CPreprocessTokenNode* first_expanded = 0;
     CPreprocessTokenNode* last_expanded = 0;
     u64 expanded_count = 0;
-    if (valid)
+    if (valid && preprocessor_arithmetic)
     {
         CMacroExpansionStorage expansion_storage = {0};
         valid = c_preprocess_expand(arena, &expansion_storage, space, symbols, first_macro, 0, 0, stamps, transformed, transformed_count, &first_expanded,
                                     &last_expanded, &expanded_count, expansion_limit, result, 0);
         c_macro_expansion_storage_destroy(&expansion_storage, result->detail);
+    }
+    else if (valid)
+    {
+        // A parse-side query has no macro table and no pragma context, so
+        // expansion would copy every token through unchanged; the list is
+        // linked over one guarded array instead (#1256). The one token that
+        // expansion would diagnose there, a stray `__VA_OPT__`, fails the
+        // evaluation as that diagnostic does for every parse-side caller.
+        CPreprocessTokenNode* nodes = C_PARSE_BODY_SCRATCH_ARRAY(arena, CPreprocessTokenNode, transformed_count);
+        valid = nodes != 0;
+        for (u32 token_index = 0; valid && token_index < transformed_count; token_index += 1)
+        {
+            valid = !c_macro_is_va_opt(transformed[token_index].token);
+            nodes[token_index] = (CPreprocessTokenNode){
+                .token = transformed[token_index],
+                .next = token_index + 1 < transformed_count ? nodes + token_index + 1 : 0,
+            };
+        }
+        first_expanded = valid && transformed_count ? nodes : 0;
+        expanded_count = transformed_count;
     }
     if (valid)
     {
@@ -8413,9 +8585,10 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     }
     if (valid)
     {
-        u64* values = arena_allocate(arena, u64, expanded_count + 1);
-        u8* value_flags = arena_allocate(arena, u8, expanded_count + 1);
-        CConditionalOperator* operations = arena_allocate(arena, CConditionalOperator, expanded_count + 1);
+        u64* values = C_PARSE_BODY_SCRATCH_ARRAY(arena, u64, expanded_count + 1);
+        u8* value_flags = C_PARSE_BODY_SCRATCH_ARRAY(arena, u8, expanded_count + 1);
+        CConditionalOperator* operations = C_PARSE_BODY_SCRATCH_ARRAY(arena, CConditionalOperator, expanded_count + 1);
+        valid = values && value_flags && operations;
         u32 value_count = 0;
         u32 operation_count = 0;
         bool expect_operand = true;
@@ -8591,14 +8764,17 @@ BUSTER_C_SHARED bool c_integer_expression_evaluate(Arena* arena, char8 const* sp
     CSpellingSpace view = {
         .base = (char8*)spelling_base,
     };
-    CPpToken* wrapped = arena_allocate(arena, CPpToken, token_count);
-    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    // Guarded while a function body is validated (#1256): a miss fails the
+    // evaluation, and the body reports its exhaustion.
+    CPpToken* wrapped = C_PARSE_BODY_SCRATCH_ARRAY(arena, CPpToken, token_count);
+    for (u32 token_index = 0; wrapped && token_index < token_count; token_index += 1)
     {
         wrapped[token_index] = (CPpToken){
             .token = tokens[token_index],
         };
     }
-    return c_integer_expression_evaluate_with_features(arena, &view, 0, 0, 0, wrapped, token_count, expansion_limit, false, result, 0, 0, (String8){0},
+    return wrapped &&
+           c_integer_expression_evaluate_with_features(arena, &view, 0, 0, 0, wrapped, token_count, expansion_limit, false, result, 0, 0, (String8){0},
                                                        (CIncludeSearchOrigin){0}, value_out);
 }
 
@@ -9170,31 +9346,40 @@ struct CPragmaPackStack
     u16 alignment;
 };
 
-// The pack change list under construction. Entries are appended lazily at
-// output-append time — the first token that lands after a state change
+// One #pragma GCC visibility push, holding the state it replaced.
+typedef struct CPragmaVisibilityStack CPragmaVisibilityStack;
+struct CPragmaVisibilityStack
+{
+    CPragmaVisibilityStack* previous;
+    u8 visibility;
+};
+
+// The pragma state change list under construction. Entries are appended lazily
+// at output-append time — the first token that lands after a state change
 // carries the new value's span start — so pragmas on directive lines and
 // _Pragma markers mid-expansion record through the same comparison, and
 // consecutive changes with no token between them collapse to one entry.
-typedef struct CPackAlignmentRecorder CPackAlignmentRecorder;
-struct CPackAlignmentRecorder
+typedef struct CPragmaStateRecorder CPragmaStateRecorder;
+struct CPragmaStateRecorder
 {
     Arena* arena;
-    CPackAlignment* changes;
+    CPragmaState* changes;
     u32 count;
     u32 capacity;
     u16 recorded;
+    u8 recorded_visibility;
 };
 
-BUSTER_C_INTERNAL void c_pack_alignment_record(CPackAlignmentRecorder* recorder, u64 token_index, u16 alignment)
+BUSTER_C_INTERNAL void c_pragma_state_record(CPragmaStateRecorder* recorder, u64 token_index, u16 alignment, u8 visibility)
 {
-    if (alignment == recorder->recorded)
+    if (alignment == recorder->recorded && visibility == recorder->recorded_visibility)
     {
         return;
     }
     if (recorder->count == recorder->capacity)
     {
         u32 capacity = recorder->capacity ? recorder->capacity * 2 : 16;
-        CPackAlignment* changes = arena_allocate(recorder->arena, CPackAlignment, capacity);
+        CPragmaState* changes = arena_allocate(recorder->arena, CPragmaState, capacity);
         if (recorder->count)
         {
             memcpy(changes, recorder->changes, sizeof(*changes) * recorder->count);
@@ -9202,21 +9387,24 @@ BUSTER_C_INTERNAL void c_pack_alignment_record(CPackAlignmentRecorder* recorder,
         recorder->changes = changes;
         recorder->capacity = capacity;
     }
-    recorder->changes[recorder->count++] = (CPackAlignment){
+    recorder->changes[recorder->count++] = (CPragmaState){
         .token_index = (u32)token_index,
         .alignment = alignment,
+        .visibility = visibility,
     };
     recorder->recorded = alignment;
+    recorder->recorded_visibility = visibility;
 }
 
-u32 c_preprocess_pack_alignment(CPreprocessResult const* preprocess, u64 token_index)
+// The last entry at or before the token, or the all-zero state before the first.
+BUSTER_C_INTERNAL CPragmaState c_preprocess_pragma_state(CPreprocessResult const* preprocess, u64 token_index)
 {
     u32 low = 0;
-    u32 high = preprocess->pack_change_count;
+    u32 high = preprocess->pragma_change_count;
     while (low < high)
     {
         u32 middle = low + (high - low) / 2;
-        if (preprocess->pack_changes[middle].token_index <= token_index)
+        if (preprocess->pragma_changes[middle].token_index <= token_index)
         {
             low = middle + 1;
         }
@@ -9225,7 +9413,22 @@ u32 c_preprocess_pack_alignment(CPreprocessResult const* preprocess, u64 token_i
             high = middle;
         }
     }
-    return low ? preprocess->pack_changes[low - 1].alignment : 0;
+    CPragmaState result = {0};
+    if (low)
+    {
+        result = preprocess->pragma_changes[low - 1];
+    }
+    return result;
+}
+
+u32 c_preprocess_pack_alignment(CPreprocessResult const* preprocess, u64 token_index)
+{
+    return c_preprocess_pragma_state(preprocess, token_index).alignment;
+}
+
+u32 c_preprocess_symbol_visibility(CPreprocessResult const* preprocess, u64 token_index)
+{
+    return c_preprocess_pragma_state(preprocess, token_index).visibility;
 }
 
 struct CPreprocessPragmaContext
@@ -9238,7 +9441,9 @@ struct CPreprocessPragmaContext
     CMacroPushMacro** macro_push_stack;
     CPragmaPackStack** pack_stack;
     u16* pack_alignment;
-    CPackAlignmentRecorder* pack_changes;
+    CPragmaVisibilityStack** visibility_stack;
+    u8* visibility;
+    CPragmaStateRecorder* pragma_changes;
     CIncludeFileTable* include_files;
     String8 current_path;
     CIncludeFileIdentity current_identity;
@@ -9423,6 +9628,63 @@ BUSTER_C_INTERNAL void c_preprocess_pragma_pack(CPreprocessPragmaContext context
     }
 }
 
+// `#pragma GCC visibility push(name)` and `pop`, with name one of default,
+// hidden, internal or protected. The state is the CSymbolVisibility that
+// declarations reach through c_preprocess_symbol_visibility. A push nests, a
+// pop restores what its push replaced, and a pop with nothing pushed is
+// ignored, as in GCC. A malformed pragma is ignored with a warning (GCC's
+// spelling of it); protected has no object-model representation, so it is
+// an error rather than a silently weaker default. The push still nests so a
+// matching pop stays balanced.
+BUSTER_C_INTERNAL void c_preprocess_pragma_visibility(CPreprocessPragmaContext context, char8 const* base, CToken* tokens, u32 token_count)
+{
+    bool is_push = token_count == 6 && tokens[2].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[2], S8("push")) &&
+                   c_token_is_punctuator(&tokens[3], C_PUNCTUATOR_LEFT_PARENTHESIS) && tokens[4].kind == C_TOKEN_IDENTIFIER &&
+                   c_token_is_punctuator(&tokens[5], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+    bool is_pop = token_count == 3 && tokens[2].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[2], S8("pop"));
+    u8 requested = C_SYMBOL_VISIBILITY_UNSPECIFIED;
+    if (is_push)
+    {
+        String8 name = c_token_spelling(base, tokens[4]);
+        requested = string_equal(name, S8("default"))     ? C_SYMBOL_VISIBILITY_DEFAULT
+                    : string_equal(name, S8("hidden"))    ? C_SYMBOL_VISIBILITY_HIDDEN
+                    : string_equal(name, S8("internal"))  ? C_SYMBOL_VISIBILITY_INTERNAL
+                    : string_equal(name, S8("protected")) ? C_SYMBOL_VISIBILITY_PROTECTED
+                                                          : C_SYMBOL_VISIBILITY_UNSPECIFIED;
+    }
+    if (is_push && requested != C_SYMBOL_VISIBILITY_UNSPECIFIED)
+    {
+        CPragmaVisibilityStack* entry = arena_allocate(context.arena, CPragmaVisibilityStack, 1);
+        *entry = (CPragmaVisibilityStack){
+            .previous = *context.visibility_stack,
+            .visibility = *context.visibility,
+        };
+        *context.visibility_stack = entry;
+        if (requested == C_SYMBOL_VISIBILITY_PROTECTED)
+        {
+            c_preprocess_diagnostic_push(context.arena, context.preprocess, context.current_location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                         S8("#pragma GCC visibility push(protected) is not supported: protected visibility has no object-model representation"));
+        }
+        else
+        {
+            *context.visibility = requested;
+        }
+    }
+    else if (is_pop)
+    {
+        if (*context.visibility_stack)
+        {
+            *context.visibility = (*context.visibility_stack)->visibility;
+            *context.visibility_stack = (*context.visibility_stack)->previous;
+        }
+    }
+    else
+    {
+        c_preprocess_diagnostic_push_severity(context.arena, context.preprocess, context.current_location, C_DIAGNOSTIC_PREPROCESSOR_WARNING, C_DIAGNOSTIC_WARNING,
+                                              S8("#pragma GCC visibility must be followed by push(default|hidden|internal|protected) or pop; ignored"));
+    }
+}
+
 BUSTER_C_INTERNAL void c_preprocess_handle_pragma(CPreprocessPragmaContext context, char8 const* base, CToken* tokens, u32 token_count)
 {
     if (token_count)
@@ -9464,9 +9726,14 @@ BUSTER_C_INTERNAL void c_preprocess_handle_pragma(CPreprocessPragmaContext conte
         {
             c_preprocess_pragma_pack(context, base, tokens, token_count);
         }
-        // GCC/Clang/MSVC diagnostic, visibility, system-header, warning,
-        // comment, region, and OpenMP pragmas are compatibility no-ops. Unknown
-        // pragma bodies are intentionally ignored as well.
+        if (token_count >= 2 && tokens[0].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[0], S8("GCC")) &&
+            tokens[1].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[1], S8("visibility")))
+        {
+            c_preprocess_pragma_visibility(context, base, tokens, token_count);
+        }
+        // GCC/Clang/MSVC diagnostic, system-header, warning, comment, region,
+        // and OpenMP pragmas are compatibility no-ops. Unknown pragma bodies
+        // are intentionally ignored as well.
     }
 }
 
@@ -9584,13 +9851,14 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
         CPpToken item = node->token;
         if (pack_pending)
         {
-            c_pack_alignment_record(context.pack_changes, *output_count + count, *context.pack_alignment);
+            c_pragma_state_record(context.pragma_changes, *output_count + count, *context.pack_alignment, *context.visibility);
             pack_pending = false;
         }
         if (item.foreign)
         {
             String8 spelling = c_token_spelling(space->base, item.token);
             BUSTER_CHECK(!spelling.length || copy); // Counted in foreign_length above.
+            u32 spelling_offset = copy ? c_space_offset(space, copy) : (u32)space->used;
             for (u64 byte_index = 0; byte_index < spelling.length; byte_index += 1)
             {
                 copy[byte_index] = spelling.pointer[byte_index];
@@ -9599,7 +9867,7 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
             {
                 CSourceLocation location = c_pp_stamp_location(stamps, item.stamp);
                 c_source_map_append(map, (IrSourceRegion){
-                                             .start = c_space_offset(space, copy),
+                                             .start = spelling_offset,
                                              .source = location.file,
                                              .stamp = c_position_from_source_location(location),
                                              .kind = IR_SOURCE_REGION_STAMP,
@@ -9608,8 +9876,11 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
                 run_open = true;
                 run_stamp = item.stamp;
             }
-            item.token.offset = c_space_offset(space, copy);
-            copy += spelling.length;
+            item.token.offset = spelling_offset;
+            if (spelling.length)
+            {
+                copy += spelling.length;
+            }
         }
         else
         {
@@ -9630,6 +9901,64 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
     }
     *output_count += count;
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_expanded_empty_foreign_token_source_map(Arena* arena)
+{
+    bool result = false;
+    Arena* token_arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+    Arena* shape_arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+    if (token_arena && shape_arena)
+    {
+        char8 spelling_base[] = "x";
+        CSpellingSpace space = {.base = spelling_base, .used = 1, .capacity = sizeof(spelling_base)};
+        u32 expected_offset = 1;
+        CSourceLocation location = {.offset = 17, .line = 3, .column = 5, .file = 7, .map_offset = expected_offset};
+        CPpStampTable stamps = {.entries = &location, .count = 1};
+        CSourceMap map = {.arena = arena};
+        CPragmaStateRecorder pragma_changes = {.arena = arena};
+        u16 pack_alignment = 0;
+        u8 visibility = C_SYMBOL_VISIBILITY_UNSPECIFIED;
+        CPreprocessPragmaContext context = {
+            .arena = arena,
+            .pack_alignment = &pack_alignment,
+            .visibility = &visibility,
+            .pragma_changes = &pragma_changes,
+        };
+        CPreprocessTokenNode node = {
+            .token = {
+                .token = {.offset = expected_offset, .kind = C_TOKEN_IDENTIFIER},
+                .stamp = 1,
+                .foreign = 1,
+            },
+        };
+        CTokenStream token_stream = {
+            .arena = token_arena,
+            .shape_arena = shape_arena,
+            .base = (CToken*)((char8*)token_arena + arena_minimum_position),
+            .shape_base = (CTokenShape*)((char8*)shape_arena + arena_minimum_position),
+        };
+        u64 output_count = 0;
+        c_preprocess_process_expanded_line(context, &space, &map, &stamps, &node, 1, &token_stream, &output_count, 0);
+        CToken token = token_stream.base[0];
+        IrSourcePosition stamp = map.count ? map.regions[0].stamp : (IrSourcePosition){0};
+        IrSourcePosition expected_stamp = c_position_from_source_location(location);
+        result = output_count == 1 && token.offset == expected_offset && token.length == 0 && map.count == 1 &&
+                 map.regions[0].start == expected_offset && map.regions[0].source == location.file &&
+                 stamp.source == expected_stamp.source && stamp.offset == expected_stamp.offset && stamp.line == expected_stamp.line &&
+                 stamp.column == expected_stamp.column;
+    }
+    if (shape_arena)
+    {
+        arena_destroy(shape_arena, 1);
+    }
+    if (token_arena)
+    {
+        arena_destroy(token_arena, 1);
+    }
+    return result;
+}
+#endif
 
 BUSTER_C_INTERNAL u32 c_preprocess_tokens_from_nodes(CPreprocessTokenNode* first, Arena* arena, CToken** tokens_out)
 {
@@ -10862,6 +11191,7 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
     }
     else if (token_count >= 3 && c_token_is_punctuator(&tokens[0], C_PUNCTUATOR_LESS) && c_token_is_punctuator(&tokens[token_count - 1], C_PUNCTUATOR_GREATER))
     {
+        bool named = true;
         u64 end = (u64)tokens[0].offset + 1;
         for (u32 index = 1; preserve_characters && index < token_count; index += 1)
         {
@@ -10886,9 +11216,11 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
             {
                 length += c_token_length(base, tokens[index]);
             }
-            char8* name = arena_allocate(arena, char8, length + 1);
+            // Guarded while a function body is validated (#1256): a miss
+            // leaves the name unrecognized.
+            char8* name = C_PARSE_BODY_SCRATCH_ARRAY(arena, char8, length + 1);
             u64 output = 0;
-            for (u32 index = 1; index + 1 < token_count; index += 1)
+            for (u32 index = 1; name && index + 1 < token_count; index += 1)
             {
                 String8 spelling = c_token_spelling(base, tokens[index]);
                 if (spelling.length)
@@ -10897,14 +11229,18 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
                 }
                 output += spelling.length;
             }
-            name[output] = 0;
+            if (name)
+            {
+                name[output] = 0;
+            }
+            named = name != 0;
             *name_out = (String8){
                 .pointer = name,
                 .length = output,
             };
         }
         *quoted_out = false;
-        recognized = true;
+        recognized = named;
     }
     return recognized;
 }
@@ -11735,13 +12071,13 @@ BUSTER_C_INTERNAL u64 c_preprocess_rewrite_obsolete_designators(Arena* arena, CS
         memcpy(new_shapes + destination, shapes + source, (count - source) * sizeof(CTokenShape));
         // A pack change at or past an inserted '.' moves with its token.
         u64 shifted = 0;
-        for (u32 change = 0; change < result->pack_change_count; change += 1)
+        for (u32 change = 0; change < result->pragma_change_count; change += 1)
         {
-            while (shifted < accepted && positions[shifted] <= result->pack_changes[change].token_index)
+            while (shifted < accepted && positions[shifted] <= result->pragma_changes[change].token_index)
             {
                 shifted += 1;
             }
-            result->pack_changes[change].token_index += (u32)shifted;
+            result->pragma_changes[change].token_index += (u32)shifted;
         }
         result->tokens = tokens;
         recovery->token_shapes = new_shapes;
@@ -11807,7 +12143,7 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSymbolTable) == 72);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CDiagnostic) == 48);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 632 + 32 * BUSTER_INCLUDE_TESTS);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceFileMetrics) == 32);
-BUSTER_CT_CHECK(sizeof(CPackAlignment) == 8);
+BUSTER_CT_CHECK(sizeof(CPragmaState) == 8);
 
 BUSTER_C_INTERNAL bool c_preprocess_seal_owns(CPreprocessSeal const* seal, void const* pointer)
 {
@@ -11954,7 +12290,7 @@ BUSTER_C_INTERNAL void c_preprocess_seal(CPreprocessSeal* seal, CPreprocessResul
     {
         result->files[index] = c_preprocess_seal_string(seal, result->files[index]);
     }
-    result->pack_changes = c_preprocess_seal_typed(seal, result->pack_changes, CPackAlignment, result->pack_change_count);
+    result->pragma_changes = c_preprocess_seal_typed(seal, result->pragma_changes, CPragmaState, result->pragma_change_count);
     if (result->detail)
     {
         CPreprocessDetail* detail = c_preprocess_seal_typed(seal, result->detail, CPreprocessDetail, 1);
@@ -11981,7 +12317,7 @@ u64 c_test_preprocess_references_range(CPreprocessResult const* result, void con
     u64 count = c_test_pointer_in_range(result->tokens, start, end) + c_test_pointer_in_range(result->spelling_base, start, end) +
                 c_test_pointer_in_range(result->recovery, start, end) + c_test_pointer_in_range(result->symbols, start, end) +
                 c_test_pointer_in_range(result->diagnostics, start, end) + c_test_pointer_in_range(result->files, start, end) +
-                c_test_pointer_in_range(result->pack_changes, start, end) + c_test_pointer_in_range(result->detail, start, end);
+                c_test_pointer_in_range(result->pragma_changes, start, end) + c_test_pointer_in_range(result->detail, start, end);
     CSourceMapRecovery const* recovery = result->recovery;
     if (recovery)
     {
@@ -12304,7 +12640,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     c_symbols_intern_tokens(symbol_table, root_lex.spelling_base, root_lex.tokens, root_lex.token_shapes, root_lex.token_count);
     CPpClassMasks root_class_masks;
     c_pp_class_masks_build(arena, &root_class_masks, root_lex.token_shapes, root_lex.token_count);
-    result.diagnostic_capacity = BUSTER_MIN(source.length + options.macro_operation_count + options.definition_count + 1, UINT64_C(64));
+    result.diagnostic_capacity = BUSTER_MIN(source.length + options.macro_operation_count + options.definition_count + options.forced_include_count + 1, UINT64_C(64));
     C_DIAGNOSTIC_RESERVATION_CENSUS(PREPROCESS, result.diagnostic_capacity);
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
     CMacro* first_macro = 0;
@@ -12613,7 +12949,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
             C_DEFINE_TYPE_MACRO("__pie__", level);
         }
     }
-    // __GCC_HAVE_SYNC_COMPARE_AND_SWAP_* has no matching __sync compare-and-swap builtins,
+    // __GCC_HAVE_SYNC_COMPARE_AND_SWAP_* is not defined: the generic __sync compare-and-swap
+    // builtins exist but their sized `_1`..`_16` forms do not (#1394),
     // __SIZEOF_FLOAT128__ is unmodeled, __SEG_FS/__SEG_GS have no keywords,
     // and __PRAGMA_REDEFINE_EXTNAME is an unimplemented pragma.
     C_DEFINE_TYPE_MACRO("__SIZE_TYPE__", unsigned_pointer_type);
@@ -13029,9 +13366,11 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     COutputSpacingBlock* first_spacing = 0;
     COutputSpacingBlock* last_spacing = 0;
     CPragmaPackStack* pack_stack = 0;
+    CPragmaVisibilityStack* visibility_stack = 0;
     CMacroPushMacro* macro_push_stack = 0;
     u16 pack_alignment = 0;
-    CPackAlignmentRecorder pack_changes = {
+    u8 visibility = C_SYMBOL_VISIBILITY_UNSPECIFIED;
+    CPragmaStateRecorder pragma_changes = {
         .arena = arena,
     };
     u32 expansion_limit = options.expansion_limit ? options.expansion_limit : 65536;
@@ -13067,6 +13406,50 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     if (!options.already_preprocessed)
     {
         c_preprocess_command_operations(arena, space, symbol_table, options, &first_macro, &last_macro, &result);
+        if (options.forced_include_count)
+        {
+            // `-include FILE` runs as `#include "FILE"` lines of a synthetic
+            // file that sits above the root frame, so the primary source's
+            // line numbers and __FILE__ never see it. The quote lookup starts
+            // from the synthetic path's directory, which is the working
+            // directory, and then walks the -I chain: GCC's order.
+            String8 forced_text = {0};
+            for (u32 forced_index = 0; forced_index < options.forced_include_count; forced_index += 1)
+            {
+                forced_text = forced_index ? string_format(arena, S8("{S8}#include \"{S8}\"\n"), forced_text, options.forced_includes[forced_index])
+                                           : string_format(arena, S8("#include \"{S8}\"\n"), options.forced_includes[forced_index]);
+            }
+            CLexResult forced_lex = c_lex_space(arena, space, forced_text, false, result.dialect);
+            for (u64 diagnostic_index = 0; diagnostic_index < forced_lex.diagnostic_count; diagnostic_index += 1)
+            {
+                c_preprocess_diagnostic_copy(arena, &result, forced_lex.diagnostics[diagnostic_index]);
+            }
+            c_symbols_intern_tokens(symbol_table, forced_lex.spelling_base, forced_lex.tokens, forced_lex.token_shapes, forced_lex.token_count);
+            CPreprocessSourceFrame* forced_frame = arena_allocate(arena, CPreprocessSourceFrame, 1);
+            *forced_frame = (CPreprocessSourceFrame){
+                .previous = &root_frame,
+                .lex = forced_lex,
+                .path = S8("<command-line>"),
+                .identity = c_include_file_identity(S8("<command-line>"), (FileIdentity){0}),
+                .logical_path = S8("<command-line>"),
+                .line_start = true,
+            };
+            c_pp_class_masks_build(arena, &forced_frame->class_masks, forced_lex.token_shapes, forced_lex.token_count);
+            forced_frame->map_entry = map.count;
+            c_source_map_append(&map, (IrSourceRegion){
+                                          .start = forced_lex.translated_offset,
+                                          .source = UINT32_MAX,
+                                          .checkpoints = forced_lex.checkpoints,
+                                          .checkpoint_offsets = forced_lex.checkpoint_offsets,
+                                          .checkpoint_pages = forced_lex.checkpoint_pages,
+                                          .checkpoint_page_count = forced_lex.checkpoint_page_count,
+                                          .checkpoint_count = forced_lex.checkpoint_count,
+                                          .base = forced_lex.translated_offset,
+                                          .kind = IR_SOURCE_REGION_TEXT,
+                                      });
+            c_source_map_name(&map, forced_frame->path, forced_frame->logical_path);
+            source_frame = forced_frame;
+        }
     }
     CIncludeFileTable include_files = {
         .arena = arena,
@@ -13086,7 +13469,9 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         .macro_push_stack = &macro_push_stack,
         .pack_stack = &pack_stack,
         .pack_alignment = &pack_alignment,
-        .pack_changes = &pack_changes,
+        .visibility_stack = &visibility_stack,
+        .visibility = &visibility,
+        .pragma_changes = &pragma_changes,
         .include_files = &include_files,
     };
     while (source_frame)
@@ -13744,7 +14129,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
             // Pragmas cannot fire inside a text line on this path (only
             // directive lines and _Pragma markers change pack state), so
             // one sample covers the whole batch.
-            c_pack_alignment_record(&pack_changes, output_count, pack_alignment);
+            c_pragma_state_record(&pragma_changes, output_count, pack_alignment, visibility);
             CTokenShape* line_shapes = 0;
             CToken* line_output = c_token_stream_reserve(&token_stream, logical_end - token_index, &line_shapes);
             u64 written = 0;
@@ -13903,8 +14288,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         }
         result.detail->output_spacing = boundaries;
     }
-    result.pack_changes = pack_changes.changes;
-    result.pack_change_count = pack_changes.count;
+    result.pragma_changes = pragma_changes.changes;
+    result.pragma_change_count = pragma_changes.count;
     // The stream is contiguous, so the spellings sum in one linear pass
     // rather than one add per token as the lines were appended.
     result.detail->preprocessed.tokens = output_count;

@@ -16,9 +16,10 @@
 //                                                marker, prepare) and
 //                                                generate_guard_self_test
 //   build_artifact_fanout_*, self_host_*         self-host stages, stage
-//                                                comparison, and the
-//                                                provenance-checked artifact
-//                                                fan-out worker
+//                                                comparison, stage-1 work
+//                                                ceilings (self_host_work_*),
+//                                                and the provenance-checked
+//                                                artifact fan-out worker
 //   tools/clang_analyze.c                       analyzer shards and aggregation
 //   cmake_profile_summary_*,                    diagnostics: build summaries
 //   ninja_log_summary_*, time_trace_summary_*,   and the compile/test time
@@ -37,6 +38,7 @@
 //   native_retirement_census_main                frozen native coverage inventory
 //   gpu_tools_main                               real GPU toolchain acceptance
 //   uefi_boot_*                                 pinned firmware boot gate
+//   tools/ci_no_code.c                          conservative no-code admission plan
 //   tools/source_size.c                         source-size report and ratchet
 //   tools/ci_unit_tests.c                       isolated test-module partitions
 //   tools/clang_suite.c                         pinned external Clang source ledger and preprocessing probes
@@ -102,11 +104,14 @@ typedef enum BuildCommand
     BUILD_COMMAND_NONE,
     BUILD_COMMAND_BENCH_THROUGHPUT,
     BUILD_COMMAND_BENCH_THROUGHPUT_CI,
+    BUILD_COMMAND_COMPILER_CLOSURE,
     BUILD_COMMAND_PRODUCTION_PROFILE,
     BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST,
     BUILD_COMMAND_GENERATE,
     BUILD_COMMAND_BUILD,
     BUILD_COMMAND_CLANG_ANALYZE,
+    BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK,
+    BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION,
     BUILD_COMMAND_OPTNONE_AUDIT,
     BUILD_COMMAND_CMAKE_PROFILE_SUMMARY,
     BUILD_COMMAND_NINJA_LOG_SUMMARY,
@@ -147,6 +152,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS,
     BUILD_COMMAND_TEST_UEFI,
     BUILD_COMMAND_SOURCE_SIZE,
+    BUILD_COMMAND_CI_NO_CODE,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST,
@@ -3598,22 +3604,23 @@ BUSTER_GLOBAL_LOCAL void build_add(Arena* arena, String8 build_directory, SliceS
 // Source metrics are evidence, not an optional performance hint. The writer
 // closes every record with a newline; missing fields, duplicate fields,
 // truncated records and overflowing integers must not turn into a successful
-// bootstrap check. Unknown complete fields remain forward-compatible.
-BUSTER_GLOBAL_LOCAL bool self_host_source_metrics_parse(String8 text, SelfHostSourceMetrics* metrics)
+// bootstrap check. Unknown complete fields remain forward-compatible. Fills
+// values[i] for keys[i] and succeeds only when every key appeared exactly once.
+BUSTER_GLOBAL_LOCAL bool self_host_metrics_fields_parse(String8 text, String8 const* keys, u64* values, u32 count)
 {
-    String8 keys[] = {S8("version"), S8("lexed.translated_bytes"), S8("lexed.translated_lines"), S8("lexed.code_lines"),
-                      S8("preprocessed.tokens"), S8("preprocessed.bytes")};
-    u64 values[BUSTER_ARRAY_LENGTH(keys)] = {0};
     u32 seen = 0;
-    bool valid = text.length && text.pointer[text.length - 1] == '\n';
+    bool valid = count <= 32 && text.length && text.pointer[text.length - 1] == '\n';
     String8 line = {0};
-    *metrics = (SelfHostSourceMetrics){0};
+    for (u32 i = 0; i < count; i += 1)
+    {
+        values[i] = 0;
+    }
     while (valid && text_next_line(&text, &line))
     {
         String8 key = {0};
         String8 value = {0};
         bool field = text_split_field(line, &key, &value);
-        for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(keys); i += 1)
+        for (u32 i = 0; i < count; i += 1)
         {
             if (string_equal(field ? key : line, keys[i]))
             {
@@ -3631,8 +3638,17 @@ BUSTER_GLOBAL_LOCAL bool self_host_source_metrics_parse(String8 text, SelfHostSo
             }
         }
     }
-    valid = valid && seen == (1u << BUSTER_ARRAY_LENGTH(keys)) - 1 && values[0] == 1 &&
-            values[1] && values[2] && values[3] && values[4] && values[5];
+    return valid && seen == (u32)(((u64)1 << count) - 1);
+}
+
+BUSTER_GLOBAL_LOCAL bool self_host_source_metrics_parse(String8 text, SelfHostSourceMetrics* metrics)
+{
+    String8 const keys[] = {S8("version"), S8("lexed.translated_bytes"), S8("lexed.translated_lines"), S8("lexed.code_lines"),
+                            S8("preprocessed.tokens"), S8("preprocessed.bytes")};
+    u64 values[BUSTER_ARRAY_LENGTH(keys)] = {0};
+    bool valid = self_host_metrics_fields_parse(text, keys, values, BUSTER_ARRAY_LENGTH(keys)) && values[0] == 1 &&
+                 values[1] && values[2] && values[3] && values[4] && values[5];
+    *metrics = (SelfHostSourceMetrics){0};
     if (valid)
     {
         *metrics = (SelfHostSourceMetrics){.bytes = values[1], .loc = values[2], .sloc = values[3], .tokens = values[4], .token_bytes = values[5]};
@@ -3826,7 +3842,8 @@ BUSTER_GLOBAL_LOCAL String8 self_host_metrics_path(Arena* arena, String8 output)
 // wall time on a shared runner is too noisy to gate on, so this is the early
 // signal that the cost above has drifted. #2406 made every stage 20-40x
 // slower and merged green because nothing compared the time against these
-// figures. Pass/fail regression gating belongs to deterministic counters.
+// figures. Pass/fail regression gating belongs to deterministic counters
+// (SELF_HOST_WORK_CEILING_*).
 #define SELF_HOST_SLOW_FACTOR 3
 BUSTER_CT_CHECK(SELF_HOST_STAGE1_SECONDS * SELF_HOST_SLOW_FACTOR < SELF_HOST_TIMEOUT_SECONDS);
 BUSTER_CT_CHECK(SELF_HOST_STAGE2_SECONDS * SELF_HOST_SLOW_FACTOR < SELF_HOST_TIMEOUT_SECONDS);
@@ -4836,6 +4853,153 @@ BUSTER_GLOBAL_LOCAL void self_host_compare_and_bench_add(Arena* arena, String8 s
     };
 }
 
+// Deterministic work ceilings for self-host stage 1 (#3094). The trusted
+// Clang-built ide compiles stage 1, so these counts depend only on the
+// compiler source and the target's headers: unlike wall time they carry no
+// runner noise and move only when the compiler does more work. #2406 took
+// solves from about 165 to 31,473 and pass_state_types from 13.6 M to 4.9 B,
+// and every check still passed, because SELF_HOST_TIMEOUT_SECONDS only
+// catches hangs. Each ceiling is about twice the highest desktop value with
+// #3093 (stage 1 solves / pass_state_types: Linux x86-64 188 / 16.0 M, macOS
+// 189 / 16.0 M, Windows x86-64 186 / 17.9 M). Raise one only in the PR that
+// causes the growth, citing that cause; see docs/agents/build.md.
+#define SELF_HOST_WORK_CEILING_LAYOUT_SOLVES 400
+#define SELF_HOST_WORK_CEILING_LAYOUT_PASS_STATE_TYPES 36000000
+
+typedef enum SelfHostWorkCounter
+{
+    SELF_HOST_WORK_LAYOUT_SOLVES,
+    SELF_HOST_WORK_LAYOUT_PASS_STATE_TYPES,
+    SELF_HOST_WORK_COUNTER_COUNT,
+} SelfHostWorkCounter;
+
+// Keys of the -fsource-metrics file ide.c's write_source_metrics produces.
+BUSTER_GLOBAL_LOCAL String8 self_host_work_counter_keys[SELF_HOST_WORK_COUNTER_COUNT] = {
+    [SELF_HOST_WORK_LAYOUT_SOLVES] = S8_INITIALIZER("c_type_layout.solves"),
+    [SELF_HOST_WORK_LAYOUT_PASS_STATE_TYPES] = S8_INITIALIZER("c_type_layout.pass_state_types"),
+};
+
+BUSTER_GLOBAL_LOCAL String8 self_host_work_ceiling_names[SELF_HOST_WORK_COUNTER_COUNT] = {
+    [SELF_HOST_WORK_LAYOUT_SOLVES] = S8_INITIALIZER("SELF_HOST_WORK_CEILING_LAYOUT_SOLVES"),
+    [SELF_HOST_WORK_LAYOUT_PASS_STATE_TYPES] = S8_INITIALIZER("SELF_HOST_WORK_CEILING_LAYOUT_PASS_STATE_TYPES"),
+};
+
+BUSTER_GLOBAL_LOCAL u64 const self_host_work_ceilings[SELF_HOST_WORK_COUNTER_COUNT] = {
+    [SELF_HOST_WORK_LAYOUT_SOLVES] = SELF_HOST_WORK_CEILING_LAYOUT_SOLVES,
+    [SELF_HOST_WORK_LAYOUT_PASS_STATE_TYPES] = SELF_HOST_WORK_CEILING_LAYOUT_PASS_STATE_TYPES,
+};
+
+// Empty when every counter is within its ceiling. Otherwise one error line per
+// counter over it, naming the value and the ceiling, then the update rule.
+BUSTER_GLOBAL_LOCAL String8 self_host_work_violations(Arena* arena, u64 const* values, u64 const* ceilings)
+{
+    String8 report = {0};
+    for (u32 i = 0; i < SELF_HOST_WORK_COUNTER_COUNT; i += 1)
+    {
+        if (values[i] > ceilings[i])
+        {
+            String8 line = string_format(arena, S8("error: self-host stage 1 {S8}={u64} exceeds its ceiling {u64} ({S8} in build.c)\n"),
+                                         self_host_work_counter_keys[i], values[i], ceilings[i], self_host_work_ceiling_names[i]);
+            report = string_format(arena, S8("{S8}{S8}"), report, line);
+        }
+    }
+    if (report.length)
+    {
+        report = string_format(arena, S8("{S8}note: these counts are deterministic, so the compiler source now does more work; compare `ide cc -v` "
+                                         "C_TYPE_LAYOUT with the merge base to find the cause. Raise a ceiling only in the PR that causes the "
+                                         "growth, citing the cause in that same PR (docs/agents/build.md, self-host work ceilings)\n"),
+                               report);
+    }
+    return report;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult self_host_work_gate_action(Arena* arena, void* data)
+{
+    String8 metrics_path = *(String8*)data;
+    u64 values[SELF_HOST_WORK_COUNTER_COUNT] = {0};
+    ByteSlice bytes = file_read(arena, metrics_path, (FileReadOptions){0});
+    bool measured = self_host_metrics_fields_parse(BYTE_SLICE_TO_STRING(8, bytes), self_host_work_counter_keys, values, SELF_HOST_WORK_COUNTER_COUNT);
+    String8 violations = measured ? self_host_work_violations(arena, values, self_host_work_ceilings) : (String8){0};
+    ProcessResult result = PROCESS_RESULT_FAILED;
+    if (!measured)
+    {
+        string_print(S8("error: self-host stage 1 work counters are missing or malformed in {S8}\n"), metrics_path);
+    }
+    else if (violations.length)
+    {
+        string_print(S8("{S8}"), violations);
+    }
+    else
+    {
+        string_print(S8("SELF_HOST_WORK stage=1 {S8}={u64} ceiling={u64} {S8}={u64} ceiling={u64}\n"),
+                     self_host_work_counter_keys[SELF_HOST_WORK_LAYOUT_SOLVES], values[SELF_HOST_WORK_LAYOUT_SOLVES],
+                     self_host_work_ceilings[SELF_HOST_WORK_LAYOUT_SOLVES], self_host_work_counter_keys[SELF_HOST_WORK_LAYOUT_PASS_STATE_TYPES],
+                     values[SELF_HOST_WORK_LAYOUT_PASS_STATE_TYPES], self_host_work_ceilings[SELF_HOST_WORK_LAYOUT_PASS_STATE_TYPES]);
+        result = PROCESS_RESULT_SUCCESS;
+    }
+    return result;
+}
+
+// Runs right after stage 1 links, so a regression fails before stage 2 spends
+// its own, equally inflated, compile.
+BUSTER_GLOBAL_LOCAL void self_host_work_gate_add(Arena* arena, String8 stage1)
+{
+    String8* metrics_path = arena_allocate(arena, String8, 1);
+    *metrics_path = self_host_metrics_path(arena, stage1);
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    *run = (ProcessRun){
+        .callback = self_host_work_gate_action,
+        .callback_data = metrics_path,
+    };
+}
+
+// Negative control for the gate: the current counts pass, a count one over
+// either ceiling fails with a message naming it, and #2406's stage 1 (Linux
+// x86-64 release, merge_group run 37667271117) fails on both counters.
+BUSTER_GLOBAL_LOCAL bool self_host_work_gate_self_test(Arena* arena)
+{
+    String8 keys[] = {S8("c_type_layout.solves"), S8("c_type_layout.pass_state_types")};
+    u64 values[SELF_HOST_WORK_COUNTER_COUNT] = {0};
+    String8 current_text = S8("version=1\nc_type_layout.solves=188\nc_type_layout.pass_solves=186\nc_type_layout.pass_state_types=15994468\n");
+    bool current = self_host_metrics_fields_parse(current_text, self_host_work_counter_keys, values, SELF_HOST_WORK_COUNTER_COUNT) &&
+                   values[0] == 188 && values[1] == 15994468 && !self_host_work_violations(arena, values, self_host_work_ceilings).length;
+    u64 at_ceiling[] = {SELF_HOST_WORK_CEILING_LAYOUT_SOLVES, SELF_HOST_WORK_CEILING_LAYOUT_PASS_STATE_TYPES};
+    bool ceiling = !self_host_work_violations(arena, at_ceiling, self_host_work_ceilings).length;
+    bool over = true;
+    for (u32 i = 0; i < SELF_HOST_WORK_COUNTER_COUNT; i += 1)
+    {
+        u64 counts[] = {SELF_HOST_WORK_CEILING_LAYOUT_SOLVES, SELF_HOST_WORK_CEILING_LAYOUT_PASS_STATE_TYPES};
+        counts[i] += 1;
+        String8 report = self_host_work_violations(arena, counts, self_host_work_ceilings);
+        String8 expected = string_format(arena, S8("{S8}={u64} exceeds its ceiling {u64} ({S8} in build.c)"), keys[i], counts[i],
+                                         self_host_work_ceilings[i], self_host_work_ceiling_names[i]);
+        over = over && string_first_sequence(report, expected) != BUSTER_STRING_NO_MATCH &&
+               string_first_sequence(report, keys[1 - i]) == BUSTER_STRING_NO_MATCH &&
+               string_first_sequence(report, S8("citing the cause in that same PR")) != BUSTER_STRING_NO_MATCH;
+    }
+    String8 regression_text = S8("c_type_layout.solves=31473\nc_type_layout.pass_state_types=4935805947\n");
+    String8 regression = self_host_metrics_fields_parse(regression_text, self_host_work_counter_keys, values, SELF_HOST_WORK_COUNTER_COUNT)
+                             ? self_host_work_violations(arena, values, self_host_work_ceilings)
+                             : (String8){0};
+    bool pr2406 = string_first_sequence(regression, S8("c_type_layout.solves=31473 exceeds")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(regression, S8("c_type_layout.pass_state_types=4935805947 exceeds")) != BUSTER_STRING_NO_MATCH;
+    bool missing = !self_host_metrics_fields_parse(S8("c_type_layout.solves=188\n"), self_host_work_counter_keys, values, SELF_HOST_WORK_COUNTER_COUNT);
+    bool duplicate = !self_host_metrics_fields_parse(string_format(arena, S8("{S8}c_type_layout.solves=1\n"), current_text), self_host_work_counter_keys,
+                                                     values, SELF_HOST_WORK_COUNTER_COUNT);
+    bool result = current && ceiling && over && pr2406 && missing && duplicate;
+    if (result)
+    {
+        string_print(S8("SELF_HOST_WORK_GATE_SELF_TEST current=1 at_ceiling=1 over_ceiling=1 pr2406=1 missing=1 duplicate=1\n"));
+    }
+    else
+    {
+        string_print(S8("error: self-host work gate self-test failed current={u32} at_ceiling={u32} over_ceiling={u32} pr2406={u32} missing={u32} duplicate={u32}\n"),
+                     current, ceiling, over, pr2406, missing, duplicate);
+    }
+    return result;
+}
+
 #if !BUSTER_WINDOWS
 // The fixed-point pair uses FAST. A QUALITY-built stage also executes the
 // complete compiler workload so both native allocators are covered at scale.
@@ -4878,7 +5042,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, Buil
     string_print(S8("error: artifact fan-out self-host consumer is unsupported on this target\n"));
     return PROCESS_RESULT_FAILED;
 #else
-    if (!stage_object_provenance_self_test(arena) || !self_host_stage_slow_self_test())
+    if (!stage_object_provenance_self_test(arena) || !self_host_stage_slow_self_test() || !self_host_work_gate_self_test(arena))
     {
         return PROCESS_RESULT_FAILED;
     }
@@ -4936,6 +5100,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, Buil
                                                    S8("Self-host stage 1"), SELF_HOST_STAGE1_SECONDS, (String8){0}, &stage1_link_run);
     stage1_link_run->cleanup_callback = build_artifact_fanout_cleanup_action;
     stage1_link_run->cleanup_data = fanout;
+    self_host_work_gate_add(arena, stage1);
     ProcessRun* stage2_run = self_host_compile_add(arena, stage1, fanout->build_directory, sysroot, stage2, S8("Self-host stage 2"), SELF_HOST_STAGE2_SECONDS, (String8){0}, 0);
     self_host_compare_and_bench_add(arena, stage1, stage2, stage1_run, stage2_run
 #if BUSTER_WINDOWS
@@ -5044,7 +5209,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
     string_print(S8("error: deterministic self-hosting is currently supported only on Linux and Windows x86-64, and macOS\n"));
     return PROCESS_RESULT_FAILED;
 #else
-    if (!stage_object_provenance_self_test(arena) || !self_host_stage_slow_self_test())
+    if (!stage_object_provenance_self_test(arena) || !self_host_stage_slow_self_test() || !self_host_work_gate_self_test(arena))
     {
         return PROCESS_RESULT_FAILED;
     }
@@ -5110,6 +5275,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
     String8 targets[] = {S8("ide")};
     build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, options);
     ProcessRun* stage1_run = self_host_compile_add(arena, bootstrap, build_directory, sysroot, stage1, S8("Self-host stage 1"), SELF_HOST_STAGE1_SECONDS, (String8){0}, 0);
+    self_host_work_gate_add(arena, stage1);
     ProcessRun* stage2_run = self_host_compile_add(arena, stage1, build_directory, sysroot, stage2, S8("Self-host stage 2"), SELF_HOST_STAGE2_SECONDS, (String8){0}, 0);
     self_host_compare_and_bench_add(arena, stage1, stage2, stage1_run, stage2_run
 #if BUSTER_WINDOWS
@@ -6744,6 +6910,7 @@ BUSTER_GLOBAL_LOCAL String8 clang_analyze_compile_commands_path(Arena* arena, St
 }
 
 #include "tools/clang_analyze.c"
+#include "tools/clang_analyze_benchmark.c"
 #include "tools/optnone_audit.c"
 
 BUSTER_GLOBAL_LOCAL void clang_analyze_command_add(Arena* arena, String8 build_directory, CmakeBuildOptions options)
@@ -25215,15 +25382,19 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
     {
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
         case BUILD_COMMAND_TEST_UNITS_PARTITIONED:
+        case BUILD_COMMAND_COMPILER_CLOSURE:
         case BUILD_COMMAND_PRODUCTION_PROFILE:
         case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
         case BUILD_COMMAND_CLANG_ANALYZE:
+        case BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK:
+        case BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION:
         case BUILD_COMMAND_OPTNONE_AUDIT:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
         case BUILD_COMMAND_SOURCE_SIZE:
+        case BUILD_COMMAND_CI_NO_CODE:
         case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY:
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
         {
@@ -25250,6 +25421,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
     BuildCommandArgumentOwnershipTest tests[] = {
         {.command = BUILD_COMMAND_TEST_UEFI, .owns_arguments = true},
         {.command = BUILD_COMMAND_CLANG_ANALYZE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK, .owns_arguments = true},
+        {.command = BUILD_COMMAND_COMPILER_CLOSURE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION, .owns_arguments = true},
         {.command = BUILD_COMMAND_TEST_CLANG_SUITE, .owns_arguments = true},
         {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
         {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
@@ -39167,9 +39341,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 }
 
 #include "tools/production_profile.c"
+#include "tools/compiler_experiment_supervisor.c"
+#include "tools/compiler_closure_phase.c"
+#include "tools/compiler_closure.c"
 #include "tools/source_size.c"
+#include "tools/ci_no_code.c"
 #include "tools/ci_unit_tests.c"
 #include "tools/clang_suite.c"
+#include "tools/compiler_profile_qualification.c"
 
 ProcessResult process_arguments(void)
 {
@@ -39186,11 +39365,14 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_NONE] = S8_INITIALIZER("none"),
         [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
         [BUILD_COMMAND_BENCH_THROUGHPUT_CI] = S8_INITIALIZER("bench_throughput_ci"),
+        [BUILD_COMMAND_COMPILER_CLOSURE] = S8_INITIALIZER("compiler_closure"),
         [BUILD_COMMAND_PRODUCTION_PROFILE] = S8_INITIALIZER("production_profile"),
         [BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST] = S8_INITIALIZER("production_profile_self_test"),
         [BUILD_COMMAND_GENERATE] = S8_INITIALIZER("generate"),
         [BUILD_COMMAND_BUILD] = S8_INITIALIZER("build"),
         [BUILD_COMMAND_CLANG_ANALYZE] = S8_INITIALIZER("clang_analyze"),
+        [BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK] = S8_INITIALIZER("clang_analyze_benchmark"),
+        [BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION] = S8_INITIALIZER("compiler_profile_qualification"),
         [BUILD_COMMAND_OPTNONE_AUDIT] = S8_INITIALIZER("optnone_audit"),
         [BUILD_COMMAND_CMAKE_PROFILE_SUMMARY] = S8_INITIALIZER("cmake_profile_summary"),
         [BUILD_COMMAND_NINJA_LOG_SUMMARY] = S8_INITIALIZER("ninja_log_summary"),
@@ -39231,6 +39413,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS] = S8_INITIALIZER("native_retirement_census"),
         [BUILD_COMMAND_TEST_UEFI] = S8_INITIALIZER("test_uefi"),
         [BUILD_COMMAND_SOURCE_SIZE] = S8_INITIALIZER("source_size"),
+        [BUILD_COMMAND_CI_NO_CODE] = S8_INITIALIZER("ci_no_code"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
         [BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST] = S8_INITIALIZER("coverage_manifest_self_test"),
@@ -39326,15 +39509,19 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         {
             case BUILD_COMMAND_MATRIX_PHASE_RUN: result = matrix_phase_run(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UNITS_PARTITIONED: result = ci_unit_tests_main(arena, owned_arguments, arguments.pointer[0]); break;
+            case BUILD_COMMAND_COMPILER_CLOSURE: result = compiler_closure_main(arena, owned_arguments); break;
             case BUILD_COMMAND_PRODUCTION_PROFILE: result = production_profile_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST: result = production_profile_self_test(arena); break;
             case BUILD_COMMAND_CLANG_ANALYZE: result = clang_analyze_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK: result = clang_analyze_benchmark_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION: result = compiler_profile_qualification_main(arena, owned_arguments); break;
             case BUILD_COMMAND_OPTNONE_AUDIT: result = optnone_audit_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_DIFFERENTIAL: result = differential_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_CLANG_SUITE: result = clang_suite_main(arena, owned_arguments); break;
             case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS: result = native_retirement_census_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UEFI: result = uefi_boot_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_SOURCE_SIZE: result = source_size_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_CI_NO_CODE: result = ci_no_code_main(arena, owned_arguments); break;
             case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY: result = binary_coverage_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_GPU_TOOLCHAINS: result = gpu_tools_main(arena, owned_arguments); break;
             default: BUSTER_UNREACHABLE(); break;
@@ -40329,6 +40516,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             build_add(arena, build_directory, string8_list_to_slice(arena, build_targets), string8_list_to_slice(arena, native_arguments), options);
         }
         break;
+        case BUILD_COMMAND_COMPILER_CLOSURE:
         case BUILD_COMMAND_PRODUCTION_PROFILE:
         case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
         {
@@ -40336,6 +40524,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         }
         break;
         case BUILD_COMMAND_CLANG_ANALYZE:
+        case BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK:
+        case BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION:
         case BUILD_COMMAND_OPTNONE_AUDIT:
         {
             // Already executed by the command-specific argument parser.
@@ -40541,6 +40731,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
         case BUILD_COMMAND_SOURCE_SIZE:
+        case BUILD_COMMAND_CI_NO_CODE:
         {
             // Executed before the ordinary build-option parser.
         }

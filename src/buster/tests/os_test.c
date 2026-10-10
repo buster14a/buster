@@ -277,6 +277,38 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_thread_liveness(void* argument)
     {
     }
 }
+
+#define OS_TEST_DEBUGGER_THREAD_COUNT 4
+#define OS_TEST_DEBUGGER_ROUNDS 16
+#define OS_TEST_DEBUGGER_QUERIES 64
+
+typedef struct OsTestDebuggerState OsTestDebuggerState;
+struct OsTestDebuggerState
+{
+    AtomicU64 ready;
+    AtomicU64 start;
+    AtomicU64 disagreements;
+    u64 expected;
+};
+
+// Every thread released together asks the cold failure-path question against an
+// unprobed cache. Whichever thread loses the race to publish must still return
+// the same answer as the one that won, never a half-written one.
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_thread_debugger(void* argument)
+{
+    OsTestDebuggerState* state = (OsTestDebuggerState*)argument;
+    atomic_u64_increment(&state->ready);
+    while (!atomic_u64_load(&state->start))
+    {
+    }
+    for (u32 query = 0; query < OS_TEST_DEBUGGER_QUERIES; query += 1)
+    {
+        if ((u64)is_debugger_present() != state->expected)
+        {
+            atomic_u64_increment(&state->disagreements);
+        }
+    }
+}
 #endif
 
 #if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SINGLE_THREADED
@@ -2737,6 +2769,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
             .use_process_environment = 1,
             .new_process_group = 1,
+            .observe_resources = 1,
         };
         ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
                                                      (SliceString8){0}, (SliceString8){0}, options);
@@ -2777,6 +2810,10 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, tree.waited.result == PROCESS_RESULT_FAILED && tree.waited.timed_out);
                 BUSTER_TEST(arguments, tree.waited.termination_requested && tree.waited.forcibly_terminated);
                 BUSTER_TEST(arguments, !tree.waited.process_tree_cleanup_failed);
+#if BUSTER_LINUX
+                BUSTER_TEST(arguments, tree.waited.resources.cpu_status == PROCESS_RESOURCE_OBSERVED);
+                BUSTER_TEST(arguments, tree.waited.resources.memory_status == PROCESS_RESOURCE_OBSERVED);
+#endif
             }
         }
         if (!readiness_proven)
@@ -3216,7 +3253,8 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             bool expire_after_ready;
         } deadline_cases[] = {
             {S8("sleep 30"), false, 100000, true, 0, false},
-            {S8("printf ok; sleep 30"), true, 100000, true, 2, false},
+            // The deadline includes shell startup, so this short timeout must not require child output.
+            {S8("sleep 30"), true, 100000, true, 0, false},
             {S8("printf ok"), true, 30000000, false, 2, false},
             {S8("printf ok"), false, 0, false, 0, false},
             {S8("printf ok; sleep 30"), true, 30000000, true, 2, true},
@@ -3656,6 +3694,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, counter == 13);
         BUSTER_TEST(arguments, atomic_u64_decrement(&counter) == 13);
         BUSTER_TEST(arguments, counter == 12);
+        BUSTER_TEST(arguments, atomic_u64_load(&counter) == 12);
+        counter = UINT64_MAX;
+        BUSTER_TEST(arguments, atomic_u64_load(&counter) == UINT64_MAX);
+        counter = UINT64_C(0x123456789abcdef0);
+        BUSTER_TEST(arguments, atomic_u64_load(&counter) == UINT64_C(0x123456789abcdef0));
+        counter = 12;
 
         ProcessControlAtomic control = 0;
         BUSTER_TEST(arguments, process_control_atomic_load(&control) == 0);
@@ -3698,6 +3742,45 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, os_thread_join(thread));
             BUSTER_TEST(arguments, os_is_only_live_thread());
             BUSTER_TEST(arguments, liveness.worker_saw_only_live_thread == 0);
+        }
+
+        // The debugger cache publishes one tri-state after its probe. Reset it
+        // before each round so every thread races the first probe.
+        {
+            os_debugger_state_test_reset();
+            BUSTER_TEST(arguments, os_debugger_state_test_state() == 0);
+            bool expected = is_debugger_present();
+            BUSTER_TEST(arguments, os_debugger_state_test_state() == (expected ? 2u : 1u));
+            BUSTER_TEST(arguments, is_debugger_present() == expected);
+            for (u32 round = 0; round < OS_TEST_DEBUGGER_ROUNDS; round += 1)
+            {
+                OsTestDebuggerState debugger = {.expected = expected ? 1 : 0};
+                OsThreadHandle* threads[OS_TEST_DEBUGGER_THREAD_COUNT] = {0};
+                u32 started = 0;
+                os_debugger_state_test_reset();
+                for (u32 index = 0; index < OS_TEST_DEBUGGER_THREAD_COUNT; index += 1)
+                {
+                    threads[index] = os_thread_create((ThreadCreateOptions){
+                        .callback = &os_test_thread_debugger,
+                        .argument = &debugger,
+                    });
+                    BUSTER_TEST(arguments, threads[index] != 0);
+                    started += threads[index] != 0;
+                }
+                while (atomic_u64_load(&debugger.ready) != started)
+                {
+                }
+                atomic_u64_increment(&debugger.start);
+                for (u32 index = 0; index < OS_TEST_DEBUGGER_THREAD_COUNT; index += 1)
+                {
+                    if (threads[index])
+                    {
+                        BUSTER_TEST(arguments, os_thread_join(threads[index]));
+                    }
+                }
+                BUSTER_TEST(arguments, atomic_u64_load(&debugger.disagreements) == 0);
+                BUSTER_TEST(arguments, os_debugger_state_test_state() == (expected ? 2u : 1u));
+            }
         }
 
         u64 frame_checksum = 0;

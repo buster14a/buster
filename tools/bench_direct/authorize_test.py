@@ -398,5 +398,225 @@ class SchedulingPolicyTest(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+class SamplingTransportTest(unittest.TestCase):
+    def parent(self, patch):
+        return {"files": [{"filename": authorize.COMPARE_REQUEST, "patch": patch}]}
+
+    def test_inherited_sampling_line_does_not_capture_a_fresh_ordinary_request(self):
+        line = "profile: compiler-main-sampling-pilot-v1 packet: 0 freeze: " + BASE
+        parents = [self.parent("@@ -1 +1 @@\n " + line + "\n+request: ordinary explicit acceptance\n")]
+        self.assertFalse(authorize.sampling_patch_requested(parents))
+        self.assertIsNone(authorize.sampling_fresh_selector(line + "\nrequest: ordinary explicit acceptance\n", parents))
+
+    def test_exact_sampling_line_must_be_added_for_every_parent(self):
+        line = "profile: compiler-main-sampling-pilot-v1 packet: 0 freeze: " + BASE
+        added = self.parent("@@ -0,0 +1 @@\n+" + line + "\n")
+        inherited = self.parent("@@ -1 +1 @@\n " + line + "\n+request: inherited\n")
+        self.assertTrue(authorize.sampling_patch_requested([added, added]))
+        self.assertEqual(authorize.sampling_fresh_selector(line + "\n", [added, added])[0], line)
+        self.assertFalse(authorize.sampling_patch_requested([added, inherited]))
+        self.assertIsNone(authorize.sampling_fresh_selector(line + "\n", [added, inherited]))
+
+    def test_moved_or_multiple_sampling_lines_cannot_request_a_packet(self):
+        line = "profile: compiler-main-sampling-pilot-v1 packet: 0 freeze: " + BASE
+        moved = self.parent("@@ -1 +1 @@\n-" + line + "\n+" + line + "\n")
+        self.assertFalse(authorize.sampling_patch_requested([moved]))
+        added = self.parent("@@ -0,0 +1 @@\n+" + line + "\n")
+        with self.assertRaises(ValueError):
+            authorize.sampling_fresh_selector(line + "\n" + line + "\n", [added])
+
+
+
+    def test_preparation_selector_is_distinct_fresh_and_bounded(self):
+        line = "profile: compiler-baseline-closure-qualification-v1 packet: 0 freeze: " + BASE
+        added = self.parent("@@ -0,0 +1 @@\n+" + line + "\n")
+        inherited = self.parent("@@ -1 +1,2 @@\n " + line + "\n+request: ordinary explicit\n")
+        self.assertEqual(authorize.preparation_fresh_selector(line + "\n", [added, added]),
+                         (line, "qualify", "0", BASE))
+        self.assertIsNone(authorize.preparation_fresh_selector(line + "\n", [added, inherited]))
+        self.assertFalse(authorize.sampling_patch_requested([inherited], authorize.PREPARATION_PREFIX))
+        for wrong in (line.replace("packet: 0", "packet: 1"), line.replace("freeze: ", "freeze: x"),
+                      line + "\n" + line, line.replace("-v1", "-v2")):
+            with self.subTest(wrong=wrong), self.assertRaises(ValueError):
+                authorize.preparation_selector(wrong)
+        other = "profile: compiler-main-sampling-pilot-v1 packet: 0 freeze: " + BASE
+        with self.assertRaises(ValueError):
+            authorize.preparation_fresh_selector(line + "\n" + other + "\n", [added])
+        other_added = self.parent("@@ -0,0 +1 @@\n+" + other + "\n")
+        with self.assertRaises(ValueError):
+            authorize.sampling_fresh_selector(other + "\n" + line + "\n", [other_added])
+
+    def test_preparation_route_keeps_the_same_tokenless_native_boundary(self):
+        original = policy.DIRECT.read_text()
+        errors = []
+        policy.check_preparation_path(errors, original)
+        self.assertEqual(errors, [])
+        for before, after in (
+            ("needs.preparation-queue.result == 'success'", "true"),
+            ("needs.authorize.outputs.preparation_admitted == 'true'", "true"),
+            ("github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1", "true"),
+            ("compiler_profile_qualification --execute-preparation", "compiler_profile_qualification --execute"),
+            ("      BQ_PREPARATION_HISTORY_DATA:", "      GH_TOKEN:"),
+            ("needs.authorize.outputs.preparation_trusted_revision", "github.event.workflow_run.head_sha"),
+        ):
+            with self.subTest(before=before):
+                errors = []
+                policy.check_preparation_path(errors, original.replace(before, after))
+                self.assertTrue(errors, before)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("request.txt", "plan.tsv", "allowlist.tsv", "facts.tsv", "history.tsv"):
+                (root / name).write_bytes(b"schema\tv1\n")
+            values = authorize.sampling_transport(root, preparation=True)
+            self.assertEqual(set(values), {"preparation_request_data", "preparation_plan_data",
+                "preparation_allowlist_data", "preparation_facts_data", "preparation_history_data"})
+            self.assertEqual(authorize.base64.b64decode(values["preparation_plan_data"]), b"schema\tv1\n")
+            (root / "history.tsv").write_bytes(b"x" * 49153)
+            with self.assertRaises(ValueError):
+                authorize.sampling_transport(root, preparation=True)
+
+    def test_disabled_sampling_route_cannot_lose_owner_or_token_boundary(self):
+        original = policy.DIRECT.read_text()
+        for before, after in (
+            ("needs.sampling-queue.result == 'success'", "true"),
+            ("needs.authorize.outputs.sampling_admitted == 'true'", "true"),
+            ("github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1", "true"),
+            ("trusted/build.sh compiler_profile_qualification --execute", "python3 trusted/tools/bench_direct/compiler_compare.py"),
+            ("          ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}\n          path: trusted\n          persist-credentials: false", "          ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}\n          path: trusted\n          token: ${{ github.token }}\n          persist-credentials: false"),
+            ("      BQ_SAMPLING_HISTORY_DATA:", "      GH_TOKEN:"),
+        ):
+            with self.subTest(before=before):
+                self.assertIn(before, original)
+                errors = []
+                policy.check_sampling_path(errors, original.replace(before, after))
+                self.assertTrue(errors, before)
+
+    def test_tokenless_transport_preserves_only_bounded_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = ("request.txt", "freeze.tsv", "parent-freeze.tsv", "acquisition-plan.tsv", "allowlist.tsv", "facts.tsv", "history.tsv")
+            for name in names:
+                (root / name).write_bytes(b"schema\tv1\n" if name != "parent-freeze.tsv" else b"")
+            values = authorize.sampling_transport(root)
+            self.assertEqual(len(values), 7)
+            self.assertEqual(authorize.base64.b64decode(values["sampling_freeze_data"]), b"schema\tv1\n")
+            self.assertEqual(values["sampling_parent_freeze_data"], "")
+            (root / "history.tsv").write_bytes(b"x" * 49153)
+            with self.assertRaises(ValueError):
+                authorize.sampling_transport(root)
+
+    def test_sampling_history_retains_old_request_after_the_same_pull_advances(self):
+        revision, campaign = BASE, "c" * 64
+        marker = f"profile: compiler-main-sampling-pilot-v1 packet: 0 freeze: {revision}\n"
+        old = dict(request_run(), run_attempt=1, created_at="2026-10-09T00:00:00Z",
+                   pull_requests=[{"number": 42}])
+        advanced = dict(pull_request(), number=42, head={"sha": "d" * 40, "repo": {"full_name": REPOSITORY}})
+        check = {"name": authorize.SAMPLING_CHECK, "head_sha": HEAD, "app": {"id": 15368},
+                 "external_id": f"buster-main-sampling-v1:{campaign}:pilot:0:91:101:1",
+                 "status": "completed", "conclusion": "success",
+                 "output": {"title": "Valid unqualified sampling packet"}}
+        executor = {"id": 101, "path": ".github/workflows/9700x-direct-bench.yml", "event": "workflow_run",
+                    "status": "completed", "conclusion": "success",
+                    "head_branch": "main", "run_attempt": 1, "head_sha": "e" * 40,
+                    "display_title": f"9700X request 91.1 head {HEAD}",
+                    "repository": {"full_name": REPOSITORY}, "head_repository": {"full_name": REPOSITORY},
+                    "actor": dict(OWNER), "triggering_actor": dict(OWNER)}
+        jobs = [{"name": "Sampling qualification packet", "conclusion": "success",
+                 "started_at": "2026-10-09T00:00:00Z", "completed_at": "2026-10-09T00:00:10Z"},
+                {"name": "Validate sampling packet evidence", "conclusion": "success"}]
+
+        delta = {"status": "ahead", "base_commit": {"sha": BASE}, "merge_base_commit": {"sha": BASE},
+                 "files": [{"filename": authorize.COMPARE_REQUEST, "status": "modified",
+                            "patch": "@@ -0,0 +1 @@\n+" + marker.rstrip("\n")}]}
+        check_history = [check]
+
+        def read(path, token):
+            if "/workflows/" in path:
+                return {"total_count": 1, "workflow_runs": [old]}
+            if path.endswith("/commits/" + HEAD):
+                return {"sha": HEAD, "parents": [{"sha": BASE}]}
+            if "/compare/" in path:
+                return delta
+            if "/pulls?" in path:
+                return [advanced]
+            if "/check-runs?" in path:
+                return {"check_runs": check_history}
+            if path.endswith("/actions/runs/101"):
+                return executor
+            if "/attempts/1/jobs?" in path:
+                return {"jobs": jobs}
+            self.fail(path)
+
+        def history():
+            return authorize.sampling_attempt_history(REPOSITORY, "token", "999", "2026-10-09T00:00:00Z",
+                                                       revision, campaign, "-", "-")
+
+        with mock.patch.object(authorize, "fetch", side_effect=read), \
+                mock.patch.object(authorize, "sampling_content", return_value=marker):
+            self.assertEqual(history()[0][:8], ["pilot", "0", "91", "1", "101", "1", "complete", "12000000"])
+            original_start, original_end = jobs[0]["started_at"], jobs[0]["completed_at"]
+            for start, end in (("2026-10-09T00:00:00", "2026-10-09T00:00:10"),
+                               ("2026-10-09T00:00:00", original_end),
+                               (original_start, "2026-10-09T00:00:10"),
+                               (original_start, original_start),
+                               (original_end, original_start),
+                               ("not-a-timestamp", original_end)):
+                with self.subTest(occupancy_start=start, occupancy_end=end):
+                    jobs[0].update(started_at=start, completed_at=end)
+                    with self.assertRaises(ValueError):
+                        history()
+            for start, end in ((None, original_end), (original_start, None), (None, None)):
+                with self.subTest(unavailable_occupancy=(start, end)):
+                    jobs[0].update(started_at=start, completed_at=end)
+                    self.assertEqual(history()[0][6:8], ["invalid", "-"])
+            jobs[0].update(started_at=original_start, completed_at=original_end)
+            for record, field, wrong in ((advanced, "user", dict(OTHER)),
+                                         (advanced, "number", 43),
+                                         (old, "run_attempt", 2),
+                                         (executor, "display_title", "9700X request 92.1 head " + HEAD),
+                                         (executor, "head_branch", "foreign"),
+                                         (executor, "id", 102),
+                                         (executor, "repository", {"full_name": "fork/buster"}),
+                                         (executor, "actor", dict(OTHER)),
+                                         (executor, "run_attempt", 2)):
+                with self.subTest(field=field, wrong=wrong):
+                    saved = record[field]
+                    record[field] = wrong
+                    with self.assertRaises(ValueError):
+                        history()
+                    record[field] = saved
+            # An omitted snapshot can still use unique associated-commit
+            # membership, without requiring the live head to equal old HEAD.
+            old.pop("pull_requests")
+            self.assertEqual(history()[0][6], "complete")
+            for result in ("failure", "cancelled"):
+                with self.subTest(executor_terminal=result):
+                    executor["conclusion"] = result
+                    self.assertNotEqual(history()[0][6], "complete")
+            executor["conclusion"] = "success"
+            original_patch = delta["files"][0]["patch"]
+            for patch in ("@@ -1 +1,2 @@\n " + marker.rstrip("\n") + "\n+ordinary request",
+                          "@@ -1 +1 @@\n-" + marker.rstrip("\n") + "\n+" + marker.rstrip("\n")):
+                with self.subTest(inherited_or_moved=patch):
+                    delta["files"][0]["patch"] = patch
+                    self.assertEqual(history(), [])
+            delta["files"][0]["patch"] = original_patch
+            check_history.clear()
+            for result, expected in (("failure", "failed"), ("cancelled", "cancelled"), ("success", "not_run")):
+                with self.subTest(fresh_hostless=result):
+                    old["conclusion"] = result
+                    self.assertEqual(history()[0][6:8], [expected, "-"])
+
+    def test_duplicate_or_incomplete_github_history_cannot_be_transported(self):
+        run = dict(request_run(), run_attempt=1, created_at="2026-10-09T00:00:00Z")
+        for response in ({"total_count": 2, "workflow_runs": [run]},
+                         {"total_count": 2, "workflow_runs": [run, run]},
+                         {"total_count": 1001, "workflow_runs": [run]}):
+            with self.subTest(response=response), mock.patch.object(authorize, "fetch", return_value=response):
+                with self.assertRaises(ValueError):
+                    authorize.sampling_attempt_history(REPOSITORY, "token", "999", "2026-10-09T00:00:00Z",
+                                                       BASE, "c" * 64, "-", "-")
+
+
 if __name__ == "__main__":
     unittest.main()

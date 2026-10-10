@@ -1,0 +1,40 @@
+{
+  "sha": "42fc9eb51891da028883058d7618a42abe540d9e",
+  "node_id": "C_kwDOP-FZBdoAKDQyZmM5ZWI1MTg5MWRhMDI4ODgzMDU4ZDc2MThhNDJhYmU1NDBkOWU",
+  "url": "https://api.github.com/repos/buster14a/buster/git/commits/42fc9eb51891da028883058d7618a42abe540d9e",
+  "html_url": "https://github.com/buster14a/buster/commit/42fc9eb51891da028883058d7618a42abe540d9e",
+  "author": {
+    "name": "David",
+    "email": "davidgmbb@gmail.com",
+    "date": "2026-10-09T13:07:40Z"
+  },
+  "committer": {
+    "name": "David",
+    "email": "davidgmbb@gmail.com",
+    "date": "2026-10-09T13:07:40Z"
+  },
+  "tree": {
+    "sha": "4310f86cf35b41acdca079f52ad8133505fd4800",
+    "url": "https://api.github.com/repos/buster14a/buster/git/trees/4310f86cf35b41acdca079f52ad8133505fd4800"
+  },
+  "message": "ci(analyzer): restore per-row execution after measured #3130 no-go",
+  "parents": [
+    {
+      "sha": "0b01499d92284e57e7578c33bbe297b9b681845d",
+      "url": "https://api.github.com/repos/buster14a/buster/git/commits/0b01499d92284e57e7578c33bbe297b9b681845d",
+      "html_url": "https://github.com/buster14a/buster/commit/0b01499d92284e57e7578c33bbe297b9b681845d"
+    },
+    {
+      "sha": "dfedd934e50a5465975c28a2870b0d6382632a60",
+      "url": "https://api.github.com/repos/buster14a/buster/git/commits/dfedd934e50a5465975c28a2870b0d6382632a60",
+      "html_url": "https://github.com/buster14a/buster/commit/dfedd934e50a5465975c28a2870b0d6382632a60"
+    }
+  ],
+  "verification": {
+    "verified": false,
+    "reason": "unsigned",
+    "signature": null,
+    "payload": null,
+    "verified_at": null
+  }
+}

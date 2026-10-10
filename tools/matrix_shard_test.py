@@ -1135,7 +1135,7 @@ class CompletionGateTests(unittest.TestCase):
         self.assertIn("checks: read", aggregate)
         self.assertIn("github_ci_time.py require-jobs", aggregate)
         self.assertIn("Verify every desktop partition exists", aggregate)
-        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse]", aggregate)
+        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse, no_code_plan]", aggregate)
         self.assertIn('--checks-layout "$BUSTER_CI_CHECKS_LAYOUT"', aggregate)
 
     def test_default_split_keeps_only_combined_and_barrier_dispatch_overrides(self):
@@ -1512,8 +1512,20 @@ class DraftMacosDeferralTests(unittest.TestCase):
             self.assertFalse(self.skips_in_a_deferred_lane(condition), condition)
         for job, text in self.workflow_jobs().items():
             steps = re.findall(r"(?ms)^      - (?:name: ([^\n]+)|uses: [^\n]+)\n(.*?)(?=^      - |\Z)", text)
-            self.assertEqual([name for name, _ in steps[:2]], [github_ci_time.DEFERRAL_STEP, "Checkout"])
-            for step_name, body in steps[2:]:
+            self.assertEqual([name for name, _ in steps[:4]], [
+                "Machine specifications", github_ci_time.DEFERRAL_STEP, "Checkout",
+                "Record actual checkout identity"])
+            # Every allocated runner reports before draft deferral; source
+            # identity follows the exact checkout predicate and cannot run on
+            # the cheap Linux deferral host for a macOS workload.
+            self.assertNotRegex(steps[0][1], r"(?m)^        if:")
+            self.assertIn("uses: buster14a/buster/.github/actions/machine-specifications@", steps[0][1])
+            checkout_guard = re.search(r"^        if: (.+)$", steps[2][1], re.M).group(1)
+            source_guard = re.search(r"^        if: (.+)$", steps[3][1], re.M).group(1)
+            self.assertEqual(source_guard, checkout_guard)
+            self.assertEqual(checkout_guard, "${{ !startsWith(matrix.runner, 'macos-') || runner.os == 'macOS' }}")
+            self.assertIn("mode: source", steps[3][1])
+            for step_name, body in steps[4:]:
                 with self.subTest(job=job, step=step_name):
                     condition = re.search(r"^        if: (.+)$", body, re.M)
                     self.assertIsNotNone(condition)
@@ -1532,10 +1544,10 @@ class DraftMacosDeferralTests(unittest.TestCase):
                 name = re.search(r"^    name: (.+)$", text, re.M).group(1)
                 self.assertTrue(name.endswith(f"${{{{ {self.PREDICATE} && '{github_ci_time.DEFERRED_SUFFIX}' || '' }}}}"))
                 if job == "test":
-                    self.assertIn("\n    needs: [queue_lint, reuse]\n", text)
+                    self.assertIn("\n    needs: [queue_lint, reuse, no_code_plan]\n", text)
                 else:
-                    # Only the cheap main-push reuse decision may gate these lanes.
-                    self.assertEqual(re.findall(r"^    needs: .*$", text, re.M), ["    needs: reuse"])
+                    # Only main-push reuse and trusted no-code planning gate these lanes.
+                    self.assertEqual(re.findall(r"^    needs: .*$", text, re.M), ["    needs: [reuse, no_code_plan]"])
                 step = text.split(f"      - name: {github_ci_time.DEFERRAL_STEP}\n", 1)[1].split("\n      - name:", 1)[0]
                 self.assertIn("if: ${{ startsWith(matrix.runner, 'macos-') && runner.os != 'macOS' }}", step)
                 self.assertIn("DEFERRAL_AUTHORIZED: ${{ github.event_name == 'pull_request' && "

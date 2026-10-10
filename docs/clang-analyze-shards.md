@@ -26,7 +26,12 @@ owns the build tree and must not overlap a reader. For a split analyzer tree:
 `--results` must name a fresh directory with an existing parent. Without it,
 the driver creates a unique directory beside the database. Default limits are
 eight shards, at most two simultaneous workers (also bounded by host CPU count),
-and 600 seconds per TU. Available worker slots are refilled as shards finish. Each worker runs one
+and 600 seconds per TU. For eight shards the native coordinator launches in
+measured priority order `2,7,3,0,6,5,1,4`; other shard counts retain numeric
+order. This changes admission only, preserving shard IDs, module ownership,
+manifest contents and each worker's original TU order. Available worker slots
+are refilled as shards finish. `ANALYZE_DISPATCH ordinal=... shard=...` records
+the real launch order, including under `--quiet`. Each worker runs one
 analyzer at a time, keeps going
 after failures and reaps every child. `--timeout` changes the per-TU bound;
 `--jobs 1` uses the same worker path with serial scheduling. The standalone
@@ -164,12 +169,39 @@ blobs in different measurement cohorts.
 
 `peak_pending_workers` is launched-but-not-yet-reaped worker concurrency;
 actual analyzer overlap can be lower, particularly for empty or tiny shards.
-On Linux the coordinator and descendants are also sampled every 25 ms:
-`peak_live_processes` and `sampled_peak_tree_rss_bytes` report observed process
-concurrency and summed resident memory. Shared resident pages count in each
-process; sampling and process-exit races make this a lower bound on the actual
-peak, not a PSS or physical-memory measurement. Other hosts report zero samples
-for unavailable tree metrics.
+On Linux the coordinator and descendants are sampled every 25 ms. The sampler
+resolves its root through `/proc/self`, then follows the child list for each
+process's main thread at `/proc/PID/task/PID/children`; it does not claim to
+enumerate children created by non-leader threads. `peak_live_processes` and
+`sampled_peak_tree_rss_bytes` retain the observed process count and summed RSS
+as lower bounds, including when a later sample finds that discovery was
+incomplete. Shared resident pages count in each process; sampling and normal
+exit races mean these values are not an atomic process-tree snapshot, PSS, or a
+physical-memory measurement.
+
+Every `ANALYZE_RUN` also reports
+`process_tree_status=complete|incomplete|unavailable` and a stable
+`process_tree_reason` token. `complete` means a bounded traversal successfully
+read `statm` and the main-thread child-list interface for every live PID it
+examined at that sampling instant. It does not cover processes that start or
+exit between samples, children created by non-leader threads, or arbitrary
+workloads outside that bounded traversal; the values are not a continuous,
+all-thread process-tree snapshot. A missing child list while its process is
+live, malformed child data, unreadable live-process memory, the 4096-PID table
+limit, the 8192-read child-list budget, or unknown parentage when `stat` and
+parent-list evidence are unavailable marks the run `incomplete`.
+Membership checks stop as soon as they find a PID and report an unknown result
+if the bounded read cannot prove absence. A normal exiting or reparented PID is
+treated as a sampling race when procfs confirms it is no longer a live child.
+Unknown-parentage PIDs are omitted from the numeric RSS lower bound.
+Other hosts report `unavailable` with
+`process_tree_reason=unsupported-host`. A Linux run with no resident samples
+reports `unavailable`; its reason keeps the first sampling obstacle, or uses
+`process_tree_reason=no-rss-samples` when no other obstacle was observed.
+`ANALYZE_RUN status` remains the analyzer result and is independent of this
+sampling status. The worker-budget verifier requires
+`process_tree_status=complete` for every arm and rejects a missing status even
+when the numeric lower-bound fields are positive.
 
 `ANALYZE_SHARD` and `ANALYZE_AGGREGATE` record the largest child high-water RSS
 from POSIX `getrusage`, in bytes. It is **not a sum of simultaneous process-tree
@@ -179,6 +211,16 @@ speedup follows from a single hosted-runner sample. CI retains the revision,
 Clang version, database, CMake cache, manifest, shard reports and logs.
 The initial complete comparison and its measurement limits are recorded in
 [the CI performance audit](performance-audits/2026-09-12T192036Z.md).
+The later exact-command investigation of the four analyzer hotspots is recorded
+in [the #3131 profile audit](performance-audits/2026-10-08T225442Z.md). It is
+pinned to source revision `96eba05bf1be5a146afc7ca3a1d1c6ae2fac9473`; it found
+no supported safe source reduction and changed no checker, source coverage,
+scheduler, or CI gate. Its cloud timings are diagnostic, not approved-host
+performance validation.
+
+The full #3130 analyzer deduplication experiment and measured NoGo disposition
+are recorded in [the final #3130 acceptance audit](performance-audits/2026-10-09T133729Z.md).
+Local integration validation for the canonical NoGo source is recorded in [the #3130 integration follow-up](performance-audits/2026-10-09T164716Z.md).
 
 `python3 tools/analyzer_selection_test.py -v` executes the actual bootstrap and
 campaign bodies with a logging compiler/driver. It covers each event, changed
@@ -193,6 +235,29 @@ drivers explicitly outside required CI. Such an experiment is not a correctness
 prerequisite and cannot automatically reinstate a reference pass. Removing the
 measured reference work reduces this job's work; it does not establish the same
 whole-CI latency saving when another required job controls completion.
+
+## Eight-shard launch priority
+
+Two completed Ubuntu Clang 21.1.8 jobs with 182 eligible/checked units and zero
+failures had the same shard-duration ranking:
+[job 113505844135](https://github.com/buster14a/buster/actions/runs/37833871097/job/113505844135)
+and [job 113480896888](https://github.com/buster14a/buster/actions/runs/37826583840/job/113480896888).
+Their complete candidate walls were 907.196 and 1194.076 seconds.
+Replaying their observed shard durations with two slots gives 906.702/1193.412
+seconds for numeric admission versus 834.650/1100.619 seconds for the measured
+priority. This is a fixed-duration scheduling hypothesis: the executions used
+different source revisions and VMs, and changing overlap may change durations.
+It is not an executed A/B speedup or qualified Zen 5 performance validation.
+
+The native scheduler keeps two workers and starts the largest measured shards
+early. No source, checker, warning policy, timeout, immutable-run proof or
+independent aggregation is removed. Native self-tests check a complete
+permutation for every supported shard count, numeric fallback, reordered
+successful coverage, complete results after a warning and independent replay.
+Revisit priority when the source inventory or measured relative weights change.
+Rollback is to return the ordinal in `clang_analyze_schedule_shard`; it needs no
+CLI, workflow or evidence-format transition. Qualified performance validation
+remains incomplete until relevant approved-host evidence exists (#2761).
 
 ## Opt-in worker-budget qualification
 
@@ -223,12 +288,18 @@ split database per VM. It retains source/tree and binary hashes, Clang identity,
 CPU affinity/topology, cgroup ancestor limits/counters, host memory/pressure,
 all failures and full per-TU evidence. `tools/analyzer_worker_budget.py verify`
 independently checks the selected union, exact commands/deadlines, all shard
-fingerprints and diagnostic checksums across arms. It supports downloaded,
-relocated artifacts and never changes a default or admits a performance result.
-Run `python3 tools/analyzer_worker_budget_test.py -v` after building the native
+fingerprints, diagnostic checksums, and the explicit complete process-tree
+status for every arm. It supports downloaded, relocated artifacts and never
+changes a default or admits a performance result. Run
+`python3 tools/analyzer_worker_budget_test.py -v` after building the native
 driver at `build/analyzer-driver`; `BUSTER_ANALYZER_TEST_DRIVER` overrides that
-path. Native self-tests also exercise complete and failed qualification arms
-on hosts reporting four or more logical CPUs.
+path. Native self-tests cover a positive synthetic descendant tree, a readable
+coordinator with a missing child-list interface, a child removed from its
+parent's readable list, a zombie exit race, capped duplicate-heavy child lists,
+and live children with missing `statm` or child-list files. The worker-budget
+verifier rejects incomplete or absent status despite positive RSS fields. A
+live host qualification control runs only when the host provides complete
+sampling evidence.
 
 #2033's predeclared decision requires at least 10% wall improvement in each
 order-balanced pair on both trials, no more than 5% additional child CPU work,

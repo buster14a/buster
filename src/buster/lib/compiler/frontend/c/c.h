@@ -260,6 +260,7 @@ typedef enum CDiagnosticKind
     C_DIAGNOSTIC_INVALID_FLEXIBLE_ARRAY_MEMBER,
     C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH,
     C_DIAGNOSTIC_EXPECTED_DECLARATION,
+    C_DIAGNOSTIC_EXPECTED_EXPRESSION,
     C_DIAGNOSTIC_UNMATCHED_DELIMITER,
     C_DIAGNOSTIC_CONFLICTING_DECLARATION,
     C_DIAGNOSTIC_REDEFINITION,
@@ -594,6 +595,11 @@ struct CPreprocessOptions
     String8* undefinitions;
     String8* include_paths;
     String8* system_include_paths;
+    // `-include FILE` names in command-line order. The preprocessor processes
+    // them as `#include "FILE"` lines of a synthetic `<command-line>` file
+    // that precedes the primary source, after command-line macros and without
+    // shifting the primary source's lines or __FILE__.
+    String8* forced_includes;
     String8 source_path;
     // Identity of the descriptor that supplied source, when available.
     // In-memory callers retain the path namespace by leaving this invalid.
@@ -605,6 +611,7 @@ struct CPreprocessOptions
     u32 undefinition_count;
     u32 include_path_count;
     u32 system_include_path_count;
+    u32 forced_include_count;
     u32 expansion_limit;
     u32 include_depth_limit;
     CPreprocessDialect dialect;
@@ -720,18 +727,38 @@ struct CSourceMapRecovery
     u32 reserved;
 };
 
-// One entry of the #pragma pack change list: `alignment` is in effect for
-// every final-stream token from index `token_index` until the next entry.
-// The preprocessor appends an entry whenever the pack state at output-append
-// time differs from the last entry (a _Pragma can change it mid-expansion,
-// so the state is sampled as tokens land in the final stream, not at lex
-// time), which keeps the list sorted and deduplicated by construction;
-// c_preprocess_pack_alignment binary-searches it.
-typedef struct CPackAlignment CPackAlignment;
-struct CPackAlignment
+// A symbol's ELF-style visibility as the C frontend names it. UNSPECIFIED is
+// the absence of any statement (no attribute, no active pragma, no option);
+// DEFAULT is a statement, so `visibility("default")` and
+// `#pragma GCC visibility push(default)` override -fvisibility= where
+// UNSPECIFIED does not. INTERNAL has no object-model spelling of its own and
+// lowers as HIDDEN (see IrSymbol.is_hidden). PROTECTED has no representation
+// at all and is refused wherever it is written.
+typedef enum CSymbolVisibility
+{
+    C_SYMBOL_VISIBILITY_UNSPECIFIED,
+    C_SYMBOL_VISIBILITY_DEFAULT,
+    C_SYMBOL_VISIBILITY_HIDDEN,
+    C_SYMBOL_VISIBILITY_INTERNAL,
+    C_SYMBOL_VISIBILITY_PROTECTED,
+} CSymbolVisibility;
+
+// One entry of the pragma state change list: `alignment` (#pragma pack) and
+// `visibility` (a CSymbolVisibility from #pragma GCC visibility push/pop) are
+// in effect for every final-stream token from index `token_index` until the
+// next entry. The preprocessor appends an entry whenever either state at
+// output-append time differs from the last entry (a _Pragma can change it
+// mid-expansion, so the state is sampled as tokens land in the final stream,
+// not at lex time), which keeps the list sorted and deduplicated by
+// construction; c_preprocess_pack_alignment and c_preprocess_symbol_visibility
+// binary-search it.
+typedef struct CPragmaState CPragmaState;
+struct CPragmaState
 {
     u32 token_index;
-    u32 alignment;
+    u16 alignment;
+    u8 visibility;
+    u8 reserved;
 };
 
 typedef struct CPreprocessResult CPreprocessResult;
@@ -748,9 +775,10 @@ struct CPreprocessResult
     CSymbolTable* symbols;
     CDiagnostic* diagnostics;
     String8* files;
-    // Sorted (token index, alignment) spans replacing a per-token field;
-    // null with count 0 for hand-built results, which query as alignment 0.
-    CPackAlignment* pack_changes;
+    // Sorted (token index, pack alignment, visibility) spans replacing a
+    // per-token field; null with count 0 for hand-built results, which query
+    // as alignment 0 and UNSPECIFIED visibility.
+    CPragmaState* pragma_changes;
     // The data layout and the measurement tables; see CPreprocessDetail for
     // why they are not members here. Null for hand-built results.
     CPreprocessDetail* detail;
@@ -762,7 +790,7 @@ struct CPreprocessResult
     u64 diagnostic_capacity;
     u32 file_count;
     CPreprocessDialect dialect;
-    u32 pack_change_count;
+    u32 pragma_change_count;
 };
 
 // Hand-built results carry no detail block and read as an all-zero one, which
@@ -970,8 +998,10 @@ struct CMember
     // and the IR layout in c_gen.c -- asks bit_width_resolved and reads this
     // number; none re-evaluates [bit_width_token_start, +count), which remain
     // only for diagnostics. An unresolved width holds a layout unresolved
-    // rather than reading as zero. An unresolved width of UINT32_MAX was
-    // already diagnosed where it was declared.
+    // rather than reading as zero. When the width was a valid negative or
+    // unrepresentably large declaration-point constant, UINT32_MAX marks it
+    // invalid and the sparse CParseResult side table retains its exact value
+    // until member constraints emit the diagnostic.
     u32 bit_width;
     u32 bit_width_token_start;
     u32 bit_width_token_count;
@@ -1082,6 +1112,25 @@ struct CIntegerConstant
 };
 BUSTER_CT_CHECK(sizeof(CIntegerConstant) == 32);
 
+// A bit-field width can be a valid integer constant expression that is
+// negative or too wide for CMember.bit_width. Keep its declaration-point
+// value until the shared member-constraint pass so an early width failure
+// cannot suppress unrelated diagnostics in the translation unit.
+typedef struct CDeferredBitFieldWidthDiagnostic CDeferredBitFieldWidthDiagnostic;
+struct CDeferredBitFieldWidthDiagnostic
+{
+    // Member rows retain a declaration-point value. Query rows carry no member
+    // or type ID; their copied message and source location survive private models.
+    u32 member_index;
+    u32 bit_width_token_start;
+    CIntegerConstant width;
+    CSourceLocation query_location;
+    String8 query_message;
+    bool is_query_diagnostic;
+    // Copy-on-append table growth preserves this row-local exact-once state.
+    bool diagnostic_published;
+};
+
 typedef struct CEnumMember CEnumMember;
 struct CEnumMember
 {
@@ -1105,7 +1154,15 @@ struct CEnumMember
     // Once published, ordinary lookup is authoritative; this avoids scanning
     // completed lists for unresolved non-enum identifiers and keywords.
     bool is_published;
-    u8 reserved[6];
+    // Defined inside a function declarator's parameter list, so the name
+    // lives in that prototype's scope (C17 6.2.1p4) and is never published
+    // at file scope nor found by pending lookup from outside it.
+    bool is_prototype_scope;
+    // Defined by an enum type name inside a file-scope declaration's
+    // initializer, bound or static assertion. Its scope begins at its own
+    // definition (C17 6.2.1p7), so an earlier file-scope use is diagnosed.
+    bool is_expression_defined;
+    u8 reserved[4];
 };
 BUSTER_CT_CHECK(sizeof(CEnumMember) == 96);
 
@@ -1190,6 +1247,15 @@ struct CEntity
     // One-based member index for enumerators, zero otherwise. Wide enum values
     // stay in their existing sparse member records, not in every entity.
     u32 enum_member_plus_one;
+    // Parameter count of the file-scope function's empty-list or
+    // identifier-list definition, plus one; zero when no such definition has
+    // been seen or in C23. The entity keeps its first declaration's type, so
+    // later prototypes need this to be held to C17 6.7.6.3p15.
+    u32 definition_parameter_count_plus_one;
+    // Parameter count, plus one, of the first prototype that followed an
+    // unprototyped first declaration; zero otherwise. It stands in for the
+    // entity type's missing rows when checking later declarations.
+    u32 prototype_parameter_count_plus_one;
     u64 constant_value;
 };
 
@@ -1357,6 +1423,26 @@ struct CParserDeclaration
 };
 
 typedef struct CNumberFacts CNumberFacts;
+typedef struct CAst CAst;
+
+// What the tree expression typer (c_ast_types.c, GitHub #3102) did over one
+// analysis: bodies it typed, expression nodes it typed, and how each type
+// query that reached it ended. An answer replaced the type machine; a decline
+// mapped to a node the typer does not accept (or accepts only unchecked); a
+// miss mapped to no node; a gated query met a machine state the typer leaves
+// to the machine (nested frames, a constant-evaluation mode, no capacity).
+typedef struct CAstTypeStatistics CAstTypeStatistics;
+struct CAstTypeStatistics
+{
+    u64 bodies;
+    // Expression nodes the eager pass visited, and the ones it gave a type.
+    u64 nodes_typed;
+    u64 nodes_accepted;
+    u64 answers;
+    u64 declines;
+    u64 misses;
+    u64 gated;
+};
 
 typedef struct CParserResult CParserResult;
 struct CParserResult
@@ -1370,6 +1456,15 @@ struct CParserResult
     // once here and read by semantic analysis and lowering (c_number_fact).
     // Null for hand-built inputs, whose consumers convert the spelling.
     CNumberFacts const* number_facts;
+    // The unit's complete syntax tree when the caller built one (the driver's
+    // -fc-ast-pilot): semantic analysis answers function-body expression type
+    // queries from it where it can, and falls back to the type machine for
+    // everything else. Null means no tree, and analysis behaves exactly as it
+    // always has. The tree and the preprocessing result must outlive the
+    // analysis.
+    CAst const* ast;
+    // Optional: receives the typer's counts, added to what it already holds.
+    CAstTypeStatistics* ast_type_statistics;
     u32 declaration_count;
     u32 diagnostic_count;
     u32 declaration_capacity;
@@ -1457,6 +1552,16 @@ struct CTokenPositionIndex
     u32* type_identity_positions;
     u32 type_identity_count;
     u32 type_identity_capacity;
+    // Parallel to type_identity_positions: the retained identity row recorded
+    // at that site, plus one (zero: none). A hint only; c_parse_type_identity_find
+    // validates the row against the live table, so rollbacks and private query
+    // copies that share this index stay correct.
+    u32* type_identity_rows_plus_one;
+#if BUSTER_INCLUDE_TESTS
+    // Diagnostics for tests: lookups, and rows read by the validating scan.
+    u64 type_identity_lookups;
+    u64 type_identity_rows_examined;
+#endif
     u32* alignas_positions;
     // Ascending positions of every identifier token directly followed by a
     // ':' punctuator — the necessary condition c_ir_named_label_at tests
@@ -1532,6 +1637,7 @@ typedef struct CStringLiteralMemo CStringLiteralMemo;
 // exists. Counts of actual operations, not timings; see
 // docs/agents/frontend/layout.md for each field's exact meaning.
 typedef struct CMemberLookup CMemberLookup;
+typedef struct CObjectSizeFacts CObjectSizeFacts;
 typedef struct CTypeLayoutStatistics CTypeLayoutStatistics;
 struct CTypeLayoutStatistics
 {
@@ -1619,6 +1725,9 @@ struct CParseResult
     // by-value operand copy keeps counting into the same record. Null for
     // hand-built results, which then count nothing.
     CTypeLayoutStatistics* type_layout_statistics;
+    // Outside the checkpointed body for the same reason (CObjectSizeFacts in
+    // c_internal.h). Null for hand-built results, which record nothing.
+    CObjectSizeFacts* object_size_facts;
     // Name index of wide aggregates for c_parse_member_type (CMemberLookup in
     // c_internal.h). Outside the checkpointed body too: entries are validated
     // against the live rows on every use, so a rollback or a by-value copy may
@@ -1646,6 +1755,9 @@ struct CParseResult
     u32* declarations_by_entity;
     CDiagnostic* diagnostics;
     CDeferredStaticAssert* deferred_static_asserts;
+    // Sparse declaration-point widths and owned diagnostics from private type
+    // queries. Snapshots roll these rows back with their parsed members.
+    CDeferredBitFieldWidthDiagnostic* deferred_bit_field_width_diagnostics;
     // The function types a declarator spelled `noreturn` on: the attribute
     // written on a function pointer or a typedef rather than on a function
     // declaration. It lives beside the type table instead of as a bit inside
@@ -1670,6 +1782,7 @@ struct CParseResult
     u32 identifier_use_count;
     u32 diagnostic_count;
     u32 deferred_static_assert_count;
+    u32 deferred_bit_field_width_diagnostic_count;
     u32 declaration_capacity;
     u32 type_capacity;
     u32 parameter_capacity;
@@ -1699,6 +1812,7 @@ struct CParseResult
     u32 identifier_use_by_token_capacity;
     u32 diagnostic_capacity;
     u32 deferred_static_assert_capacity;
+    u32 deferred_bit_field_width_diagnostic_capacity;
     u32 noreturn_function_type_count;
     u32 noreturn_function_type_capacity;
     u32 type_alignment_count;
@@ -1737,6 +1851,10 @@ struct CIRLowerOptions
     // change; tests use it as the differential reference for the shortcut.
     bool disable_declaration_shortcut;
     bool sysv_unnamed_bitfields_integer;
+    // -fvisibility=: the CSymbolVisibility of definitions that carry neither a
+    // visibility attribute nor an active #pragma GCC visibility. UNSPECIFIED
+    // and DEFAULT lower alike; plain extern declarations are never affected.
+    u8 default_visibility;
     // No consumer will read debug information (-g0): lowered functions carry
     // no IrDebugLocal records. Their only readers are the debug-value, debug
     // location and debug-model builders, which run only with debug output;
@@ -1833,9 +1951,13 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE String8 c_token_spelling(ch
     return result;
 }
 // The #pragma pack alignment in effect at a final-stream token index: the
-// greatest pack_changes entry at or before it, 0 (natural alignment) before
+// greatest pragma_changes entry at or before it, 0 (natural alignment) before
 // the first entry or when the result carries no list.
 BUSTER_F_DECL u32 c_preprocess_pack_alignment(CPreprocessResult const* preprocess, u64 token_index);
+// The #pragma GCC visibility state in effect at a final-stream token index, as
+// a CSymbolVisibility: UNSPECIFIED before the first entry, when the result
+// carries no list, and after the push stack has been popped empty.
+BUSTER_F_DECL u32 c_preprocess_symbol_visibility(CPreprocessResult const* preprocess, u64 token_index);
 // On-demand line/column/file recovery. The lex variant serves standalone lex
 // results (file always 0) and advances the result's amortization cursor; the
 // preprocess variant binary-searches the source map and is safe on any token
@@ -1882,6 +2004,59 @@ BUSTER_F_DECL CAggregateAttributes c_parse_aggregate_attributes(CParseResult con
 // translation unit, so the scan is a count test in the common case.
 BUSTER_F_DECL CTypeAlignment const* c_parse_type_alignment(CParseResult const* result, CTypeId type);
 BUSTER_F_DECL CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess);
+
+// Why c_parse_ast_from_tree handed a unit to the token walker (GitHub #3102).
+typedef enum CParserTreeFallback
+{
+    C_PARSER_TREE_FALLBACK_NONE,
+    // The walker's own preconditions fail, or the tree is not complete.
+    C_PARSER_TREE_FALLBACK_INPUT,
+    // One of the walker's token validators would report a diagnostic.
+    C_PARSER_TREE_FALLBACK_DIAGNOSTIC,
+    // A parenthesized specifier (typeof, _Atomic(T), _Alignas, _BitInt) or
+    // an enum's fixed underlying type.
+    C_PARSER_TREE_FALLBACK_SPECIFIERS,
+    // Redundant parentheses (#3215's family), attributes inside the
+    // declarator, a function derivation followed by a suffix, or no name.
+    C_PARSER_TREE_FALLBACK_DECLARATOR,
+    // An old-style definition with a declaration list.
+    C_PARSER_TREE_FALLBACK_OLD_STYLE,
+    // A token next to an anchor is not the one the shape requires, or a
+    // comma operator in an initializer.
+    C_PARSER_TREE_FALLBACK_TOKENS,
+    // A _Static_assert spelled otherwise, with a comma operator in its
+    // condition, or a body assertion behind an attribute list.
+    C_PARSER_TREE_FALLBACK_ASSERTION,
+    // A top-level node kind with no record rule (a pragma).
+    C_PARSER_TREE_FALLBACK_EXTERNAL,
+    C_PARSER_TREE_FALLBACK_COUNT,
+} CParserTreeFallback;
+
+typedef struct CParserTreeStatistics CParserTreeStatistics;
+struct CParserTreeStatistics
+{
+    // Units whose records the tree produced, and units handed to the walker.
+    u64 units;
+    u64 fallbacks;
+    // Records and body assertion ranges the tree produced.
+    u64 records;
+    u64 assertions;
+    u64 fallback_counts[C_PARSER_TREE_FALLBACK_COUNT];
+    // The last fallback: its reason and the first token of the external
+    // declaration that caused it (UINT32_MAX when no declaration did).
+    CParserTreeFallback reason;
+    u32 fallback_token;
+};
+
+// c_parse_ast for a unit whose complete syntax tree the caller holds (the
+// driver's -fc-ast-pilot): the same CParserResult, with the declaration
+// split, names, bodies and body assertions read from the tree's nodes. It
+// falls back to c_parse_ast's token walker for the whole unit when that
+// walker would report a diagnostic or read a shape differently from the
+// grammar, so its result is always the walker's. `statistics` may be null.
+BUSTER_F_DECL CParserResult c_parse_ast_from_tree(Arena* arena, CPreprocessResult preprocess, CAst const* ast, CParserTreeStatistics* statistics);
+// The CParserTreeFallback in lower case without its prefix ("none", "input", ...).
+BUSTER_F_DECL String8 c_parser_tree_fallback_name(CParserTreeFallback reason);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 // Complete syntax and semantic analysis without constructing canonical IR.
 BUSTER_F_DECL CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax);

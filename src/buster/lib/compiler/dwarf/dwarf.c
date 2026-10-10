@@ -80,6 +80,7 @@ enum
     DW_AT_CALL_LINE = 0x59,
     DW_AT_CONST_VALUE = 0x1c,
     DW_AT_EXTERNAL = 0x3f,
+    DW_AT_DECLARATION = 0x3c,
 };
 
 enum
@@ -93,6 +94,7 @@ enum
     DW_FORM_DATA1 = 0x0b,
     DW_FORM_REF4 = 0x13,
     DW_FORM_EXPRLOC = 0x18,
+    DW_FORM_FLAG_PRESENT = 0x19,
 };
 
 enum
@@ -1222,7 +1224,7 @@ BUSTER_GLOBAL_LOCAL bool dwarf_model_base_has_bit_size(DebugType* type)
 }
 
 BUSTER_GLOBAL_LOCAL void dwarf_model_emit_abbreviations(DwarfBuffer* buffer, bool include_padded_float, bool include_volatile,
-                                                        bool include_internal_global)
+                                                        bool include_internal_global, bool include_declaration)
 {
     static const u32 cu_attributes[] = {DW_AT_PRODUCER, DW_AT_LANGUAGE, DW_AT_NAME, DW_AT_COMP_DIR, DW_AT_LOW_PC, DW_AT_HIGH_PC, DW_AT_STMT_LIST};
     static const u32 cu_forms[] = {DW_FORM_STRP, DW_FORM_DATA2, DW_FORM_STRP, DW_FORM_STRP, DW_FORM_ADDR, DW_FORM_DATA8, DW_FORM_SEC_OFFSET};
@@ -1267,6 +1269,10 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_abbreviations(DwarfBuffer* buffer, boo
     static const u32 global_forms[] = {DW_FORM_STRP, DW_FORM_UDATA, DW_FORM_UDATA, DW_FORM_REF4, DW_FORM_EXPRLOC, DW_FORM_DATA1};
     static const u32 internal_global_attributes[] = {DW_AT_NAME, DW_AT_DECL_FILE, DW_AT_DECL_LINE, DW_AT_TYPE, DW_AT_LOCATION};
     static const u32 internal_global_forms[] = {DW_FORM_STRP, DW_FORM_UDATA, DW_FORM_UDATA, DW_FORM_REF4, DW_FORM_EXPRLOC};
+    // A tag that is never completed in the unit: a name and DW_AT_declaration
+    // only, with no size, location or children (DWARF 5 section 5.7.1).
+    static const u32 declaration_attributes[] = {DW_AT_NAME, DW_AT_DECLARATION};
+    static const u32 declaration_forms[] = {DW_FORM_STRP, DW_FORM_FLAG_PRESENT};
     static const u32 inline_attributes[] = {DW_AT_ABSTRACT_ORIGIN, DW_AT_CALL_FILE, DW_AT_CALL_LINE, DW_AT_RANGES};
     static const u32 inline_forms[] = {DW_FORM_REF4, DW_FORM_UDATA, DW_FORM_UDATA, DW_FORM_SEC_OFFSET};
     static const u32 qualified_attributes[] = {DW_AT_TYPE};
@@ -1320,6 +1326,13 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_abbreviations(DwarfBuffer* buffer, boo
     {
         dwarf_model_abbrev(buffer, 30, DW_TAG_VARIABLE, false, internal_global_attributes, internal_global_forms,
                            BUSTER_ARRAY_LENGTH(internal_global_attributes));
+    }
+    if (include_declaration)
+    {
+        dwarf_model_abbrev(buffer, 31, DW_TAG_STRUCTURE_TYPE, false, declaration_attributes, declaration_forms,
+                           BUSTER_ARRAY_LENGTH(declaration_attributes));
+        dwarf_model_abbrev(buffer, 32, DW_TAG_UNION_TYPE, false, declaration_attributes, declaration_forms,
+                           BUSTER_ARRAY_LENGTH(declaration_attributes));
     }
     dwarf_emit_uleb128(buffer, 0);
 }
@@ -1383,6 +1396,12 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_type(DwarfModelWriter* writer, DebugTy
         break;
     case DEBUG_TYPE_STRUCT:
     case DEBUG_TYPE_UNION:
+        if (type->is_declaration)
+        {
+            dwarf_emit_uleb128(&writer->info, type->kind == DEBUG_TYPE_STRUCT ? 31 : 32);
+            dwarf_model_string(writer, type->name);
+            break;
+        }
         dwarf_emit_uleb128(&writer->info, type->kind == DEBUG_TYPE_STRUCT ? 5 : 6);
         dwarf_model_string(writer, type->name);
         dwarf_emit_u64(&writer->info, type->size);
@@ -1687,6 +1706,7 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_function(DwarfModelWriter* writer, u32
         DebugScope* scope = writer->model->scopes + function->scope;
         has_children = scope->variable_count != 0 || dwarf_model_scope_has_child(writer, function->scope);
     }
+    has_children |= function->static_count != 0;
     for (u32 inline_index = 0; inline_index < writer->model->inline_site_count; inline_index += 1)
     {
         if (writer->model->inline_sites[inline_index].function == function)
@@ -1705,6 +1725,13 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_function(DwarfModelWriter* writer, u32
     if (has_children && function->scope < writer->model->scope_count)
     {
         dwarf_model_emit_scope_variables(writer, writer->model->scopes + function->scope);
+    }
+    // A function-scope static is a variable DIE of its subprogram, so a name
+    // lookup inside another function does not find it (#2719).
+    for (u32 static_index = 0; static_index < function->static_count && function->static_start + static_index < writer->model->variable_count;
+         static_index += 1)
+    {
+        dwarf_model_emit_global(writer, writer->model->variables + function->static_start + static_index);
     }
     for (u32 inline_index = 0; has_children && inline_index < writer->model->inline_site_count; inline_index += 1)
     {
@@ -1849,17 +1876,21 @@ DwarfResult dwarf_build_model(Arena* arena, DwarfInput input)
                 bool include_padded_float = false;
                 bool include_volatile = false;
                 bool include_internal_global = false;
+                bool include_declaration = false;
                 for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
                 {
                     include_padded_float |= dwarf_model_base_has_bit_size(model->types + type_index);
                     include_volatile |= model->types[type_index].kind == DEBUG_TYPE_QUALIFIED && model->types[type_index].is_volatile;
+                    include_declaration |= (model->types[type_index].kind == DEBUG_TYPE_STRUCT || model->types[type_index].kind == DEBUG_TYPE_UNION) &&
+                                           model->types[type_index].is_declaration;
                 }
                 for (u32 variable_index = 0; variable_index < model->variable_count; variable_index += 1)
                 {
                     include_internal_global |= model->variables[variable_index].kind == DEBUG_VARIABLE_GLOBAL &&
                                                model->variables[variable_index].is_internal;
                 }
-                dwarf_model_emit_abbreviations(&writer.abbrev, include_padded_float, include_volatile, include_internal_global);
+                dwarf_model_emit_abbreviations(&writer.abbrev, include_padded_float, include_volatile, include_internal_global,
+                                                include_declaration);
                 dwarf_emit_u32(&writer.info, 0);
                 dwarf_emit_u16(&writer.info, DWARF_VERSION);
                 dwarf_model_relocation(&writer, (DwarfRelocation){
@@ -1894,7 +1925,7 @@ DwarfResult dwarf_build_model(Arena* arena, DwarfInput input)
                 for (u32 variable_index = 0; variable_index < model->variable_count; variable_index += 1)
                 {
                     DebugVariable* variable = model->variables + variable_index;
-                    if (variable->kind == DEBUG_VARIABLE_GLOBAL)
+                    if (variable->kind == DEBUG_VARIABLE_GLOBAL && !variable->is_static_local)
                     {
                         dwarf_model_emit_global(&writer, variable);
                     }

@@ -88,6 +88,8 @@ typedef enum CIncludeFileStatus
 #define C_INCLUDE_FILE_INITIAL_CAPACITY 64
 
 #if BUSTER_INCLUDE_TESTS
+// Exercise the production expanded-line commit with an empty foreign token.
+BUSTER_F_DECL bool c_test_expanded_empty_foreign_token_source_map(Arena* arena);
 BUSTER_F_DECL bool c_test_source_allocation_plan(u64 length, CSourceAllocationPlan* plan);
 // Includes lex into a shared spelling space; exercise that production entry
 // without creating or mapping a multi-gigabyte file.

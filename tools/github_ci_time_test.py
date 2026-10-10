@@ -21,6 +21,36 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 
+class NoCodeBookkeepingTests(unittest.TestCase):
+    def test_planner_never_conceals_a_failed_workload(self):
+        failed = {"name": "Workflow lint", "status": "completed", "conclusion": "failure"}
+        plan = {"name": "No-code plan / Classify no-code changes", "run_id": 1,
+                "run_attempt": 1, "head_sha": "a" * 40,
+                "status": "completed", "conclusion": "success"}
+        jobs, errors = github_ci_time.separate_reuse_job(
+            [failed, plan], 1, 1, "a" * 40, event="merge_group")
+        self.assertEqual((jobs, errors), ([failed], []))
+        for key, value in (("head_sha", "b" * 40), ("run_id", 2), ("run_attempt", 2),
+                           ("conclusion", "skipped"), ("status", "queued")):
+            jobs, errors = github_ci_time.separate_reuse_job(
+                [failed, dict(plan, **{key: value})], 1, 1, "a" * 40, event="merge_group")
+            self.assertTrue(errors)
+            self.assertEqual(jobs, [failed])
+
+    def test_only_inapplicable_skipped_callers_are_bookkeeping(self):
+        for event in ("push", "schedule", "workflow_dispatch"):
+            for name in ("No-code plan", "No-code plan / Classify no-code changes"):
+                plan = {"name": name, "run_id": 1, "run_attempt": 1, "head_sha": "a" * 40,
+                        "status": "completed", "conclusion": "skipped"}
+                self.assertEqual(github_ci_time.separate_no_code_plan(
+                    [plan], 1, 1, "a" * 40, event), ([], []))
+                self.assertTrue(github_ci_time.separate_no_code_plan(
+                    [dict(plan, conclusion="success")], 1, 1, "a" * 40, event)[1])
+        jobs, errors = github_ci_time.separate_no_code_plan(
+            [plan, dict(plan, name="No-code plan")], 1, 1, "a" * 40, "push")
+        self.assertTrue(errors)
+
+
 class InactiveLintTests(unittest.TestCase):
     def test_only_the_inactive_event_branch_may_be_skipped(self):
         for event in ("pull_request", "merge_group", "push", "workflow_dispatch"):
@@ -303,8 +333,9 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
         writer = {"id": 8000, "name": "Show the pull request comparison check" if mode == "pull" else
                                          "Show the main commit comparison check",
                   "run_id": 600, "run_attempt": 1, "head_sha": "b" * 40,
+                  "status": "in_progress", "conclusion": None,
                   "steps": [{"name": "Check out the trusted check writer", "status": "completed", "conclusion": "success"},
-                            {"name": "Queue the check and mark it running when the 9700X starts",
+                            {"name": github_ci_time.COMPILER_BENCHMARK_CURRENT_DISPLAY_STEP,
                              "status": "in_progress", "conclusion": None}]}
         self.benchmark_reads = {"actions/runs/500/attempts/1": request, "actions/runs/600/attempts/1": publisher,
                                 "actions/runs/600/attempts/1/jobs?per_page=100": {"total_count": 1, "jobs": [writer]}}
@@ -312,6 +343,22 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
     def test_names_and_namespaces_match_the_trusted_publisher(self):
         self.assertEqual({name: prefix for name, (prefix, _, _) in github_ci_time.COMPILER_BENCHMARK_CHECKS.items()},
                          {name: prefix for name, prefix in compiler_receipt.MODES.values()})
+
+    def test_current_display_jobs_and_step_match_the_workflow(self):
+        workflow = (ROOT / github_ci_time.COMPILER_BENCHMARK_WORKFLOW).read_text(encoding="utf-8")
+        for mode, (job_key, job_name) in github_ci_time.COMPILER_BENCHMARK_DISPLAY_JOBS.items():
+            with self.subTest(mode=mode):
+                start = re.search(r"(?m)^  " + re.escape(job_key) + r":\n", workflow)
+                self.assertIsNotNone(start, job_key)
+                tail = workflow[start.end():]
+                boundary = re.search(r"(?m)^  [A-Za-z0-9_-]+:\s*$", tail)
+                block = tail[:boundary.start()] if boundary else tail
+                declared_names = re.findall(r"(?m)^    name: (.+)$", block)
+                self.assertEqual(declared_names, [job_name])
+                step_names = re.findall(r"(?m)^      - name: (.+)$", block)
+                self.assertEqual(step_names.count(github_ci_time.COMPILER_BENCHMARK_CURRENT_DISPLAY_STEP), 1)
+                self.assertNotIn(github_ci_time.COMPILER_BENCHMARK_LEGACY_RUNNING_DISPLAY_STEP, step_names)
+                self.assertIn("run: python3 -B tools/bench_direct/compiler_github.py start", block)
 
     def test_both_modes_and_all_verdicts_are_separate_from_workloads(self):
         for mode in ("main", "pull"):
@@ -327,6 +374,17 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
                     self.assertEqual(metadata["job"], self.jobs[-1])
                     self.assertEqual(metadata["raw_check"], self.checks[-1])
                     self.assertEqual(metadata["publisher_provenance"]["publisher"]["head_branch"], "main")
+
+    def test_exact_legacy_running_step_remains_supported_for_both_modes(self):
+        for mode in ("main", "pull"):
+            with self.subTest(mode=mode):
+                self.setUp()
+                self.benchmark(mode)
+                publisher = self.benchmark_reads["actions/runs/600/attempts/1"]
+                publisher["status"] = "in_progress"
+                writer = self.benchmark_reads["actions/runs/600/attempts/1/jobs?per_page=100"]["jobs"][0]
+                writer["steps"][1]["name"] = github_ci_time.COMPILER_BENCHMARK_LEGACY_RUNNING_DISPLAY_STEP
+                self.assertTrue(self.gate()["success"])
 
     def test_completed_default_check_url_uses_one_exact_publisher_link(self):
         self.benchmark(status="completed", conclusion="success")
@@ -358,7 +416,7 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
         request = self.benchmark_reads["actions/runs/500/attempts/1"]
         request.update(status="in_progress", conclusion=None)
         writer = {"id": 8000, "name": "Show the queued compiler benchmark check", "run_id": 500,
-                  "run_attempt": 1, "head_sha": self.HEAD,
+                  "run_attempt": 1, "head_sha": self.HEAD, "status": "in_progress", "conclusion": None,
                   "steps": [{"name": "Check out the trusted check writer", "status": "completed", "conclusion": "success"},
                             {"name": "Create the queued check", "status": "in_progress", "conclusion": None}]}
         self.benchmark_reads["actions/runs/500/attempts/1/jobs?per_page=100"] = {"total_count": 1, "jobs": [writer]}
@@ -370,15 +428,21 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
         self.checks[-1]["status"] = "in_progress"
         self.assertFalse(self.gate()["success"])
 
-    def test_completed_check_can_prove_the_publisher_when_display_start_failed(self):
-        self.benchmark(status="completed", conclusion="success")
-        writer = self.benchmark_reads["actions/runs/600/attempts/1/jobs?per_page=100"]["jobs"][0]
-        writer["name"] = "Publish the pull request compiler benchmark check"
-        writer["steps"] = [{"name": "Check out the trusted publisher", "status": "completed", "conclusion": "success"},
-                           {"name": "Validate the evidence and publish the check", "status": "completed", "conclusion": "success"}]
-        self.assertTrue(self.gate()["success"])
-        writer["steps"][1]["conclusion"] = "skipped"
-        self.assertFalse(self.gate()["success"])
+    def test_completed_check_can_prove_terminal_publication_for_both_modes(self):
+        for mode in ("main", "pull"):
+            with self.subTest(mode=mode):
+                self.setUp()
+                self.benchmark(mode, status="completed", conclusion="success")
+                writer = self.benchmark_reads["actions/runs/600/attempts/1/jobs?per_page=100"]["jobs"][0]
+                writer["name"] = ("Publish the pull request compiler benchmark check" if mode == "pull" else
+                                  "Publish the compiler benchmark check")
+                writer["status"] = "completed"
+                writer["conclusion"] = "success"
+                writer["steps"] = [{"name": "Check out the trusted publisher", "status": "completed", "conclusion": "success"},
+                                   {"name": "Validate the evidence and publish the check", "status": "completed", "conclusion": "success"}]
+                self.assertTrue(self.gate()["success"])
+                writer["steps"][1]["conclusion"] = "skipped"
+                self.assertFalse(self.gate()["success"])
 
     def test_same_attempt_duplicates_fail_but_historical_attempt_rows_are_preserved(self):
         self.benchmark()
@@ -423,7 +487,8 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
                     self.benchmark()
                     self.benchmark_reads[path][field] = value
                     self.assertFalse(self.gate()["success"])
-        for defect in ("missing", "duplicate", "wrong-attempt", "missing-step", "failed-checkout", "skipped-writer", "partial"):
+        for defect in ("missing", "duplicate", "wrong-attempt", "missing-step", "renamed-step",
+                       "failed-checkout", "skipped-writer", "partial"):
             with self.subTest(defect=defect):
                 self.setUp()
                 self.benchmark()
@@ -438,6 +503,8 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
                     writer["run_attempt"] = True
                 elif defect == "missing-step":
                     writer["steps"] = []
+                elif defect == "renamed-step":
+                    writer["steps"][1]["name"] = "An unrelated writer step"
                 elif defect == "failed-checkout":
                     writer["steps"][0]["conclusion"] = "failure"
                 elif defect == "skipped-writer":
@@ -578,7 +645,7 @@ class MacosRunnerDemandTests(unittest.TestCase):
         harness = text.split("\n  harness:\n", 1)[1].split("\n  regression-guard:\n", 1)[0]
         self.assertIn("        os: [ubuntu-26.04, windows-2025]\n", harness)
         self.assertNotIn("macos", text.replace("throughput-harness-macos.yml", ""))
-        self.assertEqual(text.count("    needs: harness\n"), 2)
+        self.assertEqual(text.count("    needs: [harness, no_code_plan]\n"), 2)
 
     def test_macos_harness_is_path_filtered_ready_and_identical(self):
         throughput = (self.WORKFLOWS / "compiler-throughput.yml").read_text(encoding="utf-8")

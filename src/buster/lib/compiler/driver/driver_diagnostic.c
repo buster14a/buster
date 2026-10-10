@@ -27,6 +27,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_c_diagnostic_code(CDiagnosticKind ki
         [C_DIAGNOSTIC_INVALID_FLEXIBLE_ARRAY_MEMBER] = S8_INITIALIZER("c.invalid-flexible-array-member"),
         [C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH] = S8_INITIALIZER("c.invalid-bit-field-width"),
         [C_DIAGNOSTIC_EXPECTED_DECLARATION] = S8_INITIALIZER("c.expected-declaration"),
+        [C_DIAGNOSTIC_EXPECTED_EXPRESSION] = S8_INITIALIZER("c.expected-expression"),
         [C_DIAGNOSTIC_UNMATCHED_DELIMITER] = S8_INITIALIZER("c.unmatched-delimiter"),
         [C_DIAGNOSTIC_CONFLICTING_DECLARATION] = S8_INITIALIZER("c.conflicting-declaration"),
         [C_DIAGNOSTIC_REDEFINITION] = S8_INITIALIZER("c.redefinition"),

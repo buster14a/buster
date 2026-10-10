@@ -189,6 +189,7 @@ Positive decimal limits are configurable through
 The caller default equals 64 sites times the 16-row tiny-body threshold; it also
 accommodates multiple required checked-arithmetic helpers in production callers.
 The module, work and storage guards still independently bound expansion.
+The module, work and storage guards still independently bound expansion.
 Zero numeric fields in embedding options normalize to those defaults.
 Mandatory calls are processed before optional tiny candidates across the module;
 both phases share the same caller and module limits. The mandatory graph captures

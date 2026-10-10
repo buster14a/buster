@@ -698,13 +698,35 @@ struct IrPublishedCfg
 
 typedef struct IrFunction IrFunction;
 typedef struct IrDebugLocal IrDebugLocal;
+// Lexical block identity for debug information. A function's blocks are
+// numbered by dense ordinals in IrFunction.debug_scopes: ordinal 0 is the
+// function's outermost scope (parameters and the body's top-level locals) and
+// is implicit, so IrFunction.debug_scopes[ordinal - 1] describes ordinal N.
+// Only blocks that directly declare a local are numbered. Ordinals ascend in
+// source order, so a parent has a smaller ordinal than its child and a block
+// begins after every earlier ordinal's block began. The ordinals belong to the
+// function: they are not frontend scope ids and name no AST node.
+//
+// extent is the block's source span from its first token up to, and excluding,
+// the token that ends it; a zero length means the extent is unknown (for
+// example a block written by macro expansion). The debug model does not use
+// the extent yet: it gives every block the whole function's code range.
+typedef struct IrDebugScope IrDebugScope;
+struct IrDebugScope
+{
+    IrSourceRange extent;
+    u32 parent;
+};
+
 struct IrDebugLocal
 {
     String8 name;
     IrSourceRange source;
     IrTypeId type;
     IrLocalId id;
-    u32 scope_depth;
+    // Ordinal of the lexical block that declares this local (see IrDebugScope);
+    // zero when the function carries no block table.
+    u32 scope;
     bool is_parameter;
     u8 reserved[3];
 };
@@ -724,6 +746,7 @@ struct IrFunction
     IrValueId* local_places;
     bool* local_uses_memory;
     IrDebugLocal* debug_locals;
+    IrDebugScope* debug_scopes;
     IrValueId* label_metadata_values;
     IrValueLabelMetadata* label_metadata;
     IrInstructionId* extra_instructions;
@@ -739,6 +762,7 @@ struct IrFunction
     u32 value_capacity;
     u32 local_count;
     u32 debug_local_count;
+    u32 debug_scope_count;
     u32 label_metadata_count;
     u32 label_metadata_capacity;
     u32 extra_count;
@@ -770,6 +794,20 @@ struct IrModuleAssembly
 // reproduces the same order with an ordinary ascending sort.
 #define IR_INITIALIZER_PRIORITY_NONE 0x10000u
 
+// The priority of an ELF `.preinit_array` entry. `ld` and `lld` run that array
+// (DT_PREINIT_ARRAY) before every constructor of every priority, including a
+// `constructor(0)` and any dependency's, so no value in the 0..65535 range or
+// above it can stand for it under an ascending sort. It is the one value that
+// IR_INITIALIZER_PRIORITY_ORDER_KEY wraps to the smallest key. Only the ELF
+// readers produce it; no `constructor` attribute and no COFF or Mach-O object
+// carries it, and a writer that has no such array maps it to priority zero.
+#define IR_INITIALIZER_PRIORITY_PREINIT 0xffffffffu
+
+// The ascending sort key of an initializer priority: preinit first, then
+// 0..65535, then the unprioritized entries. Every comparison of two
+// priorities goes through it; the argument is evaluated once.
+#define IR_INITIALIZER_PRIORITY_ORDER_KEY(priority) ((u32)(priority) + 1u)
+
 // One function that runs before `main` (`__attribute__((constructor))`) or
 // after it (`__attribute__((destructor))`). Like IrSymbolAlias this is a
 // relation rather than a symbol property -- the object writer turns the list
@@ -781,7 +819,9 @@ struct IrModuleInitializer
 {
     IrSymbolId symbol;
     // 0..65535 as written, or IR_INITIALIZER_PRIORITY_NONE when the attribute
-    // named no priority. Ascending, so the sort is one comparison.
+    // named no priority. Ascending, so the sort is one comparison. (A
+    // `.preinit_array` entry's IR_INITIALIZER_PRIORITY_PREINIT exists only in
+    // object files, never in this list.)
     u32 priority;
     // Runs after `main` rather than before it: `.fini_array`, not
     // `.init_array`.
@@ -999,8 +1039,8 @@ struct IrProgram
     bool disable_target_local_promotion;
     // With -g a named scalar local stays SSA only when debug info can describe it
     // by one defining instruction; every other one keeps a frame slot of its own
-    // the debugger reads for the whole function. Costs code, so it is opt-in
-    // (-fpinned-debug-locals); plain -g code is identical to -g0 code.
+    // that the debugger reads for the whole function. The driver enables this by
+    // default for -g and accepts -fno-pinned-debug-locals as an explicit opt-out.
     bool pin_debug_locals;
     IrInlineOptions inline_options;
     u32 fast_passes;
