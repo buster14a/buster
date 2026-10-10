@@ -1366,9 +1366,10 @@ typedef enum CConstantEvaluationMode
 // c_parse_pointer_chain and the type machine's `&` each build a fresh row for
 // every type name or address they read, and an expression's type name is
 // read once per operator-scan level and again by its leaf, so nearly all the
-// rows the per-body validation queries mint are copies. While `enabled` --
-// only inside c_parse_validate_lowering_constraints' loop over function
-// bodies -- c_parse_intern_type returns the earlier row instead. The header
+// rows the static-initializer and per-body validation queries mint are copies.
+// While `enabled` -- only in c_parse_validate_lowering_constraints, from the
+// static-initializer walk through the loop over function bodies --
+// c_parse_intern_type returns the earlier row instead. The header
 // exists only when the caller asked for it (CParserResult.type_interning,
 // which the driver sets with the tree under -fc-ast-pilot), so the default
 // path appends every row as before.
@@ -1376,8 +1377,9 @@ typedef enum CConstantEvaluationMode
 // The window is what keeps the copies unobservable but for the table's size.
 // Such a row is immutable, carries no tag, link, bound or alignment record,
 // and lowers to a scalar or pointer IR type that lowering interns itself; and
-// the loop runs after every declaration has its rows, so a row it interns
-// follows every row that can refer to it. Lowering maps rows in passes, in
+// the window opens after every declaration has its rows, and nothing in it
+// rewrites a declaration's, so a row it interns follows every row that can
+// refer to it. Lowering maps rows in passes, in
 // table order, and a struct resolves only once the rows of its members are
 // mapped: interning a member's row would move it ahead of its struct and
 // resolve the struct a pass earlier, which reorders the IR types and so the

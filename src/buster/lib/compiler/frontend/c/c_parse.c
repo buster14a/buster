@@ -37209,6 +37209,19 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
     // is a tree, lives with the other tables built once outside the per-body
     // checkpoints; the static initializers below are its first readers.
     c_ast_types_bodies_prepare(machine, result);
+    // Every declaration has its rows by now, and nothing below rewrites one:
+    // the static-initializer and body queries may share the primitive and
+    // pointer rows they mint (CTypeInterning).
+    bool interning = c_parse_type_interning(result) != 0;
+#if BUSTER_INCLUDE_TESTS
+    interning &= !c_parse_type_interning_off;
+#endif
+    if (interning)
+    {
+        // No machine frame is live here, so no member segment is either.
+        c_parse_type_interning(result)->suspended = 0;
+        c_parse_type_interning(result)->enabled = true;
+    }
     c_parse_validate_static_initializers(machine, arena, result, preprocess);
     for (u32 entity_index = 0; entity_index < result->entity_count; entity_index += 1)
     {
@@ -37253,18 +37266,6 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
     // a scratch arena, so it is forced here, before any body's guard opens,
     // rather than on a body's first delimiter query (#1256).
     c_parse_position_index_ensure(result, preprocess);
-    // Every declaration has its rows by now: the body queries below may share
-    // the primitive and pointer rows they mint (CTypeInterning).
-    bool interning = c_parse_type_interning(result) != 0;
-#if BUSTER_INCLUDE_TESTS
-    interning &= !c_parse_type_interning_off;
-#endif
-    if (interning)
-    {
-        // No machine frame is live here, so no member segment is either.
-        c_parse_type_interning(result)->suspended = 0;
-        c_parse_type_interning(result)->enabled = true;
-    }
     for (u32 declaration_index = 0; declaration_index < result->declaration_count; declaration_index += 1)
     {
         CDeclaration* declaration = result->declarations + declaration_index;

@@ -318,8 +318,8 @@ evidence.
 bodies and in file-scope initializers from the tree, in place of the
 speculative type machine (`CTypeParseMachine` in `c_parse.c`). Stage 1 covers
 names, literals and postfix chains; stage 2 adds the operators; stage 3 adds
-file-scope initializers, and, in bodies, `&` and casts to primitive and
-pointer type names over rows the machine interns under the pilot. It runs
+file-scope initializers, and `&` and casts to primitive and pointer type
+names over rows the machine interns under the pilot. It runs
 only when the caller supplies a tree in `CParserResult.ast`, which today only
 the [driver hook](#driver-pilot-hook) does; without one, analysis is
 unchanged.
@@ -409,8 +409,8 @@ unchanged.
   - a cast or compound literal to any other type name: a qualified typedef,
     a tag, a qualified or `restrict` pointer, or an array or function
     declarator. Their readers append rows that are not interned.
-  - `&` or a type name whose interned rows do not exist yet when the body is
-    typed;
+  - `&` or a type name whose interned rows do not exist yet when the body or
+    initializer is typed;
   - a string literal. Its array row is not interned, because lowering gives
     each array row its own IR array type and `-g` describes every IR type.
     A query on one costs the machine little: the unity self-host makes about
@@ -466,13 +466,16 @@ a fresh row for every type name or address they read, and a cast's type name
 is read once per operator-scan level and again by its leaf. On the unity
 self-host 93.8% of the 96,717 pointer rows and nearly all of the 37,000
 primitive rows were copies. Under the pilot, inside
-`c_parse_validate_lowering_constraints`' loop over function bodies, where the
-per-body queries mint them, those builders go through `c_parse_intern_type`.
-It returns the live row equal to the one it would append (`CTypeInterning` in
-`c_internal.h`). The tree's answers for casts and `&` read those rows.
-File-scope initializers are validated before the window opens, where the
-machine appends, so an initializer's answers read no interned row
-(`c_ast_types_interned`) and those shapes decline there.
+`c_parse_validate_lowering_constraints` from the file-scope initializer walk
+(`c_parse_validate_static_initializers`) through the loop over function
+bodies, where the queries mint them, those builders go through
+`c_parse_intern_type`. It returns the live row equal to the one it would
+append (`CTypeInterning` in `c_internal.h`). The tree's answers for casts and
+`&` read those rows, in initializers as in bodies (`c_ast_types_interned`), so
+`S8()`'s `(char8*)("text")` at file scope answers with the replay. Until
+[#3102](https://github.com/buster14a/buster/issues/3102)'s initializer slice,
+the window opened only for the bodies, after the initializer walk, and every
+such initializer shape declined.
 
 Interning is part of the pilot, not the default path. Semantic analysis keeps
 the interning header only when the caller asks for it
@@ -490,8 +493,9 @@ A row interned there is observable only as table size:
   Lowering keys its per-type tables on array rows.
 - Lowering maps it to a scalar, qualified-scalar or pointer IR type, and
   lowering interns those itself.
-- The window opens after every declaration has its rows, so an interned row
-  only ever replaces a later copy of itself. That copy resolves in the same
+- The window opens after every declaration has its rows, and the initializer
+  walk and the bodies rewrite no declaration's row, so an interned row only
+  ever replaces a later copy of itself. That copy resolves in the same
   lowering pass, and the IR types, and so the `-g` type entries, keep their
   order.
 
@@ -514,7 +518,9 @@ aggregate inside the window. The c_ast corpus and the frontend fixtures define
 a few, but in none of them did interning move a member's row ahead of its
 aggregate, which is why the self-host checks missed it.
 `c_test_type_interning_objects` compiles
-both shapes with the window shut (`c_test_set_type_interning_off`) and open,
+both shapes, and a third that does the same in file-scope initializers
+(`S8()`-style casts, `&` of objects, aggregates defined in initializer type
+names), with the window shut (`c_test_set_type_interning_off`) and open,
 at `-g0` and `-g`, with and without the tree, and requires identical objects
 and diagnostics.
 
@@ -1016,5 +1022,34 @@ the same way and diagnostic only:
   (5.2%) slower, with 4 of 15 pairs favouring fusion, and a repeat agreed. The
   A/A control itself exceeded its ±0.5% bound.
 - **Decision.** Fusion does not ship. The token array and the array build stay.
+
+For the initializer slice of stage 3, which opens the interning window at the
+file-scope initializer walk instead of after it, these budgets were declared
+before its measured runs. The input and flags are stage 2's, and the four
+Callgrind arms are counted on tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `f38a7716`, which the candidate branches from. The budgets:
+- correctness:
+  - no verify mismatch over the corpus, with every run of the gate interning;
+  - identical diagnostics and type-table sizes with and without the tree;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms;
+  - byte-identical objects between the default, the pilot, and the pilot with
+    the window shut, including the file-scope source
+    (`c_test_type_interning_objects`).
+- the default path (D against A): no interning header exists there, so the
+  change adds no work. The difference stays within ±0.05% Ir on
+  `-fsyntax-only` and on `-c` (`-g0`).
+- the slice's own effect on the pilot (C against B):
+  - fewer instructions in the whole compile, with the interning lookups and
+    the larger accepted set charged;
+  - fewer machine runs from queries;
+  - fewer tree declines.
+- performance acceptance: the hosted counts are diagnostic and claim nothing
+  for production. Zen 5 validation stays incomplete (#2761), and the hook
+  stays opt-in.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
