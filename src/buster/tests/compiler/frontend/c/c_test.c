@@ -21426,8 +21426,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_infinity(UnitTestArguments* ar
 }
 
 // __builtin_classify_type answers Clang's type class from the unevaluated,
-// decayed operand type as an int constant. _BitInt and nullptr_t are not
-// modeled by the frontend type system, so they have no rows here.
+// decayed operand type as an int constant. _BitInt is not modeled by the
+// frontend type system; nullptr_t (C_TYPE_NULLPTR) is modeled but deliberately
+// refused, so neither has a row here.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_classify_type(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -21526,6 +21527,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_classify_type(UnitTestArgument
         BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0, invalid[index]);
         BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0, invalid[index]);
         BUSTER_TEST(arguments, !lowered.canonical_ir_certified && lowered.program == 0);
+        scratch_end(temporary);
+    }
+    {
+        // va_list's class depends on the target ABI, so the function that
+        // asks for it fails to lower with a diagnostic naming the builtin.
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = targets[0];
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, S8("int bad(__builtin_va_list list) { return __builtin_classify_type(list); }"),
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("builtin-classify-type-va-list.c"), preprocess, syntax, target,
+            (CIRLowerOptions){0});
+        bool named = false;
+        for (u64 index = 0; index < lowered.diagnostic_count; index += 1)
+        {
+            named |= string_first_sequence(lowered.diagnostics[index].message, S8("__builtin_classify_type")) != BUSTER_STRING_NO_MATCH;
+        }
+        BUSTER_TEST(arguments, lowered.diagnostic_count != 0 && named && !lowered.canonical_ir_certified);
         scratch_end(temporary);
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -59487,8 +59506,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_brace_designators);
     C_TEST_FIXTURE(arguments, c_test_braced_string_initializers);
     C_TEST_FIXTURE(arguments, c_test_braced_string_runtime);
-    C_TEST_FIXTURE(arguments, c_test_builtin_infinity);
     C_TEST_FIXTURE(arguments, c_test_builtin_classify_type);
+    C_TEST_FIXTURE(arguments, c_test_builtin_infinity);
     C_TEST_FIXTURE(arguments, c_test_c23_attribute_noreturn);
     C_TEST_FIXTURE(arguments, c_test_c23_attribute_positions);
     C_TEST_FIXTURE(arguments, c_test_c23_auto_local_declarations);

@@ -25010,6 +25010,11 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 if (argument_count != (selected->builtin_classify_type ? 1u : 2u) || !c_ir_type_identity_query(builder, selected->token_index, selected->close_index + 1, &answer) ||
                     answer.result_start != UINT32_MAX)
                 {
+                    // A refused operand type (nullptr_t, va_list) or a wrong
+                    // arity records no answer.
+                    builder->failure_message = selected->builtin_classify_type
+                                                   ? S8("__builtin_classify_type takes one expression whose type it can classify")
+                                                   : builder->failure_message;
                     return C_IR_PREPARED_CALL_STEP_FAILED;
                 }
                 selected->result = c_ir_emit_integer_value_typed(builder, answer.result_end, false, token, builder->s32_type);

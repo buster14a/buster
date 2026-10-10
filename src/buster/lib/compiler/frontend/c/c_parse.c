@@ -8260,8 +8260,8 @@ enum
 // Clang's __builtin_classify_type values for the types this frontend models.
 // The operand is unevaluated and undergoes lvalue conversion and decay, so the
 // caller passes the unqualified, decayed type. Returns false for a type with
-// no modeled class (the _BitInt and nullptr_t types are not modeled, and
-// va_list's class depends on the target ABI).
+// no class here: _BitInt is not modeled, nullptr_t (Clang's -1) is refused,
+// and va_list's class depends on the target ABI.
 BUSTER_C_INTERNAL bool c_parse_classify_type_value(CParseResult* result, CTypeId type, u32* value_out)
 {
     CTypeKind kind = type.value < result->type_count ? result->types[type.value].kind : C_TYPE_INVALID;
