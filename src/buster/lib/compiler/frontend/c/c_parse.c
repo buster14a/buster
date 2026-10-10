@@ -8325,6 +8325,44 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_tree_string(CTypeParseMachine* mach
     return type;
 }
 
+// A string literal's answer (C_AST_TYPE_STRING) for c_parse_expression_tree_query,
+// outside it so the common answer path stays as it was. The replay types the
+// answer, so it runs first; the mutation limit and the verify mark are taken
+// before it, where the machine's checkpoint takes them.
+BUSTER_C_INTERNAL bool c_parse_expression_tree_string_answer(CTypeParseMachine* machine, Arena* arena, CPreprocessResult const* preprocess,
+                                                             CParseResult* result, CScopeId scope, u32 end, u32 slot, u32 flags, CAstTypeAnswer tree,
+                                                             CTypeId* type_out, CAstTypePending* pending)
+{
+    u32 type_limit = result->type_count;
+#if BUSTER_INCLUDE_TESTS
+    CAstTypeVerifyMark mark = c_ast_types_verify_begin(result);
+#else
+    BUSTER_UNUSED(pending);
+#endif
+    tree.type = c_parse_expression_tree_string(machine, arena, preprocess, result, scope, flags, tree);
+    tree.status = C_AST_TYPE_ANSWER;
+    tree.replay_start = 0;
+    tree.replay_end = 0;
+    bool answered = tree.type.value < result->type_count;
+#if BUSTER_INCLUDE_TESTS
+    if (answered && c_ast_types_verifying())
+    {
+        *pending = (CAstTypePending){.answer = tree, .mark = mark};
+        c_ast_types_verify_hold_replay(result, pending);
+        answered = false;
+    }
+#endif
+    if (answered)
+    {
+        c_ast_types_publish(machine, result, tree, end);
+        machine->mutation_type_limit = type_limit;
+        *type_out = tree.type;
+        if (slot != UINT32_MAX && !machine->expression_constraint.length)
+            c_parse_expression_query_publish(machine, slot, end, scope, tree.type, flags);
+    }
+    return answered;
+}
+
 // The tree expression typer's turn in c_parse_expression_type_query, on a
 // range the per-body memo does not hold. True when the tree answered, which
 // leaves the machine state, *type_out and the memo entry exactly as the
@@ -8335,47 +8373,17 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_tree_string(CTypeParseMachine* mach
 // or machine run answers the same range and c_parse_expression_type_query
 // compares the two at its end. A replayed answer's appends are made here too
 // (c_parse_expression_tree_replay), and a string literal's answer is its own
-// replay (c_parse_expression_tree_string), which may fail and leave the query
-// to the machine.
+// replay (c_parse_expression_tree_string_answer), which may fail and leave
+// the query to the machine.
 BUSTER_C_INTERNAL bool c_parse_expression_tree_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult const* preprocess, CParseResult* result,
                                                        CScopeId scope, u32 start, u32 end, u32 slot, u32 flags, CTypeId* type_out,
                                                        CAstTypePending* pending)
 {
     CAstTypeAnswer tree = c_ast_types_answer(machine, preprocess, result, scope, start, end);
     bool answered = tree.status == C_AST_TYPE_ANSWER;
-#if !BUSTER_INCLUDE_TESTS
-    BUSTER_UNUSED(pending);
-#endif
     if (tree.status == C_AST_TYPE_STRING)
     {
-        // The replay types the answer, so it runs first; the mutation limit
-        // and the verify mark are taken before it, where the machine's
-        // checkpoint takes them.
-        u32 type_limit = result->type_count;
-#if BUSTER_INCLUDE_TESTS
-        CAstTypeVerifyMark mark = c_ast_types_verify_begin(result);
-#endif
-        tree.type = c_parse_expression_tree_string(machine, arena, preprocess, result, scope, flags, tree);
-        tree.status = C_AST_TYPE_ANSWER;
-        tree.replay_start = 0;
-        tree.replay_end = 0;
-        answered = tree.type.value < result->type_count;
-#if BUSTER_INCLUDE_TESTS
-        if (answered && c_ast_types_verifying())
-        {
-            *pending = (CAstTypePending){.answer = tree, .mark = mark};
-            c_ast_types_verify_hold_replay(result, pending);
-            answered = false;
-        }
-#endif
-        if (answered)
-        {
-            c_ast_types_publish(machine, result, tree, end);
-            machine->mutation_type_limit = type_limit;
-            *type_out = tree.type;
-            if (slot != UINT32_MAX && !machine->expression_constraint.length)
-                c_parse_expression_query_publish(machine, slot, end, scope, tree.type, flags);
-        }
+        answered = c_parse_expression_tree_string_answer(machine, arena, preprocess, result, scope, end, slot, flags, tree, type_out, pending);
     }
 #if BUSTER_INCLUDE_TESTS
     else if (answered && c_ast_types_verifying())
