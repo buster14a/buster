@@ -14,7 +14,7 @@ From the repository root, build `ide` normally and use a **new** output director
 ```
 
 On desktop SysV x86-64, the defaults use fourteen successful permanent cases,
-two rejection controls, and four generated cases, seed 1, a
+two rejection controls, and four [generated cases](#generated-cases), seed 1, a
 10-second deadline per child, and at most 64 reduction trials for the first
 runtime mismatch in each case. A reference compiler must be available; its
 absence is a failure, not a skip. `--cc` accepts one executable, not a shell
@@ -156,6 +156,53 @@ These are accepted flag spellings, not a claim that all optimization spellings
 implement different passes. Optimization flags precede allocator flags because
 the driver's existing last-option-wins rule lets a later `-O` restore FAST.
 QUALITY exercises its scheduling policy; there is no invented scheduler flag.
+
+## Distinct objects
+
+Many rows produce byte-identical output: on Linux x86-64, measured with this
+change on `3f3b88b1`, the default corpus of 20 cases × 216 rows produced 79 distinct candidate
+artifacts. Each row still compiles, verifies and compares its diagnostics. The
+artifact the candidate wrote is its identity: the object for cases with a fixed
+host caller, otherwise the executable it linked itself. A row whose artifact
+matches an earlier row's size and `buster_hash_64`, and whose bytes are then
+confirmed equal, reuses that row's link and run observation instead of linking
+and executing it again. Classification still runs per row, so a failing object
+names every row that produced it. Platforms whose linkers write timestamps or
+paths into executables simply find fewer matches.
+
+Each tracked row writes `object.txt` with the artifact's index, the first row
+that produced it, whether this row reused it, and its hash and size.
+`DIFFERENTIAL_CASE` lines, each case's `result.txt` (version 3) and the final
+`DIFFERENTIAL_SUMMARY` line report `distinct_objects` beside the row count.
+Rejection cases produce no artifact and report zero. The top-level
+`summary.txt` keeps its version 1 format.
+
+## Generated cases
+
+`--generated N` adds N cases named `seed-<value>`, where each value advances a
+fixed LCG from `--seed`. `d_generated_source` turns the value into a program
+whose structure varies, not just its literals. It picks lane types from
+`signed char` to `unsigned long long`, global variables, a partially
+initialized aggregate that is passed and returned by value, and two to six functions
+with mixed narrow and wide parameters. Function bodies mix plain and compound
+assignments, local arrays, a pointer to a local, `if`/`else`, bounded `for` and
+`do`/`while` loops with `break` and `continue`, `switch` with fallthrough,
+calls to earlier functions, and `&&`, `||` and `?:` that sequence a
+trace-recording call. Expressions chain signed and unsigned `+ - * & | ^`,
+guarded `/` and `%`, masked variable shifts, unary `- ~ !`, comparisons and
+exact floating-point conversions. `main` hashes every global, the aggregate and
+the call trace into its output and exit status. The independent host compiler
+at O0 and O2 supplies the expected observation.
+
+Programs are free of undefined behavior even without `-fwrapv`. Narrow signed
+arithmetic is computed in a wider signed type. 64-bit signed `+`, `-`, `*` and
+`<<` use unsigned arithmetic, and divisors exclude 0 and −1. Floating-point
+values are small exact dyadic numbers. Out-of-range signed narrowing is
+implementation-defined; every supported target defines it as modulo. The
+generator is iterative, and its self-test checks that output is reproducible,
+that program shape varies by seed, and that sixteen seeds together reach every
+listed construct. The exact source is saved as `seed-<value>.c` in the output
+directory.
 
 This runner executes the **native target**. It does not pretend a successfully
 written cross-target object was executed. Continue running `test_mode_matrix`
