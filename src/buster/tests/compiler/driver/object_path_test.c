@@ -2134,6 +2134,54 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_preinit_tests(UnitTestArg
 #endif
             BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(shared_output));
         }
+        // A dynamic executable's preinit entries are the loader's: ld.so runs
+        // DT_PREINIT_ARRAY, with argc, argv and envp, before the constructors
+        // of the shared libraries it loads, and those before the executable's
+        // own. The trace is 9 (preinit), 2 (the library), 3 (the program);
+        // an entry stub call would give 293. `-pie` exists only on x86-64.
+        String8 library_source = string_format_z(arena, S8("{S8}/preinitdep.c"), root);
+        String8 library = string_format_z(arena, S8("{S8}/libpreinitdep.so"), root);
+        String8 dynamic_source = string_format_z(arena, S8("{S8}/dynamic.c"), root);
+        String8 dynamic_object = string_format_z(arena, S8("{S8}/dynamic.o"), root);
+        BUSTER_TEST(arguments, file_write(library_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "extern volatile int trace;\n"
+            "__attribute__((constructor)) static void library_constructor(void) { trace = trace * 10 + 2; }\n"
+            "int preinit_dependency_touch(void) { return 0; }\n"))));
+        BUSTER_TEST(arguments, file_write(dynamic_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "volatile int trace;\n"
+            "static void early(int argc, char **argv, char **envp) { trace = trace * 10 + (argc == 1 && argv[0] && envp ? 9 : 8); }\n"
+            "__attribute__((section(\".preinit_array\"), used)) static void (*entry)(int, char **, char **) = early;\n"
+            "__attribute__((constructor)) static void own(void) { trace = trace * 10 + 3; }\n"
+            "int preinit_dependency_touch(void);\n"
+            "int main(void) { return preinit_dependency_touch() + (trace != 923); }\n"))));
+        String8 library_compile[] = {S8("-w"), S8("-O2"), S8("-fPIC"), S8("-shared"), library_source, S8("-o"), library};
+        String8 dynamic_compile[] = {S8("-w"), S8("-O2"), S8("-fPIE"), S8("-c"), dynamic_source, S8("-o"), dynamic_object};
+        bool dynamic_produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(library_compile)) &&
+                                compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(dynamic_compile));
+        BUSTER_TEST(arguments, dynamic_produced);
+        if (dynamic_produced)
+        {
+            String8 library_directory = string_format_z(arena, S8("-L{S8}"), root);
+            String8 dynamic_oracle = string_format_z(arena, S8("{S8}/dynamic-oracle"), root);
+            String8 dynamic_host_link[] = {S8("-no-pie"), dynamic_object, library_directory, S8("-lpreinitdep"), S8("-o"), dynamic_oracle};
+            bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(dynamic_host_link));
+            BUSTER_TEST(arguments, linked);
+            if (linked) BUSTER_TEST(arguments, compiler_driver_tls_export_run(arguments, dynamic_oracle, root));
+#if BUSTER_CPU_ARCH_X86_64
+            String8 kinds[] = {S8("-no-pie"), S8("-pie")};
+#else
+            String8 kinds[] = {S8("-no-pie")};
+#endif
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(kinds); index += 1)
+            {
+                String8 output = string_format_z(arena, S8("{S8}/dynamic{S8}-buster"), root, kinds[index]);
+                String8 command[] = {kinds[index], dynamic_object, library_directory, S8("-lpreinitdep"), S8("-o"), output};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_tls_export_run(arguments, output, root));
+            }
+        }
         BUSTER_TEST(arguments, os_directory_delete(root));
     }
     return result;

@@ -158,12 +158,47 @@ part of it that reads nodes.
 
 ## Storage and lifetime
 
-During construction, columns grow in fixed-size chunks in the phase arena.
-They are then sealed into the caller's arena as exact-sized contiguous arrays,
-one copy per column. The phase arena is released afterwards, or a private one
-is retired. `CAstStatistics` reports the retained bytes, the transient high
-water mark and the bytes copied by sealing. On the first syntax error the
-build records one structured diagnostic and publishes an empty tree, so a
+The builder writes each node once, where the published tree keeps it. Each of
+the four columns grows in place in its own private arena (`CAstStorage`):
+- The arena reserves address space for `C_AST_COLUMN_CAPACITY` nodes, which
+  is 2^28. Across the four columns that is 13 bytes per node, or 3.25 GiB of
+  address space, not memory.
+- The arena commits `C_AST_COLUMN_STEP` (65,536) nodes at a time as the
+  builder appends.
+
+Nothing is staged or sealed. A tree larger than its reservations moves into
+reservations of twice the capacity, once per doubling. That move is the only
+copy a build can make, and `CAstStatistics.column_copy_bytes` counts it. The
+unity self-host tree fills about 1% of the first reservation. The reservation
+is not a bound on the tree, so the builder's limit stays `C_AST_NODE_LIMIT`.
+
+Columns allocated once in the caller's arena at an upper bound would need no
+arenas of their own, but no bound on nodes per final-stream token is proven.
+Wrapper nodes share tokens: `int x;` is five nodes for three tokens, against
+0.66 nodes per token on the self-host. A proven bound would need an audit of
+every append site, would reserve several times the tree, and would leave gaps
+between four columns sized that way in the caller's arena.
+
+The tree owns its column arenas:
+- `c_ast_release` retires them into the calling thread's reuse pool. Each
+  keeps at most `C_PHASE_ARENA_RETAINED_SIZE` committed, as the preprocessor's
+  private arenas do under `c_preprocess_release`.
+- It must run on the thread that built the tree.
+- It is idempotent through any copy, because copies share one storage record
+  in the caller's arena.
+- The driver releases the pilot tree at the end of the unit, before the
+  preprocessing result.
+
+The caller's arena holds the storage record, the diagnostics and the HYBRID
+and EXPLICIT slices. Builder frames, stacks, bindings and the refill ring live
+in the phase arena, which is released afterwards, or in a private one that is
+retired. `CAstStatistics` reports:
+- the retained bytes;
+- the phase arena's high-water mark, which holds no node bytes;
+- the bytes a move copied.
+
+On the first syntax error, or a refused reservation, the build records one
+structured diagnostic, releases its columns and publishes an empty tree, so a
 partial tree is never handed on. The tree refers to the preprocessing result's
 tokens and symbols by index, so that result must stay alive as long as the
 tree does.
@@ -233,9 +268,10 @@ The tree accepts two attribute placements that need node slots of their own:
 [driver guide](../driver.md)) is off by default. When given, the C compile path
 calls `c_ast_build` after `c_preprocess` succeeds, inside the existing parse
 phase boundary, so the build's time is part of `parse_ns` and of the `parse`
-phase in `-fmetrics-out`. The bare flag is the implicit layout. The tree lives
-in the unit's arena. The driver then takes the unit's declaration records from
-`c_parse_ast_from_tree` in place of `c_parse_ast`
+phase in `-fmetrics-out`. The bare flag is the implicit layout. The tree's
+storage record lives in the unit's arena and its columns in their own arenas,
+which the unit releases when it ends. The driver then takes the unit's
+declaration records from `c_parse_ast_from_tree` in place of `c_parse_ast`
 ([declaration split](#declaration-split-from-the-tree)), and hands the tree to
 semantic analysis in `CParserResult.ast`, where the
 [tree expression typer](#tree-expression-typer) reads it; nothing else does.
@@ -250,7 +286,7 @@ never reach the hook.
 Under `-v` the driver prints four rows with the other verbose counters:
 
 - `C_AST nodes=<n> tokens=<parser tokens> build_ns=<c_ast_build wall time>
-  retained_bytes=<> transient_high_water=<> sealed_copy_bytes=<>
+  retained_bytes=<> transient_high_water=<> column_copy_bytes=<>
   finalize_child_entries=<> layout=<name>`
 - `C_AST_WALK walk_ns=<one full c_ast_walk over the root> walk_steps=<events>
   scan_ns=<one linear pass over the kinds column> children_ns=<c_ast_children
@@ -694,7 +730,7 @@ The first hosted census is
 - The build and retained budgets pass: the implicit build takes about 1.03–1.06×
   `c_parse_ast`, and the tree retains 8.6 B per token.
 - The transient budget fails: the chunks hold the whole tree until the seal
-  copies it.
+  copies it. The in-place columns, below, fix that.
 - The implicit layout is kept. The explicit indices save about 2 ms per full
   traversal of the self-host tree, and cost 16–36 ms of build time and 8–26 MB.
 
@@ -845,6 +881,43 @@ The same audit records that version's hosted census, diagnostic only:
 - On the merge with main `f6e8d25f`, the same arms read −0.077% on the
   default path and −0.84% under the pilot.
 - The requested 9700X comparison decides the performance disposition (#2761).
+
+For the in-place columns ([storage](#storage-and-lifetime)), these budgets were
+declared before the measured runs, on the same input and flags, with stage 2's
+four arms (A base default, B base with `-fc-ast-pilot`, C candidate with it,
+D candidate default):
+- correctness:
+  - the self-host tree is identical in B and C, by a one-off digest of the
+    node count and the four columns;
+  - the tests compare trees built with and without column moves, under every
+    refill batch and layout;
+  - `-c` objects (`-g0` and `-g`) are byte-identical across the four arms.
+- the copy: `column_copy_bytes` is 0 on the self-host.
+- the pilot's transient budget, unchanged: the phase arena's peak holds only
+  frames, stacks and bindings. On the self-host `transient_high_water` must be
+  at most 2 MiB; the base reports the whole tree there, about 35 MB.
+- the build's own cost (C against B): fewer instructions in `c_ast_build`
+  inclusive, with the column arenas' reservations and commits charged, and
+  no more instructions in the whole compile, the release included.
+- the default path (D against A): within ±0.05% Ir.
+- memory: peak RSS with the pilot does not rise (C against B, within 1%).
+
+Wall time is reported but not budgeted: on this host it cannot resolve an
+effect of a few milliseconds.
+
+The in-place columns' hosted census is
+[`2026-10-09T214805Z`](../../performance-audits/2026-10-09T214805Z.md), taken
+the same way and diagnostic only. Every budget passes:
+- The tree digests and the objects of all four arms are identical.
+- `column_copy_bytes` is 0, where the base sealed 35.4 MB.
+- `transient_high_water` falls from 35.6 MB to 60 KB, so the pilot's transient
+  budget now passes.
+- The pilot's compile loses 33.1 M instructions (−0.34%), 35.4 M of them the
+  seal's copy, and 8.2 MB of peak RSS.
+- The default path is within −0.0007%.
+- `c_ast_build`'s own hosted time falls from a median of 86.6 ms to 63.5 ms;
+  the whole compile's wall time is unresolved by host noise.
+- Zen 5 validation stays incomplete (#2761).
 
 For the [declaration split](#declaration-split-from-the-tree), these budgets
 were declared before its measured runs. The input and flags are the same as

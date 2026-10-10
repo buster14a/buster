@@ -489,7 +489,7 @@ struct CompilerDriverCAstPilotResult
     u64 build_nanoseconds;
     u64 retained_bytes;
     u64 transient_high_water;
-    u64 sealed_copy_bytes;
+    u64 column_copy_bytes;
     u64 finalize_child_entries;
     u64 walk_nanoseconds;
     u64 walk_steps;
