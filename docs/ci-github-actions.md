@@ -676,8 +676,14 @@ event base, actual tested merge and independently trusted policy are separate
 identities. Merge groups are independently evaluated against their actual base
 and complete synthetic head.
 
-The initial exact allowlist is `README.md`, `docs/compiler-lifetime.md`,
-`docs/diagnostics.md`, and `docs/incremental-compilation.md`. Arbitrary Markdown,
+The exact allowlist is `README.md`, `docs/byte-writer.md`,
+`docs/canonical-cfg-publication.md`, `docs/canonical-fast-pipeline.md`,
+`docs/compiler-lifetime.md`, `docs/diagnostics.md`,
+`docs/incremental-compilation.md`, `docs/ir-validation-boundaries.md`, and
+`docs/object-emission.md`. An entry is added only when no tool, test, build
+input, manifest or Pages artifact reads it and no workflow names it. Readers
+common to every tracked Markdown file (the whole-tree link check and the
+Pages `docs/**` trigger) do not disqualify it. Arbitrary Markdown,
 agent instructions, executable policy under docs, source, tests, fixtures,
 runtime assets, build inputs and workflow changes retain ordinary validation.
 Only regular mode-100644 blobs are eligible. Additions/deletions are supported;
