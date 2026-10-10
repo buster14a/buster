@@ -12,7 +12,7 @@ opt-in [driver hook](#driver-pilot-hook) builds it, and two consumers read it:
 - the [declaration split](#declaration-split-from-the-tree) publishes
   `c_parse_ast`'s top-level records from its declaration nodes;
 - the [tree expression typer](#tree-expression-typer) answers function-body
-  expression-type queries during semantic analysis.
+  and file-scope initializer expression-type queries during semantic analysis.
 
 Otherwise `c_analyze_semantics_only` and `c_lower_to_ir_with_options` still
 rediscover syntax from token ranges, as described in the
@@ -158,12 +158,47 @@ part of it that reads nodes.
 
 ## Storage and lifetime
 
-During construction, columns grow in fixed-size chunks in the phase arena.
-They are then sealed into the caller's arena as exact-sized contiguous arrays,
-one copy per column. The phase arena is released afterwards, or a private one
-is retired. `CAstStatistics` reports the retained bytes, the transient high
-water mark and the bytes copied by sealing. On the first syntax error the
-build records one structured diagnostic and publishes an empty tree, so a
+The builder writes each node once, where the published tree keeps it. Each of
+the four columns grows in place in its own private arena (`CAstStorage`):
+- The arena reserves address space for `C_AST_COLUMN_CAPACITY` nodes, which
+  is 2^28. Across the four columns that is 13 bytes per node, or 3.25 GiB of
+  address space, not memory.
+- The arena commits `C_AST_COLUMN_STEP` (65,536) nodes at a time as the
+  builder appends.
+
+Nothing is staged or sealed. A tree larger than its reservations moves into
+reservations of twice the capacity, once per doubling. That move is the only
+copy a build can make, and `CAstStatistics.column_copy_bytes` counts it. The
+unity self-host tree fills about 1% of the first reservation. The reservation
+is not a bound on the tree, so the builder's limit stays `C_AST_NODE_LIMIT`.
+
+Columns allocated once in the caller's arena at an upper bound would need no
+arenas of their own, but no bound on nodes per final-stream token is proven.
+Wrapper nodes share tokens: `int x;` is five nodes for three tokens, against
+0.66 nodes per token on the self-host. A proven bound would need an audit of
+every append site, would reserve several times the tree, and would leave gaps
+between four columns sized that way in the caller's arena.
+
+The tree owns its column arenas:
+- `c_ast_release` retires them into the calling thread's reuse pool. Each
+  keeps at most `C_PHASE_ARENA_RETAINED_SIZE` committed, as the preprocessor's
+  private arenas do under `c_preprocess_release`.
+- It must run on the thread that built the tree.
+- It is idempotent through any copy, because copies share one storage record
+  in the caller's arena.
+- The driver releases the pilot tree at the end of the unit, before the
+  preprocessing result.
+
+The caller's arena holds the storage record, the diagnostics and the HYBRID
+and EXPLICIT slices. Builder frames, stacks, bindings and the refill ring live
+in the phase arena, which is released afterwards, or in a private one that is
+retired. `CAstStatistics` reports:
+- the retained bytes;
+- the phase arena's high-water mark, which holds no node bytes;
+- the bytes a move copied.
+
+On the first syntax error, or a refused reservation, the build records one
+structured diagnostic, releases its columns and publishes an empty tree, so a
 partial tree is never handed on. The tree refers to the preprocessing result's
 tokens and symbols by index, so that result must stay alive as long as the
 tree does.
@@ -233,13 +268,16 @@ The tree accepts two attribute placements that need node slots of their own:
 [driver guide](../driver.md)) is off by default. When given, the C compile path
 calls `c_ast_build` after `c_preprocess` succeeds, inside the existing parse
 phase boundary, so the build's time is part of `parse_ns` and of the `parse`
-phase in `-fmetrics-out`. The bare flag is the implicit layout. The tree lives
-in the unit's arena. The driver then takes the unit's declaration records from
-`c_parse_ast_from_tree` in place of `c_parse_ast`
+phase in `-fmetrics-out`. The bare flag is the implicit layout. The tree's
+storage record lives in the unit's arena and its columns in their own arenas,
+which the unit releases when it ends. The driver then takes the unit's
+declaration records from `c_parse_ast_from_tree` in place of `c_parse_ast`
 ([declaration split](#declaration-split-from-the-tree)), and hands the tree to
 semantic analysis in `CParserResult.ast`, where the
 [tree expression typer](#tree-expression-typer) reads it; nothing else does.
-The object, every diagnostic and every later stage are unchanged. The driver has no phase arena to lend (`c_preprocess` is not
+With it the driver sets `CParserResult.type_interning`, which the typer's
+answers for casts and `&` need ([interned rows](#interned-rows)). The object,
+every diagnostic and every later stage are unchanged. The driver has no phase arena to lend (`c_preprocess` is not
 given one either), so the builder creates and retires its own. A build that is
 not complete fails the unit with the parse error class; its diagnostic is
 published exactly as a `c_parse_ast` diagnostic is. `-E` and assembly inputs
@@ -248,17 +286,18 @@ never reach the hook.
 Under `-v` the driver prints four rows with the other verbose counters:
 
 - `C_AST nodes=<n> tokens=<parser tokens> build_ns=<c_ast_build wall time>
-  retained_bytes=<> transient_high_water=<> sealed_copy_bytes=<>
+  retained_bytes=<> transient_high_water=<> column_copy_bytes=<>
   finalize_child_entries=<> layout=<name>`
 - `C_AST_WALK walk_ns=<one full c_ast_walk over the root> walk_steps=<events>
   scan_ns=<one linear pass over the kinds column> children_ns=<c_ast_children
   over every node into a scratch buffer> child_entries=<sum of child counts>
   scan_calls=<CALL nodes the scan counted>`
-- `C_AST_TYPES bodies=<function bodies typed> nodes_typed=<expression nodes
-  the eager pass visited> nodes_accepted=<those it gave a type> answers=<type
-  queries answered from the tree> declines=<queries that mapped to a node the
-  typer does not vouch for> misses=<queries that mapped to no node>
-  gated=<queries met in a machine state the typer leaves alone>`
+- `C_AST_TYPES bodies=<function bodies typed> initializers=<file-scope
+  initializers a query had typed> nodes_typed=<expression nodes the eager pass visited>
+  nodes_accepted=<those it gave a type> answers=<type queries answered from
+  the tree> declines=<queries that mapped to a node the typer does not vouch
+  for> misses=<queries that mapped to no node> gated=<queries met in a machine
+  state the typer leaves alone>`
 - `C_AST_SPLIT units=<units whose records the tree split published>
   records=<records it published> assertions=<body _Static_assert ranges it
   published> fallbacks=<units it handed to c_parse_ast's walker>
@@ -276,22 +315,45 @@ evidence.
 ## Tree expression typer
 
 `c_ast_types.c` answers semantic analysis's expression-type queries in function
-bodies from the tree, in place of the speculative type machine
-(`CTypeParseMachine` in `c_parse.c`). Stage 1 covers names, literals and
-postfix chains; stage 2 adds the operators. It runs only when the caller
-supplies a tree in `CParserResult.ast`, which today only the
-[driver hook](#driver-pilot-hook) does; without one, analysis is unchanged.
+bodies and in file-scope initializers from the tree, in place of the
+speculative type machine (`CTypeParseMachine` in `c_parse.c`). Stage 1 covers
+names, literals and postfix chains; stage 2 adds the operators; stage 3 adds
+file-scope initializers, and, in bodies, `&` and casts to primitive and
+pointer type names over rows the machine interns under the pilot. It runs
+only when the caller supplies a tree in `CParserResult.ast`, which today only
+the [driver hook](#driver-pilot-hook) does; without one, analysis is
+unchanged.
 
 - **When it types.** `c_parse_validate_lowering_constraints` indexes the
-  tree's top-level function definitions once (`c_ast_types_bodies_prepare`).
-  Before each body's validator families run, `c_ast_types_body_begin` makes one
-  forward pass over the body's node interval. Children come before parents, so
-  each expression node's operands are already typed when the node is reached.
-  The pass records each node's token span and, for the accepted kinds, its
-  type, whether it is safe under constraint checks, and the bit-field width of
-  a member. A node is accepted only when every operand the machine types for
-  it is accepted. Its arrays live in the machine's scratch arena above the
-  body's validation mark and are released with the rest of the body's scratch.
+  tree's top-level function definitions and declarations once
+  (`c_ast_types_bodies_prepare`). Before each body's validator families run,
+  `c_ast_types_body_begin` makes one forward pass over the body's node
+  interval. Children come before parents, so each expression node's operands
+  are already typed when the node is reached. The pass records each node's
+  token span and, for the accepted kinds, its type, whether it is safe under
+  constraint checks, and the bit-field width of a member. A node is accepted
+  only when every operand the machine types for it is accepted. Its arrays
+  live in the machine's scratch arena above the body's validation mark and are
+  released with the rest of the body's scratch.
+- **File-scope initializers.** `c_parse_validate_static_initializers` made
+  nearly all of the queries outside a typed body: 77,545 of 79,035 on the unity
+  self-host, at about 190 M machine Ir, against at most 3 M for any other
+  validator (audit `2026-10-09T213311Z`). Before it validates a file-scope
+  object's initializer, `c_ast_types_initializer_begin` reserves the arrays
+  for that initializer's subtree, over the initializer's tokens, and they are
+  released afterwards. The subtree is typed the same way, but only when the
+  first query that the literal fast path does not answer reaches it. Until
+  then a lone literal keeps the literal path (`c_ast_types_waiting`). That
+  matters: 61 of the self-host's 2,777 initializers are numeric tables that
+  are only asked about lone literals, and they hold 551,736 of the 736,333
+  expression nodes. Typing them all cost more than the machine runs it
+  removed. The binder records no identifier use outside bodies. Where it recorded none, the machine resolves an identifier, and a
+  cast's or compound literal's typedef name, by spelling in the query's scope,
+  so the pass does the same lookup in the file scope. Each such node keeps the
+  entity it found and carries the lookup mark, so the query repeats the lookup
+  in its own scope (`c_ast_types_lookups_agree`). The kinds and rules are the
+  bodies'. There is no memo at file scope, so an answer publishes only the
+  machine state.
 - **When it answers.** `c_parse_expression_type_query` reads the per-body memo
   first. On a miss it asks the typer, which maps the range to a node (after
   stripping balanced outer parentheses, as the machine does). It answers only
@@ -306,11 +368,13 @@ supplies a tree in `CParserResult.ast`, which today only the
   - over a `_Generic` or `__builtin_types_compatible_p` site;
   - while an enumerator list is half parsed;
   - when, in the query's scope, a callee or a cast's typedef name somewhere in
-    the subtree resolves to an entity other than the one the binder bound
-    (`c_ast_types_lookups_agree`).
+    the subtree resolves to an entity other than the one the binder bound, or,
+    in an initializer, an unbound name resolves to an entity other than the one
+    the pass found (`c_ast_types_lookups_agree`).
 - **What it accepts.** Each answer is a row that already exists: an entity's,
-  member's, element's, return or typedef type, an operand's own row, or an
-  immutable scalar row. The rules are the machine's own functions, shared
+  member's, element's, return or typedef type, an operand's own row, an
+  immutable scalar row, or an interned primitive or pointer row (see
+  [Interned rows](#interned-rows)). The rules are the machine's own functions, shared
   through `c_internal.h` and applied to operand types the pass already holds:
   `c_parse_expression_arithmetic_type`, the promotion with a bit-field width,
   the operator precedence and the scalar conversion check.
@@ -327,22 +391,47 @@ supplies a tree in `CParserResult.ast`, which today only the
       vector and same-row aggregate arms;
     - casts and compound literals whose type name is one typedef name;
     - `sizeof` and `_Alignof`.
+  - Stage 3 (`c_ast_types_type_name`, `c_ast_types_cast`,
+    `c_ast_types_address`):
+    - `&`, whose answer is the interned pointer to the operand's row;
+    - casts and compound literals whose type name is a typedef name or a run
+      of primitive specifier words (with `const` and `volatile`), then plain
+      `*`s. The answer is the typedef's row or the interned primitive row,
+      under interned pointer rows. Each is accepted only once every row it
+      reads is already interned, so its machine run appends nothing at any
+      task level.
 - **What it declines.** Every shape whose machine answer appends a row stays
   with the machine:
   - a qualified member or array element;
-  - `&` and string literals;
   - an array operand of `+` or `-`, which decays;
   - a pointer or `nullptr` conditional;
   - a qualified operand whose unqualified row was never recorded;
-  - a cast or compound literal to any other type name. The machine's operator
-    scan reads a parenthesized type name through a reader that appends
-    primitive and pointer rows, and its leaf reads it again, so the number of
-    rows depends on how many of its task levels see the group.
+  - a cast or compound literal to any other type name: a qualified typedef,
+    a tag, a qualified or `restrict` pointer, or an array or function
+    declarator. Their readers append rows that are not interned.
+  - `&` or a type name whose interned rows do not exist yet when the body is
+    typed;
+  - a string literal. Its array row is not interned, because lowering gives
+    each array row its own IR array type and `-g` describes every IR type.
+    A query on one costs the machine little: the unity self-host makes about
+    6,650, against 2.19 million queries. A literal path that answered them
+    before the machine saved about 1 million instructions there, and its
+    check on every query cost more than that, so it was dropped.
 
   An operand the machine scans but does not type (a cast's operand without
-  constraint checks, a `sizeof` expression) must therefore hold no type name.
-  The typer also declines a `?:` whose range holds a top-level comma or
-  assignment, which the machine splits at instead.
+  constraint checks, a `sizeof` expression) must therefore hold no type name
+  the tree did not accept. The typer also declines a `?:` whose range holds a
+  top-level comma or assignment, which the machine splits at instead.
+- **The replay.** With constraint checks the machine types a cast's operand.
+  When that operand is one string-literal token, alone or in parentheses
+  (`(char8*)("text")`, as `S8()` spells it), its typing appends the literal's
+  array row. The tree answers such a query anyway: the answer carries the
+  token, and `c_parse_expression_tree_query` makes exactly the machine's
+  operand task. That task strips the enclosing parentheses, probes the
+  per-body memo for the token under the query's scope and flags and, on a
+  miss, calls the machine's string leaf, which appends the same row. The node
+  is never constraint-safe for its parents, whose machine runs would type the
+  literal too. An operand of several literal tokens is not replayed.
 - **Constraint checks.** A checked query is answered only from a node whose
   operands are safe and whose own checked-mode rule cannot fire. For the
   binary operators that is the machine's operand rule. The cases it settles by
@@ -352,6 +441,90 @@ supplies a tree in `CParserResult.ast`, which today only the
   scalar.
 - **Authority.** The machine remains the only producer of diagnostics. A query
   the typer declines, misses or leaves alone runs the machine as before.
+- **Designator probes.** Nearly every miss was one of two designator probes
+  from `c_parse_validate_const_assignments`, 64,905 of 65,070 on the unity
+  self-host (about 56 M machine Ir):
+  - the lone `{` or `,` that its member walk takes for the base of the
+    `.name` designator after it;
+  - the `.name` chain that its assignment walk takes for the place before a
+    designator's `=`.
+
+  No expression starts with these tokens. The machine's direct reader stops at
+  the first one, so it fails without a diagnostic, a constraint, a new row or a
+  memo entry, and the walk reads only that failure. The walk therefore no
+  longer asks (`c_parse_designator_probe`), with or without a tree, so this is
+  a deliberate change to the default path as well. In verify mode the machine
+  answers each skipped probe anyway, and the probe must fail and leave the
+  diagnostics and table sizes as they were. A `[index]` designator, and a
+  probe range that starts at a `{` but runs on (`{ .a` before `.a.b`), still
+  run the machine.
+
+### Interned rows
+
+`c_parse_primitive_type`, `c_parse_pointer_chain` and the machine's `&` append
+a fresh row for every type name or address they read, and a cast's type name
+is read once per operator-scan level and again by its leaf. On the unity
+self-host 93.8% of the 96,717 pointer rows and nearly all of the 37,000
+primitive rows were copies. Under the pilot, inside
+`c_parse_validate_lowering_constraints`' loop over function bodies, where the
+per-body queries mint them, those builders go through `c_parse_intern_type`.
+It returns the live row equal to the one it would append (`CTypeInterning` in
+`c_internal.h`). The tree's answers for casts and `&` read those rows.
+File-scope initializers are validated before the window opens, where the
+machine appends, so an initializer's answers read no interned row
+(`c_ast_types_interned`) and those shapes decline there.
+
+Interning is part of the pilot, not the default path. Semantic analysis keeps
+the interning header only when the caller asks for it
+(`CParserResult.type_interning`), and the driver asks only with the tree
+(`-fc-ast-pilot`). Without it every builder appends as before. The first
+version of stage 3 interned on the default path too. Review held it because a
+default-path change needs 9700X acceptance, so it was narrowed
+([#3321](https://github.com/buster14a/buster/pull/3321)).
+
+A row interned there is observable only as table size:
+- It is never mutated in place. Only aggregate and enum rows are completed in
+  place.
+- No side table is keyed by its index. Alignment records, the definition
+  index and the aggregate lookup key rows with a tag or an unqualified link.
+  Lowering keys its per-type tables on array rows.
+- Lowering maps it to a scalar, qualified-scalar or pointer IR type, and
+  lowering interns those itself.
+- The window opens after every declaration has its rows, so an interned row
+  only ever replaces a later copy of itself. That copy resolves in the same
+  lowering pass, and the IR types, and so the `-g` type entries, keep their
+  order.
+
+Interning declarations too is not unobservable. Lowering maps rows in passes,
+in table order, and a struct resolves only once its members' rows are mapped.
+A member's interned `char *` row moved ahead of its struct, the struct resolved
+a pass earlier, and the `-g` type entries of the unity self-host came out in a
+different order.
+
+The same holds for an aggregate a body query defines. The machine reads most
+aggregate definitions written in expressions back from rows the declaration
+pass made. One whose type name puts a qualifier before the tag
+(`(const struct { char *p; })`) it defines itself, inside the window, with its
+row ahead of its members'. CTypeInterning's `suspended` counts the member
+segments the machine is reading (`c_type_parse_aggregate_range_step`), and
+nothing is interned while any is in flight. The machine's failure path takes
+back the segments it discards. Without that, a source of this shape kept its
+`-g0` object but its `-g` object changed. The unity self-host defines no
+aggregate inside the window. The c_ast corpus and the frontend fixtures define
+a few, but in none of them did interning move a member's row ahead of its
+aggregate, which is why the self-host checks missed it.
+`c_test_type_interning_objects` compiles
+both shapes with the window shut (`c_test_set_type_interning_off`) and open,
+at `-g0` and `-g`, with and without the tree, and requires identical objects
+and diagnostics.
+
+A `restrict`-qualified row is never interned, because
+`c_type_parse_root_finish` diagnoses an invalid `restrict` only on rows a
+query appends. Array rows are never interned: each lowers to its own IR array
+type, which `-g` describes. The interning log's live length,
+`CParseResult.interned_type_count`, rolls back with the result, so a row a
+rollback removed is never returned. The private constant-query copy, which
+must not write shared state, appends instead.
 
 `rederive.tree_type_{answers,declines,misses,nodes}` in the work ledger and the
 `C_AST_TYPES` row under `-v` count its work. `c_ast_test_types` probes each
@@ -481,8 +654,15 @@ tree, with it, and with it in verify mode (`c_test_ast_type_verify_set`), where
 the type machine also answers every query the tree answered. The first two
 runs must end with the same diagnostics and the same type-table sizes. Every
 tree answer must match the machine's in validity, structural type, constraint,
-nonplace fact, diagnostics and table growth. The fixtures give about 56,000
-checked answers, and the hosted frontend sources about 246,600 more.
+nonplace fact, diagnostics and table growth; a replayed answer's rows are
+taken back after the replay, and the machine must append the same rows again.
+The fixtures give about 56,600 checked answers on Linux x86-64, and the
+hosted frontend sources about 282,300 more. Preprocessed for Windows AArch64
+the fixtures reach fewer typed bodies: each stage-3 change alone gave about
+50,300 and 50,800 there. Verify mode also has the machine answer every
+designator probe the const-assignment walk skips (about 1,400 in the
+fixtures, 27,600 in all), and each must fail without a diagnostic or a new
+table row.
 
 The compiler sources are preprocessed against the host's C library, so the
 differential also covers glibc's headers. It caught `__float128`, which glibc
@@ -518,9 +698,10 @@ Deleting it waits on the hook becoming the default.
 
 The [tree expression typer](#tree-expression-typer) is the first consumer of
 the fourth row's replacement. Under `-fc-ast-pilot` it answers most of semantic
-analysis's body expression-type queries from expression nodes, operators
-included. The machine still answers the rest: every shape whose answer
-appends a type row, and every query outside a typed body. So that row is not
+analysis's body and file-scope initializer expression-type queries from
+expression nodes, operators, `&` and casts included. The machine still
+answers the rest: shapes whose answer appends a row that is not interned,
+and every query outside a typed body or initializer. So that row is not
 retired.
 
 ## Measurement plan
@@ -549,7 +730,7 @@ The first hosted census is
 - The build and retained budgets pass: the implicit build takes about 1.03–1.06×
   `c_parse_ast`, and the tree retains 8.6 B per token.
 - The transient budget fails: the chunks hold the whole tree until the seal
-  copies it.
+  copies it. The in-place columns, below, fix that.
 - The implicit layout is kept. The explicit indices save about 2 ms per full
   traversal of the self-host tree, and cost 16–36 ms of build time and 8–26 MB.
 
@@ -615,6 +796,128 @@ the same way and diagnostic only:
 - In bodies the machine still answers mostly shapes that append rows: casts to
   primitive or pointer type names, `&` and string literals. Outside bodies
   and misses are the other large items.
+
+For stage 3, which types file-scope initializers and skips the designator
+probes, these budgets were declared before its measured runs. They use the
+same input, flags and four arms as stage 2, with the base at main `14544ffe`,
+which already carries stage 2:
+- correctness: as for stage 2, and every skipped designator probe, over the
+  corpus and the self-host input, must also fail on the machine without a
+  diagnostic or a new table row.
+- the default path (D against A): the probe skip is the one intended change.
+  D must run fewer instructions than A, and its machine runs from queries
+  must fall by the skipped probes and by nothing else.
+- the initializer typer's own effect: C against B, less the default path's
+  D against A, must be fewer instructions, with the initializer passes and
+  their lookups charged, and fewer machine runs from queries outside typed
+  bodies.
+- adoption of the hook as the default: unchanged from stage 1. Only its
+  instruction half can be checked on this host.
+
+For stage 3 (interned rows, `&`, casts to primitive and pointer type names,
+the replay and the string literal path), these budgets were declared before
+its measured runs, on the same input, flags and four arms (A base default, B
+base with `-fc-ast-pilot`, C candidate with it, D candidate default):
+- correctness: as for stage 2. No verify mismatch over the corpus or the
+  self-host input; identical diagnostics and type-table sizes with and
+  without the tree; and byte-identical `-c` objects (`-g0` and `-g`) across
+  the four arms.
+- the default path (D against A) changes on purpose here, so it is measured
+  as its own arm: the type table must shrink, and neither `-fsyntax-only` nor
+  `-c` (`-g0`) may grow by more than the 0.05% rebuild noise in
+  instructions. A reduction is the expected result.
+- stage 3's own effect on the pilot: C against B must remove more
+  instructions than D against A, with the larger eager pass charged, and
+  fewer machine runs from queries.
+- adoption of the hook as the default: unchanged from stage 1. Hosted
+  instruction counts can show only its instruction half; wall time, `-c` and
+  RSS acceptance remain with the Zen 5 route.
+
+The first measured runs failed the default-path budget at +0.21% on
+`-fsyntax-only`, and the string literal path was the cause. It was dropped,
+and the budgets above apply unchanged to what remains.
+
+The row-appending slice's hosted census is
+[`2026-10-10T014058Z`](../../performance-audits/2026-10-10T014058Z.md), taken
+the same way and diagnostic only:
+- That census measured the first version, which interned on the default
+  path. Its hosted budgets passed: the default path was −0.064% on
+  `-fsyntax-only` and −0.114% on `-c`, and the type table at the end of body
+  validation shrank from 190,076 to 133,389 rows.
+- Stage 3 removes 0.72% of the pilot's instructions. Machine runs from queries
+  fall from 205,248 to 179,293. Most of the gain is the replay of `S8()`'s
+  `(char8*)("text")` casts.
+- Turning the hook on is now a 3.76% instruction gain against default.
+  Acceptance stays with Zen 5 (#2761), so the default stays off.
+- In bodies the machine still answers string literals (10,940 queries), `&`
+  and `*` levels whose pointer row is minted later in the same body (about
+  3,600), and checked casts over a declined or unsafe operand (about 850).
+
+Stage 3 was then narrowed so that interning runs only under the pilot
+(above), and the default path no longer changes. For that version, these
+budgets were declared before its measured runs, on the same input, flags and
+four arms. The base is now main `f01f5523`, which the branch merges.
+- correctness: as above, with every run of the corpus gate interning, and with
+  byte-identical `-c` objects (`-g0` and `-g`) across the four arms and
+  between the pilot with and without interned rows
+  (`c_test_type_interning_objects`).
+- the default path (D against A): unchanged, so within ±0.05% Ir on
+  `-fsyntax-only` and on `-c` (`-g0`).
+- stage 3's own effect on the pilot: C against B removes instructions, with
+  the larger eager pass charged, and fewer machine runs from queries.
+- performance acceptance: the hosted counts are diagnostic and claim nothing
+  for production. An exact-head 9700X compiler comparison is requested in the
+  PR head. Until it publishes, performance validation is incomplete (#2761),
+  and the hook stays opt-in.
+
+The same audit records that version's hosted census, diagnostic only:
+- The correctness and object-identity budgets pass.
+- The default path interns nothing and its objects are unchanged, but its
+  count moved by −0.069% on `-fsyntax-only`, outside the ±0.05% band on the
+  cheaper side. The cause is the code around the changed functions, compiled
+  differently, not saved work. `-c` is within the band at −0.031%.
+- Stage 3 removes 0.80% of the pilot's instructions. Machine runs from queries
+  fall from 207,217 to 181,003.
+- On the merge with main `f6e8d25f`, the same arms read −0.077% on the
+  default path and −0.84% under the pilot.
+- The requested 9700X comparison decides the performance disposition (#2761).
+
+For the in-place columns ([storage](#storage-and-lifetime)), these budgets were
+declared before the measured runs, on the same input and flags, with stage 2's
+four arms (A base default, B base with `-fc-ast-pilot`, C candidate with it,
+D candidate default):
+- correctness:
+  - the self-host tree is identical in B and C, by a one-off digest of the
+    node count and the four columns;
+  - the tests compare trees built with and without column moves, under every
+    refill batch and layout;
+  - `-c` objects (`-g0` and `-g`) are byte-identical across the four arms.
+- the copy: `column_copy_bytes` is 0 on the self-host.
+- the pilot's transient budget, unchanged: the phase arena's peak holds only
+  frames, stacks and bindings. On the self-host `transient_high_water` must be
+  at most 2 MiB; the base reports the whole tree there, about 35 MB.
+- the build's own cost (C against B): fewer instructions in `c_ast_build`
+  inclusive, with the column arenas' reservations and commits charged, and
+  no more instructions in the whole compile, the release included.
+- the default path (D against A): within ±0.05% Ir.
+- memory: peak RSS with the pilot does not rise (C against B, within 1%).
+
+Wall time is reported but not budgeted: on this host it cannot resolve an
+effect of a few milliseconds.
+
+The in-place columns' hosted census is
+[`2026-10-09T214805Z`](../../performance-audits/2026-10-09T214805Z.md), taken
+the same way and diagnostic only. Every budget passes:
+- The tree digests and the objects of all four arms are identical.
+- `column_copy_bytes` is 0, where the base sealed 35.4 MB.
+- `transient_high_water` falls from 35.6 MB to 60 KB, so the pilot's transient
+  budget now passes.
+- The pilot's compile loses 33.1 M instructions (−0.34%), 35.4 M of them the
+  seal's copy, and 8.2 MB of peak RSS.
+- The default path is within −0.0007%.
+- `c_ast_build`'s own hosted time falls from a median of 86.6 ms to 63.5 ms;
+  the whole compile's wall time is unresolved by host noise.
+- Zen 5 validation stays incomplete (#2761).
 
 For the [declaration split](#declaration-split-from-the-tree), these budgets
 were declared before its measured runs. The input and flags are the same as

@@ -676,8 +676,14 @@ event base, actual tested merge and independently trusted policy are separate
 identities. Merge groups are independently evaluated against their actual base
 and complete synthetic head.
 
-The initial exact allowlist is `README.md`, `docs/compiler-lifetime.md`,
-`docs/diagnostics.md`, and `docs/incremental-compilation.md`. Arbitrary Markdown,
+The exact allowlist is `README.md`, `docs/byte-writer.md`,
+`docs/canonical-cfg-publication.md`, `docs/canonical-fast-pipeline.md`,
+`docs/compiler-lifetime.md`, `docs/diagnostics.md`,
+`docs/incremental-compilation.md`, `docs/ir-validation-boundaries.md`, and
+`docs/object-emission.md`. An entry is added only when no tool, test, build
+input, manifest or Pages artifact reads it and no workflow names it. Readers
+common to every tracked Markdown file (the whole-tree link check and the
+Pages `docs/**` trigger) do not disqualify it. Arbitrary Markdown,
 agent instructions, executable policy under docs, source, tests, fixtures,
 runtime assets, build inputs and workflow changes retain ordinary validation.
 Only regular mode-100644 blobs are eligible. Additions/deletions are supported;
@@ -686,9 +692,18 @@ type and gitlink changes always select full validation. A bounded Git capture
 failure, missing object, malformed raw diff or stale merge identity selects full
 validation with a reason. No comment/whitespace stripping is attempted.
 
+A merge group is compared three ways: its base to the tested tree, the
+contribution itself, and the trusted policy (current main) to the group base.
+A prose-only group stacked behind a queued code group therefore runs full;
+its receipt names that cause `execution-affecting-base-drift`, distinct from
+`execution-affecting-or-unknown-input` for the group's own changes. Only the
+group at the front of an otherwise empty queue, whose base is main, can be
+no-code.
+
 `./build.sh ci_no_code --self-test` exercises the raw parser. Hosted
 `No-code classifier controls` also exercises authentic Git PR/group graphs,
-mixed changes, a prose-only final commit on a code PR, and missing/stale objects.
+mixed changes, a prose-only final commit on a code PR, a prose group stacked
+on queued code, and missing/stale objects.
 The immutable trusted-base reader is installed before automatic omission.
 During the transition it continues accepting genuinely executed legacy gates;
 once producers declare no-code plans, deliberately omitted gates must be skipped
@@ -722,7 +737,11 @@ There is no platform-shaped no-op replacement.
 
 The trusted reconciler accepts conditionally skipped independent jobs only
 after its own native no-code classification, with successful matching planner
-identity and a complete zero-allocation inventory. A failed or missing selected
+identity and a complete zero-allocation inventory. GitHub may list the
+reconciler's own published admission checks among an Actions run's jobs; the
+inventory excludes only rows whose IDs match its exact-head marker-bound
+publications and that have no runner or steps (first live no-code group,
+#3343). A failed or missing selected
 obligation cannot be explained by another job's deliberate omission. The
 fail-fast watcher defers conditional skips for trusted adjudication and reports
 no-code completion only from the exact reconciler receipt. It still cancels

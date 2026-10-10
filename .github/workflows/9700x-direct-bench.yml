@@ -77,6 +77,27 @@ jobs:
       merge_base: ${{ steps.verify.outputs.merge_base }}
       merge_base_tree: ${{ steps.verify.outputs.merge_base_tree }}
       head_tree: ${{ steps.verify.outputs.head_tree }}
+      utility_request_data: ${{ steps.verify.outputs.utility_request_data }}
+      utility_plan_data: ${{ steps.verify.outputs.utility_plan_data }}
+      utility_allowlist_data: ${{ steps.verify.outputs.utility_allowlist_data }}
+      utility_facts_data: ${{ steps.verify.outputs.utility_facts_data }}
+      utility_history_data: ${{ steps.verify.outputs.utility_history_data }}
+      utility_admitted: ${{ steps.utility.outputs.utility_admitted }}
+      utility_phase: ${{ steps.utility.outputs.utility_phase }}
+      utility_packet: ${{ steps.utility.outputs.utility_packet }}
+      utility_family: ${{ steps.utility.outputs.utility_family }}
+      utility_reservation_seconds: ${{ steps.utility.outputs.utility_reservation_seconds }}
+      utility_worker_seconds: ${{ steps.utility.outputs.utility_worker_seconds }}
+      utility_timeout_minutes: ${{ steps.utility.outputs.utility_timeout_minutes }}
+      utility_plan_revision: ${{ steps.utility.outputs.utility_plan_revision }}
+      utility_plan_sha256: ${{ steps.utility.outputs.utility_plan_sha256 }}
+      utility_protocol_sha256: ${{ steps.utility.outputs.utility_protocol_sha256 }}
+      utility_base: ${{ steps.utility.outputs.utility_base }}
+      utility_base_tree: ${{ steps.utility.outputs.utility_base_tree }}
+      utility_pull_head: ${{ steps.utility.outputs.utility_pull_head }}
+      utility_candidate_revision: ${{ steps.utility.outputs.utility_candidate_revision }}
+      utility_candidate_tree: ${{ steps.utility.outputs.utility_candidate_tree }}
+      utility_trusted_revision: ${{ steps.utility.outputs.utility_trusted_revision }}
       preparation_request_data: ${{ steps.verify.outputs.preparation_request_data }}
       preparation_plan_data: ${{ steps.verify.outputs.preparation_plan_data }}
       preparation_allowlist_data: ${{ steps.verify.outputs.preparation_allowlist_data }}
@@ -148,7 +169,7 @@ jobs:
         run: python3 -B tools/bench_direct/authorize.py
 
       - name: Fetch the pinned admission bootstrap compiler
-        if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' }}
+        if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' || steps.verify.outputs.utility_requested == 'true' }}
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: TinyCC/tinycc
@@ -156,14 +177,14 @@ jobs:
           path: .tools/tinycc
           persist-credentials: false
       - name: Record actual checkout identity 2
-        if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' }}
+        if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' || steps.verify.outputs.utility_requested == 'true' }}
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           mode: source
           source-directory: .tools/tinycc
           source-repository: TinyCC/tinycc
       - name: Install the pinned admission bootstrap compiler
-        if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' }}
+        if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' || steps.verify.outputs.utility_requested == 'true' }}
         working-directory: .tools/tinycc
         shell: bash
         run: |
@@ -200,9 +221,319 @@ jobs:
             "$RUNNER_TEMP/compiler-preparation-admission/plan.tsv" \
             "$RUNNER_TEMP" "$GITHUB_WORKSPACE" "$GITHUB_OUTPUT"
 
+      - name: Admit only the separately frozen closure utility experiment
+        if: ${{ steps.verify.outputs.utility_requested == 'true' }}
+        id: utility
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh compiler_profile_qualification --admit-utility \
+            "$RUNNER_TEMP/compiler-utility-admission/allowlist.tsv" \
+            "$RUNNER_TEMP/compiler-utility-admission/request.txt" \
+            "$RUNNER_TEMP/compiler-utility-admission/facts.tsv" \
+            "$RUNNER_TEMP/compiler-utility-admission/history.tsv" \
+            "$RUNNER_TEMP/compiler-utility-admission/plan.tsv" \
+            "$RUNNER_TEMP" "$GITHUB_WORKSPACE" "$GITHUB_OUTPUT"
+
   # "Re-run failed jobs" reuses the outputs of jobs that succeeded in an
   # earlier attempt, so bench requires authorize to have passed in this same
   # attempt; a maintainer re-run must use "Re-run all jobs".
+  utility-queue:
+    name: Queue compiler closure utility
+    needs: authorize
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1 && needs.authorize.outputs.utility_admitted == 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: write
+    timeout-minutes: 5
+    concurrency:
+      group: buster-9700x-check-writer
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
+      - name: Check out the frozen utility implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.authorize.outputs.utility_trusted_revision }}
+          persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - name: Fetch the pinned utility bootstrap compiler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+      - name: Record actual checkout identity 4
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
+      - name: Install the pinned utility bootstrap compiler
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --prefix="$RUNNER_TEMP/qualification-tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/qualification-tcc/bin" >> "$GITHUB_PATH"
+      - name: Queue the exact unqualified research attempt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+          BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          BQ_RUN_ID: ${{ github.run_id }}
+          BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+          BQ_TRUSTED_REVISION: ${{ github.sha }}
+          BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}
+          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}
+          BQ_UTILITY_PHASE: ${{ needs.authorize.outputs.utility_phase }}
+          BQ_UTILITY_PACKET: ${{ needs.authorize.outputs.utility_packet }}
+          BQ_UTILITY_FAMILY: ${{ needs.authorize.outputs.utility_family }}
+          BQ_UTILITY_CANDIDATE_TREE: ${{ needs.authorize.outputs.utility_candidate_tree }}
+          BQ_UTILITY_WORKER_SECONDS: ${{ needs.authorize.outputs.utility_worker_seconds }}
+          BQ_UTILITY_RESERVATION_SECONDS: ${{ needs.authorize.outputs.utility_reservation_seconds }}
+          BQ_UTILITY_TIMEOUT_MINUTES: ${{ needs.authorize.outputs.utility_timeout_minutes }}
+          BQ_UTILITY_PLAN_REVISION: ${{ needs.authorize.outputs.utility_plan_revision }}
+          BQ_UTILITY_PLAN_SHA256: ${{ needs.authorize.outputs.utility_plan_sha256 }}
+          BQ_UTILITY_PROTOCOL_SHA256: ${{ needs.authorize.outputs.utility_protocol_sha256 }}
+          BQ_UTILITY_BASE: ${{ needs.authorize.outputs.utility_base }}
+          BQ_UTILITY_BASE_TREE: ${{ needs.authorize.outputs.utility_base_tree }}
+          BQ_UTILITY_PULL_HEAD: ${{ needs.authorize.outputs.utility_pull_head }}
+          BQ_UTILITY_CANDIDATE_REVISION: ${{ needs.authorize.outputs.utility_candidate_revision }}
+          BQ_UTILITY_TRUSTED_REVISION: ${{ needs.authorize.outputs.utility_trusted_revision }}
+        run: python3 -B tools/bench_direct/compiler_publish.py utility-queue
+
+  utility:
+    name: Compiler closure utility
+    needs: [authorize, utility-queue]
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1 && needs.authorize.outputs.utility_admitted == 'true' && needs.utility-queue.result == 'success' }}
+    runs-on:
+      group: buster-9700x-service-dispatch
+      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: ${{ fromJSON(needs.authorize.outputs.utility_timeout_minutes) }}
+    env:
+      BQ_PULL: ${{ needs.authorize.outputs.pull }}
+      BQ_REPOSITORY: ${{ github.repository }}
+      BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+      BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+      BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      BQ_RUN_ID: ${{ github.run_id }}
+      BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+      BQ_TRUSTED_REVISION: ${{ github.sha }}
+      BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}
+      BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}
+      BQ_UTILITY_PHASE: ${{ needs.authorize.outputs.utility_phase }}
+      BQ_UTILITY_PACKET: ${{ needs.authorize.outputs.utility_packet }}
+      BQ_UTILITY_FAMILY: ${{ needs.authorize.outputs.utility_family }}
+      BQ_UTILITY_CANDIDATE_TREE: ${{ needs.authorize.outputs.utility_candidate_tree }}
+      BQ_UTILITY_WORKER_SECONDS: ${{ needs.authorize.outputs.utility_worker_seconds }}
+      BQ_UTILITY_RESERVATION_SECONDS: ${{ needs.authorize.outputs.utility_reservation_seconds }}
+      BQ_UTILITY_TIMEOUT_MINUTES: ${{ needs.authorize.outputs.utility_timeout_minutes }}
+      BQ_UTILITY_PLAN_REVISION: ${{ needs.authorize.outputs.utility_plan_revision }}
+      BQ_UTILITY_PLAN_SHA256: ${{ needs.authorize.outputs.utility_plan_sha256 }}
+      BQ_UTILITY_PROTOCOL_SHA256: ${{ needs.authorize.outputs.utility_protocol_sha256 }}
+      BQ_UTILITY_BASE: ${{ needs.authorize.outputs.utility_base }}
+      BQ_UTILITY_BASE_TREE: ${{ needs.authorize.outputs.utility_base_tree }}
+      BQ_UTILITY_PULL_HEAD: ${{ needs.authorize.outputs.utility_pull_head }}
+      BQ_UTILITY_CANDIDATE_REVISION: ${{ needs.authorize.outputs.utility_candidate_revision }}
+      BQ_UTILITY_TRUSTED_REVISION: ${{ needs.authorize.outputs.utility_trusted_revision }}
+      BQ_UTILITY_PLAN_DATA: ${{ needs.authorize.outputs.utility_plan_data }}
+      BQ_UTILITY_REQUEST_DATA: ${{ needs.authorize.outputs.utility_request_data }}
+      BQ_UTILITY_ALLOWLIST_DATA: ${{ needs.authorize.outputs.utility_allowlist_data }}
+      BQ_UTILITY_FACTS_DATA: ${{ needs.authorize.outputs.utility_facts_data }}
+      BQ_UTILITY_HISTORY_DATA: ${{ needs.authorize.outputs.utility_history_data }}
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+      - name: Refuse retained native cleanup uncertainty
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||
+                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then
+            echo '::error::Native cleanup ownership is retained; manual review is required before host admission.'
+            exit 1
+          fi
+      - name: Check out the frozen measurement harness
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.authorize.outputs.utility_trusted_revision }}
+          path: trusted
+          persist-credentials: false
+      - name: Record actual checkout identity 3
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: trusted
+          source-repository: ${{ github.repository }}
+      - name: Observe the actual physical job start
+        shell: bash
+        env:
+          BQ_PHYSICAL_CLOCK_KIND: utility
+        run: |
+          set -euo pipefail
+          python3 -B trusted/tools/bench_direct/compiler_publish.py physical-clock
+      - name: Run only the admitted native utility packet
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A hard stop before native exec keeps this fixed reservation.
+          [[ "${BQ_RUN_ID:-}" == "$GITHUB_RUN_ID" ]]
+          [[ "${BQ_REQUEST_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "${BQ_HEAD_COMMIT:-}" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_REPOSITORY" == buster14a/buster ]]
+          [[ "$GITHUB_JOB" == compare || "$GITHUB_JOB" == preparation ||
+             "$GITHUB_JOB" == utility || "$GITHUB_JOB" == sampling ]]
+          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||
+                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then
+            echo '::error::Native cleanup ownership is retained before bootstrap.'
+            exit 1
+          fi
+          read -r process_stat < "/proc/$$/stat"
+          [[ "$process_stat" == "$$ ("* ]]
+          read -r -a process_fields <<< "${process_stat##*) }"
+          [[ "${#process_fields[@]}" -ge 20 && "${process_fields[19]}" =~ ^[1-9][0-9]*$ ]]
+          read -r boot_id < /proc/sys/kernel/random/boot_id
+          [[ "$boot_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+          umask 077
+          mkdir -m 0700 /tmp/buster-9700x-cleanup-active-v1
+          (
+            set -o noclobber
+            printf 'schema\tbuster-9700x-preentry-active-v1\nowner_pid\t%s\nowner_start_ticks\t%s\nboot_id\t%s\nrequest_run_id\t%s\nexecutor_run_id\t%s\nexecutor_attempt\t%s\nrequest_head\t%s\nrepository\t%s\njob\t%s\npolicy_revision\t%s\n' \
+              "$$" "${process_fields[19]}" "$boot_id" "$BQ_REQUEST_RUN_ID" "$GITHUB_RUN_ID" \
+              "$GITHUB_RUN_ATTEMPT" "$BQ_HEAD_COMMIT" "$GITHUB_REPOSITORY" "$GITHUB_JOB" "$GITHUB_SHA" \
+              > /tmp/buster-9700x-cleanup-active-v1/owner.tsv
+          )
+          sync /tmp/buster-9700x-cleanup-active-v1/owner.tsv
+          sync /tmp/buster-9700x-cleanup-active-v1
+          sync /tmp
+          transport="$RUNNER_TEMP/compiler-preentry-driver"
+          mkdir "$transport"
+          trusted/build.sh compiler_closure driver-path > "$transport/driver.txt"
+          mapfile -t drivers < "$transport/driver.txt"
+          [[ "${#drivers[@]}" == 1 && "${drivers[0]}" == /* ]]
+          exec "${drivers[0]}" compiler_profile_qualification --execute-utility \
+            --trusted-root "$PWD/trusted" --cleanup-root "$RUNNER_TEMP" \
+            --evidence "$RUNNER_TEMP/compiler-utility-evidence"
+      - name: Retain every utility attempt as data
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-9700x-utility-${{ github.event.workflow_run.head_sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/compiler-utility-evidence
+          if-no-files-found: warn
+          retention-days: 90
+
+  utility-publish:
+    name: Validate compiler closure utility evidence
+    needs: [authorize, utility-queue, utility]
+    if: ${{ always() && vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1 && needs.authorize.outputs.utility_admitted == 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: write
+    timeout-minutes: 10
+    concurrency:
+      group: buster-9700x-check-writer
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
+      - name: Check out the frozen utility implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.authorize.outputs.utility_trusted_revision }}
+          persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - name: Fetch the pinned utility bootstrap compiler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+      - name: Record actual checkout identity 4
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
+      - name: Install the pinned utility bootstrap compiler
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --prefix="$RUNNER_TEMP/qualification-tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/qualification-tcc/bin" >> "$GITHUB_PATH"
+      - name: Publish only independently validated research evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+          BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          BQ_RUN_ID: ${{ github.run_id }}
+          BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+          BQ_TRUSTED_REVISION: ${{ github.sha }}
+          BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}
+          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}
+          BQ_UTILITY_PHASE: ${{ needs.authorize.outputs.utility_phase }}
+          BQ_UTILITY_PACKET: ${{ needs.authorize.outputs.utility_packet }}
+          BQ_UTILITY_FAMILY: ${{ needs.authorize.outputs.utility_family }}
+          BQ_UTILITY_CANDIDATE_TREE: ${{ needs.authorize.outputs.utility_candidate_tree }}
+          BQ_UTILITY_WORKER_SECONDS: ${{ needs.authorize.outputs.utility_worker_seconds }}
+          BQ_UTILITY_RESERVATION_SECONDS: ${{ needs.authorize.outputs.utility_reservation_seconds }}
+          BQ_UTILITY_TIMEOUT_MINUTES: ${{ needs.authorize.outputs.utility_timeout_minutes }}
+          BQ_UTILITY_PLAN_REVISION: ${{ needs.authorize.outputs.utility_plan_revision }}
+          BQ_UTILITY_PLAN_SHA256: ${{ needs.authorize.outputs.utility_plan_sha256 }}
+          BQ_UTILITY_PROTOCOL_SHA256: ${{ needs.authorize.outputs.utility_protocol_sha256 }}
+          BQ_UTILITY_BASE: ${{ needs.authorize.outputs.utility_base }}
+          BQ_UTILITY_BASE_TREE: ${{ needs.authorize.outputs.utility_base_tree }}
+          BQ_UTILITY_PULL_HEAD: ${{ needs.authorize.outputs.utility_pull_head }}
+          BQ_UTILITY_CANDIDATE_REVISION: ${{ needs.authorize.outputs.utility_candidate_revision }}
+          BQ_UTILITY_TRUSTED_REVISION: ${{ needs.authorize.outputs.utility_trusted_revision }}
+          BQ_UTILITY_RESULT: ${{ needs.utility.result }}
+          BQ_UTILITY_QUEUE_RESULT: ${{ needs.utility-queue.result }}
+        run: python3 -B tools/bench_direct/compiler_publish.py utility-publish
+
+
   preparation-queue:
     name: Queue compiler preparation qualification
     needs: authorize
@@ -329,6 +660,15 @@ jobs:
         with:
           requested-runner: >-
             group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+      - name: Refuse retained native cleanup uncertainty
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||
+                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then
+            echo '::error::Native cleanup ownership is retained; manual review is required before host admission.'
+            exit 1
+          fi
       - name: Check out the frozen measurement harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -341,11 +681,54 @@ jobs:
           mode: source
           source-directory: trusted
           source-repository: ${{ github.repository }}
+      - name: Observe the actual physical job start
+        shell: bash
+        env:
+          BQ_PHYSICAL_CLOCK_KIND: preparation
+        run: |
+          set -euo pipefail
+          python3 -B trusted/tools/bench_direct/compiler_publish.py physical-clock
       - name: Run only the admitted native qualification packet
         shell: bash
         run: |
           set -euo pipefail
-          trusted/build.sh compiler_profile_qualification --execute-preparation \
+          # A hard stop before native exec keeps this fixed reservation.
+          [[ "${BQ_RUN_ID:-}" == "$GITHUB_RUN_ID" ]]
+          [[ "${BQ_REQUEST_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "${BQ_HEAD_COMMIT:-}" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_REPOSITORY" == buster14a/buster ]]
+          [[ "$GITHUB_JOB" == compare || "$GITHUB_JOB" == preparation ||
+             "$GITHUB_JOB" == utility || "$GITHUB_JOB" == sampling ]]
+          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||
+                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then
+            echo '::error::Native cleanup ownership is retained before bootstrap.'
+            exit 1
+          fi
+          read -r process_stat < "/proc/$$/stat"
+          [[ "$process_stat" == "$$ ("* ]]
+          read -r -a process_fields <<< "${process_stat##*) }"
+          [[ "${#process_fields[@]}" -ge 20 && "${process_fields[19]}" =~ ^[1-9][0-9]*$ ]]
+          read -r boot_id < /proc/sys/kernel/random/boot_id
+          [[ "$boot_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+          umask 077
+          mkdir -m 0700 /tmp/buster-9700x-cleanup-active-v1
+          (
+            set -o noclobber
+            printf 'schema\tbuster-9700x-preentry-active-v1\nowner_pid\t%s\nowner_start_ticks\t%s\nboot_id\t%s\nrequest_run_id\t%s\nexecutor_run_id\t%s\nexecutor_attempt\t%s\nrequest_head\t%s\nrepository\t%s\njob\t%s\npolicy_revision\t%s\n' \
+              "$$" "${process_fields[19]}" "$boot_id" "$BQ_REQUEST_RUN_ID" "$GITHUB_RUN_ID" \
+              "$GITHUB_RUN_ATTEMPT" "$BQ_HEAD_COMMIT" "$GITHUB_REPOSITORY" "$GITHUB_JOB" "$GITHUB_SHA" \
+              > /tmp/buster-9700x-cleanup-active-v1/owner.tsv
+          )
+          sync /tmp/buster-9700x-cleanup-active-v1/owner.tsv
+          sync /tmp/buster-9700x-cleanup-active-v1
+          sync /tmp
+          transport="$RUNNER_TEMP/compiler-preentry-driver"
+          mkdir "$transport"
+          trusted/build.sh compiler_closure driver-path > "$transport/driver.txt"
+          mapfile -t drivers < "$transport/driver.txt"
+          [[ "${#drivers[@]}" == 1 && "${drivers[0]}" == /* ]]
+          exec "${drivers[0]}" compiler_profile_qualification --execute-preparation \
             --trusted-root "$PWD/trusted" --cleanup-root "$RUNNER_TEMP" \
             --evidence "$RUNNER_TEMP/compiler-preparation-evidence"
       - name: Retain every qualification attempt as data
@@ -571,6 +954,15 @@ jobs:
         with:
           requested-runner: >-
             group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+      - name: Refuse retained native cleanup uncertainty
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||
+                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then
+            echo '::error::Native cleanup ownership is retained; manual review is required before host admission.'
+            exit 1
+          fi
       - name: Check out the frozen measurement harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -583,11 +975,54 @@ jobs:
           mode: source
           source-directory: trusted
           source-repository: ${{ github.repository }}
+      - name: Observe the actual physical job start
+        shell: bash
+        env:
+          BQ_PHYSICAL_CLOCK_KIND: sampling
+        run: |
+          set -euo pipefail
+          python3 -B trusted/tools/bench_direct/compiler_publish.py physical-clock
       - name: Run only the admitted native qualification packet
         shell: bash
         run: |
           set -euo pipefail
-          trusted/build.sh compiler_profile_qualification --execute \
+          # A hard stop before native exec keeps this fixed reservation.
+          [[ "${BQ_RUN_ID:-}" == "$GITHUB_RUN_ID" ]]
+          [[ "${BQ_REQUEST_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "${BQ_HEAD_COMMIT:-}" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_REPOSITORY" == buster14a/buster ]]
+          [[ "$GITHUB_JOB" == compare || "$GITHUB_JOB" == preparation ||
+             "$GITHUB_JOB" == utility || "$GITHUB_JOB" == sampling ]]
+          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||
+                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then
+            echo '::error::Native cleanup ownership is retained before bootstrap.'
+            exit 1
+          fi
+          read -r process_stat < "/proc/$$/stat"
+          [[ "$process_stat" == "$$ ("* ]]
+          read -r -a process_fields <<< "${process_stat##*) }"
+          [[ "${#process_fields[@]}" -ge 20 && "${process_fields[19]}" =~ ^[1-9][0-9]*$ ]]
+          read -r boot_id < /proc/sys/kernel/random/boot_id
+          [[ "$boot_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+          umask 077
+          mkdir -m 0700 /tmp/buster-9700x-cleanup-active-v1
+          (
+            set -o noclobber
+            printf 'schema\tbuster-9700x-preentry-active-v1\nowner_pid\t%s\nowner_start_ticks\t%s\nboot_id\t%s\nrequest_run_id\t%s\nexecutor_run_id\t%s\nexecutor_attempt\t%s\nrequest_head\t%s\nrepository\t%s\njob\t%s\npolicy_revision\t%s\n' \
+              "$$" "${process_fields[19]}" "$boot_id" "$BQ_REQUEST_RUN_ID" "$GITHUB_RUN_ID" \
+              "$GITHUB_RUN_ATTEMPT" "$BQ_HEAD_COMMIT" "$GITHUB_REPOSITORY" "$GITHUB_JOB" "$GITHUB_SHA" \
+              > /tmp/buster-9700x-cleanup-active-v1/owner.tsv
+          )
+          sync /tmp/buster-9700x-cleanup-active-v1/owner.tsv
+          sync /tmp/buster-9700x-cleanup-active-v1
+          sync /tmp
+          transport="$RUNNER_TEMP/compiler-preentry-driver"
+          mkdir "$transport"
+          trusted/build.sh compiler_closure driver-path > "$transport/driver.txt"
+          mapfile -t drivers < "$transport/driver.txt"
+          [[ "${#drivers[@]}" == 1 && "${drivers[0]}" == /* ]]
+          exec "${drivers[0]}" compiler_profile_qualification --execute \
             --phase "$BQ_SAMPLING_PHASE" --packet "$BQ_SAMPLING_PACKET" \
             --trusted-root "$PWD/trusted" --cleanup-root "$RUNNER_TEMP" \
             --evidence "$RUNNER_TEMP/compiler-sampling-evidence"
@@ -701,6 +1136,15 @@ jobs:
         with:
           requested-runner: >-
             group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+      - name: Refuse retained native cleanup uncertainty
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||
+                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then
+            echo '::error::Native cleanup ownership is retained; manual review is required before host admission.'
+            exit 1
+          fi
       # The harness, compile command and sample plan come from main.
       - name: Check out the trusted harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -773,6 +1217,15 @@ jobs:
         with:
           requested-runner: >-
             group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+      - name: Refuse retained native cleanup uncertainty
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||
+                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then
+            echo '::error::Native cleanup ownership is retained; manual review is required before host admission.'
+            exit 1
+          fi
       - name: Check out the trusted harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -954,6 +1407,29 @@ jobs:
       pull_head: ${{ steps.verify.outputs.pull_head }}
       first_parent: ${{ steps.verify.outputs.first_parent }}
       range: ${{ steps.verify.outputs.range }}
+      main_owned: ${{ steps.verify.outputs.main_owned }}
+      main_profile: ${{ steps.verify.outputs.main_profile }}
+      main_preparation_policy: ${{ steps.verify.outputs.main_preparation_policy }}
+      main_phase_schema: ${{ steps.verify.outputs.main_phase_schema }}
+      main_measurement_revision: ${{ steps.verify.outputs.main_measurement_revision }}
+      main_certificate_revision: ${{ steps.verify.outputs.main_certificate_revision }}
+      main_certificate_sha256: ${{ steps.verify.outputs.main_certificate_sha256 }}
+      lab_sha256: ${{ steps.verify.outputs.lab_sha256 }}
+      python_path: ${{ steps.verify.outputs.python_path }}
+      python_sha256: ${{ steps.verify.outputs.python_sha256 }}
+      driver_sha256: ${{ steps.verify.outputs.driver_sha256 }}
+      compare_sha256: ${{ steps.verify.outputs.compare_sha256 }}
+      receipt_sha256: ${{ steps.verify.outputs.receipt_sha256 }}
+      owned_phase_sha256: ${{ steps.verify.outputs.owned_phase_sha256 }}
+      owned_plan_sha256: ${{ steps.verify.outputs.owned_plan_sha256 }}
+      trusted_root: ${{ steps.verify.outputs.trusted_root }}
+      candidate_root: ${{ steps.verify.outputs.candidate_root }}
+      work_root: ${{ steps.verify.outputs.work_root }}
+      evidence_root: ${{ steps.verify.outputs.evidence_root }}
+      main_policy_revision: ${{ steps.verify.outputs.main_policy_revision }}
+      main_route_data: ${{ steps.verify.outputs.main_route_data }}
+      main_facts_data: ${{ steps.verify.outputs.main_facts_data }}
+      main_identity_data: ${{ steps.verify.outputs.main_identity_data }}
     steps:
       - name: Machine specifications
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
@@ -964,7 +1440,6 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
-          sparse-checkout: tools/bench_direct
           persist-credentials: false
       - name: Record actual checkout identity
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
@@ -972,6 +1447,28 @@ jobs:
           mode: source
           source-directory: .
           source-repository: ${{ github.repository }}
+      - name: Fetch the pinned MAIN policy bootstrap compiler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+      - name: Record actual checkout identity 4
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
+      - name: Install the pinned MAIN policy bootstrap compiler
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --prefix="$RUNNER_TEMP/main-policy-tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/main-policy-tcc/bin" >> "$GITHUB_PATH"
       - name: Verify the request, the commit and main
         id: verify
         shell: bash
@@ -1053,19 +1550,50 @@ jobs:
       BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
       BQ_RUN_ID: ${{ github.run_id }}
       BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+      BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      BQ_FIRST_PARENT: ${{ needs.authorize-compiler.outputs.first_parent }}
+      BQ_RANGE: ${{ needs.authorize-compiler.outputs.range }}
+      BQ_MAIN_OWNED: ${{ needs.authorize-compiler.outputs.main_owned }}
+      BQ_MAIN_PROFILE: ${{ needs.authorize-compiler.outputs.main_profile }}
+      BQ_MAIN_PREPARATION_POLICY: ${{ needs.authorize-compiler.outputs.main_preparation_policy }}
+      BQ_MAIN_PHASE_SCHEMA: ${{ needs.authorize-compiler.outputs.main_phase_schema }}
+      BQ_MAIN_MEASUREMENT_REVISION: ${{ needs.authorize-compiler.outputs.main_measurement_revision }}
+      BQ_MAIN_CERTIFICATE_REVISION: ${{ needs.authorize-compiler.outputs.main_certificate_revision }}
+      BQ_MAIN_CERTIFICATE_SHA256: ${{ needs.authorize-compiler.outputs.main_certificate_sha256 }}
+      BQ_MAIN_LAB_SHA256: ${{ needs.authorize-compiler.outputs.lab_sha256 }}
+      BQ_MAIN_PYTHON_PATH: ${{ needs.authorize-compiler.outputs.python_path }}
+      BQ_MAIN_PYTHON_SHA256: ${{ needs.authorize-compiler.outputs.python_sha256 }}
+      BQ_MAIN_DRIVER_SHA256: ${{ needs.authorize-compiler.outputs.driver_sha256 }}
+      BQ_MAIN_COMPARE_SHA256: ${{ needs.authorize-compiler.outputs.compare_sha256 }}
+      BQ_MAIN_RECEIPT_SHA256: ${{ needs.authorize-compiler.outputs.receipt_sha256 }}
+      BQ_MAIN_OWNED_PHASE_SHA256: ${{ needs.authorize-compiler.outputs.owned_phase_sha256 }}
+      BQ_MAIN_OWNED_PLAN_SHA256: ${{ needs.authorize-compiler.outputs.owned_plan_sha256 }}
+      BQ_MAIN_TRUSTED_ROOT: ${{ needs.authorize-compiler.outputs.trusted_root }}
+      BQ_MAIN_CANDIDATE_ROOT: ${{ needs.authorize-compiler.outputs.candidate_root }}
+      BQ_MAIN_WORK_ROOT: ${{ needs.authorize-compiler.outputs.work_root }}
+      BQ_MAIN_EVIDENCE_ROOT: ${{ needs.authorize-compiler.outputs.evidence_root }}
+      BQ_MAIN_POLICY_REVISION: ${{ needs.authorize-compiler.outputs.main_policy_revision }}
     steps:
       - name: Machine specifications
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           requested-runner: >-
             group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+      - name: Refuse retained native cleanup uncertainty
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||
+                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then
+            echo '::error::Native cleanup ownership is retained; manual review is required before host admission.'
+            exit 1
+          fi
       # The harness, the lab, the build commands and the profile come from main.
       - name: Check out the trusted harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.authorize-compiler.outputs.main_measurement_revision }}
           path: trusted
-          sparse-checkout: tools
           persist-credentials: false
       - name: Record actual checkout identity
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
@@ -1090,6 +1618,7 @@ jobs:
           source-directory: candidate
           source-repository: ${{ github.repository }}
       - name: Build and compare both compilers
+        if: ${{ needs.authorize-compiler.outputs.main_owned != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1105,9 +1634,68 @@ jobs:
             --pull "$BQ_PULL" --pull-head "$BQ_PULL_HEAD" --base "$BQ_BASE_COMMIT" --base-tree "$BQ_BASE_TREE" \
             --head "$BQ_HEAD_COMMIT" --head-tree "$BQ_HEAD_TREE" --trusted-revision "$BQ_TRUSTED_REVISION" \
             --request-run-id "$BQ_REQUEST_RUN_ID" --run-id "$BQ_RUN_ID" --run-attempt "$BQ_RUN_ATTEMPT"
+      - name: Observe the actual owned MAIN physical job start
+        if: ${{ needs.authorize-compiler.outputs.main_owned == 'true' }}
+        shell: bash
+        env:
+          BQ_PHYSICAL_CLOCK_KIND: main
+        run: |
+          set -euo pipefail
+          python3 -B trusted/tools/bench_direct/compiler_publish.py physical-clock
+      - name: Execute the pinned owned MAIN comparison
+        if: ${{ needs.authorize-compiler.outputs.main_owned == 'true' }}
+        shell: bash
+        env:
+          BQ_MAIN_ROUTE_DATA: ${{ needs.authorize-compiler.outputs.main_route_data }}
+          BQ_MAIN_FACTS_DATA: ${{ needs.authorize-compiler.outputs.main_facts_data }}
+          BQ_MAIN_IDENTITY_DATA: ${{ needs.authorize-compiler.outputs.main_identity_data }}
+        run: |
+          set -euo pipefail
+          # A hard stop before native exec keeps this fixed reservation.
+          [[ "${BQ_RUN_ID:-}" == "$GITHUB_RUN_ID" ]]
+          [[ "${BQ_REQUEST_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "${BQ_HEAD_COMMIT:-}" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_REPOSITORY" == buster14a/buster ]]
+          [[ "$GITHUB_JOB" == compare || "$GITHUB_JOB" == preparation ||
+             "$GITHUB_JOB" == utility || "$GITHUB_JOB" == sampling ]]
+          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||
+                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then
+            echo '::error::Native cleanup ownership is retained before bootstrap.'
+            exit 1
+          fi
+          read -r process_stat < "/proc/$$/stat"
+          [[ "$process_stat" == "$$ ("* ]]
+          read -r -a process_fields <<< "${process_stat##*) }"
+          [[ "${#process_fields[@]}" -ge 20 && "${process_fields[19]}" =~ ^[1-9][0-9]*$ ]]
+          read -r boot_id < /proc/sys/kernel/random/boot_id
+          [[ "$boot_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+          umask 077
+          mkdir -m 0700 /tmp/buster-9700x-cleanup-active-v1
+          (
+            set -o noclobber
+            printf 'schema\tbuster-9700x-preentry-active-v1\nowner_pid\t%s\nowner_start_ticks\t%s\nboot_id\t%s\nrequest_run_id\t%s\nexecutor_run_id\t%s\nexecutor_attempt\t%s\nrequest_head\t%s\nrepository\t%s\njob\t%s\npolicy_revision\t%s\n' \
+              "$$" "${process_fields[19]}" "$boot_id" "$BQ_REQUEST_RUN_ID" "$GITHUB_RUN_ID" \
+              "$GITHUB_RUN_ATTEMPT" "$BQ_HEAD_COMMIT" "$GITHUB_REPOSITORY" "$GITHUB_JOB" "$GITHUB_SHA" \
+              > /tmp/buster-9700x-cleanup-active-v1/owner.tsv
+          )
+          sync /tmp/buster-9700x-cleanup-active-v1/owner.tsv
+          sync /tmp/buster-9700x-cleanup-active-v1
+          sync /tmp
+          transport="$RUNNER_TEMP/compiler-main-route"
+          mkdir "$transport"
+          printf '%s' "$BQ_MAIN_ROUTE_DATA" | base64 --decode > "$transport/route.tsv"
+          printf '%s' "$BQ_MAIN_FACTS_DATA" | base64 --decode > "$transport/facts.tsv"
+          printf '%s' "$BQ_MAIN_IDENTITY_DATA" | base64 --decode > "$transport/identity.tsv"
+          trusted/build.sh compiler_closure driver-path > "$transport/driver.txt"
+          mapfile -t drivers < "$transport/driver.txt"
+          [[ "${#drivers[@]}" == 1 && "${drivers[0]}" == /* ]]
+          exec "${drivers[0]}" compiler_profile_qualification --execute-main \
+            --route "$transport/route.tsv" --facts "$transport/facts.tsv" \
+            --identity "$transport/identity.tsv" --driver "${drivers[0]}"
       # Raw samples, metadata and the receipt, also when the comparison failed.
       - name: Retain the comparison evidence
-        if: ${{ always() }}
+        if: ${{ always() && needs.authorize-compiler.outputs.main_owned != 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: buster-9700x-compiler-${{ github.event.workflow_run.head_sha }}-${{ github.run_attempt }}
@@ -1115,15 +1703,25 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
-  # Hosted and credentialed: reads the evidence as data and publishes the
-  # exact-head check. It runs after a refusal or failure as well, so a
-  # candidate is never silently unbenchmarked.
+      - name: Retain owned MAIN raw evidence and the durable native owner
+        if: ${{ always() && needs.authorize-compiler.outputs.main_owned == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-9700x-compiler-${{ github.event.workflow_run.head_sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ needs.authorize-compiler.outputs.evidence_root }}
+            ${{ needs.authorize-compiler.outputs.evidence_root }}.native
+          if-no-files-found: warn
+          retention-days: 90
+
+  # Hosted and credentialed: independently validates the exact original attempt.
   publish-compiler:
     name: Publish the compiler benchmark check
     needs: [authorize-compiler, compare]
     if: ${{ always() && vars.BENCH_DIRECT_ENABLED == 'true' && vars.BENCH_COMPILER_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') }}
     runs-on: ubuntu-24.04
     permissions:
+      contents: read
       actions: read
       checks: write
     timeout-minutes: 10
@@ -1143,8 +1741,7 @@ jobs:
       - name: Check out the trusted publisher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ github.sha }}
-          sparse-checkout: tools/bench_direct
+          ref: ${{ needs.authorize-compiler.outputs.main_measurement_revision || github.sha }}
           persist-credentials: false
       - name: Record actual checkout identity
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
@@ -1152,6 +1749,28 @@ jobs:
           mode: source
           source-directory: .
           source-repository: ${{ github.repository }}
+      - name: Fetch the pinned MAIN policy bootstrap compiler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+      - name: Record actual checkout identity 4
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
+      - name: Install the pinned MAIN policy bootstrap compiler
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --prefix="$RUNNER_TEMP/main-policy-tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/main-policy-tcc/bin" >> "$GITHUB_PATH"
       - name: Validate the evidence and publish the check
         id: publish
         shell: bash

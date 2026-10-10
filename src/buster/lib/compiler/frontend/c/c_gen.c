@@ -3943,8 +3943,8 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_attempt(CIntegerIrBuilde
 BUSTER_C_INTERNAL IrTypeId c_ir_conditional_result_type_attempt(CIntegerIrBuilder* builder, IrTypeId true_type, IrTypeId false_type, u32 true_start,
                                                                   u32 true_end, u32 false_start, u32 false_end);
 BUSTER_C_INTERNAL bool c_ir_range_is_null_pointer_constant_attempt(CIntegerIrBuilder* builder, IrTypeId type, u32 start, u32 end);
-BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool runtime_tail, u64* offset_out,
-                                                      IrTypeId* tail_element_out);
+BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool runtime, u32 after, u64* offset_out,
+                                                      IrTypeId* runtime_element_out, u32* runtime_open_out);
 
 BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame right)
 {
@@ -3961,8 +3961,8 @@ BUSTER_C_INTERNAL bool c_ir_query_key_equal(CIrQueryFrame left, CIrQueryFrame ri
         case C_IR_QUERY_FRAME_SIZEOF:
         case C_IR_QUERY_FRAME_OPERAND_TYPE:
         case C_IR_QUERY_FRAME_VLA_C_TYPE:
-        case C_IR_QUERY_FRAME_TYPE_PREDICTION:
-        case C_IR_QUERY_FRAME_OFFSETOF: return left.start == right.start && left.end == right.end && left.flag == right.flag;
+        case C_IR_QUERY_FRAME_TYPE_PREDICTION: return left.start == right.start && left.end == right.end && left.flag == right.flag;
+        case C_IR_QUERY_FRAME_OFFSETOF: return left.start == right.start && left.end == right.end && left.flag == right.flag && left.third == right.third;
         case C_IR_QUERY_FRAME_COMPOUND_ELEMENT_COUNT: return left.start == right.start && left.end == right.end;
         case C_IR_QUERY_FRAME_COMPOUND_TYPE:
             return left.start == right.start && left.end == right.end && left.third == right.third && left.fourth == right.fourth;
@@ -4100,7 +4100,8 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
             frame->success = true;
             break;
         case C_IR_QUERY_FRAME_OFFSETOF:
-            frame->success = c_ir_constant_offsetof_attempt(builder, frame->start, frame->end, frame->flag, &frame->integer, &frame->result_type);
+            frame->success = c_ir_constant_offsetof_attempt(builder, frame->start, frame->end, frame->flag, frame->third, &frame->integer,
+                                                            &frame->result_type, &frame->fourth);
             break;
         }
         if (machine->has_request)
@@ -4303,17 +4304,20 @@ BUSTER_C_INTERNAL bool c_ir_offsetof_evaluate(CIntegerIrBuilder* builder, u32 st
     return success;
 }
 
-// The constant prefix and element type of `offsetof(T, designator[index])`
-// whose final index is a runtime expression.
-BUSTER_C_INTERNAL bool c_ir_offsetof_runtime_tail(CIntegerIrBuilder* builder, u32 start, u32 end, u64* offset_out, IrTypeId* element_out)
+// The constant part of an offsetof designator with runtime subscripts, and
+// the `[` and element type of the first runtime subscript after `after`
+// (UINT32_MAX once none is left).
+BUSTER_C_INTERNAL bool c_ir_offsetof_runtime_index(CIntegerIrBuilder* builder, u32 start, u32 end, u32 after, u64* offset_out, IrTypeId* element_out,
+                                                   u32* open_out)
 {
     CIrQueryFrame result = {0};
-    bool success = c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_OFFSETOF, .flag = true},
+    bool success = c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .third = after, .kind = C_IR_QUERY_FRAME_OFFSETOF, .flag = true},
                                       &result) && result.success;
     if (success)
     {
         *offset_out = result.integer;
         *element_out = result.result_type;
+        *open_out = result.fourth;
     }
     return success;
 }
@@ -35338,6 +35342,30 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
             return;
         }
         values[value_count - 1] = result;
+        // The saved resume index follows the offsetof's `)`.
+        u64 constant_offset = 0;
+        IrTypeId next_element = IR_TYPE_ID_INVALID;
+        u32 next_open = UINT32_MAX;
+        if (!c_ir_offsetof_runtime_index(builder, state->pending_start, index - 1, state->pending_end, &constant_offset, &next_element, &next_open))
+        {
+            builder->failure_message = S8("invalid __builtin_offsetof type or member designator");
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        if (next_open != UINT32_MAX)
+        {
+            state->pending_type = next_element;
+            state->pending_end = next_open;
+            u32 next_close = c_ir_matching_delimiter_cached(builder, next_open, index - 1, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+            if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                    .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                    .as.expression = {.start = next_open + 1, .end = next_close},
+                                                }))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+            return;
+        }
         expect_operand = false;
         frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
         goto c_ir_expression_core_loop;
@@ -35814,24 +35842,13 @@ c_ir_expression_core_loop:
             u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             u64 offset = 0;
             bool constant = close < end && c_ir_offsetof_evaluate(builder, index + 2, close, &offset);
-            u32 tail_open = UINT32_MAX;
-            for (u32 bracket = index + 2; !constant && close < end && bracket < close; bracket += 1)
-            {
-                if (c_token_is_punctuator(&builder->preprocess.tokens[bracket], C_PUNCTUATOR_LEFT_BRACKET) &&
-                    c_ir_matching_delimiter_cached(builder, bracket, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET) == close - 1)
-                {
-                    tail_open = bracket;
-                }
-            }
             // Only a subscript that is not a constant expression takes the
             // runtime route; constant refusals (negative, real, overflowing
             // indices) stay refused in every context.
-            CIrConstantValue tail_constant = {0};
-            bool tail_runtime = !constant && tail_open != UINT32_MAX && tail_open + 1 < close - 1 &&
-                                !(c_ir_constant_evaluate(builder, tail_open + 1, close - 1, &tail_constant) &&
-                                  tail_constant.kind != C_IR_CONSTANT_UNKNOWN && tail_constant.kind != C_IR_CONSTANT_LVALUE);
-            IrTypeId tail_element = IR_TYPE_ID_INVALID;
-            if (!constant && (!tail_runtime || !c_ir_offsetof_runtime_tail(builder, index + 2, close, &offset, &tail_element)))
+            IrTypeId runtime_element = IR_TYPE_ID_INVALID;
+            u32 runtime_open = UINT32_MAX;
+            if (!constant && (close >= end || !c_ir_offsetof_runtime_index(builder, index + 2, close, index + 2, &offset, &runtime_element, &runtime_open) ||
+                              runtime_open == UINT32_MAX))
             {
                 builder->failure_message = S8("invalid __builtin_offsetof type or member designator");
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -35840,16 +35857,20 @@ c_ir_expression_core_loop:
             values[value_count++] = c_ir_emit_integer_value_typed(builder, offset, false, token, builder->size_type);
             if (!constant)
             {
-                // GNU C and Clang evaluate a final runtime subscript. Lower
-                // it as a child expression; the resume adds index * size.
+                // GNU C and Clang evaluate runtime subscripts. Lower each as
+                // a child expression; the resume adds index * size and asks
+                // for the next one after it.
                 c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types, value_count, operation_count,
                                           close + 1, false);
-                state->pending_type = tail_element;
+                state->pending_type = runtime_element;
                 state->pending_source = source;
+                state->pending_start = index + 2;
+                state->pending_end = runtime_open;
                 frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_OFFSETOF_INDEX;
+                u32 runtime_close = c_ir_matching_delimiter_cached(builder, runtime_open, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
                 if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
                                                         .kind = C_IR_LOWER_FRAME_EXPRESSION,
-                                                        .as.expression = {.start = tail_open + 1, .end = close - 1},
+                                                        .as.expression = {.start = runtime_open + 1, .end = runtime_close},
                                                     }))
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -57696,15 +57717,103 @@ BUSTER_C_INTERNAL bool c_ir_constant_complex_initializer_bytes(CIntegerIrBuilder
            c_ir_constant_complex_initializer_store_float(builder, element, converted.imaginary, bytes + target->fields[1].offset);
 }
 
-// A runtime tail leaves a final `[index]` unevaluated: GNU C and Clang
-// accept `offsetof(T, array[n])`, which lowers to the returned prefix
-// offset plus n times the size of the returned element type.
-BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool runtime_tail, u64* offset_out,
-                                                      IrTypeId* tail_element_out)
+BUSTER_C_SHARED COffsetofWalk c_offsetof_walk_begin(Target target, u32 cursor, u32 end, u64 offset, bool expect_member, bool valid)
 {
-    IrTypeId tail_element = IR_TYPE_ID_INVALID;
+    u64 maximum = ir_integer_mask((IrInteger){.low = UINT64_MAX}, target_data_layout(target).pointer.bit_width).low;
+    return (COffsetofWalk){
+        .offset = offset,
+        .maximum = maximum,
+        .cursor = cursor,
+        .end = end,
+        .expect_member = expect_member,
+        .valid = valid && offset <= maximum,
+    };
+}
+
+// A MEMBER step leaves the cursor on the member identifier and an INDEX step
+// on its `[`; a `.` is consumed here. END requires a member after every dot.
+BUSTER_C_SHARED COffsetofStep c_offsetof_walk_next(COffsetofWalk* walk, CToken const* tokens)
+{
+    COffsetofStep step = C_OFFSETOF_STEP_INVALID;
+    if (walk->valid && walk->cursor >= walk->end)
+    {
+        step = walk->expect_member ? C_OFFSETOF_STEP_INVALID : C_OFFSETOF_STEP_END;
+    }
+    else if (walk->valid)
+    {
+        CToken token = tokens[walk->cursor];
+        if (!walk->expect_member && c_token_is_punctuator(&token, C_PUNCTUATOR_DOT))
+        {
+            walk->cursor += 1;
+            walk->expect_member = true;
+            token = walk->cursor < walk->end ? tokens[walk->cursor] : (CToken){0};
+        }
+        if (walk->expect_member && walk->cursor < walk->end && token.kind == C_TOKEN_IDENTIFIER)
+        {
+            step = C_OFFSETOF_STEP_MEMBER;
+        }
+        else if (!walk->expect_member && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            step = C_OFFSETOF_STEP_INDEX;
+        }
+    }
+    walk->valid = walk->valid && step != C_OFFSETOF_STEP_INVALID;
+    return step;
+}
+
+// `found` covers the caller's lookup: a named, non-bit-field member reached
+// through any depth of anonymous structs and unions.
+BUSTER_C_SHARED void c_offsetof_walk_member(COffsetofWalk* walk, bool found, u64 member_offset)
+{
+    walk->valid = walk->valid && found && member_offset <= walk->maximum && walk->offset <= walk->maximum - member_offset;
+    if (walk->valid)
+    {
+        walk->offset += member_offset;
+    }
+    walk->cursor += 1;
+    walk->expect_member = false;
+}
+
+// `index_type` is null when the subscript is not an integer constant. A
+// signed index with its sign bit set, a value beyond 64 bits, and a product or
+// sum beyond the target's size_t are refused rather than wrapped.
+BUSTER_C_SHARED void c_offsetof_walk_index(COffsetofWalk* walk, IrType const* index_type, IrInteger index, bool element_resolved, u64 element_size,
+                                           u32 close)
+{
+    IrInteger bits = index_type && index_type->bit_width <= 128 ? ir_integer_mask(index, index_type->bit_width) : (IrInteger){0};
+    walk->valid = walk->valid && close < walk->end && element_resolved && index_type &&
+                  (index_type->kind == IR_TYPE_INTEGER || index_type->kind == IR_TYPE_BOOLEAN) && index_type->bit_width &&
+                  index_type->bit_width <= 128 && !bits.high && !(index_type->is_signed && ir_integer_sign_bit(bits, index_type->bit_width)) &&
+                  (!element_size || bits.low <= walk->maximum / element_size);
+    u64 element_offset = walk->valid ? bits.low * element_size : 0;
+    walk->valid = walk->valid && walk->offset <= walk->maximum - element_offset;
+    if (walk->valid)
+    {
+        walk->offset += element_offset;
+    }
+    walk->cursor = close + 1;
+}
+
+// A runtime subscript adds nothing to the constant offset; lowering scales it
+// by the element size when it evaluates the subscript.
+BUSTER_C_SHARED void c_offsetof_walk_runtime_index(COffsetofWalk* walk, bool element_resolved, u32 close)
+{
+    walk->valid = walk->valid && close < walk->end && element_resolved;
+    walk->cursor = close + 1;
+}
+
+// Runtime mode leaves each subscript that is not a constant expression
+// unevaluated: GNU C and Clang accept `offsetof(T, a[i].b[j])`, which lowers
+// to the returned offset (every runtime index taken as 0) plus each index
+// times the size of its element type. The walk reports the first runtime
+// subscript whose `[` follows token `after`, or UINT32_MAX when none is left.
+BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, bool runtime, u32 after, u64* offset_out,
+                                                      IrTypeId* runtime_element_out, u32* runtime_open_out)
+{
+    IrTypeId runtime_element = IR_TYPE_ID_INVALID;
+    u32 runtime_open = UINT32_MAX;
+    bool runtime_seen = false;
     bool valid = start < end;
-    u64 maximum = ir_integer_mask((IrInteger){.low = UINT64_MAX}, target_data_layout(builder->preprocess.target).pointer.bit_width).low;
     u32 comma = end;
     u32 nested = 0;
     for (u32 index = start; index < end; index += 1)
@@ -57736,74 +57845,62 @@ BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder
     }
     IrType* type = ir_type_from_id(&builder->program->types, type_id);
     valid = valid && type && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION);
-    u64 offset = 0;
-    u32 index = comma + 1;
-    while (valid && index < end)
+    COffsetofWalk walk = c_offsetof_walk_begin(builder->preprocess.target, comma + 1, end, 0, true, valid);
+    COffsetofStep step = c_offsetof_walk_next(&walk, builder->preprocess.tokens);
+    while (step == C_OFFSETOF_STEP_MEMBER || step == C_OFFSETOF_STEP_INDEX)
     {
-        CToken token = builder->preprocess.tokens[index];
-        CIrPromotedMemberPath path = {0};
-        valid = token.kind == C_TOKEN_IDENTIFIER &&
-                c_ir_promoted_member_path(builder, type_id, c_token_spelling(builder->preprocess.spelling_base, token), &path) &&
-                path.field && !path.field->is_bit_field && path.offset <= maximum && offset <= maximum - path.offset;
-        if (valid)
+        if (step == C_OFFSETOF_STEP_MEMBER)
         {
-            offset += path.offset;
+            CToken token = builder->preprocess.tokens[walk.cursor];
+            CIrPromotedMemberPath path = {0};
+            bool found = c_ir_promoted_member_path(builder, type_id, c_token_spelling(builder->preprocess.spelling_base, token), &path) &&
+                         path.field && !path.field->is_bit_field;
+            c_offsetof_walk_member(&walk, found, path.offset);
             type_id = path.type;
-            index += 1;
         }
-        // Subscripts are constant-query children, so nested offsetof and sizeof
-        // index expressions use the same explicit query stack.
-        while (valid && index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
+        else
         {
-            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+            // Subscripts are constant-query children, so nested offsetof and
+            // sizeof index expressions use the same explicit query stack.
+            u32 open = walk.cursor;
+            u32 close = c_ir_matching_delimiter_cached(builder, open, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
             IrType* array = ir_type_from_id(&builder->program->types, type_id);
             IrTypeId element_id = array && array->kind == IR_TYPE_ARRAY ? array->element_type : IR_TYPE_ID_INVALID;
-            if (runtime_tail && close + 1 == end)
-            {
-                IrType* tail = ir_type_from_id(&builder->program->types, element_id);
-                valid = tail && tail->layout.resolved;
-                tail_element = element_id;
-                index = end;
-                break;
-            }
-            CIrConstantValue subscript = {0};
-            valid = close < end && element_id.value != IR_ID_UNDERLYING_INVALID &&
-                    c_ir_query_constant(builder, index + 1, close, &subscript) && subscript.kind == C_IR_CONSTANT_INTEGER;
-            IrType* subscript_type = ir_type_from_id(&builder->program->types, subscript.type);
-            IrInteger bits = subscript_type
-                ? ir_integer_mask((IrInteger){.low = subscript.integer, .high = subscript.integer_high}, subscript_type->bit_width)
-                : (IrInteger){0};
             IrType* element = ir_type_from_id(&builder->program->types, element_id);
-            valid = valid && subscript_type && (subscript_type->kind == IR_TYPE_INTEGER || subscript_type->kind == IR_TYPE_BOOLEAN) &&
-                    subscript_type->bit_width && subscript_type->bit_width <= 128 && !bits.high &&
-                    !(subscript_type->is_signed && ir_integer_sign_bit(bits, subscript_type->bit_width)) && element && element->layout.resolved;
-            if (valid)
+            bool shaped = close < end && open + 1 < close && element;
+            CIrConstantValue subscript = {0};
+            bool folded = shaped && c_ir_query_constant(builder, open + 1, close, &subscript);
+            // A pending child query suspends this walk; only a settled
+            // non-constant subscript takes the runtime route, so constant
+            // refusals (negative, real, overflowing) stay refused.
+            if (runtime && shaped && !builder->queries->has_request &&
+                (!folded || subscript.kind == C_IR_CONSTANT_UNKNOWN || subscript.kind == C_IR_CONSTANT_LVALUE))
             {
-                valid = !element->layout.size || bits.low <= maximum / element->layout.size;
-                if (valid)
+                c_offsetof_walk_runtime_index(&walk, element->layout.resolved, close);
+                runtime_seen = true;
+                if (open > after && runtime_open == UINT32_MAX)
                 {
-                    u64 element_offset = bits.low * element->layout.size;
-                    valid = offset <= maximum - element_offset;
-                    if (valid)
-                    {
-                        offset += element_offset;
-                        type_id = element_id;
-                        index = close + 1;
-                    }
+                    runtime_open = open;
+                    runtime_element = element_id;
                 }
             }
+            else
+            {
+                IrType* subscript_type = folded && subscript.kind == C_IR_CONSTANT_INTEGER
+                    ? ir_type_from_id(&builder->program->types, subscript.type) : 0;
+                c_offsetof_walk_index(&walk, subscript_type, (IrInteger){.low = subscript.integer, .high = subscript.integer_high},
+                                      element && element->layout.resolved, element ? element->layout.size : 0, close);
+            }
+            type_id = element_id;
         }
-        if (valid && index < end)
-        {
-            valid = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_DOT) && index + 1 < end;
-            index += 1;
-        }
+        step = c_offsetof_walk_next(&walk, builder->preprocess.tokens);
     }
-    valid = valid && (!runtime_tail || tail_element.value != IR_ID_UNDERLYING_INVALID);
+    valid = step == C_OFFSETOF_STEP_END && (!runtime || runtime_seen);
     if (valid)
     {
-        *offset_out = offset;
-        *tail_element_out = tail_element;
+        *offset_out = walk.offset;
+        *runtime_element_out = runtime_element;
+        *runtime_open_out = runtime_open;
     }
     return valid;
 }

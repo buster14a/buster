@@ -520,7 +520,13 @@ captures (#2741).
   `throughput-corpus-v2`, the default `bench_throughput` corpus under both
   retained FAST and QUALITY modes on the same
   two binaries; the publisher re-checks the corpus's own summary and metadata
-  and binds its compiler hashes to the measured binaries. Every entry point
+  and binds its compiler hashes to the measured binaries. A corpus exit 1
+  (confirmed regression) with a complete exported report is a measured,
+  report-only result on both the main and pull-request routes, so a regressing
+  main commit is reported rather than left unmeasured. Exit 1 needs positive
+  counted confirmed regressions; any other status, a missing report or a field
+  inconsistent with the producer's per-round decisions fails the receipt
+  (`compiler_receipt.classify_throughput_exit`, #3212). Every entry point
   that can claim performance validation has a row in
   [`docs/performance-validation-v1.json`](../performance-validation-v1.json),
   either a 9700X route with the consumer that checks its evidence, or an

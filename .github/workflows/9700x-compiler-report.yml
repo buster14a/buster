@@ -5,7 +5,8 @@ name: 9700X compiler benchmark report recovery
 # is built, measured or re-run. validate (read-only) re-derives the attempt's
 # identity from GitHub's records exactly as authorize-compiler does, reads its
 # retained evidence artifact as bounded data and re-validates it with main's
-# publisher; expired or unverifiable evidence is reported and not published.
+# publisher (full checkout plus pinned TinyCC for the native main-route
+# resolver); expired or unverifiable evidence is reported and not published.
 # comment (contents: write, for the commit-comment API) downloads nothing and
 # upserts the validated entry into the same owned comment that
 # 9700x-direct-bench.yml maintains, sharing its per-commit concurrency group.
@@ -51,11 +52,11 @@ jobs:
         with:
           requested-runner: >-
             ubuntu-24.04
+      # Full trusted checkout: main routing runs the native resolver through build.sh.
       - name: Check out the trusted publisher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
-          sparse-checkout: tools/bench_direct
           persist-credentials: false
       - name: Record actual checkout identity
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
@@ -63,6 +64,28 @@ jobs:
           mode: source
           source-directory: .
           source-repository: ${{ github.repository }}
+      - name: Fetch the pinned MAIN policy bootstrap compiler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
+      - name: Install the pinned MAIN policy bootstrap compiler
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --prefix="$RUNNER_TEMP/main-policy-tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/main-policy-tcc/bin" >> "$GITHUB_PATH"
       - name: Revalidate the evidence of that attempt
         id: validate
         shell: bash

@@ -1228,12 +1228,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sync_builtins_wide_no_cx16(UnitTestArg
     return result;
 }
 
-// GNU C and Clang evaluate a final runtime subscript in offsetof. RAD's
-// Linux demon reads debug registers through offsetof(T, u_debugreg[n]).
+// GNU C and Clang evaluate runtime subscripts in offsetof, final or not,
+// each exactly once (#1570). RAD's Linux demon reads debug registers through
+// offsetof(T, u_debugreg[n]).
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_runtime_index(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 source = S8("typedef unsigned long long U64;\ntypedef struct Inner { int a; short pad[3]; } Inner;\ntypedef struct User { char head[24]; U64 u_debugreg[8]; Inner inner[4]; int m[3][5]; } User;\nint gidx = 3;\nstatic int sidx = 2;\nint* gp = &gidx;\nstatic int calls;\nstatic int next(int v) { calls += 1; return v; }\nenum { E1 = 1 };\nstatic U64 param_shadows(int gidx) { return __builtin_offsetof(User, u_debugreg[gidx]); }\nstatic U64 block_shadow_ends(void)\n{\n    { int sidx = 1; (void)sidx; }\n    return __builtin_offsetof(User, u_debugreg[sidx]);\n}\nstatic U64 loop_shadow_ends(void)\n{\n    for (int gidx = 0; gidx < 1; gidx += 1) { }\n    return __builtin_offsetof(User, u_debugreg[gidx]);\n}\nint main(void)\n{\n    int failed = 0;\n    for (int n = 0; n < 8; n += 1)\n    {\n        U64 offset = __builtin_offsetof(User, u_debugreg[n]);\n        failed |= offset != 24 + 8 * (U64)n;\n    }\n    volatile unsigned char k = 3;\n    failed |= __builtin_offsetof(User, inner[k]) != __builtin_offsetof(User, inner) + 3 * sizeof(Inner);\n    failed |= 2 * __builtin_offsetof(User, u_debugreg[k - 1]) + 1 != 2 * (24 + 16) + 1;\n    failed |= __builtin_offsetof(User, u_debugreg[gidx]) != 24 + 8 * 3;\n    failed |= __builtin_offsetof(User, inner[sidx]) != __builtin_offsetof(User, inner) + 2 * sizeof(Inner);\n    failed |= __builtin_offsetof(User, u_debugreg[*gp]) != 24 + 8 * 3;\n    failed |= __builtin_offsetof(User, m[1][gidx]) != __builtin_offsetof(User, m) + 5 * sizeof(int) + 3 * sizeof(int);\n    failed |= __builtin_offsetof(User, u_debugreg[E1 + k]) != 24 + 8 * 4;\n    failed |= __builtin_offsetof(User, u_debugreg[(gidx, k)]) != 24 + 8 * 3;\n    failed |= __builtin_offsetof(User, u_debugreg[gidx ? k : 0]) != 24 + 8 * 3;\n    failed |= __builtin_offsetof(User, u_debugreg[(int){gidx}]) != 24 + 8 * 3;\n    failed |= param_shadows(5) != 24 + 8 * 5;\n    failed |= block_shadow_ends() != 24 + 8 * 2;\n    failed |= loop_shadow_ends() != 24 + 8 * 3;\n    failed |= calls != 0;\n    failed |= __builtin_offsetof(User, inner[1].pad) != __builtin_offsetof(User, inner) + sizeof(Inner) + 4;\n    return failed;\n}\n");
+    String8 source = S8("typedef unsigned long long U64;\ntypedef struct Inner { int a; short pad[3]; } Inner;\ntypedef struct User { char head[24]; U64 u_debugreg[8]; Inner inner[4]; int m[3][5]; } User;\nint gidx = 3;\nstatic int sidx = 2;\nint* gp = &gidx;\nstatic int calls;\nstatic int next(int v) { calls += 1; return v; }\nenum { E1 = 1 };\nstatic U64 param_shadows(int gidx) { return __builtin_offsetof(User, u_debugreg[gidx]); }\nstatic U64 block_shadow_ends(void)\n{\n    { int sidx = 1; (void)sidx; }\n    return __builtin_offsetof(User, u_debugreg[sidx]);\n}\nstatic U64 loop_shadow_ends(void)\n{\n    for (int gidx = 0; gidx < 1; gidx += 1) { }\n    return __builtin_offsetof(User, u_debugreg[gidx]);\n}\nint main(void)\n{\n    int failed = 0;\n    for (int n = 0; n < 8; n += 1)\n    {\n        U64 offset = __builtin_offsetof(User, u_debugreg[n]);\n        failed |= offset != 24 + 8 * (U64)n;\n    }\n    volatile unsigned char k = 3;\n    failed |= __builtin_offsetof(User, inner[k]) != __builtin_offsetof(User, inner) + 3 * sizeof(Inner);\n    failed |= 2 * __builtin_offsetof(User, u_debugreg[k - 1]) + 1 != 2 * (24 + 16) + 1;\n    failed |= __builtin_offsetof(User, u_debugreg[gidx]) != 24 + 8 * 3;\n    failed |= __builtin_offsetof(User, inner[sidx]) != __builtin_offsetof(User, inner) + 2 * sizeof(Inner);\n    failed |= __builtin_offsetof(User, u_debugreg[*gp]) != 24 + 8 * 3;\n    failed |= __builtin_offsetof(User, m[1][gidx]) != __builtin_offsetof(User, m) + 5 * sizeof(int) + 3 * sizeof(int);\n    failed |= __builtin_offsetof(User, u_debugreg[E1 + k]) != 24 + 8 * 4;\n    failed |= __builtin_offsetof(User, u_debugreg[(gidx, k)]) != 24 + 8 * 3;\n    failed |= __builtin_offsetof(User, u_debugreg[gidx ? k : 0]) != 24 + 8 * 3;\n    failed |= __builtin_offsetof(User, u_debugreg[(int){gidx}]) != 24 + 8 * 3;\n    failed |= param_shadows(5) != 24 + 8 * 5;\n    failed |= block_shadow_ends() != 24 + 8 * 2;\n    failed |= loop_shadow_ends() != 24 + 8 * 3;\n    failed |= calls != 0;\n    failed |= __builtin_offsetof(User, m[next(1)][next(2)]) != __builtin_offsetof(User, m) + 5 * sizeof(int) + 2 * sizeof(int);\n    failed |= calls != 2;\n    int step = 1;\n    failed |= __builtin_offsetof(User, inner[step++].pad[2]) != __builtin_offsetof(User, inner) + sizeof(Inner) + 4 + 2 * sizeof(short);\n    failed |= step != 2;\n    failed |= sizeof(char[__builtin_offsetof(User, inner[next(2)].a)]) != __builtin_offsetof(User, inner) + 2 * sizeof(Inner);\n    failed |= calls != 3;\n    failed |= __builtin_offsetof(User, inner[1].pad) != __builtin_offsetof(User, inner) + sizeof(Inner) + 4;\n    failed |= __builtin_offsetof(User, m[k - 2][2]) != __builtin_offsetof(User, m) + 5 * sizeof(int) + 2 * sizeof(int);\n    failed |= __builtin_offsetof(User, m[k - 2][gidx - 1]) != __builtin_offsetof(User, m) + 5 * sizeof(int) + 2 * sizeof(int);\n    failed |= __builtin_offsetof(User, inner[sidx].a) != __builtin_offsetof(User, inner) + 2 * sizeof(Inner);\n    failed |= __builtin_offsetof(User, inner[k].pad[*gp - 2]) != __builtin_offsetof(User, inner) + 3 * sizeof(Inner) + 4 + sizeof(short);\n    return failed;\n}\n");
     Target targets[] = {
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
@@ -39868,6 +39869,85 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_literal_expression_queries(UnitTestArg
     return result;
 }
 
+// Interned primitive and pointer rows (CTypeInterning) must be observable only
+// as the type table's size. The pilot interns them (-fc-ast-pilot) and the
+// default path does not, so every source compiles to the same object by
+// default, under the pilot, and under the pilot with the interning window
+// shut, at `-g0` and `-g`. The second source defines aggregates inside body
+// type names, which the declaration pass leaves to the machine; their member
+// rows must still follow the aggregate's row, or lowering resolves the
+// aggregate a pass earlier and the `-g` type entries come out in another
+// order (#3102).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("struct S { int a; char *name; } table[2];\n"
+           "void use(const void *p);\n"
+           "long f(char *p, int *ip, struct S *s)\n"
+           "{\n"
+           "    use((char *)p); use((const char *)p); use((int **)&ip); use(&s->a); use(&table[1]);\n"
+           "    long n = (long)*ip + (long)(unsigned char)*p;\n"
+           "    use((void *)\"text\"); use((char **)&p);\n"
+           "    return n + (long)(char *)p;\n"
+           "}\n"),
+        S8("struct F { char *p; int *x; } farr[2];\n"
+           "struct G { long *l; char **pp; } garr[3];\n"
+           "void use(const void *p);\n"
+           "void f(char *q, int *iq)\n"
+           "{\n"
+           "    use((char *)q); use((int *)iq); use((char **)&q);\n"
+           "    use((const struct { char *p; int *x; } [2]){ { q, 0 }, { q, 0 } });\n"
+           "    use(&(const struct { char *s; char **t; }){ q, 0 });\n"
+           "    use((const struct { char *p; } (*)[3])0);\n"
+           "    use((void *)(volatile union { char *a; int *b; } [4]){ { q } });\n"
+           "}\n"),
+    };
+    String8 debug[] = {S8("-g0"), S8("-g")};
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-type-interning"), S8(".c"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(sources[source_index])));
+        for (u32 level = 0; level < BUSTER_ARRAY_LENGTH(debug); level += 1)
+        {
+            // The default compile, the pilot, and the pilot without interned rows.
+            ByteSlice objects[3] = {0};
+            String8 diagnostics[3] = {0};
+            CompilerDriverError errors[3] = {0};
+            for (u32 mode = 0; mode < 3; mode += 1)
+            {
+                String8 output = buster_test_temporary_path(arena, string_format(arena, S8("buster-type-interning-{u32}-{u32}-{u32}"), source_index,
+                                                                                 level, mode),
+                                                            S8(".o"));
+                String8 plain[] = {S8("-nostdinc"), debug[level], S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"), output, input};
+                String8 pilot[] = {S8("-nostdinc"), debug[level], S8("-fc-ast-pilot"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"),
+                                   S8("-o"), output, input};
+                SliceString8 command = mode ? (SliceString8)BUSTER_ARRAY_TO_SLICE(pilot) : (SliceString8)BUSTER_ARRAY_TO_SLICE(plain);
+                c_test_set_type_interning_off(mode == 2);
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, command));
+                c_test_set_type_interning_off(false);
+                errors[mode] = compiled.error;
+                diagnostics[mode] = compiled.diagnostic;
+                objects[mode] = compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
+            }
+            for (u32 mode = 1; mode < 3; mode += 1)
+            {
+                BUSTER_TEST(arguments, errors[0] == COMPILER_DRIVER_ERROR_NONE && errors[mode] == COMPILER_DRIVER_ERROR_NONE);
+                BUSTER_STRING_TEST(arguments, diagnostics[0], diagnostics[mode]);
+                BUSTER_TEST_RAW(arguments,
+                                objects[0].length && objects[0].length == objects[mode].length &&
+                                    memcmp(objects[0].pointer, objects[mode].pointer, objects[0].length) == 0,
+                                string_format(arena, S8("source={u32} {S8}: the default object differs from the pilot's{S8}"), source_index, debug[level],
+                                              mode == 2 ? S8(" without interned rows") : S8("")));
+            }
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_expression_frames(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -58027,6 +58107,76 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_indices(UnitTestArgumen
     return result;
 }
 
+// A bit-field member gets one diagnostic, Clang's, in every offsetof
+// context (#1570): directly, through an anonymous member, behind a runtime or
+// constant index, and inside an offsetof nested in an index.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_bit_field_diagnostic(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 declaration = S8("struct B { int lead; int bits : 3; struct { int inner : 2; }; struct { int q; int r : 4; } rows[2]; int v[4]; };");
+    struct
+    {
+        String8 designator;
+        String8 expected;
+    } cases[] = {
+        {S8("bits"), S8("cannot compute offset of bit-field 'bits'")},
+        {S8("inner"), S8("cannot compute offset of bit-field 'inner'")},
+        {S8("rows[1].r"), S8("cannot compute offset of bit-field 'r'")},
+        {S8("v[__builtin_offsetof(struct B, bits)]"), S8("cannot compute offset of bit-field 'bits'")},
+    };
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+    {
+        for (u32 context = 0; context < 5; context += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 expression = string_format(temporary.arena, S8("__builtin_offsetof(struct B, {S8})"), cases[row].designator);
+            String8 contexts[] = {
+                string_format(temporary.arena, S8("enum {{ BIT_FIELD_OFFSET = {S8} }};"), expression),
+                string_format(temporary.arena, S8("_Static_assert({S8} == 4, \"offset\");"), expression),
+                string_format(temporary.arena, S8("static unsigned long long value = {S8};"), expression),
+                string_format(temporary.arena, S8("unsigned long long probe(void) {{ return {S8}; }}"), expression),
+                string_format(temporary.arena, S8("unsigned long long probe(int i) {{ return {S8} + __builtin_offsetof(struct B, rows[i].r); }}"),
+                              expression),
+            };
+            String8 source = string_format(temporary.arena, S8("{S8}\n{S8}\n"), declaration, contexts[context]);
+            String8 label = string_format(arguments->arena, S8("offsetof bit-field diagnostic case={u32} context={u32}: {S8}"), row, context, source);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0))
+            {
+                CParseResult parsed = c_parse(temporary.arena, tokens);
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                bool parsed_reports = false;
+                bool semantic_reports = false;
+                bool generic = false;
+                for (u32 diagnostic = 0; diagnostic < parsed.diagnostic_count; diagnostic += 1)
+                {
+                    parsed_reports |= string_ends_with_sequence(parsed.diagnostics[diagnostic].message, cases[row].expected);
+                    generic |= string_ends_with_sequence(parsed.diagnostics[diagnostic].message, S8("invalid __builtin_offsetof type or member designator"));
+                }
+                for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count; diagnostic += 1)
+                {
+                    semantic_reports |= semantic.diagnostics[diagnostic].severity == C_DIAGNOSTIC_ERROR &&
+                                        string_ends_with_sequence(semantic.diagnostics[diagnostic].message, cases[row].expected);
+                    generic |= string_ends_with_sequence(semantic.diagnostics[diagnostic].message, S8("invalid __builtin_offsetof type or member designator"));
+                }
+                BUSTER_TEST_RAW(arguments, semantic_reports && !generic, label);
+                if (context < 2)
+                {
+                    // Enumerators and assertions also report while the model is built.
+                    BUSTER_TEST_RAW(arguments, parsed_reports, label);
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+// The shared COffsetofWalk refuses every row in all four contexts: index
+// admission, target-size_t arithmetic, designator grammar and bit-fields.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_refusals(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -58051,6 +58201,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_refusals(UnitTestArgume
         {S8("struct B { int value; };"), S8("value."), false},
         {S8("struct B { struct { int value; } named; };"), S8("named value"), false},
         {S8("struct B { struct { int value; } named; };"), S8("named..value"), false},
+        {S8("struct B { int lead; int values[2]; };"), S8("values[0]lead"), false},
+        {S8("struct B { int lead; int values[2]; };"), S8("values[0]."), false},
+        {S8("struct B { int value; };"), S8("value[0]"), false},
+        {S8("struct B { int values[2]; };"), S8("values[0][0]"), false},
+        {S8("struct B { int lead; int bits : 3; };"), S8("bits"), false},
+        {S8("struct B { int lead; struct { int bits : 3; }; };"), S8("bits"), false},
     };
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
     {
@@ -61709,6 +61865,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
     C_TEST_FIXTURE(arguments, c_test_line_filename_escapes);
     C_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
+    C_TEST_FIXTURE(arguments, c_test_type_interning_objects);
     C_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
     C_TEST_FIXTURE(arguments, c_test_local_label_declarations);
     C_TEST_FIXTURE(arguments, c_test_local_labels);
@@ -61767,6 +61924,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_offsetof_typed_indices);
     C_TEST_FIXTURE(arguments, c_test_offsetof_typed_indices_runtime);
     C_TEST_FIXTURE(arguments, c_test_offsetof_typed_refusals);
+    C_TEST_FIXTURE(arguments, c_test_offsetof_bit_field_diagnostic);
     C_TEST_FIXTURE(arguments, c_test_oversized_token_spellings);
     C_TEST_FIXTURE(arguments, c_test_packed_and_aligned_layout);
     C_TEST_FIXTURE(arguments, c_test_parameter_local_alignment);

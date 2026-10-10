@@ -8173,19 +8173,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_scalar_local_locat
                 {
                     String8 description = string_format(temporary.arena, S8("{S8} {S8}.{S8}"), label, test_case->function,
                                                         test_case->locals[local]);
-                    if (string_equal(test_case->function, S8("branch_only")))
-                    {
-                        // The first complete stores are path-local, so this
-                        // bounded seed policy deliberately leaves the value
-                        // unavailable instead of exposing its entry stack bytes.
-                        BUSTER_TEST_RAW(arguments, !compiler_driver_test_debug_local_location(&built.object, test_case->function,
-                            test_case->locals[local], symbol->value, symbol->value + symbol->size, 0), description);
-                        continue;
-                    }
                     BUSTER_TEST_RAW(arguments, compiler_driver_test_debug_local_location(&built.object, test_case->function,
                                                                                          test_case->locals[local], symbol->value,
                                                                                          symbol->value + symbol->size, 0), description);
-                    if (string_equal(test_case->function, S8("deferred")) && string_equal(test_case->locals[local], S8("late")))
+                    // Both first writes sit after the entry block (#2717); the
+                    // location must start after them, not at function entry.
+                    if ((string_equal(test_case->function, S8("deferred")) && string_equal(test_case->locals[local], S8("late"))) ||
+                        string_equal(test_case->function, S8("branch_only")))
                     {
                         u64 first_begin = UINT64_MAX;
                         bool has_location = compiler_driver_test_debug_local_location(&built.object, test_case->function,
@@ -9923,6 +9917,289 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_deferred_edge_stores(Uni
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
                 {
                     BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description);
+                }
+                scratch_end(temporary);
+            }
+        }
+#endif
+    }
+    return result;
+}
+
+// A join's parameter contract picks registers for parameters whose source the
+// designated predecessor does not already hold away from the lanes of the
+// values it carries (`machine_fast_carriable`). Each function computes values
+// after a call, then joins on ternaries with one constant arm while those
+// values stay live, so the constant-sourced parameter used to take the first
+// free lane, which on x86-64 held a carried value, and the edge stored that
+// value for the block to reload. Every target must select without fallback
+// and the host runs the program under both allocators and frontend forms
+// (expected values cross-checked with host GCC and Clang). FAST and QUALITY
+// stored 19 (x86-64 Linux) and 16 (x86-64 Windows) values at block boundaries
+// before the rule and 11 and 8 with it.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_contract_carry_lanes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static volatile int opaque = 3;\n"
+        "static int sink;\n"
+        "static __attribute__((noinline)) int bump(int x) { sink += x; return x + 1; }\n"
+        "static __attribute__((noinline)) long long two_joins(int n)\n"
+        "{\n"
+        "    long long r = opaque;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long x = bump(i) ^ r, y = x * 7 % 509, z = x + y;\n"
+        "        long long p = (x & 2) ? 11 : y + 3;\n"
+        "        long long q = (z & 4) ? p * 2 : 23;\n"
+        "        r = (r + p * x + q * y + z) % 999983;\n"
+        "    }\n"
+        "    return r;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long three_joins(int n)\n"
+        "{\n"
+        "    long long s = opaque, t = 1;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long a = bump(i) + s, b = a * 3 % 251, c = a ^ t;\n"
+        "        long long p = (a & 1) ? 7 : b + c;\n"
+        "        long long q = (b & 2) ? p + a : 19;\n"
+        "        long long w = (c & 4) ? 31 : q - b;\n"
+        "        s = (s + p * a + q * b + w * c) % 1000003;\n"
+        "        t = (t + w + c) % 65521;\n"
+        "    }\n"
+        "    return s * 5 + t;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long straight(long long a, long long b)\n"
+        "{\n"
+        "    long long c = a * b % 9973, d = a + c, e = b ^ d;\n"
+        "    long long p = (c & 1) ? 13 : d - e;\n"
+        "    long long q = (e & 2) ? p * c : 29;\n"
+        "    return p * a + q * b + c * d + e;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int bad = 0;\n"
+        "    bad |= two_joins(61) != 709264ll;\n"
+        "    bad |= three_joins(47) != -4536810ll;\n"
+        "    bad |= straight(opaque + 40, 77) != 14423379ll;\n"
+        "    return bad | (sink != 2911);\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-parameter-carry-lanes"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
+        u64 boundary_spill_bounds[] = {11, 8, UINT64_MAX, UINT64_MAX, UINT64_MAX};
+        String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-parameter-carry-lanes-object"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[target], frontends[frontend],
+                                         allocators[allocator], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), object, input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 description = string_format(temporary.arena, S8("parameter carry lanes object {S8} {S8} {S8}: {S8} boundary spills {u64}"),
+                        targets[target], allocators[allocator], frontends[frontend], compiled.diagnostic,
+                        compiled.codegen_statistics.allocator_boundary_spill_count);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == 0, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.allocator_boundary_spill_count <= boundary_spill_bounds[target], description);
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-parameter-carry-lanes-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), allocators[allocator], frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), executable, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("parameter carry lanes native {S8} {S8}: {S8}"),
+                    allocators[allocator], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description);
+                }
+                scratch_end(temporary);
+            }
+        }
+#endif
+    }
+    return result;
+}
+
+// A general-only edge with several parameter assignments publishes as a
+// register parallel move (`machine_fast_publish_edge_parallel`) instead of
+// staging every resident source through the edge-copy tile. The program
+// covers a swap, three- and four-register rotations, fan-out of one source
+// to several parameters, edges mixing constants, computed values and homes,
+// eighteen loop-carried values (more than the register file holds), and an
+// edge mixing general and vector parameters, which keeps the staged form.
+// Every target must select without fallback, and the host runs the program
+// under both allocators and frontend forms; the expected values were
+// cross-checked with host GCC and Clang.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parallel_edge_moves(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static volatile int opaque = 3;\n"
+        "static int sink;\n"
+        "static __attribute__((noinline)) int bump(int x) { sink += x; return x + 1; }\n"
+        "static __attribute__((noinline)) long long swap_loop(int n)\n"
+        "{\n"
+        "    long long a = opaque, b = opaque * 7 + 1;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long t = a;\n"
+        "        a = b;\n"
+        "        b = t + (i & 3);\n"
+        "    }\n"
+        "    return a * 31 + b;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long rotate3(int n)\n"
+        "{\n"
+        "    long long a = 1, b = opaque, c = 5;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long t = a;\n"
+        "        a = b + 1;\n"
+        "        b = c;\n"
+        "        c = t ^ i;\n"
+        "    }\n"
+        "    return a * 961 + b * 31 + c;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long rotate4_fanout(int n)\n"
+        "{\n"
+        "    long long a = opaque, b = 2, c = 3, d = 4;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long t = d;\n"
+        "        d = c;\n"
+        "        c = b;\n"
+        "        b = a;\n"
+        "        a = t;\n"
+        "        if (i % 5 == 0) { b = a; c = a; }\n"
+        "    }\n"
+        "    return ((a * 31 + b) * 31 + c) * 31 + d;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long mixed_sources(int n)\n"
+        "{\n"
+        "    long long a = opaque, b = 9, c = 0;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long x = bump(i);\n"
+        "        if (x & 1) { long long t = a; a = 17; b = t + x; c = b; }\n"
+        "        else { long long t = c; c = a; a = t; b = -4; }\n"
+        "    }\n"
+        "    return a * 961 + b * 31 + c;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long wide(int n)\n"
+        "{\n"
+        "    long long v0 = opaque, v1 = 1, v2 = 2, v3 = 3, v4 = 4, v5 = 5, v6 = 6, v7 = 7;\n"
+        "    long long v8 = 8, v9 = 9, v10 = 10, v11 = 11, v12 = 12, v13 = 13, v14 = 14, v15 = 15, v16 = 16, v17 = 17;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long t = v0;\n"
+        "        v0 = v1 + i; v1 = v2; v2 = v3; v3 = v4 ^ i; v4 = v5; v5 = v6; v6 = v7; v7 = v8; v8 = v9;\n"
+        "        v9 = v10; v10 = v11; v11 = v12; v12 = v13; v13 = v14; v14 = v15; v15 = v16; v16 = v17; v17 = t;\n"
+        "        if (bump(i) % 7 == 0) { long long u = v3; v3 = v12; v12 = u; }\n"
+        "    }\n"
+        "    return v0 + v1 * 2 + v2 * 3 + v3 * 5 + v4 * 7 + v5 * 11 + v6 * 13 + v7 * 17 + v8 * 19 + v9 * 23 + v10 * 29 + v11 * 31 +\n"
+        "           v12 * 37 + v13 * 41 + v14 * 43 + v15 * 47 + v16 * 53 + v17 * 59;\n"
+        "}\n"
+        "static __attribute__((noinline)) double mixed_class(int n)\n"
+        "{\n"
+        "    double x = opaque, y = 0.5;\n"
+        "    long long p = 1, q = 2;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        double t = x;\n"
+        "        x = y * 1.5;\n"
+        "        y = t - 0.25;\n"
+        "        long long u = p;\n"
+        "        p = q;\n"
+        "        q = u + i;\n"
+        "    }\n"
+        "    return x * 3.0 + y + (double)(p * 7 + q);\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int bad = 0;\n"
+        "    bad |= (swap_loop(37) != 1819ll) << 0;\n"
+        "    bad |= (rotate3(41) != 60318ll) << 1;\n"
+        "    bad |= (rotate4_fanout(43) != 122175ll) << 2;\n"
+        "    bad |= (mixed_sources(47) != 34865ll) << 3;\n"
+        "    bad |= (wide(53) != 38176ll) << 4;\n"
+        "    bad |= (mixed_class(29) != 0x1.1a12e82p+11) << 5;\n"
+        "    bad |= (sink != 2459) << 6;\n"
+        "    return bad;\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-parallel-edge-moves"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
+        String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-parallel-edge-moves-object"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[target], frontends[frontend],
+                                         allocators[allocator], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), object, input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 description = string_format(temporary.arena, S8("parallel edge moves object {S8} {S8} {S8}: {S8}"),
+                        targets[target], allocators[allocator], frontends[frontend], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == 0, description);
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-parallel-edge-moves-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), allocators[allocator], frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), executable, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("parallel edge moves native {S8} {S8}: {S8}"),
+                    allocators[allocator], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    // Each subcase owns one exit-status bit, so a failure names
+                    // the function whose result was wrong.
+                    String8 run_arguments[] = {executable};
+                    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0},
+                        (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                    ProcessWaitResult waited = spawn.handle ? os_process_wait_deadline(temporary.arena, spawn, 30000000) : (ProcessWaitResult){0};
+                    String8 run_description = string_format(temporary.arena, S8("{S8}; run status {u32}"), description, waited.platform_status);
+                    BUSTER_TEST_RAW(arguments, spawn.handle && waited.result == PROCESS_RESULT_SUCCESS, run_description);
                 }
                 scratch_end(temporary);
             }
@@ -29765,6 +30042,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_back_edge_dead_stores);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_liveness_dead_stores);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_deferred_edge_stores);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_parameter_contract_carry_lanes);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_parallel_edge_moves);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_recreated_edge_sources);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_return_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_field_assignment_results);

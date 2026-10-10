@@ -73,20 +73,25 @@ RECONCILE_DEPTH = 15
 
 
 class Api:
-    def __init__(self, repository: str, token: str):
+    def __init__(self, repository: str, token: str, response_limit: int | None = None):
         self.repository = repository
         self.prefix = f"{API}/repos/{repository}"
         self.token = token
+        if response_limit is not None and (type(response_limit) is not int or not 0 < response_limit <= 8 << 20):
+            raise ValueError("API response bound is invalid")
+        self.response_limit = response_limit
         self.requests = 0
 
     def request(self, path: str, data: dict | None = None, method: str = "") -> object:
         """One API call. Only GET retries; writes are made idempotent by their callers' lookups."""
         method = method or ("GET" if data is None else "POST")
+        if not self.token and method != "GET":
+            raise ValueError("tokenless API access is read-only")
         result = None
         for attempt in range(1, (GET_TRIES if method == "GET" else 1) + 1):
             request = urllib.request.Request(
                 self.prefix + path, data=None if data is None else json.dumps(data).encode(), method=method, headers={
-                    "Authorization": "Bearer " + self.token,
+                    **({"Authorization": "Bearer " + self.token} if self.token else {}),
                     "Accept": "application/vnd.github+json",
                     "Content-Type": "application/json",
                     "X-GitHub-Api-Version": "2022-11-28",
@@ -94,7 +99,9 @@ class Api:
             try:
                 self.requests += 1
                 with urllib.request.urlopen(request, timeout=30) as response:
-                    payload = response.read()
+                    payload = response.read() if self.response_limit is None else response.read(self.response_limit + 1)
+                    if self.response_limit is not None and len(payload) > self.response_limit:
+                        raise ValueError("API response exceeds the data-reader bound")
                 result = json.loads(payload) if payload else None
                 break
             except (urllib.error.URLError, TimeoutError) as error:

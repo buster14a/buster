@@ -26,7 +26,7 @@ jobs:
   bootstrap:
     needs: no_code_plan
     if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com') }}
-    name: Canonical TCC bootstrap
+    name: Hosted TCC native proofs
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -120,6 +120,16 @@ jobs:
           ./build.sh time_trace_summary_self_test
           ./build.sh time_trace_summary_self_test
           ./build.sh compiler_profile_qualification --self-test
+          ./build.sh compiler_profile_qualification --self-test-main-route
+          ./build.sh compiler_profile_qualification --self-test-historical-sampling
+          ./build.sh compiler_profile_qualification --self-test-historical-prerequisites
+          ./build.sh compiler_profile_qualification --self-test-historical-original-facts
+          ./build.sh compiler_profile_qualification --self-test-historical-terminal
+          python3 -B tools/bench_direct/compiler_sampling_historical_api_test.py
+          ./build.sh compiler_profile_qualification --self-test-cleanup-guard
+          python3 -B tools/bench_direct/compiler_prerequisite_historical_api_test.py
+          ./build.sh compiler_profile_qualification --self-test-utility-admission
+          ./build.sh compiler_profile_qualification --self-test-utility-controller
           ./build.sh compiler_profile_qualification --plan
           ./build.sh compiler_profile_qualification --self-test-preparation-controller
           python3 -B tools/tests/compiler_sampling_packet_export_test.py "$PWD/build.sh" "$RUNNER_TEMP/compiler-sampling-packet-proof"
@@ -128,6 +138,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          ./build.sh compiler_closure corpus-contract-self-test
           ./build.sh compiler_closure containment-self-test timeout
           ./build.sh compiler_closure containment-self-test SIGTERM
           ./build.sh compiler_closure containment-self-test SIGINT
@@ -135,6 +146,11 @@ jobs:
           python3 -B tools/bench_direct/compiler_closure_test.py "$RUNNER_TEMP/compiler-closure-proof"
           python3 -B tools/bench_direct/compiler_test.py
           python3 -B tools/bench_direct/compiler_preparation_test.py
+          python3 -B tools/bench_direct/compiler_owned_plan_test.py
+          markers=(.cache/bootstrap-driver/posix/*/*.complete)
+          test "${#markers[@]}" = 1
+          driver="${markers[0]%.complete}"
+          python3 -B tools/bench_direct/compiler_owned_phase_test.py --native-driver "$driver"
           python3 -B tools/uarch_lab_test.py
 
       - name: Exercise the full native preparation diagnostic export
@@ -143,13 +159,21 @@ jobs:
           set -euo pipefail
           ./build.sh compiler_profile_qualification --self-test-preparation-native-export "$RUNNER_TEMP/compiler-preparation-native-proof"
           PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_sampling_publication_test.py --preparation-native-export "$RUNNER_TEMP/compiler-preparation-native-proof"
+          for diagnostic_case in invalid missing bad-exit partial-numeric inconsistent-regression; do
+            output="$RUNNER_TEMP/compiler-preparation-native-$diagnostic_case"
+            if BUSTER_PREPARATION_DIAGNOSTIC_CORPUS_CASE="$diagnostic_case" ./build.sh compiler_profile_qualification --self-test-preparation-native-export "$output"; then
+              echo "::error::An invalid native corpus diagnostic completed: $diagnostic_case"
+              exit 1
+            fi
+            PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_sampling_publication_test.py --preparation-native-negative-export "$output"
+          done
 
       - name: Retain the hosted native preparation diagnostic
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: buster-hosted-preparation-native-proof-${{ github.sha }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/compiler-preparation-native-proof
+          path: ${{ runner.temp }}/compiler-preparation-native-*
           if-no-files-found: warn
           retention-days: 90
 
@@ -224,3 +248,286 @@ jobs:
             printf '```\n'
           } >>"$GITHUB_STEP_SUMMARY"
           exit "$status"
+
+  # Retain the complete Utility proofs within a separate hosted reservation.
+  ordinary:
+    needs: no_code_plan
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com') }}
+    name: Hosted ordinary compiler bridge proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      LC_ALL: C
+      # Hosted Ubuntu supplies a supplementary group; the SGID regression
+      # must cover inheritance from a group other than the primary group.
+      BQ_REQUIRE_DISTINCT_GROUP: '1'
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
+      - name: Require CI admission to be enabled
+        shell: bash
+        env:
+          PLAN_RESULT: ${{ needs.no_code_plan.result }}
+          EVENT_NAME: ${{ github.event_name }}
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: |
+          if [[ ("${EVENT_NAME:-}" == pull_request || "${EVENT_NAME:-}" == merge_group) &&
+                "${PLAN_RESULT:-skipped}" != success ]]; then
+            echo '::error::Trusted classification failed; refusing no-code admission.'
+            exit 1
+          fi
+          if [[ "$CI_ENABLED" != true ]]; then
+            echo '::error::Required validation is disabled; refusing a skipped admission check.'
+            exit 1
+          fi
+      # Pull-request workflows are loaded from the merge ref. Use that same
+      # tested revision so workflow commands and the bootstrapped driver agree.
+      - name: Check out exact tested source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Record actual checkout identity 3
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - name: Record exact tested source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          tested_sha=$(git rev-parse HEAD)
+          test "$tested_sha" = "$GITHUB_SHA"
+          tested_tree=$(git rev-parse 'HEAD^{tree}')
+          build_c_blob=$(git rev-parse HEAD:build.c)
+          {
+            printf 'tested_checkout_sha=%s\n' "$tested_sha"
+            printf 'tested_tree_sha=%s\n' "$tested_tree"
+            printf 'build_c_blob_sha=%s\n' "$build_c_blob"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Fetch pinned bootstrap compiler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+
+      - name: Record actual checkout identity 6
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
+      - name: Install pinned TCC on the hosted runner
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 0fb54300b56512754221d80adda85ddb9815bceb
+          ./configure --prefix="$RUNNER_TEMP/tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/tcc/bin" >> "$GITHUB_PATH"
+
+      - name: Exercise every actual ordinary compiler fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh compiler_closure driver-path > "$RUNNER_TEMP/ordinary-native-driver.txt"
+          mapfile -t drivers < "$RUNNER_TEMP/ordinary-native-driver.txt"
+          [[ "${#drivers[@]}" == 1 && "${drivers[0]}" == /* && -x "${drivers[0]}" ]]
+          driver="${drivers[0]}"
+          python3 -B tools/bench_direct/compiler_ordinary_fixture_test.py --native-driver "$driver" --export "$RUNNER_TEMP/ordinary-bridge-diagnostic"
+
+      - name: Retain the hosted ordinary diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-hosted-ordinary-phase-proof-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/ordinary-bridge-diagnostic
+          if-no-files-found: warn
+          retention-days: 90
+
+
+  utility:
+    needs: no_code_plan
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com') }}
+    name: Hosted compiler closure Utility proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      LC_ALL: C
+      # Hosted Ubuntu supplies a supplementary group; the SGID regression
+      # must cover inheritance from a group other than the primary group.
+      BQ_REQUIRE_DISTINCT_GROUP: '1'
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
+      - name: Require CI admission to be enabled
+        shell: bash
+        env:
+          PLAN_RESULT: ${{ needs.no_code_plan.result }}
+          EVENT_NAME: ${{ github.event_name }}
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: |
+          if [[ ("${EVENT_NAME:-}" == pull_request || "${EVENT_NAME:-}" == merge_group) &&
+                "${PLAN_RESULT:-skipped}" != success ]]; then
+            echo '::error::Trusted classification failed; refusing no-code admission.'
+            exit 1
+          fi
+          if [[ "$CI_ENABLED" != true ]]; then
+            echo '::error::Required validation is disabled; refusing a skipped admission check.'
+            exit 1
+          fi
+      # Pull-request workflows are loaded from the merge ref. Use that same
+      # tested revision so workflow commands and the bootstrapped driver agree.
+      - name: Check out exact tested source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Record actual checkout identity 3
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - name: Record exact tested source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          tested_sha=$(git rev-parse HEAD)
+          test "$tested_sha" = "$GITHUB_SHA"
+          tested_tree=$(git rev-parse 'HEAD^{tree}')
+          build_c_blob=$(git rev-parse HEAD:build.c)
+          {
+            printf 'tested_checkout_sha=%s\n' "$tested_sha"
+            printf 'tested_tree_sha=%s\n' "$tested_tree"
+            printf 'build_c_blob_sha=%s\n' "$build_c_blob"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Fetch pinned bootstrap compiler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+
+      - name: Record actual checkout identity 6
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
+      - name: Install pinned TCC on the hosted runner
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 0fb54300b56512754221d80adda85ddb9815bceb
+          ./configure --prefix="$RUNNER_TEMP/tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/tcc/bin" >> "$GITHUB_PATH"
+
+      - name: Exercise both full ordinary Utility legs and independent replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh compiler_profile_qualification --self-test-utility-export "$RUNNER_TEMP/utility-diagnostic"
+          PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_closure_utility_publication_test.py --utility-native-export "$RUNNER_TEMP/utility-diagnostic"
+          for diagnostic_lab in legacy snapshot; do
+            output="$RUNNER_TEMP/utility-diagnostic-$diagnostic_lab-lab125"
+            if BUSTER_UTILITY_DIAGNOSTIC_LAB_CASE="$diagnostic_lab" ./build.sh compiler_profile_qualification --self-test-utility-export "$output"; then
+              echo "Expected the guarded $diagnostic_lab lab125 native fixture to refuse completion" >&2
+              exit 1
+            fi
+            PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_closure_utility_publication_test.py --utility-native-negative-export "$output"
+          done
+
+      - name: Exercise the actual fixed-40 MAIN producer and independent replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh compiler_profile_qualification --self-test-main-forty-native-export "$RUNNER_TEMP/main-forty-diagnostic" "$(readlink -f "$(command -v python3)")" "$PWD/tools/uarch_lab.py"
+          PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_closure_utility_publication_test.py --main-owned-native-export "$RUNNER_TEMP/main-forty-diagnostic"
+
+      - name: Retain the actual fixed-40 MAIN diagnostic
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-hosted-main-forty-proof-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/main-forty-diagnostic/evidence
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Retain the hosted Utility diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-hosted-closure-utility-proof-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/utility-diagnostic/evidence
+            ${{ runner.temp }}/utility-diagnostic-legacy-lab125/evidence
+            ${{ runner.temp }}/utility-diagnostic-snapshot-lab125/evidence
+          if-no-files-found: warn
+          retention-days: 90
+
+  validation:
+    name: Canonical TCC bootstrap
+    needs: [no_code_plan, bootstrap, ordinary, utility]
+    if: ${{ always() && github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
+      - name: Require every applicable hosted proof
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PLAN_RESULT: ${{ needs.no_code_plan.result }}
+          NO_CODE: ${{ needs.no_code_plan.outputs.no_code }}
+          NATIVE_RESULT: ${{ needs.bootstrap.result }}
+          UTILITY_RESULT: ${{ needs.utility.result }}
+          ORDINARY_RESULT: ${{ needs.ordinary.result }}
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: |
+          set -euo pipefail
+          if [[ "$CI_ENABLED" != true ]]; then
+            echo '::error::Required validation is disabled; refusing a skipped admission check.'
+            exit 1
+          fi
+          if [[ "$EVENT_NAME" == pull_request || "$EVENT_NAME" == merge_group ]]; then
+            if [[ "$PLAN_RESULT" != success ]]; then
+              echo '::error::Trusted classification failed; refusing no-code admission.'
+              exit 1
+            fi
+            if [[ "$NO_CODE" == true ]]; then
+              if [[ "$NATIVE_RESULT" != skipped || "$UTILITY_RESULT" != skipped || "$ORDINARY_RESULT" != skipped ]]; then
+                echo '::error::Trusted no-code admission has contradictory hosted proof results.'
+                exit 1
+              fi
+              exit 0
+            fi
+          fi
+          if [[ "$NATIVE_RESULT" != success || "$UTILITY_RESULT" != success || "$ORDINARY_RESULT" != success ]]; then
+            echo '::error::Required hosted native, ordinary or Utility proof failed, cancelled, timed out or was skipped.'
+            exit 1
+          fi

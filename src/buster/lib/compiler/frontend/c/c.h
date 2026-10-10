@@ -1424,8 +1424,8 @@ typedef struct CNumberFacts CNumberFacts;
 typedef struct CAst CAst;
 
 // What the tree expression typer (c_ast_types.c, GitHub #3102) did over one
-// analysis: bodies it typed, expression nodes it typed, and how each type
-// query that reached it ended. An answer replaced the type machine; a decline
+// analysis: function bodies and file-scope initializers it typed, expression
+// nodes it typed, and how each type query that reached it ended. An answer replaced the type machine; a decline
 // mapped to a node the typer does not accept (or accepts only unchecked); a
 // miss mapped to no node; a gated query met a machine state the typer leaves
 // to the machine (nested frames, a constant-evaluation mode, no capacity).
@@ -1433,6 +1433,7 @@ typedef struct CAstTypeStatistics CAstTypeStatistics;
 struct CAstTypeStatistics
 {
     u64 bodies;
+    u64 initializers;
     // Expression nodes the eager pass visited, and the ones it gave a type.
     u64 nodes_typed;
     u64 nodes_accepted;
@@ -1467,6 +1468,11 @@ struct CParserResult
     u32 diagnostic_count;
     u32 declaration_capacity;
     u32 diagnostic_capacity;
+    // Share the primitive and pointer rows the function-body queries mint
+    // (CTypeInterning in c_internal.h), which the tree's answers for casts and
+    // `&` need. The driver asks for it with the tree (-fc-ast-pilot); without
+    // it every row is appended, as the default path always has.
+    bool type_interning;
 };
 
 // Definition token -> lowest type id ever given that definition_start.
@@ -1519,6 +1525,7 @@ struct CAggregateLookupSlot
     bool multiple;
 };
 
+typedef struct CTypeInterning CTypeInterning;
 typedef struct CAggregateLookup CAggregateLookup;
 struct CAggregateLookup
 {
@@ -1528,6 +1535,11 @@ struct CAggregateLookup
     // Only an exhausted arena or unrepresentable growth makes the index
     // incomplete. Duplicate scoped tags use the separate per-slot flag.
     bool incomplete;
+    // The interned primitive and pointer rows (CTypeInterning in c_internal.h),
+    // the other row index that must survive a rollback. It hangs off this
+    // header rather than CParseResult, whose every checkpoint copies it; a
+    // private query's own header has none, so it appends every row.
+    CTypeInterning* type_interning;
 #if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
     u64 probe_count;
     u64 rehash_slot_count;
@@ -1821,6 +1833,9 @@ struct CParseResult
     u32 noreturn_function_type_capacity;
     u32 type_alignment_count;
     u32 type_alignment_capacity;
+    // The live entries of the interning log (CAggregateLookup.type_interning),
+    // checkpointed with type_count so a rollback forgets the rows it removes.
+    u32 interned_type_count;
     u32 bfloat16_builtin_call_count;
     u32 bfloat16_builtin_call_capacity;
     // Phase-arena bytes semantic analysis released (logical) and the releases

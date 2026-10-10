@@ -96,7 +96,8 @@ class CompilerThroughputWorkflowTest(unittest.TestCase):
         check_writers = {
             WORKFLOWS / "9700x-direct-bench.yml": {"start-pull", "publish-pull", "start-compiler", "publish-compiler",
                                                      "sampling-queue", "sampling-publish",
-                                                     "preparation-queue", "preparation-publish"},
+                                                     "preparation-queue", "preparation-publish",
+                                                     "utility-queue", "utility-publish"},
             WORKFLOWS / "9700x-compiler-request.yml": {"announce"},
             WORKFLOWS / "9700x-lifecycle.yml": {"reconcile"},
         }

@@ -688,6 +688,20 @@ walk. Member sums, array-index multiplication and accumulated array offsets
 are checked before publication. Array-index expressions are constant-query
 children on the explicit query stack; a dot must separate member selections.
 
+A runtime `__builtin_offsetof` may index with expressions that are not
+constant, at any position in the designator, as GNU C and Clang accept
+(`offsetof(T, a[i].b[j])`). `c_ir_offsetof_runtime_index` runs the same walk
+in runtime mode: each such subscript counts as index 0 in the returned
+constant offset, and the query reports the first one after a given token with
+its element type. The `__builtin_offsetof` arm of
+`c_ir_lower_expression_core_step` lowers that subscript as a child expression;
+its `OFFSETOF_INDEX` resume adds `index * sizeof(element)` in `size_t` and asks
+for the next one. Constant subscripts keep the checked admission below, so a
+negative or overflowing constant index is refused here too.
+`c_test_offsetof_runtime_index` covers final, non-final and multiple runtime
+subscripts, and evaluates each side-effecting subscript exactly once, also
+inside a variably modified `sizeof` operand.
+
 Parser enumerators and static assertions use `c_parse_constant_offsetof` as
 states 8/9 of the existing `CParseConstantTask` stack. Each array index is a
 typed child over its original token range, so nested `offsetof`, `sizeof` and
@@ -698,12 +712,34 @@ reached-type hash set grow with the promoted search; small searches use stack
 storage. Repeated aggregates are marked on dequeue, preserving breadth-first
 order and the first offset path without clearing a byte per type-table row.
 
-Parser and lowering walks require a nonnegative integer index with no remaining
-high limb after conversion to its actual type. Floating results, malformed dot
-separators and offsets beyond the target's `size_t` range are refused. Promoted
-member sums, index products and accumulated sums are checked before arithmetic.
-Issue #1570 remains open for a shared parser/lowering designator authority;
-the two walks now share these admission and arithmetic bounds.
+Both walks drive one designator walker, `COffsetofWalk` (declared in
+`c_internal.h`, defined beside `c_ir_constant_offsetof_attempt`).
+`c_offsetof_walk_next` owns the grammar `member ( '[' index ']' | '.' member )*`
+and yields MEMBER, INDEX or END steps. `c_offsetof_walk_member` and
+`c_offsetof_walk_index` own the arithmetic. An index must be an integer or
+boolean of at most 128 bits whose converted value is nonnegative and fits in
+64 bits. Member sums, index products and accumulated offsets are checked
+against the target's `size_t`. Floating indices, malformed separators and
+overflow are refused, never wrapped.
+
+A designator that names a bit-field, directly, through an anonymous member,
+behind an index or in an offsetof nested inside an index, gets one diagnostic
+in every context, worded and placed at the member as Clang does: `cannot
+compute offset of bit-field 'NAME'`. `c_parse_offsetof_bit_field` steps the
+designator with the same walker, skipping indices without evaluating them, and
+asks `c_parse_constant_member_offset` whether the name it finds is a
+bit-field. Enumerators and static assertions reach it through
+`c_parse_constant_expression_syntax_error`, while static initializers and
+function bodies reach it through `c_parse_validate_offsetof_operands`, before
+any evaluator reports a generic refusal. `c_test_offsetof_bit_field_diagnostic`
+pins the text on the model-construction and semantic-only paths.
+
+Each phase keeps only what its type system owns: member lookup
+(`c_parse_constant_member_offset` or `c_ir_promoted_member_path`, both refusing
+bit-fields and promoting through anonymous members), element sizes, and the
+evaluation of index expressions. One layout authority for those answers is
+#1247's scope. GCC and Clang instead wrap negative and out-of-range constant
+indices; Buster's refusal is the #1570 range-check contract.
 
 `c_test_offsetof_members` pins direct and anonymous member offsets, a nested
 anonymous struct within a union, and an anonymous array element through

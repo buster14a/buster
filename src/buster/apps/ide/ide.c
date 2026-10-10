@@ -2104,16 +2104,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         if (compile.c_ast.units)
         {
             CompilerDriverCAstPilotResult tree = compile.c_ast;
-            string_print(S8("C_AST nodes={u64} tokens={u64} build_ns={u64} retained_bytes={u64} transient_high_water={u64} sealed_copy_bytes={u64} "
+            string_print(S8("C_AST nodes={u64} tokens={u64} build_ns={u64} retained_bytes={u64} transient_high_water={u64} column_copy_bytes={u64} "
                             "finalize_child_entries={u64} layout={S8}\n"),
-                         tree.nodes, tree.tokens, tree.build_nanoseconds, tree.retained_bytes, tree.transient_high_water, tree.sealed_copy_bytes,
+                         tree.nodes, tree.tokens, tree.build_nanoseconds, tree.retained_bytes, tree.transient_high_water, tree.column_copy_bytes,
                          tree.finalize_child_entries, compiler_driver_c_ast_pilot_name(invocation.c_ast_pilot));
             string_print(S8("C_AST_WALK walk_ns={u64} walk_steps={u64} scan_ns={u64} children_ns={u64} child_entries={u64} scan_calls={u64}\n"),
                          tree.walk_nanoseconds, tree.walk_steps, tree.scan_nanoseconds, tree.children_nanoseconds, tree.child_entries, tree.scan_calls);
-            // Counts, not times: what the tree expression typer did for the unit's function bodies.
-            string_print(S8("C_AST_TYPES bodies={u64} nodes_typed={u64} nodes_accepted={u64} answers={u64} declines={u64} misses={u64} gated={u64}\n"),
-                         tree.types.bodies, tree.types.nodes_typed, tree.types.nodes_accepted, tree.types.answers, tree.types.declines, tree.types.misses,
-                         tree.types.gated);
+            // Counts, not times: what the tree expression typer did for the unit's function bodies and file-scope initializers.
+            string_print(S8("C_AST_TYPES bodies={u64} initializers={u64} nodes_typed={u64} nodes_accepted={u64} answers={u64} declines={u64} misses={u64} "
+                            "gated={u64}\n"),
+                         tree.types.bodies, tree.types.initializers, tree.types.nodes_typed, tree.types.nodes_accepted, tree.types.answers,
+                         tree.types.declines, tree.types.misses, tree.types.gated);
             // Counts: the declaration split read from the tree, and the units handed to the token walker.
             string_print(S8("C_AST_SPLIT units={u64} records={u64} assertions={u64} fallbacks={u64} reason={S8} fallback_token={u32}\n"),
                          tree.split.units, tree.split.records, tree.split.assertions, tree.split.fallbacks,

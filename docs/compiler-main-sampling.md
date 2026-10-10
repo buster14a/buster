@@ -31,8 +31,10 @@ These are three alternatives; keep exactly one active selector, replacing an
 earlier selector when advancing the request. An inherited selector alone does
 not suppress a fresh ordinary comparison request. This PR adds no request line.
 The committed [admission configuration](compiler-main-sampling-admission-v1.tsv)
-is disabled; arbitrary selectors, freezes or changed owner/actor/source facts
-cannot assign the physical job.
+admits only the phase and freeze it names (currently `acquire`, bound to the
+[acquisition plan](compiler-main-sampling-freeze-v1.tsv) by commit and digest);
+arbitrary selectors, other freezes or changed owner/actor/source facts cannot
+assign the physical job.
 
 The hosted authorizer reads exact GitHub source/request/attempt records and
 all prior campaign attempts, then the native admission policy validates them.
@@ -90,3 +92,33 @@ qualification remains incomplete until the approved host executes the exact
 frozen campaign. Buster first-party licensing remains unselected; see
 [the build guide's license note](agents/build.md).
 No external implementation or dependency is added by this route.
+
+## Predeclared model review
+
+Before acquisition, freeze the review questions and conditional noise model below.
+The historical median/sign confidence interval assumes independent same-target
+pair ratios. The 80/39/39 qualification bounds separately assume independent
+same-family trial classifications. Bonferroni combines the three claim bounds
+without requiring independence between families; it does not repair dependence
+within a family. Seed 20261003 controls bootstrap resampling, while execution
+uses the fixed deterministic AB/BA schedule.
+
+After all nine pilot streams, review every original stream chronologically:
+AB-versus-BA and first-versus-second-half intervals, second-position factor,
+per-tenth ratio and baseline wall medians, CPU/wall/RSS observations, available
+page-fault/cycle records and environment snapshots, exact slot order, complete
+Actions attempt history, and native supervision. Record separate pair-level
+and trial-level assessments as accepted-provisionally, rejected, or unresolved,
+with artifact/member citations and a narrative mechanistic or prior evidence
+basis. Absence of flags, narrow intervals, fresh directories, and complete
+counts alone cannot establish either assumption. One fixed-40 pilot per family
+cannot empirically establish dependence among four adjacent short streams per
+confirmation packet or stability across the whole campaign. An unexplained
+common packet term leaves the trial model unresolved.
+
+Before certificate approval, reassess the same unchanged model against every
+confirmation stream, the four short positions within each packet, family
+locations, and long-comparator first/last positions. An unresolved model blocks
+probability qualification. This review adds no test statistic, threshold,
+discarded pair, spacing change, retry, replacement, or split exploratory-80
+prefix. The existing fixed counts and cost budgets remain unchanged.

@@ -71,6 +71,8 @@ struct CTestAstTypeProbe
     // The CAstKind of the node the range mapped to.
     u32 node_kind;
     bool nonplace_projection;
+    // The answer replays a checked cast's string-literal operand.
+    bool replay;
 };
 BUSTER_F_DECL CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CAst const* ast, String8 function,
                                                       u32 start, u32 end, bool checked);
@@ -108,6 +110,10 @@ struct CTestAstTypeVerify
 {
     u64 compared;
     u64 mismatches;
+    // Designator probes the const-assignment walk skipped, which the machine
+    // answered too, and those it did not fail cleanly.
+    u64 probes;
+    u64 probe_mismatches;
     u64 reason_counts[C_TEST_AST_TYPE_MISMATCH_REASONS];
     CTestAstTypeMismatch first[C_TEST_AST_TYPE_MISMATCH_KEPT];
     u32 first_count;
@@ -150,6 +156,9 @@ BUSTER_F_DECL CTestExpressionQuery c_test_expression_type_query(Arena* scratch, 
                                                                 u32 end, bool checked, bool nested, CTypeId cached, bool scalars,
                                                                 bool machine_only);
 BUSTER_F_DECL void c_test_set_literal_query_machine_only(bool machine_only);
+// Keeps the interning window shut (CTypeInterning), so one source can be
+// compiled with and without interned rows and the objects compared.
+BUSTER_F_DECL void c_test_set_type_interning_off(bool off);
 
 // Direct member alignment queries must leave the published model, including
 // spare rows and the type-map input counts/pointers, byte-for-byte unchanged.
