@@ -953,14 +953,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_forced_include(UnitTestA
         BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int second_value = FROM_FIRST + 1;")));
 
         // A relative name is looked up from the working directory first (the
-        // repository root here), then through -I.
+        // repository root here), then through -I. The header is an existing
+        // fixture, so the native-retirement inventory stays unchanged.
         String8 relative_source = buster_test_temporary_path(arguments->arena, S8("forced-relative"), S8(".c"));
-        String8 relative_text = S8("int relative_value = FORCED_INCLUDE_RELATIVE;\n");
+        String8 relative_text = S8("int relative_value = INCLUDED_VALUE;\n");
         if (BUSTER_REQUIRE(arguments, file_write(relative_source, BUSTER_SLICE_TO_BYTE_SLICE(relative_text))))
         {
-            String8 relative[] = {S8("-E"), S8("-include"), S8("tests/basic_c_forced_include.h"), relative_source};
+            String8 relative[] = {S8("-E"), S8("-include"), S8("tests/basic_c_include.h"), relative_source};
             BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(relative), &output, &error));
-            BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int relative_value = 7;")));
+            BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int relative_value = 37;")));
             String8 through_include[] = {S8("-E"), S8("-I"), header_directory, S8("-include"), string_slice(first_header, header_directory.length + 1, first_header.length),
                                          relative_source};
             BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(through_include), &output, &error));
