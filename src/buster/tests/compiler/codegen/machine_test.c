@@ -3059,12 +3059,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_address_rematerialization(
     return result;
 }
 
-// A staged edge copy (three parameters on one jump) whose sources are a
-// constant, a frame address and a loaded value: the two recreatable sources
+// An edge copy (three parameters on one jump) whose sources are a constant,
+// a frame address and a loaded value: the two recreatable sources
 // rematerialize straight into their destinations
-// (`MACHINE_FAST_EDGE_SOURCE_RECREATED`), and only the loaded value passes
-// through the edge-copy tile as one temporary store and one reload. Each
-// rematerialization lands in the register the parameter's use reads.
+// (`MACHINE_FAST_EDGE_SOURCE_RECREATED`), and the loaded value moves between
+// registers in the parallel publication (`machine_fast_publish_edge_parallel`),
+// so the edge-copy tile is never touched. Each rematerialization lands in
+// the register the parameter's use reads.
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_recreated_edge_sources(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3168,7 +3169,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_recreated_edge_sources(UnitTestA
             String8 description = string_format(arena, S8("recreated edge sources {S8} {S8}: tile {u32}/{u32}, constant {u32}, frame {u32}"),
                 aarch64 ? S8("aarch64") : S8("x86_64"), mode == 0 ? S8("fast") : S8("quality"), temporary_spills, temporary_reloads,
                 constant_location, frame_location);
-            BUSTER_TEST_RAW(arguments, temporary_spills == 1 && temporary_reloads == 1, description);
+            BUSTER_TEST_RAW(arguments, temporary_spills == 0 && temporary_reloads == 0, description);
             BUSTER_TEST_RAW(arguments, constant_location != UINT32_MAX && frame_location != UINT32_MAX, description);
             BUSTER_TEST_RAW(arguments, constant_location == placement.operand_registers[(u64)first_use * 4u + 1u] &&
                                            frame_location == placement.operand_registers[(u64)(first_use + 1u) * 4u + 1u],
