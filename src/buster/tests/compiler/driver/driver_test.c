@@ -11,6 +11,8 @@
 // driver_metrics_test.c holds the per-input metrics / -fkeep-going fixtures.
 // compiler_driver_test_aarch64_elf_ldst checks foreign non-PIC memory references
 // against native host-linked controls, including each scaled low12 form.
+// compiler_driver_test_aarch64_elf_tlsdesc runs foreign TLSDESC objects relaxed
+// to local-exec, against a host-linked control (#2582).
 // compiler_driver_test_cached_plan_lanes owns prepared-key reuse across gangs;
 // compiler_driver_test_unit_batches owns failed-cohort recovery and exact output.
 // compiler_driver_test_native_frame_vectors compiles its matrix on a lane gang
@@ -5132,6 +5134,141 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_elf_ldst(UnitTes
             }
             BUSTER_TEST(arguments, os_file_delete(object_path));
             if (host_link.handle && host_linked.result == PROCESS_RESULT_SUCCESS) { BUSTER_TEST(arguments, os_file_delete(control_path)); }
+        }
+        arena_set_position(arena, scope.position);
+    }
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// A foreign compiler's general-dynamic TLS descriptors (#2582) must relax
+// and execute in a fixed-address Buster executable. The configured host
+// compiler builds aarch64_elf_tlsdesc.c with -fPIC at -O0 and -O2; Buster
+// compiles the main that defines the second thread-local and links both.
+// Every TLSDESC sequence in the object must appear relaxed in .text as
+// MOVZ x0 / MOVK x0 / NOP / NOP, a host-linked control must print the same
+// values, and the Buster image must print and return them.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_elf_tlsdesc(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && BUSTER_CPU_ARCH_AARCH64 && !BUSTER_ANDROID
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 const fixture = S8("src/buster/tests/compiler/driver/fixtures/aarch64_elf_tlsdesc.c");
+    String8 const main_fixture = S8("src/buster/tests/compiler/driver/fixtures/aarch64_elf_tlsdesc_main.c");
+    String8 const expected_output = S8("TLSDESC_RUNTIME foreign=42 buster=8 sum=55 after=47\n");
+    ProcessSpawnOptions spawn_options = {.use_process_environment = true, .search_path = true,
+        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 level = 0; level < BUSTER_ARRAY_LENGTH(optimizations); level += 1)
+    {
+        TemporalArena scope = arena_begin_temporal(arena);
+        String8 object_path = buster_test_temporary_path(arena, S8("buster-aarch64-elf-tlsdesc"), S8(".o"));
+        String8 control_path = buster_test_temporary_path(arena, S8("buster-aarch64-elf-tlsdesc-control"), S8(""));
+        String8 output_path = buster_test_temporary_path(arena, S8("buster-aarch64-elf-tlsdesc-native"), S8(""));
+        String8 command[12];
+        u32 count = 0;
+        command[count++] = S8(BUSTER_HOST_C_COMPILER);
+        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+        command[count++] = optimizations[level];
+        command[count++] = S8("-fPIC");
+        command[count++] = S8("-ftls-model=global-dynamic");
+        command[count++] = S8("-c");
+        command[count++] = fixture;
+        command[count++] = S8("-o");
+        command[count++] = object_path;
+        ProcessSpawnResult compiler = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0}, spawn_options);
+        ProcessWaitResult compiled = compiler.handle ? os_process_wait_deadline(arena, compiler, 30000000) : (ProcessWaitResult){0};
+        bool compile_ok = compiler.handle && !compiled.timed_out && compiled.result == PROCESS_RESULT_SUCCESS;
+        String8 compile_error = BYTE_SLICE_TO_STRING(8, compiled.streams[STANDARD_STREAM_ERROR]);
+        BUSTER_TEST_RAW(arguments, compile_ok, compile_error.length ? compile_error : S8("host compiler did not run"));
+        if (compile_ok)
+        {
+            // The host toolchain links and runs the same object first, so an
+            // import failure cannot hide a fixture or host problem.
+            count = 0;
+            command[count++] = S8(BUSTER_HOST_C_COMPILER);
+            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+            command[count++] = S8("-no-pie");
+            command[count++] = main_fixture;
+            command[count++] = object_path;
+            command[count++] = S8("-o");
+            command[count++] = control_path;
+            ProcessSpawnResult host_link = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0}, spawn_options);
+            ProcessWaitResult host_linked = host_link.handle ? os_process_wait_deadline(arena, host_link, 30000000) : (ProcessWaitResult){0};
+            bool control_ok = host_link.handle && !host_linked.timed_out && host_linked.result == PROCESS_RESULT_SUCCESS;
+            BUSTER_TEST(arguments, control_ok);
+            if (control_ok)
+            {
+                String8 run_control[] = {control_path};
+                ProcessSpawnResult control = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_control), (SliceString8){0}, (SliceString8){0}, spawn_options);
+                ProcessWaitResult control_ran = control.handle ? os_process_wait_deadline(arena, control, 30000000) : (ProcessWaitResult){0};
+                control_ok = control.handle && !control_ran.timed_out && control_ran.result == PROCESS_RESULT_SUCCESS &&
+                             string_equal(BYTE_SLICE_TO_STRING(8, control_ran.streams[STANDARD_STREAM_OUTPUT]), expected_output);
+                BUSTER_TEST(arguments, control_ok);
+                BUSTER_TEST(arguments, os_file_delete(control_path));
+            }
+            // Every access in the fixture is a TLSDESC sequence; count them.
+            ByteSlice bytes = file_read(arena, object_path, (FileReadOptions){0});
+            ObjectFile imported = object_read(arena, bytes, (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX});
+            u32 descriptor_sites = 0;
+            u32 descriptor_steps = 0;
+            if (BUSTER_REQUIRE(arguments, imported.error == OBJECT_ERROR_NONE))
+            {
+                for (u32 index = 0; index < imported.relocation_count; index += 1)
+                {
+                    ObjectRelocationKind kind = imported.relocations[index].kind;
+                    descriptor_sites += kind == OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21;
+                    descriptor_steps += object_relocation_kind_is_aarch64_elf_tls_desc(kind);
+                }
+            }
+            BUSTER_TEST(arguments, descriptor_sites >= 3 && descriptor_steps == descriptor_sites * 4);
+            String8 link_command[] = {main_fixture, object_path, S8("-o"), output_path};
+            CompilerDriverResult linked = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+            BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+            if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                // Variant I puts both thread-locals after the 16-byte TCB, so
+                // each relaxed offset is at least 16 and fits in MOVK's half.
+                ByteSlice image = file_read(arena, output_path, (FileReadOptions){0});
+                ByteSlice text = compiler_driver_test_elf_section(image, S8(".text"));
+                u32 relaxed = 0;
+                u32 offset_mask = 0;
+                u32 distinct_offsets = 0;
+                for (u64 offset = 0; offset + 16 <= text.length; offset += 4)
+                {
+                    u32 words[4];
+                    memcpy(words, text.pointer + offset, sizeof(words));
+                    if ((words[0] & UINT32_C(0xffe0001f)) == UINT32_C(0xd2a00000) && (words[1] & UINT32_C(0xffe0001f)) == UINT32_C(0xf2800000) &&
+                        words[2] == UINT32_C(0xd503201f) && words[3] == UINT32_C(0xd503201f))
+                    {
+                        u32 tprel = (((words[0] >> 5) & 0xffff) << 16) | ((words[1] >> 5) & 0xffff);
+                        relaxed += 1;
+                        u32 bit = tprel >= 16 && tprel < 16 + 31 * 4 && !(tprel & 3) ? UINT32_C(1) << ((tprel - 16) / 4) : UINT32_C(0x80000000);
+                        distinct_offsets += !(offset_mask & bit);
+                        offset_mask |= bit;
+                    }
+                }
+                BUSTER_TEST(arguments, relaxed == descriptor_sites && distinct_offsets == 2 && !(offset_mask & UINT32_C(0x80000000)));
+                String8 run_native[] = {output_path};
+                ProcessSpawnResult native = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_native), (SliceString8){0}, (SliceString8){0}, spawn_options);
+                ProcessWaitResult native_ran = native.handle ? os_process_wait_deadline(arena, native, 30000000) : (ProcessWaitResult){0};
+                String8 observed = BYTE_SLICE_TO_STRING(8, native_ran.streams[STANDARD_STREAM_OUTPUT]);
+                bool executed = native.handle && !native_ran.timed_out && native_ran.result == PROCESS_RESULT_SUCCESS;
+                BUSTER_TEST_RAW(arguments, executed && string_equal(observed, expected_output), observed);
+                if (executed && control_ok && relaxed == descriptor_sites)
+                {
+                    arguments->show(arguments, string_format(arena,
+                        S8("AARCH64_ELF_TLSDESC_NATIVE_V1 optimization={S8} compiler={S8} descriptors={u32} host_control=pass buster=pass\n"),
+                        optimizations[level], S8(BUSTER_HOST_C_COMPILER), descriptor_sites));
+                }
+                BUSTER_TEST(arguments, os_file_delete(output_path));
+            }
+            BUSTER_TEST(arguments, os_file_delete(object_path));
         }
         arena_set_position(arena, scope.position);
     }
@@ -29101,6 +29238,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_scoped_constant_execution);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_coff_section_alignment);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_elf_ldst);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_elf_tlsdesc);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_write_limits);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
