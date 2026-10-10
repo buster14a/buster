@@ -1704,6 +1704,13 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         // and peak-RSS adoption gates. Keep every pass independently
         // selectable below, including a whole-pipeline opt-out.
         .fast_passes = IR_FAST_ALL,
+        .inline_options = {
+            .tiny = false,
+            .max_callee_instructions = IR_INLINE_TINY_INSTRUCTIONS,
+            .max_function_growth = IR_INLINE_FUNCTION_GROWTH,
+            .max_module_growth = IR_INLINE_MODULE_GROWTH,
+            .max_call_sites = IR_INLINE_CALL_SITES,
+        },
     };
     if (!arena)
     {
@@ -2363,6 +2370,42 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             if (fast_option) continue;
         }
+        if (string_equal(argument, S8("-fcanonical-inline")) || string_equal(argument, S8("-fno-canonical-inline")))
+        {
+            invocation.inline_options.tiny = string_equal(argument, S8("-fcanonical-inline"));
+            continue;
+        }
+        String8 inline_budget_prefixes[] = {
+            S8("-fcanonical-inline-max-callee="),
+            S8("-fcanonical-inline-function-growth="),
+            S8("-fcanonical-inline-module-growth="),
+            S8("-fcanonical-inline-call-sites="),
+        };
+        bool inline_budget_option = false;
+        for (u32 budget = 0; budget < BUSTER_ARRAY_LENGTH(inline_budget_prefixes); budget += 1)
+        {
+            String8 prefix = inline_budget_prefixes[budget];
+            if (string_starts_with_sequence(argument, prefix))
+            {
+                String8 budget_text = {.pointer = argument.pointer + prefix.length, .length = argument.length - prefix.length};
+                IntegerParsingU64 parsed = string8_parse_u64_decimal(budget_text);
+                if (parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == budget_text.length && parsed.value && parsed.value <= UINT32_MAX)
+                {
+                    u32 limit = (u32)parsed.value;
+                    if (budget == 0) invocation.inline_options.max_callee_instructions = limit;
+                    else if (budget == 1) invocation.inline_options.max_function_growth = limit;
+                    else if (budget == 2) invocation.inline_options.max_module_growth = limit;
+                    else invocation.inline_options.max_call_sites = limit;
+                }
+                else
+                {
+                    compiler_driver_argument_error(arena, &invocation, S8("expected a positive 32-bit canonical inline budget: {S8}"), argument);
+                }
+                inline_budget_option = true;
+                break;
+            }
+        }
+        if (inline_budget_option) continue;
         if (string_equal(argument, S8("-fno-target-local-promotion")) || string_equal(argument, S8("-ftarget-local-promotion")))
         {
             invocation.disable_target_local_promotion = string_equal(argument, S8("-fno-target-local-promotion"));
@@ -2407,6 +2450,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 {
                     invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST;
                     invocation.optimization_level = levels[index].level;
+                    invocation.inline_options.tiny = levels[index].level > 0;
                     found = true;
                     break;
                 }
@@ -5623,11 +5667,44 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion || lowered.program->pin_debug_locals;
     lowered.program->fast_passes = invocation.fast_passes;
     lowered.program->measure_fast_passes = invocation.measure_fast_passes;
+    lowered.program->inline_options = invocation.inline_options;
     WORK_LEDGER_PHASE(PREPARE);
     IrValidationResult validation = ir_prepare_canonical_module(lowered.program, module,
                                                                 lowered.canonical_ir_certified && !invocation.bootstrap_trace_prefix.length && !invocation.verify_codegen);
     result.local_promotion = module->local_promotion;
     result.fast = module->fast;
+    result.inlining = module->inlining;
+    if (validation.error == IR_VALIDATION_INLINE_REQUIRED)
+    {
+        IrFunction* inline_caller = validation.function.value < module->function_count ? module->functions + validation.function.value : 0;
+        IrInstruction* inline_call = inline_caller && validation.instruction.value < inline_caller->instruction_count ?
+                                     inline_caller->instructions + validation.instruction.value : 0;
+        IrSymbol* inline_callee = inline_call && inline_call->opcode == IR_OPCODE_CALL && inline_call->symbol.value < lowered.program->symbols.count ?
+                                 ir_symbol_from_id(&lowered.program->symbols, inline_call->symbol) : 0;
+        String8 function_name = inline_caller ? inline_caller->name : S8("<invalid>");
+        String8 callee_name = inline_callee ? inline_callee->name : S8("<unavailable>");
+        String8 inline_budget_reason = module->inlining.required_budget_reason == IR_INLINE_BUDGET_WORK ? S8("work") :
+                                      module->inlining.required_budget_reason == IR_INLINE_BUDGET_SCRATCH ? S8("scratch") :
+                                      module->inlining.required_budget_reason == IR_INLINE_BUDGET_CALL_SITES ? S8("call-sites") :
+                                      module->inlining.required_budget_reason == IR_INLINE_BUDGET_FUNCTION_GROWTH ? S8("function-growth") :
+                                      module->inlining.required_budget_reason == IR_INLINE_BUDGET_MODULE_GROWTH ? S8("module-growth") :
+                                      module->inlining.required_budget_reason == IR_INLINE_BUDGET_STORAGE ? S8("storage") :
+                                      module->inlining.required_budget_reason == IR_INLINE_BUDGET_COPY_ROWS ? S8("copied-rows") : S8("none");
+        CompilerDiagnostic diagnostic = {
+            .code = S8("ir.inline-required"),
+            .severity = COMPILER_DIAGNOSTIC_ERROR,
+            .primary = compiler_driver_backend_location(lowered.program, module, validation.function, validation.instruction),
+            .message = string_format(arena,
+                S8("required inlining of '{S8}' in function '{S8}' could not be completed: the callee must be available in this translation unit, nonrecursive, supported by the canonical body copier and ABI, and fit the configured call-site, function-growth, and module-growth limits (candidates={u64}, budget_skips={u64}, shape_skips={u64}, linkage_skips={u64}, recursion_skips={u64}, visits={u64}, budget_cause={S8}, demand={u64}, limit={u64})"),
+                callee_name, function_name, module->inlining.candidates, module->inlining.budget_skips, module->inlining.shape_skips,
+                module->inlining.linkage_skips, module->inlining.recursion_skips, module->inlining.visits, inline_budget_reason,
+                module->inlining.required_budget_demand, module->inlining.required_budget_limit),
+        };
+        compiler_driver_collect_diagnostic(warnings, diagnostic);
+        result.error = COMPILER_DRIVER_ERROR_IR;
+        result.diagnostic = compiler_diagnostic_render(arena, diagnostic);
+        goto end;
+    }
     if (validation.error != IR_VALIDATION_NONE)
     {
         String8 function_name = validation.function.value < module->function_count ? module->functions[validation.function.value].name : S8("<invalid>");
@@ -5642,7 +5719,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         }
         String8 boundary = validation.boundary == IR_VALIDATION_BOUNDARY_CFG_PUBLICATION ? S8("canonical CFG publication") :
                            validation.boundary == IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT ? S8("local-promotion output") :
-                           validation.boundary == IR_VALIDATION_BOUNDARY_FAST_OUTPUT ? S8("FAST output") : S8("canonical input");
+                           validation.boundary == IR_VALIDATION_BOUNDARY_FAST_OUTPUT ? S8("FAST output") :
+                           validation.boundary == IR_VALIDATION_BOUNDARY_INLINE_OUTPUT ? S8("inlining output") : S8("canonical input");
         result.error = COMPILER_DRIVER_ERROR_IR;
         result.diagnostic =
             string_format(arena, S8("canonical C IR validation failed: boundary {S8}, error {u32}, function {u32} ('{S8}'), block {u32}, instruction {u32}, opcode {u32}"),
@@ -7342,6 +7420,23 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.fast.compact_nanoseconds += unit.fast.compact_nanoseconds;
         result.fast.instructions_before += unit.fast.instructions_before;
         result.fast.instructions_after += unit.fast.instructions_after;
+        result.inlining.candidates += unit.inlining.candidates;
+        result.inlining.inlined += unit.inlining.inlined;
+        result.inlining.always_inlined += unit.inlining.always_inlined;
+        result.inlining.copied_instructions += unit.inlining.copied_instructions;
+        result.inlining.growth += unit.inlining.growth;
+        result.inlining.budget_skips += unit.inlining.budget_skips;
+        result.inlining.shape_skips += unit.inlining.shape_skips;
+        result.inlining.linkage_skips += unit.inlining.linkage_skips;
+        result.inlining.recursion_skips += unit.inlining.recursion_skips;
+        result.inlining.visits += unit.inlining.visits;
+        if (result.inlining.required_budget_reason == IR_INLINE_BUDGET_NONE &&
+            unit.inlining.required_budget_reason != IR_INLINE_BUDGET_NONE)
+        {
+            result.inlining.required_budget_reason = unit.inlining.required_budget_reason;
+            result.inlining.required_budget_demand = unit.inlining.required_budget_demand;
+            result.inlining.required_budget_limit = unit.inlining.required_budget_limit;
+        }
         codegen_statistics_add(&result.codegen_statistics, &unit.codegen_statistics);
         object_write_statistics_add(&result.object_write_statistics, &unit.object_write_statistics);
         if (unit.fallback_record_count)

@@ -14000,6 +14000,227 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_attribute_noreturn(UnitTestArgumen
 // shape a platform header or context-save routine has. The unmarked
 // `my_plain` control proves an unlisted name is still no returns-twice call,
 // and the spelled-out `setjmp` proves the name list is kept.
+BUSTER_GLOBAL_LOCAL IrSymbol* c_test_inline_attribute_symbol(IrProgram* program, String8 name)
+{
+    IrSymbol* result = 0;
+    for (u32 index = 0; program && index < program->symbols.count && !result; index += 1)
+    {
+        IrSymbol* symbol = program->symbols.symbols + index;
+        if (string_equal(symbol->name, name))
+        {
+            result = symbol;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void c_test_inline_symbol_flags(UnitTestArguments* arguments, UnitTestResult* outer_result,
+                                                     IrProgram* program, String8 name, bool always_inline, bool noinline)
+{
+    UnitTestResult result = {0};
+    IrSymbol* symbol = c_test_inline_attribute_symbol(program, name);
+    BUSTER_TEST(arguments, symbol != 0);
+    if (symbol)
+    {
+        BUSTER_TEST(arguments, symbol->always_inline == always_inline);
+        BUSTER_TEST(arguments, symbol->noinline == noinline);
+    }
+    outer_result->test_count += result.test_count;
+    outer_result->succeeded_test_count += result.succeeded_test_count;
+}
+
+// Attribute retention follows declarations, not token spelling: merged file-
+// and block-scope declarations preserve the symbol's policy, a declarator
+// trailing attribute decorates only its declarator, and tag names do not act
+// as attributes.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_attribute_retention(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 gnu_source = S8(
+        "static inline int reversed_always(int value);\n"
+        "static inline int reversed_always(int value) __attribute__((always_inline));\n"
+        "static inline int reversed_always(int value) { return value + 1; }\n"
+        "static inline int reversed_noinline(int value) { return value + 2; }\n"
+        "static inline int reversed_noinline(int value) __attribute__((noinline));\n"
+        "static inline int block_target(int value);\n"
+        "int block_user(int value)\n"
+        "{\n"
+        "    extern int block_target(int) __attribute__((always_inline));\n"
+        "    return block_target(value);\n"
+        "}\n"
+        "static inline int block_target(int value) { return value + 3; }\n"
+        "__attribute__((always_inline)) static inline int shared_first(int), shared_second(int);\n"
+        "static inline int shared_first(int value) { return value + 4; }\n"
+        "static inline int shared_second(int value) { return value + 5; }\n"
+        "static inline int trailing_first(int) __attribute__((always_inline)), trailing_second(int);\n"
+        "static inline int trailing_first(int value) { return value + 6; }\n"
+        "static inline int trailing_second(int value) { return value + 7; }\n"
+        "static inline int underscored_always(int value) __attribute__((__always_inline__));\n"
+        "static inline int underscored_always(int value) { return value + 8; }\n"
+        "static inline int underscored_noinline(int value) __attribute__((__noinline__));\n"
+        "static inline int underscored_noinline(int value) { return value + 9; }\n"
+        "struct always_inline { int value; };\n"
+        "struct nested_tag { struct always_inline always_inline; };\n"
+        "int nested_tag_control(struct nested_tag value) { return value.always_inline.value; }\n");
+    CPreprocessResult gnu_tokens = {0};
+    CParseResult gnu_parse = {0};
+    CIRLowerResult gnu_ir = c_test_lower_source(arguments->arena, gnu_source, S8("inline-attribute-gnu.c"),
+                                                 target_native, &gnu_tokens, &gnu_parse);
+    BUSTER_TEST(arguments, gnu_tokens.diagnostic_count == 0 && gnu_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, gnu_ir.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, gnu_ir.program && gnu_ir.program->module_count == 1))
+    {
+        struct
+        {
+            String8 name;
+            bool always_inline;
+            bool noinline;
+        } cases[] = {
+            {S8("reversed_always"), true, false},
+            {S8("reversed_noinline"), false, true},
+            {S8("block_target"), true, false},
+            {S8("shared_first"), true, false},
+            {S8("shared_second"), true, false},
+            {S8("trailing_first"), true, false},
+            {S8("trailing_second"), false, false},
+            {S8("underscored_always"), true, false},
+            {S8("underscored_noinline"), false, true},
+            {S8("nested_tag_control"), false, false},
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            c_test_inline_symbol_flags(arguments, &result, gnu_ir.program, cases[index].name,
+                                       cases[index].always_inline, cases[index].noinline);
+        }
+    }
+
+    String8 c23_source = S8(
+        "[[gnu::always_inline]] static inline int c23_gnu_always(int value) { return value + 10; }\n"
+        "[[gnu::__always_inline__]] static inline int c23_gnu_reserved(int value) { return value + 11; }\n"
+        "[[gnu::noinline]] static int c23_gnu_noinline(int value) { return value + 12; }\n"
+        "[[gnu::gnu_inline]] extern inline int c23_gnu_inline(int value) { return value + 16; }\n"
+        "[[vendor::gnu_inline]] extern inline int c23_vendor_gnu_inline(int value) { return value + 17; }\n"
+        "[[gnu_inline]] extern inline int c23_unqualified_gnu_inline(int value) { return value + 18; }\n"
+        "[[vendor::always_inline]] static inline int c23_vendor_always(int value) { return value + 13; }\n"
+        "[[vendor::noinline]] static int c23_vendor_noinline(int value) { return value + 14; }\n"
+        "struct always_inline { int value; };\n"
+        "struct inner_tag { struct always_inline always_inline; };\n"
+        "static inline int c23_nested_tag_control(struct inner_tag value) { return value.always_inline.value; }\n"
+        "[[noreturn]] void c23_die(void);\n"
+        "[[vendor::noreturn]] void vendor_die(void);\n"
+        "int c23_noreturn_caller(void) { c23_die(); }\n"
+        "int c23_vendor_noreturn_control(void) { vendor_die(); return 15; }\n");
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena c23_temporary = scratch_begin(0, 0);
+        CPreprocessResult c23_tokens = c_preprocess(c23_temporary.arena, c23_source,
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_C23,
+            });
+        CParseResult c23_parse = c_parse(c23_temporary.arena, c23_tokens);
+        CIRLowerResult c23_ir = c_lower_to_ir_with_options(c23_temporary.arena, S8("inline-attribute-c23.c"),
+            c23_tokens, c23_parse, target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+        BUSTER_TEST(arguments, c23_tokens.diagnostic_count == 0 && c23_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, c23_ir.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, c23_ir.program && c23_ir.program->module_count == 1))
+        {
+            c_test_inline_symbol_flags(arguments, &result, c23_ir.program, S8("c23_gnu_always"), true, false);
+            c_test_inline_symbol_flags(arguments, &result, c23_ir.program, S8("c23_gnu_reserved"), true, false);
+            c_test_inline_symbol_flags(arguments, &result, c23_ir.program, S8("c23_gnu_noinline"), false, true);
+            struct { String8 name; bool definition; } gnu_inline_cases[] = {
+                {S8("c23_gnu_inline"), false},
+                {S8("c23_vendor_gnu_inline"), true},
+                {S8("c23_unqualified_gnu_inline"), true},
+            };
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(gnu_inline_cases); index += 1)
+            {
+                IrSymbol* symbol = c_test_inline_attribute_symbol(c23_ir.program, gnu_inline_cases[index].name);
+                BUSTER_TEST(arguments, symbol != 0);
+                if (symbol)
+                {
+                    BUSTER_TEST(arguments, symbol->kind == IR_SYMBOL_FUNCTION);
+                    BUSTER_TEST(arguments, symbol->is_definition == gnu_inline_cases[index].definition);
+                    BUSTER_TEST(arguments, symbol->linkage == IR_LINKAGE_EXTERNAL);
+                }
+            }
+            c_test_inline_symbol_flags(arguments, &result, c23_ir.program, S8("c23_vendor_always"), false, false);
+            c_test_inline_symbol_flags(arguments, &result, c23_ir.program, S8("c23_vendor_noinline"), false, false);
+            c_test_inline_symbol_flags(arguments, &result, c23_ir.program, S8("c23_nested_tag_control"), false, false);
+            IrModule* module = c23_ir.program->modules;
+            IrFunction* standard = c_test_find_ir_function(module, S8("c23_noreturn_caller"));
+            IrFunction* vendor = c_test_find_ir_function(module, S8("c23_vendor_noreturn_control"));
+            if (BUSTER_REQUIRE(arguments, standard && vendor))
+            {
+                bool standard_unreachable = false;
+                bool standard_return = false;
+                bool vendor_unreachable = false;
+                bool vendor_return = false;
+                for (u32 index = 0; index < standard->instruction_count; index += 1)
+                {
+                    standard_unreachable |= standard->instructions[index].opcode == IR_OPCODE_UNREACHABLE;
+                    standard_return |= standard->instructions[index].opcode == IR_OPCODE_RETURN;
+                }
+                for (u32 index = 0; index < vendor->instruction_count; index += 1)
+                {
+                    vendor_unreachable |= vendor->instructions[index].opcode == IR_OPCODE_UNREACHABLE;
+                    vendor_return |= vendor->instructions[index].opcode == IR_OPCODE_RETURN;
+                }
+                BUSTER_TEST(arguments, standard_unreachable && !standard_return);
+                BUSTER_TEST(arguments, vendor_return && !vendor_unreachable);
+            }
+        }
+        scratch_end(c23_temporary);
+    }
+
+    String8 conflicting_source = S8(
+        "static inline __attribute__((always_inline)) int conflicting_inline(int);\n"
+        "static inline __attribute__((noinline)) int conflicting_inline(int value) { return value; }\n");
+    CPreprocessResult conflicting_tokens = c_preprocess(arguments->arena, conflicting_source,
+        (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    CParseResult conflicting_parse = c_parse(arguments->arena, conflicting_tokens);
+    BUSTER_TEST(arguments, conflicting_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, conflicting_parse.diagnostic_count == 1);
+    if (conflicting_parse.diagnostic_count == 1)
+    {
+        BUSTER_TEST(arguments, conflicting_parse.diagnostics[0].kind == C_DIAGNOSTIC_CONFLICTING_DECLARATION);
+        // Point at the opposing attribute token on the second declaration.
+        BUSTER_TEST(arguments, conflicting_parse.diagnostics[0].location.line == 2);
+        BUSTER_TEST(arguments, conflicting_parse.diagnostics[0].location.column == 30);
+    }
+
+    TargetParseResult windows_target = target_parse_triple(S8("x86_64-pc-windows-msvc"));
+    BUSTER_TEST(arguments, windows_target.error == TARGET_PARSE_ERROR_NONE);
+    if (windows_target.error == TARGET_PARSE_ERROR_NONE)
+    {
+        String8 windows_source = S8(
+            "#ifndef __forceinline\n"
+            "#error Windows target must retain __forceinline\n"
+            "#endif\n"
+            "__forceinline int windows_forceinline(int value) { return value + 1; }\n");
+        CPreprocessResult windows_tokens = c_preprocess(arguments->arena, windows_source,
+            (CPreprocessOptions){
+                .target = windows_target.target,
+                .data_layout = target_data_layout(windows_target.target),
+            });
+        CParseResult windows_parse = c_parse(arguments->arena, windows_tokens);
+        CIRLowerResult windows_ir = {0};
+        if (!windows_tokens.diagnostic_count && !windows_parse.diagnostic_count)
+        {
+            windows_ir = c_lower_to_ir(arguments->arena, S8("inline-attribute-windows.c"),
+                                        windows_tokens, windows_parse, windows_target.target);
+        }
+        BUSTER_TEST(arguments, windows_tokens.diagnostic_count == 0 && windows_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, windows_ir.diagnostic_count == 0);
+        if (windows_ir.program && windows_ir.program->module_count == 1)
+        {
+            c_test_inline_symbol_flags(arguments, &result, windows_ir.program, S8("windows_forceinline"), true, false);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_returns_twice_attribute_ir(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -61383,6 +61604,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_inline_assembly_constraint_unions);
     C_TEST_FIXTURE(arguments, c_test_inline_assembly_cpuid_register_views);
     C_TEST_FIXTURE(arguments, c_test_inline_assembly_volatile_ir);
+    C_TEST_FIXTURE(arguments, c_test_inline_attribute_retention);
     C_TEST_FIXTURE(arguments, c_test_integer_conversion_rank);
     C_TEST_FIXTURE(arguments, c_test_integer_literal_policy);
     C_TEST_FIXTURE(arguments, c_test_integer_literal_policy_runtime);

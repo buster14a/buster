@@ -29496,6 +29496,380 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_arena_reservation_f
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_assembly_calls(String8 assembly, String8 function_name)
+{
+    bool result = false;
+    for (u64 start = 0; start < assembly.length && !result;)
+    {
+        u64 end = start;
+        while (end < assembly.length && assembly.pointer[end] != '\n')
+        {
+            end += 1;
+        }
+        String8 line = {.pointer = assembly.pointer + start, .length = end - start};
+        result = string_first_sequence(line, S8("call")) != BUSTER_STRING_NO_MATCH &&
+                 string_first_sequence(line, function_name) != BUSTER_STRING_NO_MATCH;
+        start = end + (end < assembly.length);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_canonical_inlining(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source_path = buster_test_temporary_path(arena, S8("canonical-inline-source"), S8(".c"));
+    String8 listing_path = buster_test_temporary_path(arena, S8("canonical-inline-listing"), S8(".s"));
+    String8 object_path = buster_test_temporary_path(arena, S8("canonical-inline-debug"), S8(".o"));
+    String8 source = S8(
+        "static volatile int effects;\n"
+        "static int argument_evaluations;\n"
+        "static int argument(int value) { argument_evaluations += 1; return value; }\n"
+        "static int tiny_helper(int value) { effects += value; return value * 3 + 7; }\n"
+        "static inline __attribute__((always_inline)) int forced_helper(int value) { return value * 2 + 1; }\n"
+        "static int discarded_effects;\n"
+        "static inline __attribute__((always_inline)) int discarded_return_helper(int value) { discarded_effects += value; return value + 100; }\n"
+        "static __attribute__((noinline)) int blocked_helper(int value) { return value + 5; }\n"
+        "typedef struct InlinePair { int first; int second; } InlinePair;\n"
+        "static __attribute__((noinline)) int ordinary_nested(int value) { int result = value; for (int index = 0; index < 3; index += 1) result += index; return result; }\n"
+        "static inline __attribute__((always_inline)) int forced_cfg(int value)\n"
+        "{ int local = ordinary_nested(value); if (local > 4) local += 3; else local -= 2; return local; }\n"
+        "static inline __attribute__((always_inline)) InlinePair forced_aggregate(int value)\n"
+        "{ InlinePair result; result.first = ordinary_nested(value); result.second = value + 4; return result; }\n"
+        "static inline __attribute__((always_inline)) InlinePair discarded_aggregate_return(int value)\n"
+        "{ InlinePair result; result.first = value; result.second = value + 1; discarded_effects += value; return result; }\n"
+        "static int recursive_helper(int value)\n"
+        "{\n"
+        "    if (value == 0) return 0;\n"
+        "    return recursive_helper(value - 1) + 1;\n"
+        "}\n"
+        "static int mutual_odd(int value);\n"
+        "static int mutual_even(int value)\n"
+        "{\n"
+        "    if (value == 0) return 1;\n"
+        "    return mutual_odd(value - 1);\n"
+        "}\n"
+        "static int mutual_odd(int value)\n"
+        "{\n"
+        "    if (value == 0) return 0;\n"
+        "    return mutual_even(value - 1);\n"
+        "}\n"
+        "static int (*volatile escaped_helper)(int) = tiny_helper;\n"
+        "int main(void)\n"
+        "{\n"
+        "    int first = tiny_helper(argument(2));\n"
+        "    int second = tiny_helper(argument(3));\n"
+        "    int forced = forced_helper(argument(4));\n"
+        "    int blocked = blocked_helper(5);\n"
+        "    int escaped = escaped_helper(6);\n"
+        "    int recursive = recursive_helper(2);\n"
+        "    int mutual = mutual_odd(3);\n"
+        "    discarded_return_helper(6);\n"
+        "    discarded_aggregate_return(7);\n"
+        "    int cfg = forced_cfg(argument(4));\n"
+        "    InlinePair pair = forced_aggregate(argument(5));\n"
+        "    return first != 13 || second != 16 || forced != 9 || blocked != 10 || escaped != 25 ||\n"
+        "           cfg != 10 || pair.first != 8 || pair.second != 9 ||\n"
+        "           argument_evaluations != 5 || effects != 11 || discarded_effects != 13 || recursive != 2 || mutual != 1;\n"
+        "}\n");
+    bool wrote_source = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    if (BUSTER_REQUIRE(arguments, wrote_source))
+    {
+        String8 inline_command[] = {
+            S8("-target"), S8("x86_64-unknown-linux"), S8("-O2"), S8("-fcanonical-inline"),
+            S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-g0"), S8("-S"),
+            source_path, S8("-o"), listing_path,
+        };
+        CompilerDriverResult inlined = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(inline_command)));
+        BUSTER_TEST_RAW(arguments, inlined.error == COMPILER_DRIVER_ERROR_NONE, inlined.diagnostic);
+        BUSTER_TEST(arguments, inlined.inlining.inlined >= 3 && inlined.inlining.always_inlined >= 1);
+        if (inlined.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 assembly = BYTE_SLICE_TO_STRING(8, file_read(arena, listing_path, (FileReadOptions){0}));
+            BUSTER_TEST(arguments, assembly.length != 0);
+            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("tiny_helper")));
+            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("forced_helper")));
+            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("discarded_return_helper")));
+            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("discarded_aggregate_return")));
+            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("forced_cfg")));
+            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("forced_aggregate")));
+            BUSTER_TEST(arguments, compiler_driver_test_assembly_calls(assembly, S8("ordinary_nested")));
+            BUSTER_TEST(arguments, compiler_driver_test_assembly_calls(assembly, S8("blocked_helper")));
+            BUSTER_TEST(arguments, compiler_driver_test_assembly_calls(assembly, S8("recursive_helper")));
+            BUSTER_TEST(arguments, compiler_driver_test_assembly_calls(assembly, S8("mutual_odd")));
+            BUSTER_TEST(arguments, compiler_driver_test_assembly_calls(assembly, S8("mutual_even")));
+        }
+
+        String8 disabled_command[] = {
+            S8("-target"), S8("x86_64-unknown-linux"), S8("-O2"), S8("-fno-canonical-inline"),
+            S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-g0"), S8("-S"),
+            source_path, S8("-o"), listing_path,
+        };
+        CompilerDriverResult disabled = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(disabled_command)));
+        BUSTER_TEST_RAW(arguments, disabled.error == COMPILER_DRIVER_ERROR_NONE, disabled.diagnostic);
+        if (disabled.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 assembly = BYTE_SLICE_TO_STRING(8, file_read(arena, listing_path, (FileReadOptions){0}));
+            BUSTER_TEST(arguments, compiler_driver_test_assembly_calls(assembly, S8("tiny_helper")));
+            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("forced_helper")));
+        }
+
+        String8 optimized_default_command[] = {
+            S8("-target"), S8("x86_64-unknown-linux"), S8("-O2"),
+            S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-g0"), S8("-S"),
+            source_path, S8("-o"), listing_path,
+        };
+        CompilerDriverResult optimized_default = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(optimized_default_command)));
+        BUSTER_TEST_RAW(arguments, optimized_default.error == COMPILER_DRIVER_ERROR_NONE, optimized_default.diagnostic);
+        BUSTER_TEST(arguments, optimized_default.inlining.inlined != 0);
+        if (optimized_default.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 assembly = BYTE_SLICE_TO_STRING(8, file_read(arena, listing_path, (FileReadOptions){0}));
+            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("tiny_helper")));
+            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("discarded_return_helper")));
+            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("discarded_aggregate_return")));
+        }
+
+        String8 unoptimized_command[] = {
+            S8("-target"), S8("x86_64-unknown-linux"), S8("-O0"),
+            S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-g0"), S8("-S"),
+            source_path, S8("-o"), listing_path,
+        };
+        CompilerDriverResult unoptimized = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unoptimized_command)));
+        BUSTER_TEST_RAW(arguments, unoptimized.error == COMPILER_DRIVER_ERROR_NONE, unoptimized.diagnostic);
+        if (unoptimized.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 assembly = BYTE_SLICE_TO_STRING(8, file_read(arena, listing_path, (FileReadOptions){0}));
+            BUSTER_TEST(arguments, compiler_driver_test_assembly_calls(assembly, S8("tiny_helper")));
+            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("discarded_return_helper")));
+            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("discarded_aggregate_return")));
+        }
+
+        String8 last_flag_disabled_command[] = {
+            S8("-target"), S8("x86_64-unknown-linux"), S8("-O2"), S8("-fno-canonical-inline"),
+            S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-g0"), S8("-S"),
+            source_path, S8("-o"), listing_path,
+        };
+        CompilerDriverResult last_flag_disabled = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(last_flag_disabled_command)));
+        BUSTER_TEST_RAW(arguments, last_flag_disabled.error == COMPILER_DRIVER_ERROR_NONE, last_flag_disabled.diagnostic);
+        if (last_flag_disabled.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 assembly = BYTE_SLICE_TO_STRING(8, file_read(arena, listing_path, (FileReadOptions){0}));
+            BUSTER_TEST(arguments, compiler_driver_test_assembly_calls(assembly, S8("tiny_helper")));
+            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("discarded_return_helper")));
+            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("discarded_aggregate_return")));
+        }
+
+        String8 last_flag_enabled_command[] = {
+            S8("-target"), S8("x86_64-unknown-linux"), S8("-fno-canonical-inline"), S8("-O2"),
+            S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-g0"), S8("-S"),
+            source_path, S8("-o"), listing_path,
+        };
+        CompilerDriverResult last_flag_enabled = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(last_flag_enabled_command)));
+        BUSTER_TEST_RAW(arguments, last_flag_enabled.error == COMPILER_DRIVER_ERROR_NONE, last_flag_enabled.diagnostic);
+        if (last_flag_enabled.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 assembly = BYTE_SLICE_TO_STRING(8, file_read(arena, listing_path, (FileReadOptions){0}));
+            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("tiny_helper")));
+            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("discarded_return_helper")));
+            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("discarded_aggregate_return")));
+        }
+
+        String8 budget_source_path = buster_test_temporary_path(arena, S8("canonical-inline-budget"), S8(".c"));
+        String8 budget_source = S8(
+            "static int budget_tiny(int value) { return value * 3 + 7; }\n"
+            "int budget_user(int value) { return budget_tiny(value); }\n");
+        bool wrote_budget_source = file_write(budget_source_path, BUSTER_SLICE_TO_BYTE_SLICE(budget_source));
+        BUSTER_TEST(arguments, wrote_budget_source);
+        if (wrote_budget_source)
+        {
+            String8 budget_command[] = {
+                S8("-target"), S8("x86_64-unknown-linux"), S8("-O2"), S8("-fcanonical-inline"),
+                S8("-fcanonical-inline-function-growth=1"), S8("-fno-machine-fallback"),
+                S8("-fverify-codegen"), S8("-g0"), S8("-S"), budget_source_path, S8("-o"), listing_path,
+            };
+            CompilerDriverResult budget = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(budget_command)));
+            BUSTER_TEST_RAW(arguments, budget.error == COMPILER_DRIVER_ERROR_NONE, budget.diagnostic);
+            BUSTER_TEST(arguments, budget.inlining.budget_skips != 0);
+            if (budget.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 assembly = BYTE_SLICE_TO_STRING(8, file_read(arena, listing_path, (FileReadOptions){0}));
+                BUSTER_TEST(arguments, compiler_driver_test_assembly_calls(assembly, S8("budget_tiny")));
+            }
+        }
+
+        String8 debug_command[] = {
+            S8("-target"), S8("x86_64-unknown-linux"), S8("-O2"), S8("-fcanonical-inline"),
+            S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-g"), S8("-c"),
+            source_path, S8("-o"), object_path,
+        };
+        CompilerDriverResult debugged = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(debug_command)));
+        BUSTER_TEST_RAW(arguments, debugged.error == COMPILER_DRIVER_ERROR_NONE && debugged.has_object, debugged.diagnostic);
+        if (debugged.error == COMPILER_DRIVER_ERROR_NONE && debugged.has_object)
+        {
+            u32 debug_info_count = 0;
+            for (u32 section = 0; section < debugged.object.section_count; section += 1)
+            {
+                if (debugged.object.sections[section].kind == OBJECT_SECTION_DEBUG_INFO &&
+                    debugged.object.sections[section].data.length)
+                {
+                    debug_info_count += 1;
+                }
+            }
+            BUSTER_TEST(arguments, debug_info_count != 0);
+        }
+
+#if BUSTER_LINK_LIBC && !BUSTER_ANDROID && !BUSTER_IOS
+        String8 executable_path = buster_test_temporary_path(arena, S8("canonical-inline-run"),
+#if BUSTER_WINDOWS
+                                                             S8(".exe"));
+#else
+                                                             S8(""));
+#endif
+        String8 run_command[] = {
+            S8("-O2"), S8("-fcanonical-inline"), S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+            source_path, S8("-o"), executable_path,
+        };
+        CompilerDriverResult executable = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run_command)));
+        BUSTER_TEST_RAW(arguments, executable.error == COMPILER_DRIVER_ERROR_NONE, executable.diagnostic);
+        if (executable.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            BUSTER_TEST(arguments, compiler_driver_test_process_success(arena, executable_path));
+        }
+#endif
+
+        String8 recursive_required_path = buster_test_temporary_path(arena, S8("canonical-inline-recursive"), S8(".c"));
+        String8 recursive_required_object = buster_test_temporary_path(arena, S8("canonical-inline-recursive"), S8(".o"));
+        String8 recursive_required_source = S8(
+            "static inline __attribute__((always_inline)) int recursive_required(int value)\n"
+            "{\n"
+            "    return value ? recursive_required(value - 1) + 1 : 0;\n"
+            "}\n"
+            "int main(void) { return recursive_required(2); }\n");
+        bool wrote_recursive = file_write(recursive_required_path, BUSTER_SLICE_TO_BYTE_SLICE(recursive_required_source));
+        BUSTER_TEST(arguments, wrote_recursive);
+        if (wrote_recursive)
+        {
+            String8 command[] = {
+                S8("-O2"), S8("-fcanonical-inline"), S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                S8("-c"), recursive_required_path, S8("-o"), recursive_required_object,
+            };
+            CompilerDriverResult rejected = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST(arguments, rejected.error != COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, S8("recursive_required")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, S8("inline")) != BUSTER_STRING_NO_MATCH);
+        }
+
+        String8 mutual_required_path = buster_test_temporary_path(arena, S8("canonical-inline-mutual-required"), S8(".c"));
+        String8 mutual_required_object = buster_test_temporary_path(arena, S8("canonical-inline-mutual-required"), S8(".o"));
+        String8 mutual_required_source = S8(
+            "static inline __attribute__((always_inline)) int mutual_even_required(int value);\n"
+            "static inline __attribute__((always_inline)) int mutual_odd_required(int value)\n"
+            "{ return value ? mutual_even_required(value - 1) : 0; }\n"
+            "static inline __attribute__((always_inline)) int mutual_even_required(int value)\n"
+            "{ return value ? mutual_odd_required(value - 1) : 1; }\n"
+            "int main(void) { return mutual_even_required(2); }\n");
+        bool wrote_mutual_required = file_write(mutual_required_path, BUSTER_SLICE_TO_BYTE_SLICE(mutual_required_source));
+        BUSTER_TEST(arguments, wrote_mutual_required);
+        if (wrote_mutual_required)
+        {
+            String8 command[] = {
+                S8("-O2"), S8("-fcanonical-inline"), S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                S8("-c"), mutual_required_path, S8("-o"), mutual_required_object,
+            };
+            CompilerDriverResult rejected = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST(arguments, rejected.error != COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, S8("mutual_even_required")) != BUSTER_STRING_NO_MATCH ||
+                                   string_first_sequence(rejected.diagnostic, S8("mutual_odd_required")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, S8("inline")) != BUSTER_STRING_NO_MATCH);
+        }
+
+        String8 bodyless_path = buster_test_temporary_path(arena, S8("canonical-inline-bodyless"), S8(".c"));
+        String8 bodyless_object = buster_test_temporary_path(arena, S8("canonical-inline-bodyless"), S8(".o"));
+        String8 bodyless_source = S8(
+            "extern int bodyless_required(void) __attribute__((always_inline));\n"
+            "int main(void) { return bodyless_required(); }\n");
+        bool wrote_bodyless = file_write(bodyless_path, BUSTER_SLICE_TO_BYTE_SLICE(bodyless_source));
+        BUSTER_TEST(arguments, wrote_bodyless);
+        if (wrote_bodyless)
+        {
+            String8 command[] = {
+                S8("-O2"), S8("-fcanonical-inline"), S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                S8("-c"), bodyless_path, S8("-o"), bodyless_object,
+            };
+            CompilerDriverResult rejected = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST(arguments, rejected.error != COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, S8("bodyless_required")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, S8("inline")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, bodyless_path) != BUSTER_STRING_NO_MATCH);
+        }
+
+        // COFF has no ELF-style symbol interposition, so a strong external
+        // __forceinline definition is eligible for required inlining.
+        String8 windows_inline_path = buster_test_temporary_path(arena, S8("canonical-inline-windows-external"), S8(".c"));
+        String8 windows_inline_listing = buster_test_temporary_path(arena, S8("canonical-inline-windows-external"), S8(".s"));
+        String8 windows_inline_source = S8(
+            "__forceinline int exported_forceinline(int value) { return value + 3; }\n"
+            "int use_exported_forceinline(int value) { return exported_forceinline(value); }\n");
+        bool wrote_windows_inline = file_write(windows_inline_path, BUSTER_SLICE_TO_BYTE_SLICE(windows_inline_source));
+        BUSTER_TEST(arguments, wrote_windows_inline);
+        if (wrote_windows_inline)
+        {
+            String8 command[] = {
+                S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-O2"), S8("-fno-machine-fallback"),
+                S8("-fverify-codegen"), S8("-g0"), S8("-S"), windows_inline_path, S8("-o"), windows_inline_listing,
+            };
+            CompilerDriverResult windows_inline = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, windows_inline.error == COMPILER_DRIVER_ERROR_NONE, windows_inline.diagnostic);
+            BUSTER_TEST(arguments, windows_inline.inlining.always_inlined >= 1);
+            if (windows_inline.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 assembly = BYTE_SLICE_TO_STRING(8, file_read(arena, windows_inline_listing, (FileReadOptions){0}));
+                BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("exported_forceinline")));
+            }
+        }
+
+        // The same default-visible external definition remains interposable
+        // on ELF and cannot satisfy a mandatory inline request.
+        String8 linux_external_path = buster_test_temporary_path(arena, S8("canonical-inline-linux-external"), S8(".c"));
+        String8 linux_external_object = buster_test_temporary_path(arena, S8("canonical-inline-linux-external"), S8(".o"));
+        String8 linux_external_source = S8(
+            "__attribute__((always_inline)) int exported_required(int value) { return value + 3; }\n"
+            "int use_exported_required(int value) { return exported_required(value); }\n");
+        bool wrote_linux_external = file_write(linux_external_path, BUSTER_SLICE_TO_BYTE_SLICE(linux_external_source));
+        BUSTER_TEST(arguments, wrote_linux_external);
+        if (wrote_linux_external)
+        {
+            String8 command[] = {
+                S8("-target"), S8("x86_64-unknown-linux"), S8("-O2"), S8("-fcanonical-inline"),
+                S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-c"), linux_external_path,
+                S8("-o"), linux_external_object,
+            };
+            CompilerDriverResult linux_external = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST(arguments, linux_external.error != COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, string_first_sequence(linux_external.diagnostic, S8("exported_required")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(linux_external.diagnostic, S8("inline")) != BUSTER_STRING_NO_MATCH);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -29520,6 +29894,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_linker_scripts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_canonical_inlining);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocessed_c_input);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_source_cache_replay);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_validation_values);

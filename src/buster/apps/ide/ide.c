@@ -2136,6 +2136,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          measurement.scratch_peak_bytes, measurement.retained_bytes, measurement.compact_nanoseconds,
                          measurement.instructions_before, measurement.instructions_after);
         }
+        IrInlineStatistics inlining = compile.inlining;
+        if (invocation.inline_options.tiny || inlining.candidates || inlining.always_inlined)
+        {
+            string_print(S8("IR_INLINE tiny={u32} candidates={u64} inlined={u64} always_inlined={u64} copied_instructions={u64} growth={u64} "
+                            "budget_skips={u64} shape_skips={u64} linkage_skips={u64} recursion_skips={u64} visits={u64}\n"),
+                         (u32)invocation.inline_options.tiny, inlining.candidates, inlining.inlined, inlining.always_inlined,
+                         inlining.copied_instructions, inlining.growth, inlining.budget_skips, inlining.shape_skips,
+                         inlining.linkage_skips, inlining.recursion_skips, inlining.visits);
+        }
         IrLocalPromotionStatistics p = compile.local_promotion;
         string_print(S8("IR_LOCAL_PROMOTION candidates={u64} promoted={u64} loads_removed={u64} stores_removed={u64} "
                         "parameters_inserted={u64} parameters_removed={u64} uninitialized={u64} barriers={u64} "

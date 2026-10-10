@@ -10189,6 +10189,8 @@ BUSTER_C_SHARED bool c_parse_type_is_noreturn(CParseResult const* result, CTypeI
 
 BUSTER_C_SHARED bool c_ir_noreturn_marker_in_range(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_SHARED bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, CDeclaration declaration);
+BUSTER_C_SHARED u32 c_ir_declaration_always_inline_attribute(CPreprocessResult preprocess, CDeclaration declaration);
+BUSTER_C_SHARED u32 c_ir_declaration_noinline_attribute(CPreprocessResult preprocess, CDeclaration declaration);
 BUSTER_C_SHARED bool c_ir_declaration_is_gnu_inline_only(CPreprocessResult preprocess, CDeclaration declaration);
 BUSTER_C_SHARED u32 c_ir_declarator_list_specifier_end(CPreprocessResult preprocess, u32 start, u32 end);
 
@@ -23786,6 +23788,23 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         // C17 6.2.2p5: without a storage-class specifier the declarator links
         // as if it were written `extern`, so it declares no automatic object.
         bool declares_function = !is_typedef && declared_type && declared_type->kind == C_TYPE_FUNCTION;
+        u32 local_always_inline_token = UINT32_MAX;
+        u32 local_noinline_token = UINT32_MAX;
+        u8 local_inline_hints = 0;
+        if (declares_function)
+        {
+            CDeclaration inline_hint_declaration = {
+                .token_start = start,
+                .token_count = end - start,
+                .declarator_start = segment_start,
+                .declarator_count = segment_end - segment_start,
+                .kind = C_DECLARATION_FUNCTION,
+            };
+            local_always_inline_token = c_ir_declaration_always_inline_attribute(preprocess, inline_hint_declaration);
+            local_noinline_token = c_ir_declaration_noinline_attribute(preprocess, inline_hint_declaration);
+            local_inline_hints = (local_always_inline_token != UINT32_MAX ? C_ENTITY_INLINE_HINT_ALWAYS : 0) |
+                                 (local_noinline_token != UINT32_MAX ? C_ENTITY_INLINE_HINT_NOINLINE : 0);
+        }
         if (restricted_for_declaration && declares_function && !for_constraint_diagnosed)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
@@ -23810,8 +23829,50 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                                                                     .value = 0,
                                                                 },
                                                                 function_symbol, function_name);
-            if (file_scope.value == C_ID_UNDERLYING_INVALID || result->entities[file_scope.value].kind != C_ENTITY_FUNCTION)
+            if (file_scope.value != C_ID_UNDERLYING_INVALID &&
+                result->entities[file_scope.value].kind == C_ENTITY_FUNCTION)
             {
+                CEntity* file_entity = &result->entities[file_scope.value];
+                u32 conflicting_hint_token = UINT32_MAX;
+                if (local_inline_hints == (C_ENTITY_INLINE_HINT_ALWAYS | C_ENTITY_INLINE_HINT_NOINLINE))
+                {
+                    conflicting_hint_token = local_always_inline_token > local_noinline_token
+                                                 ? local_always_inline_token
+                                                 : local_noinline_token;
+                }
+                else if ((local_inline_hints & C_ENTITY_INLINE_HINT_ALWAYS) &&
+                         (file_entity->inline_hints & C_ENTITY_INLINE_HINT_NOINLINE))
+                {
+                    conflicting_hint_token = local_always_inline_token;
+                }
+                else if ((local_inline_hints & C_ENTITY_INLINE_HINT_NOINLINE) &&
+                         (file_entity->inline_hints & C_ENTITY_INLINE_HINT_ALWAYS))
+                {
+                    conflicting_hint_token = local_noinline_token;
+                }
+                if (conflicting_hint_token != UINT32_MAX)
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[conflicting_hint_token]),
+                                       C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                                       string_format(arena, S8("function '{S8}' has conflicting always_inline and noinline attributes"),
+                                                     function_name));
+                }
+                file_entity->inline_hints |= local_inline_hints;
+            }
+            else
+            {
+                u32 conflicting_hint_token = local_inline_hints == (C_ENTITY_INLINE_HINT_ALWAYS | C_ENTITY_INLINE_HINT_NOINLINE)
+                                                 ? (local_always_inline_token > local_noinline_token
+                                                        ? local_always_inline_token
+                                                        : local_noinline_token)
+                                                 : UINT32_MAX;
+                if (conflicting_hint_token != UINT32_MAX)
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[conflicting_hint_token]),
+                                       C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                                       string_format(arena, S8("function '{S8}' has conflicting always_inline and noinline attributes"),
+                                                     function_name));
+                }
                 CEntityId function_entity = {
                     .value = result->entity_count,
                 };
@@ -23845,6 +23906,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                     .declaration_index = function_declaration_index,
                     .declaration_token_plus_one = name_index + 1,
                     .kind = C_ENTITY_FUNCTION,
+                    .inline_hints = local_inline_hints,
                 };
                 if (file_scope.value == C_ID_UNDERLYING_INVALID)
                 {
@@ -23911,6 +23973,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 declarator_alignment_start = previous->alignment_start;
                 declarator_alignment_count = previous->alignment_count;
             }
+            previous->inline_hints |= local_inline_hints;
             CType previous_type = result->types[previous->type.value];
             CType new_type = result->types[type.value];
             bool previous_complete_array = previous_type.kind == C_TYPE_ARRAY && previous_type.array_bound < result->array_bound_count &&
@@ -23947,6 +24010,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             .is_constexpr = is_constexpr,
             .is_register = is_register,
             .is_extern = is_extern || declares_function,
+            .inline_hints = local_inline_hints,
         };
         CEntity* local_entity = &result->entities[entity.value];
         if (cleanup.count)
@@ -37429,6 +37493,14 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         }
         declaration->is_gnu_inline_only = kind == C_DECLARATION_FUNCTION && declaration->is_definition &&
                                           c_ir_declaration_is_gnu_inline_only(preprocess, *declaration);
+        u32 always_inline_token = kind == C_DECLARATION_FUNCTION
+                                      ? c_ir_declaration_always_inline_attribute(preprocess, *declaration)
+                                      : UINT32_MAX;
+        u32 noinline_token = kind == C_DECLARATION_FUNCTION
+                                 ? c_ir_declaration_noinline_attribute(preprocess, *declaration)
+                                 : UINT32_MAX;
+        u8 declaration_inline_hints = (always_inline_token != UINT32_MAX ? C_ENTITY_INLINE_HINT_ALWAYS : 0) |
+                                      (noinline_token != UINT32_MAX ? C_ENTITY_INLINE_HINT_NOINLINE : 0);
         CEntity* existing = 0;
         u32 existing_index = C_ID_UNDERLYING_INVALID;
         CEntity* conflicting = 0;
@@ -37539,6 +37611,29 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             declaration->entity = (CEntityId){
                 .value = existing_index,
             };
+            u32 conflicting_hint_token = UINT32_MAX;
+            if (declaration_inline_hints == (C_ENTITY_INLINE_HINT_ALWAYS | C_ENTITY_INLINE_HINT_NOINLINE))
+            {
+                conflicting_hint_token = always_inline_token > noinline_token ? always_inline_token : noinline_token;
+            }
+            else if ((declaration_inline_hints & C_ENTITY_INLINE_HINT_ALWAYS) &&
+                     (existing->inline_hints & C_ENTITY_INLINE_HINT_NOINLINE))
+            {
+                conflicting_hint_token = always_inline_token;
+            }
+            else if ((declaration_inline_hints & C_ENTITY_INLINE_HINT_NOINLINE) &&
+                     (existing->inline_hints & C_ENTITY_INLINE_HINT_ALWAYS))
+            {
+                conflicting_hint_token = noinline_token;
+            }
+            if (conflicting_hint_token != UINT32_MAX)
+            {
+                c_parse_diagnostic(&result, c_preprocess_token_location(&preprocess, preprocess.tokens[conflicting_hint_token]),
+                                   C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                                   string_format(arena, S8("function '{S8}' has conflicting always_inline and noinline attributes"),
+                                                 declaration->name));
+            }
+            existing->inline_hints |= declaration_inline_hints;
             // C17 6.2.2p7: an identifier with both internal and external
             // linkage. `extern`, and a function with no storage class, take
             // the linkage of a visible prior declaration instead.
@@ -37635,6 +37730,14 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                                                              C_PARSE_THREAD_LOCAL_KEYWORDS);
             }
         }
+        if (declaration_inline_hints == (C_ENTITY_INLINE_HINT_ALWAYS | C_ENTITY_INLINE_HINT_NOINLINE))
+        {
+            u32 conflicting_hint_token = always_inline_token > noinline_token ? always_inline_token : noinline_token;
+            c_parse_diagnostic(&result, c_preprocess_token_location(&preprocess, preprocess.tokens[conflicting_hint_token]),
+                               C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                               string_format(arena, S8("function '{S8}' has conflicting always_inline and noinline attributes"),
+                                             declaration->name));
+        }
         declaration->entity = entity;
         BUSTER_VALIDATE(result.entity_count < result.entity_capacity);
         result.entities[result.entity_count++] = (CEntity){
@@ -37660,6 +37763,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             .is_constexpr = declaration->is_constexpr,
             .definition_is_gnu_inline_only = declaration->is_gnu_inline_only,
             .has_internal_linkage = declares_static,
+            .inline_hints = declaration_inline_hints,
         };
         // The name is that token's spelling, so the id the candidate search
         // already settled is the entity's.
