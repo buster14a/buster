@@ -1,7 +1,9 @@
 # Shared compiler diagnostics
 
-[`compiler/diagnostic.h`](../src/buster/lib/compiler/diagnostic.h) defines the published record, ownership copy and terminal
-renderer. The driver exposes an ordered `CompilerDriverResult.diagnostics` array;
+[`compiler/diagnostic.h`](../src/buster/lib/compiler/diagnostic.h) defines the published record and declares
+its ownership copy and terminal renderer, `compiler_diagnostic_copy` and
+`compiler_diagnostic_render`; [`diagnostic.c`](../src/buster/lib/compiler/diagnostic.c)
+implements them. The driver exposes an ordered `CompilerDriverResult.diagnostics` array;
 `diagnostic` (first error) and `warning` remain the compatible text outputs. Stable
 codes are explicit names such as `c.undeclared-identifier`,
 `c.extra-directive-tokens`,
