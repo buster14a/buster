@@ -190,10 +190,14 @@ the dispatch POST is recorded separately as known-not-dispatched supersession.
 An uncertain leased publication is never treated as successful or blindly retried.
 
 Failed, cancelled, timed-out or ambiguous requests remain blocked for that source
-and policy even if only main advances. A catch-up request is the exception: its
-source is the bot-made empty commit, which stays the same while its PR is open,
-so a block bars only that main revision. The next main revision can request
-one new writer run, still serialized behind any active writer. A deliberate cancellation does not
+and policy even if only main advances. There is one exception: a catch-up
+blocked with a `not dispatched:` detail, which is recorded only when the
+refusal happened before the POST. Its source is the bot-made empty commit,
+which stays the same while its PR is open, and no writer was requested. So the
+block bars only that main revision, and the next one can request one writer
+run, still serialized behind any active writer. A catch-up blocked by an
+uncertain POST, a cancellation or a writer failure stays blocked like any other
+request. A deliberate cancellation does not
 immediately resurrect itself. A real source change, an explicitly reviewed new
 policy epoch, or owner-directed manual integration/reconciliation is required
 for exceptional recovery; normal successful/stale operation needs no new approval.

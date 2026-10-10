@@ -20,8 +20,8 @@ Map: ledger codec; writer/outcome reconciliation; catch-up detection
 two-phase plan -> immutable artifact upload -> dispatch; catch_up opener;
 superseded_push, which turns a main-push stale-main exit green only after an
 exact successor run exists (docs/main-push-maintenance.md). An uncertain POST
-is never retried. disposition bars a blocked catch-up only for its own main
-revision, since its empty source head never changes (#3327).
+is never retried. disposition bars a catch-up blocked before its POST only for
+its own main revision, since its empty source head never changes (#3327).
 """
 from __future__ import annotations
 
@@ -44,6 +44,9 @@ ACTIVE = frozenset(("queued", "in_progress", "waiting", "pending", "requested"))
 OUTCOME_JOB = "Native retirement automation outcome"
 OUTCOME_STEPS = {"Superseded request": "superseded", "Published request": "published",
                  "Blocked request": "blocked"}
+# Detail prefix of a block recorded before the dispatch POST: positive proof
+# that no writer was requested, unlike an uncertain POST or a writer outcome.
+NOT_DISPATCHED = "not dispatched: "
 CATCH_UP_PATH = ".github/workflows/native-retirement-catch-up.yml"
 CATCH_UP_EVENTS = frozenset(("push", "schedule", "workflow_dispatch"))
 CATCH_UP_TITLE = "Native retirement catch-up: publish generated state for main"
@@ -169,12 +172,13 @@ def reconcile(api, record: dict) -> dict:
 
 
 def disposition(records: list[dict], request: dict, catch_up: bool = False) -> str:
-    """A blocked request bars its source and policy; for a catch-up, its main too.
+    """A blocked request bars its source and policy.
 
-    A catch-up's source is a bot-made empty commit that never changes while its
-    PR stays open, so a source-wide block would strand main's generated state
-    until an owner intervened. Its real input is main: one new attempt per main
-    revision, still serialized behind any active writer.
+    One exception: a catch-up blocked before its dispatch POST (NOT_DISPATCHED)
+    bars only its own main revision. Its source is a bot-made empty commit that
+    never changes while its PR stays open, and no writer was requested, so the
+    next main revision may request one. An uncertain POST, a cancellation or a
+    writer failure stays blocked for owner reconciliation like any request.
     """
     result = "eligible"
     for record in records:
@@ -184,7 +188,8 @@ def disposition(records: list[dict], request: dict, catch_up: bool = False) -> s
             break
         if (record["state"] == "blocked" and old["source_head"] == request["source_head"] and
                 old["policy_sha256"] == request["policy_sha256"] and
-                (not catch_up or old["base"] == request["base"])):
+                not (catch_up and record["detail"].startswith(NOT_DISPATCHED) and
+                     old["base"] != request["base"])):
             result = "failed-or-cancelled-source"
             break
         if old["key"] == request["key"]:
@@ -409,7 +414,7 @@ def _dispatch(api, request: dict) -> dict:
     try:
         automation.read_request_artifact(api, request)
     except automation.AutomationError as error:
-        save(api, record, "blocked", "not dispatched: " + str(error)[:400])
+        save(api, record, "blocked", NOT_DISPATCHED + str(error)[:400])
         raise
     existing = find_writer(api, record)
     if existing is not None:

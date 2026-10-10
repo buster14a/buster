@@ -106,11 +106,11 @@ class ControllerTests(unittest.TestCase):
                                 self.api.policy_digest, 101)
         self.assertEqual(c.disposition([record], request), "failed-or-cancelled-source")
 
-    def test_catch_up_block_bars_only_its_main_revision(self):
-        # #3327: a blocked catch-up keeps its empty source head while its PR
-        # stays open. A source-wide block would strand main's generated state.
-        record = self.api.claim()
-        record = c.save(self.api, record, "blocked", "fixture failure")
+    def test_catch_up_block_before_post_bars_only_its_main_revision(self):
+        # #3327: a catch-up keeps its empty source head while its PR stays
+        # open; a block positively recorded before the POST may retry on the
+        # next main revision, never on the same one.
+        record = c.save(self.api, self.api.claim(), "blocked", c.NOT_DISPATCHED + "fixture refusal")
         same_main = a.new_request(REPOSITORY, 1791, BASE, HEAD, SOURCE, "ordinary",
                                   self.api.policy_digest, 101)
         next_main = a.new_request(REPOSITORY, 1791, "e" * 40, HEAD, SOURCE, "ordinary",
@@ -118,6 +118,28 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(c.disposition([record], same_main, True), "failed-or-cancelled-source")
         self.assertEqual(c.disposition([record], next_main, True), "eligible")
         self.assertEqual(c.disposition([record], next_main), "failed-or-cancelled-source")
+
+    def test_uncertain_or_writer_blocked_catch_up_stays_blocked_after_main_advances(self):
+        # A changed key and no active writer do not prove an uncertain POST was
+        # never accepted; cancellations and writer failures are not retried.
+        next_main = a.new_request(REPOSITORY, 1791, "e" * 40, HEAD, SOURCE, "ordinary",
+                                  self.api.policy_digest, 101)
+        uncertain = self.api.claim()
+        self.api.dispatch_error = OSError("response lost")
+        with self.assertRaises(OSError):
+            c.dispatch(self.api, self.api.request_data)
+        self.api.runs[100].update(status="completed", conclusion="failure")
+        uncertain = c.reconcile(self.api, c.ledger(self.api, 1791)[0])
+        self.assertEqual(uncertain["state"], "blocked")
+        self.assertEqual(c.disposition([uncertain], next_main, True), "failed-or-cancelled-source")
+        for conclusion in ("cancelled", "timed_out", "failure"):
+            record = self.api.claim()
+            self.api.writer_visible = True
+            self.api.runs[200].update(status="completed", conclusion=conclusion)
+            record = c.reconcile(self.api, record)
+            self.assertEqual(record["state"], "blocked", conclusion)
+            self.assertEqual(c.disposition([record], next_main, True), "failed-or-cancelled-source",
+                             conclusion)
 
     def test_rejected_request_artifact_is_blocked_before_any_post(self):
         # #3327: machine records added to the sealed request made every
@@ -134,7 +156,7 @@ class ControllerTests(unittest.TestCase):
             c.dispatch(self.api, self.api.request_data)
         record = c.ledger(self.api, 1791)[0]
         self.assertEqual(record["state"], "blocked")
-        self.assertTrue(record["detail"].startswith("not dispatched: "))
+        self.assertTrue(record["detail"].startswith(c.NOT_DISPATCHED))
         self.assertEqual(self.api.posts, [])
 
     def test_real_failure_cannot_claim_supersession_from_arbitrary_job(self):
