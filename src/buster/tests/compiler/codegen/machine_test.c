@@ -9443,6 +9443,106 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_capacity(UnitTestArg
     return result;
 }
 
+// Frame locals first written after the entry block (#2717): x is written on
+// both arms of a diamond, so it is available after each write and through the
+// whole join; y is written on one arm only and never reaches the join. Both
+// builders must produce the same ranges.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_initialized_blocks(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { INSTRUCTION_COUNT = 11, BLOCK_COUNT = 4, EDGE_COUNT = 4 };
+    IrValueId store_x_operands[2] = {{.value = 0}, {.value = 2}};
+    IrValueId store_y_operands[2] = {{.value = 1}, {.value = 2}};
+    IrInstruction instructions[INSTRUCTION_COUNT] = {
+        {.opcode = IR_OPCODE_LOCAL, .result = {.value = 0}, .canonical_local = {.value = 0}},
+        {.opcode = IR_OPCODE_LOCAL, .result = {.value = 1}, .canonical_local = {.value = 1}},
+        {.opcode = IR_OPCODE_CONSTANT_INTEGER, .result = {.value = 2}, .canonical_local = IR_LOCAL_ID_INVALID},
+        {.opcode = IR_OPCODE_BRANCH_IF, .result = IR_VALUE_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID},
+        {.opcode = IR_OPCODE_STORE, .result = IR_VALUE_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID,
+         .operands = store_x_operands, .operand_count = 2},
+        {.opcode = IR_OPCODE_STORE, .result = IR_VALUE_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID,
+         .operands = store_y_operands, .operand_count = 2},
+        {.opcode = IR_OPCODE_BRANCH, .result = IR_VALUE_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID},
+        {.opcode = IR_OPCODE_STORE, .result = IR_VALUE_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID,
+         .operands = store_x_operands, .operand_count = 2},
+        {.opcode = IR_OPCODE_BRANCH, .result = IR_VALUE_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID},
+        {.opcode = IR_OPCODE_CONSTANT_INTEGER, .result = IR_VALUE_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID},
+        {.opcode = IR_OPCODE_RETURN, .result = IR_VALUE_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID},
+    };
+    IrValue values[3] = {
+        {.definition = {.value = 0}, .canonical_type = IR_TYPE_ID_INVALID, .category = IR_VALUE_PLACE},
+        {.definition = {.value = 1}, .canonical_type = IR_TYPE_ID_INVALID, .category = IR_VALUE_PLACE},
+        {.definition = {.value = 2}, .canonical_type = IR_TYPE_ID_INVALID},
+    };
+    IrValueId local_places[2] = {{.value = 0}, {.value = 1}};
+    IrBlock blocks[BLOCK_COUNT] = {
+        {.id = {.value = 0}, .first_instruction = {.value = 0}},
+        {.id = {.value = 1}, .first_instruction = {.value = 4}},
+        {.id = {.value = 2}, .first_instruction = {.value = 7}},
+        {.id = {.value = 3}, .first_instruction = {.value = 9}},
+    };
+    IrCfgBlock cfg_blocks[BLOCK_COUNT] = {
+        {.first_instruction = 0, .instruction_count = 4, .successor_offset = 0, .successor_count = 2},
+        {.first_instruction = 4, .instruction_count = 3, .successor_offset = 2, .successor_count = 1, .predecessor_offset = 0,
+         .predecessor_count = 1},
+        {.first_instruction = 7, .instruction_count = 2, .successor_offset = 3, .successor_count = 1, .predecessor_offset = 1,
+         .predecessor_count = 1},
+        {.first_instruction = 9, .instruction_count = 2, .successor_offset = 4, .predecessor_offset = 2, .predecessor_count = 2},
+    };
+    IrCfgEdge edges[EDGE_COUNT] = {
+        {.source = {.value = 0}, .destination = {.value = 1}},
+        {.source = {.value = 0}, .destination = {.value = 2}},
+        {.source = {.value = 1}, .destination = {.value = 3}},
+        {.source = {.value = 2}, .destination = {.value = 3}},
+    };
+    u32 predecessors[EDGE_COUNT] = {0, 1, 2, 3};
+    IrPublishedCfg published = {
+        .blocks = cfg_blocks,
+        .edges = edges,
+        .predecessors = predecessors,
+        .block_count = BLOCK_COUNT,
+        .instruction_count = INSTRUCTION_COUNT,
+        .edge_count = EDGE_COUNT,
+    };
+    IrDebugLocal locals[2] = {{.id = {.value = 0}}, {.id = {.value = 1}}};
+    IrFunction function = {
+        .instructions = instructions,
+        .values = values,
+        .blocks = blocks,
+        .debug_locals = locals,
+        .published_cfg = &published,
+        .local_places = local_places,
+        .instruction_count = INSTRUCTION_COUNT,
+        .value_count = BUSTER_ARRAY_LENGTH(values),
+        .block_count = BLOCK_COUNT,
+        .local_count = 2,
+        .debug_local_count = 2,
+    };
+    // {local, first instruction, instruction count}
+    u32 const expected[][3] = {{0, 5, 2}, {0, 8, 1}, {0, 9, 2}, {1, 6, 1}};
+    IrProgram program = {0};
+    MachineFunction indexed = {0};
+    MachineFunction dense = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    bool indexed_built = machine_test_debug_values_build(temporary.arena, &program, &function, &indexed, 0, 0);
+    bool dense_built = machine_test_debug_values_build_dense(temporary.arena, &program, &function, &dense, 0, 0);
+    bool counted = indexed_built && dense_built && indexed.debug_value_count == BUSTER_ARRAY_LENGTH(expected) &&
+                   dense.debug_value_count == BUSTER_ARRAY_LENGTH(expected);
+    BUSTER_TEST(arguments, counted);
+    for (u32 index = 0; counted && index < BUSTER_ARRAY_LENGTH(expected); index += 1)
+    {
+        MachineDebugValue indexed_value = indexed.debug_values[index];
+        MachineDebugValue dense_value = dense.debug_values[index];
+        BUSTER_TEST(arguments, indexed_value.local.value == expected[index][0] && indexed_value.first_instruction == expected[index][1] &&
+                                   indexed_value.instruction_count == expected[index][2] &&
+                                   dense_value.local.value == indexed_value.local.value &&
+                                   dense_value.first_instruction == indexed_value.first_instruction &&
+                                   dense_value.instruction_count == indexed_value.instruction_count && dense_value.kind == indexed_value.kind);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_sparse_local_state(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -10039,6 +10139,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_line_mark_repair);
     BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_trace_equivalence);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_capacity);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_initialized_blocks);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_differential);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_sparse_work);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);

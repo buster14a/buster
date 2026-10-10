@@ -1549,8 +1549,16 @@ objects. Unwind information remains independent of source debug information.
 With `-g`, named scalar locals that need more than one defining instruction to
 describe stay in distinct frame slots, so their location lists follow stores
 through reassignment and control-flow joins. A frame location starts after its
-first entry-block store; a local whose first store is only on a later control
-flow path stays unavailable rather than exposing uninitialized frame bytes. A
+first entry-block store. A local first stored on a later control-flow path
+gets per-block ranges from a forward must-initialized pass over the published
+CFG (`machine_debug_initialized_build`): the whole of each reachable block
+that every incoming path has written, else the rest of a block after its own
+first write. A write on only some paths therefore never reaches the join, and
+uninitialized frame bytes are never exposed. Past
+`MACHINE_DEBUG_INITIALIZED_CELL_LIMIT` block-local cells those locals stay
+unavailable. The codegen regression is
+`codegen_test_debug_local_seed_coverage`; the builder fixture is
+`machine_test_debug_value_initialized_blocks`. A
 local stays SSA only when its sole write is its entry initializer and that
 initializer is an instruction result no other local already names. This costs
 code in debug builds: the target keeps the remaining memory locals in frame
