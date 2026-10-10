@@ -722,6 +722,18 @@ boolean of at most 128 bits whose converted value is nonnegative and fits in
 against the target's `size_t`. Floating indices, malformed separators and
 overflow are refused, never wrapped.
 
+A designator that names a bit-field, directly, through an anonymous member,
+behind an index or in an offsetof nested inside an index, gets one diagnostic
+in every context, worded and placed at the member as Clang does: `cannot
+compute offset of bit-field 'NAME'`. `c_parse_offsetof_bit_field` steps the
+designator with the same walker, skipping indices without evaluating them, and
+asks `c_parse_constant_member_offset` whether the name it finds is a
+bit-field. Enumerators and static assertions reach it through
+`c_parse_constant_expression_syntax_error`, while static initializers and
+function bodies reach it through `c_parse_validate_offsetof_operands`, before
+any evaluator reports a generic refusal. `c_test_offsetof_bit_field_diagnostic`
+pins the text on the model-construction and semantic-only paths.
+
 Each phase keeps only what its type system owns: member lookup
 (`c_parse_constant_member_offset` or `c_ir_promoted_member_path`, both refusing
 bit-fields and promoting through anonymous members), element sizes, and the
