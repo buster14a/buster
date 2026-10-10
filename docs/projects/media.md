@@ -90,6 +90,19 @@ syntactically recognized variant outside the table's decoded scope returns
 `IMAGE_DECODE_UNSUPPORTED_FEATURE` rather than being misclassified as an unknown
 file.
 
+The PNG decoder's throughput paths include:
+
+- a 9-bit first-level Huffman lookup table;
+- bulk literal, match and stored-block copies;
+- one deferred Adler-32 pass;
+- slice-by-8 chunk CRCs, with tables built on the stack;
+- one loop per filter type and per-row color expansion.
+
+Each path charges exactly the work units of the byte-serial definition. It
+falls back to that definition wherever a chunk boundary, malformed code or
+limit could make the result differ. Statuses, error offsets and observed limit
+values therefore match the byte-serial decoder (#2721).
+
 ## Recognized but unsupported formats
 
 The detector assigns these families a stable `ImageFormat`, but `image_probe`

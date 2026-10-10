@@ -186,6 +186,150 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_string_symbols(UnitTestArgu
     return result;
 }
 
+// Functions own differently sized, contiguous string ranges (#1500). Each
+// string is referenced twice, so the relocation sequence names every literal
+// in emission order and fails if a lookup crosses a function or range slot.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_string_ranges(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    u32 string_counts[] = {4, 1, 3, 5};
+    enum { function_count = BUSTER_ARRAY_LENGTH(string_counts), max_strings = 5 };
+    IrProgram program = ir_program_initialize(arena, 1, 4, function_count, 0);
+    IrTypeId byte = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 8,
+        .layout = {.size = 1, .alignment = 1, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
+    IrTypeId boolean = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_BOOLEAN, .bit_width = 1,
+        .layout = {.size = 1, .alignment = 1, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
+    IrTypeId pointer = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_POINTER, .element_type = byte,
+        .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true}});
+    IrTypeId signature = ir_program_add_type(&program, (IrType){.kind = IR_TYPE_FUNCTION, .return_type = boolean,
+        .calling_convention = IR_CALLING_CONVENTION_C,
+        .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true}});
+    u32 total_strings = 0;
+    for (u32 function_index = 0; function_index < function_count; function_index += 1)
+    {
+        String8 name = string_format(arena, S8("ranges_{u32}"), function_index);
+        IrSymbolId symbol = ir_program_add_symbol(&program, (IrSymbol){.name = name, .type = signature,
+            .kind = IR_SYMBOL_FUNCTION, .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true});
+        IrFunction* function = ir_module_add_function(arena, program.modules, (IrFunction){.name = name, .symbol = symbol,
+            .canonical_type = signature, .entry = {.value = 0}, .state = IR_FUNCTION_LOWERED});
+        IrBlock* block = ir_function_add_block(arena, function, (IrBlock){.first_instruction = IR_INSTRUCTION_ID_INVALID,
+            .last_instruction = IR_INSTRUCTION_ID_INVALID, .terminated = true, .sealed = true});
+        // Constants first, then one self-comparison per string folded with
+        // BOOLEAN_AND, so every string has exactly two uses.
+        IrValueId strings[max_strings];
+        IrInstructionId previous = IR_INSTRUCTION_ID_INVALID;
+        IrValueId accumulator = IR_VALUE_ID_INVALID;
+        for (u32 pass = 0; pass < 2; pass += 1)
+        {
+            for (u32 index = 0; index < string_counts[function_index]; index += 1)
+            {
+                IrInstructionId instruction;
+                if (pass == 0)
+                {
+                    strings[index] = ir_function_add_value(arena, function, (IrValue){.canonical_type = pointer,
+                        .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_VALUE});
+                    instruction = ir_function_add_instruction(arena, function, (IrInstruction){.opcode = IR_OPCODE_CONSTANT_STRING,
+                        .canonical_type = pointer, .result = strings[index], .next = IR_INSTRUCTION_ID_INVALID}, (IrSourceRange){0});
+                    ir_instruction_extra_ensure(arena, function, instruction)->literal =
+                        string_format(arena, S8("f{u32}s{u32}"), function_index, index);
+                    function->values[strings[index].value].definition = instruction;
+                }
+                else
+                {
+                    IrValueId comparison = ir_function_add_value(arena, function, (IrValue){.canonical_type = boolean,
+                        .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_VALUE});
+                    IrValueId* compared = arena_allocate(arena, IrValueId, 2);
+                    compared[0] = strings[index];
+                    compared[1] = strings[index];
+                    instruction = ir_function_add_instruction(arena, function, (IrInstruction){.opcode = IR_OPCODE_BINARY,
+                        .binary_operation = IR_BINARY_POINTER_EQUAL, .canonical_type = boolean, .result = comparison,
+                        .operands = compared, .operand_count = 2, .next = IR_INSTRUCTION_ID_INVALID}, (IrSourceRange){0});
+                    function->values[comparison.value].definition = instruction;
+                    if (index)
+                    {
+                        function->instructions[previous.value].next = instruction;
+                        previous = instruction;
+                        IrValueId combined = ir_function_add_value(arena, function, (IrValue){.canonical_type = boolean,
+                            .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_VALUE});
+                        IrValueId* joined = arena_allocate(arena, IrValueId, 2);
+                        joined[0] = accumulator;
+                        joined[1] = comparison;
+                        instruction = ir_function_add_instruction(arena, function, (IrInstruction){.opcode = IR_OPCODE_BINARY,
+                            .binary_operation = IR_BINARY_BOOLEAN_AND, .canonical_type = boolean, .result = combined,
+                            .operands = joined, .operand_count = 2, .next = IR_INSTRUCTION_ID_INVALID}, (IrSourceRange){0});
+                        function->values[combined.value].definition = instruction;
+                        comparison = combined;
+                    }
+                    accumulator = comparison;
+                }
+                if (previous.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    block->first_instruction = instruction;
+                }
+                else
+                {
+                    function->instructions[previous.value].next = instruction;
+                }
+                previous = instruction;
+            }
+        }
+        IrValueId* returned = arena_allocate(arena, IrValueId, 1);
+        returned[0] = accumulator;
+        IrInstructionId exit = ir_function_add_instruction(arena, function, (IrInstruction){.opcode = IR_OPCODE_RETURN,
+            .canonical_type = boolean, .result = IR_VALUE_ID_INVALID, .operands = returned, .operand_count = 1,
+            .next = IR_INSTRUCTION_ID_INVALID}, (IrSourceRange){0});
+        function->instructions[previous.value].next = exit;
+        block->last_instruction = exit;
+        total_strings += string_counts[function_index];
+    }
+    BUSTER_TEST(arguments, ir_validate_canonical_module(&program, program.modules).error == IR_VALIDATION_NONE);
+    EbpfArtifact artifact = ebpf_emit_program(arena, &program);
+    if (!artifact.success) arguments->show(arguments, S8("eBPF string ranges: {S8}\n"), artifact.error.message);
+    BUSTER_TEST(arguments, artifact.success);
+    if (artifact.success)
+    {
+        ByteSlice elf = artifact.bytes;
+        u32 section_count = (u32)codegen_test_ebpf_read(elf.pointer + 60, 2);
+        ByteSlice symbols = {0}, relocations = {0};
+        for (u32 index = 1; index < section_count; index += 1)
+        {
+            ByteSlice header = codegen_test_ebpf_section(elf, index);
+            u32 type = header.length ? (u32)codegen_test_ebpf_read(header.pointer + 4, 4) : 0;
+            if (type == 2) symbols = codegen_test_ebpf_section_data(elf, index);
+            if (type == 9) relocations = codegen_test_ebpf_section_data(elf, index);
+        }
+        BUSTER_TEST(arguments, relocations.length == total_strings * 2 * 16);
+        u32 relocation_index = 0;
+        for (u32 function_index = 0; function_index < function_count && relocations.length == total_strings * 2 * 16; function_index += 1)
+        {
+            for (u32 index = 0; index < string_counts[function_index]; index += 1)
+            {
+                String8 expected = string_format(arena, S8("f{u32}s{u32}"), function_index, index);
+                for (u32 reference = 0; reference < 2; reference += 1, relocation_index += 1)
+                {
+                    u8 const* relocation = relocations.pointer + relocation_index * 16;
+                    u64 symbol_index = codegen_test_ebpf_read(relocation + 8, 8) >> 32;
+                    bool matches = (symbol_index + 1) * 24 <= symbols.length;
+                    if (matches)
+                    {
+                        u8 const* string = symbols.pointer + symbol_index * 24;
+                        ByteSlice rodata = codegen_test_ebpf_section_data(elf, (u32)codegen_test_ebpf_read(string + 6, 2));
+                        u64 offset = codegen_test_ebpf_read(string + 8, 8);
+                        matches = offset <= rodata.length && expected.length + 1 <= rodata.length - offset &&
+                            memory_compare(rodata.pointer + offset, expected.pointer, expected.length) &&
+                            rodata.pointer[offset + expected.length] == 0;
+                    }
+                    BUSTER_TEST(arguments, matches);
+                }
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_global_symbols(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -312,6 +456,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_symbols(UnitTestArguments* 
     UnitTestResult strings = codegen_test_ebpf_string_symbols(arguments);
     result.succeeded_test_count += strings.succeeded_test_count;
     result.test_count += strings.test_count;
+    UnitTestResult ranges = codegen_test_ebpf_string_ranges(arguments);
+    result.succeeded_test_count += ranges.succeeded_test_count;
+    result.test_count += ranges.test_count;
     UnitTestResult globals = codegen_test_ebpf_global_symbols(arguments);
     result.succeeded_test_count += globals.succeeded_test_count;
     result.test_count += globals.test_count;

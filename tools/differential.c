@@ -5,6 +5,9 @@
 // d_case_lane dynamically admits complete cases into the persistent lane gang;
 // d_cases_run validates and publishes case-owned evidence in registry order.
 // d_workers_self_test checks live admission, unequal cases and arena cleanup.
+// d_execute reuses the link/run observation of a byte-identical candidate
+// artifact through DObjects; d_generated_source owns the seeded structural
+// generator behind --generated.
 // d_reference_* owns explicit reference dialect capabilities and argv policy.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <signal.h>
@@ -32,6 +35,7 @@ BUSTER_GLOBAL_LOCAL DCase const d_builtin_cases[] = {
     {S8("native-variadic"), S8("tests/differential/native_variadic.c"), S8("tests/differential/native_variadic_host.c"), false, {0}, true},
     {S8("va-list-places"), S8("tests/basic_c_va_list_places.c"), {0}, false, {0}, true},
     {S8("native-aggregate"), S8("tests/differential/native_aggregate.c"), S8("tests/differential/native_aggregate_host.c"), false, {0}, true},
+    {S8("run-identity"), S8("tools/fixtures/differential_run_identity.c"), {0}, false, {0}, true},
 #if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
     {S8("sysv-va-list"), S8("tests/differential/sysv_va_list.c"), S8("tests/differential/sysv_va_list_host.c"), false, {0}, true, true},
     {S8("sysv-sseup"), S8("tests/basic_c_sysv_sseup.c"), S8("tests/host_sysv_sseup.c"), false, {0}, true, true},
@@ -67,7 +71,20 @@ struct DResult
     bool linked;
     bool ran;
     bool verified;
+    // One-based DObjects entry for the candidate artifact; zero when untracked.
+    u32 object;
+    bool object_reused;
+    bool object_recorded;
 };
+// Distinct candidate artifacts of one case. Matrix rows that produce a
+// byte-identical object or executable share its link and run observation, so
+// redundant rows are counted and compared without being executed again. Each
+// distinct artifact is moved to directory/<index> and linked and run there, so
+// its argv, paths and sanitizer environment never depend on a matrix row.
+typedef struct DObject DObject;
+struct DObject { u64 hash; u64 size; String8 path; String8 row; DResult result; };
+typedef struct DObjects DObjects;
+struct DObjects { DObject* entries; u32 count; u32 capacity; String8 directory; };
 typedef struct DOracleFailure DOracleFailure;
 struct DOracleFailure { String8 reason; String8 failure_phase; };
 typedef enum DReferenceDialect { D_REFERENCE_GNU, D_REFERENCE_MSVC } DReferenceDialect;
@@ -119,6 +136,7 @@ struct DSettings
     SliceString8 environment_keys;
     SliceString8 environment_values;
     u32 rows;
+    u32 objects;
     u32 timeout_seconds;
     u32 reference_timeout_seconds;
     u32 reference_samples;
@@ -1159,7 +1177,19 @@ BUSTER_GLOBAL_LOCAL u32 d_process_timeout_seconds(DSettings* settings, bool refe
         settings->reference_timeout_seconds : settings->timeout_seconds;
 }
 
-BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig config, bool host, bool optimize, String8 directory, String8 caller_object)
+BUSTER_GLOBAL_LOCAL bool d_files_equal(Arena* arena, String8 left, String8 right)
+{
+    u64 position = arena->position;
+    FileReadResult left_bytes = file_read_checked(arena, left, (FileReadOptions){0});
+    FileReadResult right_bytes = file_read_checked(arena, right, (FileReadOptions){0});
+    bool result = left_bytes.bytes.pointer && right_bytes.bytes.pointer && left_bytes.bytes.length == right_bytes.bytes.length &&
+        memcmp(left_bytes.bytes.pointer, right_bytes.bytes.pointer, (size_t)left_bytes.bytes.length) == 0;
+    arena_set_position(arena, position);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig config, bool host, bool optimize, String8 directory,
+    String8 caller_object, DObjects* objects)
 {
     Arena* arena = settings->arena;
     u32 timeout_seconds = d_process_timeout_seconds(settings, host);
@@ -1236,7 +1266,56 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
     {
         result.verified = d_verification(settings, &result.compile, config);
     }
-    if (!test.reject && d_success(result.compile))
+    // Identity is the candidate's own output: the object linked to the fixed
+    // caller, or the executable it linked itself. A hash match is confirmed
+    // byte for byte before the earlier link/run observation is reused.
+    String8 artifact = test.host.length ? object : executable;
+    u64 artifact_hash = 0, artifact_size = 0;
+    bool artifact_hashed = objects && !host && !test.reject && d_success(result.compile) &&
+        build_artifact_fanout_hash_file(arena, artifact, &artifact_hash, &artifact_size) && artifact_size;
+    for (u32 index = 0; artifact_hashed && !result.object && index < objects->count; index += 1)
+    {
+        DObject* entry = objects->entries + index;
+        if (entry->hash == artifact_hash && entry->size == artifact_size && d_files_equal(arena, entry->path, artifact))
+        {
+            DResult reused = entry->result;
+            reused.compile = result.compile;
+            reused.verified = result.verified;
+            reused.object = index + 1;
+            reused.object_reused = true;
+            reused.object_recorded = false;
+            result = reused;
+        }
+    }
+    // A new artifact leaves its row directory before any link or run.
+    String8 run_directory = directory;
+    if (artifact_hashed && !result.object_reused && objects->count < objects->capacity)
+    {
+        run_directory = path_join(arena, objects->directory, string_format(arena, S8("{u32}"), objects->count + 1));
+        make_directory_recursive(arena, run_directory);
+        String8 moved_object = path_join(arena, run_directory, settings->reference_dialect == D_REFERENCE_MSVC ? S8("subject.obj") : S8("subject.o"));
+#if BUSTER_WINDOWS
+        String8 moved_executable = path_join(arena, run_directory, S8("program.exe"));
+#else
+        String8 moved_executable = path_join(arena, run_directory, S8("program"));
+#endif
+        String8 moved = test.host.length ? moved_object : moved_executable;
+        String8 artifact_z = string_duplicate_arena(arena, artifact, true);
+        String8 moved_z = string_duplicate_arena(arena, moved, true);
+        artifact_hashed = !path_exists(arena, moved) && rename((char*)artifact_z.pointer, (char*)moved_z.pointer) == 0;
+        if (artifact_hashed)
+        {
+            object = moved_object;
+            executable = moved_executable;
+            artifact = moved;
+        }
+        else
+        {
+            settings->io_failed = true;
+            run_directory = directory;
+        }
+    }
+    if (!test.reject && d_success(result.compile) && !result.object_reused)
     {
         bool executable_ready = path_exists(arena, executable);
         if ((msvc_host || (!host && test.host.length)) && path_exists(arena, object))
@@ -1250,7 +1329,7 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
                 os_file_delete(link_caller);
                 count = d_reference_compile_arguments(settings, test, test.host, link_caller, optimize, argv);
                 result.caller_compile = d_observe_with_timeout(settings, (SliceString8){.pointer = argv, .length = count},
-                    path_join(arena, directory, S8("caller-compile")), timeout_seconds);
+                    path_join(arena, run_directory, S8("caller-compile")), timeout_seconds);
                 result.caller_compiled = true;
                 result.caller_output_ready = path_exists(arena, link_caller);
                 result.caller_ready = d_caller_ready(result.caller_compile, result.caller_output_ready, settings->io_failed);
@@ -1268,7 +1347,7 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
                         object, executable, !link_caller.length, argv);
                 }
                 result.link = d_observe_with_timeout(settings, (SliceString8){.pointer = argv, .length = count},
-                    path_join(arena, directory, S8("link")), timeout_seconds);
+                    path_join(arena, run_directory, S8("link")), timeout_seconds);
             }
             executable_ready = caller_ready && d_success(result.link) && path_exists(arena, executable);
         }
@@ -1276,9 +1355,17 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
         {
             argv[0] = executable;
             result.run = d_observe_with_timeout(settings, (SliceString8){.pointer = argv, .length = 1},
-                path_join(arena, directory, S8("run")), timeout_seconds);
+                path_join(arena, run_directory, S8("run")), timeout_seconds);
             result.ran = true;
         }
+    }
+    if (artifact_hashed && !result.object_reused && objects->count < objects->capacity)
+    {
+        result.object = objects->count + 1;
+        result.object_recorded = true;
+        objects->entries[objects->count] = (DObject){.hash = artifact_hash, .size = artifact_size, .path = artifact,
+            .row = config.name, .result = result};
+        objects->count += 1;
     }
     return result;
 }
@@ -1513,11 +1600,11 @@ BUSTER_GLOBAL_LOCAL void d_reduce(DSettings* settings, DCase test, DConfig confi
             if (best.length > to) { memcpy(candidate_bytes + from, best.pointer + to, (size_t)(best.length - to)); }
             d_write(settings, source, candidate);
             String8 trial = path_join(arena, directory, string_format(arena, S8("trial-{u32}"), trials++));
-            DResult o0 = d_execute(settings, reduced, config, true, false, path_join(arena, trial, S8("host-o0")), (String8){0});
-            DResult o2 = d_execute(settings, reduced, config, true, true, path_join(arena, trial, S8("host-o2")), (String8){0});
+            DResult o0 = d_execute(settings, reduced, config, true, false, path_join(arena, trial, S8("host-o0")), (String8){0}, 0);
+            DResult o2 = d_execute(settings, reduced, config, true, true, path_join(arena, trial, S8("host-o2")), (String8){0}, 0);
             if (d_oracle_valid(arena, o0, o2, reduced))
             {
-                DResult actual = d_execute(settings, reduced, config, false, false, path_join(arena, trial, S8("buster")), (String8){0});
+                DResult actual = d_execute(settings, reduced, config, false, false, path_join(arena, trial, S8("buster")), (String8){0}, 0);
                 if (d_classify(actual, o0, false) == signature)
                 {
                     best = string_duplicate_arena(arena, candidate, false);
@@ -1532,9 +1619,9 @@ BUSTER_GLOBAL_LOCAL void d_reduce(DSettings* settings, DCase test, DConfig confi
     String8 final_source = path_join(arena, directory, S8("minimized.c"));
     d_write_evidence(settings, final_source, best);
     reduced.source = final_source;
-    DResult o0 = d_execute(settings, reduced, config, true, false, path_join(arena, directory, S8("final-host-o0")), (String8){0});
-    DResult o2 = d_execute(settings, reduced, config, true, true, path_join(arena, directory, S8("final-host-o2")), (String8){0});
-    DResult actual = d_execute(settings, reduced, config, false, false, path_join(arena, directory, S8("final-buster")), (String8){0});
+    DResult o0 = d_execute(settings, reduced, config, true, false, path_join(arena, directory, S8("final-host-o0")), (String8){0}, 0);
+    DResult o2 = d_execute(settings, reduced, config, true, true, path_join(arena, directory, S8("final-host-o2")), (String8){0}, 0);
+    DResult actual = d_execute(settings, reduced, config, false, false, path_join(arena, directory, S8("final-buster")), (String8){0}, 0);
     bool confirmed = d_oracle_valid(arena, o0, o2, reduced) && d_classify(actual, o0, false) == signature;
     d_write_evidence(settings, path_join(arena, directory, S8("reduction.txt")),
         string_format(arena, S8("version=1 original_bytes={u64} reduced_bytes={u64} trials={u32} signature={u32} confirmed={u32}\n"),
@@ -1570,8 +1657,8 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
         samples_o2_valid = samples_o0_valid && d_measure_reference_samples(settings, test, directory, true);
     }
     bool reference_samples_valid = samples_o0_valid && samples_o2_valid;
-    DResult o0 = d_execute(settings, test, configs[0], true, false, path_join(arena, directory, S8("host-o0")), (String8){0});
-    DResult o2 = d_execute(settings, test, configs[0], true, true, path_join(arena, directory, S8("host-o2")), (String8){0});
+    DResult o0 = d_execute(settings, test, configs[0], true, false, path_join(arena, directory, S8("host-o0")), (String8){0}, 0);
+    DResult o2 = d_execute(settings, test, configs[0], true, true, path_join(arena, directory, S8("host-o2")), (String8){0}, 0);
     DOracleFailure oracle_failure = d_oracle_failure_reason(arena, o0, o2, test);
     bool trusted = !oracle_failure.reason.length;
     u32 failures = (trusted ? 0 : 1) + (reference_samples_valid ? 0 : 1);
@@ -1598,12 +1685,22 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
             d_log(settings, string_format(arena, S8("DIFFERENTIAL_FAIL case={S8} caller_compile=invalid\n"), test.name));
         }
     }
+    DObjects objects = {.entries = arena_allocate(arena, DObject, config_count), .capacity = config_count,
+        .directory = path_join(arena, directory, S8("objects"))};
     for (u32 index = 0; ready && index < config_count && !d_atomic_load(&d_cancellation_signal); index += 1)
     {
         u64 scratch = arena->position;
         DConfig config = configs[index];
         settings->rows += 1;
-        DResult actual = d_execute(settings, test, config, false, false, path_join(arena, directory, config.name), caller_object);
+        String8 row_directory = path_join(arena, directory, config.name);
+        DResult actual = d_execute(settings, test, config, false, false, row_directory, caller_object, &objects);
+        if (actual.object)
+        {
+            DObject* entry = objects.entries + actual.object - 1;
+            d_write_evidence(settings, path_join(arena, row_directory, S8("object.txt")),
+                string_format(arena, S8("version=1 object={u32} first_row={S8} reused={u32} hash_algorithm=buster_hash_64 hash={u64} bytes={u64}\n"),
+                    actual.object, entry->row, (u32)actual.object_reused, entry->hash, entry->size));
+        }
         u32 failure = d_classify(actual, o0, test.reject);
         // Source paths are identical across the matrix; only the explicitly
         // validated CODEGEN_VERIFY line is removed from successful diagnostics.
@@ -1621,12 +1718,483 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
                 reduced = true;
             }
         }
-        // First observation's diagnostics survive; all later child buffers are
-        // reclaimed after writing their byte-exact files and status records.
-        if (index) { arena_set_position(arena, scratch); }
+        // First observation's diagnostics and every distinct artifact's
+        // observations survive; other child buffers are reclaimed after
+        // writing their byte-exact files and status records.
+        if (index && !actual.object_recorded) { arena_set_position(arena, scratch); }
     }
-    d_log(settings, string_format(arena, S8("DIFFERENTIAL_CASE name={S8} configurations={u32} failures={u32}\n"), test.name, ready ? config_count : 0, failures));
+    settings->objects = objects.count;
+    d_log(settings, string_format(arena, S8("DIFFERENTIAL_CASE name={S8} configurations={u32} distinct_objects={u32} failures={u32}\n"),
+        test.name, ready ? config_count : 0, objects.count, failures));
     return failures;
+}
+
+// Seeded structural generator for --generated cases. Each seed chooses lane
+// types, globals, an aggregate, function signatures, statement shapes and
+// expression chains; the independent host compiler at O0 and O2 supplies the
+// expected observation. Sources stay defined under the runner's -fwrapv:
+// narrow signed lanes compute in a wider signed type, 64-bit signed +,-,*,<<
+// compute unsigned, divisors exclude 0 and -1, shift counts are masked,
+// floating values are exact small dyadics, loops are bounded and calls reach
+// only earlier functions outside loops. Out-of-range signed narrowing is
+// implementation-defined modulo on every supported target. Generation is
+// iterative: expressions are chains and statement nesting uses d_gen_open.
+// Tables passed to string_format are not const: TCC rejects a const struct
+// passed in a stack-slot variadic argument as an assignment to read-only data.
+typedef struct DGenType DGenType;
+struct DGenType { String8 name; String8 wide; String8 shift; u32 bits; bool is_signed; };
+BUSTER_GLOBAL_LOCAL DGenType d_gen_types[] = {
+    {S8("signed char"), S8("int"), S8("unsigned"), 8, true},
+    {S8("unsigned char"), S8("unsigned"), S8("unsigned"), 8, false},
+    {S8("short"), S8("int"), S8("unsigned"), 16, true},
+    {S8("unsigned short"), S8("unsigned"), S8("unsigned"), 16, false},
+    {S8("int"), S8("long long"), S8("unsigned"), 32, true},
+    {S8("unsigned"), S8("unsigned"), S8("unsigned"), 32, false},
+    {S8("long long"), S8("unsigned long long"), S8("unsigned long long"), 64, true},
+    {S8("unsigned long long"), S8("unsigned long long"), S8("unsigned long long"), 64, false},
+};
+#define D_GEN_TYPE_COUNT ((u32)BUSTER_ARRAY_LENGTH(d_gen_types))
+#define D_GEN_NAME_CAPACITY 64
+#define D_GEN_PART_CAPACITY 4096
+#define D_GEN_FUNCTION_CAPACITY 6
+#define D_GEN_DEPTH_CAPACITY 3
+typedef enum DGenBlock { D_GEN_BLOCK_IF, D_GEN_BLOCK_ELSE, D_GEN_BLOCK_FOR, D_GEN_BLOCK_DO } DGenBlock;
+typedef struct DGen DGen;
+struct DGen
+{
+    Arena* arena;
+    u32 state;
+    u32 tags;
+    String8* parts;
+    u32 part_count;
+    String8 names[D_GEN_NAME_CAPACITY];
+    u32 types[D_GEN_NAME_CAPACITY];
+    bool writable[D_GEN_NAME_CAPACITY];
+    u32 name_count;
+    u32 array_type;
+    u32 function_count;
+    u32 returns[D_GEN_FUNCTION_CAPACITY];
+    u32 parameters[D_GEN_FUNCTION_CAPACITY][3];
+    DGenBlock blocks[D_GEN_DEPTH_CAPACITY];
+    u32 block_names[D_GEN_DEPTH_CAPACITY];
+    u32 depth;
+};
+
+BUSTER_GLOBAL_LOCAL u32 d_gen_below(DGen* g, u32 bound)
+{
+    g->state ^= g->state << 13;
+    g->state ^= g->state >> 17;
+    g->state ^= g->state << 5;
+    return g->state % bound;
+}
+
+BUSTER_GLOBAL_LOCAL void d_gen_emit(DGen* g, String8 text)
+{
+    BUSTER_CHECK(g->part_count < D_GEN_PART_CAPACITY);
+    g->parts[g->part_count++] = text;
+}
+
+BUSTER_GLOBAL_LOCAL void d_gen_name(DGen* g, String8 name, u32 type, bool writable)
+{
+    BUSTER_CHECK(g->name_count < D_GEN_NAME_CAPACITY);
+    g->names[g->name_count] = name;
+    g->types[g->name_count] = type;
+    g->writable[g->name_count] = writable;
+    g->name_count += 1;
+}
+
+BUSTER_GLOBAL_LOCAL String8 d_gen_constant(DGen* g, u32 type)
+{
+    DGenType t = d_gen_types[type];
+    u32 shape = d_gen_below(g, 4);
+    u32 value = g->state;
+    String8 result;
+    if (shape == 0) { result = string_format(g->arena, S8("(({S8}){u32})"), t.name, d_gen_below(g, 9)); }
+    else if (shape == 1 && t.is_signed) { result = string_format(g->arena, S8("(({S8})-{u32})"), t.name, d_gen_below(g, 70000)); }
+    else if (t.bits == 64) { result = string_format(g->arena, S8("(({S8})({u32}ull << 32 | {u32}u))"), t.name, value, d_gen_below(g, 0xffffffffu)); }
+    else { result = string_format(g->arena, S8("(({S8}){u32}u)"), t.name, value); }
+    return result;
+}
+
+// A side-effect-free operand without nested operands.
+BUSTER_GLOBAL_LOCAL String8 d_gen_atom(DGen* g, u32 type)
+{
+    String8 result;
+    if (g->name_count == 0 || d_gen_below(g, 4) == 0) { result = d_gen_constant(g, type); }
+    else { result = string_format(g->arena, S8("(({S8}){S8})"), d_gen_types[type].name, g->names[d_gen_below(g, g->name_count)]); }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 d_gen_leaf(DGen* g, u32 type)
+{
+    String8 name = d_gen_types[type].name;
+    u32 shape = d_gen_below(g, 12);
+    String8 result;
+    if (shape == 0)
+    {
+        String8 left = d_gen_atom(g, 4);
+        String8 right = d_gen_atom(g, 2);
+        result = string_format(g->arena, S8("(({S8})(int)((double)(short){S8} * 0.5 + (double)(short){S8} / 4.0))"), name, left, right);
+    }
+    else if (shape == 1)
+    {
+        String8 left = d_gen_atom(g, 0);
+        String8 right = d_gen_atom(g, 2);
+        result = string_format(g->arena, S8("(({S8})(int)((float)(signed char){S8} * 0.25f - (float)(short){S8}))"), name, left, right);
+    }
+    else if (shape == 2 && g->array_type < D_GEN_TYPE_COUNT)
+    {
+        result = string_format(g->arena, S8("(({S8})la[(int)({S8} & 7)])"), name, d_gen_atom(g, d_gen_below(g, D_GEN_TYPE_COUNT)));
+    }
+    else { result = d_gen_atom(g, type); }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 d_gen_condition(DGen* g)
+{
+    String8 comparisons[] = {S8("<"), S8("<="), S8(">"), S8(">="), S8("=="), S8("!=")};
+    u32 type = d_gen_below(g, D_GEN_TYPE_COUNT);
+    String8 left = d_gen_leaf(g, type);
+    String8 comparison = comparisons[d_gen_below(g, BUSTER_ARRAY_LENGTH(comparisons))];
+    return string_format(g->arena, S8("({S8} {S8} {S8})"), left, comparison, d_gen_leaf(g, type));
+}
+
+BUSTER_GLOBAL_LOCAL String8 d_gen_expression(DGen* g, u32 type)
+{
+    String8 binary[] = {S8("+"), S8("-"), S8("*"), S8("&"), S8("|"), S8("^")};
+    DGenType t = d_gen_types[type];
+    String8 accumulator = d_gen_leaf(g, type);
+    u32 steps = 1 + d_gen_below(g, 5);
+    for (u32 step = 0; step < steps; step += 1)
+    {
+        String8 leaf = d_gen_leaf(g, type);
+        u32 shape = d_gen_below(g, 14);
+        if (shape < 6)
+        {
+            bool swap = d_gen_below(g, 2);
+            accumulator = string_format(g->arena, S8("(({S8})(({S8}){S8} {S8} ({S8}){S8}))"), t.name, t.wide,
+                swap ? leaf : accumulator, binary[shape], t.wide, swap ? accumulator : leaf);
+        }
+        else if (shape < 8)
+        {
+            String8 guard = t.is_signed ?
+                string_format(g->arena, S8("({S8} == 0 || {S8} == -1 ? ({S8})7 : {S8})"), leaf, leaf, t.name, leaf) :
+                string_format(g->arena, S8("({S8} == 0 ? ({S8})7 : {S8})"), leaf, t.name, leaf);
+            accumulator = string_format(g->arena, S8("(({S8})({S8} {S8} {S8}))"), t.name, accumulator, shape == 6 ? S8("/") : S8("%"), guard);
+        }
+        else if (shape == 8)
+        {
+            accumulator = string_format(g->arena, S8("(({S8})({S8} >> ({S8} & {u32})))"), t.name, accumulator, leaf, t.bits == 64 ? 63u : 31u);
+        }
+        else if (shape == 9)
+        {
+            accumulator = string_format(g->arena, S8("(({S8})(({S8}){S8} << ({S8} & {u32})))"), t.name, t.shift, accumulator, leaf, t.bits == 64 ? 63u : 31u);
+        }
+        else if (shape == 10)
+        {
+            String8 unary[] = {S8("-"), S8("~"), S8("!")};
+            accumulator = string_format(g->arena, S8("(({S8})({S8}({S8}){S8}))"), t.name, unary[d_gen_below(g, 3)], t.wide, accumulator);
+        }
+        else if (shape == 11)
+        {
+            bool swap = d_gen_below(g, 2);
+            accumulator = string_format(g->arena, S8("(({S8})({S8} ? {S8} : {S8}))"), t.name, d_gen_condition(g),
+                swap ? leaf : accumulator, swap ? accumulator : leaf);
+        }
+        else
+        {
+            accumulator = string_format(g->arena, S8("(({S8})({S8} {S8} {S8}))"), t.name, accumulator, shape == 12 ? S8("&&") : S8("||"), leaf);
+        }
+    }
+    return accumulator;
+}
+
+BUSTER_GLOBAL_LOCAL u32 d_gen_target(DGen* g)
+{
+    u32 start = d_gen_below(g, g->name_count);
+    u32 result = start;
+    while (!g->writable[result]) { result = (result + 1) % g->name_count; }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 d_gen_assignment(DGen* g)
+{
+    u32 target = d_gen_target(g);
+    u32 type = g->types[target];
+    DGenType t = d_gen_types[type];
+    String8 result;
+    u32 shape = d_gen_below(g, 4);
+    if (shape == 0)
+    {
+        // Compound forms avoid signed int/long long overflow and promoted
+        // unsigned short products; narrow left shifts stay within int.
+        String8 operators[] = {S8("+="), S8("-="), S8("^="), S8("|="), S8("&="), S8(">>="), S8("*="), S8("<<=")};
+        u32 index;
+        if (t.is_signed && t.bits >= 32) { index = 2 + d_gen_below(g, 4); }
+        else if (t.is_signed) { index = d_gen_below(g, 6); }
+        else if (t.bits < 32) { index = d_gen_below(g, 7); index = index == 6 ? 7 : index; }
+        else { index = d_gen_below(g, 8); }
+        String8 value = index == 5 || index == 7 ?
+            string_format(g->arena, S8("({S8} & {u32})"), d_gen_leaf(g, type), index == 7 && t.bits < 32 ? t.bits - 1 : t.bits == 64 ? 63u : 31u) :
+            d_gen_expression(g, type);
+        result = string_format(g->arena, S8("{S8} {S8} {S8};\n"), g->names[target], operators[index], value);
+    }
+    else if (shape == 1 && g->array_type < D_GEN_TYPE_COUNT)
+    {
+        String8 index = d_gen_atom(g, d_gen_below(g, D_GEN_TYPE_COUNT));
+        result = string_format(g->arena, S8("la[(int)({S8} & 7)] = {S8};\n"), index, d_gen_expression(g, g->array_type));
+    }
+    else { result = string_format(g->arena, S8("{S8} = {S8};\n"), g->names[target], d_gen_expression(g, type)); }
+    return result;
+}
+
+// Each draw is its own statement: argument and initializer evaluation order
+// is unspecified, and a seed must give the same source from every compiler.
+BUSTER_GLOBAL_LOCAL String8 d_gen_call(DGen* g, u32 callee)
+{
+    String8 arguments[3];
+    for (u32 index = 0; index < 3; index += 1) { arguments[index] = d_gen_atom(g, g->parameters[callee][index]); }
+    return string_format(g->arena, S8("{u32}({S8}, {S8}, {S8})"), callee, arguments[0], arguments[1], arguments[2]);
+}
+
+// Adds two values of one lane in its wide type, which is wider or unsigned,
+// so the sum cannot overflow before narrowing back to the lane.
+BUSTER_GLOBAL_LOCAL String8 d_gen_sum(Arena* arena, u32 type, String8 left, String8 right)
+{
+    DGenType t = d_gen_types[type];
+    return string_format(arena, S8("(({S8})(({S8}){S8} + ({S8}){S8}))"), t.name, t.wide, left, t.wide, right);
+}
+
+// Calls and aggregate assignment stay outside loops, so each function calls at
+// most two earlier functions and execution stays bounded.
+BUSTER_GLOBAL_LOCAL String8 d_gen_statement(DGen* g, u32 function, u32* calls)
+{
+    u32 shape = d_gen_below(g, 10);
+    u32 loop = g->depth;
+    while (loop && g->blocks[loop - 1] != D_GEN_BLOCK_FOR && g->blocks[loop - 1] != D_GEN_BLOCK_DO) { loop -= 1; }
+    String8 result;
+    if (shape == 4)
+    {
+        u32 target = d_gen_target(g);
+        String8 type = d_gen_types[g->types[target]].name;
+        u32 tag = g->tags;
+        g->tags += 2;
+        u32 form = d_gen_below(g, 3);
+        String8 condition = d_gen_condition(g);
+        String8 first = d_gen_atom(g, 4);
+        if (form == 0)
+        {
+            result = string_format(g->arena, S8("if ({S8} && tick({u32}, (int){S8}))\n{{\n{S8}}\n"),
+                condition, tag, first, d_gen_assignment(g));
+        }
+        else if (form == 1)
+        {
+            result = string_format(g->arena, S8("{S8} = ({S8})({S8} ? tick({u32}, (int){S8}) : tick({u32}, (int){S8}));\n"),
+                g->names[target], type, condition, tag, first, tag + 1, d_gen_atom(g, 4));
+        }
+        else
+        {
+            result = string_format(g->arena, S8("{S8} = ({S8})(tick({u32}, {S8}) || tick({u32}, (int){S8}));\n"),
+                g->names[target], type, tag, condition, tag + 1, first);
+        }
+    }
+    else if (shape == 5)
+    {
+        result = string_format(g->arena, S8("switch ((int)({S8} & 3))\n{{\n"), d_gen_atom(g, d_gen_below(g, D_GEN_TYPE_COUNT)));
+        String8 labels[] = {S8("case 0:\n"), S8("case 1:\n"), S8("case 2:\n"), S8("default:\n")};
+        for (u32 label = 0; label < BUSTER_ARRAY_LENGTH(labels); label += 1)
+        {
+            bool fallthrough = label + 1 < BUSTER_ARRAY_LENGTH(labels) && d_gen_below(g, 2);
+            result = string_format(g->arena, S8("{S8}{S8}{S8}{S8}"), result, labels[label], d_gen_assignment(g),
+                fallthrough ? S8("") : S8("break;\n"));
+        }
+        result = string_format(g->arena, S8("{S8}}\n"), result);
+    }
+    else if (shape == 6 && g->depth == 0 && *calls < 2)
+    {
+        *calls += 1;
+        if (function == 0 || d_gen_below(g, 3) == 0)
+        {
+            result = string_format(g->arena, S8("gs = fs(gs, (int){S8});\n"), d_gen_atom(g, 4));
+        }
+        else
+        {
+            u32 callee = d_gen_below(g, function);
+            u32 target = d_gen_target(g);
+            result = string_format(g->arena, S8("{S8} = ({S8})f{S8};\n"), g->names[target],
+                d_gen_types[g->types[target]].name, d_gen_call(g, callee));
+        }
+    }
+    else if (shape == 7 && loop)
+    {
+        // A do-while continue would skip its counter update.
+        bool next = g->blocks[loop - 1] == D_GEN_BLOCK_FOR && d_gen_below(g, 2);
+        result = string_format(g->arena, S8("if {S8}\n{{\n{S8}}\n"), d_gen_condition(g), next ? S8("continue;\n") : S8("break;\n"));
+    }
+    else { result = d_gen_assignment(g); }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void d_gen_open(DGen* g)
+{
+    u32 kind = d_gen_below(g, 3);
+    g->block_names[g->depth] = g->name_count;
+    if (kind == 0)
+    {
+        g->blocks[g->depth] = D_GEN_BLOCK_IF;
+        d_gen_emit(g, string_format(g->arena, S8("if {S8}\n{{\n"), d_gen_condition(g)));
+    }
+    else if (kind == 1)
+    {
+        g->blocks[g->depth] = D_GEN_BLOCK_FOR;
+        String8 name = string_format(g->arena, S8("i{u32}"), g->depth);
+        d_gen_emit(g, string_format(g->arena, S8("for (int {S8} = 0; {S8} < {u32}; {S8} += 1)\n{{\n"), name, name, 1 + d_gen_below(g, 6), name));
+        d_gen_name(g, name, 4, false);
+    }
+    else
+    {
+        g->blocks[g->depth] = D_GEN_BLOCK_DO;
+        String8 name = string_format(g->arena, S8("k{u32}"), g->depth);
+        d_gen_emit(g, string_format(g->arena, S8("{{\nint {S8} = {u32};\ndo\n{{\n"), name, 1 + d_gen_below(g, 6)));
+        d_gen_name(g, name, 4, false);
+    }
+    g->depth += 1;
+}
+
+BUSTER_GLOBAL_LOCAL void d_gen_close(DGen* g)
+{
+    u32 top = g->depth - 1;
+    if (g->blocks[top] == D_GEN_BLOCK_IF && d_gen_below(g, 2))
+    {
+        g->blocks[top] = D_GEN_BLOCK_ELSE;
+        d_gen_emit(g, S8("}\nelse\n{\n"));
+    }
+    else
+    {
+        if (g->blocks[top] == D_GEN_BLOCK_DO)
+        {
+            d_gen_emit(g, string_format(g->arena, S8("k{u32} -= 1;\n}\nwhile (k{u32} > 0);\n}\n"), top, top));
+        }
+        else { d_gen_emit(g, S8("}\n")); }
+        g->name_count = g->block_names[top];
+        g->depth = top;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL String8 d_generated_source(Arena* arena, u32 seed)
+{
+    DGen generator = {.arena = arena, .state = seed * 2654435761u + 0x9e3779b9u, .array_type = D_GEN_TYPE_COUNT};
+    DGen* g = &generator;
+    g->state = g->state ? g->state : 1;
+    g->parts = arena_allocate(arena, String8, D_GEN_PART_CAPACITY);
+    d_gen_emit(g, string_format(arena, S8("// test_differential structural generator v1, seed {u32}.\nextern int printf(const char *, ...);\n"), seed));
+    String8 fields[] = {S8("a"), S8("b"), S8("c[0]"), S8("c[1]"), S8("c[2]"), S8("d")};
+    u32 field_types[BUSTER_ARRAY_LENGTH(fields)];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fields); index += 1)
+    {
+        field_types[index] = index == 3 || index == 4 ? field_types[2] : d_gen_below(g, D_GEN_TYPE_COUNT);
+    }
+    d_gen_emit(g, string_format(arena, S8("struct DS {{ {S8} a; {S8} b; {S8} c[3]; {S8} d; };\n"), d_gen_types[field_types[0]].name,
+        d_gen_types[field_types[1]].name, d_gen_types[field_types[2]].name, d_gen_types[field_types[5]].name));
+    u32 globals = 4 + d_gen_below(g, 5);
+    for (u32 index = 0; index < globals; index += 1)
+    {
+        u32 type = d_gen_below(g, D_GEN_TYPE_COUNT);
+        String8 name = string_format(arena, S8("g{u32}"), index);
+        d_gen_emit(g, string_format(arena, S8("static {S8} {S8} = {S8};\n"), d_gen_types[type].name, name, d_gen_constant(g, type)));
+        d_gen_name(g, name, type, true);
+    }
+    // Partial initialization leaves the array tail and last field zero.
+    String8 initializers[3];
+    for (u32 index = 0; index < 3; index += 1) { initializers[index] = d_gen_constant(g, field_types[index]); }
+    d_gen_emit(g, string_format(arena, S8("static struct DS gs = {{ {S8}, {S8}, {{ {S8} } };\n"),
+        initializers[0], initializers[1], initializers[2]));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fields); index += 1)
+    {
+        d_gen_name(g, string_format(arena, S8("gs.{S8}"), fields[index]), field_types[index], true);
+    }
+    u32 global_names = g->name_count;
+    d_gen_emit(g, S8("static unsigned long long g_trace;\nstatic unsigned long long d_hash = 1469598103934665603ull;\n"
+        "static int tick(int k, int v)\n{\ng_trace = g_trace * 31ull + (unsigned long long)k;\nreturn v;\n}\n"
+        "static void d_mix(unsigned long long v)\n{\nd_hash = (d_hash ^ v) * 1099511628211ull;\n}\n"
+        "static struct DS fs(struct DS s, int k)\n{\n"));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fields); index += 1)
+    {
+        d_gen_name(g, string_format(arena, S8("s.{S8}"), fields[index]), field_types[index], true);
+    }
+    d_gen_name(g, S8("k"), 4, false);
+    u32 aggregate_statements = 2 + d_gen_below(g, 3);
+    for (u32 index = 0; index < aggregate_statements; index += 1) { d_gen_emit(g, d_gen_assignment(g)); }
+    d_gen_emit(g, string_format(arena, S8("s.c[k & 1] = {S8};\nreturn s;\n}\n"), d_gen_expression(g, field_types[2])));
+    g->function_count = 2 + d_gen_below(g, D_GEN_FUNCTION_CAPACITY - 1);
+    for (u32 function = 0; function < g->function_count; function += 1)
+    {
+        g->name_count = global_names;
+        g->array_type = D_GEN_TYPE_COUNT;
+        g->returns[function] = d_gen_below(g, D_GEN_TYPE_COUNT);
+        String8 header = string_format(arena, S8("static {S8} f{u32}("), d_gen_types[g->returns[function]].name, function);
+        for (u32 parameter = 0; parameter < 3; parameter += 1)
+        {
+            u32 type = d_gen_below(g, D_GEN_TYPE_COUNT);
+            String8 name = string_format(arena, S8("a{u32}"), parameter);
+            g->parameters[function][parameter] = type;
+            header = string_format(arena, S8("{S8}{S8}{S8} {S8}"), header, parameter ? S8(", ") : S8(""), d_gen_types[type].name, name);
+            d_gen_name(g, name, type, true);
+        }
+        d_gen_emit(g, string_format(arena, S8("{S8})\n{{\n"), header));
+        u32 locals = 2 + d_gen_below(g, 3);
+        u32 local_names = g->name_count;
+        for (u32 local = 0; local < locals; local += 1)
+        {
+            u32 type = d_gen_below(g, D_GEN_TYPE_COUNT);
+            String8 name = string_format(arena, S8("l{u32}"), local);
+            d_gen_emit(g, string_format(arena, S8("{S8} {S8} = {S8};\n"), d_gen_types[type].name, name, d_gen_expression(g, type)));
+            d_gen_name(g, name, type, true);
+        }
+        u32 pointee = local_names + d_gen_below(g, locals);
+        u32 array_type = d_gen_below(g, D_GEN_TYPE_COUNT);
+        String8 elements[3];
+        elements[0] = d_gen_constant(g, array_type);
+        elements[1] = d_gen_atom(g, array_type);
+        elements[2] = d_gen_atom(g, array_type);
+        d_gen_emit(g, string_format(arena, S8("{S8} la[8] = {{ {S8}, {S8}, {S8} };\n{S8}* lp = &{S8};\n"), d_gen_types[array_type].name,
+            elements[0], elements[1], elements[2], d_gen_types[g->types[pointee]].name, g->names[pointee]));
+        d_gen_name(g, S8("(*lp)"), g->types[pointee], true);
+        g->array_type = array_type;
+        u32 statements = 4 + d_gen_below(g, 9);
+        u32 calls = 0;
+        for (u32 statement = 0; statement < statements; statement += 1)
+        {
+            u32 choice = d_gen_below(g, 10);
+            if (g->depth && choice < 2) { d_gen_close(g); }
+            else if (g->depth < D_GEN_DEPTH_CAPACITY - 1 && choice < 5) { d_gen_open(g); }
+            else { d_gen_emit(g, d_gen_statement(g, function, &calls)); }
+        }
+        while (g->depth) { d_gen_close(g); }
+        u32 sum = d_gen_below(g, D_GEN_TYPE_COUNT);
+        u32 mixed = d_gen_below(g, 8);
+        u32 returned = g->returns[function];
+        String8 left = d_gen_expression(g, returned);
+        String8 right = string_format(arena, S8("(({S8}){S8})"), d_gen_types[returned].name, d_gen_expression(g, sum));
+        d_gen_emit(g, string_format(arena, S8("d_mix((unsigned long long)la[{u32}]);\nreturn {S8};\n}\n"), mixed,
+            d_gen_sum(arena, returned, left, right)));
+    }
+    g->name_count = global_names;
+    g->array_type = D_GEN_TYPE_COUNT;
+    d_gen_name(g, S8("r"), 4, false);
+    d_gen_emit(g, S8("int main(void)\n{\nfor (int r = 0; r < 3; r += 1)\n{\n"));
+    u32 last = g->function_count - 1;
+    u32 other = d_gen_below(g, g->function_count);
+    String8 last_call = d_gen_call(g, last);
+    String8 other_call = d_gen_call(g, other);
+    d_gen_emit(g, string_format(arena, S8("d_mix((unsigned long long)f{S8});\nd_mix((unsigned long long)f{S8});\ngs = fs(gs, r);\n}\n"),
+        last_call, other_call));
+    for (u32 index = 0; index < global_names; index += 1)
+    {
+        d_gen_emit(g, string_format(arena, S8("d_mix((unsigned long long){S8});\n"), g->names[index]));
+    }
+    d_gen_emit(g, S8("d_mix(g_trace);\nprintf(\"%llu\\n\", d_hash);\nreturn (int)(d_hash & 127u);\n}\n"));
+    return string_join_arena(arena, (SliceString8){.pointer = g->parts, .length = g->part_count}, false);
 }
 
 // Explicit test children exercise the real capture/status/deadline path. They
@@ -1901,6 +2469,7 @@ struct DCaseRecord
 {
     u32 failures;
     u32 rows;
+    u32 objects;
     u32 completed;
     bool io_failed;
     u64 report_hash;
@@ -1953,8 +2522,8 @@ BUSTER_GLOBAL_LOCAL bool d_jobs(u32 requested, u32 cpus, String8 quota_text, u32
 
 BUSTER_GLOBAL_LOCAL String8 d_case_record_text(Arena* arena, DCase test, DCaseRecord record, u32 count)
 {
-    return string_format(arena, S8("version=2 case={S8} configurations={u32} rows={u32} failures={u32} io_failed={u32} completed={u32} evidence_files={u32}\n"),
-        test.name, count, record.rows, record.failures, (u32)record.io_failed, record.completed, record.evidence_count);
+    return string_format(arena, S8("version=3 case={S8} configurations={u32} rows={u32} distinct_objects={u32} failures={u32} io_failed={u32} completed={u32} evidence_files={u32}\n"),
+        test.name, count, record.rows, record.objects, record.failures, (u32)record.io_failed, record.completed, record.evidence_count);
 }
 
 BUSTER_GLOBAL_LOCAL u32 d_evidence_hash_capacity(u64 entries)
@@ -2038,6 +2607,7 @@ BUSTER_GLOBAL_LOCAL void d_case_lane(void* argument)
         settings.evidence_path_capacity = 0;
         settings.evidence_count = 0;
         settings.rows = 0;
+        settings.objects = 0;
         String8 directory = path_join(arena, settings.out, test.name);
         bool claimed = d_create_output(arena, directory);
         if (!claimed) { settings.io_failed = true; }
@@ -2096,6 +2666,7 @@ BUSTER_GLOBAL_LOCAL void d_case_lane(void* argument)
             settings.io_failed |= !build_artifact_fanout_hash_file(arena, evidence_path, &record->evidence_hash, &record->evidence_size);
         }
         record->rows = settings.rows;
+        record->objects = settings.objects;
         record->evidence_count = settings.evidence_count;
         record->io_failed = settings.io_failed;
         record->completed += 1;
@@ -2266,6 +2837,11 @@ BUSTER_GLOBAL_LOCAL u32 d_cases_run(DSettings* settings, DCase* tests, u32 count
         lane_run(BUSTER_MIN(jobs, count), &d_case_lane, &work);
         os_mutex_destroy(work.settings.spawn_mutex);
         failures = d_cases_collect(&work);
+        for (u32 index = 0; index < count; index += 1)
+        {
+            settings->rows += work.records[index].rows;
+            settings->objects += work.records[index].objects;
+        }
     }
     return failures;
 }
@@ -2702,6 +3278,50 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         caller_compile.kind = (DKind)kind;
         errors += d_caller_ready(caller_compile, true, false);
     }
+    // Generated sources are reproducible per seed and vary in shape, not only
+    // in literals: line counts differ and the corpus reaches every construct.
+    String8 const generated_features[] = {S8("switch ("), S8("for (int "), S8("do\n"), S8("tick("), S8(" / ("), S8(" % ("),
+        S8(" >> ("), S8(" << ("), S8("(double)"), S8("(float)"), S8("la[(int)("), S8("(*lp)"), S8("gs = fs(gs"),
+        S8(" ? "), S8(" && "), S8(" || "), S8("break;"), S8("continue;"), S8("else\n"), S8("signed char"), S8("unsigned long long")};
+    u64 generated_found = 0;
+    u32 generated_lines[16] = {0};
+    bool generated_shapes_vary = false;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(generated_lines); index += 1)
+    {
+        u64 position = arena->position;
+        String8 source = d_generated_source(arena, index + 1);
+        errors += !string_equal(source, d_generated_source(arena, index + 1));
+        for (u64 at = 0; at < source.length; at += 1)
+        {
+            generated_lines[index] += source.pointer[at] == '\n';
+            // Function results are formed only by d_gen_sum; main returns its hash.
+            String8 rest = string_slice(source, at, source.length);
+            if (source.pointer[at] == '\n' && string_starts_with_sequence(rest, S8("\nreturn (")))
+            {
+                errors += !string_starts_with_sequence(rest, S8("\nreturn ((")) && !string_starts_with_sequence(rest, S8("\nreturn (int)(d_hash"));
+            }
+        }
+        generated_shapes_vary |= generated_lines[index] != generated_lines[0];
+        for (u32 feature = 0; feature < BUSTER_ARRAY_LENGTH(generated_features); feature += 1)
+        {
+            if (d_contains(source, generated_features[feature])) { generated_found |= (u64)1 << feature; }
+        }
+        arena_set_position(arena, position);
+    }
+    errors += !generated_shapes_vary || generated_found != ((u64)1 << BUSTER_ARRAY_LENGTH(generated_features)) - 1;
+    // Every lane's wide type is unsigned or strictly wider, so the + - * forms
+    // and d_gen_sum cannot overflow before narrowing, with or without -fwrapv.
+    for (u32 type = 0; type < D_GEN_TYPE_COUNT; type += 1)
+    {
+        u32 wide = D_GEN_TYPE_COUNT;
+        for (u32 index = 0; index < D_GEN_TYPE_COUNT; index += 1)
+        {
+            if (string_equal(d_gen_types[index].name, d_gen_types[type].wide)) { wide = index; }
+        }
+        errors += wide == D_GEN_TYPE_COUNT || (d_gen_types[wide].is_signed && d_gen_types[wide].bits <= d_gen_types[type].bits);
+    }
+    errors += !string_equal(d_gen_sum(arena, 4, S8("x"), S8("y")), S8("((int)((long long)x + (long long)y))"));
+    errors += !string_equal(d_gen_sum(arena, 6, S8("x"), S8("y")), S8("((long long)((unsigned long long)x + (unsigned long long)y))"));
     if (errors) { string_print(S8("DIFFERENTIAL_SELF_TEST_FAIL pure_controls={u32}\n"), errors); }
     String8 directory = string_format_z(arena, S8("build/differential self-test%-{u64}"), os_now_microseconds());
     if (!d_create_output(arena, directory)) { errors += 1; }
@@ -2816,6 +3436,16 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         errors += !path_exists(arena, stale_object);
         errors += d_prepare_caller(&missing_caller, caller_case, directory).length != 0;
         errors += path_exists(arena, stale_object) || missing_caller.io_failed;
+        // Object reuse needs byte equality, not only an equal size and hash.
+        String8 same_left = path_join(arena, directory, S8("object-left"));
+        String8 same_right = path_join(arena, directory, S8("object-right"));
+        String8 changed = path_join(arena, directory, S8("object-changed"));
+        d_write(&settings, same_left, S8("object\0bytes"));
+        d_write(&settings, same_right, S8("object\0bytes"));
+        d_write(&settings, changed, S8("object\0bytez"));
+        errors += !d_files_equal(arena, same_left, same_right);
+        errors += d_files_equal(arena, same_left, changed);
+        errors += d_files_equal(arena, same_left, path_join(arena, directory, S8("object-missing")));
         errors += d_create_output(arena, directory); // Never reuse existing output.
         if (errors) { string_print(S8("DIFFERENTIAL_SELF_TEST_FAIL before_workers={u32}\n"), errors); }
         errors += d_workers_self_test(arena, directory, recovering_sanitizer);
@@ -3062,11 +3692,8 @@ else
                             seed = seed * 1664525U + 1013904223U;
                             String8 name = string_format(arena, S8("seed-{u32}"), seed);
                             String8 source = path_join(arena, settings.out, string_format(arena, S8("{S8}.c"), name));
-                            // Defined unsigned wrap and masked shifts; bounded loops. Keep
-                            // generation deterministic and preserve the exact source artifact.
-                            String8 prefix = S8("extern int printf(const char *, ...);\nunsigned mix(unsigned x, unsigned n) {\n unsigned a=x, b=x^1234567u;\n for(unsigned i=0;i<n;i++){ unsigned t=a; a=(b+(i*17u))^(a>>3); b=(t<<5)|(t>>27); if(a&1u) b^=a; else a+=b; }\n return a^b;\n}\nint main(void) { unsigned x=mix(");
-                            String8 suffix = S8("u,31u); printf(\"%u\\n\",x); return (int)(x&127u); }\n");
-                            d_write(&settings, source, string_format(arena, S8("{S8}{u32}{S8}"), prefix, seed, suffix));
+                            // Keep generation deterministic and preserve the exact source artifact.
+                            d_write(&settings, source, d_generated_source(arena, seed));
                             cases[BUSTER_ARRAY_LENGTH(d_builtin_cases) + index] = (DCase){.name = name, .source = source};
                         }
                         failures += d_cases_run(&settings, cases, case_count, configs, count, jobs);
@@ -3080,7 +3707,8 @@ else
         }
     }
     failures += settings.io_failed;
-    string_print(S8("DIFFERENTIAL_SUMMARY failures={u32} configurations={u32}\n"), failures, count);
+    string_print(S8("DIFFERENTIAL_SUMMARY failures={u32} configurations={u32} rows={u32} distinct_objects={u32}\n"),
+        failures, count, settings.rows, settings.objects);
     if (cancellation_signal)
     {
         fflush(0);

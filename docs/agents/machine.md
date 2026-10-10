@@ -369,7 +369,11 @@ fixture as well as compiling both architectures.
   immutable, non-pinned general value the designated predecessor holds dirty,
   in the register it already occupies; an edge that delivers it there keeps
   it across the parameter publication, and any other edge stores and reloads
-  it as before. The carried value's dirtiness is the OR over the edges.
+  it as before. The carried value's dirtiness is the OR over the edges. A
+  parameter whose source the designated predecessor does not already hold
+  picks a register outside those carried lanes (`machine_fast_carriable`)
+  when one is free, so it does not displace a carried value into an edge
+  store and a reload.
 - FAST/QUALITY drop the write-back of an escaping value once no path can
   reach its last textual use. `machine_fast_loop_floors` gives each block the
   first instruction of the lowest block a path from it can re-enter through

@@ -105,8 +105,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena, Strin
         production_profile_write(ide, S8("baseline compiler bytes\n")) && chmod((char*)ide.pointer, 0755) == 0 &&
         production_profile_write(path_join(arena, root, S8("empty.file")), S8("")) &&
         production_profile_write(path_join(arena, build, S8("CMakeCache.txt")),
+            // build.c configures the compiler as STRING; the regenerated fixture cache keeps FILEPATH.
             string_format(arena, S8("BUSTER_INCLUDE_TESTS:BOOL=OFF\nCMAKE_HOME_DIRECTORY:INTERNAL={S8}\n"
-                "CMAKE_C_COMPILER:FILEPATH={S8}\nCMAKE_LINKER:FILEPATH={S8}\nCMAKE_MAKE_PROGRAM:FILEPATH={S8}\n"),
+                "CMAKE_C_COMPILER:STRING={S8}\nCMAKE_LINKER:FILEPATH={S8}\nCMAKE_MAKE_PROGRAM:FILEPATH={S8}\n"),
                 root, clang, linker, ninja));
     string_print(S8("COMPILER_CLOSURE_FIXTURE setup={u64}\n"), passed ? 1ull : 0ull);
     String8 init[] = {S8("git"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("-c"), S8("core.hooksPath=/dev/null"), S8("-C"), root, S8("init"), S8("--quiet")};
