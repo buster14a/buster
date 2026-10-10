@@ -2291,8 +2291,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_ifunc_tests(UnitTestArgum
 #if BUSTER_CPU_ARCH_X86_64
         if (produced)
         {
-            // The runner is the shared object's first DT_INIT_ARRAY entry,
-            // and the exported name is the thunk the host program binds to.
+            // The shared object's slots are R_X86_64_IRELATIVE, and the
+            // exported name is the thunk the host program binds to.
             String8 library = string_format_z(arena, S8("{S8}/libbusterifunc.so"), root);
             String8 shared_command[] = {S8("-shared"), shared_object, S8("-o"), library};
             CompilerDriverResult shared = compiler_driver_execute_invocation(
@@ -2305,6 +2305,58 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_ifunc_tests(UnitTestArgum
                           compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
             BUSTER_TEST(arguments, linked);
             if (linked) BUSTER_TEST(arguments, compiler_driver_tls_export_run(arguments, consumer, root));
+            // An executable's DT_PREINIT_ARRAY runs before its dependencies'
+            // DT_INIT_ARRAY, so a preinit callback that calls a library's
+            // IFUNC needs the slot filled during relocation: the library's
+            // R_X86_64_IRELATIVE. The resolver here is idempotent, so the
+            // host-built library, which resolves at each binding, is the oracle.
+            String8 simple_source = string_format_z(arena, S8("{S8}/simple.c"), root);
+            String8 simple_object = string_format_z(arena, S8("{S8}/simple-pic.o"), root);
+            String8 preinit_source = string_format_z(arena, S8("{S8}/preinit-consumer.c"), root);
+            String8 preinit_object = string_format_z(arena, S8("{S8}/preinit-consumer.o"), root);
+            BUSTER_TEST(arguments, file_write(simple_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+                "static int thrice(int x) { return x * 3; }\n"
+                "static int (*resolve_scale(void))(int) { return thrice; }\n"
+                "int scale(int) __attribute__((ifunc(\"resolve_scale\")));\n"))));
+            BUSTER_TEST(arguments, file_write(preinit_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+                "int scale(int);\n"
+                "static volatile int early;\n"
+                "static void before_constructors(void) { early = scale(7); }\n"
+                "__attribute__((section(\".preinit_array\"), used)) static void (*entry)(void) = before_constructors;\n"
+                "int main(void) { return early != 21; }\n"))));
+            String8 simple_compile[] = {S8("-w"), S8("-O2"), S8("-fPIC"), S8("-c"), simple_source, S8("-o"), simple_object};
+            String8 preinit_compile[] = {S8("-w"), S8("-O2"), S8("-fPIE"), S8("-c"), preinit_source, S8("-o"), preinit_object};
+            bool preinit_produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(simple_compile)) &&
+                                    compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(preinit_compile));
+            BUSTER_TEST(arguments, preinit_produced);
+            for (u32 linker = 0; preinit_produced && linker < 2; linker += 1)
+            {
+                // A directory per library, so each consumer loads its own libpreinitifunc.so.
+                String8 directory = string_format_z(arena, S8("{S8}/preinit-{S8}"), root, linker ? S8("buster") : S8("host"));
+                OsDirectoryCreateResult made = os_make_directory(directory);
+                BUSTER_TEST(arguments, made.error.v == 0);
+                String8 preinit_library = string_format_z(arena, S8("{S8}/libpreinitifunc.so"), directory);
+                bool built = false;
+                if (linker)
+                {
+                    String8 command[] = {S8("-shared"), simple_object, S8("-o"), preinit_library};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    built = compiled.error == COMPILER_DRIVER_ERROR_NONE;
+                }
+                else
+                {
+                    String8 command[] = {S8("-shared"), simple_object, S8("-o"), preinit_library};
+                    built = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                }
+                BUSTER_TEST(arguments, built);
+                String8 program = string_format_z(arena, S8("{S8}/preinit-consumer"), directory);
+                String8 search = string_format_z(arena, S8("-L{S8}"), directory);
+                String8 link[] = {preinit_object, search, S8("-lpreinitifunc"), S8("-o"), program};
+                bool program_linked = built && compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(link));
+                BUSTER_TEST(arguments, program_linked);
+                if (program_linked) BUSTER_TEST(arguments, compiler_driver_tls_export_run(arguments, program, directory));
+            }
         }
 #endif
         BUSTER_TEST(arguments, os_directory_delete(root));

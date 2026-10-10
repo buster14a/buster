@@ -349,8 +349,11 @@ struct ObjectSymbol
     bool final_name;
     // An ELF STT_GNU_IFUNC definition: `value` is the resolver, and a
     // reference wants the function the resolver returns. Only the ELF reader
-    // sets it, and link_elf_indirect_functions_rebind replaces every such
-    // symbol before an image writer runs, so no writer sees one.
+    // sets it, and link_elf_indirect_functions_rebind rebinds every such
+    // name before an image writer runs. The one indirect symbol a writer
+    // sees is a shared object's local resolver, whose slot's absolute
+    // reference the position-independent writer publishes as
+    // R_X86_64_IRELATIVE.
     bool indirect;
 };
 
