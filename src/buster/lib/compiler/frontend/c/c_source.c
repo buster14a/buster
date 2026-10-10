@@ -88,7 +88,10 @@
 //   c_include_suppressed                       and #ifndef guard identity
 //   c_preprocess_command_operations,           ordered command-line macro
 //   c_preprocess_define_directive              operations and shared #define
-//                                              parsing
+//                                              parsing; forced_includes
+//                                              (-include) run as a synthetic
+//                                              `<command-line>` frame above
+//                                              the root frame
 //   c_preprocess_respell_token,                final-stream rewrites: C23 and
 //   c_preprocess_respell_identifiers,          UCN respellings, GNU `member:`
 //   c_preprocess_rewrite_obsolete_designators, as `.member =`, and block-
@@ -589,8 +592,14 @@ BUSTER_C_SHARED CSpellingSpace c_space_local(Arena* arena, u64 capacity)
     };
     C_CENSUS_PHASE_RECORD(TEMP_SPACES, 1);
     C_CENSUS_PHASE_RECORD(TEMP_SPACE_BYTES, space.capacity);
-    space.base = arena_allocate(arena, char8, space.capacity);
-    memcpy(c_space_allocate(&space, C_SPELLING_PRELUDE_LENGTH), C_SPELLING_PRELUDE_TEXT, C_SPELLING_PRELUDE_LENGTH);
+    // Guarded while a function body is validated (#1256): a miss returns a
+    // space with no base and no capacity, which the caller must not write.
+    space.base = C_PARSE_BODY_SCRATCH_ARRAY(arena, char8, space.capacity);
+    space.capacity = space.base ? space.capacity : 0;
+    if (space.base)
+    {
+        memcpy(c_space_allocate(&space, C_SPELLING_PRELUDE_LENGTH), C_SPELLING_PRELUDE_TEXT, C_SPELLING_PRELUDE_LENGTH);
+    }
     return space;
 }
 
@@ -4238,7 +4247,9 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_constant_p"), C_SYMBOL_BUILTIN_CONSTANT_P },
     { S8_INITIALIZER("__builtin_choose_expr"), C_SYMBOL_BUILTIN_CHOOSE_EXPR },
     { S8_INITIALIZER("__builtin_types_compatible_p"), C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P },
+    { S8_INITIALIZER("__builtin_classify_type"), C_SYMBOL_BUILTIN_CLASSIFY_TYPE },
     { S8_INITIALIZER("__builtin_object_size"), C_SYMBOL_BUILTIN_OBJECT_SIZE },
+    { S8_INITIALIZER("__builtin_dynamic_object_size"), C_SYMBOL_BUILTIN_OBJECT_SIZE },
     { S8_INITIALIZER("__builtin_assume_aligned"), C_SYMBOL_BUILTIN_ASSUME_ALIGNED },
     { S8_INITIALIZER("__builtin_debugtrap"), C_SYMBOL_BUILTIN_DEBUGTRAP },
     { S8_INITIALIZER("__builtin_trap"), C_SYMBOL_BUILTIN_DEBUGTRAP },
@@ -4288,6 +4299,20 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__sync_synchronize"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__sync_fetch_and_nand"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__sync_nand_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_add"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_sub"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_or"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_and"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_xor"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_add_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_sub_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_or_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_and_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_xor_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_bool_compare_and_swap"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_val_compare_and_swap"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_lock_test_and_set"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_lock_release"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__atomic_load"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__atomic_store"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__atomic_exchange"), C_SYMBOL_BUILTIN_ATOMIC },
@@ -4345,6 +4370,27 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_powil"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_roundf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_round"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_truncf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_trunc"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_truncl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_rintf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_rint"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_rintl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_nearbyintf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_nearbyint"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_nearbyintl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fmaf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fma"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fmal"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_ldexpf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_ldexp"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_ldexpl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_lroundf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_lround"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_lroundl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_llroundf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_llround"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_llroundl"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_inf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_inff"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_nanf"), C_SYMBOL_BUILTIN_MATH },
@@ -4425,6 +4471,11 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_umul_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
     { S8_INITIALIZER("__builtin_umull_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
     { S8_INITIALIZER("__builtin_umulll_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    // The generic forms take any two integer operands and any integer result
+    // pointer; c_ir_emit_overflow_builtin documents what they lower.
+    { S8_INITIALIZER("__builtin_add_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_sub_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
+    { S8_INITIALIZER("__builtin_mul_overflow"), C_SYMBOL_BUILTIN_OVERFLOW },
     { S8_INITIALIZER("__builtin_popcount"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     { S8_INITIALIZER("__builtin_popcountl"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     { S8_INITIALIZER("__builtin_popcountll"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
@@ -4700,11 +4751,11 @@ bool c_semantic_integer_builtin_fold(CSymbolBuiltin builtin, u32 width, u64 bits
         case C_SYMBOL_BUILTIN_PARITY: answer = population & 1; break;
         case C_SYMBOL_BUILTIN_ABSOLUTE_VALUE:
         {
-            // The most negative value has no positive counterpart: leave it
-            // unfolded rather than claim a constant for undefined behavior.
+            // The most negative value has no positive counterpart and wraps
+            // to itself under -fwrapv, as the (x ^ s) - s lowering and GCC's
+            // static-initializer fold both do.
             u64 sign = UINT64_C(1) << (width - 1);
             answer = bits & sign ? (0 - bits) & mask : bits;
-            known = answer != sign;
             break;
         }
         case C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS:
@@ -4731,12 +4782,58 @@ bool c_semantic_integer_builtin_fold(CSymbolBuiltin builtin, u32 width, u64 bits
     return known;
 }
 
-// The math builtins whose result is long double, by link name. A bare `l`
-// suffix test is wrong: ceil and huge_val end in `l` but return double.
+// The libm-backed rounding, fused-multiply-add and scaling builtins, one row
+// per link name. `argument_kind` is the floating type of every floating
+// parameter, `result_kind` the call's type, and `integer_second` marks the
+// `int` second parameter of ldexp. The call lowers to a runtime libm import.
+BUSTER_GLOBAL_LOCAL CMathLibmShape const c_math_libm_shapes[] = {
+    {S8_INITIALIZER("truncf"), 1, C_TYPE_FLOAT, C_TYPE_FLOAT, false},
+    {S8_INITIALIZER("trunc"), 1, C_TYPE_DOUBLE, C_TYPE_DOUBLE, false},
+    {S8_INITIALIZER("truncl"), 1, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_DOUBLE, false},
+    {S8_INITIALIZER("rintf"), 1, C_TYPE_FLOAT, C_TYPE_FLOAT, false},
+    {S8_INITIALIZER("rint"), 1, C_TYPE_DOUBLE, C_TYPE_DOUBLE, false},
+    {S8_INITIALIZER("rintl"), 1, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_DOUBLE, false},
+    {S8_INITIALIZER("nearbyintf"), 1, C_TYPE_FLOAT, C_TYPE_FLOAT, false},
+    {S8_INITIALIZER("nearbyint"), 1, C_TYPE_DOUBLE, C_TYPE_DOUBLE, false},
+    {S8_INITIALIZER("nearbyintl"), 1, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_DOUBLE, false},
+    {S8_INITIALIZER("fmaf"), 3, C_TYPE_FLOAT, C_TYPE_FLOAT, false},
+    {S8_INITIALIZER("fma"), 3, C_TYPE_DOUBLE, C_TYPE_DOUBLE, false},
+    {S8_INITIALIZER("fmal"), 3, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_DOUBLE, false},
+    {S8_INITIALIZER("ldexpf"), 2, C_TYPE_FLOAT, C_TYPE_FLOAT, true},
+    {S8_INITIALIZER("ldexp"), 2, C_TYPE_DOUBLE, C_TYPE_DOUBLE, true},
+    {S8_INITIALIZER("ldexpl"), 2, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_DOUBLE, true},
+    {S8_INITIALIZER("lroundf"), 1, C_TYPE_FLOAT, C_TYPE_LONG, false},
+    {S8_INITIALIZER("lround"), 1, C_TYPE_DOUBLE, C_TYPE_LONG, false},
+    {S8_INITIALIZER("lroundl"), 1, C_TYPE_LONG_DOUBLE, C_TYPE_LONG, false},
+    {S8_INITIALIZER("llroundf"), 1, C_TYPE_FLOAT, C_TYPE_LONG_LONG, false},
+    {S8_INITIALIZER("llround"), 1, C_TYPE_DOUBLE, C_TYPE_LONG_LONG, false},
+    {S8_INITIALIZER("llroundl"), 1, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_LONG, false},
+};
+
+// The libm shape of a math builtin named by its link name or its
+// `__builtin_` spelling; `arity` is zero when it is not one of those.
+CMathLibmShape c_semantic_math_libm_shape(String8 name)
+{
+    String8 link_name = string_starts_with_sequence(name, S8("__builtin_")) ? string_slice(name, 10, name.length) : name;
+    CMathLibmShape result = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_math_libm_shapes) && !result.arity; index += 1)
+    {
+        if (string_equal(link_name, c_math_libm_shapes[index].link_name))
+        {
+            result = c_math_libm_shapes[index];
+        }
+    }
+    return result;
+}
+
+// The math builtins whose floating operand is long double, by link name. A
+// bare `l` suffix test is wrong: ceil and huge_val end in `l` but return double.
 bool c_semantic_math_link_is_long_double(String8 link_name)
 {
+    CMathLibmShape libm = c_semantic_math_libm_shape(link_name);
     return string_equal(link_name, S8("fabsl")) || string_equal(link_name, S8("fmaxl")) || string_equal(link_name, S8("fminl")) ||
-           string_equal(link_name, S8("powil")) || string_equal(link_name, S8("copysignl")) || string_equal(link_name, S8("signbitl"));
+           string_equal(link_name, S8("powil")) || string_equal(link_name, S8("copysignl")) || string_equal(link_name, S8("signbitl")) ||
+           (libm.arity && libm.argument_kind == C_TYPE_LONG_DOUBLE);
 }
 
 // One probe entry of the intern table. The identity of a name is its first
@@ -8058,6 +8155,9 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_umul_overflow",
         "__builtin_umull_overflow",
         "__builtin_umulll_overflow",
+        "__builtin_add_overflow",
+        "__builtin_sub_overflow",
+        "__builtin_mul_overflow",
         "__builtin_popcount",      "__builtin_popcountl",
         "__builtin_popcountll",
         "__builtin_parity",        "__builtin_parityl",
@@ -8066,7 +8166,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_copysign",      "__builtin_copysignf",
         "__builtin_copysignl",
         "__builtin_assume_aligned", "__builtin_choose_expr",
-        "__builtin_constant_p",    "__builtin_object_size",
+        "__builtin_constant_p",    "__builtin_object_size", "__builtin_dynamic_object_size",
         "__builtin_expect",        "__builtin_expect_with_probability",
         "__builtin_fabs",          "__builtin_fabsf",
         "__builtin_fabsl",
@@ -8097,7 +8197,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_ia32_pslldi128", "__builtin_ia32_psllqi128",
         "__builtin_ia32_psradi128", "__builtin_ia32_psrldi128",
         "__builtin_ia32_psrlqi128",
-        "__builtin_types_compatible_p", "__builtin_offsetof",
+        "__builtin_types_compatible_p", "__builtin_classify_type", "__builtin_offsetof",
         "__builtin_unreachable",   "__builtin_frame_address",
         "__builtin_alloca",
         "__builtin_c23_va_start",
@@ -8135,6 +8235,10 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
                  ((builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC) &&
                   c_semantic_vendor_builtin_supported((Target){.cpu_arch = cpu_arch}, name)) ||
                  (builtin == C_SYMBOL_BUILTIN_COMPLEX && (native || cpu_arch == CPU_ARCH_WASM64)) ||
+                 // The libm rounding/fma/ldexp calls are floating imports: eBPF has
+                 // no floating point, and Wasm64 lowers no long double (#1394).
+                 (builtin == C_SYMBOL_BUILTIN_MATH && c_semantic_math_libm_shape(name).arity &&
+                  (native || (cpu_arch == CPU_ARCH_WASM64 && c_semantic_math_libm_shape(name).argument_kind != C_TYPE_LONG_DOUBLE))) ||
                  (builtin == C_SYMBOL_BUILTIN_RETURN_ADDRESS && native && os != OPERATING_SYSTEM_WINDOWS);
     }
 
@@ -8318,11 +8422,12 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
             }
             argument_count += 1;
         }
-        if (!close)
+        // Guarded while a function body is validated (#1256).
+        CToken* arguments = close ? C_PARSE_BODY_SCRATCH_ARRAY(arena, CToken, argument_count) : 0;
+        if (!arguments)
         {
             return false;
         }
-        CToken* arguments = arena_allocate(arena, CToken, argument_count);
         u32 argument_index = 0;
         bool literal_header = open->next && open->next->token.no_expand;
         for (scan = open->next; scan != close; scan = scan->next)
@@ -8404,7 +8509,10 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     IR_SEMANTIC_RECORD(PREPROCESSOR_EVALUATIONS, 1);
     bool valid = true;
     char8 const* base = space->base;
-    CPpToken* transformed = arena_allocate(arena, CPpToken, token_count);
+    // Guarded while a function body is validated (#1256): a miss fails the
+    // evaluation, and the body reports its exhaustion.
+    CPpToken* transformed = C_PARSE_BODY_SCRATCH_ARRAY(arena, CPpToken, token_count);
+    valid = transformed != 0;
     u32 transformed_count = 0;
     for (u32 token_index = 0; valid && token_index < token_count; token_index += 1)
     {
@@ -8444,12 +8552,32 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     CPreprocessTokenNode* first_expanded = 0;
     CPreprocessTokenNode* last_expanded = 0;
     u64 expanded_count = 0;
-    if (valid)
+    if (valid && preprocessor_arithmetic)
     {
         CMacroExpansionStorage expansion_storage = {0};
         valid = c_preprocess_expand(arena, &expansion_storage, space, symbols, first_macro, 0, 0, stamps, transformed, transformed_count, &first_expanded,
                                     &last_expanded, &expanded_count, expansion_limit, result, 0);
         c_macro_expansion_storage_destroy(&expansion_storage, result->detail);
+    }
+    else if (valid)
+    {
+        // A parse-side query has no macro table and no pragma context, so
+        // expansion would copy every token through unchanged; the list is
+        // linked over one guarded array instead (#1256). The one token that
+        // expansion would diagnose there, a stray `__VA_OPT__`, fails the
+        // evaluation as that diagnostic does for every parse-side caller.
+        CPreprocessTokenNode* nodes = C_PARSE_BODY_SCRATCH_ARRAY(arena, CPreprocessTokenNode, transformed_count);
+        valid = nodes != 0;
+        for (u32 token_index = 0; valid && token_index < transformed_count; token_index += 1)
+        {
+            valid = !c_macro_is_va_opt(transformed[token_index].token);
+            nodes[token_index] = (CPreprocessTokenNode){
+                .token = transformed[token_index],
+                .next = token_index + 1 < transformed_count ? nodes + token_index + 1 : 0,
+            };
+        }
+        first_expanded = valid && transformed_count ? nodes : 0;
+        expanded_count = transformed_count;
     }
     if (valid)
     {
@@ -8457,9 +8585,10 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     }
     if (valid)
     {
-        u64* values = arena_allocate(arena, u64, expanded_count + 1);
-        u8* value_flags = arena_allocate(arena, u8, expanded_count + 1);
-        CConditionalOperator* operations = arena_allocate(arena, CConditionalOperator, expanded_count + 1);
+        u64* values = C_PARSE_BODY_SCRATCH_ARRAY(arena, u64, expanded_count + 1);
+        u8* value_flags = C_PARSE_BODY_SCRATCH_ARRAY(arena, u8, expanded_count + 1);
+        CConditionalOperator* operations = C_PARSE_BODY_SCRATCH_ARRAY(arena, CConditionalOperator, expanded_count + 1);
+        valid = values && value_flags && operations;
         u32 value_count = 0;
         u32 operation_count = 0;
         bool expect_operand = true;
@@ -8635,14 +8764,17 @@ BUSTER_C_SHARED bool c_integer_expression_evaluate(Arena* arena, char8 const* sp
     CSpellingSpace view = {
         .base = (char8*)spelling_base,
     };
-    CPpToken* wrapped = arena_allocate(arena, CPpToken, token_count);
-    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    // Guarded while a function body is validated (#1256): a miss fails the
+    // evaluation, and the body reports its exhaustion.
+    CPpToken* wrapped = C_PARSE_BODY_SCRATCH_ARRAY(arena, CPpToken, token_count);
+    for (u32 token_index = 0; wrapped && token_index < token_count; token_index += 1)
     {
         wrapped[token_index] = (CPpToken){
             .token = tokens[token_index],
         };
     }
-    return c_integer_expression_evaluate_with_features(arena, &view, 0, 0, 0, wrapped, token_count, expansion_limit, false, result, 0, 0, (String8){0},
+    return wrapped &&
+           c_integer_expression_evaluate_with_features(arena, &view, 0, 0, 0, wrapped, token_count, expansion_limit, false, result, 0, 0, (String8){0},
                                                        (CIncludeSearchOrigin){0}, value_out);
 }
 
@@ -11059,6 +11191,7 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
     }
     else if (token_count >= 3 && c_token_is_punctuator(&tokens[0], C_PUNCTUATOR_LESS) && c_token_is_punctuator(&tokens[token_count - 1], C_PUNCTUATOR_GREATER))
     {
+        bool named = true;
         u64 end = (u64)tokens[0].offset + 1;
         for (u32 index = 1; preserve_characters && index < token_count; index += 1)
         {
@@ -11083,9 +11216,11 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
             {
                 length += c_token_length(base, tokens[index]);
             }
-            char8* name = arena_allocate(arena, char8, length + 1);
+            // Guarded while a function body is validated (#1256): a miss
+            // leaves the name unrecognized.
+            char8* name = C_PARSE_BODY_SCRATCH_ARRAY(arena, char8, length + 1);
             u64 output = 0;
-            for (u32 index = 1; index + 1 < token_count; index += 1)
+            for (u32 index = 1; name && index + 1 < token_count; index += 1)
             {
                 String8 spelling = c_token_spelling(base, tokens[index]);
                 if (spelling.length)
@@ -11094,14 +11229,18 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
                 }
                 output += spelling.length;
             }
-            name[output] = 0;
+            if (name)
+            {
+                name[output] = 0;
+            }
+            named = name != 0;
             *name_out = (String8){
                 .pointer = name,
                 .length = output,
             };
         }
         *quoted_out = false;
-        recognized = true;
+        recognized = named;
     }
     return recognized;
 }
@@ -12501,7 +12640,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     c_symbols_intern_tokens(symbol_table, root_lex.spelling_base, root_lex.tokens, root_lex.token_shapes, root_lex.token_count);
     CPpClassMasks root_class_masks;
     c_pp_class_masks_build(arena, &root_class_masks, root_lex.token_shapes, root_lex.token_count);
-    result.diagnostic_capacity = BUSTER_MIN(source.length + options.macro_operation_count + options.definition_count + 1, UINT64_C(64));
+    result.diagnostic_capacity = BUSTER_MIN(source.length + options.macro_operation_count + options.definition_count + options.forced_include_count + 1, UINT64_C(64));
     C_DIAGNOSTIC_RESERVATION_CENSUS(PREPROCESS, result.diagnostic_capacity);
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
     CMacro* first_macro = 0;
@@ -12810,7 +12949,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
             C_DEFINE_TYPE_MACRO("__pie__", level);
         }
     }
-    // __GCC_HAVE_SYNC_COMPARE_AND_SWAP_* has no matching __sync compare-and-swap builtins,
+    // __GCC_HAVE_SYNC_COMPARE_AND_SWAP_* is not defined: the generic __sync compare-and-swap
+    // builtins exist but their sized `_1`..`_16` forms do not (#1394),
     // __SIZEOF_FLOAT128__ is unmodeled, __SEG_FS/__SEG_GS have no keywords,
     // and __PRAGMA_REDEFINE_EXTNAME is an unimplemented pragma.
     C_DEFINE_TYPE_MACRO("__SIZE_TYPE__", unsigned_pointer_type);
@@ -13266,6 +13406,50 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     if (!options.already_preprocessed)
     {
         c_preprocess_command_operations(arena, space, symbol_table, options, &first_macro, &last_macro, &result);
+        if (options.forced_include_count)
+        {
+            // `-include FILE` runs as `#include "FILE"` lines of a synthetic
+            // file that sits above the root frame, so the primary source's
+            // line numbers and __FILE__ never see it. The quote lookup starts
+            // from the synthetic path's directory, which is the working
+            // directory, and then walks the -I chain: GCC's order.
+            String8 forced_text = {0};
+            for (u32 forced_index = 0; forced_index < options.forced_include_count; forced_index += 1)
+            {
+                forced_text = forced_index ? string_format(arena, S8("{S8}#include \"{S8}\"\n"), forced_text, options.forced_includes[forced_index])
+                                           : string_format(arena, S8("#include \"{S8}\"\n"), options.forced_includes[forced_index]);
+            }
+            CLexResult forced_lex = c_lex_space(arena, space, forced_text, false, result.dialect);
+            for (u64 diagnostic_index = 0; diagnostic_index < forced_lex.diagnostic_count; diagnostic_index += 1)
+            {
+                c_preprocess_diagnostic_copy(arena, &result, forced_lex.diagnostics[diagnostic_index]);
+            }
+            c_symbols_intern_tokens(symbol_table, forced_lex.spelling_base, forced_lex.tokens, forced_lex.token_shapes, forced_lex.token_count);
+            CPreprocessSourceFrame* forced_frame = arena_allocate(arena, CPreprocessSourceFrame, 1);
+            *forced_frame = (CPreprocessSourceFrame){
+                .previous = &root_frame,
+                .lex = forced_lex,
+                .path = S8("<command-line>"),
+                .identity = c_include_file_identity(S8("<command-line>"), (FileIdentity){0}),
+                .logical_path = S8("<command-line>"),
+                .line_start = true,
+            };
+            c_pp_class_masks_build(arena, &forced_frame->class_masks, forced_lex.token_shapes, forced_lex.token_count);
+            forced_frame->map_entry = map.count;
+            c_source_map_append(&map, (IrSourceRegion){
+                                          .start = forced_lex.translated_offset,
+                                          .source = UINT32_MAX,
+                                          .checkpoints = forced_lex.checkpoints,
+                                          .checkpoint_offsets = forced_lex.checkpoint_offsets,
+                                          .checkpoint_pages = forced_lex.checkpoint_pages,
+                                          .checkpoint_page_count = forced_lex.checkpoint_page_count,
+                                          .checkpoint_count = forced_lex.checkpoint_count,
+                                          .base = forced_lex.translated_offset,
+                                          .kind = IR_SOURCE_REGION_TEXT,
+                                      });
+            c_source_map_name(&map, forced_frame->path, forced_frame->logical_path);
+            source_frame = forced_frame;
+        }
     }
     CIncludeFileTable include_files = {
         .arena = arena,

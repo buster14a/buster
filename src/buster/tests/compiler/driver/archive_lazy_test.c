@@ -502,6 +502,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_aarch64_refusal_
     Arena* arena = arguments->arena;
     Target target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX};
     // Literal ABI names and words are independent of the reader's lookup.
+    // The descriptor rows 562..569 use words outside the AAELF64 sequence
+    // (adrp x1, ldr x0, add x1, blr x0); the exact words are read (#2582).
     struct
     {
         u32 type;
@@ -512,9 +514,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_aarch64_refusal_
         {280, UINT32_C(0x34000000), S8("R_AARCH64_CONDBR19")},
         {560, UINT32_C(0x58000000), S8("R_AARCH64_TLSDESC_LD_PREL19")},
         {561, UINT32_C(0x10000000), S8("R_AARCH64_TLSDESC_ADR_PREL21")},
-        {562, UINT32_C(0x90000000), S8("R_AARCH64_TLSDESC_ADR_PAGE21")},
+        {562, UINT32_C(0x90000001), S8("R_AARCH64_TLSDESC_ADR_PAGE21")},
         {563, UINT32_C(0xf9400000), S8("R_AARCH64_TLSDESC_LD64_LO12")},
-        {564, UINT32_C(0x91000000), S8("R_AARCH64_TLSDESC_ADD_LO12")},
+        {564, UINT32_C(0x91000021), S8("R_AARCH64_TLSDESC_ADD_LO12")},
         {565, UINT32_C(0xd2a00000), S8("R_AARCH64_TLSDESC_OFF_G1")},
         {566, UINT32_C(0xf2800000), S8("R_AARCH64_TLSDESC_OFF_G0_NC")},
         {567, UINT32_C(0xf9400000), S8("R_AARCH64_TLSDESC_LDR")},
@@ -586,6 +588,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_aarch64_refusal_
     } supported[] = {
         {311, UINT32_C(0x90000000), OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21},
         {312, UINT32_C(0xf9400000), OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12},
+        {562, UINT32_C(0x90000000), OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21},
+        {563, UINT32_C(0xf9400001), OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12},
+        {564, UINT32_C(0x91000000), OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12},
+        {569, UINT32_C(0xd63f0020), OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL},
     };
     for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(supported); row += 1)
     {

@@ -2114,6 +2114,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             string_print(S8("C_AST_TYPES bodies={u64} nodes_typed={u64} nodes_accepted={u64} answers={u64} declines={u64} misses={u64} gated={u64}\n"),
                          tree.types.bodies, tree.types.nodes_typed, tree.types.nodes_accepted, tree.types.answers, tree.types.declines, tree.types.misses,
                          tree.types.gated);
+            // Counts: the declaration split read from the tree, and the units handed to the token walker.
+            string_print(S8("C_AST_SPLIT units={u64} records={u64} assertions={u64} fallbacks={u64} reason={S8} fallback_token={u32}\n"),
+                         tree.split.units, tree.split.records, tree.split.assertions, tree.split.fallbacks,
+                         c_parser_tree_fallback_name(tree.split.fallbacks ? tree.split.reason : C_PARSER_TREE_FALLBACK_NONE),
+                         tree.split.fallbacks ? tree.split.fallback_token : UINT32_MAX);
         }
         if (invocation.fast_passes)
         {

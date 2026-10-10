@@ -194,6 +194,9 @@ struct CompilerDriverInvocation
     CompilerDriverLinkOperation* link_operations;
     String8* include_paths;
     String8* system_include_paths;
+    // -include FILE names in command-line order; every C translation unit
+    // processes them as #include "FILE" before its first line.
+    String8* forced_includes;
     // Parsed command lines populate only this ordered stream. The separate
     // arrays remain an execution compatibility path for API-built invocations
     // and are used only when macro_operation_count is zero.
@@ -265,6 +268,7 @@ struct CompilerDriverInvocation
     bool enable_source_cache;
     u32 include_path_count;
     u32 system_include_path_count;
+    u32 forced_include_count;
     u32 macro_operation_count;
     u32 definition_count;
     u32 undefinition_count;
@@ -496,6 +500,9 @@ struct CompilerDriverCAstPilotResult
     // What the tree expression typer did during semantic analysis; see
     // CAstTypeStatistics. Zero when the analysis had no tree to use.
     CAstTypeStatistics types;
+    // The declaration split read from the tree (c_parse_ast_from_tree):
+    // records published, and units handed to the token walker and why.
+    CParserTreeStatistics split;
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;

@@ -7,8 +7,8 @@ lowercase commit SHA. Mutable branches/tags, unlisted paths and unapproved
 revisions fail. Local and container references require a separate policy
 decision before use; approved same-commit references are listed below.
 
-The `Workflow lint` job runs the checker and the maintained
-`tools/ci_workflow_policy_test.py` entry before actionlint. It delegates to the complete maintained `tools/ci_workflow_tools_test.py` suite, which inherits
+The `Workflow lint` job runs the checker, the maintained
+`tools/ci_workflow_policy_test.py` entry and `tools/ci_job_environment_test.py` before actionlint. It delegates to the complete maintained `tools/ci_workflow_tools_test.py` suite, which inherits
 the frozen `tests/action_pins_test.py` cases and replaces only the current
 lint entry point and artifact-reference inventory assertions. The checker now lives under `tools/` because the Forgejo workflows
 and their script directory were removed. Its allowlist preserves existing revisions and records staged migrations; an
@@ -93,7 +93,8 @@ still fail CI.
    including runtime requirements, authentication handling and post-job cleanup.
 2. Update workflow literals and `APPROVED` in the checker together. Record
    the action path, full commit, tag/date and compatibility changes here.
-3. Run `python3 tools/check_action_pins.py`, `python3 tools/ci_workflow_policy_test.py`
+3. Run `python3 tools/check_action_pins.py`, `python3 tools/ci_workflow_policy_test.py`,
+   `python3 tools/ci_job_environment_test.py`
    and `go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 .github/workflows/*.yml`.
    Mutable references and unapproved SHAs must still fail.
 4. Validate the submitted revision on the affected GitHub jobs before claiming
@@ -152,6 +153,17 @@ attestation of the bundled JavaScript dependency graph. These MIT licenses cover
 the named upstream action projects, not all transitive packages or Buster's
 first-party code. No upstream source, theme, or license text is copied into the
 published site. See [Pages setup and acceptance](github-pages.md).
+
+## Machine specifications collector
+
+Every executing job starts with `buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768`.
+This repository-owned C collector is frozen independently of candidate checkouts.
+It receives only the configured runner and matrix index; it receives no token,
+secret, candidate code, or publication authority. Its compiler bootstrap uses the
+preinstalled Clang and installs nothing. The same pin records actual checkout
+identities after each checkout. Update both implementation blob identities and
+the immutable action reference when changing it. Workflow lint rejects absent,
+conditional, delayed, renamed-only, or unreviewed startup reporting.
 
 ## Hosted timing reporter dependency
 
