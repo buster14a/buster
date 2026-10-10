@@ -65,7 +65,10 @@
 // that array comes off the object instead (link_mach_initializer_prepare)
 // and a registrar prepended to the initializer array registers a runner over
 // it with `atexit`. The UEFI writer has neither a stub nor such a loader and
-// refuses the link; link_initializer_plan_empty is that refusal.
+// refuses the link; link_initializer_plan_empty is that refusal. A dynamic
+// ELF executable first moves its `.preinit_array` entries into writable data
+// for DT_PREINIT_ARRAY (link_elf_preinit_array_split), because only the loader
+// can run them before its shared libraries' constructors.
 //
 // A second rule crosses the dynamic ELF writers: imported data reaches an
 // executable through a copy relocation (every imported object in a
@@ -796,6 +799,96 @@ BUSTER_GLOBAL_LOCAL bool link_initializer_plan_build(Arena* arena, ObjectFile* o
     }
 
     return result;
+}
+
+// A dynamic executable's `.preinit_array` entries belong to the loader, not to
+// the entry stub: glibc's ld.so and bionic's linker run DT_PREINIT_ARRAY
+// before the constructors of every shared-object dependency, and the stub only
+// runs after all of those (issue 1243).  The merged constructor array carries
+// them first (IR_INITIALIZER_PRIORITY_PREINIT sorts ahead of every priority),
+// so this hands back the same object with that leading run moved onto the end
+// of the writable data, its relocations and any symbol naming one of its slots
+// moved with it, and the rest of the array, its priorities and relocations
+// shifted down.  The plan built afterwards then holds only the constructors,
+// every writer already relocates a data pointer, and the writer publishes the
+// moved range through DT_PREINIT_ARRAY/DT_PREINIT_ARRAYSZ.  It is a pure
+// function of the object, so the AArch64 writer and the x86-64 staging writer
+// it overlays derive the same layout from the same input.  A static image has
+// no loader and no dependencies, and keeps calling the entries from its stub.
+BUSTER_GLOBAL_LOCAL void link_elf_preinit_array_split(Arena* arena, ObjectFile* object, ObjectFile* split, u64* preinit_offset, u64* preinit_size)
+{
+    *split = *object;
+    *preinit_offset = 0;
+    *preinit_size = 0;
+    u32* priorities = object->initializer_priorities[0];
+    ObjectSection* array = object->sections + OBJECT_SECTION_INIT_ARRAY;
+    u64 entries = priorities ? array->data.length / OBJECT_INITIALIZER_ENTRY_SIZE : 0;
+    u64 leading = 0;
+    while (leading < entries && priorities[leading] == IR_INITIALIZER_PRIORITY_PREINIT)
+    {
+        leading += 1;
+    }
+    if (leading)
+    {
+        u64 moved = leading * OBJECT_INITIALIZER_ENTRY_SIZE;
+        ObjectSection* sections = arena_allocate(arena, ObjectSection, object->section_count);
+        memcpy(sections, object->sections, (u64)object->section_count * sizeof(*sections));
+        ObjectSection* data_section = sections + OBJECT_SECTION_DATA;
+        u64 base = align_forward(BUSTER_MAX(data_section->data.length, data_section->virtual_size), OBJECT_INITIALIZER_ENTRY_SIZE);
+        u8* data = arena_allocate_zeroed(arena, u8, base + moved);
+        if (data_section->data.length)
+        {
+            memcpy(data, data_section->data.pointer, data_section->data.length);
+        }
+        memcpy(data + base, array->data.pointer, moved);
+        data_section->data = (ByteSlice){.pointer = data, .length = base + moved};
+        if (data_section->virtual_size)
+        {
+            data_section->virtual_size = base + moved;
+        }
+        data_section->alignment = BUSTER_MAX(data_section->alignment, OBJECT_INITIALIZER_ENTRY_SIZE);
+        sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice){.pointer = array->data.pointer + moved, .length = array->data.length - moved};
+        if (sections[OBJECT_SECTION_INIT_ARRAY].virtual_size)
+        {
+            sections[OBJECT_SECTION_INIT_ARRAY].virtual_size = array->data.length - moved;
+        }
+        split->sections = sections;
+        split->initializer_priorities[0] = leading < entries ? priorities + leading : 0;
+        ObjectSymbol* symbols = arena_allocate(arena, ObjectSymbol, object->symbol_count ? object->symbol_count : 1);
+        for (u32 index = 0; index < object->symbol_count; index += 1)
+        {
+            ObjectSymbol symbol = object->symbols[index];
+            if (symbol.section == OBJECT_SECTION_INIT_ARRAY && symbol.value < moved)
+            {
+                symbol.section = OBJECT_SECTION_DATA;
+                symbol.value += base;
+            }
+            else if (symbol.section == OBJECT_SECTION_INIT_ARRAY)
+            {
+                symbol.value -= moved;
+            }
+            symbols[index] = symbol;
+        }
+        split->symbols = symbols;
+        ObjectRelocation* relocations = arena_allocate(arena, ObjectRelocation, object->relocation_count ? object->relocation_count : 1);
+        for (u32 index = 0; index < object->relocation_count; index += 1)
+        {
+            ObjectRelocation relocation = object->relocations[index];
+            if (relocation.section == OBJECT_SECTION_INIT_ARRAY && relocation.offset < moved)
+            {
+                relocation.section = OBJECT_SECTION_DATA;
+                relocation.offset += base;
+            }
+            else if (relocation.section == OBJECT_SECTION_INIT_ARRAY)
+            {
+                relocation.offset -= moved;
+            }
+            relocations[index] = relocation;
+        }
+        split->relocations = relocations;
+        *preinit_offset = base;
+        *preinit_size = moved;
+    }
 }
 
 // Whether the destructors of this plan are registered with the C runtime
@@ -4756,6 +4849,8 @@ enum
     ELF_DYNAMIC_PROGRAM_HEADER_INDEX = 5,
     ELF_DYNAMIC_TAG_TEXTREL = 22,
     ELF_DYNAMIC_TAG_FLAGS = 30,
+    ELF_DYNAMIC_TAG_PREINIT_ARRAY = 32,
+    ELF_DYNAMIC_TAG_PREINIT_ARRAYSZ = 33,
     ELF_DYNAMIC_TAG_FLAGS_1 = 0x6ffffffb,
     ELF_DYNAMIC_FLAG_BIND_NOW = 0x8,
     ELF_DYNAMIC_FLAG_1_NOW = 0x1,
@@ -6048,6 +6143,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         return result;
     }
     object = &hosted_object;
+    ObjectFile preinit_split_object = {0};
+    u64 preinit_offset = 0;
+    u64 preinit_size = 0;
+    link_elf_preinit_array_split(arena, object, &preinit_split_object, &preinit_offset, &preinit_size);
+    object = &preinit_split_object;
     ObjectFile stripped_object = {0};
     LinkInitializerPlan plan = {0};
     LinkElfTlsIndex tls_index = {0};
@@ -6379,7 +6479,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     // 12 fixed tags: DT_HASH, STRTAB, SYMTAB, STRSZ, SYMENT, PLTGOT, PLTRELSZ,
     // PLTREL, JMPREL, RELAENT, DT_DEBUG and the DT_NULL terminator, plus
     // DT_FLAGS and DT_FLAGS_1 (the trailing 2).
-    u32 dynamic_count = needed_library_count + 12 + (dynamic_data_relocation_count ? 2 : 0) + (version_count ? 3 : 0) + (u32)text_relocations + 2;
+    u32 dynamic_count = needed_library_count + 12 + (dynamic_data_relocation_count ? 2 : 0) + (version_count ? 3 : 0) + (u32)text_relocations +
+                        (preinit_size ? 2 : 0) + 2;
     u64 dynamic_size = (u64)dynamic_count * ELF_DYNAMIC_SIZE;
     // The relocation boundary is a page boundary: the loader seals whole pages.
     if (!link_elf_virtual_align(dynamic_offset + dynamic_size, BUSTER_MAX((u32)ELF_PAGE_SIZE, object->sections[OBJECT_SECTION_DATA].alignment),
@@ -7019,6 +7120,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_NEED_COUNT, version_need_count);
     }
     if (text_relocations) BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_TEXTREL, 0);
+    if (preinit_size)
+    {
+        BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_PREINIT_ARRAY, image_base + section_offsets[OBJECT_SECTION_DATA] + preinit_offset);
+        BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_PREINIT_ARRAYSZ, preinit_size);
+    }
     // Eager binding, which is what lets PT_GNU_RELRO cover the PLT slots.
     BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_FLAGS, ELF_DYNAMIC_FLAG_BIND_NOW);
     BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_FLAGS_1, ELF_DYNAMIC_FLAG_1_NOW);
@@ -7912,11 +8018,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     u8* entry_stub = 0;
     u32* initializer_displacement_offsets = 0;
     u32* copy_import_indices = 0;
+    u64 preinit_offset = 0;
+    u64 preinit_size = 0;
     if (result.error == LINK_ERROR_NONE && !shared)
     {
+        ObjectFile preinit_split_object = {0};
         ObjectFile stripped_object = {0};
-        if (!link_elf_hosted_exit_symbol(arena, object, &hosted_object, &exit_symbol_index, &atexit_symbol_index) ||
-            !link_initializer_plan_build(arena, &hosted_object, &stripped_object, &plan))
+        bool hosted = link_elf_hosted_exit_symbol(arena, object, &hosted_object, &exit_symbol_index, &atexit_symbol_index);
+        if (hosted)
+        {
+            link_elf_preinit_array_split(arena, &hosted_object, &preinit_split_object, &preinit_offset, &preinit_size);
+        }
+        if (!hosted || !link_initializer_plan_build(arena, &preinit_split_object, &stripped_object, &plan))
         {
             result.error = LINK_ERROR_INVALID_INPUT;
         }
@@ -8103,7 +8216,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     u32 dynamic_count = needed_library_count + (soname.length ? 1u : 0u) + 5 + (image.plt_count ? 4u : 0u) + (image.dynamic_relocation_count ? 3u : 0u) +
                         (object->sections[OBJECT_SECTION_INIT_ARRAY].data.length ? 2u : 0u) +
                         (object->sections[OBJECT_SECTION_FINI_ARRAY].data.length ? 2u : 0u) + (versions.version_count ? 3u : 0u) +
-                        (image.static_tls ? 1u : 0u) + (shared ? 0u : 2u) + 1;
+                        (image.static_tls ? 1u : 0u) + (shared ? 0u : 2u) + (preinit_size ? 2u : 0u) + 1;
     u64 dynamic_offset = align_forward(cursor, 8);
     u64 dynamic_size = (u64)dynamic_count * ELF_DYNAMIC_SIZE;
     u64 got_offset = dynamic_offset + dynamic_size;
@@ -8307,6 +8420,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
         {
             BUSTER_LINK_DYNAMIC(26, section_offsets[OBJECT_SECTION_FINI_ARRAY]);
             BUSTER_LINK_DYNAMIC(28, fini_array_size);
+        }
+        if (preinit_size)
+        {
+            BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_PREINIT_ARRAY, section_offsets[OBJECT_SECTION_DATA] + preinit_offset);
+            BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_PREINIT_ARRAYSZ, preinit_size);
         }
         if (versions.version_count)
         {
@@ -9290,9 +9408,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         return result;
     }
     object = &hosted_object;
+    // The staging writer below splits the `.preinit_array` entries off the
+    // same object the same way, publishes them as DT_PREINIT_ARRAY, and so
+    // reserves the stub slot of a plan without them.
+    ObjectFile preinit_split_object = {0};
+    u64 preinit_offset = 0;
+    u64 preinit_size = 0;
+    link_elf_preinit_array_split(arena, object, &preinit_split_object, &preinit_offset, &preinit_size);
     ObjectFile stripped_object = {0};
     LinkInitializerPlan plan = {0};
-    if (!link_initializer_plan_build(arena, object, &stripped_object, &plan))
+    if (!link_initializer_plan_build(arena, &preinit_split_object, &stripped_object, &plan))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
         return result;

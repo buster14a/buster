@@ -158,10 +158,15 @@ of another name is ordinary data, as the host linkers leave it, and the
 assembler refuses a `@preinit_array` section of another name. A preinit entry
 in a `-shared` output is refused with a named diagnostic, as `ld` does.
 
-The linker still folds the preinit entries, sorted first, into `DT_INIT_ARRAY`
-rather than emitting a `DT_PREINIT_ARRAY` the loader runs before the
-constructors of dependencies; that loader-facing phase remains open under
-[#1243](https://github.com/buster14a/buster/issues/1243). See the
+A dynamic executable (x86-64 fixed-address or `-pie`, AArch64, and the
+Android images staged through them) publishes its preinit entries through
+`DT_PREINIT_ARRAY`/`DT_PREINIT_ARRAYSZ`, so the loader runs them with argc,
+argv and envp before the constructors of the shared objects it loads, as for
+`ld` and `lld` (#1243). `link_elf_preinit_array_split` moves the leading
+preinit run of the merged constructor array onto the end of the writable data
+with its relocations, so the entry stub calls only the constructors. A static
+executable has no loader and no dependency constructors; its entry stub still
+calls the preinit entries first. See the
 [ELF initialization contract](https://gabi.xinuos.com/v42/elf/08-dynamic.html#initialization-and-termination-functions).
 
 The bounded refusal repair for #1243 rejects unsupported allocated section
@@ -209,7 +214,8 @@ the host linker/runtime to preserve each input's meaning. A same-image
 preinit/constructor control continues to link and run through both linkers, as
 does a canonical optional GNU property control. `compiler_driver_elf_preinit_tests`
 covers a preinit entry against a dependency's `constructor(0)` in both link
-orders, the data-only sections above and the shared-output refusal, against
+orders, against a host-built shared library's constructor in a dynamic
+executable, the data-only sections above and the shared-output refusal, against
 the host linker; `link_test` and `object_test` cover the merge order and the
 writer mappings. Raw note controls cover every known feature combination,
 unknown/required properties, malformed shape, and payload bounds;
