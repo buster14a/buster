@@ -691,8 +691,9 @@ class CatchUpLeaseTests(unittest.TestCase):
     """The branch compare-and-swap against a real Git remote, no network."""
 
     def git(self, repo, *arguments):
-        return subprocess.run(["git", "-C", os.fspath(repo), *arguments], check=True,
-                              capture_output=True, text=True).stdout.strip()
+        # Runners have no global identity; the fixture's own commits need one.
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", os.fspath(repo),
+                               *arguments], check=True, capture_output=True, text=True).stdout.strip()
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -704,7 +705,7 @@ class CatchUpLeaseTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q", os.fspath(self.work)], check=True)
         (self.work / "file").write_text("main\n")
         self.git(self.work, "add", "file")
-        self.git(self.work, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "main")
+        self.git(self.work, "commit", "-q", "-m", "main")
         self.git(self.work, "remote", "add", "origin", os.fspath(self.remote))
         self.base = self.git(self.work, "rev-parse", "HEAD")
 
