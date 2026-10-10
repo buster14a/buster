@@ -3798,6 +3798,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
             BUSTER_TEST(arguments, probe.status == C_TEST_AST_TYPE_PROBE_DECLINE);
         }
     }
+    c_ast_release(&built.ast);
     scratch_end(temporary);
     // The const-assignment walk does not ask about the designator probes of
     // `{ .f = 1, .g = 2 }`: the `{` and the `,` it would take for the bases of
