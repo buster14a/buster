@@ -282,10 +282,11 @@ jobs:
         run: |
           set -euo pipefail
           llvm-dis-18 --version
+          # LLVM bitcode has no exact AVX-512 IR lowering; exercise simd.h's scalar source fallback.
           for mode in off on; do
             selection=-fno-canonical-inline
             if [[ "$mode" == on ]]; then selection=-fcanonical-inline; fi
-            ./build/Release/ide cc -v -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -O3 "$selection" -emit-llvm -c src/buster/apps/ide/ide.c -o "direct-ssa-census-evidence/tiny-$mode.bc" > "direct-ssa-census-evidence/tiny-$mode.stdout.log" 2> "direct-ssa-census-evidence/tiny-$mode.stderr.log"
+            ./build/Release/ide cc -v -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -U__AVX512F__ -U__AVX512BW__ -U__AVX512VBMI__ -U__AVX512VBMI2__ -O3 "$selection" -emit-llvm -c src/buster/apps/ide/ide.c -o "direct-ssa-census-evidence/tiny-$mode.bc" > "direct-ssa-census-evidence/tiny-$mode.stdout.log" 2> "direct-ssa-census-evidence/tiny-$mode.stderr.log"
             llvm-dis-18 "direct-ssa-census-evidence/tiny-$mode.bc" -o "direct-ssa-census-evidence/tiny-$mode.ll"
           done
           records='['
@@ -305,7 +306,8 @@ jobs:
               exit 1
             fi
           done
-          printf '%s]\n' "$records" > direct-ssa-census-evidence/production-tiny-helper-calls.json          grep '^IR_INLINE ' direct-ssa-census-evidence/tiny-*.stdout.log
+          printf '%s]\n' "$records" > direct-ssa-census-evidence/production-tiny-helper-calls.json
+          grep '^IR_INLINE ' direct-ssa-census-evidence/tiny-*.stdout.log
           sha256sum direct-ssa-census-evidence/tiny-*.bc direct-ssa-census-evidence/tiny-*.ll > direct-ssa-census-evidence/tiny-inputs.sha256
       - name: Report census scope without a performance verdict
         if: always()
