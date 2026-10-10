@@ -699,7 +699,8 @@ its `OFFSETOF_INDEX` resume adds `index * sizeof(element)` in `size_t` and asks
 for the next one. Constant subscripts keep the checked admission below, so a
 negative or overflowing constant index is refused here too.
 `c_test_offsetof_runtime_index` covers final, non-final and multiple runtime
-subscripts.
+subscripts, and evaluates each side-effecting subscript exactly once, also
+inside a variably modified `sizeof` operand.
 
 Parser enumerators and static assertions use `c_parse_constant_offsetof` as
 states 8/9 of the existing `CParseConstantTask` stack. Each array index is a
