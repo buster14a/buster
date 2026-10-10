@@ -22539,6 +22539,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__builtin_umul_overflow"), all_targets},
         {S8("__builtin_umull_overflow"), all_targets},
         {S8("__builtin_umulll_overflow"), all_targets},
+        {S8("__builtin_add_overflow"), all_targets},
+        {S8("__builtin_sub_overflow"), all_targets},
+        {S8("__builtin_mul_overflow"), all_targets},
         {S8("__builtin_clrsb"), all_targets},
         {S8("__builtin_clrsbl"), all_targets},
         {S8("__builtin_clrsbll"), all_targets},
@@ -22614,8 +22617,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__va_start"), 0},
         {S8("_mm_pause"), 0},
         {S8("__builtin_buster_simd_load"), 0},
-        // Generic overflow checks are not lowered yet.
-        {S8("__builtin_add_overflow"), 0},
+        {S8("__builtin_overflow"), 0},
+        {S8("__builtin_add_overflow_p"), 0},
     };
     Target targets[] = {
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
@@ -46874,6 +46877,297 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_library_builtins_runtime(UnitTestA
     return result;
 }
 
+// The generic checked-arithmetic builtins take operands and a result of any
+// integer types without converting them to a common type, so each case here
+// pairs a signedness or width combination with the answer Clang 18 gives. The
+// program returns zero, or a line number identifying the failing check.
+BUSTER_GLOBAL_LOCAL String8 const c_test_generic_overflow_runtime_sources[] = {
+    S8_INITIALIZER(
+        "#define INT_MAX 2147483647\n"
+        "#define INT_MIN (-2147483647 - 1)\n"
+        "#define UINT_MAX 4294967295u\n"
+        "#define LLONG_MAX 9223372036854775807LL\n"
+        "#define LLONG_MIN (-9223372036854775807LL - 1)\n"
+        "#define ULLONG_MAX 18446744073709551615ULL\n"
+        "typedef unsigned __int128 u128;\n"
+        "typedef __int128 i128;\n"
+        "enum E { E0, E1 };\n"
+        "enum S { S0 = -1, S1 = 1 };\n"
+        "static unsigned evaluations;\n"
+        "static long long next(long long v) { evaluations++; return v; }\n"
+        "#define CHECK(COND) do { if (!(COND)) return __LINE__ % 255 + 1; } while (0)\n"
+        "#define CASE(OP, TA, TB, TR, A, B, EO, ER) { TR r = 0; int o = __builtin_##OP##_overflow((TA)(A), (TB)(B), &r); \\\n"
+        "    CHECK(o == (EO) && (long long)r == (ER)); }\n"
+        "#define CASE128(OP, TA, TB, TR, A, B, EO, HI, LO) { TR r = 0; int o = __builtin_##OP##_overflow((TA)(A), (TB)(B), &r); \\\n"
+        "    CHECK(o == (EO) && (unsigned long long)((u128)r >> 64) == (HI) && (unsigned long long)r == (LO)); }\n"),
+    S8_INITIALIZER(
+        "static int mixed_widths(void)\n"
+        "{\n"
+        "CASE(add, int, int, int, INT_MAX, 1, 1, -2147483648LL)\n"
+        "CASE(sub, int, int, int, INT_MIN, 1, 1, 2147483647LL)\n"
+        "CASE(add, int, int, int, 2, 3, 0, 5LL)\n"
+        "CASE(mul, int, int, int, 65536, 65536, 1, 0LL)\n"
+        "CASE(mul, int, int, int, -46341, 46340, 0, -2147441940LL)\n"
+        "CASE(add, unsigned, int, int, UINT_MAX, -1, 1, -2LL)\n"
+        "CASE(add, unsigned, int, unsigned, 5, -6, 1, 4294967295LL)\n"
+        "CASE(add, unsigned, int, unsigned, 7, -6, 0, 1LL)\n"
+        "CASE(sub, int, unsigned, int, 5, 6u, 0, -1LL)\n"
+        "CASE(mul, int, unsigned, long long, -1, 4000000000u, 0, -4000000000LL)\n"
+        "CASE(add, int, int, unsigned char, 200, 100, 1, 44LL)\n"
+        "CASE(add, int, int, unsigned char, 100, 100, 0, 200LL)\n"
+        "CASE(sub, int, int, unsigned char, 0, 1, 1, 255LL)\n"
+        "CASE(mul, int, int, short, 300, 300, 1, 24464LL)\n"
+        "CASE(mul, int, int, short, -300, 100, 0, -30000LL)\n"
+        "CASE(sub, int, int, signed char, -100, 100, 1, 56LL)\n"
+        "CASE(add, char, char, char, 100, 100, 1, -56LL)\n"
+        "CASE(add, unsigned char, unsigned char, unsigned char, 255, 1, 1, 0LL)\n"
+        "CASE(add, short, short, int, 32767, 32767, 0, 65534LL)\n"
+        "CASE(mul, long long, long long, long long, 3000000000LL, 4, 0, 12000000000LL)\n"
+        "CASE(mul, long long, long long, long long, 3000000000LL, 4000000000LL, 1, -6446744073709551616LL)\n"
+        "CASE(mul, long long, long long, long long, LLONG_MIN, -1, 1, (-9223372036854775807LL - 1))\n"
+        "CASE(add, long long, long long, long long, LLONG_MAX, 1, 1, (-9223372036854775807LL - 1))\n"
+        "CASE(sub, long long, long long, long long, LLONG_MIN, 1, 1, 9223372036854775807LL)\n"
+        "CASE(sub, unsigned long long, unsigned long long, long long, 0, 1, 0, -1LL)\n"
+        "CASE(sub, unsigned long long, unsigned long long, long long, ULLONG_MAX, 1, 1, -2LL)\n"
+        "CASE(sub, unsigned long long, unsigned long long, long long, 1ULL << 63, 0, 1, (-9223372036854775807LL - 1))\n"
+        "CASE(sub, unsigned long long, unsigned long long, long long, 0, 1ULL << 63, 0, (-9223372036854775807LL - 1))\n"
+        "CASE(add, unsigned long long, unsigned long long, unsigned long long, ULLONG_MAX, 1, 1, 0LL)\n"
+        "CASE(add, unsigned long long, long long, unsigned long long, 5, -6, 1, -1LL)\n"
+        "CASE(add, unsigned long long, long long, long long, ULLONG_MAX, LLONG_MIN, 0, 9223372036854775807LL)\n"
+        "CASE(mul, unsigned long long, unsigned long long, unsigned long long, 1ULL << 32, 1ULL << 32, 1, 0LL)\n"
+        "CASE(mul, unsigned long long, unsigned long long, unsigned long long, 1ULL << 31, 1ULL << 32, 0, (-9223372036854775807LL - 1))\n"
+        "CASE(mul, unsigned long long, long long, long long, 1ULL << 62, 2, 1, (-9223372036854775807LL - 1))\n"
+        "CASE(mul, unsigned long long, long long, unsigned long long, 3, -1, 1, -3LL)\n"
+        "CASE(add, long long, long long, int, 1LL << 40, 5, 1, 5LL)\n"
+        "CASE(add, long long, long long, int, 7, 5, 0, 12LL)\n"
+        "CASE(add, long long, long long, unsigned, -1, 0, 1, 4294967295LL)\n"
+        "CASE(add, long, long, long, __LONG_MAX__, 1, 1, (-9223372036854775807LL - 1))\n"
+        "CASE(sub, unsigned long, unsigned long, unsigned long, 0, 1, 1, -1LL)\n"
+        "CASE(mul, unsigned long, unsigned long, unsigned long, 1UL << 30, 1UL << 30, 0, 1152921504606846976LL)\n"
+        "    return 0;\n"
+        "}\n"),
+    S8_INITIALIZER(
+        "static int boolean_and_enum_results(void)\n"
+        "{\n"
+        "    { _Bool b = 1; int o = __builtin_add_overflow(1, 1, &b); CHECK(o == 1 && b == 0); }\n"
+        "    { _Bool b = 0; int o = __builtin_add_overflow(1, 0, &b); CHECK(o == 0 && b == 1); }\n"
+        "    { _Bool b = 1; int o = __builtin_add_overflow(2, 0, &b); CHECK(o == 1 && b == 0); }\n"
+        "    { _Bool b = 0; int o = __builtin_sub_overflow(0, 1, &b); CHECK(o == 1 && b == 1); }\n"
+        "    { _Bool b = 0; int o = __builtin_mul_overflow(3, 5, &b); CHECK(o == 1 && b == 1); }\n"
+        "    { _Bool x = 1, y = 1; int r = 0; int o = __builtin_add_overflow(x, y, &r); CHECK(o == 0 && r == 2); }\n"
+        "    { enum E e = E0; int o = __builtin_add_overflow(1, 1, &e); CHECK(o == 0 && (int)e == 2); }\n"
+        "    { enum E e = E0; int o = __builtin_sub_overflow(0, 1, &e); CHECK(o == 1 && (int)e == -1); }\n"
+        "    { enum S e = S1; int o = __builtin_sub_overflow(0, 1, &e); CHECK(o == 0 && (int)e == -1); }\n"
+        "    { enum E e = E1; int r = 0; int o = __builtin_add_overflow(e, -2, &r); CHECK(o == 0 && r == -1); }\n"
+        "    return 0;\n"
+        "}\n"
+        "static int qualifiers_and_evaluation(void)\n"
+        "{\n"
+        "    { volatile int v = 0; int o = __builtin_add_overflow(INT_MAX, 1, &v); CHECK(o == 1 && v == INT_MIN); }\n"
+        "    { volatile long long v = 0; int o = __builtin_add_overflow(1, 2, &v); CHECK(o == 0 && v == 3); }\n"
+        "    { int a[2] = {0, 0}; int o = __builtin_add_overflow(1, 2, a); CHECK(o == 0 && a[0] == 3 && a[1] == 0); }\n"
+        "    {\n"
+        "        int r = 0;\n"
+        "        evaluations = 0;\n"
+        "        int o = __builtin_mul_overflow(next(6), next(7), &r);\n"
+        "        CHECK(o == 0 && r == 42 && evaluations == 2);\n"
+        "    }\n"
+        "    {\n"
+        "        int r = 0;\n"
+        "        evaluations = 0;\n"
+        "        int o = __builtin_sub_overflow(next(5), next(7), (&r + next(0) * 0));\n"
+        "        CHECK(o == 0 && r == -2 && evaluations == 3);\n"
+        "    }\n"
+        "    { int r = 0; int o = __builtin_add_overflow(1, 2, &r) + __builtin_add_overflow(INT_MAX, 1, &r); CHECK(o == 1 && r == INT_MIN); }\n"
+        "    { int r = 0; CHECK(sizeof(__builtin_add_overflow(1, 2, &r)) == sizeof(_Bool)); }\n"
+        "    { int r = 0; if (__builtin_add_overflow(INT_MAX, 1, &r)) return 0; return __LINE__ % 255 + 1; }\n"
+        "}\n"),
+    S8_INITIALIZER(
+        "static int wide_results(void)\n"
+        "{\n"
+        "    CASE128(add, i128, i128, i128, (i128)1 << 126, (i128)1 << 126, 1, 0x8000000000000000ULL, 0)\n"
+        "    CASE128(add, i128, i128, i128, (i128)1 << 100, (i128)1 << 100, 0, 0x0000002000000000ULL, 0)\n"
+        "    CASE128(add, u128, u128, u128, ~(u128)0, 1, 1, 0, 0)\n"
+        "    CASE128(sub, u128, u128, u128, 0, 1, 1, ~0ULL, ~0ULL)\n"
+        "    CASE128(sub, i128, i128, i128, (i128)((u128)1 << 127), 1, 1, 0x7fffffffffffffffULL, ~0ULL)\n"
+        "    CASE128(add, long long, long long, i128, LLONG_MAX, LLONG_MAX, 0, 0, 0xfffffffffffffffeULL)\n"
+        "    CASE128(mul, long long, long long, i128, LLONG_MAX, LLONG_MAX, 0, 0x3fffffffffffffffULL, 1)\n"
+        "    CASE128(sub, long long, long long, i128, -5, LLONG_MAX, 0, ~0ULL, 0x7ffffffffffffffcULL)\n"
+        "    CASE128(sub, unsigned long long, unsigned long long, u128, 1, 2, 1, ~0ULL, ~0ULL)\n"
+        "    CASE128(add, int, unsigned, i128, -5, 3u, 0, ~0ULL, 0xfffffffffffffffeULL)\n"
+        "    return 0;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int status = mixed_widths();\n"
+        "    status = status ? status : boolean_and_enum_results();\n"
+        "    status = status ? status : qualifiers_and_evaluation();\n"
+        "    status = status ? status : wide_results();\n"
+        "    return status;\n"
+        "}\n"),
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_overflow_builtins_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("generic-overflow-runtime"), S8(".c"));
+    // The program is split only to stay within the portable string-literal
+    // length; the parts are written back to back.
+    String8 program = string_format(arguments->arena, S8("{S8}{S8}{S8}{S8}"), c_test_generic_overflow_runtime_sources[0],
+                                    c_test_generic_overflow_runtime_sources[1], c_test_generic_overflow_runtime_sources[2],
+                                    c_test_generic_overflow_runtime_sources[3]);
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(program))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("generic-overflow-runtime-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], forms[form], S8("-O0"), S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("generic overflow mode={u32} form={u32}: {S8}"), mode, form, compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("generic overflow runtime mode={u32} form={u32}: status={u32} timed_out={u32}"),
+                                mode, form, execution.platform_status, (u32)execution.timed_out));
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+        BUSTER_TEST(arguments, os_file_delete(source));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// Lowering and diagnostics of the generic checked-arithmetic builtins. Every
+// accepted combination must lower and validate on both native targets; the
+// refused ones (a 128-bit operand or result that needs more than 128 bits of
+// exact arithmetic, or multiplication at 128 bits) must fail with a structured
+// diagnostic instead of producing partial output.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_overflow_builtins(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    String8 accepted =
+        S8("#if !__has_builtin(__builtin_add_overflow) || !__has_builtin(__builtin_sub_overflow) || !__has_builtin(__builtin_mul_overflow)\n"
+           "#error hidden generic overflow builtins\n#endif\n"
+           "enum E { E0, E1 };\n"
+           "_Static_assert(sizeof(__builtin_add_overflow(1, 2, (int*)0)) == sizeof(_Bool), \"overflow result\");\n"
+           "int query(int a, unsigned b, long long c, unsigned long long d, short s, _Bool z, enum E e, __int128 w, unsigned __int128 u,\n"
+           "          int* i, unsigned char* uc, long long* ll, _Bool* zr, enum E* er, __int128* wr, unsigned __int128* ur, volatile int* vi) {\n"
+           "    return __builtin_add_overflow(a, b, i) + __builtin_sub_overflow(a, b, uc) + __builtin_mul_overflow(c, d, ll) +\n"
+           "           __builtin_add_overflow(s, z, zr) + __builtin_sub_overflow(e, c, er) + __builtin_add_overflow(c, c, wr) +\n"
+           "           __builtin_mul_overflow(c, d, wr) + __builtin_add_overflow(w, w, wr) + __builtin_sub_overflow(u, u, ur) +\n"
+           "           __builtin_add_overflow(w, a, wr) + __builtin_add_overflow(a, 1, vi) + __builtin_mul_overflow(a, b, ll);\n"
+           "}\n");
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, accepted, (CPreprocessOptions){.target = targets[target_index]});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("generic-overflow.c"), preprocess, parse, targets[target_index],
+                    (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0,
+                    lowered.diagnostic_count ? lowered.diagnostics[0].message : S8(""));
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count == 1))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    IrFunction* query = c_test_find_ir_function(module, S8("query"));
+                    BUSTER_TEST(arguments, query != 0 && c_test_ir_call_count(query) == 0);
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+
+    // Invalid uses are rejected while analyzing the call.
+    String8 invalid_sources[] = {
+        S8("int f(int* r) { return __builtin_add_overflow(1, 2); }"),
+        S8("int f(int* r) { return __builtin_sub_overflow(1, 2, r, r); }"),
+        S8("int f(int* r, int* p) { return __builtin_mul_overflow(p, 2, r); }"),
+        S8("int f(int* r, int* p) { return __builtin_add_overflow(1, p, r); }"),
+        S8("int f(int* r) { return __builtin_add_overflow(1.0, 2, r); }"),
+        S8("int f(int* r) { return __builtin_add_overflow(1, 2.5f, r); }"),
+        S8("struct S { int v; }; int f(struct S s, int* r) { return __builtin_add_overflow(s, 1, r); }"),
+        S8("int f(const int* r) { return __builtin_add_overflow(1, 2, r); }"),
+        S8("int f(void) { const int r = 0; return __builtin_sub_overflow(1, 2, &r); }"),
+        S8("int f(int r) { return __builtin_add_overflow(1, 2, r); }"),
+        S8("int f(float* r) { return __builtin_add_overflow(1, 2, r); }"),
+        S8("int f(int** r) { return __builtin_mul_overflow(1, 2, r); }"),
+        S8("int f(void* r) { return __builtin_add_overflow(1, 2, r); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid_sources[index], (CPreprocessOptions){.target = targets[0]});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST_RAW(arguments, parse.diagnostic_count != 0, invalid_sources[index]);
+        c_test_scratch_end(temporary);
+    }
+
+    // Combinations the lowering does not support fail to lower with a
+    // diagnostic: multiplication at 128 bits, and an exact result that does
+    // not fit a signed 128-bit value (a 128-bit operand that must also narrow
+    // or change signedness, or a 64-bit unsigned product into 128 bits).
+    String8 refused_sources[] = {
+        S8("int f(__int128 a, __int128 b, __int128* r) { return __builtin_mul_overflow(a, b, r); }"),
+        S8("int f(unsigned long long a, unsigned long long b, unsigned __int128* r) { return __builtin_mul_overflow(a, b, r); }"),
+        S8("int f(__int128 a, __int128 b, long long* r) { return __builtin_add_overflow(a, b, r); }"),
+        S8("int f(unsigned __int128 a, int b, __int128* r) { return __builtin_sub_overflow(a, b, r); }"),
+        S8("int f(__int128 a, unsigned __int128 b, unsigned __int128* r) { return __builtin_add_overflow(a, b, r); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused_sources); index += 1)
+    {
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, refused_sources[index], (CPreprocessOptions){.target = targets[target_index]});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, refused_sources[index]);
+            if (preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("generic-overflow-refused.c"), preprocess, parse, targets[target_index],
+                    (CIRLowerOptions){0});
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0, refused_sources[index]);
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
 // IEC 60559 compareQuietEqual: == and != never raise FE_INVALID for a quiet NaN,
 // while the relational operators are signaling and always do (C17 F.3). Each
@@ -60041,6 +60335,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_libm_rounding_builtins_lowering);
     C_TEST_FIXTURE(arguments, c_test_generic_float_builtins_runtime);
     C_TEST_FIXTURE(arguments, c_test_gnu_library_builtins_runtime);
+    C_TEST_FIXTURE(arguments, c_test_generic_overflow_builtins);
+    C_TEST_FIXTURE(arguments, c_test_generic_overflow_builtins_runtime);
     C_TEST_FIXTURE(arguments, c_test_quiet_nan_compare_runtime);
     C_TEST_FIXTURE(arguments, c_test_atomic_float_compare_exchange_runtime);
     C_TEST_FIXTURE(arguments, c_test_aarch64_float_compare_quiet_signaling);

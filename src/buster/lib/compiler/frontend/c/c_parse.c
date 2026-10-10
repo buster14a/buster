@@ -32641,6 +32641,41 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
                 }
             }
         }
+        if (builtin == C_SYMBOL_BUILTIN_OVERFLOW && !message.length && c_semantic_overflow_builtin_generic(name))
+        {
+            // The generic forms take two integer operands of any type and a
+            // pointer (or array) of a non-const integer; the typed spellings convert
+            // their arguments instead and are not checked here.
+            for (u32 argument = 0; !message.length && argument < count && argument < 3; argument += 1)
+            {
+                CTypeId type = C_TYPE_ID_INVALID;
+                bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, starts[argument], ends[argument], &type);
+                if (typed && type.value < result->type_count)
+                {
+                    CType value = result->types[type.value];
+                    if (argument < 2)
+                    {
+                        if (!c_parse_expression_integer_kind(value.kind))
+                        {
+                            message = string_format(result->arena, S8("{S8} requires integer operands"), name);
+                        }
+                    }
+                    else
+                    {
+                        bool pointer = (value.kind == C_TYPE_POINTER || value.kind == C_TYPE_ARRAY) && value.element_type.value < result->type_count;
+                        CType pointee = pointer ? result->types[value.element_type.value] : (CType){0};
+                        if (!pointer || !c_parse_expression_integer_kind(pointee.kind) || pointee.is_const)
+                        {
+                            message = string_format(result->arena, S8("{S8} requires a pointer to a non-const integer as its result"), name);
+                        }
+                    }
+                    if (message.length)
+                    {
+                        location = starts[argument];
+                    }
+                }
+            }
+        }
         if (message.length)
         {
             for (u32 previous = index; previous > start;)
