@@ -686,9 +686,18 @@ type and gitlink changes always select full validation. A bounded Git capture
 failure, missing object, malformed raw diff or stale merge identity selects full
 validation with a reason. No comment/whitespace stripping is attempted.
 
+A merge group is compared three ways: its base to the tested tree, the
+contribution itself, and the trusted policy (current main) to the group base.
+A prose-only group stacked behind a queued code group therefore runs full;
+its receipt names that cause `execution-affecting-base-drift`, distinct from
+`execution-affecting-or-unknown-input` for the group's own changes. Only the
+group at the front of an otherwise empty queue, whose base is main, can be
+no-code.
+
 `./build.sh ci_no_code --self-test` exercises the raw parser. Hosted
 `No-code classifier controls` also exercises authentic Git PR/group graphs,
-mixed changes, a prose-only final commit on a code PR, and missing/stale objects.
+mixed changes, a prose-only final commit on a code PR, a prose group stacked
+on queued code, and missing/stale objects.
 The immutable trusted-base reader is installed before automatic omission.
 During the transition it continues accepting genuinely executed legacy gates;
 once producers declare no-code plans, deliberately omitted gates must be skipped
