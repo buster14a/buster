@@ -8314,7 +8314,9 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
 #else
     CAstTypePending* pending_out = 0;
 #endif
-    if (stored)
+    // A stored answer needs the query table, which a slot already implies;
+    // the explicit test lets the analyzer see that too.
+    if (stored && machine->expression_queries)
     {
         WORK_LEDGER_RECORD(REDERIVE_TYPE_QUERY_CACHE_HITS, 1);
         *type_out = machine->expression_queries[slot].type;
