@@ -3783,11 +3783,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
     c_ast_release(&built.ast);
     scratch_end(temporary);
     // Without interned rows, the default path, the typer finds no `int *` row
-    // for `&` to answer with, and declines it.
+    // for `&` to answer with, and declines it. The tree's column reservations
+    // are back where they started once it is released.
     temporary = scratch_begin(&arguments->arena, 1);
     preprocess = c_ast_test_preprocess(temporary.arena, S8("int* f(int a) { return &a; }"), C_PREPROCESS_DIALECT_GNU17);
-    built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
     analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+    u64 reserved = arena_test_live_reserved_bytes();
+    built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
     u32 address = c_ast_test_token_index(preprocess, S8("&"), 0);
     if (BUSTER_REQUIRE(arguments, built.complete && !analysis.diagnostic_count && address != UINT32_MAX))
     {
@@ -3799,6 +3801,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
         }
     }
     c_ast_release(&built.ast);
+    BUSTER_TEST(arguments, arena_test_live_reserved_bytes() == reserved);
     scratch_end(temporary);
     // The const-assignment walk does not ask about the designator probes of
     // `{ .f = 1, .g = 2 }`: the `{` and the `,` it would take for the bases of
