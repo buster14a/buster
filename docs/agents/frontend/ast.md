@@ -601,11 +601,14 @@ two cases:
 A fallback discards everything derived and returns `c_parse_ast`'s result, so
 the records, the diagnostics and #3215's rejections are always the walker's.
 Neither #3215 nor #3143 is changed by this split. Where the walker's reading
-is wrong but the split can state it, the split reproduces it instead. For
-example, a `typedef` or `constexpr` word anywhere outside the body marks the
-whole declaration ([#3310](https://github.com/buster14a/buster/issues/3310)).
-The `typedef` and `constexpr` words are collected once per unit, so only a
-declaration that holds one outside its top-level specifiers is scanned whole.
+is wrong but the split can state it, the split reproduces it instead.
+A declaration is a typedef or constexpr only through its own top-level
+specifiers. The walker counts a `typedef` or `constexpr` word only outside
+every delimiter and before the first top-level `=` or `,`. The split counts a
+`SPECIFIER_WORD` item of the declaration's `DECL_SPECIFIERS`. A word inside an
+initializer, such as a statement expression's `typedef` or a C23 constexpr
+compound literal, marks neither the declaration nor its later declarators
+([#3310](https://github.com/buster14a/buster/issues/3310)).
 
 `c_ast_test_split` runs one shape per fallback reason, both #3215 inputs
 included, in every layout. It requires the walker's result and the named
