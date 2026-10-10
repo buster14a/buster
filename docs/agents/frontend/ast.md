@@ -1056,4 +1056,16 @@ The base is main `f38a7716`, which the candidate branches from. The budgets:
 - performance acceptance: the hosted counts are diagnostic. Zen 5 validation
   (#2761) stays incomplete, and the hook stays opt-in.
 
+The failing-operand rule's hosted census is
+[`2026-10-10T193402Z`](../../performance-audits/2026-10-10T193402Z.md). It
+was taken the same way and is diagnostic only. Every hosted budget passes:
+- 0 verify mismatches, and byte-identical objects across the four arms.
+- The declined and unsafe checked casts fall from 873 to 236. `__func__`
+  casts and `os.h`'s failure macros made up 637 of them.
+- The pilot's instructions fall by 0.076%, with 719 fewer machine runs from
+  queries.
+- The default path moves by at most +0.0011%.
+- Most of what remains is declined in the operand itself: members, string
+  runs and `&`.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
