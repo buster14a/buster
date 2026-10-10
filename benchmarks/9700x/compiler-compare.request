@@ -125,7 +125,24 @@ request: PR #3154 issue #1488 bound per-clear union-state preservation; source 2
 request: PR #3155 issue #3143 malformed syntax diagnostics; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3155 issue #3143 fresh syntax-only candidate preserving semicolon recovery; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3155 issue #3143 return-scoped syntax-only diagnostics; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
+
+# request: issue #3130 PR #3167 same-run analyzer invocation dedup; baseline 6badc05b250b18a3e76e1de396480a60373774fa
+profile: clang-analyze-full-v1
+# request: issue #3130 PR #3167 fresh full analyzer qualification after #3168/#3170 corrections and trusted-reader integration; main 521b791421a962a085a0a9685357b6ea5ca790ef
+profile: clang-analyze-full-v1
+# request: issue #3130 PR #3167 third full matched comparison after #3168 VA_COPY guard, #3170 artifact cleanup and #3129/#3172 main integration (main f2188669c5174f71879e9b682eded8f7004d8988); the second attempt failed all four arms at row 97, so its timings do not qualify.
+profile: clang-analyze-full-v1
+# request: issue #3130 PR #3167 third physical matched analyzer comparison; H3 was blocked before any actions and was not an attempt. Run after merging main 35c43d1877620ef9a57b9ffc98ae022b688a7c9d (#3108/#3164), with the #3168 VA_COPY guard and #3170 fixture cleanup; the prior completed comparison failed all arms at row 97 and gives no performance verdict.
+profile: clang-analyze-full-v1
+
+# request: issue #3130 fresh full analyzer V2 comparison after trusted PR #3223 merged (main 92c4969c764e42ce61fd4b0006e5b93d264278ae; reviewed producer source 7cdd7997df75bfdcfb2a3a18fd6b3a1fc14d5707); derive selected rows from the exact current compile database.
+profile: clang-analyze-full-v2
 request: issue #1297 idle member-offset committed-layout replay and reached-set scratch; validated production c1b2481103fc22ee20a7a2e48de6f600eb3fb1df; fresh compiler-compare-v1 and throughput-corpus-v2 qualification
 request: PR #3141 issue #1297 member-owner replay preserving aligned aggregate views; validated production 9a377bdcf6b20f48826747f67ee896395b719aaa; renewed exact-head compiler-compare-v1 and throughput-corpus-v2 qualification
 request: PR #3141 issue #1297 preserved-parent integration of main fcf5790c4aa3452396113b99eaeecb9f7c496b91 including #3121 inferred-bound finalization and shared scaling fixtures; fresh exact-head compiler-compare-v1 and throughput-corpus-v2 qualification
 request: PR #3141 issue #1297 conflict-preserving source repair atop frozen main 8ea54465a2309f95bcb160143ce4804e05a8dbc8; fresh exact-head compiler-compare-v1 and throughput-corpus-v2 qualification; prior candidate results do not carry forward
+request: issue #2717 candidate default -g complete-entry-store scalar pinning; compare exact PR head and throughput-corpus-v2
+request: PR #3157 issue #2717 final default -g scalar location candidate after dense-scan review; compare exact head
+# request: PR #3157 issue #2717 remove analyzer dead store; compare the final exact PR head
+request: PR #3157 issue #2717 guard optional published CFG; compare the final exact PR head
+request: PR #3157 issue #2717 ready-head Apple/macOS/iOS CI and fresh compiler-compare-v1 after marker-only push from ee52b190; source-identical code

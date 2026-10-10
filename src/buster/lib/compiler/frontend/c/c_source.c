@@ -9760,6 +9760,7 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
         {
             String8 spelling = c_token_spelling(space->base, item.token);
             BUSTER_CHECK(!spelling.length || copy); // Counted in foreign_length above.
+            u32 spelling_offset = copy ? c_space_offset(space, copy) : (u32)space->used;
             for (u64 byte_index = 0; byte_index < spelling.length; byte_index += 1)
             {
                 copy[byte_index] = spelling.pointer[byte_index];
@@ -9768,7 +9769,7 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
             {
                 CSourceLocation location = c_pp_stamp_location(stamps, item.stamp);
                 c_source_map_append(map, (IrSourceRegion){
-                                             .start = c_space_offset(space, copy),
+                                             .start = spelling_offset,
                                              .source = location.file,
                                              .stamp = c_position_from_source_location(location),
                                              .kind = IR_SOURCE_REGION_STAMP,
@@ -9777,8 +9778,11 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
                 run_open = true;
                 run_stamp = item.stamp;
             }
-            item.token.offset = c_space_offset(space, copy);
-            copy += spelling.length;
+            item.token.offset = spelling_offset;
+            if (spelling.length)
+            {
+                copy += spelling.length;
+            }
         }
         else
         {
@@ -9799,6 +9803,64 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
     }
     *output_count += count;
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_expanded_empty_foreign_token_source_map(Arena* arena)
+{
+    bool result = false;
+    Arena* token_arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+    Arena* shape_arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+    if (token_arena && shape_arena)
+    {
+        char8 spelling_base[] = "x";
+        CSpellingSpace space = {.base = spelling_base, .used = 1, .capacity = sizeof(spelling_base)};
+        u32 expected_offset = 1;
+        CSourceLocation location = {.offset = 17, .line = 3, .column = 5, .file = 7, .map_offset = expected_offset};
+        CPpStampTable stamps = {.entries = &location, .count = 1};
+        CSourceMap map = {.arena = arena};
+        CPragmaStateRecorder pragma_changes = {.arena = arena};
+        u16 pack_alignment = 0;
+        u8 visibility = C_SYMBOL_VISIBILITY_UNSPECIFIED;
+        CPreprocessPragmaContext context = {
+            .arena = arena,
+            .pack_alignment = &pack_alignment,
+            .visibility = &visibility,
+            .pragma_changes = &pragma_changes,
+        };
+        CPreprocessTokenNode node = {
+            .token = {
+                .token = {.offset = expected_offset, .kind = C_TOKEN_IDENTIFIER},
+                .stamp = 1,
+                .foreign = 1,
+            },
+        };
+        CTokenStream token_stream = {
+            .arena = token_arena,
+            .shape_arena = shape_arena,
+            .base = (CToken*)((char8*)token_arena + arena_minimum_position),
+            .shape_base = (CTokenShape*)((char8*)shape_arena + arena_minimum_position),
+        };
+        u64 output_count = 0;
+        c_preprocess_process_expanded_line(context, &space, &map, &stamps, &node, 1, &token_stream, &output_count, 0);
+        CToken token = token_stream.base[0];
+        IrSourcePosition stamp = map.count ? map.regions[0].stamp : (IrSourcePosition){0};
+        IrSourcePosition expected_stamp = c_position_from_source_location(location);
+        result = output_count == 1 && token.offset == expected_offset && token.length == 0 && map.count == 1 &&
+                 map.regions[0].start == expected_offset && map.regions[0].source == location.file &&
+                 stamp.source == expected_stamp.source && stamp.offset == expected_stamp.offset && stamp.line == expected_stamp.line &&
+                 stamp.column == expected_stamp.column;
+    }
+    if (shape_arena)
+    {
+        arena_destroy(shape_arena, 1);
+    }
+    if (token_arena)
+    {
+        arena_destroy(token_arena, 1);
+    }
+    return result;
+}
+#endif
 
 BUSTER_C_INTERNAL u32 c_preprocess_tokens_from_nodes(CPreprocessTokenNode* first, Arena* arena, CToken** tokens_out)
 {

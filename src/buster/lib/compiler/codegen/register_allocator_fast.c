@@ -18,13 +18,17 @@
 // `machine_fast_parameter_contract` also lets a join or loop header receive its
 // general parameters, and the live values its designated predecessor holds
 // dirty, in registers, which `machine_fast_conform_edge_parameters` publishes
-// and keeps on every incoming jump. `machine_fast_loop_floors` bounds where
+// and keeps on every incoming jump; a staged edge copy of a constant or frame
+// address rematerializes into its destination rather than passing through
+// the edge-copy tile (`MACHINE_FAST_EDGE_SOURCE_RECREATED`). `machine_fast_loop_floors` bounds where
 // backward edges can return control, so an escaping value past its last use
 // below that floor is dead and never stored; its entry bypass lets a sole
 // backward edge drop strict SSA values no block dominating the header
-// defines. `machine_fast_value_liveness` gives the prepass block live-out of
-// every storable escaping value, and `machine_fast_dead_out` drops the
-// write-back of one no path out of the block reads. A fixed or tied operand that
+// defines. `machine_fast_value_liveness` gives the prepass block live-out and
+// live-in of every storable escaping value: `machine_fast_dead_out` drops the
+// write-back of one no path out of the block reads, and `machine_fast_dead_in`
+// lets an edge conform leave one its destination does not read dirty for the
+// source's other successors. A fixed or tied operand that
 // needs an occupied register moves the live occupant to a free one
 // (`machine_fast_vacate`) rather than storing it. `machine_fast_placement_build_pinned` then lays the frame out
 // for both scan modes: `machine_fast_close_live_ranges` widens selector slots
@@ -70,6 +74,11 @@ BUSTER_CT_CHECK(MACHINE_FAST_OPERAND_USE_DEFINE_SHIFT == MACHINE_FAST_OPERAND_RO
 // row's address. Immediate pool indices never reach it.
 #define MACHINE_FAST_REMATERIALIZE_FRAME (UINT32_MAX - 1u)
 BUSTER_CT_CHECK(MACHINE_FAST_REMATERIALIZE_FRAME >= MACHINE_REF_PAYLOAD_LIMIT);
+// Captured-source marker of a staged edge copy whose source is recreatable:
+// it skips the edge-copy tile and is rematerialized straight into its
+// destination. Physical register indices never reach it.
+#define MACHINE_FAST_EDGE_SOURCE_RECREATED (UINT32_MAX - 1u)
+BUSTER_CT_CHECK(MACHINE_FAST_EDGE_SOURCE_RECREATED >= MACHINE_TARGET_REGISTER_LIMIT);
 // Contract-held, contract-dirty, out-held and out-dirty: the four per-block
 // register-file masks, allocated and cleared as one block.
 #define MACHINE_FAST_BLOCK_MASK_COUNT 4u
@@ -173,13 +182,17 @@ struct MachineFastState
     u32 back_edge_bypass;
     // Block of each value's first textual definition, from the prepass.
     u32 const* definition_blocks;
-    // The prepass's value liveness (`machine_fast_value_liveness`) and the
-    // live-out row of the block whose exit is being scanned or conformed:
-    // the scanned block, or the source of a retroactive conform. Null when
-    // the prepass built none; every value then counts as live.
+    // The prepass's value liveness (`machine_fast_value_liveness`), the
+    // live-out row of the block whose exit is being scanned or conformed
+    // (the scanned block, or the source of a retroactive conform), and the
+    // live-in row of the one destination an edge conform serves, or null for
+    // a dispatch that serves several. Null when the prepass built none;
+    // every value then counts as live.
     u32 const* live_index;
     u64 const* live_out;
+    u64 const* live_in;
     u64 const* live_out_row;
+    u64 const* live_in_row;
     u32 live_words;
     // Index of the next call at or after each instruction within its own
     // block, or UINT32_MAX: a value whose last use lies past it crosses
@@ -383,6 +396,16 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_dead_out(MachineFastState* state, u32 valu
 {
     u32 index = state->live_out_row ? state->live_index[value] : UINT32_MAX;
     return index != UINT32_MAX && !machine_fast_lane_held(state->live_out_row[index / 64u], index % 64u);
+}
+
+// True when the destination of the edge being conformed (`live_in_row`)
+// reads the value only after writing it again, or never: that edge needs no
+// current home. The value may still be live out of the source block, for
+// the source's other successors or as this edge's own parameter source.
+BUSTER_GLOBAL_LOCAL bool machine_fast_dead_in(MachineFastState* state, u32 value)
+{
+    u32 index = state->live_in_row ? state->live_index[value] : UINT32_MAX;
+    return index != UINT32_MAX && !machine_fast_lane_held(state->live_in_row[index / 64u], index % 64u);
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_fast_owner_is_dead(MachineFastState* state, u32 physical_register)
@@ -625,6 +648,18 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
     // escape their block are dead at a boundary and rematerializable
     // constants never store, exactly as the eviction path treats them. Only
     // the dirty lanes can owe a store, and dirty implies held.
+    //
+    // A value this edge's destination does not read (`machine_fast_dead_in`)
+    // but the source block still carries out stays dirty instead: another
+    // successor's conform stores it at this same terminator point or keeps
+    // it in a register its own contract carries dirty, so deferring never
+    // adds a store and often removes one. The census before this rule found
+    // 33,100 of 58,080 such write-backs on unity `ide.c` under FAST: a
+    // conditional's first-contracted successor storing a value only the
+    // other one reads, and a parameter edge storing the source it publishes.
+    // A value in a register the contract promises still stores here, since
+    // pass 2 may hand that register to its contract value; no dirty
+    // occupant it releases is then still owed a store.
     for (u64 remaining = *dirty; remaining; remaining &= remaining - 1u)
     {
         u32 physical_register = machine_fast_first_set(remaining);
@@ -645,7 +680,12 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
                      (definition_block == state->back_edge_header || definition_block > state->back_edge_bypass) &&
                      !(state->function->virtual_registers[resident].flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) &&
                      !(state->pinned_registers && state->pinned_registers[resident] != UINT32_MAX));
-        if (state->escapes[resident] && state->rematerialize_immediates[resident] == UINT32_MAX && !dead)
+        bool stored = state->escapes[resident] && state->rematerialize_immediates[resident] == UINT32_MAX && !dead;
+        if (stored && !machine_fast_lane_held(contract_held, physical_register) && machine_fast_dead_in(state, resident))
+        {
+            continue;
+        }
+        if (stored)
         {
             machine_fast_conform_append(state, stream, point, MACHINE_EDIT_SPILL, resident, physical_register);
             state->placement->spill_count += 1;
@@ -835,7 +875,11 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
             MACHINE_REGISTER_CLASS_GENERAL;
     // Capture resident and pinned sources before flushing the predecessor.
     // A source with no direct location may still have a dirty predecessor
-    // alias, so its home is safe to reload only after that flush.
+    // alias, so its home is safe to reload only after that flush. A staged
+    // general copy of a recreatable source (constant or frame address) reads
+    // no register, so it needs no capture: it is rematerialized into its
+    // destination after the parallel copy instead of passing through the
+    // tile as a store and a load.
     TemporalArena temporary = scratch_begin(&state->arena, 1);
     u32* captured = arena_allocate(temporary.arena, u32, copy_count);
     u32 temporary_offset = 0;
@@ -848,7 +892,13 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         temporary_offset += vector ? 64u : 8u;
         u32 source_value = machine_ref_kind(source) == MACHINE_REF_VIRTUAL_REGISTER ? machine_ref_payload(source) : UINT32_MAX;
         u32 source_register = machine_ref_kind(source) == MACHINE_REF_PHYSICAL_REGISTER ? machine_ref_payload(source) : UINT32_MAX;
-        if (source_value != UINT32_MAX)
+        bool recreated = !direct && source_value != UINT32_MAX && state->rematerialize_immediates[source_value] != UINT32_MAX &&
+                         state->function->virtual_registers[destination_value].register_class == MACHINE_REGISTER_CLASS_GENERAL;
+        if (recreated)
+        {
+            source_register = MACHINE_FAST_EDGE_SOURCE_RECREATED;
+        }
+        else if (source_value != UINT32_MAX)
         {
             if (locations)
             {
@@ -868,16 +918,16 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
                 source_register = state->pinned_registers[source_value];
             }
         }
-        if (source_register != UINT32_MAX && !direct)
+        if (source_register != UINT32_MAX && !recreated && !direct)
         {
             machine_fast_conform_append(state, stream, point, MACHINE_EDIT_TEMP_SPILL, temporary_offset, source_register);
         }
         captured[copy_index] = source_register;
     }
     // The write-back below drops a value whose last use is this terminator
-    // and lies below the loop floor. A copy that found no register for its
-    // source reloads that source's home after the flush, so such a source
-    // stores here first.
+    // and lies below the loop floor, and defers one the destination does not
+    // read. A copy that found no register for its source reloads that
+    // source's home after the flush, so such a source stores here first.
     u32 terminator_index = machine_point_instruction(point);
     for (u64 remaining = *dirty; remaining; remaining &= remaining - 1u)
     {
@@ -891,7 +941,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
                         captured[copy_index] == UINT32_MAX;
         }
         if (reloaded && state->escapes[value] && state->rematerialize_immediates[value] == UINT32_MAX &&
-            state->last_use[value] == terminator_index && state->last_use[value] < state->loop_floor)
+            ((state->last_use[value] == terminator_index && state->last_use[value] < state->loop_floor) || machine_fast_dead_in(state, value)))
         {
             machine_fast_conform_append(state, stream, point, MACHINE_EDIT_SPILL, value, physical);
             state->placement->spill_count += 1;
@@ -985,7 +1035,16 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         if (!direct)
         {
             stored = target != UINT32_MAX ? target : (vector ? state->description->vector_slot_scratch[0] : state->description->slot_scratch[0]);
-            machine_fast_conform_append(state, stream, point, MACHINE_EDIT_TEMP_RELOAD, temporary_offset, stored);
+            if (captured[copy_index] == MACHINE_FAST_EDGE_SOURCE_RECREATED)
+            {
+                MachineEdit rematerialize = machine_fast_rematerialize_edit(
+                    state, point, machine_ref_payload(state->function->edge_copy_sources[edge->copy_offset + copy_index]), stored);
+                machine_fast_conform_append(state, stream, point, rematerialize.kind, rematerialize.subject, stored);
+            }
+            else
+            {
+                machine_fast_conform_append(state, stream, point, MACHINE_EDIT_TEMP_RELOAD, temporary_offset, stored);
+            }
         }
         else if (captured[copy_index] != UINT32_MAX)
         {
@@ -1740,16 +1799,17 @@ BUSTER_GLOBAL_LOCAL void machine_fast_value_liveness(Arena* arena, MachineFuncti
     u64 plane = (u64)block_count * words;
     if (block_count > 1 && tracked && plane <= MACHINE_FAST_LIVENESS_WORD_LIMIT)
     {
-        // Only live-out outlives the solve; reads, writes and live-in are
-        // one scratch allocation and one clear.
+        // Live-out and live-in outlive the solve; reads and writes are one
+        // scratch allocation and one clear. The solve writes every block's
+        // live-in row in full, since every block starts on its worklist.
         u64* live_out = arena_allocate(arena, u64, plane);
         memset(live_out, 0, plane * sizeof(*live_out));
+        u64* live_in = arena_allocate(arena, u64, plane);
         TemporalArena temporary = scratch_begin(&arena, 1);
-        u64* planes = arena_allocate(temporary.arena, u64, plane * 3u);
-        memset(planes, 0, plane * 3u * sizeof(*planes));
+        u64* planes = arena_allocate(temporary.arena, u64, plane * 2u);
+        memset(planes, 0, plane * 2u * sizeof(*planes));
         u64* reads = planes;
         u64* writes = planes + plane;
-        u64* live_in = planes + plane * 2u;
         for (u32 block_index = 0; block_index < block_count; block_index += 1)
         {
             MachineBlock const* block = function->blocks + block_index;
@@ -1815,6 +1875,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_value_liveness(Arena* arena, MachineFuncti
         scratch_end(temporary);
         prepass->live_index = live_index;
         prepass->live_out = live_out;
+        prepass->live_in = live_in;
         prepass->live_words = words;
     }
 }
@@ -3584,6 +3645,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             .definition_blocks = prepass->definition_blocks,
             .live_index = prepass->live_index,
             .live_out = prepass->live_out,
+            .live_in = prepass->live_in,
             .live_words = prepass->live_words,
         };
         u32 const* predecessor_offsets = prepass->predecessor_offsets;
@@ -3827,6 +3889,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                     MachineEdge const* predecessor_edge = machine_fast_indexed_edge(function, prepass->predecessor_edges, predecessor_index);
                     state.loop_floor = loop_floors[predecessor];
                     state.live_out_row = state.live_out ? state.live_out + (u64)predecessor * state.live_words : 0;
+                    state.live_in_row = state.live_in ? state.live_in + (u64)block_index * state.live_words : 0;
                     machine_fast_conform_edge_parameters(&state, &retro_edits, machine_point_make(terminator_index, MACHINE_POINT_BEFORE), predecessor_edge,
                                                          out_owner + (u64)predecessor * register_count, out_held + predecessor, out_dirty + predecessor, 0,
                                                          entry_owner, entry_held, entry_dirty,
@@ -3856,6 +3919,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             // spuriously at a point every iteration passes.
             state.loop_floor = loop_floors[block_index];
             state.live_out_row = state.live_out ? state.live_out + (u64)block_index * state.live_words : 0;
+            state.live_in_row = 0;
             state.physical_live_mask = 0;
             u64 head_pin_active = state.pinned_registers && block->instruction_count ? machine_fast_pin_active(&state, block->first_instruction) : 0;
             for (u64 remaining = entry_held & ~head_pin_active; remaining; remaining &= remaining - 1u)
@@ -4330,16 +4394,20 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                                 // dropped write-back to reach.
                                 state.back_edge_header = block_slots == machine_fast_lane(slot) ? successor : UINT32_MAX;
                                 state.back_edge_bypass = entry_bypass[successor];
+                                state.live_in_row = state.live_in ? state.live_in + (u64)successor * state.live_words : 0;
                                 machine_fast_conform_edge_parameters(&state, &edits, state.current_point, successor_edge, state.owner, &state.held_mask,
                                                                      &state.dirty_mask, state.virtual_register_locations,
                                                                      contract_owner + (u64)successor * register_count, contract_held[successor],
                                                                      contract_dirty[successor], true);
                                 state.back_edge_header = UINT32_MAX;
+                                state.live_in_row = 0;
                             }
                             else if (cold_blocks[successor])
                             {
+                                state.live_in_row = state.live_in ? state.live_in + (u64)successor * state.live_words : 0;
                                 machine_fast_conform_edge(&state, &edits, state.current_point, state.owner, &state.held_mask, &state.dirty_mask,
                                                           state.virtual_register_locations, machine_fast_empty_contract_owner, 0, 0, true);
+                                state.live_in_row = 0;
                             }
                         }
                     }

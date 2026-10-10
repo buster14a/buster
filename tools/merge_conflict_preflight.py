@@ -115,6 +115,7 @@ RETIREMENT_TRUST_PATHS = frozenset((
     "tools/native_retirement_sdks.py",
 ))
 RETIREMENT_POLICY_SCHEMA_PATHS = frozenset((
+    "docs/current-native-object-census-v1.json",
     ".github/native-retirement-automation.json",
     "docs/native-retirement-support-v1.tsv",
     "docs/native-retirement-dependencies-legacy-v1.json",

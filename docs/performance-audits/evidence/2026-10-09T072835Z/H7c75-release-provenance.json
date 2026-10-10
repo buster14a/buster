@@ -1,0 +1,60 @@
+{
+  "bounded_observations": {
+    "native_analyzer_self_test": {
+      "checks": 141,
+      "expected_rejections": 53,
+      "failures": 0,
+      "log_timestamp_utc": "2026-10-09T06:58:27.1917041Z",
+      "status": "pass"
+    },
+    "release_local_analyzer_aggregate": {
+      "aliased_rows": 0,
+      "checked": 18,
+      "excluded_config_or_language": 0,
+      "failures": 0,
+      "log_timestamp_utc": "2026-10-09T07:07:28.1975703Z",
+      "selected_rows": 18,
+      "shards": 8,
+      "status": "pass",
+      "unique_executions": 18
+    },
+    "release_local_analyzer_run": {
+      "elapsed_us": 46838127,
+      "jobs": 2,
+      "peak_live_processes": 5,
+      "process_tree_reason": "none",
+      "process_tree_status": "complete",
+      "sampled_peak_tree_rss_bytes": 1254244352,
+      "samples": 1843,
+      "status": "pass"
+    },
+    "uploaded_release_artifact": {
+      "artifact_id": "11601290545",
+      "name": "desktop-linux-x86_64-release-37894323214-1",
+      "sha256": "364057253a0d6a25de800b156d0f31d34294dc8e4d79efc91a5a206e92f3602d",
+      "size_bytes": 308936
+    }
+  },
+  "candidate_head": "7c75f6277c723125c09152a21cffc217c14db5c5",
+  "candidate_head_tree": "6f711a0b96409a3c97b343d2614eadf4488d1a5d",
+  "checkout_commit": "646d7e6a5daba7ae056cec1647b39a3080086ad2",
+  "checkout_subject": "Merge 7c75f6277c723125c09152a21cffc217c14db5c5 into 521b791421a962a085a0a9685357b6ea5ca790ef",
+  "merge_parents": [
+    "7c75f6277c723125c09152a21cffc217c14db5c5",
+    "521b791421a962a085a0a9685357b6ea5ca790ef"
+  ],
+  "merge_tree": "6f711a0b96409a3c97b343d2614eadf4488d1a5d",
+  "raw_log": {
+    "path": "inputs/H7c75-linux-release/issue3130-H7c75-run37894323214-job113702071809-linux-x86-release.log",
+    "sha256": "2a129d555cc5c84d2f6b4052d68a1f5dee636136a4427e837874e33f1de580d1",
+    "size_bytes": 4497036
+  },
+  "scope_limit": "This Release job is identity-bound to the H source tree through a merge commit, not a literal H checkout. It supplies the listed Release-local tests and analyzer aggregate; it is not the separate complete 182-row 9700X full analyzer campaign and does not prove upload of its fixture.",
+  "tree_identity_source": "Root independently verified the hosted merge object and exact tree equality with H; the merge object is not present in the local issue3130 worktree used for this staging.",
+  "workflow": {
+    "checkout_ref": "refs/remotes/pull/3167/merge",
+    "job": "Linux x86-64 release",
+    "job_id": "113702071809",
+    "run_id": "37894323214"
+  }
+}

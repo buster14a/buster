@@ -3059,6 +3059,128 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_address_rematerialization(
     return result;
 }
 
+// A staged edge copy (three parameters on one jump) whose sources are a
+// constant, a frame address and a loaded value: the two recreatable sources
+// rematerialize straight into their destinations
+// (`MACHINE_FAST_EDGE_SOURCE_RECREATED`), and only the loaded value passes
+// through the edge-copy tile as one temporary store and one reload. Each
+// rematerialization lands in the register the parameter's use reads.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_recreated_edge_sources(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    enum
+    {
+        RECREATED_EDGE_SLOT_COUNT = 3,
+        RECREATED_EDGE_PARAMETER_COUNT = 3,
+    };
+    for (u32 target = 0; target < 2; target += 1)
+    {
+        bool aarch64 = target == 1;
+        u16 constant_opcode = aarch64 ? MACHINE_A64_MOV_RI : MACHINE_X64_MOV_RI;
+        u16 lea_frame = aarch64 ? MACHINE_A64_LEA_FRAME : MACHINE_X64_LEA_FRAME;
+        u16 load_frame = aarch64 ? MACHINE_A64_LOAD_FRAME : MACHINE_X64_LOAD_FRAME;
+        u16 store_frame = aarch64 ? MACHINE_A64_STORE_FRAME64 : MACHINE_X64_STORE_FRAME64;
+        u16 jump = aarch64 ? MACHINE_A64_B : MACHINE_X64_JMP;
+        u16 return_opcode = aarch64 ? MACHINE_A64_RET : MACHINE_X64_RET;
+        MachineFunctionBuilder builder = machine_function_builder_begin(arena);
+        u32 sources[RECREATED_EDGE_PARAMETER_COUNT];
+        u32 parameters[RECREATED_EDGE_PARAMETER_COUNT];
+        for (u32 index = 0; index < RECREATED_EDGE_PARAMETER_COUNT; index += 1)
+        {
+            sources[index] = machine_builder_virtual_register(
+                &builder, (MachineVirtualRegister){.definition_point = machine_point_make(index, MACHINE_POINT_AFTER),
+                                                   .register_class = MACHINE_REGISTER_CLASS_GENERAL});
+        }
+        for (u32 index = 0; index < RECREATED_EDGE_PARAMETER_COUNT; index += 1)
+        {
+            parameters[index] = machine_builder_virtual_register(
+                &builder, (MachineVirtualRegister){.definition_point = MACHINE_POINT_INVALID, .register_class = MACHINE_REGISTER_CLASS_GENERAL});
+        }
+        machine_builder_block_begin(&builder);
+        machine_builder_instruction(&builder, (MachineInstruction){.opcode = constant_opcode,
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, sources[0]), machine_ref_make(MACHINE_REF_IMMEDIATE, 0)}});
+        machine_builder_instruction(&builder, (MachineInstruction){.opcode = lea_frame, .payload = 8,
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, sources[1]), machine_ref_make(MACHINE_REF_STACK_SLOT, 0)}});
+        machine_builder_instruction(&builder, (MachineInstruction){.opcode = load_frame,
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, sources[2]), machine_ref_make(MACHINE_REF_STACK_SLOT, 1)}});
+        u32 terminator = machine_builder_instruction(&builder, (MachineInstruction){.opcode = jump,
+            .operands = {machine_ref_make(MACHINE_REF_BLOCK, 1)}});
+        machine_builder_block_end(&builder, (MachineBlock){0});
+        u32 copy_offset = UINT32_MAX;
+        for (u32 index = 0; index < RECREATED_EDGE_PARAMETER_COUNT; index += 1)
+        {
+            u32 offset = machine_builder_edge_copy_source(&builder, machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, sources[index]));
+            copy_offset = index == 0 ? offset : copy_offset;
+        }
+        machine_builder_edge(&builder, (MachineEdge){.source_block = 0, .destination_block = 1, .copy_offset = copy_offset,
+                                                     .copy_count = RECREATED_EDGE_PARAMETER_COUNT});
+        u32 parameter_offset = UINT32_MAX;
+        for (u32 index = 0; index < RECREATED_EDGE_PARAMETER_COUNT; index += 1)
+        {
+            u32 offset = machine_builder_block_parameter(&builder, (MachineBlockParameter){.virtual_register = parameters[index]});
+            parameter_offset = index == 0 ? offset : parameter_offset;
+        }
+        machine_builder_block_begin(&builder);
+        u32 first_use = UINT32_MAX;
+        for (u32 index = 0; index < RECREATED_EDGE_PARAMETER_COUNT; index += 1)
+        {
+            u32 row = machine_builder_instruction(&builder, (MachineInstruction){.opcode = store_frame,
+                .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, 2), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, parameters[index])}});
+            first_use = index == 0 ? row : first_use;
+        }
+        machine_builder_instruction(&builder, (MachineInstruction){.opcode = return_opcode});
+        machine_builder_block_end(&builder, (MachineBlock){.parameter_offset = parameter_offset, .parameter_count = RECREATED_EDGE_PARAMETER_COUNT});
+        MachineFunction function = machine_function_builder_finish(arena, &builder);
+        function.target = aarch64 ? machine_target_aarch64() : machine_target_x86_64();
+        function.immediates = arena_allocate(arena, u64, 1);
+        function.immediates[0] = 0x123456789abcull;
+        function.immediate_count = 1;
+        function.stack_slot_sizes = arena_allocate(arena, u32, RECREATED_EDGE_SLOT_COUNT);
+        function.stack_slot_alignments = arena_allocate(arena, u32, RECREATED_EDGE_SLOT_COUNT);
+        for (u32 slot = 0; slot < RECREATED_EDGE_SLOT_COUNT; slot += 1)
+        {
+            function.stack_slot_sizes[slot] = slot == 0 ? 16u : 8u;
+            function.stack_slot_alignments[slot] = 8;
+        }
+        function.stack_slot_count = RECREATED_EDGE_SLOT_COUNT;
+        function.returns_twice_absence_certified = true;
+        BUSTER_TEST(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE);
+        for (u32 mode = 0; mode < 2; mode += 1)
+        {
+            MachineStackPlacement placement =
+                mode == 0 ? machine_fast_placement_build(arena, &function) : machine_quality_placement_build(arena, &function);
+            BUSTER_TEST(arguments, placement.valid);
+            u32 temporary_spills = 0;
+            u32 temporary_reloads = 0;
+            u32 constant_location = UINT32_MAX;
+            u32 frame_location = UINT32_MAX;
+            for (u32 index = 0; index < placement.edit_count; index += 1)
+            {
+                MachineEdit edit = placement.edits[index];
+                bool at_edge = machine_point_instruction(edit.point) == terminator;
+                temporary_spills += at_edge && edit.kind == MACHINE_EDIT_TEMP_SPILL;
+                temporary_reloads += at_edge && edit.kind == MACHINE_EDIT_TEMP_RELOAD;
+                constant_location = at_edge && edit.kind == MACHINE_EDIT_REMATERIALIZE && edit.subject == 0 ? edit.location : constant_location;
+                frame_location = at_edge && edit.kind == MACHINE_EDIT_REMATERIALIZE_FRAME && edit.subject == sources[1] ? edit.location
+                                                                                                                       : frame_location;
+            }
+            String8 description = string_format(arena, S8("recreated edge sources {S8} {S8}: tile {u32}/{u32}, constant {u32}, frame {u32}"),
+                aarch64 ? S8("aarch64") : S8("x86_64"), mode == 0 ? S8("fast") : S8("quality"), temporary_spills, temporary_reloads,
+                constant_location, frame_location);
+            BUSTER_TEST_RAW(arguments, temporary_spills == 1 && temporary_reloads == 1, description);
+            BUSTER_TEST_RAW(arguments, constant_location != UINT32_MAX && frame_location != UINT32_MAX, description);
+            BUSTER_TEST_RAW(arguments, constant_location == placement.operand_registers[(u64)first_use * 4u + 1u] &&
+                                           frame_location == placement.operand_registers[(u64)(first_use + 1u) * 4u + 1u],
+                            description);
+            MachineEncodeResult encoded =
+                aarch64 ? machine_encode_aarch64(arena, &function, &placement) : machine_encode_x86_64(arena, &function, &placement);
+            BUSTER_TEST(arguments, encoded.valid);
+        }
+    }
+    return result;
+}
+
 // Large virtual sizes exercise frame arithmetic without reserving or executing
 // a large native stack. Independent boundary values distinguish u32 storage,
 // x86-64 signed displacements and AArch64's unsigned frame/footer range.
@@ -9279,6 +9401,44 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_capacity(UnitTestArg
     bool built = machine_test_debug_values_build(temporary.arena, &program, &function, &machine_function, 0, 0);
     u64 retained = temporary.arena->position - position;
     BUSTER_TEST(arguments, built && machine_function.debug_value_count == LOCAL_COUNT && retained < BUSTER_KB(8));
+
+    IrInstruction unresolved_instruction = {
+        .opcode = IR_OPCODE_CONSTANT_INTEGER,
+        .result = {.value = 0},
+        .canonical_local = IR_LOCAL_ID_INVALID,
+    };
+    IrValue unresolved_value = {.definition = {.value = 0}, .canonical_type = IR_TYPE_ID_INVALID};
+    IrBlock unresolved_block = {.first_instruction = {.value = 0}, .id = {.value = 0}};
+    IrDebugLocal unresolved_local = {.id = {.value = 0}};
+    IrFunction unresolved_function = {
+        .instructions = &unresolved_instruction,
+        .values = &unresolved_value,
+        .blocks = &unresolved_block,
+        .debug_locals = &unresolved_local,
+        .instruction_count = 1,
+        .value_count = 1,
+        .block_count = 1,
+        .local_count = 1,
+        .debug_local_count = 1,
+    };
+    MachineFunction unresolved_indexed = {0};
+    MachineFunction unresolved_dense = {0};
+    bool unresolved_indexed_built = machine_test_debug_values_build(temporary.arena, &program, &unresolved_function,
+                                                                    &unresolved_indexed, 0, 0);
+    bool unresolved_dense_built = machine_test_debug_values_build_dense(temporary.arena, &program, &unresolved_function,
+                                                                        &unresolved_dense, 0, 0);
+    BUSTER_TEST(arguments, unresolved_indexed_built && unresolved_dense_built && unresolved_indexed.debug_value_count == 1 &&
+                               unresolved_dense.debug_value_count == 1);
+    if (unresolved_indexed_built && unresolved_dense_built && unresolved_indexed.debug_value_count == 1 &&
+        unresolved_dense.debug_value_count == 1)
+    {
+        MachineDebugValue indexed_value = unresolved_indexed.debug_values[0];
+        MachineDebugValue dense_value = unresolved_dense.debug_values[0];
+        BUSTER_TEST(arguments, indexed_value.local.value == 0 && indexed_value.kind == MACHINE_DEBUG_VALUE_UNAVAILABLE &&
+                                   indexed_value.first_instruction == UINT32_MAX && dense_value.local.value == indexed_value.local.value &&
+                                   dense_value.kind == indexed_value.kind && dense_value.first_instruction == indexed_value.first_instruction &&
+                                   dense_value.instruction_count == indexed_value.instruction_count);
+    }
     scratch_end(temporary);
     return result;
 }
@@ -9924,6 +10084,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_frame_capacity);
     BUSTER_TEST_FIXTURE(arguments, machine_test_frame_storage_reuse);
     BUSTER_TEST_FIXTURE(arguments, machine_test_frame_address_rematerialization);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_recreated_edge_sources);
     BUSTER_TEST_FIXTURE(arguments, machine_test_boolean_i128_cast);
     BUSTER_TEST_FIXTURE(arguments, machine_test_i128_block_parameters);
     BUSTER_TEST_FIXTURE(arguments, machine_test_pointer_block_parameters);

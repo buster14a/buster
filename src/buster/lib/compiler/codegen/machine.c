@@ -2728,6 +2728,9 @@ struct MachineDebugFacts
 {
     MachineDebugOrigin* origins;
     u32 origin_count;
+    // First complete entry-block write to each canonical frame-local place.
+    // This is gathered while the instruction stream is already being scanned.
+    u32* local_first_store_after;
     // First IR_OPCODE_ARGUMENT result per parameter ordinal. Ordinals count
     // parameter debug locals, so the table is sized by those.
     IrValueId* argument_results;
@@ -2741,16 +2744,77 @@ struct MachineDebugFacts
     u32 reserved;
 };
 
+// A frame home is not a value until a complete write reaches it. Seed the
+// location after an entry-block store or complete register asm output; later
+// path-only initializers remain unavailable rather than exposing stack bytes.
+BUSTER_GLOBAL_LOCAL void machine_debug_facts_record_local_store(IrFunction* function, IrValueId const* local_places,
+                                                                 MachineDebugFacts* facts, IrValueId place, u32 instruction_index)
+{
+    IrInstructionId definition = place.value < function->value_count ? function->values[place.value].definition : IR_INSTRUCTION_ID_INVALID;
+    IrInstruction const* local_definition = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
+    bool local_place_definition = local_definition && local_definition->opcode == IR_OPCODE_LOCAL &&
+                                  local_definition->result.value == place.value;
+    u32 local_id = local_place_definition ? local_definition->canonical_local.value : IR_ID_UNDERLYING_INVALID;
+    bool complete_place = place.value < function->value_count && function->values[place.value].category == IR_VALUE_PLACE;
+    if (complete_place && local_id < function->local_count && local_places && local_places[local_id].value == place.value &&
+        facts->local_first_store_after[local_id] == UINT32_MAX)
+    {
+        facts->local_first_store_after[local_id] = instruction_index + 1u;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void machine_debug_local_first_stores_initialize(Arena* arena, IrFunction* function, MachineDebugFacts* facts)
+{
+    facts->local_first_store_after = arena_allocate(arena, u32, function->local_count ? function->local_count : 1u);
+    for (u32 local_index = 0; local_index < function->local_count; local_index += 1)
+    {
+        facts->local_first_store_after[local_index] = UINT32_MAX;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void machine_debug_facts_record_instruction_local_stores(IrFunction* function, IrValueId const* local_places,
+                                                                               MachineDebugFacts* facts,
+                                                                               IrInstruction const* instruction,
+                                                                               u32 instruction_index, bool in_entry)
+{
+    if (in_entry && local_places && function->values && instruction_index + 1u < function->instruction_count)
+    {
+        if ((instruction->opcode == IR_OPCODE_STORE || instruction->opcode == IR_OPCODE_ATOMIC_STORE) &&
+            instruction->operand_count == 2 && instruction->operands)
+        {
+            machine_debug_facts_record_local_store(function, local_places, facts, instruction->operands[0], instruction_index);
+        }
+        else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->operands && instruction->immediates &&
+                 instruction->operand_count == instruction->immediate_count)
+        {
+            for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+            {
+                u64 constraint = instruction->immediates[operand_index];
+                bool complete_register_output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) &&
+                                                !(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) &&
+                                                (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_R;
+                if (complete_register_output)
+                {
+                    machine_debug_facts_record_local_store(function, local_places, facts, instruction->operands[operand_index],
+                                                           instruction_index);
+                }
+            }
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL u32 machine_debug_wide_slot(u32 key, u32 mask)
 {
     return ((key * UINT32_C(2654435761)) >> 8) & mask;
 }
 
-BUSTER_GLOBAL_LOCAL void machine_debug_facts_build(Arena* arena, IrFunction* function, MachineFunction* machine_function, MachineDebugFacts* facts)
+BUSTER_GLOBAL_LOCAL void machine_debug_facts_build(Arena* arena, IrFunction* function, MachineFunction* machine_function,
+                                                    IrValueId const* local_places, MachineDebugFacts* facts)
 {
     facts->origin_count = function->value_count;
     facts->origins = arena_allocate(arena, MachineDebugOrigin, facts->origin_count ? facts->origin_count : 1u);
     memset(facts->origins, 0, sizeof(*facts->origins) * (u64)(facts->origin_count ? facts->origin_count : 1u));
+    machine_debug_local_first_stores_initialize(arena, function, facts);
     for (u32 register_index = 0; register_index < machine_function->virtual_register_count; register_index += 1)
     {
         MachineVirtualRegister const* virtual_register = machine_function->virtual_registers + register_index;
@@ -2769,9 +2833,17 @@ BUSTER_GLOBAL_LOCAL void machine_debug_facts_build(Arena* arena, IrFunction* fun
     facts->argument_results = arena_allocate(arena, IrValueId, facts->argument_count ? facts->argument_count : 1u);
     memset(facts->argument_results, 0xff, sizeof(IrValueId) * (u64)(facts->argument_count ? facts->argument_count : 1u));
     u32 wide_count = 0;
+    IrCfgBlock const* entry = function->published_cfg && function->published_cfg->blocks && function->entry.value < function->published_cfg->block_count
+                                  ? function->published_cfg->blocks + function->entry.value
+                                  : 0;
+    u64 entry_end = entry ? (u64)entry->first_instruction + entry->instruction_count : 0;
+    bool entry_range_valid = entry && entry_end <= function->instruction_count;
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
     {
         IrInstruction const* instruction = function->instructions + instruction_index;
+        bool in_entry = entry_range_valid && instruction_index >= entry->first_instruction && instruction_index < entry_end;
+        machine_debug_facts_record_instruction_local_stores(function, local_places, facts, instruction, instruction_index,
+                                                             in_entry);
         wide_count += (instruction->opcode == IR_OPCODE_LOCAL || instruction->opcode == IR_OPCODE_ARGUMENT) &&
                       instruction->result.value < function->value_count && instruction->canonical_local.value >= function->local_count &&
                       instruction->canonical_local.value != IR_ID_UNDERLYING_INVALID;
@@ -2933,7 +3005,7 @@ BUSTER_GLOBAL_LOCAL IrValueId machine_debug_local_place(IrFunction* function, Ma
                                                          IrValueId const* local_places, IrDebugLocal const* local, u32 parameter_ordinal)
 {
     IrValueId parameter_place = IR_VALUE_ID_INVALID;
-    if (local->is_parameter && function->published_cfg)
+    if (local->is_parameter && function->published_cfg && function->published_cfg->parameters)
     {
         for (u32 parameter_index = 0; parameter_index < function->published_cfg->parameter_count; parameter_index += 1)
         {
@@ -3032,7 +3104,7 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
             }
         }
         MachineDebugFacts facts = {0};
-        machine_debug_facts_build(scratch.arena, ir_function, machine_function, &facts);
+        machine_debug_facts_build(scratch.arena, ir_function, machine_function, local_places, &facts);
 
         IrValueId* debug_places = arena_allocate(scratch.arena, IrValueId, debug_count);
         memset(debug_places, 0xff, sizeof(*debug_places) * (u64)debug_count);
@@ -3054,6 +3126,10 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
                 unresolved[unresolved_count++] = debug_index;
             }
         }
+        bool published_cfg_valid = !ir_function->block_count ||
+                                   (ir_function->published_cfg && ir_function->published_cfg->blocks &&
+                                    ir_function->published_cfg->block_count == ir_function->block_count &&
+                                    (!ir_function->published_cfg->parameter_count || ir_function->published_cfg->parameters));
 
         u32 local_slot_count = 8u;
         while (local_slot_count / 2u < unresolved_count && local_slot_count < (1u << 30))
@@ -3106,7 +3182,8 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
         }
         MachineBuilderStream block_value_stream;
         machine_stream_initialize(&block_value_stream, sizeof(MachineDebugBlockValue));
-        for (u32 block_index = 0; result && unresolved_count && block_index < ir_function->block_count; block_index += 1)
+        for (u32 block_index = 0; result && published_cfg_valid && unresolved_count && block_index < ir_function->block_count;
+             block_index += 1)
         {
             IrBlock const* block = ir_function->blocks + block_index;
             IrCfgBlock const* published = ir_function->published_cfg->blocks + block_index;
@@ -3241,6 +3318,22 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
                 {
                     first = definition;
                 }
+                bool frame_local = !local->is_parameter && local->id.value < ir_function->local_count && ir_function->local_places &&
+                                   ir_function->local_places[local->id.value].value == place.value;
+                if (frame_local)
+                {
+                    u32 after_store = facts.local_first_store_after[local->id.value];
+                    if (after_store == UINT32_MAX)
+                    {
+                        values[value_count++] = (MachineDebugValue){
+                            .local = local->id,
+                            .first_instruction = UINT32_MAX,
+                            .kind = MACHINE_DEBUG_VALUE_UNAVAILABLE,
+                        };
+                        continue;
+                    }
+                    first.value = after_store;
+                }
                 u32 instruction_count = first.value < ir_function->instruction_count ? ir_function->instruction_count - first.value : 0;
                 values[value_count++] = machine_debug_value_make(program, ir_function, &facts, value_stack_slots, value_indirect_slots,
                                                                  local->id, place,
@@ -3359,7 +3452,7 @@ BUSTER_GLOBAL_LOCAL IrValueId machine_debug_local_place_dense(IrFunction* functi
                                                          u32 parameter_ordinal)
 {
     IrValueId parameter_place = IR_VALUE_ID_INVALID;
-    if (local->is_parameter && function->published_cfg)
+    if (local->is_parameter && function->published_cfg && function->published_cfg->parameters)
     {
         for (u32 parameter_index = 0; parameter_index < function->published_cfg->parameter_count; parameter_index += 1)
         {
@@ -3433,6 +3526,18 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build_dense(Arena* arena, IrProgra
     {
         IrValueId* local_places = arena_allocate(arena, IrValueId, ir_function->local_count ? ir_function->local_count : 1);
         memset(local_places, 0xff, sizeof(*local_places) * ir_function->local_count);
+        MachineDebugFacts facts = {0};
+        machine_debug_local_first_stores_initialize(arena, ir_function, &facts);
+        bool published_cfg_valid = !ir_function->block_count ||
+                                   (ir_function->published_cfg && ir_function->published_cfg->blocks &&
+                                    ir_function->published_cfg->block_count == ir_function->block_count &&
+                                    (!ir_function->published_cfg->parameter_count || ir_function->published_cfg->parameters));
+        IrCfgBlock const* entry = ir_function->published_cfg && ir_function->published_cfg->blocks &&
+                                          ir_function->entry.value < ir_function->published_cfg->block_count
+                                      ? ir_function->published_cfg->blocks + ir_function->entry.value
+                                      : 0;
+        u64 entry_end = entry ? (u64)entry->first_instruction + entry->instruction_count : 0;
+        bool entry_range_valid = entry && entry_end <= ir_function->instruction_count;
         for (u32 instruction_index = 0; instruction_index < ir_function->instruction_count; instruction_index += 1)
         {
             IrInstruction* instruction = ir_function->instructions + instruction_index;
@@ -3441,6 +3546,9 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build_dense(Arena* arena, IrProgra
             {
                 local_places[instruction->canonical_local.value] = instruction->result;
             }
+            bool in_entry = entry_range_valid && instruction_index >= entry->first_instruction && instruction_index < entry_end;
+            machine_debug_facts_record_instruction_local_stores(ir_function, local_places, &facts, instruction, instruction_index,
+                                                                 in_entry);
         }
         u32 parameter_ordinal = 0;
         for (u32 debug_index = 0; result && debug_index < ir_function->debug_local_count; debug_index += 1)
@@ -3455,7 +3563,7 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build_dense(Arena* arena, IrProgra
             u64 local_capacity = place.value != IR_ID_UNDERLYING_INVALID;
             if (!local_capacity)
             {
-                for (u32 block_index = 0; block_index < ir_function->block_count; block_index += 1)
+                for (u32 block_index = 0; published_cfg_valid && block_index < ir_function->block_count; block_index += 1)
                 {
                     IrCfgBlock const* published = ir_function->published_cfg->blocks + block_index;
                     IrValueId value = machine_debug_block_value(ir_function, local, block_index);
@@ -3491,6 +3599,22 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build_dense(Arena* arena, IrProgra
                 {
                     first = definition;
                 }
+                bool frame_local = !local->is_parameter && local->id.value < ir_function->local_count && ir_function->local_places &&
+                                   ir_function->local_places[local->id.value].value == place.value;
+                if (frame_local)
+                {
+                    u32 after_store = facts.local_first_store_after[local->id.value];
+                    if (after_store == UINT32_MAX)
+                    {
+                        values[value_count++] = (MachineDebugValue){
+                            .local = local->id,
+                            .first_instruction = UINT32_MAX,
+                            .kind = MACHINE_DEBUG_VALUE_UNAVAILABLE,
+                        };
+                        continue;
+                    }
+                    first.value = after_store;
+                }
                 u32 instruction_count = first.value < ir_function->instruction_count ? ir_function->instruction_count - first.value : 0;
                 values[value_count++] = machine_debug_value_make_dense(program, ir_function, machine_function, value_stack_slots,
                                                                  value_indirect_slots, local->id, place,
@@ -3500,7 +3624,7 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build_dense(Arena* arena, IrProgra
             }
             else
             {
-                for (u32 block_index = 0; block_index < ir_function->block_count; block_index += 1)
+                for (u32 block_index = 0; published_cfg_valid && block_index < ir_function->block_count; block_index += 1)
                 {
                     IrBlock* block = ir_function->blocks + block_index;
                     IrCfgBlock const* published = ir_function->published_cfg->blocks + block_index;

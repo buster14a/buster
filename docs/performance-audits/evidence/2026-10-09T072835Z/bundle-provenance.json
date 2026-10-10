@@ -1,0 +1,19 @@
+{
+  "H_release_source_binding": "H7c75-release-provenance.json records hosted merge checkout 646d with parents H/base; root verified the merge tree equals H. This was not a literal H checkout or the full 182-row physical profile.",
+  "VA_correction_binding": "VA-correction-provenance.json and VA-source-binding.json retain db062 identity and Clang 21 captures with exact distinctions among precommit+dirty executions, console-only build/runtime, empty success logs, and unavailable NullPointerArithm checker failure. Review is pending.",
+  "copy_method": "Byte-for-byte copy verified before archive creation; tar.xz is lossless; each payload member is verified against manifest size and SHA-256.",
+  "created_utc": "2026-10-09T07:25:59.839761+00:00",
+  "first_attempt_handling": "The first-attempt external identity record is included; first physical ZIP is excluded because immutable first-attempt audit already holds it.",
+  "inputs": [
+    "inputs/pre-campaign",
+    "inputs/second-failed",
+    "inputs/H7c75-linux-release",
+    "inputs/va-correction-clang21"
+  ],
+  "license_status": "Second-failed provenance contains a bounded review of existing candidate-H notice/README files; it does not assert a project-wide license or exhaustive legal conclusion.",
+  "omissions": "No first physical ZIP, runner binaries, full build directory, source snapshots, host actions, or repository mutations.",
+  "purpose": "Lossless evidence set for eventual #3130 audit: all supplied pre-campaign captures, the second failed full 9700X attempt, the H-associated Linux Release job, and available #3168 VA-correction captures.",
+  "route_and_full_attempt": "Pre-campaign includes request, authorization and TCC logs; second-failed includes original second-attempt ZIP, hosted logs, inventory, external identity and independent facts.",
+  "schema": "buster-3130-evidence-bundle-provenance-v1",
+  "status": "preparation candidate including available VA-correction captures; not a final repository audit. This candidate supersedes preparation 20261009T072418Z after a wording correction in the second-failed audit."
+}

@@ -2158,6 +2158,10 @@ BUSTER_C_SHARED CRecordLayoutRule c_record_layout_rule(Target target)
                                                             : C_RECORD_LAYOUT_ITANIUM;
 }
 
+// The object-size limit of a 32-bit target, the narrowest target_data_layout
+// gives; c_parse_type_layout_core compares against it before asking the target.
+#define C_PARSE_OBJECT_SIZE_LIMIT_FLOOR UINT32_MAX
+
 // Object byte sizes must fit the target size_t and the shared u64 bit-size
 // representation. The 61-bit cap also matches Clang's constant-array limit
 // (ConstantArrayType::getMaxSizeBits); it is not a PTRDIFF_MAX rule.
@@ -4697,7 +4701,17 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
 BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                              CTypeId requested, u64* size_out, u32* alignment_out, u32 offset_member, u64* offset_out)
 {
-    return c_parse_type_layout_solve(machine, arena, preprocess, result, requested, size_out, alignment_out, offset_member, offset_out, 0, true);
+    bool answered = c_parse_type_layout_solve(machine, arena, preprocess, result, requested, size_out, alignment_out, offset_member, offset_out, 0, true);
+    // Count answers past the target object-size limit for the static-assertion
+    // check (CObjectSizeFacts). target_data_layout gives pointers of 32 or 64
+    // bits, so no limit is below C_PARSE_OBJECT_SIZE_LIMIT_FLOOR and an
+    // ordinary answer costs one comparison.
+    if (answered && *size_out > C_PARSE_OBJECT_SIZE_LIMIT_FLOOR && result->object_size_facts &&
+        *size_out > c_array_object_size_limit(target_data_layout(preprocess.target).pointer.bit_width))
+    {
+        result->object_size_facts->oversized_layouts += 1;
+    }
+    return answered;
 }
 
 BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
@@ -6155,7 +6169,7 @@ BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind(CTypeKind kind)
     return kind;
 }
 
-BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind_with_width(Target target, CTypeKind kind, u32 bit_field_width)
+BUSTER_C_SHARED CTypeKind c_parse_expression_promoted_kind_with_width(Target target, CTypeKind kind, u32 bit_field_width)
 {
     kind = c_parse_expression_promoted_kind(kind);
     if (bit_field_width && c_parse_expression_integer_kind(kind))
@@ -6173,7 +6187,7 @@ BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind_with_width(Target t
 // Integer operations use the compatible type of an enum, never an implicit
 // signed-int default after completion. Qualified forward uses resolve through
 // their original tag, whose compatible type may have been selected later.
-BUSTER_C_INTERNAL CTypeKind c_parse_expression_value_kind(CParseResult* result, CTypeId id)
+BUSTER_C_SHARED CTypeKind c_parse_expression_value_kind(CParseResult* result, CTypeId id)
 {
     CTypeKind kind = C_TYPE_INVALID;
     if (id.value < result->type_count)
@@ -6263,8 +6277,8 @@ BUSTER_C_SHARED bool c_parse_pending_enum_possible(CParseResult const* result)
     return possible;
 }
 
-BUSTER_C_INTERNAL CTypeId c_parse_expression_arithmetic_type(CParseResult* result, Target target, CTypeId left_id, CTypeId right_id,
-                                                                u32 left_bit_field_width, u32 right_bit_field_width)
+BUSTER_C_SHARED CTypeId c_parse_expression_arithmetic_type(CParseResult* result, Target target, CTypeId left_id, CTypeId right_id,
+                                                              u32 left_bit_field_width, u32 right_bit_field_width)
 {
     CTypeId type;
     if (left_id.value >= result->type_count || right_id.value >= result->type_count)
@@ -6324,7 +6338,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_token_ends_operand(CToken token)
            c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS);
 }
 
-BUSTER_C_INTERNAL u32 c_parse_expression_operator_precedence(CToken token)
+BUSTER_C_SHARED u32 c_parse_expression_operator_precedence(CToken token)
 {
     if (c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
     {
@@ -6695,7 +6709,7 @@ BUSTER_C_INTERNAL u32 c_parse_expression_bit_field_width(Arena* arena, CPreproce
 BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
                                                                 CTypeId left, CTypeId right, u32 left_start, u32 left_end, u32 right_start, u32 right_end);
 
-BUSTER_C_INTERNAL bool c_parse_expression_real_kind(CTypeKind kind)
+BUSTER_C_SHARED bool c_parse_expression_real_kind(CTypeKind kind)
 {
     bool result = c_parse_expression_integer_kind(kind) || kind == C_TYPE_FLOAT16 || kind == C_TYPE_BFLOAT16 || kind == C_TYPE_FLOAT ||
                   kind == C_TYPE_DOUBLE || kind == C_TYPE_LONG_DOUBLE;
@@ -6716,7 +6730,7 @@ BUSTER_C_INTERNAL String8 c_parse_invalid_unary_operand_message(CParseResult* re
     return message;
 }
 
-BUSTER_C_INTERNAL String8 c_parse_scalar_conversion_message(Target target, CTypeKind to, CTypeKind from, bool runtime)
+BUSTER_C_SHARED String8 c_parse_scalar_conversion_message(Target target, CTypeKind to, CTypeKind from, bool runtime)
 {
     String8 message = {0};
     bool source_pointer = from == C_TYPE_POINTER || from == C_TYPE_ARRAY || from == C_TYPE_FUNCTION;
@@ -9485,6 +9499,12 @@ BUSTER_C_INTERNAL String8 c_parse_constant_expression_syntax_error(CTypeParseMac
     return message;
 }
 
+// Oversized layout answers so far; an assertion compares it around its fold.
+BUSTER_C_INTERNAL u64 c_parse_oversized_layout_count(CParseResult* result)
+{
+    return result->object_size_facts ? result->object_size_facts->oversized_layouts : 0;
+}
+
 BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                      CDeclaration declaration, CScopeId scope)
 {
@@ -9528,6 +9548,7 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
     if (!syntax_error.length && !deferred)
     {
         CToken first = preprocess.tokens[declaration.token_start];
+        u64 oversized_before = c_parse_oversized_layout_count(result);
         bool expression_is_integer = true;
         u32 expression_start = 0;
         u32 expression_end = 0;
@@ -9571,15 +9592,21 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
         {
             c_parse_defer_static_assert(preprocess, result, declaration, scope);
         }
-        else if (!evaluated)
+        else if (!evaluated || !value)
         {
-            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
-                               c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT));
-        }
-        else if (!value)
-        {
-            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
-                               c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_FAILED));
+            // An assertion that measured an oversized type folded a value from
+            // its saturated size; the size error stands for it. Any diagnostic
+            // gates the size validation that reports that error, so ask for it.
+            if (result->object_size_facts)
+            {
+                result->object_size_facts->validation_requested = true;
+            }
+            if (c_parse_oversized_layout_count(result) == oversized_before)
+            {
+                CDiagnosticKind kind = evaluated ? C_DIAGNOSTIC_STATIC_ASSERT_FAILED : C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT;
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), kind,
+                                   c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, kind));
+            }
         }
     }
     return;
@@ -23538,7 +23565,7 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_list_parameter_declarations(CType
                                    S8("old-style parameter declaration permits only the register storage class"));
                 continue;
             }
-            CType* parameter_type = entity->type.value < result->type_count ? result->types + entity->type.value : 0;
+            CType* parameter_type = result->types && entity->type.value < result->type_count ? result->types + entity->type.value : 0;
             if (!parameter_type || parameter_type->kind == C_TYPE_VOID)
             {
                 c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, entity->location), C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
@@ -31856,18 +31883,22 @@ BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* m
         u32 start = 0;
         u32 end = 0;
         u64 mark = machine->scratch_arena->position;
+        u64 oversized_before = c_parse_oversized_layout_count(result);
         CParseConstant value = {.type = C_TYPE_ID_INVALID};
         if (c_parse_static_assert_expression_range(preprocess, declaration, &start, &end))
         {
             value = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, assertion.scope, start, end);
         }
         arena_set_position(machine->scratch_arena, mark);
-        if (!value.valid)
+        // This assertion measured an oversized type; the size validation
+        // around this pass reports it (see c_parse_static_assert_check).
+        bool size_reported = c_parse_oversized_layout_count(result) != oversized_before;
+        if (!size_reported && !value.valid)
         {
             c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, assertion.location), C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
                                c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT));
         }
-        else if (value.is_float || !c_parse_constant_truth(value))
+        else if (!size_reported && (value.is_float || !c_parse_constant_truth(value)))
         {
             c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, assertion.location), C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
                                c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_FAILED));
@@ -35005,6 +35036,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     result.string_literals = c_string_literal_memo_create(arena, preprocess.tokens);
     result.type_layout_statistics = arena_allocate(arena, CTypeLayoutStatistics, 1);
     *result.type_layout_statistics = (CTypeLayoutStatistics){0};
+    result.object_size_facts = arena_allocate(arena, CObjectSizeFacts, 1);
+    *result.object_size_facts = (CObjectSizeFacts){0};
     result.member_lookup = arena_allocate(arena, CMemberLookup, 1);
     *result.member_lookup = (CMemberLookup){0};
     result.identifier_uses = arena_allocate(arena, CIdentifierUse, result.identifier_use_capacity);
@@ -35673,6 +35706,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     };
     c_parse_validate_unattached_cleanup_attributes(&result, preprocess);
     c_parse_validate_bfloat16_builtin_calls(&machine, arena, &result, preprocess);
+    bool object_sizes_validated = false;
     if (validate_lowering_constraints)
     {
         c_parse_index_scope_children(&result, arena);
@@ -35682,7 +35716,17 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         c_parse_validate_integer_transform_calls(&machine, &result, preprocess);
         c_parse_validate_vendor_builtin_calls(&machine, &result, preprocess);
         if (!result.diagnostic_count)
+        {
             c_parse_validate_lowering_constraints(&machine, arena, &result, preprocess);
+            object_sizes_validated = true;
+        }
+    }
+    // A failing static assertion gated the lowering constraints, which hold
+    // the size validation it asked for (CObjectSizeFacts): one pass here
+    // reports every oversized type, before or after it, once.
+    if (!object_sizes_validated && result.object_size_facts->validation_requested)
+    {
+        c_parse_validate_array_object_sizes(&machine, &result, preprocess, 0);
     }
     // Preserve declaration-point width reports when another early diagnostic
     // gates the ordinary member-constraint pass. This publishes only retained
