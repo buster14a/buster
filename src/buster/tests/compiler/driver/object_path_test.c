@@ -1831,7 +1831,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_semantic_tests(UnitTestAr
             {S8("ifunc"), S8("static int implementation(int x) { return x * 3; }\n"
                 "static int (*resolve_scale(void))(int) { return implementation; }\n"
                 "int scale(int) __attribute__((ifunc(\"resolve_scale\")));\n"
-                "int main(void) { return scale(7) != 21; }\n"), S8("unsupported ELF symbol scale (type 10)")},
+                "int main(void) { return scale(7) != 21; }\n"), {0}},
             {S8("ctors"), S8("static int ran; static void hook(void) { ran = 1; }\n"
                 "__attribute__((section(\".ctors\"), used)) static void (*entry)(void) = hook;\n"
                 "int main(void) { return ran != 1; }\n"), S8("unsupported ELF section .ctors (type 1)")},
@@ -1921,13 +1921,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_semantic_tests(UnitTestAr
                     BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && compiled.error == COMPILER_DRIVER_ERROR_NONE);
                     if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
                 }
-                if (index == 0)
+                // An IFUNC-only member is selected from an archive and still
+                // resolves through its resolver (issue 1243).
+                String8 member_source = string_format_z(arena, S8("{S8}/ifunc-member.c"), root);
+                String8 member_object = string_format_z(arena, S8("{S8}/ifunc-member.o"), root);
+                String8 member_compile[] = {S8("-O2"), S8("-fno-pie"), S8("-c"), member_source, S8("-o"), member_object};
+                bool member_produced = index == 0 &&
+                    file_write(member_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("static int implementation(int x) { return x * 3; }\n"
+                        "static int (*resolve_scale(void))(int) { return implementation; }\n"
+                        "int scale(int) __attribute__((ifunc(\"resolve_scale\")));\n"))) &&
+                    compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(member_compile));
+                if (index == 0) BUSTER_TEST(arguments, member_produced);
+                if (member_produced)
                 {
-                    ByteSlice member = file_read(arena, object, (FileReadOptions){0});
+                    ByteSlice member = file_read(arena, member_object, (FileReadOptions){0});
                     ByteSlice archive_bytes = compiler_driver_elf_semantic_archive(arena, member);
                     ObjectArchive eager = object_archive_read(arena, archive_bytes, target_native);
-                    BUSTER_TEST(arguments, eager.error == OBJECT_ERROR_UNSUPPORTED_TARGET && eager.failed_member == 0);
-                    BUSTER_STRING_TEST(arguments, eager.diagnostic, S8("member semantic.o: unsupported ELF symbol scale (type 10)"));
+                    BUSTER_TEST(arguments, eager.error == OBJECT_ERROR_NONE && eager.object_count == 1);
                     ObjectArchive lazy = object_archive_read_link(arena, archive_bytes, target_native);
                     BUSTER_TEST(arguments, lazy.error == OBJECT_ERROR_NONE && lazy.object_count == 1);
                     String8 archive = string_format_z(arena, S8("{S8}/ifunc.a"), root);
@@ -1942,21 +1952,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_semantic_tests(UnitTestAr
                         String8 link[] = {S8("-no-pie"), caller, archive, S8("-o"), image};
                         invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link));
                         CompilerDriverResult archived = compiler_driver_execute_invocation(arena, invocation);
-                        if (selected)
-                        {
-                            BUSTER_TEST(arguments, archived.error == COMPILER_DRIVER_ERROR_OBJECT && archived.object_error == OBJECT_ERROR_UNSUPPORTED_TARGET);
-                            String8 cpu = cpu_arch_to_string_os(target_native.cpu_arch);
-                            String8 os = operating_system_to_string_os(target_native.os);
-                            BUSTER_STRING_TEST(arguments, archived.diagnostic, string_format(arena,
-                                S8("could not read archive {S8}: selected member semantic.o ({S8}-{S8}) for {S8}-{S8}: unsupported ELF symbol scale (type 10); error {u32}"),
-                                archive, cpu, os, cpu, os, (u32)OBJECT_ERROR_UNSUPPORTED_TARGET));
-                            BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(image));
-                        }
-                        else
-                        {
-                            BUSTER_TEST(arguments, archived.error == COMPILER_DRIVER_ERROR_NONE);
-                            if (archived.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, image));
-                        }
+                        BUSTER_TEST(arguments, archived.error == COMPILER_DRIVER_ERROR_NONE);
+                        if (archived.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, image));
                     }
                 }
             }
@@ -2186,6 +2183,134 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_preinit_tests(UnitTestArg
     }
     return result;
 }
+
+// Issue 1243: a GNU IFUNC from a host-compiled object resolves through its
+// resolver, exactly once, and every reference -- calls from either object, a
+// local function pointer, a pointer in initialized data and one taken inside
+// the defining object -- sees one address. The resolver returns a different
+// function on any later call, so a second call or a direct call of the
+// resolver changes the result. Both link orders are linked by this linker, as
+// a static image (no libc reference) and a dynamic one, `-pie` on x86-64, and
+// against the host linker as the oracle. On x86-64 the defining object is
+// also linked `-shared` by this linker and loaded by a host-linked program.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_ifunc_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 compiler = S8(BUSTER_HOST_C_COMPILER_ID);
+    bool supported = string_equal(compiler, S8("GNU")) || string_equal(compiler, S8("Clang"));
+    if (supported)
+    {
+        String8 root = buster_test_temporary_path(arena, S8("buster-elf-ifunc"), S8(""));
+        OsDirectoryCreateResult created = os_make_directory(root);
+        BUSTER_TEST(arguments, created.error.v == 0);
+        String8 library_source = string_format_z(arena, S8("{S8}/scale.c"), root);
+        String8 library_object = string_format_z(arena, S8("{S8}/scale.o"), root);
+        String8 shared_object = string_format_z(arena, S8("{S8}/scale-pic.o"), root);
+        BUSTER_TEST(arguments, file_write(library_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "static int twice(int x) { return x * 2; }\n"
+            "static int thrice(int x) { return x * 3; }\n"
+            "static int resolutions;\n"
+            "static int (*resolve_scale(void))(int) { resolutions += 1; return resolutions == 1 ? thrice : twice; }\n"
+            "int scale(int) __attribute__((ifunc(\"resolve_scale\")));\n"
+            "int (*library_pointer(void))(int) { return scale; }\n"
+            "int library_call(int x) { return scale(x); }\n"))));
+        String8 mains[] = {S8("static"), S8("dynamic")};
+        // The dynamic program differs only in the libc call that makes the image dynamic.
+        String8 main_programs[] = {
+            S8("int scale(int);\n"
+               "int (*library_pointer(void))(int);\n"
+               "int library_call(int);\n"
+               "int (*volatile data_pointer)(int) = scale;\n"
+               "int main(void)\n"
+               "{\n"
+               "    int (*local)(int) = scale;\n"
+               "    int ok = scale(7) == 21 && library_call(7) == 21 && local(7) == 21 && data_pointer(7) == 21 &&\n"
+               "             local == library_pointer() && local == data_pointer;\n"
+               "    return !ok;\n"
+               "}\n"),
+            S8("int puts(const char *);\n"
+               "int scale(int);\n"
+               "int (*library_pointer(void))(int);\n"
+               "int library_call(int);\n"
+               "int (*volatile data_pointer)(int) = scale;\n"
+               "int main(void)\n"
+               "{\n"
+               "    int (*local)(int) = scale;\n"
+               "    int ok = scale(7) == 21 && library_call(7) == 21 && local(7) == 21 && data_pointer(7) == 21 &&\n"
+               "             local == library_pointer() && local == data_pointer;\n"
+               "    puts(ok ? \"ifunc ok\" : \"ifunc wrong\");\n"
+               "    return !ok;\n"
+               "}\n"),
+        };
+        String8 main_sources[2];
+        String8 main_objects[2];
+        for (u32 index = 0; index < 2; index += 1)
+        {
+            main_sources[index] = string_format_z(arena, S8("{S8}/main-{S8}.c"), root, mains[index]);
+            main_objects[index] = string_format_z(arena, S8("{S8}/main-{S8}.o"), root, mains[index]);
+            BUSTER_TEST(arguments, file_write(main_sources[index], BUSTER_SLICE_TO_BYTE_SLICE(main_programs[index])));
+        }
+        String8 library_compile[] = {S8("-w"), S8("-O2"), S8("-fPIE"), S8("-c"), library_source, S8("-o"), library_object};
+        String8 shared_compile[] = {S8("-w"), S8("-O2"), S8("-fPIC"), S8("-c"), library_source, S8("-o"), shared_object};
+        bool produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(library_compile)) &&
+                        compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(shared_compile));
+        for (u32 index = 0; produced && index < 2; index += 1)
+        {
+            String8 main_compile[] = {S8("-w"), S8("-O2"), S8("-fPIE"), S8("-c"), main_sources[index], S8("-o"), main_objects[index]};
+            produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(main_compile));
+        }
+        BUSTER_TEST(arguments, produced);
+#if BUSTER_CPU_ARCH_X86_64
+        String8 kinds[] = {S8("-no-pie"), S8("-pie")};
+#else
+        String8 kinds[] = {S8("-no-pie")};
+#endif
+        for (u32 index = 0; produced && index < 2; index += 1)
+        {
+            String8 oracle = string_format_z(arena, S8("{S8}/{S8}-oracle"), root, mains[index]);
+            String8 host_link[] = {S8("-no-pie"), main_objects[index], library_object, S8("-o"), oracle};
+            bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
+            BUSTER_TEST(arguments, linked);
+            if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, oracle));
+            for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+            {
+                for (u32 order = 0; order < 2; order += 1)
+                {
+                    String8 output = string_format_z(arena, S8("{S8}/{S8}{S8}-{u32}-buster"), root, mains[index], kinds[kind], order);
+                    String8 first = order ? library_object : main_objects[index];
+                    String8 second = order ? main_objects[index] : library_object;
+                    String8 command[] = {kinds[kind], first, second, S8("-o"), output};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
+                }
+            }
+        }
+#if BUSTER_CPU_ARCH_X86_64
+        if (produced)
+        {
+            // The runner is the shared object's first DT_INIT_ARRAY entry,
+            // and the exported name is the thunk the host program binds to.
+            String8 library = string_format_z(arena, S8("{S8}/libbusterifunc.so"), root);
+            String8 shared_command[] = {S8("-shared"), shared_object, S8("-o"), library};
+            CompilerDriverResult shared = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(shared_command)));
+            BUSTER_TEST(arguments, shared.error == COMPILER_DRIVER_ERROR_NONE);
+            String8 consumer = string_format_z(arena, S8("{S8}/shared-consumer"), root);
+            String8 library_directory = string_format_z(arena, S8("-L{S8}"), root);
+            String8 host_link[] = {main_objects[1], library_directory, S8("-lbusterifunc"), S8("-o"), consumer};
+            bool linked = shared.error == COMPILER_DRIVER_ERROR_NONE &&
+                          compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
+            BUSTER_TEST(arguments, linked);
+            if (linked) BUSTER_TEST(arguments, compiler_driver_tls_export_run(arguments, consumer, root));
+        }
+#endif
+        BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+    return result;
+}
 #endif
 
 #if !BUSTER_ANDROID && !BUSTER_IOS
@@ -2341,6 +2466,7 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
 #if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_semantic_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_preinit_tests);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_ifunc_tests);
 #endif
 #if BUSTER_ANDROID || BUSTER_IOS
     BUSTER_UNUSED(arguments);

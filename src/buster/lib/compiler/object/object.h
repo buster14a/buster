@@ -347,6 +347,11 @@ struct ObjectSymbol
     // underscore itself, so the driver strips it, or sets this when the
     // source name had none, and the writer emits the bytes unchanged.
     bool final_name;
+    // An ELF STT_GNU_IFUNC definition: `value` is the resolver, and a
+    // reference wants the function the resolver returns. Only the ELF reader
+    // sets it, and link_elf_indirect_functions_rebind replaces every such
+    // symbol before an image writer runs, so no writer sees one.
+    bool indirect;
 };
 
 typedef struct ObjectRelocation ObjectRelocation;
