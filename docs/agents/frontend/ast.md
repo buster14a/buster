@@ -8,11 +8,13 @@ appends a complete syntax tree as it goes. The tree covers declarations and
 declarators, statements, expressions, initializers and designators,
 attributes, assembly and the supported GNU/C23 forms, function bodies
 included. **Status: pilot.** The default pipeline does not build it. The
-opt-in [driver hook](#driver-pilot-hook) builds it, and two consumers read it:
+opt-in [driver hook](#driver-pilot-hook) builds it, and three consumers read it:
 - the [declaration split](#declaration-split-from-the-tree) publishes
   `c_parse_ast`'s top-level records from its declaration nodes;
 - the [tree expression typer](#tree-expression-typer) answers function-body
-  and file-scope initializer expression-type queries during semantic analysis.
+  and file-scope initializer expression-type queries during semantic analysis;
+- the [statement plan](#statement-plan-from-the-tree) gives the body binder
+  each function body's statement boundaries and block declaration ends.
 
 Otherwise `c_analyze_semantics_only` and `c_lower_to_ir_with_options` still
 rediscover syntax from token ranges, as described in the
@@ -274,7 +276,8 @@ which the unit releases when it ends. The driver then takes the unit's
 declaration records from `c_parse_ast_from_tree` in place of `c_parse_ast`
 ([declaration split](#declaration-split-from-the-tree)), and hands the tree to
 semantic analysis in `CParserResult.ast`, where the
-[tree expression typer](#tree-expression-typer) reads it; nothing else does.
+[tree expression typer](#tree-expression-typer) and the body binder's
+[statement plan](#statement-plan-from-the-tree) read it; nothing else does.
 With it the driver sets `CParserResult.type_interning`, which the typer's
 answers for casts and `&` need ([interned rows](#interned-rows)). The object,
 every diagnostic and every later stage are unchanged. The driver has no phase arena to lend (`c_preprocess` is not
@@ -283,7 +286,7 @@ not complete fails the unit with the parse error class; its diagnostic is
 published exactly as a `c_parse_ast` diagnostic is. `-E` and assembly inputs
 never reach the hook.
 
-Under `-v` the driver prints four rows with the other verbose counters:
+Under `-v` the driver prints five rows with the other verbose counters:
 
 - `C_AST nodes=<n> tokens=<parser tokens> build_ns=<c_ast_build wall time>
   retained_bytes=<> transient_high_water=<> column_copy_bytes=<>
@@ -303,9 +306,18 @@ Under `-v` the driver prints four rows with the other verbose counters:
   published> fallbacks=<units it handed to c_parse_ast's walker>
   reason=<CParserTreeFallback of the last fallback> fallback_token=<the first
   token of the declaration that caused it>`
+- `C_AST_STATEMENTS bodies=<function bodies whose plan the binder followed>
+  segments=<plain segments it bound in one pass> segment_tokens=<their tokens>
+  uses=<identifier uses they bound> bails=<segments it handed back to the
+  token loop partway> declaration_hints=<block declarations whose end the plan
+  gave> loop_hints=<for statements whose boundaries the plan gave>
+  declines=<statements the plan left to the token loop> fallbacks=<bodies left
+  wholly to the token loop> reason=<CAstStatementFallback of the last
+  fallback> fallback_token=<that body's `{`>`
 
-The second row's passes run only under `-v`; they are diagnostic. The third
-and fourth rows count what the typer and the split did; they time nothing. Each feeds a
+The second row's passes run only under `-v`; they are diagnostic. The third,
+fourth and fifth rows count what the typer, the split and the statement plan
+did; they time nothing. Each feeds a
 counter that is printed (`walk_steps`, `scan_calls`, `child_entries`), so the
 compiler cannot drop the measured loop. Both rows use the driver's own clock
 and are summed over the inputs of one invocation; the layout is the
@@ -618,6 +630,78 @@ and 33 body assertions, with no fallback. The fixtures that fall back are the
 parenthesized specifiers, the fixed-type enums and a few attributed or
 redundant declarators.
 
+## Statement plan from the tree
+
+The body binder (`c_parse_bind_function_body` in `c_parse.c`) walks each
+function body token by token: `c_parse_bind_block_statements` opens and closes
+scopes, finds where each block declaration ends and hands it to
+`c_parse_local_declarations`, finds a `for` header's first `;`, its `)` and
+the loop's end (`c_parse_statement_end`), and binds every identifier use.
+Under `-fc-ast-pilot` it follows the body's **statement plan**
+(`c_parse_statement_plan_build`), read from the tree's `COMPOUND_STATEMENT`
+items before the walk. The token loop stays the engine and the authority; at
+given tokens the plan tells it what it would otherwise scan for:
+
+- **Segments.** An expression, `return`, `goto`, `break`, `continue` or null
+  statement, an `if`, `while` or `switch` header, a `case` or `default` label,
+  a do-while tail, a `for` header after its first clause, and an `else` or
+  `do` keyword, when its subtree holds only plain syntax: expressions, and
+  type names without a member or enumerator list, braces or attributes.
+  Adjacent segments merge. The loop binds a segment's identifiers in one pass
+  (`c_parse_bind_plan_segment`) with its own predicates: the type-start probe
+  at a statement start, the label test and the use filter. Nothing in a
+  segment can open a scope, declare, or reach any other path of the loop, so
+  the loop's per-token chain of tests (attributes, asm ranges, aggregate
+  definitions, braces, `for`) is skipped. A segment is handed back to the loop
+  at the token where the loop would leave plain expression handling: a type
+  start, which the loop reads as a declaration, or `__builtin_offsetof`. One
+  is not entered while a state the plan cannot see reaches into it: a pending
+  GNU typeof declaration, a live asm range, an attribute resume point, or the
+  end of a statement scope.
+- **Declaration hints.** A block `DECLARATION` gives its `;`, so the loop's
+  scan for it and its search for a GNU typeof statement expression are
+  skipped. `c_parse_local_declarations` still reads the declaration from its
+  tokens; that is the next row's declarator machine.
+- **Loop hints.** A `FOR` gives its header's first `;` and `)` and one past
+  its body, in place of the loop's scans and `c_parse_statement_end`.
+
+Every boundary comes from node anchors and is checked against the token the
+grammar puts there:
+- an expression statement's anchor is its `;`, and its first token is the
+  least anchor of its expression, widened over wrapping parentheses (the token
+  before a statement ends the previous one and is never `(`);
+- an expression's last token is the greatest anchor on its rightmost chain
+  (children come in source order and a node's last child is the node before
+  it), followed only by closers, then the `;`, `:` or `)` the statement needs;
+- a declaration's or `return`'s `;` is found that way only when its subtree
+  holds no member list, enumerator list or statement expression, whose own
+  `;` could come first;
+- a statement's last token follows the last-child chain through compound
+  statements (each adds its `}`) and the statements that end in a
+  sub-statement, memoized per node so nested statements share one descent.
+
+A statement whose rule cannot state its boundaries, and every label, asm
+statement, attributed statement, static assertion, nested function and
+statement whose subtree is not plain, gets no entry, and the loop reads it as
+it always has. A token the grammar fixes next to an anchor that is not that
+token sends the whole body to the loop, as does a body the tree does not have;
+`CAstStatementFallback` names the two cases (`tokens`, `input`). The plan is
+built by one preorder walk over statements on an explicit stack, so entries
+come out in token order; each expression is scanned once, by the statement
+that owns it. The loop consumes them with one cursor, through a single
+next-event test that replaces its pending-typeof test, so a walk without a
+plan does the same work per token as before.
+
+The scopes, entities, identifier uses and diagnostics are the loop's own,
+because the plan only skips work whose outcome it states: the
+[corpus differential](#corpus-differential) compares every identifier use,
+the per-token use map, every scope and every entity of the analysis with the
+plan against the analysis without the tree. `c_ast_test_statements` runs one
+body that takes every kind of entry, one whose statements the plan leaves to
+the loop (with an `__builtin_offsetof` bail), and one tampered tree per
+fallback reason, in every layout. On the self-host unity input every body
+follows its plan, with no fallback and no bail.
+
 ## Corpus differential
 
 `c_ast_test_corpus` (`c_ast_tests`; like `c_test.c`'s fixture suites it does not run on Android or iOS, whose test runs carry no repository tree) builds every `tests/**/*.c` file the
@@ -659,7 +743,14 @@ also checks the [tree expression typer](#tree-expression-typer)
 (`c_ast_corpus_types`). Semantic analysis runs three times on it: without the
 tree, with it, and with it in verify mode (`c_test_ast_type_verify_set`), where
 the type machine also answers every query the tree answered. The first two
-runs must end with the same diagnostics and the same type-table sizes. Every
+runs must end with the same diagnostics and the same type-table sizes. The
+second run also follows the [statement plans](#statement-plan-from-the-tree),
+so the two must also bind alike, field by field
+(`c_ast_corpus_bindings_differ`): every identifier use in order (token, entity,
+scope), the per-token use map, every scope and every entity. There are floors
+on the segments the plans bound and the uses in them: about 6,800 segments and
+25,700 uses from the fixtures, and about 34,300 and 129,400 with the frontend
+sources. No corpus body falls back. Every
 tree answer must match the machine's in validity, structural type, constraint,
 nonplace fact, diagnostics and table growth; a replayed answer's rows are
 taken back after the replay, and the machine must append the same rows again.
@@ -687,7 +778,7 @@ differential tests pass.
 | Current owner | Rediscovers | Tree replacement | Status |
 |---|---|---|---|
 | `c_parse_ast_run`, `c_parser_parse_function_body`, `c_parser_parse_declaration_expression` | declaration split, declarator name, body range, static-assert ranges | `DECLARATION`, `FUNCTION_DEFINITION`, `INIT_DECLARATOR`, `STATIC_ASSERT` | Retired under `-fc-ast-pilot` by the [declaration split](#declaration-split-from-the-tree). The walker stays the default path and the per-unit fallback. |
-| `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Not migrated. |
+| `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, and plain segments bound in one pass. The token loop stays the engine, the default path and the per-body fallback; `c_parse_local_declarations` still reads each declaration's declarators from tokens (next row), and the switch and control-statement validators still call `c_parse_statement_end`. |
 | `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Not migrated. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Not migrated. |
@@ -702,6 +793,17 @@ declaration loop, reads records that come from `DECLARATION`,
 field-by-field differential passes. The row is not retired by default: the
 walker still runs without the flag and for every unit the split hands back.
 Deleting it waits on the hook becoming the default.
+
+Under `-fc-ast-pilot`, the second row's boundary scans no longer run for a
+planned statement: the body binder takes block declaration ends, `for` header
+boundaries and loop ends from the tree, and binds plain segments without its
+per-token loop. Its consumer is the binder itself, and the field-by-field
+binding differential passes. The row is not retired: the loop still runs
+without the flag, for every statement the plan declines and for every body
+that falls back; `c_parse_local_declarations` still splits declarators and
+initializers by tokens; and `c_parse_validate_one_switch` and
+`c_parse_validate_control_statements` still find statement ends with
+`c_parse_statement_end`.
 
 The [tree expression typer](#tree-expression-typer) is the first consumer of
 the fourth row's replacement. Under `-fc-ast-pilot` it answers most of semantic
@@ -1023,6 +1125,48 @@ the same way and diagnostic only:
   (5.2%) slower, with 4 of 15 pairs favouring fusion, and a repeat agreed. The
   A/A control itself exceeded its ±0.5% bound.
 - **Decision.** Fusion does not ship. The token array and the array build stay.
+
+For the [statement plan](#statement-plan-from-the-tree), these budgets were
+declared before its measured runs. The input and flags are the same as for
+the declaration split (`-g0 -fsyntax-only`, the self-host unity input), and
+four arms are counted with Callgrind on tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `f86d65f9`, which the candidate branches from. The budgets:
+- **Correctness.**
+  - 0 binding differences over the corpus and the frontend sources: every
+    identifier use, the per-token use map, every scope and every entity, with
+    the diagnostics and type-table sizes;
+  - a one-off comparison of the same fields on the self-host unity input, also
+    with 0 differences;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **Coverage.** Every function body of the self-host unity input follows its
+  plan: no fallback.
+- **The plan's own effect (C against B).** `c_parse_bind_function_body`
+  inclusive costs fewer instructions, with the plans' construction charged,
+  and the whole compile costs fewer instructions.
+- **The default path (D against A).** The plan adds no work there, so the
+  difference stays within ±0.05% Ir.
+- **Adoption of the hook as the default.** Unchanged from stage 1. Hosted
+  instruction counts show only its instruction half; wall time, `-c` and RSS
+  acceptance remain with the Zen 5 route (#2761).
+
+The statement plan's hosted census is
+[`2026-10-10T195257Z`](../../performance-audits/2026-10-10T195257Z.md), taken
+the same way and diagnostic only:
+- Correctness, object identity and coverage pass: every one of the self-host's
+  6,584 bodies follows its plan, and the four arms' `-c` objects are identical.
+- The binder's own cost (`c_parse_bind_function_body`) falls by 147.8 M
+  (15.4%), with about 55 M of plan construction charged, and the whole compile
+  by 145.7 M (1.53%, C against B).
+- **The default-path budget fails on the cheaper side:** D against A is
+  −0.34%. The planless walk runs no plan code and makes the same calls; the
+  difference is the walk's code generation, now an always-inline worker with
+  a planless and a planned caller. The band was not widened.
+- Acceptance stays with Zen 5 (#2761), so the default stays off.
 
 For the split's [diagnostic probe](#declaration-split-from-the-tree)
 (`c_parser_tree_probe`), these budgets were declared before its measured runs.
