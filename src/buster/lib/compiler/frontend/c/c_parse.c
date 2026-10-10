@@ -1900,7 +1900,6 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
 BUSTER_C_INTERNAL CTypeId c_parse_parenthesized_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                                    CTypeId base, u32 declarator_start, u32 name_index, u32 suffix_end, bool has_name);
 BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult preprocess, u32 declarator_start, u32 end, u32* name_index);
-BUSTER_C_INTERNAL bool c_parse_declarator_name_has_parameters(CPreprocessResult preprocess, u32 name_index, u32 end);
 
 BUSTER_C_INTERNAL void c_parse_diagnose_unknown_type_name(CParseResult* result, CPreprocessResult preprocess, u32 token_index, bool parameter,
                                                           u32 segment_start, u32 segment_end, bool declares_no_storage);
@@ -17370,8 +17369,13 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
                 nested_index += 1;
             }
         }
+        // A group that opens this one directly is nested only when it holds
+        // the name: `((x))[3]` and `((*pq))(int)` wrap a whole declarator
+        // in a redundant pair (GitHub #3215), while an abstract `(()...)`
+        // stays the parameter list it is.
         frame->nested = nested_index < frame->end &&
-                        (nested_index > frame->declarator_start + 1 || frame->kind == C_TYPE_PARSE_FRAME_PARAMETER_GROUP) &&
+                        (nested_index > frame->declarator_start + 1 || frame->kind == C_TYPE_PARSE_FRAME_PARAMETER_GROUP ||
+                         (frame->has_name && frame->name_index > nested_index && frame->name_index < frame->end)) &&
                         c_token_is_punctuator(&preprocess.tokens[nested_index], C_PUNCTUATOR_LEFT_PARENTHESIS);
         if (frame->nested)
         {
@@ -19116,19 +19120,28 @@ BUSTER_C_SHARED CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessR
     return base;
 }
 
-BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult preprocess, u32 declarator_start, u32 end, u32* name_index)
+// Walks into the declarator group that opens at `declarator_start` to the
+// name it declares, through attribute lists, pointers and nested groups.
+// `depth` counts the groups opened before the name and `pointer_depth` is the
+// deepest of them holding a `*` (zero when none does), which is what
+// c_parse_parenthesized_declarator_is_function walks back out through.
+BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_walk(CPreprocessResult preprocess, u32 declarator_start, u32 end, u32* name_index, u32* depth,
+                                                             u32* pointer_depth)
 {
     if (declarator_start >= end || !c_token_is_punctuator(&preprocess.tokens[declarator_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
         return false;
     }
     u32 index = declarator_start + 1;
+    u32 group_depth = 1;
+    u32 star_depth = 0;
     while (index < end)
     {
         index = c_parse_skip_declaration_decoration(preprocess, index, end);
         while (index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_STAR))
         {
             index += 1;
+            star_depth = group_depth;
             CType ignored = {0};
             for (;;)
             {
@@ -19152,6 +19165,7 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult p
         if (index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             index += 1;
+            group_depth += 1;
             continue;
         }
         break;
@@ -19165,7 +19179,45 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult p
         return false;
     }
     *name_index = index;
+    *depth = group_depth;
+    *pointer_depth = star_depth;
     return true;
+}
+
+BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult preprocess, u32 declarator_start, u32 end, u32* name_index)
+{
+    u32 depth = 0;
+    u32 pointer_depth = 0;
+    return c_parse_parenthesized_declarator_walk(preprocess, declarator_start, end, name_index, &depth, &pointer_depth);
+}
+
+// Whether the parenthesized declarator that opens at `start` declares a
+// function. The derivation nearest the name decides it, so this walks out
+// from the name rather than reading what follows the outermost group: a `(`
+// is the name's parameter list, a `[` makes an array, and a `)` closes a
+// group, which makes a pointer when the group (or one inside it) holds a `*`
+// and is redundant otherwise. `(f)(int)`, `((h))(void)`, `(gd(int a))` and
+// `(*f(int))[3]` declare functions; `(*f)(int)`, `((*pq))(int)`, `(*(f))(int)`
+// and `((x))[3]` declare objects (GitHub #3215).
+BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_is_function(CPreprocessResult preprocess, u32 start, u32 end, u32* name_index)
+{
+    u32 depth = 0;
+    u32 pointer_depth = 0;
+    bool function = false;
+    if (c_parse_parenthesized_declarator_walk(preprocess, start, end, name_index, &depth, &pointer_depth))
+    {
+        u32 index = *name_index + 1;
+        bool walking = true;
+        while (walking)
+        {
+            index = c_parse_skip_attributes(preprocess, index, end);
+            function = index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS);
+            walking = depth > pointer_depth && index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            depth -= walking;
+            index += walking;
+        }
+    }
+    return function;
 }
 
 // Return the name of a parenthesized function declarator (`(f)(...)` or
@@ -19173,6 +19225,9 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult p
 // from the identifier immediately before its parameter list; a redundant
 // pair of parentheses moves that identifier inside the first group, so keep
 // this small shape test shared by the AST and semantic declaration passes.
+// A function whose own list sits inside the group, `(gd(int a))`, has no
+// list after the group; the scans test that shape themselves, because
+// `f(T (a))` spells it too when `f` is the name and `T` a typedef.
 BUSTER_C_INTERNAL bool c_parse_parenthesized_function_name(CPreprocessResult preprocess, u32 start, u32 end, u32* name_index)
 {
     if (start >= end || !c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
@@ -19202,25 +19257,16 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_function_name(CPreprocessResult pre
     // group's own name carries the parameter list, and what follows the group
     // is the pointee of the returned pointer. `(*p)[3]` has no parameter list
     // after its name and stays an object.
+    u32 function_name = 0;
     if (depth || close >= end ||
         !(c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
           (c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_LEFT_BRACKET) &&
-           c_parse_declarator_name_has_parameters(preprocess, candidate, end))))
+           c_parse_parenthesized_declarator_is_function(preprocess, start, end, &function_name))))
     {
         return false;
     }
     *name_index = candidate;
     return true;
-}
-
-// A pointer declarator whose name carries its own parameter list is a
-// function that returns the pointer -- `void (*getf(int))(void)` -- rather
-// than an object holding one.  `void (*fp)(void)` and `void (*table[3])(void)`
-// put a `)` or a `[` after the name instead, so the parameter list is exactly
-// what separates the two shapes.
-BUSTER_C_INTERNAL bool c_parse_declarator_name_has_parameters(CPreprocessResult preprocess, u32 name_index, u32 end)
-{
-    return name_index + 1 < end && c_token_is_punctuator(&preprocess.tokens[name_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
 }
 
 // A top-level `(` that follows an identifier is a parameter list when that
@@ -19232,9 +19278,47 @@ BUSTER_C_INTERNAL bool c_parse_declarator_name_has_parameters(CPreprocessResult 
 // a `*`, and a group that does is a declarator group whatever precedes it.
 // Without this, `T (*p)[2]` and `struct s (*p)[2]` were read as functions
 // named `T` and `s`, and the declaration they really make was dropped whole.
+// A parameter cannot begin with a `(` either, so `T ((p))[2]` opens a
+// redundant declarator group the same way (GitHub #3215).
 BUSTER_C_INTERNAL bool c_parse_pointer_declarator_group(CPreprocessResult preprocess, u32 open, u32 end)
 {
-    return open + 1 < end && c_token_is_punctuator(&preprocess.tokens[open + 1], C_PUNCTUATOR_STAR);
+    return open + 1 < end && (c_token_is_punctuator(&preprocess.tokens[open + 1], C_PUNCTUATOR_STAR) ||
+                              c_token_is_punctuator(&preprocess.tokens[open + 1], C_PUNCTUATOR_LEFT_PARENTHESIS));
+}
+
+// Whether the declaration scans read the top-level `(` at `open` as a
+// declarator group, so that the name inside it is the declarator's and a
+// parameter list right after that name, `int (gd(int a))`, makes a function
+// (GitHub #3215). It does after nothing in [start, open), a punctuator
+// (`*`, `,`, the `}` of a tag body) or a type or qualifier word, except the
+// words whose operand is parenthesized:
+// `_Atomic(int)`, `_Alignas(8)` and `typeof(f(1))` open no group. After a
+// typedef or tag name it is a group only when it opens on `*` or `(`, which
+// no parameter list does (c_parse_pointer_declarator_group); `T (x)` is read
+// as a function `T`. After any other keyword -- `_Static_assert((f(1)))` --
+// it is none, and after a `)` or `]` it is the suffix of what precedes it:
+// `(void)` in `int (*fp)(void)` is a parameter list.
+BUSTER_C_INTERNAL bool c_parse_declarator_group_may_open(CPreprocessResult preprocess, u32 start, u32 open, u32 end)
+{
+    bool after_suffix = open > start && (c_token_is_punctuator(&preprocess.tokens[open - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                                         c_token_is_punctuator(&preprocess.tokens[open - 1], C_PUNCTUATOR_RIGHT_BRACKET));
+    bool may_open = open == start || (preprocess.tokens[open - 1].kind != C_TOKEN_IDENTIFIER && !after_suffix);
+    if (!may_open && !after_suffix)
+    {
+        CToken word = preprocess.tokens[open - 1];
+        if (!c_declaration_keyword_for_dialect_token(preprocess, word))
+        {
+            may_open = c_parse_pointer_declarator_group(preprocess, open, end);
+        }
+        else if (c_parse_type_word_for_dialect_token(preprocess, word))
+        {
+            String8 spelling = c_token_spelling(preprocess.spelling_base, word);
+            may_open = !string_equal(spelling, S8("_Atomic")) && !string_equal(spelling, S8("_Alignas")) && !string_equal(spelling, S8("typeof")) &&
+                       !string_equal(spelling, S8("__typeof")) && !string_equal(spelling, S8("__typeof__")) &&
+                       !string_equal(spelling, S8("typeof_unqual"));
+        }
+    }
+    return may_open;
 }
 
 BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end)
@@ -27051,15 +27135,21 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
                 bool pointer_group = c_parse_pointer_declarator_group(preprocess, index, end);
                 bool ordinary_function = !pointer_group && index > start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
                                          !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[index - 1]);
+                // `int (gd(int a))` holds the name's own list inside the
+                // group; after a name candidate, `f(T (a))` is f's list.
+                parenthesized_function = parenthesized_function ||
+                                         (!ordinary_function && c_parse_declarator_group_may_open(preprocess, start, index, end) &&
+                                          c_parse_parenthesized_declarator_is_function(preprocess, index, end, &parenthesized_name_token));
                 if (parenthesized_function)
                 {
                     declarator.name_token = parenthesized_name_token;
-                    // `(*f)(...)` declares an object holding a function
-                    // pointer; the redundant plain `(f)(...)` form and the
-                    // pointer-returning `(*f(...))(...)` form are function
-                    // declarations in the AST.
-                    if (!c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR) ||
-                        c_parse_declarator_name_has_parameters(preprocess, parenthesized_name_token, end))
+                    // `(*f)(...)` and `((*f))(...)` declare an object
+                    // holding a function pointer; the redundant `(f)(...)`
+                    // and `(f(...))` forms and the pointer-returning
+                    // `(*f(...))(...)` form are function declarations in
+                    // the AST.
+                    u32 function_name = 0;
+                    if (c_parse_parenthesized_declarator_is_function(preprocess, index, end, &function_name))
                     {
                         declarator.function_name_token = parenthesized_name_token;
                     }
@@ -27069,7 +27159,8 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
                     declarator.function_name_token = index - 1;
                     declarator.name_token = declarator.function_name_token;
                 }
-                else if ((declarator.name_token == C_ID_UNDERLYING_INVALID || pointer_group) &&
+                else if ((declarator.name_token == C_ID_UNDERLYING_INVALID || pointer_group ||
+                          c_parse_declarator_group_may_open(preprocess, start, index, end)) &&
                          c_parse_parenthesized_declarator_name(preprocess, index, end, &parenthesized_name_token))
                 {
                     declarator.name_token = parenthesized_name_token;
@@ -27304,11 +27395,18 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                         bool ordinary_function = !pointer_group && index > start &&
                                                   c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
                                                   !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[index - 1]);
+                        // `int (gd(int a))` holds the name's own list inside
+                        // the group; after a name candidate, `f(T (a))` is
+                        // f's list (GitHub #3215).
+                        parenthesized_function =
+                            parenthesized_function ||
+                            (!ordinary_function && c_parse_declarator_group_may_open(preprocess, start, index, token_count) &&
+                             c_parse_parenthesized_declarator_is_function(preprocess, index, token_count, &parenthesized_name_token));
                         if (parenthesized_function)
                         {
                             name_token = parenthesized_name_token;
-                            if (!c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR) ||
-                                c_parse_declarator_name_has_parameters(preprocess, parenthesized_name_token, token_count))
+                            u32 function_name = 0;
+                            if (c_parse_parenthesized_declarator_is_function(preprocess, index, token_count, &function_name))
                             {
                                 function_name_token = parenthesized_name_token;
                             }
@@ -27319,7 +27417,8 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                             name_token = function_name_token;
                             parameter_list_open = index;
                         }
-                        else if ((name_token == C_ID_UNDERLYING_INVALID || pointer_group) &&
+                        else if ((name_token == C_ID_UNDERLYING_INVALID || pointer_group ||
+                                  (!seen_declarator_comma && c_parse_declarator_group_may_open(preprocess, start, index, token_count))) &&
                                  c_parse_parenthesized_declarator_name(preprocess, index, token_count, &parenthesized_name_token))
                         {
                             name_token = parenthesized_name_token;
@@ -27594,7 +27693,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
 //   over a superset of the tokens it validates;
 // - its heuristics would read a shape differently from the grammar, or the
 //   rules here do not state what they read (CParserTreeFallback): redundant
-//   parentheses (#3215), attributes inside a declarator, a parenthesized
+//   parentheses after a typedef or tag name, attributes inside a declarator, a parenthesized
 //   specifier, an old-style declaration list, a comma operator where the
 //   walker splits on commas, or a token next to an anchor that is not the
 //   one the shape requires.
@@ -27819,10 +27918,14 @@ struct CParserTreeDeclarator
 // c_parse_pointer_declarator_group, c_parse_parenthesized_declarator_name)
 // then lands on this name, naming a function exactly when the first
 // derivation above the name is one. Redundant parentheses leave no node, so
-// the token run before the name counts the `(` and `*` actually written:
-// more `(` than boundaries, or fewer `*` than pointers (an attribute list in
-// the run), refuses the shape, as do attributes on a pointer or opening a
-// group, and a function returning an array or a function.
+// the token run before the name counts the `(` and `*` actually written.
+// More `(` than boundaries is a redundant group, which the walker reads the
+// same way (c_parse_parenthesized_declarator_is_function walks out through
+// it, GitHub #3215), except after a typedef or tag name, where the walker
+// reads the group as that name's parameter list; that shape is refused.
+// Fewer `*` than pointers (an attribute list in the run)
+// refuses the shape, as do attributes on a pointer or opening a group, and a
+// function returning an array or a function.
 BUSTER_C_INTERNAL bool c_parser_tree_declarator(CParserTreeSplit* split, u32 root, u32 lower, CParserTreeDeclarator* declarator)
 {
     CAst const* ast = split->ast;
@@ -27905,14 +28008,20 @@ BUSTER_C_INTERNAL bool c_parser_tree_declarator(CParserTreeSplit* split, u32 roo
                 index = run ? qualifier : index;
             }
         }
-        shaped = opens == boundaries && stars == pointers && (!function || ast->tokens[first_derivation] == name + 1);
+        // A redundant group the walker does not read as a group is refused
+        // (c_parse_declarator_group_may_open): after a typedef or tag name,
+        // `T (x)` and `T (gd(int a))` name a function `T` there.
+        bool redundant = opens > boundaries;
+        bool misread = redundant && c_parser_tree_punctuator_at(preprocess, index, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                       !c_parse_declarator_group_may_open(*preprocess, lower, index, (u32)preprocess->token_count);
+        shaped = opens >= boundaries && stars == pointers && !misread && (!function || redundant || ast->tokens[first_derivation] == name + 1);
         *declarator = (CParserTreeDeclarator){
             .name = name,
             .first = index,
             .open = function ? ast->tokens[first_derivation] : C_ID_UNDERLYING_INVALID,
             .list = function ? first_derivation - 1 : C_AST_NODE_INVALID,
             .function = function,
-            .ordinary = function && boundaries == 0,
+            .ordinary = function && opens == 0,
             .ends_in_function = outer_function != C_AST_NODE_INVALID,
             .variadic = outer_function != C_AST_NODE_INVALID && ast->kinds[outer_function - 1] == C_AST_PARAMETER_LIST_VARIADIC,
         };
@@ -28184,14 +28293,17 @@ BUSTER_C_INTERNAL CParserTreeInitDeclarator c_parser_tree_init_declarator(CAst c
 
 // The token after a declarator that ends in a function's `)`, which the
 // walker's group test reads: a `(` or `[` there would make it read the
-// parameters' first word as a parenthesized function name.
+// parameters' first word as a parenthesized function name. The walker reads
+// a list as variadic from the `...` before the declarator's last `)`, so a
+// variadic list inside a redundant group, `(gv(int, ...))`, is refused too.
 BUSTER_C_INTERNAL bool c_parser_tree_declarator_end(CParserTreeSplit* split, CParserTreeDeclarator const* declarator, u32 after)
 {
     CPreprocessResult const* preprocess = &split->preprocess;
     bool shaped = !declarator->ends_in_function ||
                   (c_parser_tree_punctuator_at(preprocess, after - 1, C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
                    !c_parser_tree_punctuator_at(preprocess, after, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-                   !c_parser_tree_punctuator_at(preprocess, after, C_PUNCTUATOR_LEFT_BRACKET));
+                   !c_parser_tree_punctuator_at(preprocess, after, C_PUNCTUATOR_LEFT_BRACKET) &&
+                   declarator->variadic == c_parser_tree_punctuator_at(preprocess, after - 2, C_PUNCTUATOR_ELLIPSIS));
     return shaped || c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_TOKENS, after);
 }
 
