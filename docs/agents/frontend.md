@@ -229,6 +229,16 @@ the int-returning count family. Lowering is `(x ^ s) - s` with `s = x >> (w - 1)
 Constant folding shares the integer-builtin fold and leaves the most negative
 value unfolded. Wrong arity or a non-arithmetic argument is a diagnostic.
 
+`__builtin_dynamic_object_size` (#1394) is a conservative alias of
+`__builtin_object_size`: `c_symbol_predefined` maps both spellings to
+`C_SYMBOL_BUILTIN_OBJECT_SIZE`, so they share operand admission, diagnostics
+and lowering, and `__has_builtin` answers 1 for both. The answer is always the
+compile-time `object_size` value (a known size, or `(size_t)-1`/`0` for an
+unknown object), which GCC documents as a valid result. There is no runtime
+allocation tracking: the extra precision GCC and Clang can give a size known
+only at run time (a `malloc` argument, a variable-length array) is not
+provided. `c_test_dynamic_object_size` compares both spellings' lowered IR.
+
 `__builtin_parity`/`l`/`ll` share the popcount operand policy and lower to
 `popcount(x) & 1`. `__builtin_bswap16/32/64` take and return `unsigned short`,
 `unsigned int` and `unsigned long long` (`c_semantic_byte_swap_kind`) and lower
@@ -246,8 +256,19 @@ The typed `__builtin_{s,u}{add,sub,mul}{,l,ll}_overflow` checks
 the wrapped result through the third argument and answer `_Bool`. Lowering
 computes in the unsigned counterpart: sign tests for add/sub, and for multiply
 a divide-back check of the magnitudes' product, so no wider type, trap or
-runtime helper is needed. The generic `__builtin_*_overflow` forms (#1394) and
-`__builtin_return_address` are not implemented and answer `__has_builtin` 0.
+runtime helper is needed. The generic `__builtin_{add,sub,mul}_overflow`
+(#1394) take any two integer operands and a pointer to any non-const integer
+(`_Bool` and enums included); `c_ir_emit_generic_overflow_builtin` computes the
+exact result in signed 64- or 128-bit arithmetic, stores its low bits (bit 0
+for `_Bool`) and answers whether it left the result type's range. Same-signedness
+operands no wider than the result use the typed lowering at the result type
+(add/sub only at 128 bits). Refused with a structured diagnostic: multiply with
+a 128-bit operand or result, an exact result needing more than 128 signed bits
+(a 128-bit operand that also narrows or changes signedness, an unsigned 64-bit
+product into 128 bits), and anything needing 128-bit arithmetic on targets other
+than x86-64 and AArch64 (WebAssembly). The parser rejects wrong arity, non-integer
+operands and a result that is not a pointer to a non-const integer.
+`__builtin_return_address` is not implemented and answers `__has_builtin` 0.
 `__builtin_fabsl` clears the stored sign bit, `__builtin_fmax`/`fmin` and their
 `f`/`l` forms read NaN-ness from the stored bits and select the other operand,
 and `__builtin_powi`/`powif`/`powil` run an inline square-and-multiply loop;

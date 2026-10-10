@@ -1266,6 +1266,21 @@ is linked, and a link refuses the first one named as
 semantics (a link without the C runtime start-up files or default libraries), so
 they are never silently ignored where they would matter (GitHub #1418).
 
+`-include FILE` and `-includeFILE` (GitHub #1418) process each file as
+`#include "FILE"` before the first line of every C and assembly translation
+unit, in command-line order, after `-D`/`-U` have been applied. The names become
+`#include` lines of a synthetic `<command-line>` frame stacked above the
+primary file's frame (`forced_includes` in `CPreprocessOptions`), so the
+primary file's `__LINE__`, `__FILE__` and diagnostic lines never shift. Lookup
+approximates GCC: the working directory first (the synthetic file's directory
+is `.`), then the `-I` chain, then builtin headers; the primary file's
+directory is not searched. An absolute name is opened directly. A missing file
+is the ordinary `included file was not found: FILE` diagnostic located in
+`<command-line>`, and the compilation fails. A name with a double quote or line
+break is refused, as is a joined spelling that begins with `-`
+(`-include-pch` and `-iprefix` stay unsupported options), and `-include` with a
+GPU target is refused because the external GPU pipeline does not forward it.
+
 ### Deliberately rejected GCC/Clang spellings
 
 Each row is covered by a driver test. A spelling is refused, never ignored
@@ -1367,22 +1382,62 @@ words come from `object_aarch64_elf_tls_ie_relax` and
 `object_aarch64_elf_tls_desc_relax`). The reader accepts RELA entries whose
 words are exactly those instructions (the immediates are canonicalized to
 zero, x0 where the ABI fixes it, a scratch `Xt` of x1..x30) and refuses any
-other word by relocation name. `link_aarch64_tls_relax` sorts the sites by
-section and offset and consumes one whole sequence at a time: each step must
-sit four bytes after the previous one, in order, with one symbol and addend,
-one register for an IE pair and one scratch for the descriptor's LDR and BLR,
-against a defined thread-local symbol with a 32-bit offset. A missing,
-repeated, overlapping, reordered or split step fails the link before the
-image is written, as `link.relocation` naming the symbol and the relocation
-that could not start or complete its sequence. Non-adjacent schedules are
-refused rather than relaxed; Clang 18 at `-O2` already separates an IE ADRP
-from its LDR, so such an initial-exec object fails to link today. The other descriptor forms (560/561 and the
-565-568 `OFF_G1`/`OFF_G0_NC`/`LDR`/`ADD` sequence), the dynamic
+other word by relocation name. `link_aarch64_tls_relax` heap-sorts the sites
+by section and offset, then scans them once. A descriptor sequence is consumed
+whole: each step must sit four bytes after the previous one, in order, with one
+symbol and addend and one scratch register for its LDR and BLR. An initial-exec
+pair may be non-adjacent, since Clang 18 at `-O2` schedules loads between the
+halves: each section keeps a table of pending ADRPs keyed by destination
+register, and an LDR (base register equal to its destination, 64-bit) pairs
+with the nearest preceding ADRP of that register in the same section, which
+must name the same symbol and addend. Each ADRP is consumed by exactly one
+LDR; a second ADRP for a register that is still pending, an LDR without a
+partner, two LDRs sharing one ADRP, a register, symbol or addend mismatch, or
+an ADRP left unpaired at the end of its section refuses the link. The sort is
+O(n log n). The halves may enclose at most `LINK_AARCH64_TLS_IE_GAP_MAX` (64)
+words, and every one of them must be proven harmless for `xN` or the link is
+refused: it must match a row of `link_aarch64_inert_forms` (load/store
+register in its unsigned-immediate, unscaled, pre/post-index and
+register-offset forms, GPR and FP/SIMD; load/store pair; ADD/SUB immediate,
+shifted and extended register; logical shifted register and immediate, the
+latter with an allocated bitmask; MOVN/MOVZ/MOVK; ADR/ADRP; SBFM/BFM/UBFM;
+UDIV/SDIV and variable shifts; MADD/MSUB and the long and high multiplies;
+CSEL/CSINC/CSINV/CSNEG; `mrs Xt, TPIDR_EL0`; NOP), each narrowed to its
+allocated size/opc/option combinations, and none of the general-register
+fields that row names (Rt/Rd, Rn, Rt2/Ra, Rm; FP/SIMD data registers are not
+general registers, a writeback base is) may equal N. Field value 31 is SP or
+XZR and never N, since the reader limits N to x0..x30. Branches of every
+kind, exception, barrier and other system instructions, any other MRS or MSR,
+and any unlisted or unallocated word refuse the link
+(`link_aarch64_tls_ie_gap_inert`). The pairing scan is therefore O(n + total
+gap). All of it runs against a defined thread-local symbol with a 32-bit
+offset and fails the link before the image is written, as `link.relocation` naming the symbol and the relocation that
+could not start or complete its sequence. The enforced contract is that,
+along the straight-line words from the ADRP to its LDR, nothing observes the
+GOT page the ADRP produced or replaces it before the LDR consumes it, so the
+`movz`/`movk` pair computes the offset the original pair loaded. A branch
+from elsewhere into those words is outside what the linker can see; it is
+safe whenever the incoming path, as the original LDR requires, carries the
+page from a GOTTPREL ADRP of the same symbol and addend, because every such
+ADRP becomes the same `movz Xn, #hi` and every matching LDR the same
+`movk Xn, #lo`. The register-overlap forms the architecture calls CONSTRAINED
+UNPREDICTABLE (for example a writeback base equal to its transfer register)
+are accepted only when none of their registers is N; their permitted
+behaviors change only the named registers or raise UNDEFINED at that word.
+TLS descriptors stay strictly adjacent. The other descriptor forms (560/561
+and the 565-568 `OFF_G1`/`OFF_G0_NC`/`LDR`/`ADD` sequence), the dynamic
 `R_AARCH64_TLSDESC` 1031, and TLS owned by a loader or shared library are
 still refused by name. The tests (the "initial-exec TLS (#2582)" and "TLS
 descriptors (#2582)" blocks of `object_tests`,
 `link_test_aarch64_tls_initial_exec_relaxation` and
-`link_test_aarch64_tls_descriptor_relaxation`) check encodings only.
+`link_test_aarch64_tls_descriptor_relaxation`) check encodings, including
+adversarial reads, writes, base uses, branches, unrecognized words and
+oversized gaps between non-adjacent halves.
+`compiler_driver_test_aarch64_elf_tls_initial_exec` runs only on Linux
+AArch64 hosts: it compiles `fixtures/aarch64_elf_tls_initial_exec.c` with the
+host compiler at `-O2 -ftls-model=initial-exec`, requires a non-adjacent
+541/542 pair in the object, links it with Buster, checks the relaxed
+`movz`/`movk` words and compares the output with a host-linked control.
 `compiler_driver_test_aarch64_elf_tlsdesc` runs on Linux AArch64 hosts: the
 configured host compiler builds `fixtures/aarch64_elf_tlsdesc.c` with `-fPIC
 -ftls-model=global-dynamic` at `-O0` and `-O2`, Buster links it with a

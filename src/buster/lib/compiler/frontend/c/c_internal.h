@@ -508,6 +508,20 @@ struct CStringLiteralMemo
 BUSTER_C_EXTERN CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
+// Per-body validation scratch (#1256). While c_parse_validate_lowering_constraints
+// validates one function body, an allocation from the guarded scratch arena
+// that would pass the body's limit returns 0 and marks the body exhausted;
+// every later guarded allocation of that body returns 0 too. Callers skip the
+// work the array was for. Any other arena, and the guarded one outside a body,
+// allocates exactly as arena_allocate does. c_parse_body_scratch_fits is the
+// same check for a caller that allocates the bytes itself right after it;
+// c_parse_body_scratch_refuse marks an open body exhausted outright.
+BUSTER_C_EXTERN void* c_parse_body_scratch_allocate(Arena* arena, u64 element_size, u64 count, u64 alignment);
+BUSTER_C_EXTERN bool c_parse_body_scratch_fits(Arena* arena, u64 size, u64 alignment);
+BUSTER_C_EXTERN bool c_parse_body_scratch_guarded(Arena const* arena);
+BUSTER_C_EXTERN Arena* c_parse_body_scratch_arena(void);
+BUSTER_C_EXTERN void c_parse_body_scratch_refuse(void);
+#define C_PARSE_BODY_SCRATCH_ARRAY(arena, T, count) ((T*)c_parse_body_scratch_allocate((arena), sizeof(T), (count), BUSTER_ALIGN_OF(T)))
 
 // One language constraint, not a claim that an expression or translation unit
 // has passed all semantic checks. These helpers use C bindings/types only;
@@ -1809,6 +1823,7 @@ BUSTER_C_EXTERN String8 c_semantic_asm_x87_operands_message(u64 const* constrain
 
 BUSTER_C_EXTERN String8 c_ir_math_builtin_link_name(String8 name);
 BUSTER_C_EXTERN u32 c_semantic_memory_builtin_arity(String8 name);
+BUSTER_C_EXTERN bool c_semantic_overflow_builtin_generic(String8 name);
 
 typedef enum CIrSimdArgument
 {

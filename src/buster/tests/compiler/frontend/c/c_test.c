@@ -112,6 +112,473 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_reservation_failures(UnitTest
     return result;
 }
 
+// Per-body validation scratch guard (#1256). Every array a function body's
+// validation sizes by the body goes through c_parse_body_scratch_allocate; a
+// request past the body's limit is refused, the body is reported once, and
+// validation continues with the next body. The seams cap the guard's view of
+// the scratch arena per body and record each request it checks, so these
+// fixtures pick a cap from a real run's own requests and exhaust exactly the
+// allocation site they name: the per-token arrays of a flat body, the
+// geometric growth of the scope-pending stack of a deeply nested body, and
+// the operand and name tables of a large inline-assembly statement.
+#define C_TEST_BODY_SCRATCH_TRACE_CAPACITY (1u << 16)
+#define C_TEST_BODY_SCRATCH_MESSAGES 4
+#define C_TEST_BODY_SCRATCH_NESTING 200
+#define C_TEST_BODY_SCRATCH_ASM_OPERANDS 160
+
+typedef struct CTestBodyScratchRun CTestBodyScratchRun;
+struct CTestBodyScratchRun
+{
+    String8 messages[C_TEST_BODY_SCRATCH_MESSAGES];
+    u32 diagnostic_count;
+    u32 trace_count;
+    bool lowered;
+};
+
+BUSTER_GLOBAL_LOCAL CTestBodyScratchRun c_test_body_scratch_run(UnitTestArguments* arguments, String8 source, u64 cap,
+                                                                CTestBodyScratchRequest* trace)
+{
+    CTestBodyScratchRun run = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessOptions options = {.source_path = S8("body-scratch.c"), .target = target_native, .data_layout = target_data_layout(target_native)};
+    c_test_body_validation_scratch_limit(cap);
+    c_test_body_validation_scratch_trace(trace, C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source, options);
+    CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, options.source_path, preprocess, syntax, target_native, (CIRLowerOptions){0});
+    run.trace_count = c_test_body_validation_scratch_trace_count();
+    c_test_body_validation_scratch_trace(0, 0);
+    c_test_body_validation_scratch_limit(0);
+    run.diagnostic_count = (u32)preprocess.error_count + (u32)lowered.diagnostic_count;
+    run.lowered = !preprocess.error_count && !lowered.diagnostic_count && lowered.canonical_ir_certified && lowered.program;
+    for (u32 index = 0; lowered.diagnostics && index < lowered.diagnostic_count && index < C_TEST_BODY_SCRATCH_MESSAGES; index += 1)
+    {
+        run.messages[index] = string_duplicate_arena(arguments->arena, lowered.diagnostics[index].message, false);
+    }
+    c_preprocess_release(&preprocess);
+    scratch_end(temporary);
+    return run;
+}
+
+// The trace row that opens body `body` (its separator), or `count`.
+BUSTER_GLOBAL_LOCAL u32 c_test_body_scratch_body_start(CTestBodyScratchRequest const* trace, u32 count, u32 body)
+{
+    u32 seen = 0;
+    u32 row = 0;
+    while (row < count && !(trace[row].element_size == 0 && seen++ == body))
+    {
+        row += 1;
+    }
+    return row;
+}
+
+// The furthest end any request of body `body` reached before row `limit`
+// (exclusive; UINT32_MAX for the whole body).
+BUSTER_GLOBAL_LOCAL u64 c_test_body_scratch_peak(CTestBodyScratchRequest const* trace, u32 count, u32 body, u32 limit)
+{
+    u64 peak = 0;
+    for (u32 row = c_test_body_scratch_body_start(trace, count, body) + 1; row < count && row < limit && trace[row].element_size; row += 1)
+    {
+        peak = BUSTER_MAX(peak, trace[row].end);
+    }
+    return peak;
+}
+
+// The first row of body `body` requesting `count` elements of `element_size`, or UINT32_MAX.
+BUSTER_GLOBAL_LOCAL u32 c_test_body_scratch_find(CTestBodyScratchRequest const* trace, u32 count, u32 body, u64 element_size, u64 elements)
+{
+    u32 found = UINT32_MAX;
+    for (u32 row = c_test_body_scratch_body_start(trace, count, body) + 1; found == UINT32_MAX && row < count && trace[row].element_size; row += 1)
+    {
+        found = trace[row].element_size == element_size && trace[row].count == elements ? row : found;
+    }
+    return found;
+}
+
+// The first refused row of the trace, or UINT32_MAX.
+BUSTER_GLOBAL_LOCAL u32 c_test_body_scratch_refused(CTestBodyScratchRequest const* trace, u32 count)
+{
+    u32 found = UINT32_MAX;
+    for (u32 row = 0; found == UINT32_MAX && row < count; row += 1)
+    {
+        found = trace[row].element_size && trace[row].end == UINT64_MAX ? row : found;
+    }
+    return found;
+}
+
+// Diagnostic `index` of the run is the "too large" report naming `function`.
+BUSTER_GLOBAL_LOCAL bool c_test_body_scratch_reported(UnitTestArguments* arguments, CTestBodyScratchRun const* run, u32 index, String8 function)
+{
+    String8 message = index < C_TEST_BODY_SCRATCH_MESSAGES ? run->messages[index] : (String8){0};
+    String8 expected = string_format(arguments->arena, S8("in function '{S8}': C function body is too large for semantic validation"), function);
+    return string_equal(message, expected);
+}
+
+// Runs `source` uncapped, then capped so the request at `row` of body `body`
+// is the first that cannot fit, and checks that exactly that request is
+// refused and the function is reported once.
+BUSTER_GLOBAL_LOCAL void c_test_body_scratch_refuse_at(UnitTestArguments* arguments, UnitTestResult* outer_result, String8 source,
+                                                       CTestBodyScratchRequest* trace, u32 trace_count, u32 body, u32 row, String8 function)
+{
+    UnitTestResult result = {0};
+    if (BUSTER_REQUIRE(arguments, row < trace_count))
+    {
+        CTestBodyScratchRequest target = trace[row];
+        u64 cap = c_test_body_scratch_peak(trace, trace_count, body, row);
+        BUSTER_TEST(arguments, target.end > cap);
+        CTestBodyScratchRun capped = c_test_body_scratch_run(arguments, source, cap, trace);
+        u32 refused = c_test_body_scratch_refused(trace, capped.trace_count);
+        BUSTER_TEST(arguments, !capped.lowered && capped.diagnostic_count == 1 && c_test_body_scratch_reported(arguments, &capped, 0, function));
+        if (BUSTER_REQUIRE(arguments, refused < capped.trace_count))
+        {
+            BUSTER_TEST(arguments, refused == row && trace[refused].element_size == target.element_size && trace[refused].count == target.count);
+        }
+    }
+    outer_result->test_count += result.test_count;
+    outer_result->succeeded_test_count += result.succeeded_test_count;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_validation_scratch_exhaustion(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CTestBodyScratchRequest* trace = arena_allocate(arguments->arena, CTestBodyScratchRequest, C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+    String8 statements[64];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(statements); index += 1)
+    {
+        statements[index] = S8("x += 1;");
+    }
+    String8 flat_body = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(statements), false);
+    // (d) The flat body at its boundary: its own peak fits, one byte less does not.
+    String8 flat = string_format(arguments->arena, S8("static int id(int x){{return x;} int main(void){{int x=0;{S8}return id(x);}"), flat_body);
+    CTestBodyScratchRun open = c_test_body_scratch_run(arguments, flat, 0, trace);
+    BUSTER_TEST(arguments, open.lowered && open.trace_count < C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+    u64 flat_peak = c_test_body_scratch_peak(trace, open.trace_count, 1, UINT32_MAX);
+    BUSTER_TEST(arguments, flat_peak != 0);
+    CTestBodyScratchRun fits = c_test_body_scratch_run(arguments, flat, flat_peak, trace);
+    BUSTER_TEST(arguments, fits.lowered && c_test_body_scratch_refused(trace, fits.trace_count) == UINT32_MAX);
+    CTestBodyScratchRun short_by_one = c_test_body_scratch_run(arguments, flat, flat_peak - 1, trace);
+    BUSTER_TEST(arguments, !short_by_one.lowered && short_by_one.diagnostic_count == 1 && c_test_body_scratch_reported(arguments, &short_by_one, 0, S8("main")));
+    // The per-token arrays: the flag array after the expression-query memo.
+    open = c_test_body_scratch_run(arguments, flat, 0, trace);
+    c_test_body_scratch_refuse_at(arguments, &result, flat, trace, open.trace_count, 1, c_test_body_scratch_body_start(trace, open.trace_count, 1) + 2,
+                                  S8("main"));
+
+    // (a) Deeply nested scopes: each level holds a leaf block before the
+    // block that nests the next level, so the scope walk keeps one pending
+    // leaf per level and grows its stack past the initial 64 entries. The cap
+    // admits every per-token array and the initial stack; the growth is
+    // refused.
+    {
+        String8 parts[2 * C_TEST_BODY_SCRATCH_NESTING + 2];
+        parts[0] = S8("int main(void){int x=0;");
+        for (u32 level = 0; level < C_TEST_BODY_SCRATCH_NESTING; level += 1)
+        {
+            parts[1 + level] = string_format(arguments->arena, S8("{{int b{u32}=x; x+=b{u32};} {{int a{u32}=x; x+=a{u32};"), level, level, level, level);
+            parts[1 + C_TEST_BODY_SCRATCH_NESTING + level] = S8("}");
+        }
+        parts[1 + 2 * C_TEST_BODY_SCRATCH_NESTING] = S8("return x;}");
+        String8 nested = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+        CTestBodyScratchRun nested_open = c_test_body_scratch_run(arguments, nested, 0, trace);
+        BUSTER_TEST(arguments, nested_open.lowered && nested_open.trace_count < C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+        // The first growth doubles 64 pending scopes of three u32 each.
+        u32 growth = c_test_body_scratch_find(trace, nested_open.trace_count, 0, sizeof(u32), 128 * 3);
+        BUSTER_TEST(arguments, growth != UINT32_MAX && c_test_body_scratch_find(trace, nested_open.trace_count, 0, sizeof(u32), 256 * 3) != UINT32_MAX);
+        c_test_body_scratch_refuse_at(arguments, &result, nested, trace, nested_open.trace_count, 0, growth, S8("main"));
+    }
+
+    // (b) A large inline-assembly statement: the constraint and operand
+    // tables and the operand-name table, each sized by the statement, are
+    // refused in turn.
+    {
+        String8 parts[C_TEST_BODY_SCRATCH_ASM_OPERANDS + 2];
+        parts[0] = S8("int main(void){int a=1; __asm__ volatile(\"\" : : ");
+        for (u32 operand = 0; operand < C_TEST_BODY_SCRATCH_ASM_OPERANDS; operand += 1)
+        {
+            parts[1 + operand] = string_format(arguments->arena, S8("{S8}[o{u32}] \"m\"(a)"), operand ? S8(", ") : S8(""), operand);
+        }
+        parts[1 + C_TEST_BODY_SCRATCH_ASM_OPERANDS] = S8(" : \"memory\", \"cc\"); return a;}");
+        String8 assembly = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+        CTestBodyScratchRun assembly_open = c_test_body_scratch_run(arguments, assembly, 0, trace);
+        BUSTER_TEST(arguments, assembly_open.lowered && assembly_open.trace_count < C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+        // From `(` to `)`: the template, two colons, each `[name] "m" (a)`
+        // (seven tokens) and the comma between operands, then the clobber
+        // colon and two clobbers with their comma.
+        u64 span = 3 + 8 * (u64)C_TEST_BODY_SCRATCH_ASM_OPERANDS - 1 + 4 + 1;
+        u32 constraints = c_test_body_scratch_find(trace, assembly_open.trace_count, 0, sizeof(u64), span);
+        u32 names = c_test_body_scratch_find(trace, assembly_open.trace_count, 0, sizeof(String8), span);
+        BUSTER_TEST(arguments, constraints != UINT32_MAX && names != UINT32_MAX && names > constraints);
+        c_test_body_scratch_refuse_at(arguments, &result, assembly, trace, assembly_open.trace_count, 0, constraints, S8("main"));
+        assembly_open = c_test_body_scratch_run(arguments, assembly, 0, trace);
+        c_test_body_scratch_refuse_at(arguments, &result, assembly, trace, assembly_open.trace_count, 0, names, S8("main"));
+    }
+
+    // (c) Recovery: an exhausted body is reported once and validation goes on
+    // with every later body, which still reports its own findings.
+    {
+        String8 recovering = string_format(arguments->arena,
+            S8("static int big(int x){{{S8}return x;} static int fine(int x){{return x+1;} int main(void){{return big(1)+fine(2);}"), flat_body);
+        CTestBodyScratchRun recovering_open = c_test_body_scratch_run(arguments, recovering, 0, trace);
+        BUSTER_TEST(arguments, recovering_open.lowered);
+        u64 big_peak = c_test_body_scratch_peak(trace, recovering_open.trace_count, 0, UINT32_MAX);
+        u64 later_peak = BUSTER_MAX(c_test_body_scratch_peak(trace, recovering_open.trace_count, 1, UINT32_MAX),
+                                    c_test_body_scratch_peak(trace, recovering_open.trace_count, 2, UINT32_MAX));
+        BUSTER_TEST(arguments, later_peak && later_peak < big_peak);
+        CTestBodyScratchRun recovered = c_test_body_scratch_run(arguments, recovering, later_peak, trace);
+        BUSTER_TEST(arguments, !recovered.lowered && recovered.diagnostic_count == 1 && c_test_body_scratch_reported(arguments, &recovered, 0, S8("big")));
+        BUSTER_TEST(arguments, c_test_body_scratch_body_start(trace, recovered.trace_count, 2) < recovered.trace_count);
+        String8 invalid_later = string_format(arguments->arena,
+            S8("static int big(int x){{{S8}return x;} static void bad(void){{break;} int main(void){{bad(); return big(1);}"), flat_body);
+        CTestBodyScratchRun invalid_open = c_test_body_scratch_run(arguments, invalid_later, 0, trace);
+        BUSTER_TEST(arguments, invalid_open.diagnostic_count == 1 &&
+                                   string_first_sequence(invalid_open.messages[0], S8("in function 'bad'")) == 0);
+        u64 invalid_later_peak = BUSTER_MAX(c_test_body_scratch_peak(trace, invalid_open.trace_count, 1, UINT32_MAX),
+                                            c_test_body_scratch_peak(trace, invalid_open.trace_count, 2, UINT32_MAX));
+        BUSTER_TEST(arguments, invalid_later_peak && invalid_later_peak < c_test_body_scratch_peak(trace, invalid_open.trace_count, 0, UINT32_MAX));
+        CTestBodyScratchRun both = c_test_body_scratch_run(arguments, invalid_later, invalid_later_peak, trace);
+        BUSTER_TEST(arguments, both.diagnostic_count == 2 && c_test_body_scratch_reported(arguments, &both, 0, S8("big")) &&
+                                   string_equal(both.messages[1], invalid_open.messages[0]));
+    }
+    return result;
+}
+
+// The first row of body `body` requesting `elements` elements of any size
+// after row `after` (exclusive), or UINT32_MAX. Families whose element types
+// are private to the parser are found by their exact, input-derived counts.
+BUSTER_GLOBAL_LOCAL u32 c_test_body_scratch_find_count(CTestBodyScratchRequest const* trace, u32 count, u32 body, u32 after, u64 elements)
+{
+    u32 found = UINT32_MAX;
+    u32 first = BUSTER_MAX(c_test_body_scratch_body_start(trace, count, body) + 1, after + 1);
+    for (u32 row = first; found == UINT32_MAX && row < count && trace[row].element_size; row += 1)
+    {
+        found = trace[row].count == elements ? row : found;
+    }
+    return found;
+}
+
+// A source of `count` copies of `piece` joined after `head` and before `tail`.
+BUSTER_GLOBAL_LOCAL String8 c_test_body_scratch_repeat(Arena* arena, String8 head, String8 piece, u32 count, String8 tail)
+{
+    String8 result = head;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        result = string_format(arena, S8("{S8}{S8}"), result, piece);
+    }
+    return string_format(arena, S8("{S8}{S8}"), result, tail);
+}
+
+// The families the flat, nested and assembly fixtures above leave out, each
+// refused at its exact bound (#1256): the scope walk's initial pending stack,
+// the untyped constant evaluator a vector_size operand reaches (its token
+// copy, then the linked token list it evaluates), the typed constant
+// evaluator of a long case label, the statement-end table of the loop and
+// jump checks, the clobber table of an inline-assembly statement, and the
+// slot table of an inferred initializer. The evaluator is also refused with
+// a later invalid body, which still reports its own finding.
+#define C_TEST_BODY_SCRATCH_EVALUATOR_TERMS 40
+#define C_TEST_BODY_SCRATCH_CASE_TERMS 30
+// Two named clobbers and sixteen numbered registers, valid on x86-64
+// (xmm0..xmm15) and AArch64 (x0..x15).
+#define C_TEST_BODY_SCRATCH_CLOBBERS 18
+#define C_TEST_BODY_SCRATCH_MEMBERS 37
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_validation_scratch_families(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CTestBodyScratchRequest* trace = arena_allocate(arguments->arena, CTestBodyScratchRequest, C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+
+    // Scope: the walk's initial pending stack holds 64 scopes of three u32.
+    {
+        String8 scoped = S8("int main(void){int x=0; {int a=x; x+=a;} {int b=x; x+=b;} return x;}");
+        CTestBodyScratchRun open = c_test_body_scratch_run(arguments, scoped, 0, trace);
+        BUSTER_TEST(arguments, open.lowered);
+        u32 stack = c_test_body_scratch_find(trace, open.trace_count, 0, sizeof(u32), 64 * 3);
+        c_test_body_scratch_refuse_at(arguments, &result, scoped, trace, open.trace_count, 0, stack, S8("main"));
+    }
+
+    // Evaluator: `16 + 0*1 + ...` has 1 + 4 * terms tokens. The evaluator
+    // copies them into twice as many plus one, and later links one node per
+    // token; that list is the third request of exactly that many elements
+    // (after the wrapped and transformed copies).
+    {
+        u64 tokens = 1 + 4 * (u64)C_TEST_BODY_SCRATCH_EVALUATOR_TERMS;
+        String8 operand = c_test_body_scratch_repeat(arguments->arena, S8("16"), S8(" + 0*1"), C_TEST_BODY_SCRATCH_EVALUATOR_TERMS, S8(""));
+        String8 evaluator = string_format(arguments->arena,
+            S8("int main(void){{int x=1; int s=(int)sizeof(int __attribute__((vector_size({S8})))); return x+s;}"), operand);
+        CTestBodyScratchRun open = c_test_body_scratch_run(arguments, evaluator, 0, trace);
+        BUSTER_TEST(arguments, open.lowered);
+        u32 copy = c_test_body_scratch_find(trace, open.trace_count, 0, sizeof(CToken), tokens * 2 + 1);
+        u32 wrapped = c_test_body_scratch_find_count(trace, open.trace_count, 0, copy, tokens);
+        u32 transformed = wrapped < open.trace_count ? c_test_body_scratch_find_count(trace, open.trace_count, 0, wrapped, tokens) : UINT32_MAX;
+        u32 nodes = transformed < open.trace_count ? c_test_body_scratch_find_count(trace, open.trace_count, 0, transformed, tokens) : UINT32_MAX;
+        BUSTER_TEST(arguments, copy < wrapped && wrapped < transformed && transformed < nodes && nodes < open.trace_count);
+        c_test_body_scratch_refuse_at(arguments, &result, evaluator, trace, open.trace_count, 0, copy, S8("main"));
+        open = c_test_body_scratch_run(arguments, evaluator, 0, trace);
+        c_test_body_scratch_refuse_at(arguments, &result, evaluator, trace, open.trace_count, 0, nodes, S8("main"));
+
+        // Recovery: the same refusal in an earlier body, then a later body
+        // whose own finding is still reported after the exhaustion report.
+        String8 recovering = string_format(arguments->arena,
+            S8("static int big(void){{int s=(int)sizeof(int __attribute__((vector_size({S8})))); return s;} static void bad(void){{break;} "
+               "int main(void){{bad(); return big();}"), operand);
+        CTestBodyScratchRun recovering_open = c_test_body_scratch_run(arguments, recovering, 0, trace);
+        BUSTER_TEST(arguments, recovering_open.diagnostic_count == 1 && string_first_sequence(recovering_open.messages[0], S8("in function 'bad'")) == 0);
+        u32 big_copy = c_test_body_scratch_find(trace, recovering_open.trace_count, 0, sizeof(CToken), tokens * 2 + 1);
+        u64 cap = c_test_body_scratch_peak(trace, recovering_open.trace_count, 0, big_copy);
+        u64 later_peak = BUSTER_MAX(c_test_body_scratch_peak(trace, recovering_open.trace_count, 1, UINT32_MAX),
+                                    c_test_body_scratch_peak(trace, recovering_open.trace_count, 2, UINT32_MAX));
+        BUSTER_TEST(arguments, big_copy < recovering_open.trace_count && later_peak <= cap && trace[big_copy].end > cap);
+        String8 bad_message = recovering_open.messages[0];
+        CTestBodyScratchRun recovered = c_test_body_scratch_run(arguments, recovering, cap, trace);
+        BUSTER_TEST(arguments, c_test_body_scratch_refused(trace, recovered.trace_count) == big_copy);
+        BUSTER_TEST(arguments, recovered.diagnostic_count == 2 && c_test_body_scratch_reported(arguments, &recovered, 0, S8("big")) &&
+                                   string_equal(recovered.messages[1], bad_message));
+    }
+
+    // Typed constants: a case label of 1 + 4 * terms tokens takes one task
+    // per token plus one.
+    {
+        u64 tokens = 1 + 4 * (u64)C_TEST_BODY_SCRATCH_CASE_TERMS;
+        String8 label = c_test_body_scratch_repeat(arguments->arena, S8("1"), S8(" + 0*1"), C_TEST_BODY_SCRATCH_CASE_TERMS, S8(""));
+        String8 cases = string_format(arguments->arena,
+            S8("int main(void){{int x=1; switch (x) {{case {S8}: x=2; break; case 3: x=4; break; default: break;} return x;}"), label);
+        CTestBodyScratchRun open = c_test_body_scratch_run(arguments, cases, 0, trace);
+        BUSTER_TEST(arguments, open.lowered);
+        u32 tasks = c_test_body_scratch_find_count(trace, open.trace_count, 0, 0, tokens + 1);
+        c_test_body_scratch_refuse_at(arguments, &result, cases, trace, open.trace_count, 0, tasks, S8("main"));
+    }
+
+    // Loops: the statement-end table's pending stack holds two entries per
+    // body token plus two; the body's first request names its token count.
+    {
+        String8 loops = S8("int main(void){int x=1; for (int i=0; i<3; i++) {while (x<10) {x++; if (x==5) break;} do {x--;} while (x>7);} "
+                           "return x;}");
+        CTestBodyScratchRun open = c_test_body_scratch_run(arguments, loops, 0, trace);
+        BUSTER_TEST(arguments, open.lowered);
+        u32 first = c_test_body_scratch_body_start(trace, open.trace_count, 0) + 1;
+        u64 body_tokens = first < open.trace_count ? trace[first].count : 0;
+        u32 pending = c_test_body_scratch_find(trace, open.trace_count, 0, sizeof(u32), (body_tokens + 1) * 2);
+        c_test_body_scratch_refuse_at(arguments, &result, loops, trace, open.trace_count, 0, pending, S8("main"));
+    }
+
+    // Assembly: the clobber table spans the third colon and the clobber
+    // list. Clobbers must be distinct and valid for the target, so the list
+    // is `"memory", "cc"` and then numbered vector or general registers.
+    {
+        String8 clobbers = S8("\"memory\", \"cc\"");
+        String8 register_prefix = target_native.cpu_arch == CPU_ARCH_X86_64 ? S8("xmm") : S8("x");
+        for (u32 clobber = 2; clobber < C_TEST_BODY_SCRATCH_CLOBBERS; clobber += 1)
+        {
+            clobbers = string_format(arguments->arena, S8("{S8}, \"{S8}{u32}\""), clobbers, register_prefix, clobber - 2);
+        }
+        String8 assembly = string_format(arguments->arena, S8("int main(void){{int a=1; __asm__ volatile(\"nop\" : : : {S8}); return a;}"), clobbers);
+        CTestBodyScratchRun open = c_test_body_scratch_run(arguments, assembly, 0, trace);
+        BUSTER_TEST(arguments, open.lowered);
+        u32 table = c_test_body_scratch_find(trace, open.trace_count, 0, sizeof(String8), 2 * (u64)C_TEST_BODY_SCRATCH_CLOBBERS);
+        c_test_body_scratch_refuse_at(arguments, &result, assembly, trace, open.trace_count, 0, table, S8("main"));
+    }
+
+    // Initializers: inferring `struct S a[]` builds one slot table per
+    // record, two rows of one u32 per member.
+    {
+        String8 members = S8("int m0;");
+        for (u32 member = 1; member < C_TEST_BODY_SCRATCH_MEMBERS; member += 1)
+        {
+            members = string_format(arguments->arena, S8("{S8} int m{u32};"), members, member);
+        }
+        String8 initializers = string_format(arguments->arena,
+            S8("struct S {{{S8}}; int main(void){{struct S a[] = {{{{1, 2}, {{3, 4}}}; return a[1].m1;}"), members);
+        CTestBodyScratchRun open = c_test_body_scratch_run(arguments, initializers, 0, trace);
+        BUSTER_TEST(arguments, open.lowered);
+        u32 slots = c_test_body_scratch_find(trace, open.trace_count, 0, sizeof(u32), C_TEST_BODY_SCRATCH_MEMBERS);
+        c_test_body_scratch_refuse_at(arguments, &result, initializers, trace, open.trace_count, 0, slots, S8("main"));
+        open = c_test_body_scratch_run(arguments, initializers, 0, trace);
+        c_test_body_scratch_refuse_at(arguments, &result, initializers, trace, open.trace_count, 0, slots + 1, S8("main"));
+    }
+    return result;
+}
+
+// The furthest end a model row of body `body` reached, and the first such row
+// (`first`, UINT32_MAX when the body made no type-constant query).
+BUSTER_GLOBAL_LOCAL u64 c_test_body_scratch_model_peak(CTestBodyScratchRequest const* trace, u32 count, u32 body, u32* first)
+{
+    u64 peak = 0;
+    *first = UINT32_MAX;
+    for (u32 row = c_test_body_scratch_body_start(trace, count, body) + 1; row < count && trace[row].element_size; row += 1)
+    {
+        if (trace[row].model)
+        {
+            peak = BUSTER_MAX(peak, trace[row].end);
+            *first = BUSTER_MIN(*first, row);
+        }
+    }
+    return peak;
+}
+
+BUSTER_GLOBAL_LOCAL CTestBodyScratchRun c_test_body_scratch_model_run(UnitTestArguments* arguments, String8 source, u64 model_cap,
+                                                                      CTestBodyScratchRequest* trace)
+{
+    c_test_body_validation_model_limit(model_cap);
+    CTestBodyScratchRun run = c_test_body_scratch_run(arguments, source, 0, trace);
+    c_test_body_validation_model_limit(0);
+    return run;
+}
+
+// The private model of c_parse_type_integer_constant_query_core (#1256): a
+// member alignment query in a case label copies the type table into its own
+// arena and adds the cast's pointer type there. That model arena is guarded
+// on the body under its own limit, so the query's model rows (the trace's
+// `model` rows) are checked like the body's scratch: at the furthest end they
+// reach the body validates and lowers, one byte less refuses the query, and
+// the function is reported once while every later body is still validated.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_validation_type_query_model(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CTestBodyScratchRequest* trace = arena_allocate(arguments->arena, CTestBodyScratchRequest, C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+    String8 members = S8("");
+    for (u32 index = 0; index < 20; index += 1)
+    {
+        members = string_format(arguments->arena, S8("{S8}int m{u32}; "), members, index);
+    }
+    String8 head = string_format(arguments->arena, S8("struct S {{ char c; long long m; {S8}}; "
+        "static int big(void){{struct S s = {{0}; int x = 0; switch (x) {{ case _Alignof(((const struct S*)&s)->m19): x = 1; break; "
+        "default: break; } return x + s.m19;} "), members);
+    String8 query = string_format(arguments->arena, S8("{S8}static int fine(int x){{return x+1;} int main(void){{return big()+fine(2);}"), head);
+    CTestBodyScratchRun open = c_test_body_scratch_model_run(arguments, query, 0, trace);
+    BUSTER_TEST(arguments, open.lowered && open.trace_count < C_TEST_BODY_SCRATCH_TRACE_CAPACITY);
+    u32 first = UINT32_MAX;
+    u64 peak = c_test_body_scratch_model_peak(trace, open.trace_count, 0, &first);
+    // The query reached its model: the guard checked rows in its arena.
+    BUSTER_TEST(arguments, peak != 0 && first < open.trace_count);
+    u32 later_first = UINT32_MAX;
+    c_test_body_scratch_model_peak(trace, open.trace_count, 1, &later_first);
+    BUSTER_TEST(arguments, later_first == UINT32_MAX);
+    CTestBodyScratchRun fits = c_test_body_scratch_model_run(arguments, query, peak, trace);
+    BUSTER_TEST(arguments, fits.lowered && c_test_body_scratch_refused(trace, fits.trace_count) == UINT32_MAX);
+    CTestBodyScratchRun spare = c_test_body_scratch_model_run(arguments, query, peak + 1, trace);
+    BUSTER_TEST(arguments, spare.lowered && c_test_body_scratch_refused(trace, spare.trace_count) == UINT32_MAX);
+    CTestBodyScratchRun short_by_one = c_test_body_scratch_model_run(arguments, query, peak - 1, trace);
+    u32 refused = c_test_body_scratch_refused(trace, short_by_one.trace_count);
+    BUSTER_TEST(arguments, !short_by_one.lowered && short_by_one.diagnostic_count == 1 &&
+                               c_test_body_scratch_reported(arguments, &short_by_one, 0, S8("big")));
+    if (BUSTER_REQUIRE(arguments, refused < short_by_one.trace_count))
+    {
+        BUSTER_TEST(arguments, trace[refused].model && refused < c_test_body_scratch_body_start(trace, short_by_one.trace_count, 1));
+    }
+    // Recovery: the bodies after the refused one are validated, and a later
+    // invalid body still reports its own finding. Its unit has other
+    // function types, so its query's model has its own peak.
+    BUSTER_TEST(arguments, c_test_body_scratch_body_start(trace, short_by_one.trace_count, 2) < short_by_one.trace_count);
+    String8 invalid_later = string_format(arguments->arena, S8("{S8}static void bad(void){{break;} int main(void){{bad(); return big();}"), head);
+    CTestBodyScratchRun invalid_open = c_test_body_scratch_model_run(arguments, invalid_later, 0, trace);
+    BUSTER_TEST(arguments, invalid_open.diagnostic_count == 1 && string_first_sequence(invalid_open.messages[0], S8("in function 'bad'")) == 0);
+    u64 invalid_peak = c_test_body_scratch_model_peak(trace, invalid_open.trace_count, 0, &first);
+    BUSTER_TEST(arguments, invalid_peak != 0);
+    CTestBodyScratchRun both = c_test_body_scratch_model_run(arguments, invalid_later, invalid_peak - 1, trace);
+    BUSTER_TEST(arguments, both.diagnostic_count == 2 && c_test_body_scratch_reported(arguments, &both, 0, S8("big")) &&
+                               string_equal(both.messages[1], invalid_open.messages[0]));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_lower_capacity_plan(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1252,6 +1719,126 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_conditional_sizeof_mem
         BUSTER_TEST(arguments, lowered.program->rejected_function_count == 0);
     }
     c_test_scratch_end(temporary);
+    return result;
+}
+
+// A member `_Alignas` that measures the previous record of a chain folds from
+// the solve's own layouts instead of a nested typed query per level (#3269).
+// The chains run past the old 256-level refusal and the depth that overflowed
+// the stack before it. Each line names the previous record: a plain `sizeof`,
+// an `_Alignof` over arrays of varying length, and a mix of a typedef, a
+// qualified tag, pointers and the `+`/`*` arithmetic the fold accepts. The
+// final assertion holds the answer Clang gives for the same source.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignas_typed_query_chain(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 depth = 1500;
+    String8 bases[] = {S8("struct S0 { double d; };\n"), S8("struct S0 { _Alignas(16) char c; };\n"), S8("struct S0 { _Alignas(16) char c; };\n")};
+    String8 assertions[] = {S8("_Static_assert(sizeof(struct S1499) == 8 && _Alignof(struct S1499) == 8, \"chain\");\n"),
+                            S8("_Static_assert(sizeof(struct S1499) == 16 && _Alignof(struct S1499) == 16, \"chain\");\n"),
+                            S8("_Static_assert(sizeof(struct S1499) == 16 && _Alignof(struct S1499) == 16, \"chain\");\n")};
+    for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(bases); variant += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u64 source_capacity = bases[variant].length + (u64)depth * 160 + assertions[variant].length;
+        char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+        u64 source_length = 0;
+        c_test_append_source(source_bytes, source_capacity, &source_length, bases[variant]);
+        for (u32 index = 1; index < depth; index += 1)
+        {
+            String8 current = string_format(temporary.arena, S8("{u32}"), index);
+            String8 previous = string_format(temporary.arena, S8("{u32}"), index - 1);
+            String8 pieces[16] = {0};
+            u32 piece_count = 0;
+            switch (variant)
+            {
+            case 0:
+                pieces[piece_count++] = S8("struct S");
+                pieces[piece_count++] = current;
+                pieces[piece_count++] = S8(" { _Alignas(sizeof(struct S");
+                pieces[piece_count++] = previous;
+                pieces[piece_count++] = S8(")) char c; };\n");
+                break;
+            case 1:
+                pieces[piece_count++] = S8("struct S");
+                pieces[piece_count++] = current;
+                pieces[piece_count++] = S8(" { _Alignas(_Alignof(struct S");
+                pieces[piece_count++] = previous;
+                pieces[piece_count++] = S8(")) char c[");
+                pieces[piece_count++] = string_format(temporary.arena, S8("{u32}"), index % 5 + 1);
+                pieces[piece_count++] = S8("]; };\n");
+                break;
+            default:
+                pieces[piece_count++] = S8("typedef struct S");
+                pieces[piece_count++] = previous;
+                pieces[piece_count++] = S8(" T");
+                pieces[piece_count++] = previous;
+                pieces[piece_count++] = S8("; struct S");
+                pieces[piece_count++] = current;
+                pieces[piece_count++] = S8(" { _Alignas(sizeof(T");
+                pieces[piece_count++] = previous;
+                pieces[piece_count++] = S8(") * 0 + _Alignof(const struct S");
+                pieces[piece_count++] = previous;
+                pieces[piece_count++] = S8(") * (1)) char a[");
+                pieces[piece_count++] = string_format(temporary.arena, S8("{u32}"), index % 3 + 1);
+                pieces[piece_count++] = S8("]; T");
+                pieces[piece_count++] = previous;
+                pieces[piece_count++] = S8(" *previous; };\n");
+                break;
+            }
+            for (u32 piece = 0; piece < piece_count; piece += 1)
+            {
+                c_test_append_source(source_bytes, source_capacity, &source_length, pieces[piece]);
+            }
+        }
+        c_test_append_source(source_bytes, source_capacity, &source_length, assertions[variant]);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, (String8){.pointer = source_bytes, .length = source_length},
+                                                     S8("alignas-typed-query-chain.c"), target_native, &preprocess, &parse);
+        BUSTER_TEST(arguments, source_length < source_capacity);
+        BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0,
+                        lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("alignas typed query chain"));
+        BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
+// The alignment fold answers only when no intermediate value can wrap. These
+// requests wrap an unsigned product, so they reach the typed query, which
+// keeps the C arithmetic: a wrapped product is zero. A request whose 32-bit
+// product does not wrap the final 64-bit sum stays oversized and is refused,
+// not folded to a small alignment (#3269).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignas_fold_typed_width(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 accepted[] = {
+        S8("struct W { _Alignas(sizeof(int) * 0 + 65536U * 65536U * 0 + 8) char c; };\n"
+           "_Static_assert(_Alignof(struct W) == 8, \"w\");\n"),
+        S8("struct X { _Alignas(sizeof(int) + 65536U * 65536U + 4) char c; };\n"
+           "_Static_assert(_Alignof(struct X) == 8, \"x\");\n"),
+        S8("struct Y { _Alignas(sizeof(int) * 2 + 4 * (1 + 1)) char c; };\n"
+           "_Static_assert(_Alignof(struct Y) == 16, \"y\");\n"),
+        S8("struct Q { _Alignas(sizeof(int) * 4294967296ULL * 4294967296ULL + 8) char c; };\n"
+           "_Static_assert(_Alignof(struct Q) == 8, \"q\");\n"),
+    };
+    String8 refused[] = {
+        S8("struct R { _Alignas(sizeof(int) * 0 + 65536U * 65536U + 18446744069414584328ULL) char c; };\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(accepted) + BUSTER_ARRAY_LENGTH(refused); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        bool accept = index < BUSTER_ARRAY_LENGTH(accepted);
+        String8 source = accept ? accepted[index] : refused[index - BUSTER_ARRAY_LENGTH(accepted)];
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("alignas-fold-typed-width.c"), target_native, &preprocess, &parse);
+        u64 diagnostics = preprocess.diagnostic_count + parse.diagnostic_count + lowered.diagnostic_count;
+        BUSTER_TEST_RAW(arguments, accept ? diagnostics == 0 && lowered.canonical_ir_certified : diagnostics != 0,
+                        lowered.diagnostic_count ? lowered.diagnostics[0].message : source);
+        c_test_scratch_end(temporary);
+    }
     return result;
 }
 
@@ -10813,6 +11400,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
         {S8("char d[(unsigned long long)5]; _Static_assert(sizeof(d) == 5, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("char d[(_Bool)5 + 1]; _Static_assert(sizeof(d) == 2, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("enum { X = 300 }; char d[(char)X + (signed char)200 + 100]; _Static_assert(sizeof(d) == 88, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        // A request that measures a record folds from the solve's own layouts
+        // (#3269); one that reaches its own record waits on it and still ends
+        // in the diagnostic, and a folded value obeys the power-of-two rule.
+        {S8("struct A { _Alignas(sizeof(struct A)) char c; };"), S8("invalid object alignment"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct A { _Alignas(sizeof(struct A) * 2 + 1) char c; };"), S8("invalid object alignment"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct B; struct A { _Alignas(sizeof(struct B)) char c; }; struct B { _Alignas(_Alignof(struct A)) char c; };"), S8("invalid object alignment"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct S0 { char c[3]; }; struct S1 { _Alignas(sizeof(struct S0)) char c; };"), S8("not a power of two"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct A { _Alignas(sizeof(struct A *)) char c; struct A *next; }; typedef struct A TA; struct B { _Alignas(sizeof(const TA) + 0 * sizeof(int)) char c; }; struct C { _Alignas(sizeof(struct B) * 2) char c; }; _Static_assert(sizeof(struct B) == 16 && _Alignof(struct C) == 32, \"fold\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("void g(void) { struct X { char c[3]; }; { struct X { char c[64]; }; struct Y { _Alignas(sizeof(struct X)) char c; }; _Static_assert(_Alignof(struct Y) == 64, \"inner\"); } struct Z { _Alignas(sizeof(struct X) + 1) char c; }; _Static_assert(_Alignof(struct Z) == 4, \"outer\"); }"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("typedef int A16 __attribute__((aligned(16))); struct V { _Alignas(_Alignof(const A16) + 0) char c; }; _Static_assert(_Alignof(struct V) == 16, \"v\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         // Only a type that reaches itself is refused, however deep a chain of
         // distinct types runs.
         {S8("struct S0 { double d; }; struct S1 { _Alignas(sizeof(struct S0)) char c; }; struct S2 { _Alignas(sizeof(struct S1)) char c; }; struct S3 { _Alignas(sizeof(struct S2)) char c; }; struct S4 { _Alignas(sizeof(struct S3)) char c; }; struct S5 { _Alignas(sizeof(struct S4)) char c; }; struct S6 { _Alignas(sizeof(struct S5)) char c; }; struct S7 { _Alignas(sizeof(struct S6)) char c; }; _Static_assert(sizeof(struct S7) == 8, \"chain\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
@@ -22539,6 +23136,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__builtin_umul_overflow"), all_targets},
         {S8("__builtin_umull_overflow"), all_targets},
         {S8("__builtin_umulll_overflow"), all_targets},
+        {S8("__builtin_add_overflow"), all_targets},
+        {S8("__builtin_sub_overflow"), all_targets},
+        {S8("__builtin_mul_overflow"), all_targets},
         {S8("__builtin_clrsb"), all_targets},
         {S8("__builtin_clrsbl"), all_targets},
         {S8("__builtin_clrsbll"), all_targets},
@@ -22614,8 +23214,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__va_start"), 0},
         {S8("_mm_pause"), 0},
         {S8("__builtin_buster_simd_load"), 0},
-        // Generic overflow checks are not lowered yet.
-        {S8("__builtin_add_overflow"), 0},
+        {S8("__builtin_overflow"), 0},
+        {S8("__builtin_add_overflow_p"), 0},
     };
     Target targets[] = {
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
@@ -23076,6 +23676,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
             c_test_scratch_end(temporary);
         }
     }
+    return result;
+}
+
+// __builtin_dynamic_object_size shares __builtin_object_size's admission and
+// result: GCC and Clang allow the conservative static answer. Neither is an
+// integer constant expression here, so compare the lowered IR of both spellings.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_dynamic_object_size(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 spellings[] = {S8("__builtin_dynamic_object_size"), S8("__builtin_object_size")};
+    CIRLowerResult lowered[2] = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    for (u32 index = 0; index < 2; index += 1)
+    {
+        String8 source = string_format_z(temporary.arena,
+            S8("#if !__has_builtin(__builtin_dynamic_object_size) || !__has_builtin(__builtin_object_size)\n"
+               "#error missing dynamic object size\n"
+               "#endif\n"
+               "typedef struct Holder {{ int head; char tail[12]; } Holder;\n"
+               "static char array[24];\n"
+               "static Holder holder;\n"
+               "extern char* unknown;\n"
+               "unsigned long long array0(void) {{ return {S8}(array, 0); }\n"
+               "unsigned long long array1(void) {{ return {S8}(array, 1); }\n"
+               "unsigned long long array2(void) {{ return {S8}(array, 2); }\n"
+               "unsigned long long array3(void) {{ return {S8}(array, 3); }\n"
+               "unsigned long long member0(void) {{ return {S8}(holder.tail, 0); }\n"
+               "unsigned long long member1(void) {{ return {S8}(holder.tail, 1); }\n"
+               "unsigned long long member2(void) {{ return {S8}(holder.tail, 2); }\n"
+               "unsigned long long member3(void) {{ return {S8}(holder.tail, 3); }\n"
+               "unsigned long long unknown0(void) {{ return {S8}(unknown, 0); }\n"
+               "unsigned long long unknown1(void) {{ return {S8}(unknown, 1); }\n"
+               "unsigned long long unknown2(void) {{ return {S8}(unknown, 2); }\n"
+               "unsigned long long unknown3(void) {{ return {S8}(unknown, 3); }\n"
+               "unsigned long long runtime(char* pointer) {{ return {S8}(pointer, 0); }\n"),
+            spellings[index], spellings[index], spellings[index], spellings[index], spellings[index], spellings[index],
+            spellings[index], spellings[index], spellings[index], spellings[index], spellings[index], spellings[index],
+            spellings[index]);
+        CPreprocessResult tokens = {0};
+        CParseResult parse = {0};
+        lowered[index] = c_test_lower_source(temporary.arena, source, S8("dynamic-object-size.c"), target_native, &tokens, &parse);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !parse.diagnostic_count && !lowered[index].diagnostic_count && lowered[index].program);
+    }
+    if (lowered[0].program && lowered[1].program && !lowered[0].diagnostic_count && !lowered[1].diagnostic_count)
+    {
+        IrModule* dynamic_module = lowered[0].program->modules;
+        IrModule* static_module = lowered[1].program->modules;
+        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered[0].program, dynamic_module).error == IR_VALIDATION_NONE);
+        BUSTER_TEST(arguments, dynamic_module->function_count == static_module->function_count && dynamic_module->function_count != 0);
+        u32 function_count = dynamic_module->function_count < static_module->function_count ? dynamic_module->function_count : static_module->function_count;
+        u32 constants = 0;
+        for (u32 function_index = 0; function_index < function_count; function_index += 1)
+        {
+            IrFunction* dynamic_function = dynamic_module->functions + function_index;
+            IrFunction* static_function = static_module->functions + function_index;
+            BUSTER_TEST(arguments, dynamic_function->instruction_count == static_function->instruction_count);
+            u32 instruction_count = dynamic_function->instruction_count < static_function->instruction_count ? dynamic_function->instruction_count
+                                                                                                             : static_function->instruction_count;
+            for (u32 instruction_index = 0; instruction_index < instruction_count; instruction_index += 1)
+            {
+                IrInstruction* dynamic_instruction = dynamic_function->instructions + instruction_index;
+                IrInstruction* static_instruction = static_function->instructions + instruction_index;
+                BUSTER_TEST(arguments, dynamic_instruction->opcode == static_instruction->opcode &&
+                                           dynamic_instruction->immediate_count == static_instruction->immediate_count);
+                if (dynamic_instruction->opcode == static_instruction->opcode && dynamic_instruction->opcode == IR_OPCODE_CONSTANT_INTEGER &&
+                    dynamic_instruction->immediate_count && dynamic_instruction->immediate_count == static_instruction->immediate_count)
+                {
+                    constants += 1;
+                    BUSTER_TEST(arguments, dynamic_instruction->immediates[0] == static_instruction->immediates[0]);
+                }
+            }
+        }
+        BUSTER_TEST(arguments, constants >= 12);
+    }
+    String8 invalid_sources[] = {
+        S8("unsigned long long f(char* p) { return __builtin_dynamic_object_size(p); }\n"),
+        S8("unsigned long long f(char* p) { return __builtin_dynamic_object_size(p, 0, 1); }\n"),
+        S8("unsigned long long f(char* p) { return __builtin_dynamic_object_size(p, 4); }\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_sources); index += 1)
+    {
+        CPreprocessResult invalid_tokens = {0};
+        CParseResult invalid_parse = {0};
+        CIRLowerResult invalid = c_test_lower_source(temporary.arena, invalid_sources[index], S8("dynamic-object-size-invalid.c"), target_native,
+                                                     &invalid_tokens, &invalid_parse);
+        BUSTER_TEST(arguments, invalid.diagnostic_count != 0 || invalid_parse.diagnostic_count != 0);
+    }
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -46947,6 +47635,301 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_library_builtins_runtime(UnitTestA
     return result;
 }
 
+// The generic checked-arithmetic builtins take operands and a result of any
+// integer types without converting them to a common type, so each case here
+// pairs a signedness or width combination with the answer Clang 18 gives. The
+// program returns zero, or a line number identifying the failing check.
+// Plain `char` is unsigned on AArch64, so the narrow signed cases name
+// `signed char`. Only the hosts that run the program define it.
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+BUSTER_GLOBAL_LOCAL String8 const c_test_generic_overflow_runtime_sources[] = {
+    S8_INITIALIZER(
+        "#define INT_MAX 2147483647\n"
+        "#define INT_MIN (-2147483647 - 1)\n"
+        "#define UINT_MAX 4294967295u\n"
+        "#define LLONG_MAX 9223372036854775807LL\n"
+        "#define LLONG_MIN (-9223372036854775807LL - 1)\n"
+        "#define ULLONG_MAX 18446744073709551615ULL\n"
+        "typedef unsigned __int128 u128;\n"
+        "typedef __int128 i128;\n"
+        "enum E { E0, E1 };\n"
+        "enum S { S0 = -1, S1 = 1 };\n"
+        "static unsigned evaluations;\n"
+        "static long long next(long long v) { evaluations++; return v; }\n"
+        "#define CHECK(COND) do { if (!(COND)) return __LINE__ % 255 + 1; } while (0)\n"
+        "#define CASE(OP, TA, TB, TR, A, B, EO, ER) { TR r = 0; int o = __builtin_##OP##_overflow((TA)(A), (TB)(B), &r); \\\n"
+        "    CHECK(o == (EO) && (long long)r == (ER)); }\n"
+        "#define CASE128(OP, TA, TB, TR, A, B, EO, HI, LO) { TR r = 0; int o = __builtin_##OP##_overflow((TA)(A), (TB)(B), &r); \\\n"
+        "    CHECK(o == (EO) && (unsigned long long)((u128)r >> 64) == (HI) && (unsigned long long)r == (LO)); }\n"),
+    S8_INITIALIZER(
+        "static int mixed_widths(void)\n"
+        "{\n"
+        "CASE(add, int, int, int, INT_MAX, 1, 1, -2147483648LL)\n"
+        "CASE(sub, int, int, int, INT_MIN, 1, 1, 2147483647LL)\n"
+        "CASE(add, int, int, int, 2, 3, 0, 5LL)\n"
+        "CASE(mul, int, int, int, 65536, 65536, 1, 0LL)\n"
+        "CASE(mul, int, int, int, -46341, 46340, 0, -2147441940LL)\n"
+        "CASE(add, unsigned, int, int, UINT_MAX, -1, 1, -2LL)\n"
+        "CASE(add, unsigned, int, unsigned, 5, -6, 1, 4294967295LL)\n"
+        "CASE(add, unsigned, int, unsigned, 7, -6, 0, 1LL)\n"
+        "CASE(sub, int, unsigned, int, 5, 6u, 0, -1LL)\n"
+        "CASE(mul, int, unsigned, long long, -1, 4000000000u, 0, -4000000000LL)\n"
+        "CASE(add, int, int, unsigned char, 200, 100, 1, 44LL)\n"
+        "CASE(add, int, int, unsigned char, 100, 100, 0, 200LL)\n"
+        "CASE(sub, int, int, unsigned char, 0, 1, 1, 255LL)\n"
+        "CASE(mul, int, int, short, 300, 300, 1, 24464LL)\n"
+        "CASE(mul, int, int, short, -300, 100, 0, -30000LL)\n"
+        "CASE(sub, int, int, signed char, -100, 100, 1, 56LL)\n"
+        "CASE(add, signed char, signed char, signed char, 100, 100, 1, -56LL)\n"
+        "CASE(add, unsigned char, unsigned char, unsigned char, 255, 1, 1, 0LL)\n"
+        "CASE(add, short, short, int, 32767, 32767, 0, 65534LL)\n"
+        "CASE(mul, long long, long long, long long, 3000000000LL, 4, 0, 12000000000LL)\n"
+        "CASE(mul, long long, long long, long long, 3000000000LL, 4000000000LL, 1, -6446744073709551616LL)\n"
+        "CASE(mul, long long, long long, long long, LLONG_MIN, -1, 1, (-9223372036854775807LL - 1))\n"
+        "CASE(add, long long, long long, long long, LLONG_MAX, 1, 1, (-9223372036854775807LL - 1))\n"
+        "CASE(sub, long long, long long, long long, LLONG_MIN, 1, 1, 9223372036854775807LL)\n"
+        "CASE(sub, unsigned long long, unsigned long long, long long, 0, 1, 0, -1LL)\n"
+        "CASE(sub, unsigned long long, unsigned long long, long long, ULLONG_MAX, 1, 1, -2LL)\n"
+        "CASE(sub, unsigned long long, unsigned long long, long long, 1ULL << 63, 0, 1, (-9223372036854775807LL - 1))\n"
+        "CASE(sub, unsigned long long, unsigned long long, long long, 0, 1ULL << 63, 0, (-9223372036854775807LL - 1))\n"
+        "CASE(add, unsigned long long, unsigned long long, unsigned long long, ULLONG_MAX, 1, 1, 0LL)\n"
+        "CASE(add, unsigned long long, long long, unsigned long long, 5, -6, 1, -1LL)\n"
+        "CASE(add, unsigned long long, long long, long long, ULLONG_MAX, LLONG_MIN, 0, 9223372036854775807LL)\n"
+        "CASE(mul, unsigned long long, unsigned long long, unsigned long long, 1ULL << 32, 1ULL << 32, 1, 0LL)\n"
+        "CASE(mul, unsigned long long, unsigned long long, unsigned long long, 1ULL << 31, 1ULL << 32, 0, (-9223372036854775807LL - 1))\n"
+        "CASE(mul, unsigned long long, long long, long long, 1ULL << 62, 2, 1, (-9223372036854775807LL - 1))\n"
+        "CASE(mul, unsigned long long, long long, unsigned long long, 3, -1, 1, -3LL)\n"
+        "CASE(add, long long, long long, int, 1LL << 40, 5, 1, 5LL)\n"
+        "CASE(add, long long, long long, int, 7, 5, 0, 12LL)\n"
+        "CASE(add, long long, long long, unsigned, -1, 0, 1, 4294967295LL)\n"
+        "CASE(add, long, long, long, __LONG_MAX__, 1, 1, (-9223372036854775807LL - 1))\n"
+        "CASE(sub, unsigned long, unsigned long, unsigned long, 0, 1, 1, -1LL)\n"
+        "CASE(mul, unsigned long, unsigned long, unsigned long, 1UL << 30, 1UL << 30, 0, 1152921504606846976LL)\n"
+        "    return 0;\n"
+        "}\n"),
+    S8_INITIALIZER(
+        "static int boolean_and_enum_results(void)\n"
+        "{\n"
+        "    { _Bool b = 1; int o = __builtin_add_overflow(1, 1, &b); CHECK(o == 1 && b == 0); }\n"
+        "    { _Bool b = 0; int o = __builtin_add_overflow(1, 0, &b); CHECK(o == 0 && b == 1); }\n"
+        "    { _Bool b = 1; int o = __builtin_add_overflow(2, 0, &b); CHECK(o == 1 && b == 0); }\n"
+        "    { _Bool b = 0; int o = __builtin_sub_overflow(0, 1, &b); CHECK(o == 1 && b == 1); }\n"
+        "    { _Bool b = 0; int o = __builtin_mul_overflow(3, 5, &b); CHECK(o == 1 && b == 1); }\n"
+        "    { _Bool x = 1, y = 1; int r = 0; int o = __builtin_add_overflow(x, y, &r); CHECK(o == 0 && r == 2); }\n"
+        "    { enum E e = E0; int o = __builtin_add_overflow(1, 1, &e); CHECK(o == 0 && (int)e == 2); }\n"
+        "    { enum E e = E0; int o = __builtin_sub_overflow(0, 1, &e); CHECK(o == 1 && (int)e == -1); }\n"
+        "    { enum S e = S1; int o = __builtin_sub_overflow(0, 1, &e); CHECK(o == 0 && (int)e == -1); }\n"
+        "    { enum E e = E1; int r = 0; int o = __builtin_add_overflow(e, -2, &r); CHECK(o == 0 && r == -1); }\n"
+        "    return 0;\n"
+        "}\n"
+        "static int qualifiers_and_evaluation(void)\n"
+        "{\n"
+        "    { volatile int v = 0; int o = __builtin_add_overflow(INT_MAX, 1, &v); CHECK(o == 1 && v == INT_MIN); }\n"
+        "    { volatile long long v = 0; int o = __builtin_add_overflow(1, 2, &v); CHECK(o == 0 && v == 3); }\n"
+        "    { int a[2] = {0, 0}; int o = __builtin_add_overflow(1, 2, a); CHECK(o == 0 && a[0] == 3 && a[1] == 0); }\n"
+        "    {\n"
+        "        int r = 0;\n"
+        "        evaluations = 0;\n"
+        "        int o = __builtin_mul_overflow(next(6), next(7), &r);\n"
+        "        CHECK(o == 0 && r == 42 && evaluations == 2);\n"
+        "    }\n"
+        "    {\n"
+        "        int r = 0;\n"
+        "        evaluations = 0;\n"
+        "        int o = __builtin_sub_overflow(next(5), next(7), (&r + next(0) * 0));\n"
+        "        CHECK(o == 0 && r == -2 && evaluations == 3);\n"
+        "    }\n"
+        "    { int r = 0; int o = __builtin_add_overflow(1, 2, &r) + __builtin_add_overflow(INT_MAX, 1, &r); CHECK(o == 1 && r == INT_MIN); }\n"
+        "    { int r = 0; CHECK(sizeof(__builtin_add_overflow(1, 2, &r)) == sizeof(_Bool)); }\n"
+        "    { int r = 0; if (__builtin_add_overflow(INT_MAX, 1, &r)) return 0; return __LINE__ % 255 + 1; }\n"
+        "}\n"),
+    S8_INITIALIZER(
+        "static int wide_results(void)\n"
+        "{\n"
+        "    CASE128(add, i128, i128, i128, (i128)1 << 126, (i128)1 << 126, 1, 0x8000000000000000ULL, 0)\n"
+        "    CASE128(add, i128, i128, i128, (i128)1 << 100, (i128)1 << 100, 0, 0x0000002000000000ULL, 0)\n"
+        "    CASE128(add, u128, u128, u128, ~(u128)0, 1, 1, 0, 0)\n"
+        "    CASE128(sub, u128, u128, u128, 0, 1, 1, ~0ULL, ~0ULL)\n"
+        "    CASE128(sub, i128, i128, i128, (i128)((u128)1 << 127), 1, 1, 0x7fffffffffffffffULL, ~0ULL)\n"
+        "    CASE128(add, long long, long long, i128, LLONG_MAX, LLONG_MAX, 0, 0, 0xfffffffffffffffeULL)\n"
+        "    CASE128(mul, long long, long long, i128, LLONG_MAX, LLONG_MAX, 0, 0x3fffffffffffffffULL, 1)\n"
+        "    CASE128(sub, long long, long long, i128, -5, LLONG_MAX, 0, ~0ULL, 0x7ffffffffffffffcULL)\n"
+        "    CASE128(sub, unsigned long long, unsigned long long, u128, 1, 2, 1, ~0ULL, ~0ULL)\n"
+        "    CASE128(add, int, unsigned, i128, -5, 3u, 0, ~0ULL, 0xfffffffffffffffeULL)\n"
+        "    return 0;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int status = mixed_widths();\n"
+        "    status = status ? status : boolean_and_enum_results();\n"
+        "    status = status ? status : qualifiers_and_evaluation();\n"
+        "    status = status ? status : wide_results();\n"
+        "    return status;\n"
+        "}\n"),
+};
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_overflow_builtins_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("generic-overflow-runtime"), S8(".c"));
+    // The program is split only to stay within the portable string-literal
+    // length; the parts are written back to back.
+    String8 program = string_format(arguments->arena, S8("{S8}{S8}{S8}{S8}"), c_test_generic_overflow_runtime_sources[0],
+                                    c_test_generic_overflow_runtime_sources[1], c_test_generic_overflow_runtime_sources[2],
+                                    c_test_generic_overflow_runtime_sources[3]);
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(program))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("generic-overflow-runtime-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], forms[form], S8("-O0"), S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("generic overflow mode={u32} form={u32}: {S8}"), mode, form, compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("generic overflow runtime mode={u32} form={u32}: status={u32} timed_out={u32}"),
+                                mode, form, execution.platform_status, (u32)execution.timed_out));
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+        BUSTER_TEST(arguments, os_file_delete(source));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// Lowering and diagnostics of the generic checked-arithmetic builtins. Every
+// accepted combination must lower and validate on both native targets; the
+// refused ones (a 128-bit operand or result that needs more than 128 bits of
+// exact arithmetic, or multiplication at 128 bits) must fail with a structured
+// diagnostic instead of producing partial output.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_overflow_builtins(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    String8 accepted =
+        S8("#if !__has_builtin(__builtin_add_overflow) || !__has_builtin(__builtin_sub_overflow) || !__has_builtin(__builtin_mul_overflow)\n"
+           "#error hidden generic overflow builtins\n#endif\n"
+           "enum E { E0, E1 };\n"
+           "_Static_assert(sizeof(__builtin_add_overflow(1, 2, (int*)0)) == sizeof(_Bool), \"overflow result\");\n"
+           "int query(int a, unsigned b, long long c, unsigned long long d, short s, _Bool z, enum E e, __int128 w, unsigned __int128 u,\n"
+           "          int* i, unsigned char* uc, long long* ll, _Bool* zr, enum E* er, __int128* wr, unsigned __int128* ur, volatile int* vi) {\n"
+           "    return __builtin_add_overflow(a, b, i) + __builtin_sub_overflow(a, b, uc) + __builtin_mul_overflow(c, d, ll) +\n"
+           "           __builtin_add_overflow(s, z, zr) + __builtin_sub_overflow(e, c, er) + __builtin_add_overflow(c, c, wr) +\n"
+           "           __builtin_mul_overflow(c, d, wr) + __builtin_add_overflow(w, w, wr) + __builtin_sub_overflow(u, u, ur) +\n"
+           "           __builtin_add_overflow(w, a, wr) + __builtin_add_overflow(a, 1, vi) + __builtin_mul_overflow(a, b, ll);\n"
+           "}\n");
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, accepted, (CPreprocessOptions){.target = targets[target_index]});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("generic-overflow.c"), preprocess, parse, targets[target_index],
+                    (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0,
+                    lowered.diagnostic_count ? lowered.diagnostics[0].message : S8(""));
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count == 1))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    IrFunction* query = c_test_find_ir_function(module, S8("query"));
+                    BUSTER_TEST(arguments, query != 0 && c_test_ir_call_count(query) == 0);
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+
+    // Invalid uses are rejected while analyzing the call.
+    String8 invalid_sources[] = {
+        S8("int f(int* r) { return __builtin_add_overflow(1, 2); }"),
+        S8("int f(int* r) { return __builtin_sub_overflow(1, 2, r, r); }"),
+        S8("int f(int* r, int* p) { return __builtin_mul_overflow(p, 2, r); }"),
+        S8("int f(int* r, int* p) { return __builtin_add_overflow(1, p, r); }"),
+        S8("int f(int* r) { return __builtin_add_overflow(1.0, 2, r); }"),
+        S8("int f(int* r) { return __builtin_add_overflow(1, 2.5f, r); }"),
+        S8("struct S { int v; }; int f(struct S s, int* r) { return __builtin_add_overflow(s, 1, r); }"),
+        S8("int f(const int* r) { return __builtin_add_overflow(1, 2, r); }"),
+        S8("int f(void) { const int r = 0; return __builtin_sub_overflow(1, 2, &r); }"),
+        S8("int f(int r) { return __builtin_add_overflow(1, 2, r); }"),
+        S8("int f(float* r) { return __builtin_add_overflow(1, 2, r); }"),
+        S8("int f(int** r) { return __builtin_mul_overflow(1, 2, r); }"),
+        S8("int f(void* r) { return __builtin_add_overflow(1, 2, r); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid_sources[index], (CPreprocessOptions){.target = targets[0]});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST_RAW(arguments, parse.diagnostic_count != 0, invalid_sources[index]);
+        c_test_scratch_end(temporary);
+    }
+
+    // Combinations the lowering does not support fail to lower with a
+    // diagnostic: multiplication at 128 bits, and an exact result that does
+    // not fit a signed 128-bit value (a 128-bit operand that must also narrow
+    // or change signedness, or a 64-bit unsigned product into 128 bits).
+    String8 refused_sources[] = {
+        S8("int f(__int128 a, __int128 b, __int128* r) { return __builtin_mul_overflow(a, b, r); }"),
+        S8("int f(unsigned long long a, unsigned long long b, unsigned __int128* r) { return __builtin_mul_overflow(a, b, r); }"),
+        S8("int f(__int128 a, __int128 b, long long* r) { return __builtin_add_overflow(a, b, r); }"),
+        S8("int f(unsigned __int128 a, int b, __int128* r) { return __builtin_sub_overflow(a, b, r); }"),
+        S8("int f(__int128 a, unsigned __int128 b, unsigned __int128* r) { return __builtin_add_overflow(a, b, r); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused_sources); index += 1)
+    {
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, refused_sources[index], (CPreprocessOptions){.target = targets[target_index]});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, refused_sources[index]);
+            if (preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("generic-overflow-refused.c"), preprocess, parse, targets[target_index],
+                    (CIRLowerOptions){0});
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0, refused_sources[index]);
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
 // IEC 60559 compareQuietEqual: == and != never raise FE_INVALID for a quiet NaN,
 // while the relational operators are signaling and always do (C17 F.3). Each
@@ -59720,6 +60703,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration_file_scope_name);
     C_TEST_FIXTURE(arguments, c_test_block_type_name_attributes);
     C_TEST_FIXTURE(arguments, c_test_body_scope_map);
+    C_TEST_FIXTURE(arguments, c_test_body_validation_scratch_exhaustion);
+    C_TEST_FIXTURE(arguments, c_test_body_validation_scratch_families);
+    C_TEST_FIXTURE(arguments, c_test_body_validation_type_query_model);
     C_TEST_FIXTURE(arguments, c_test_bool_bit_field_loads);
     C_TEST_FIXTURE(arguments, c_test_brace_designators);
     C_TEST_FIXTURE(arguments, c_test_braced_string_initializers);
@@ -59761,6 +60747,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_controlling_expression_scope);
     C_TEST_FIXTURE(arguments, c_test_array_object_size_limits);
     C_TEST_FIXTURE(arguments, c_test_static_assert_object_size_scaling);
+    C_TEST_FIXTURE(arguments, c_test_alignas_typed_query_chain);
+    C_TEST_FIXTURE(arguments, c_test_alignas_fold_typed_width);
     C_TEST_FIXTURE(arguments, c_test_declaration_constraints);
     C_TEST_FIXTURE(arguments, c_test_declaration_regressions);
     C_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
@@ -59780,6 +60768,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_join_simplify);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
     C_TEST_FIXTURE(arguments, c_test_duplicate_parameter_names);
+    C_TEST_FIXTURE(arguments, c_test_dynamic_object_size);
     C_TEST_FIXTURE(arguments, c_test_redefinition_names_previous_site);
     C_TEST_FIXTURE(arguments, c_test_empty_scalar_initializer_runtime);
     C_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
@@ -59836,6 +60825,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_function_pointer_array_type_name_runtime);
     C_TEST_FIXTURE(arguments, c_test_function_typedef_scopes);
     C_TEST_FIXTURE(arguments, c_test_generic_function_designator_call);
+    C_TEST_FIXTURE(arguments, c_test_generic_overflow_builtins);
+    C_TEST_FIXTURE(arguments, c_test_generic_overflow_builtins_runtime);
     C_TEST_FIXTURE(arguments, c_test_generic_string_subscripts);
     C_TEST_FIXTURE(arguments, c_test_elifdef_and_wide_character_constants);
     C_TEST_FIXTURE(arguments, c_test_abstract_declarator_and_pointer_typing);

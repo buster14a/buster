@@ -525,6 +525,126 @@ test-unit registry is unregistered and cannot retain destroyed arena pointers. E
 The lexer diagnostic arena remains an optional optimization with a tested
 result-arena fallback; failure there retains the original lexical diagnostics.
 
+### Per-body validation scratch (#1256)
+
+`c_parse_validate_lowering_constraints` validates each function body in the
+thread's scratch arena between a body mark and its rewind. Those arrays are
+sized by the input (the body's tokens, scopes, labels, cases and asm operands,
+and the expressions and type table that constant, layout and typing queries
+reach), so one large body can need more than the arena's whole reservation.
+The contract is recoverable, not a preflight estimate:
+
+- While a body's guard is open (`c_parse_body_scratch_guard_begin` to
+  `c_parse_body_scratch_guard_end`), every allocation from the guarded arena
+  is either made by `c_parse_body_scratch_allocate`
+  (`C_PARSE_BODY_SCRATCH_ARRAY`) or preceded by `c_parse_body_scratch_fits`
+  for the bytes the caller then carves. Both are an O(1) overflow-checked test
+  of size plus alignment padding against the body's limit, which is the
+  arena's whole reservation; no headroom is held back for unchecked sites,
+  because there are none. Other arenas, and the guarded arena outside a body,
+  allocate exactly as `arena_allocate` does after one thread-local compare.
+- The first refusal marks the body exhausted and every later request of that
+  body is refused. Each family treats a zero pointer as "skip this work"
+  (an unanswered constant, layout or member query, an unbuilt cache table, a
+  failed evaluation). The caller drops the body's partial diagnostics back to
+  its mark, reports one `C function body is too large for semantic
+  validation` diagnostic naming the function, rewinds the scratch mark and
+  continues with the next body. Validation of later bodies, and their own
+  findings, is unchanged.
+- Sites that reach the guarded arena through generic `Arena*` parameters are
+  routed too: the body-scope, statement-end, label, switch, const-assignment
+  and asm tables; `c_space_local`, the integer evaluator
+  (`c_integer_expression_evaluate` and its `_with_features` core, whose
+  parse-side form links its token list over one guarded array instead of
+  running macro expansion without macros), `c_conditional_feature_operators`
+  and `c_include_name`; string-literal decoding and imaginary spellings;
+  `c_parse_constant_expression_evaluate`, `c_parse_typed_constant` and the
+  type-constant query machine; the layout attempts and ordered passes (the
+  agenda solver, which grows its tables as it discovers the closure, does not
+  run in the guarded arena); the member-type, member-offset and initializer
+  slot-cache searches; `c_parse_alignof_object_alignment` and the bit-field
+  width evaluation (whose two-entry diagnostic buffer is constant-size but is
+  routed so nothing bypasses the limit after a refusal); and parse-result
+  growth through `c_parse_arena_can_allocate`, which asks the guard before its
+  own reservation check so the refusal is the body's. Decimal spellings that
+  `string_format` used to put in scratch are formed on the stack
+  (`c_parse_space_decimal`), the type-constant query's call-arity probe forms
+  no message, and the private type model of
+  `c_parse_type_integer_constant_query_core` is guarded as described below.
+  The lazy position index is built before the first guard opens.
+- The type-constant query's private model (`CParseResult query`) lives in the
+  other scratch arena, or a private arena when the caller's arena is that one,
+  never the body's. While a body's guard is open,
+  `c_parse_body_scratch_model_begin` guards that model arena on the same body
+  under its own limit (its whole reservation, measured from its position when
+  the query opens it) and `c_parse_body_scratch_model_end` restores an
+  enclosing query's. The guard is keyed on both arenas and shares one
+  exhausted flag, so a model request past its limit exhausts the body. A query
+  that saw the body exhausted leaves its constant or member alignment
+  unanswered and forwards no width diagnostic. Each model-arena allocation is
+  checked by construction:
+  - the copy-on-first-append tables (types, array bounds, type alignments,
+    noreturn function types and deferred bit-field widths) and the aggregate
+    and definition slot tables grow only through
+    `c_parse_arena_can_allocate`, which asks the guard first;
+  - the type-identity answers (`c_parse_type_identity_record`) and builtin
+    call positions (`c_parse_position_index_append`; the query seals its
+    bfloat16 list at its count) use the guarded array and drop the row on a
+    refusal; string decoding and both evaluators already did;
+  - the member name index is not offered: the query clears `member_lookup`,
+    whose entries are shared with the caller, so an index built in the model
+    arena can no longer be left in the caller's lookup after the model is
+    rewound; member lookups in a query scan the record's members;
+  - every message `c_parse.c` forms goes through `c_parse_message`, which on
+    the model arena forms a fixed text and allocates nothing, and
+    `c_parse_assignment_conversion_type_name` forms no name there. No message
+    leaves the query except bit-field width texts: their copies use
+    `c_parse_message_copy` (checked for the copied length) and
+    `c_parse_bit_field_width_message` checks `2 * name + 256` bytes first,
+    which bounds its at most two copies of the name, two decimal magnitudes
+    and fixed text;
+  - the layout cache is unreachable: the query's machines carry none, and
+    its layout solves run with no machine.
+  The fixed parameter, alignment-specifier and diagnostic buffers stay in
+  their own arena sized exactly before the query starts, and the parse
+  machine's arrays are guarded on the body's arena.
+- Completeness is established by enumeration, not by a margin: the allocation
+  sites reachable from per-body validation were audited, and a local
+  instrumentation build that reported every allocation on the guarded arena
+  not made or pre-checked by the guard found none across `c_frontend_tests`,
+  `test_all`, the self-host stages and the large-body `_Generic` reproducer.
+  The same instrumentation on the query model arena reported the member index
+  and conversion type names, both removed above, and nothing else across the
+  unit tests and a corpus of 73 member-alignment query shapes in bodies
+  (casts, compound literals, string and wide literals, nested queries, vector
+  and bit-field operands and invalid operands). The unit tests themselves
+  make no type-constant query inside a body; the model fixture below is the
+  first. This is coverage evidence for an audited list, not a static proof
+  over every input: the model arena has no numeric maximum-live bound, only
+  the guard's checked limit, so a new site that allocates in a scratch arena
+  or a query model reachable from body validation must use the guard and
+  tolerate a zero result, and the families or model fixture is where its
+  exact-bound refusal belongs.
+
+`c_test_body_validation_scratch_exhaustion` and
+`c_test_body_validation_scratch_families` use the test seams
+(`c_test_body_validation_scratch_limit` and `c_test_body_validation_scratch_trace`)
+to record each checked request, cap the body exactly at the furthest end
+reached before a named site, and assert that site is the first refused and the
+function is reported once: the flat body's per-token arrays (and its one-byte
+boundary), the scope-pending stack's initial size and its geometric growth, the
+asm constraint, name and clobber tables, the statement-end table of the loop
+and jump checks, the untyped evaluator's token copy and linked token list, the
+typed evaluator of a long case label, and the inferred initializer's slot
+tables. Recovery fixtures refuse an earlier body (flat and evaluator) and check
+that a later invalid body still reports its own finding.
+`c_test_body_validation_type_query_model` caps the query model through
+`c_test_body_validation_model_limit` and reads the trace's `model` rows: a
+member-alignment case label in one body (`_Alignof(((const struct S*)&s)->m19)`)
+validates and lowers at its model peak and one byte past it, one byte short
+refuses a model row and reports that function once, the later bodies are
+still validated, and a later invalid body reports its own finding.
+
 ## Regression contract
 
 The registered `c_test_integer_semantics_agreement` matrix pins #1577's
