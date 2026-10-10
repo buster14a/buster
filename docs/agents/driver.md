@@ -1562,11 +1562,14 @@ so back-to-back blocks become one location-list entry or CodeView
 cells, or once a function's deferred ranges would exceed
 `MACHINE_DEBUG_INITIALIZED_RANGE_LIMIT`, the remaining locals stay
 unavailable. The CodeView symbol reserve counts every location range
-(`CODEVIEW_DEFRANGE_RECORD_BYTES`). Regressions:
+(`CODEVIEW_DEFRANGE_RECORD_BYTES`), and a range longer than the 16-bit
+`S_DEFRANGE_*` length is emitted as consecutive records of at most
+`CODEVIEW_DEFRANGE_MAX_LENGTH` bytes rather than clamped. Regressions:
 `codegen_test_debug_local_seed_coverage`,
 `machine_test_debug_value_initialized_blocks`,
-`machine_test_debug_value_initialized_budget` and
-`codeview_test_many_location_ranges`. A
+`machine_test_debug_value_initialized_budget`,
+`codeview_test_many_location_ranges` and
+`codeview_test_long_location_range`. A
 local stays SSA only when its sole write is its entry initializer and that
 initializer is an instruction result no other local already names. This costs
 code in debug builds: the target keeps the remaining memory locals in frame
