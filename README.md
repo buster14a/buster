@@ -21,7 +21,8 @@ products: retained source and standalone tools have explicit integration limits.
 | How should an agent contribute? | [AGENTS.md](AGENTS.md) |
 
 Automatic CI classifies the complete PR or merge group. A prose-only final
-commit does not erase execution-affecting changes earlier in the PR.
+commit does not erase execution-affecting changes earlier in the PR, and a
+prose-only merge group queued behind code changes still runs full validation.
 
 The `ide` target is currently headless; its historical name does not advertise a
 working graphical IDE. See the compiler page for its entry point. Adding another
