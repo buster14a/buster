@@ -10027,7 +10027,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_deferred_edge_stores(Uni
 // and the host runs the program under both allocators and frontend forms
 // (expected values cross-checked with host GCC and Clang). FAST and QUALITY
 // stored 19 (x86-64 Linux) and 16 (x86-64 Windows) values at block boundaries
-// before the rule and 11 and 8 with it.
+// before the rule and 11 and 8 with it; carrying mutable values as well
+// brings that to 7 and 6.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_contract_carry_lanes(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -10080,7 +10081,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_contract_carry
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
         String8 targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
-        u64 boundary_spill_bounds[] = {11, 8, UINT64_MAX, UINT64_MAX, UINT64_MAX};
+        u64 boundary_spill_bounds[] = {7, 6, UINT64_MAX, UINT64_MAX, UINT64_MAX};
         String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
         for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
@@ -33650,6 +33651,79 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
         scratch_end(constexpr_temporary);
+    }
+    // A C23 constexpr compound literal initializing an ordinary file-scope
+    // object (#3310): only the literal is constexpr, so `cy` and the later
+    // declarator `cz` are plain objects. -fsyntax-only and -c accept it with
+    // and without -fc-ast-pilot, the objects match, and the program exits 0.
+    // The source is a temporary file, so the native-retirement inventory
+    // stays unchanged.
+    {
+        TemporalArena literal_temporary = arena_begin_temporal(arguments->arena);
+        Arena* literal_arena = literal_temporary.arena;
+        String8 literal_source = buster_test_temporary_path(literal_arena, S8("buster-c-constexpr-literal"), S8(".c"));
+        String8 literal_object = buster_test_temporary_path(literal_arena, S8("buster-c-constexpr-literal"), S8(".o"));
+        String8 literal_path = buster_test_temporary_path(literal_arena, S8("buster-c-constexpr-literal"),
+#if BUSTER_WINDOWS
+                                                          S8(".exe"));
+#else
+                                                          S8(""));
+#endif
+        String8 literal_text = S8("int cy = (constexpr int){3}, cz;\n"
+                                  "int main(void) { cz += cy; return cy == 3 && cz == 3 ? 0 : 1; }\n");
+        if (BUSTER_REQUIRE(arguments, file_write(literal_source, BUSTER_SLICE_TO_BYTE_SLICE(literal_text))))
+        {
+            ByteSlice reference = {0};
+            String8 pilots[] = {S8(""), S8("-fc-ast-pilot")};
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(pilots); index += 1)
+            {
+                u64 skipped = index == 0;
+                String8 syntax_command[] = {pilots[index], S8("-std=c23"), S8("-fsyntax-only"), literal_source};
+                CompilerDriverResult checked = compiler_driver_execute_invocation(
+                    literal_arena, compiler_driver_parse_arguments(literal_arena, (SliceString8){syntax_command + skipped, BUSTER_ARRAY_LENGTH(syntax_command) - skipped}));
+                BUSTER_TEST_RAW(arguments, checked.error == COMPILER_DRIVER_ERROR_NONE, checked.diagnostic);
+                String8 object_command[] = {pilots[index], S8("-std=c23"), S8("-g0"), S8("-c"), S8("-o"), literal_object, literal_source};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    literal_arena, compiler_driver_parse_arguments(literal_arena, (SliceString8){object_command + skipped, BUSTER_ARRAY_LENGTH(object_command) - skipped}));
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                ByteSlice bytes = file_read(literal_arena, literal_object, (FileReadOptions){0});
+                if (BUSTER_REQUIRE(arguments, bytes.pointer && bytes.length))
+                {
+                    if (index == 0)
+                    {
+                        reference = bytes;
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, bytes.length == reference.length && memory_compare(bytes.pointer, reference.pointer, bytes.length));
+                    }
+                }
+            }
+            String8 link_command[] = {S8("-std=c23"), S8("-o"), literal_path, literal_source};
+            CompilerDriverResult linked = compiler_driver_execute_invocation(
+                literal_arena, compiler_driver_parse_arguments(literal_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+            BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+            if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run_arguments[] = {
+                    literal_path,
+                };
+                ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                              (ProcessSpawnOptions){
+                                                                  .use_process_environment = true, .search_path = true,
+                                                              });
+                BUSTER_TEST(arguments, spawned.handle != 0);
+                if (spawned.handle)
+                {
+                    ProcessWaitResult waited = os_process_wait_sync(literal_arena, spawned);
+                    BUSTER_TEST(arguments, waited.result == PROCESS_RESULT_SUCCESS);
+                }
+                BUSTER_TEST(arguments, os_file_delete(literal_path));
+            }
+            BUSTER_TEST(arguments, os_file_delete(literal_object));
+            BUSTER_TEST(arguments, os_file_delete(literal_source));
+        }
+        scratch_end(literal_temporary);
     }
 #if BUSTER_LINUX
     buster_test_arena_end(arguments, driver_fixture, true);

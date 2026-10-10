@@ -103,14 +103,19 @@ The catch-up is fully automatic:
    `snapshot_stale` compares the committed snapshot with admitted source bytes
    read from Git objects, with no pinned closure needed. It only does the following:
    - When the snapshot is stale and no request is open, it creates one empty
-     commit on `main`, points the bot-owned `native-retirement/catch-up` branch
-     at it and opens the PR. Its token has `contents: write` and
-     `pull-requests: write` for exactly this. It publishes no generated state,
+     commit on `main`, moves the bot-owned `native-retirement/catch-up` branch
+     to it with a leased push from the value it read, and opens the PR. Its
+     token has `contents: write` and `pull-requests: write` for exactly this. It publishes no generated state,
      cannot merge and does not enable auto-merge: GitHub starts no workflows
      for events caused by `GITHUB_TOKEN`, including the `merge_group` event of
      a queue entry that token enqueued, so every required check would wait
      forever (seen on #1966).
    - When `main` is current, it closes any open catch-up request.
+   - When a published catch-up's exact head has a completed, failed latest
+     `CI complete` and `main` has since advanced past the base recorded in
+     its integration trailer, it comments the reason on that PR, closes it
+     and opens a fresh request for the new `main` (see step 4). Its token
+     has `checks: read` for this.
 2. The controller treats that bot-owned PR as an ordinary request with an empty
    classification. It skips prerequisite CI, because nothing on a bot-created
    empty head needs testing. GitHub still records that head's `pull_request`
@@ -118,6 +123,9 @@ The catch-up is fully automatic:
    validate nothing. Nobody needs to approve them. It dispatches the existing writer through the
    standing grant. The writer regenerates the pair for current `main` and
    publishes the usual two-parent integration head; that push starts PR CI.
+   If `main` moves during the run without newer generated state, the writer
+   still publishes for its expected base (see
+   [staleness](#staleness-failure-and-cancellation)).
    The controller records its claim as a comment on the PR, so its job needs
    `pull-requests: write`; with `pull-requests: read` the issues API refuses
    the comment with 403 and the whole reconciliation aborts.
@@ -134,6 +142,33 @@ The catch-up is fully automatic:
    groups. A published catch-up that is still admissible is not rebuilt when
    `main` moves. If sources moved on, the next run opens a new catch-up after
    this one lands.
+4. A published catch-up whose PR CI fails can never merge, and neither the
+   controller nor the opener would otherwise act: the controller treats the
+   still-admissible head as already current, and the opener sees an open
+   request (#3271 failed `CI complete` at `ba667d8` and sat open until it was
+   closed by hand). The opener therefore replaces it, but only after `main`
+   advances strictly past the head's recorded base, confirmed by the compare
+   API. A same-`main` replacement would rebuild identical inputs, which is
+   rerun-until-green, so the failed request stays open on an unchanged `main`
+   for owner inspection. Pending, missing or passing CI and an unpublished
+   empty head are never replaced. The opener and writer have separate
+   concurrency groups, so they serialize on the branch itself: the writer
+   publishes with `--force-with-lease` on the head it was requested for, and
+   the opener moves the bot branch only with a leased push from the value it
+   read (the exact failed head, or absent), never with a forced ref update.
+   Exactly one of two racing updates wins. If the writer wins, the opener's
+   lease is refused, it reopens the PR at the fresh head and opens nothing;
+   if the opener wins, the writer's lease is refused. Retirement also waits
+   while a writer is active and closes the PR only while its live head is
+   the failed one, which makes a writer that has not yet authorized refuse.
+   The replacement records the `main` it was
+   built for, so a deterministic failure costs at most one writer run and one
+   CI run per `main` revision and cannot create a writer loop. Each closed PR
+   keeps its failed checks and an explanatory comment as evidence. No test
+   is skipped, rerun or quarantined: the new head is new generated state for
+   new inputs, tested in full. Recording the failure in the ledger for owner
+   reconciliation was rejected because main's snapshot would stay stale
+   until an owner acted, even when the next `main` already fixed the cause.
 
 Prerequisites beyond the standing-grant activation below:
 - Settings -> Actions -> General must allow GitHub Actions to create pull
@@ -177,7 +212,27 @@ ledger data and pagination limits are also blocking, not silently truncated.
 ## Staleness, failure and cancellation
 
 The writer preserves exit 75 for positively observed main movement and exit 76
-for positively observed head movement. Trusted job outputs carry those outcomes
+for positively observed head movement.
+
+A writer run takes minutes, so on a busy `main` an exact-main rule superseded
+catch-up requests repeatedly: catch-up #3271 needed three writer runs. An
+automatic catch-up request is therefore exempt from exit 75 for one kind of
+movement. That means a bot-owned PR from `native-retirement/catch-up` with an
+empty candidate, dispatched in `automation` mode. It still publishes the same
+two-parent commit and attestation for its expected base when both of these hold
+for live `main`:
+
+- the expected base is an ancestor of live `main`;
+- `generated_changed_between(expected_base, live_main)` is false.
+
+The merge gate admits exactly that head. `catch_up_main_admissible` in
+`tools/native_retirement_integration.py` holds this rule. Authorization
+(`authorize`, with and without `--automation-publication`) applies it before it
+reads the live policy. The publication step applies it through `catch-up-main`
+at both of its `main` checks. Any other movement still exits 75. Ordinary,
+trust-transition and manually dispatched requests still need exact current
+`main` at every check. A lease failure while `main` differs from the base is
+still reported as main movement. Trusted job outputs carry those outcomes
 into a separate read-only result job. Its fixed `Superseded request` marker is
 accepted only from the verified writer's exact attempt; candidate test logs or
 artifacts cannot supply that decision. The first failed stage decides the

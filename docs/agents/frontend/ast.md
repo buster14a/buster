@@ -581,7 +581,11 @@ two cases:
    validators over every token: integer spelling, type-specifier runs and the
    missing return operand. It reads the shape sidecar in 64-token windows. The
    walker validates a subset of those tokens, so a clean probe means a clean
-   walk.
+   walk. An identifier lane is classified as a type word or `return` from its
+   interned id, with one bound compare and one `word_bits` read. A specifier
+   run of at most four interned type words, with no tag keyword, is checked
+   only of the run's own tokens, so its verdict depends on its ids alone. A
+   run spelled like one that already validated clean is skipped.
 2. **The walker would read a shape differently from the grammar, or no rule
    here states what it reads.** `CParserTreeFallback` names each case:
    - `specifiers`: a parenthesized specifier (`typeof`, `_Atomic(T)`,
@@ -603,11 +607,14 @@ two cases:
 A fallback discards everything derived and returns `c_parse_ast`'s result, so
 the records and the diagnostics are always the walker's, and #3143 is not
 changed by this split. Where the walker's reading is wrong but the split can
-state it, the split reproduces it instead. For
-example, a `typedef` or `constexpr` word anywhere outside the body marks the
-whole declaration ([#3310](https://github.com/buster14a/buster/issues/3310)).
-The `typedef` and `constexpr` words are collected once per unit, so only a
-declaration that holds one outside its top-level specifiers is scanned whole.
+state it, the split reproduces it instead.
+A declaration is a typedef or constexpr only through its own top-level
+specifiers. The walker counts a `typedef` or `constexpr` word only outside
+every delimiter and before the first top-level `=` or `,`. The split counts a
+`SPECIFIER_WORD` item of the declaration's `DECL_SPECIFIERS`. A word inside an
+initializer, such as a statement expression's `typedef` or a C23 constexpr
+compound literal, marks neither the declaration nor its later declarators
+([#3310](https://github.com/buster14a/buster/issues/3310)).
 
 **Redundant groups ([#3215](https://github.com/buster14a/buster/issues/3215)).**
 The walker used to classify a parenthesized declarator by the token after its
@@ -1044,5 +1051,44 @@ the same way and diagnostic only:
   (5.2%) slower, with 4 of 15 pairs favouring fusion, and a repeat agreed. The
   A/A control itself exceeded its ±0.5% bound.
 - **Decision.** Fusion does not ship. The token array and the array build stay.
+
+For the split's [diagnostic probe](#declaration-split-from-the-tree)
+(`c_parser_tree_probe`), these budgets were declared before its measured runs.
+The probe classifies identifier lanes from their interned ids instead of
+asking the word table and the `return` id through the token predicates. The
+input and flags are the same as for the declaration split, and the four
+Callgrind arms (`--cache-sim=no --branch-sim=no`) are counted on tests-off
+`-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `f86d65f9`, which the candidate branches from. The budgets:
+- correctness:
+  - the probe stays a superset of the tokens the walker validates, so
+    `c_ast_split_cases` still reaches its `diagnostic` fallbacks (`0x`,
+    `long long long`) and the corpus differential keeps 0 differences above
+    its floors;
+  - the self-host unity input still takes the split whole, with no fallback;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- the probe's own effect (C against B): `c_parser_tree_probe`'s call-site
+  inclusive cost falls by at least 25%, and the whole compile costs fewer
+  instructions.
+- the default path (D against A): the probe does not run there, so the
+  difference stays within ±0.05% Ir.
+- adoption of the hook as the default: unchanged from stage 1, with
+  acceptance on the Zen 5 route (#2761).
+
+The probe's hosted census is
+[`2026-10-10T175428Z`](../../performance-audits/2026-10-10T175428Z.md), taken
+the same way and diagnostic only:
+- Every budget passes except adoption. Objects are byte-identical across the
+  four arms, and the self-host unit takes the split whole.
+- The probe falls from 125.5 M to 81.6 M Ir (−35.0%), and the whole compile by
+  44.1 M (−0.46%, C against B). The id classification alone gives −14.0%; the
+  memo cuts the validated specifier runs from 29,649 to 3,299.
+- The default path is −0.0037%.
+- Acceptance stays with Zen 5 (#2761), so the default stays off.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
