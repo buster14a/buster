@@ -1052,4 +1052,17 @@ The base is main `f38a7716`, which the candidate branches from. The budgets:
   for production. Zen 5 validation stays incomplete (#2761), and the hook
   stays opt-in.
 
+The initializer slice's hosted census is
+[`2026-10-10T190424Z`](../../performance-audits/2026-10-10T190424Z.md), taken
+the same way and diagnostic only:
+- Every budget passes. Objects are byte-identical across the four arms at
+  `-g0` and `-g`.
+- The default path is −0.00007% on `-fsyntax-only` and +0.0024% on `-c`.
+- On the pilot the slice removes 44.98 M instructions (−0.47%):
+  - machine runs from queries fall from 55,593 to 45,297, about the
+    `S8()` casts at file scope;
+  - tree declines fall from 52,535 to 42,239.
+- The hook is now 8.76% below the default in instructions on this input.
+  Zen 5 validation is incomplete (#2761), and the default stays off.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
