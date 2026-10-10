@@ -88,7 +88,10 @@
 //   c_include_suppressed                       and #ifndef guard identity
 //   c_preprocess_command_operations,           ordered command-line macro
 //   c_preprocess_define_directive              operations and shared #define
-//                                              parsing
+//                                              parsing; forced_includes
+//                                              (-include) run as a synthetic
+//                                              `<command-line>` frame above
+//                                              the root frame
 //   c_preprocess_respell_token,                final-stream rewrites: C23 and
 //   c_preprocess_respell_identifiers,          UCN respellings, GNU `member:`
 //   c_preprocess_rewrite_obsolete_designators, as `.member =`, and block-
@@ -12586,7 +12589,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     c_symbols_intern_tokens(symbol_table, root_lex.spelling_base, root_lex.tokens, root_lex.token_shapes, root_lex.token_count);
     CPpClassMasks root_class_masks;
     c_pp_class_masks_build(arena, &root_class_masks, root_lex.token_shapes, root_lex.token_count);
-    result.diagnostic_capacity = BUSTER_MIN(source.length + options.macro_operation_count + options.definition_count + 1, UINT64_C(64));
+    result.diagnostic_capacity = BUSTER_MIN(source.length + options.macro_operation_count + options.definition_count + options.forced_include_count + 1, UINT64_C(64));
     C_DIAGNOSTIC_RESERVATION_CENSUS(PREPROCESS, result.diagnostic_capacity);
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
     CMacro* first_macro = 0;
@@ -13352,6 +13355,50 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     if (!options.already_preprocessed)
     {
         c_preprocess_command_operations(arena, space, symbol_table, options, &first_macro, &last_macro, &result);
+        if (options.forced_include_count)
+        {
+            // `-include FILE` runs as `#include "FILE"` lines of a synthetic
+            // file that sits above the root frame, so the primary source's
+            // line numbers and __FILE__ never see it. The quote lookup starts
+            // from the synthetic path's directory, which is the working
+            // directory, and then walks the -I chain: GCC's order.
+            String8 forced_text = {0};
+            for (u32 forced_index = 0; forced_index < options.forced_include_count; forced_index += 1)
+            {
+                forced_text = forced_index ? string_format(arena, S8("{S8}#include \"{S8}\"\n"), forced_text, options.forced_includes[forced_index])
+                                           : string_format(arena, S8("#include \"{S8}\"\n"), options.forced_includes[forced_index]);
+            }
+            CLexResult forced_lex = c_lex_space(arena, space, forced_text, false, result.dialect);
+            for (u64 diagnostic_index = 0; diagnostic_index < forced_lex.diagnostic_count; diagnostic_index += 1)
+            {
+                c_preprocess_diagnostic_copy(arena, &result, forced_lex.diagnostics[diagnostic_index]);
+            }
+            c_symbols_intern_tokens(symbol_table, forced_lex.spelling_base, forced_lex.tokens, forced_lex.token_shapes, forced_lex.token_count);
+            CPreprocessSourceFrame* forced_frame = arena_allocate(arena, CPreprocessSourceFrame, 1);
+            *forced_frame = (CPreprocessSourceFrame){
+                .previous = &root_frame,
+                .lex = forced_lex,
+                .path = S8("<command-line>"),
+                .identity = c_include_file_identity(S8("<command-line>"), (FileIdentity){0}),
+                .logical_path = S8("<command-line>"),
+                .line_start = true,
+            };
+            c_pp_class_masks_build(arena, &forced_frame->class_masks, forced_lex.token_shapes, forced_lex.token_count);
+            forced_frame->map_entry = map.count;
+            c_source_map_append(&map, (IrSourceRegion){
+                                          .start = forced_lex.translated_offset,
+                                          .source = UINT32_MAX,
+                                          .checkpoints = forced_lex.checkpoints,
+                                          .checkpoint_offsets = forced_lex.checkpoint_offsets,
+                                          .checkpoint_pages = forced_lex.checkpoint_pages,
+                                          .checkpoint_page_count = forced_lex.checkpoint_page_count,
+                                          .checkpoint_count = forced_lex.checkpoint_count,
+                                          .base = forced_lex.translated_offset,
+                                          .kind = IR_SOURCE_REGION_TEXT,
+                                      });
+            c_source_map_name(&map, forced_frame->path, forced_frame->logical_path);
+            source_frame = forced_frame;
+        }
     }
     CIncludeFileTable include_files = {
         .arena = arena,

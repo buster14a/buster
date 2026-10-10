@@ -886,6 +886,133 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_run_cc(UnitTestArguments* argument
 }
 #endif
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
+// Whether `text` holds `needle`; keeps the -include assertions one line each.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_contains(String8 text, String8 needle)
+{
+    return string_first_sequence(text, needle) != BUSTER_STRING_NO_MATCH;
+}
+#endif
+
+// `-include FILE` of #1418: both spellings, command-line order, -D visibility
+// inside the header, the primary file's own line numbers, and refusals.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_forced_include(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    String8 first_header = buster_test_temporary_path(arguments->arena, S8("forced-first"), S8(".h"));
+    String8 second_header = buster_test_temporary_path(arguments->arena, S8("forced-second"), S8(".h"));
+    String8 defined_header = buster_test_temporary_path(arguments->arena, S8("forced-defined"), S8(".h"));
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("forced-source"), S8(".c"));
+    u64 directory_length = first_header.length;
+    while (directory_length && first_header.pointer[directory_length - 1] != '/')
+    {
+        directory_length -= 1;
+    }
+    String8 header_directory = string_slice(first_header, 0, directory_length ? directory_length - 1 : 0);
+    String8 first_text = S8("#define FROM_FIRST 20\nint first_line = __LINE__;\n");
+    String8 second_text = S8("int second_value = FROM_FIRST + 1;\n");
+    String8 defined_text = S8("int defined_value = FROM_COMMAND;\n");
+    String8 source = S8("int source_line = __LINE__;\nchar const* source_file = __FILE__;\n#warning source-warning\n"
+                        "int use_first = FROM_FIRST;\n");
+    if (BUSTER_REQUIRE(arguments, file_write(first_header, BUSTER_SLICE_TO_BYTE_SLICE(first_text)) &&
+                                      file_write(second_header, BUSTER_SLICE_TO_BYTE_SLICE(second_text)) &&
+                                      file_write(defined_header, BUSTER_SLICE_TO_BYTE_SLICE(defined_text)) &&
+                                      file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 output = {0};
+        String8 error = {0};
+        // Absolute path, separate spelling: the macro is visible to the source.
+        String8 separate[] = {S8("-E"), S8("-include"), first_header, source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(separate), &output, &error));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int use_first = 20;")));
+        // The header's own lines are its own, and the primary file's lines and
+        // __FILE__ are unchanged by the synthetic prologue.
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int first_line = 2;")));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int source_line = 1;")));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, string_format(arguments->arena, S8("source_file = \"{S8}\""), source_path)));
+        // A diagnostic in the primary file keeps its real line (#warning is line 3).
+        BUSTER_TEST(arguments, compiler_driver_test_contains(error, source_path));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(error, S8(":3:")));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(error, S8("source-warning")));
+
+        // Joined spelling; a -D value reaches the header, which runs after the
+        // command-line macros.
+        String8 joined_option = string_format(arguments->arena, S8("-include{S8}"), defined_header);
+        String8 joined[] = {S8("-E"), S8("-DFROM_COMMAND=33"), joined_option, source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(joined), &output, &error));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int defined_value = 33;")));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int source_line = 1;")));
+
+        // Command-line order: the second header needs the first one's macro.
+        String8 ordered[] = {S8("-E"), S8("-include"), first_header, S8("-include"), second_header, source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(ordered), &output, &error));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int second_value = 20 + 1;")));
+        String8 reversed[] = {S8("-E"), S8("-include"), second_header, S8("-include"), first_header, source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(reversed), &output, &error));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int second_value = FROM_FIRST + 1;")));
+
+        // A relative name is looked up from the working directory first (the
+        // repository root here), then through -I.
+        String8 relative_source = buster_test_temporary_path(arguments->arena, S8("forced-relative"), S8(".c"));
+        String8 relative_text = S8("int relative_value = FORCED_INCLUDE_RELATIVE;\n");
+        if (BUSTER_REQUIRE(arguments, file_write(relative_source, BUSTER_SLICE_TO_BYTE_SLICE(relative_text))))
+        {
+            String8 relative[] = {S8("-E"), S8("-include"), S8("tests/basic_c_forced_include.h"), relative_source};
+            BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(relative), &output, &error));
+            BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int relative_value = 7;")));
+            String8 through_include[] = {S8("-E"), S8("-I"), header_directory, S8("-include"), string_slice(first_header, header_directory.length + 1, first_header.length),
+                                         relative_source};
+            BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(through_include), &output, &error));
+            BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("int first_line = 2;")));
+        }
+
+        // Every translation unit gets the prologue.
+        String8 second_source = buster_test_temporary_path(arguments->arena, S8("forced-second-source"), S8(".c"));
+        String8 second_source_text = S8("int again = FROM_FIRST;\n");
+        if (BUSTER_REQUIRE(arguments, file_write(second_source, BUSTER_SLICE_TO_BYTE_SLICE(second_source_text))))
+        {
+            String8 compile_two[] = {S8("-fsyntax-only"), S8("-w"), S8("-include"), first_header, source_path, second_source};
+            BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_two), &output, &error));
+            String8 compile_one_plain[] = {S8("-fsyntax-only"), S8("-w"), source_path, second_source};
+            BUSTER_TEST(arguments, !compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_one_plain), &output, &error));
+        }
+
+        // A missing file is a diagnostic that names it, and the build fails.
+        String8 missing[] = {S8("-E"), S8("-include"), S8("forced-no-such-header.h"), source_path};
+        BUSTER_TEST(arguments, !compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing), &output, &error));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(error, S8("forced-no-such-header.h")));
+        String8 missing_compile[] = {S8("-fsyntax-only"), S8("-includeforced-no-such-header.h"), source_path};
+        BUSTER_TEST(arguments, !compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing_compile), &output, &error));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(error, S8("forced-no-such-header.h")));
+    }
+
+    // Other -include-* and -i* options are not -include.
+    String8 refused[] = {S8("-include-pch"), S8("-iprefix"), S8("-include-pch=x"), S8("-idirafter")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
+    {
+        String8 command_line[] = {refused[index], S8("source.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command_line));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        BUSTER_TEST(arguments, invocation.forced_include_count == 0);
+    }
+    String8 missing_value[] = {S8("source.c"), S8("-include")};
+    CompilerDriverInvocation missing_invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing_value));
+    BUSTER_TEST(arguments, missing_invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    String8 accepted[] = {S8("-include"), S8("a.h"), S8("-includeb.h"), S8("source.c")};
+    CompilerDriverInvocation accepted_invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(accepted));
+    BUSTER_TEST(arguments, accepted_invocation.error == COMPILER_DRIVER_ERROR_NONE && accepted_invocation.forced_include_count == 2);
+    if (accepted_invocation.forced_include_count == 2)
+    {
+        BUSTER_STRING_TEST(arguments, accepted_invocation.forced_includes[0], S8("a.h"));
+        BUSTER_STRING_TEST(arguments, accepted_invocation.forced_includes[1], S8("b.h"));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // GCC/Clang spellings of #1418: the x86-64 psABI levels, -fno-strict-overflow,
 // -w and the --version/-dumpversion/-dumpmachine queries.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestArguments* arguments)
@@ -29193,6 +29320,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_diagnostic_streams);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_warning_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_gcc_spellings);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_forced_include);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_pack_state);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_batch);
