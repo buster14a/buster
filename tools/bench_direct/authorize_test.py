@@ -516,7 +516,7 @@ class SamplingTransportTest(unittest.TestCase):
             ("needs.authorize.outputs.sampling_admitted == 'true'", "true"),
             ("github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1", "true"),
             ('exec "${drivers[0]}" compiler_profile_qualification --execute', "python3 trusted/tools/bench_direct/compiler_compare.py"),
-            ("          path: trusted\n          persist-credentials: false\n      - name: Observe the actual physical job start", "          path: trusted\n          token: ${{ github.token }}\n          persist-credentials: false\n      - name: Observe the actual physical job start"),
+            ("          ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}\n          path: trusted\n          persist-credentials: false", "          ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}\n          path: trusted\n          token: ${{ github.token }}\n          persist-credentials: false"),
             ("      BQ_SAMPLING_HISTORY_DATA:", "      GH_TOKEN:"),
         ):
             with self.subTest(before=before):

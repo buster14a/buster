@@ -562,6 +562,52 @@ bool object_aarch64_elf_tls_ie_relax(ObjectRelocationKind kind, u32 word, u64 tp
     return valid;
 }
 
+bool object_relocation_kind_is_aarch64_elf_tls_desc(ObjectRelocationKind kind)
+{
+    return kind == OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21 || kind == OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12 ||
+           kind == OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12 || kind == OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL;
+}
+
+#define OBJECT_AARCH64_ADRP_X0 UINT32_C(0x90000000)
+#define OBJECT_AARCH64_BLR UINT32_C(0xd63f0000)
+#define OBJECT_AARCH64_NOP UINT32_C(0xd503201f)
+
+// AAELF64 fixes every descriptor register except the LDR/BLR scratch:
+// `adrp x0` / `ldr Xt, [x0]` / `add x0, x0` / `blr Xt`. The reader
+// canonicalizes the ADRP/LDR/ADD immediates to zero, so these are exact
+// words; Xt is neither x0 (the argument) nor x31 (XZR).
+bool object_aarch64_elf_tls_desc_relax(ObjectRelocationKind kind, u32 word, u64 tprel, u32* patched)
+{
+    u32 scratch = kind == OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL ? (word >> 5) & 31 : word & 31;
+    bool valid = patched && tprel <= UINT32_MAX;
+    u32 relaxed = OBJECT_AARCH64_NOP;
+    switch (kind)
+    {
+    case OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21:
+        valid = valid && word == OBJECT_AARCH64_ADRP_X0;
+        relaxed = OBJECT_AARCH64_MOVZ_X | (UINT32_C(1) << 21) | ((u32)(tprel >> 16) << 5);
+        break;
+    case OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12:
+        valid = valid && (word & ~UINT32_C(31)) == OBJECT_AARCH64_LDR_X_UNSIGNED && scratch && scratch != 31;
+        relaxed = OBJECT_AARCH64_MOVK_X | ((u32)(tprel & 0xffff) << 5);
+        break;
+    case OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12:
+        valid = valid && word == OBJECT_AARCH64_ADD_X_IMMEDIATE;
+        break;
+    case OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL:
+        valid = valid && (word & ~(UINT32_C(31) << 5)) == OBJECT_AARCH64_BLR && scratch && scratch != 31;
+        break;
+    default:
+        valid = false;
+        break;
+    }
+    if (valid)
+    {
+        *patched = relaxed;
+    }
+    return valid;
+}
+
 // AAELF64 direct page pairs use Page(S+A)-Page(P) and the low twelve bits
 // of S+A: ADD uses byte granularity, LD/ST scales by the relocation's size.
 // Share the checked address arithmetic and instruction authority between
@@ -1821,6 +1867,11 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_aarch64_immediate_relocation(Objec
     {
         return false;
     }
+    u32 relaxed = 0;
+    if (object_relocation_kind_is_aarch64_elf_tls_desc(relocation->kind) && !object_aarch64_elf_tls_desc_relax(relocation->kind, word, 0, &relaxed))
+    {
+        return false;
+    }
     if (object_relocation_kind_is_aarch64_elf_ldst(relocation->kind))
     {
         u32 scale = 0;
@@ -2025,6 +2076,7 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
         case OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21:
         case OBJECT_RELOCATION_AARCH64_MACH_PAGE21:
         case OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21:
+        case OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21:
         case OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP:
         case OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21:
         {
@@ -2035,7 +2087,8 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
                            relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21;
             bool elf_adrp = relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 ||
                             relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 ||
-                            relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21;
+                            relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21 ||
+                            relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21;
             if (((elf_adrp || pe_adrp) &&
                  !a64_pc_relative_patch(A64_OPCODE_ADRP, word, 0, &canonical)) ||
                 (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && !object_mach_page21_instruction_valid(word)))
@@ -2058,9 +2111,11 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
                 : relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ? S8("@PAGE")
                 : relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 ? S8(":got:")
                 : relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21 ? S8(":gottprel:")
+                : relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21 ? S8(":tlsdesc:")
                                                                              : (String8){0},
                 relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 &&
-                    relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21);
+                    relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21 &&
+                    relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21);
             object_assembly_append_string(buffer, S8("\n"));
             return true;
         }
@@ -2088,6 +2143,8 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
         case OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12:
         case OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12:
         case OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12:
+        case OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12:
+        case OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12:
         case OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
         case OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12:
         case OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L:
@@ -2100,6 +2157,7 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
                                : relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12          ? S8(":secrel_lo12:")
                                : relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12        ? S8(":got_lo12:")
                                : relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12 ? S8(":gottprel_lo12:")
+                               : object_relocation_kind_is_aarch64_elf_tls_desc(relocation->kind)       ? S8(":tlsdesc_lo12:")
                                                                                                           : S8(":lo12:");
             return object_assembly_emit_aarch64_immediate_relocation(buffer, object, target, relocation, section_data, modifier,
                                                                      relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 ||
@@ -2117,6 +2175,23 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             object_assembly_append_string(buffer, relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12
                                                         ? S8(", #:secrel_hi12:") : S8(", #:tprel_hi12:"));
             object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
+            object_assembly_append_string(buffer, S8("\n"));
+            return true;
+        }
+        case OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL:
+        {
+            // The marker names the descriptor; the BLR itself carries no field.
+            u32 word = 0;
+            u32 relaxed = 0;
+            memcpy(&word, section_data.pointer + relocation->offset, sizeof(word));
+            if (!object_aarch64_elf_tls_desc_relax(relocation->kind, word, 0, &relaxed))
+            {
+                return false;
+            }
+            object_assembly_append_string(buffer, S8("\t.tlsdesccall "));
+            object_assembly_append_aarch64_relocation_value(buffer, object, target, relocation, (String8){0}, false);
+            object_assembly_append_string(buffer, S8("\n\tblr "));
+            object_assembly_append_aarch64_register(buffer, word >> 5);
             object_assembly_append_string(buffer, S8("\n"));
             return true;
         }
@@ -6310,6 +6385,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                    : relocation_type == 283                           ? OBJECT_RELOCATION_AARCH64_CALL26
                                    : relocation_type == 541                           ? OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21
                                    : relocation_type == 542                           ? OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12
+                                   : relocation_type == 562                           ? OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21
+                                   : relocation_type == 563                           ? OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12
+                                   : relocation_type == 564                           ? OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12
+                                   : relocation_type == 569                           ? OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL
                                    : relocation_type == 549                           ? OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12
                                    : relocation_type == 551                           ? OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12
                                                                                       : OBJECT_RELOCATION_COUNT;
@@ -6407,23 +6486,29 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                             }
                         }
-                        else if (object_relocation_kind_is_aarch64_elf_tls_ie(kind))
+                        else if (object_relocation_kind_is_aarch64_elf_tls_ie(kind) || object_relocation_kind_is_aarch64_elf_tls_desc(kind))
                         {
-                            // RELA only: a REL addend would live in the ADRP/LDR
-                            // immediates, which relaxation discards.
+                            // RELA only: a REL addend would live in the ADRP/LDR/ADD
+                            // immediates, which relaxation discards. A descriptor
+                            // word must also be exactly the AAELF64 sequence step.
                             u64 instruction_offset = section_bases[target_section] + source_offset;
                             u32 instruction = 0;
                             u32 canonical = 0;
+                            u32 relaxed = 0;
                             A64MCInst decoded = {0};
-                            bool adrp = kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21;
+                            bool adrp = kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21 || kind == OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21;
+                            bool descriptor = object_relocation_kind_is_aarch64_elf_tls_desc(kind);
                             read_ok = section_type != 9 && !(instruction_offset & 3) && target_section_data->alignment >= 4 &&
                                       object_read_u32(target_section_data->data, instruction_offset, &instruction);
                             if (read_ok)
                             {
                                 read_ok = adrp ? a64_mc_decode(instruction, &decoded) && decoded.opcode == A64_OPCODE_ADRP &&
                                                      a64_pc_relative_patch(A64_OPCODE_ADRP, instruction, 0, &canonical)
-                                               : object_aarch64_got_load_read(instruction, 0);
-                                canonical = adrp ? canonical : instruction & ~(A64_IMM12_MAX << 10);
+                                               : descriptor || object_aarch64_got_load_read(instruction, 0);
+                                canonical = adrp                                            ? canonical
+                                            : kind == OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL ? instruction
+                                                                                            : instruction & ~(A64_IMM12_MAX << 10);
+                                read_ok = read_ok && (!descriptor || object_aarch64_elf_tls_desc_relax(kind, canonical, 0, &relaxed));
                             }
                             if (read_ok)
                             {
@@ -10988,6 +11073,10 @@ static ObjectRelocationProperties const object_relocation_properties[] = {
     {4, false}, // OBJECT_RELOCATION_AARCH64_ELF_ADR_PREL_LO21
     {4, true}, // OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21
     {4, true}, // OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12
+    {4, true}, // OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21
+    {4, true}, // OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12
+    {4, true}, // OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12
+    {4, true}, // OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL
 };
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(object_relocation_properties) == OBJECT_RELOCATION_COUNT);
 
@@ -13060,6 +13149,10 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
            : kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12     ? 312
            : kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21 ? 541
            : kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12 ? 542
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21 ? 562
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12 ? 563
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12 ? 564
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL ? 569
            : kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ? 549
            : kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 ? 551
            : kind == OBJECT_RELOCATION_ABSOLUTE64                   ? 257
@@ -15098,17 +15191,18 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
                 return result;
             }
         }
-        if (object_relocation_kind_is_aarch64_elf_tls_ie(source->kind))
+        if (object_relocation_kind_is_aarch64_elf_tls_ie(source->kind) || object_relocation_kind_is_aarch64_elf_tls_desc(source->kind))
         {
             // Only the canonical zero-immediate forms the reader produces and
-            // the linker relaxes; the destination register is checked there.
+            // the linker relaxes; the IE destination register is checked there.
             u32 word = 0;
             u32 relaxed = 0;
             memcpy(&word, object->sections[source->section].data.pointer + source->offset, sizeof(word));
             if (format != OBJECT_FORMAT_ELF64 || object->target.cpu_arch != CPU_ARCH_AARCH64 ||
                 object->sections[source->section].alignment < 4 || (source->offset & 3) ||
                 !(source->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12 ? object_aarch64_got_load_read(word, 0)
-                                                                                         : object_aarch64_elf_tls_ie_relax(source->kind, word, 0, &relaxed)))
+                                                                                         : object_aarch64_elf_tls_ie_relax(source->kind, word, 0, &relaxed) ||
+                                                                                               object_aarch64_elf_tls_desc_relax(source->kind, word, 0, &relaxed)))
             {
                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                 return result;

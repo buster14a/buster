@@ -141,11 +141,22 @@ jobs:
       sampling_candidate_revision: ${{ steps.native.outputs.sampling_candidate_revision }}
       sampling_trusted_revision: ${{ steps.native.outputs.sampling_trusted_revision }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the trusted authorization rules
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Verify the request run and its pull request
         id: verify
         shell: bash
@@ -165,6 +176,13 @@ jobs:
           ref: 0fb54300b56512754221d80adda85ddb9815bceb
           path: .tools/tinycc
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
       - name: Install the pinned admission bootstrap compiler
         if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' || steps.verify.outputs.utility_requested == 'true' }}
         working-directory: .tools/tinycc
@@ -487,11 +505,22 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the frozen qualification implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.authorize.outputs.preparation_trusted_revision }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Fetch the pinned qualification bootstrap compiler
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -499,6 +528,12 @@ jobs:
           ref: 0fb54300b56512754221d80adda85ddb9815bceb
           path: .tools/tinycc
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
       - name: Install the pinned qualification bootstrap compiler
         working-directory: .tools/tinycc
         shell: bash
@@ -575,6 +610,11 @@ jobs:
       BQ_PREPARATION_FACTS_DATA: ${{ needs.authorize.outputs.preparation_facts_data }}
       BQ_PREPARATION_HISTORY_DATA: ${{ needs.authorize.outputs.preparation_history_data }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
       - name: Refuse retained native cleanup uncertainty
         shell: bash
         run: |
@@ -590,6 +630,12 @@ jobs:
           ref: ${{ needs.authorize.outputs.preparation_trusted_revision }}
           path: trusted
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: trusted
+          source-repository: ${{ github.repository }}
       - name: Observe the actual physical job start
         shell: bash
         env:
@@ -665,11 +711,22 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the frozen qualification implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.authorize.outputs.preparation_trusted_revision }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Fetch the pinned qualification bootstrap compiler
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -677,6 +734,12 @@ jobs:
           ref: 0fb54300b56512754221d80adda85ddb9815bceb
           path: .tools/tinycc
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
       - name: Install the pinned qualification bootstrap compiler
         working-directory: .tools/tinycc
         shell: bash
@@ -734,11 +797,22 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the frozen qualification implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Fetch the pinned qualification bootstrap compiler
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -746,6 +820,12 @@ jobs:
           ref: 0fb54300b56512754221d80adda85ddb9815bceb
           path: .tools/tinycc
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
       - name: Install the pinned qualification bootstrap compiler
         working-directory: .tools/tinycc
         shell: bash
@@ -824,6 +904,11 @@ jobs:
       BQ_SAMPLING_FACTS_DATA: ${{ needs.authorize.outputs.sampling_facts_data }}
       BQ_SAMPLING_HISTORY_DATA: ${{ needs.authorize.outputs.sampling_history_data }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
       - name: Refuse retained native cleanup uncertainty
         shell: bash
         run: |
@@ -839,6 +924,12 @@ jobs:
           ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}
           path: trusted
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: trusted
+          source-repository: ${{ github.repository }}
       - name: Observe the actual physical job start
         shell: bash
         env:
@@ -915,11 +1006,22 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the frozen qualification implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Fetch the pinned qualification bootstrap compiler
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -927,6 +1029,12 @@ jobs:
           ref: 0fb54300b56512754221d80adda85ddb9815bceb
           path: .tools/tinycc
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
       - name: Install the pinned qualification bootstrap compiler
         working-directory: .tools/tinycc
         shell: bash
@@ -978,6 +1086,11 @@ jobs:
       BQ_BASE_COMMIT: ${{ needs.authorize.outputs.base }}
       BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
       - name: Refuse retained native cleanup uncertainty
         shell: bash
         run: |
@@ -998,6 +1111,12 @@ jobs:
       # Full commit history without file contents, so the harness can list
       # what the pull request changed; only the workload directory is
       # materialized.
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: trusted
+          source-repository: ${{ github.repository }}
       - name: Check out the pull request workloads
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -1007,6 +1126,12 @@ jobs:
           filter: blob:none
           sparse-checkout: benchmarks/9700x
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate
+          source-repository: ${{ github.repository }}
       - name: Compile and run the changed workloads
         shell: bash
         run: |
@@ -1042,6 +1167,11 @@ jobs:
       BQ_RUN_ID: ${{ github.run_id }}
       BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
       - name: Refuse retained native cleanup uncertainty
         shell: bash
         run: |
@@ -1058,6 +1188,12 @@ jobs:
           path: trusted
           sparse-checkout: tools
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: trusted
+          source-repository: ${{ github.repository }}
       # Full history, so the merge base is present; file contents on demand.
       - name: Check out the pull request
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -1067,6 +1203,12 @@ jobs:
           fetch-depth: 0
           filter: blob:none
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate
+          source-repository: ${{ github.repository }}
       - name: Build and compare both compilers
         shell: bash
         run: |
@@ -1110,12 +1252,23 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the trusted check writer
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           sparse-checkout: tools/bench_direct
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Adopt the exact attempt check in one pass
         shell: bash
         env:
@@ -1146,12 +1299,23 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the trusted publisher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           sparse-checkout: tools/bench_direct
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Validate the evidence and publish the check
         shell: bash
         env:
@@ -1222,11 +1386,22 @@ jobs:
       main_facts_data: ${{ steps.verify.outputs.main_facts_data }}
       main_identity_data: ${{ steps.verify.outputs.main_identity_data }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the trusted authorization rules
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Fetch the pinned MAIN policy bootstrap compiler
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -1272,12 +1447,23 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the trusted check writer
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           sparse-checkout: tools/bench_direct
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Adopt the exact attempt check in one pass
         shell: bash
         env:
@@ -1337,6 +1523,11 @@ jobs:
       BQ_MAIN_EVIDENCE_ROOT: ${{ needs.authorize-compiler.outputs.evidence_root }}
       BQ_MAIN_POLICY_REVISION: ${{ needs.authorize-compiler.outputs.main_policy_revision }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
       - name: Refuse retained native cleanup uncertainty
         shell: bash
         run: |
@@ -1353,6 +1544,12 @@ jobs:
           ref: ${{ needs.authorize-compiler.outputs.main_measurement_revision }}
           path: trusted
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: trusted
+          source-repository: ${{ github.repository }}
       # The main commit with its history without blobs: the baseline on its
       # first-parent chain and, for a queue merge, the pull request head.
       - name: Check out the main commit
@@ -1363,6 +1560,12 @@ jobs:
           fetch-depth: 0
           filter: blob:none
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate
+          source-repository: ${{ github.repository }}
       - name: Build and compare both compilers
         if: ${{ needs.authorize-compiler.outputs.main_owned != 'true' }}
         shell: bash
@@ -1479,11 +1682,22 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the trusted publisher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.authorize-compiler.outputs.main_measurement_revision || github.sha }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Fetch the pinned MAIN policy bootstrap compiler
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -1545,12 +1759,23 @@ jobs:
       group: buster-9700x-compiler-comment-${{ needs.publish-compiler.outputs.head }}
       cancel-in-progress: false
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the trusted comment writer
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           sparse-checkout: tools/bench_direct
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Upsert the report comment on the main commit
         shell: bash
         env:

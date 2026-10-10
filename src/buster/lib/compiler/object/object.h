@@ -209,6 +209,17 @@ typedef enum ObjectRelocationKind
     // ELF page family: nothing may resolve them as an ordinary page pair.
     OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21,
     OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12,
+    // R_AARCH64_TLSDESC_ADR_PAGE21 (562), R_AARCH64_TLSDESC_LD64_LO12 (563),
+    // R_AARCH64_TLSDESC_ADD_LO12 (564) and R_AARCH64_TLSDESC_CALL (569): the
+    // general-dynamic descriptor sequence `adrp x0` / `ldr Xt, [x0]` /
+    // `add x0, x0` / `blr Xt`. The reader keeps the words with zero
+    // immediates; a fixed-address executable relaxes the adjacent sequence
+    // to MOVZ/MOVK/NOP/NOP (object_aarch64_elf_tls_desc_relax). No other
+    // consumer resolves a descriptor.
+    OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21,
+    OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12,
+    OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12,
+    OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
@@ -234,6 +245,15 @@ BUSTER_F_DECL bool object_relocation_kind_is_aarch64_elf_tls_ie(ObjectRelocation
 // untouched, when the word is not exactly that instruction (XZR, a base that
 // differs from the destination, a nonzero offset) or tprel needs over 32 bits.
 BUSTER_F_DECL bool object_aarch64_elf_tls_ie_relax(ObjectRelocationKind kind, u32 word, u64 tprel, u32* patched);
+// The four AArch64 ELF TLS descriptor kinds (562/563/564/569).
+BUSTER_F_DECL bool object_relocation_kind_is_aarch64_elf_tls_desc(ObjectRelocationKind kind);
+// Rewrite one canonical TLSDESC instruction for a fixed-address executable,
+// as GNU ld and lld do: `adrp x0` becomes `MOVZ x0, #tprel[31:16], LSL #16`,
+// `ldr Xt, [x0]` becomes `MOVK x0, #tprel[15:0]`, and `add x0, x0, #0` and
+// `blr Xt` become NOP. Xt is x1..x30; the caller checks the LDR and BLR
+// name the same one. Refused, with *patched untouched, for any other word
+// or a tprel over 32 bits.
+BUSTER_F_DECL bool object_aarch64_elf_tls_desc_relax(ObjectRelocationKind kind, u32 word, u64 tprel, u32* patched);
 
 // Apply the ordinary Windows ARM64 PAGEBASE_REL21/PAGEOFFSET_12A contract to
 // one canonical instruction.  The reader removes COFF's inline addend; the
