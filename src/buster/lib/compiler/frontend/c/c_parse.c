@@ -8349,7 +8349,9 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
 #if BUSTER_INCLUDE_TESTS
     literal &= !c_parse_literal_query_machine_only;
 #endif
-    u32 stored = c_parse_expression_query_lookup(machine, result, slot, end, scope, flags);
+    // The slot test repeats the lookup's own guard where the static analyzer
+    // sees it: a slot exists only while the memo does.
+    u32 stored = slot != UINT32_MAX ? c_parse_expression_query_lookup(machine, result, slot, end, scope, flags) : 0u;
 #if BUSTER_INCLUDE_TESTS
     // Only the status is read until c_parse_expression_tree_query fills it.
     CAstTypePending pending;
