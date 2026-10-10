@@ -1147,4 +1147,18 @@ The base is main `f86d65f9`, which the candidate branches from. The budgets:
   instruction counts show only its instruction half; wall time, `-c` and RSS
   acceptance remain with the Zen 5 route (#2761).
 
+The statement plan's hosted census is
+[`2026-10-10T195257Z`](../../performance-audits/2026-10-10T195257Z.md), taken
+the same way and diagnostic only:
+- Correctness, object identity and coverage pass: every one of the self-host's
+  6,584 bodies follows its plan, and the four arms' `-c` objects are identical.
+- The binder's own cost (`c_parse_bind_function_body`) falls by 147.8 M
+  (15.4%), with about 55 M of plan construction charged, and the whole compile
+  by 145.7 M (1.53%, C against B).
+- **The default-path budget fails on the cheaper side:** D against A is
+  −0.34%. The planless walk runs no plan code and makes the same calls; the
+  difference is the walk's code generation, now an always-inline worker with
+  a planless and a planned caller. The band was not widened.
+- Acceptance stays with Zen 5 (#2761), so the default stays off.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
