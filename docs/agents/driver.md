@@ -1266,6 +1266,21 @@ is linked, and a link refuses the first one named as
 semantics (a link without the C runtime start-up files or default libraries), so
 they are never silently ignored where they would matter (GitHub #1418).
 
+`-include FILE` and `-includeFILE` (GitHub #1418) process each file as
+`#include "FILE"` before the first line of every C and assembly translation
+unit, in command-line order, after `-D`/`-U` have been applied. The names become
+`#include` lines of a synthetic `<command-line>` frame stacked above the
+primary file's frame (`forced_includes` in `CPreprocessOptions`), so the
+primary file's `__LINE__`, `__FILE__` and diagnostic lines never shift. Lookup
+approximates GCC: the working directory first (the synthetic file's directory
+is `.`), then the `-I` chain, then builtin headers; the primary file's
+directory is not searched. An absolute name is opened directly. A missing file
+is the ordinary `included file was not found: FILE` diagnostic located in
+`<command-line>`, and the compilation fails. A name with a double quote or line
+break is refused, as is a joined spelling that begins with `-`
+(`-include-pch` and `-iprefix` stay unsupported options), and `-include` with a
+GPU target is refused because the external GPU pipeline does not forward it.
+
 ### Deliberately rejected GCC/Clang spellings
 
 Each row is covered by a driver test. A spelling is refused, never ignored
