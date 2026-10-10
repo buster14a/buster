@@ -28578,8 +28578,6 @@ BUSTER_C_INTERNAL bool c_parser_tree_probe(Arena* arena, CPreprocessResult const
     CTokenShape const* token_shapes = c_preprocess_token_shapes(preprocess);
     CToken const* tokens = preprocess->tokens;
     CSymbolTable const* symbols = preprocess->symbols;
-    u16 const* word_bits = symbols ? symbols->word_bits : 0;
-    u32 predefined_limit = symbols ? symbols->predefined_limit : 0;
     u16 type_mask = C_WORD_TYPE;
     if (c_preprocess_dialect_is_gnu(preprocess->dialect))
     {
@@ -28622,9 +28620,9 @@ BUSTER_C_INTERNAL bool c_parser_tree_probe(Arena* arena, CPreprocessResult const
             u32 symbol = tokens[index].symbol;
             bool type_word;
             bool is_return;
-            if (symbol && word_bits)
+            if (symbol && symbols)
             {
-                type_word = symbol <= predefined_limit && (word_bits[symbol] & type_mask) != 0;
+                type_word = symbol <= symbols->predefined_limit && (symbols->word_bits[symbol] & type_mask) != 0;
                 is_return = symbol == (u32)C_SYMBOL_WELL_KNOWN_RETURN;
             }
             else
@@ -28635,7 +28633,7 @@ BUSTER_C_INTERNAL bool c_parser_tree_probe(Arena* arena, CPreprocessResult const
             if (type_word && index >= validated_end)
             {
                 u32 run_end = index;
-                u64 key = symbol && word_bits ? c_parser_tree_probe_run_key(preprocess, type_mask, index, &run_end) : 0;
+                u64 key = symbol && symbols ? c_parser_tree_probe_run_key(preprocess, type_mask, index, &run_end) : 0;
                 u32 slot = key ? c_parser_tree_probe_run_slot(runs, key) : C_PARSER_TREE_PROBE_RUN_SLOTS;
                 if (slot < C_PARSER_TREE_PROBE_RUN_SLOTS && runs[slot] == key)
                 {
