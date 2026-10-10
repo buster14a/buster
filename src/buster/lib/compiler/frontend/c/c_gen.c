@@ -20334,28 +20334,29 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_generic_overflow_builtin(CIntegerIrBuilder
         integers = shapes[index] && (shapes[index]->kind == IR_TYPE_INTEGER || shapes[index]->kind == IR_TYPE_BOOLEAN) &&
                    shapes[index]->bit_width >= 1 && shapes[index]->bit_width <= 128;
     }
-    if (!integers)
-    {
-        builder->failure_message = S8("__builtin_*_overflow requires two integer operands and a pointer to an integer result");
-        return result;
-    }
-    bool is_boolean = pointee->kind == IR_TYPE_BOOLEAN;
+    // A refused shape leaves every width zero, so only the first branch below
+    // can take it.
+    bool is_boolean = integers && pointee->kind == IR_TYPE_BOOLEAN;
     bool is_multiply = builtin.operation == IR_BINARY_INTEGER_MULTIPLY;
-    u32 width_left = types[0]->bit_width;
-    u32 width_right = types[1]->bit_width;
-    u32 width_result = pointee->bit_width;
-    bool signed_left = types[0]->kind == IR_TYPE_INTEGER && types[0]->is_signed;
-    bool signed_right = types[1]->kind == IR_TYPE_INTEGER && types[1]->is_signed;
-    bool signed_result = !is_boolean && pointee->is_signed;
+    u32 width_left = integers ? types[0]->bit_width : 0;
+    u32 width_right = integers ? types[1]->bit_width : 0;
+    u32 width_result = integers ? pointee->bit_width : 0;
+    bool signed_left = integers && types[0]->kind == IR_TYPE_INTEGER && types[0]->is_signed;
+    bool signed_right = integers && types[1]->kind == IR_TYPE_INTEGER && types[1]->is_signed;
+    bool signed_result = integers && !is_boolean && pointee->is_signed;
     u32 need_left = width_left + (signed_left ? 0u : 1u);
     u32 need_right = width_right + (signed_right ? 0u : 1u);
     u32 need_result = is_boolean ? 2u : width_result + (signed_result ? 0u : 1u);
     u32 need = is_multiply ? need_left + need_right - (signed_left && signed_right ? 0u : 1u) : (need_left > need_right ? need_left : need_right) + 1;
     need = need > need_result ? need : need_result;
-    bool same_kind = !is_boolean && signed_left == signed_result && signed_right == signed_result && width_left <= width_result && width_right <= width_result &&
+    bool same_kind = integers && !is_boolean && signed_left == signed_result && signed_right == signed_result && width_left <= width_result && width_right <= width_result &&
                      (width_result == 32 || width_result == 64 || (width_result == 128 && !is_multiply)) &&
                      !pointee->is_volatile && !pointee->is_atomic;
-    if (same_kind)
+    if (!integers)
+    {
+        builder->failure_message = S8("__builtin_*_overflow requires two integer operands and a pointer to an integer result");
+    }
+    else if (same_kind)
     {
         CIrOverflowBuiltin typed = builtin;
         typed.operand_kind = width_result == 128 ? (signed_result ? C_TYPE_INT128 : C_TYPE_UNSIGNED_INT128)
