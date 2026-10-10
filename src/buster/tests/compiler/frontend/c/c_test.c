@@ -23212,6 +23212,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
     return result;
 }
 
+// __builtin_dynamic_object_size shares __builtin_object_size's admission and
+// result: GCC and Clang allow the conservative static answer. Neither is an
+// integer constant expression here, so compare the lowered IR of both spellings.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_dynamic_object_size(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 spellings[] = {S8("__builtin_dynamic_object_size"), S8("__builtin_object_size")};
+    CIRLowerResult lowered[2] = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    for (u32 index = 0; index < 2; index += 1)
+    {
+        String8 source = string_format_z(temporary.arena,
+            S8("#if !__has_builtin(__builtin_dynamic_object_size) || !__has_builtin(__builtin_object_size)\n"
+               "#error missing dynamic object size\n"
+               "#endif\n"
+               "typedef struct Holder {{ int head; char tail[12]; } Holder;\n"
+               "static char array[24];\n"
+               "static Holder holder;\n"
+               "extern char* unknown;\n"
+               "unsigned long long array0(void) {{ return {S8}(array, 0); }\n"
+               "unsigned long long array1(void) {{ return {S8}(array, 1); }\n"
+               "unsigned long long array2(void) {{ return {S8}(array, 2); }\n"
+               "unsigned long long array3(void) {{ return {S8}(array, 3); }\n"
+               "unsigned long long member0(void) {{ return {S8}(holder.tail, 0); }\n"
+               "unsigned long long member1(void) {{ return {S8}(holder.tail, 1); }\n"
+               "unsigned long long member2(void) {{ return {S8}(holder.tail, 2); }\n"
+               "unsigned long long member3(void) {{ return {S8}(holder.tail, 3); }\n"
+               "unsigned long long unknown0(void) {{ return {S8}(unknown, 0); }\n"
+               "unsigned long long unknown1(void) {{ return {S8}(unknown, 1); }\n"
+               "unsigned long long unknown2(void) {{ return {S8}(unknown, 2); }\n"
+               "unsigned long long unknown3(void) {{ return {S8}(unknown, 3); }\n"
+               "unsigned long long runtime(char* pointer) {{ return {S8}(pointer, 0); }\n"),
+            spellings[index], spellings[index], spellings[index], spellings[index], spellings[index], spellings[index],
+            spellings[index], spellings[index], spellings[index], spellings[index], spellings[index], spellings[index],
+            spellings[index]);
+        CPreprocessResult tokens = {0};
+        CParseResult parse = {0};
+        lowered[index] = c_test_lower_source(temporary.arena, source, S8("dynamic-object-size.c"), target_native, &tokens, &parse);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !parse.diagnostic_count && !lowered[index].diagnostic_count && lowered[index].program);
+    }
+    if (lowered[0].program && lowered[1].program && !lowered[0].diagnostic_count && !lowered[1].diagnostic_count)
+    {
+        IrModule* dynamic_module = lowered[0].program->modules;
+        IrModule* static_module = lowered[1].program->modules;
+        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered[0].program, dynamic_module).error == IR_VALIDATION_NONE);
+        BUSTER_TEST(arguments, dynamic_module->function_count == static_module->function_count && dynamic_module->function_count != 0);
+        u32 function_count = dynamic_module->function_count < static_module->function_count ? dynamic_module->function_count : static_module->function_count;
+        u32 constants = 0;
+        for (u32 function_index = 0; function_index < function_count; function_index += 1)
+        {
+            IrFunction* dynamic_function = dynamic_module->functions + function_index;
+            IrFunction* static_function = static_module->functions + function_index;
+            BUSTER_TEST(arguments, dynamic_function->instruction_count == static_function->instruction_count);
+            u32 instruction_count = dynamic_function->instruction_count < static_function->instruction_count ? dynamic_function->instruction_count
+                                                                                                             : static_function->instruction_count;
+            for (u32 instruction_index = 0; instruction_index < instruction_count; instruction_index += 1)
+            {
+                IrInstruction* dynamic_instruction = dynamic_function->instructions + instruction_index;
+                IrInstruction* static_instruction = static_function->instructions + instruction_index;
+                BUSTER_TEST(arguments, dynamic_instruction->opcode == static_instruction->opcode &&
+                                           dynamic_instruction->immediate_count == static_instruction->immediate_count);
+                if (dynamic_instruction->opcode == static_instruction->opcode && dynamic_instruction->opcode == IR_OPCODE_CONSTANT_INTEGER &&
+                    dynamic_instruction->immediate_count && dynamic_instruction->immediate_count == static_instruction->immediate_count)
+                {
+                    constants += 1;
+                    BUSTER_TEST(arguments, dynamic_instruction->immediates[0] == static_instruction->immediates[0]);
+                }
+            }
+        }
+        BUSTER_TEST(arguments, constants >= 12);
+    }
+    String8 invalid_sources[] = {
+        S8("unsigned long long f(char* p) { return __builtin_dynamic_object_size(p); }\n"),
+        S8("unsigned long long f(char* p) { return __builtin_dynamic_object_size(p, 0, 1); }\n"),
+        S8("unsigned long long f(char* p) { return __builtin_dynamic_object_size(p, 4); }\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_sources); index += 1)
+    {
+        CPreprocessResult invalid_tokens = {0};
+        CParseResult invalid_parse = {0};
+        CIRLowerResult invalid = c_test_lower_source(temporary.arena, invalid_sources[index], S8("dynamic-object-size-invalid.c"), target_native,
+                                                     &invalid_tokens, &invalid_parse);
+        BUSTER_TEST(arguments, invalid.diagnostic_count != 0 || invalid_parse.diagnostic_count != 0);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 #include <buster/tests/compiler/frontend/c/c_integer_semantics_test.c>
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_preprocessor_short_circuit(UnitTestArguments* arguments)
@@ -60137,6 +60225,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_join_simplify);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
     C_TEST_FIXTURE(arguments, c_test_duplicate_parameter_names);
+    C_TEST_FIXTURE(arguments, c_test_dynamic_object_size);
     C_TEST_FIXTURE(arguments, c_test_redefinition_names_previous_site);
     C_TEST_FIXTURE(arguments, c_test_empty_scalar_initializer_runtime);
     C_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
