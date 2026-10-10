@@ -5007,10 +5007,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_gro
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         Arena* arena = temporary.arena;
         String8 input = buster_test_temporary_unique_path(arena, S8("buster-redundant-declarator-groups"), S8(".c"));
+#if !BUSTER_IOS
         String8 object = buster_test_temporary_unique_path(arena, S8("buster-redundant-declarator-groups"), S8(".o"));
+#endif
         if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[case_index].source))))
         {
+#if !BUSTER_IOS
             ByteSlice reference = {0};
+#endif
             for (u32 pilot = 0; pilot < 2; pilot += 1)
             {
                 String8 label = string_format(arena, S8("redundant declarator groups case {u32}, pilot {u32}"), case_index, pilot);
