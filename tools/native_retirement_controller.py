@@ -22,10 +22,16 @@ superseded_push, which turns a main-push stale-main exit green only after an
 exact successor run exists (docs/main-push-maintenance.md). An uncertain POST
 is never retried. disposition bars a catch-up blocked before its POST only for
 its own main revision, since its empty source head never changes (#3327).
+failed_catch_up lets the opener replace a published catch-up whose exact head
+failed `CI complete` once main has advanced past its recorded base: at most
+one replacement per main revision, never a rerun of the same inputs. The
+opener moves the bot branch only by lease_catch_up_branch, a leased push like
+the writer's publication, so the two serialize on the branch itself.
 """
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -50,6 +56,9 @@ NOT_DISPATCHED = "not dispatched: "
 CATCH_UP_PATH = ".github/workflows/native-retirement-catch-up.yml"
 CATCH_UP_EVENTS = frozenset(("push", "schedule", "workflow_dispatch"))
 CATCH_UP_TITLE = "Native retirement catch-up: publish generated state for main"
+# Published heads with these CI complete conclusions can never merge; success,
+# neutral and skipped are not failures and pending checks are not concluded.
+CI_PASSING = frozenset(("success", "neutral", "skipped"))
 CATCH_UP_BODY = (
     "Automatic catch-up (#1893). This PR's only commit is empty. The trusted "
     "native-retirement writer replaces it with generated state reconstructed for "
@@ -286,13 +295,18 @@ def resolve_candidate(repo: Path, base: str, pr: dict, api) -> dict:
     return record
 
 
+def actions_checks(api, head: str) -> list[dict]:
+    """Latest GitHub Actions check runs recorded for this exact head."""
+    checks = automation.collection(api, "commits/" + head + "/check-runs", "check_runs", filter="latest")
+    return [check for check in checks if check.get("head_sha") == head and
+            check.get("app", {}).get("id") == 15368]
+
+
 def prerequisite_ci(api, head: str) -> bool:
     # This is the ordinary build/test aggregate, not retirement admission or
     # generated-file preflight. Missing/running/failed/cancelled CI defers work;
     # it never dispatches a new writer merely to get another test attempt.
-    checks = automation.collection(api, "commits/" + head + "/check-runs", "check_runs", filter="latest")
-    own = [check for check in checks if check.get("head_sha") == head and
-           check.get("app", {}).get("id") == 15368]
+    own = actions_checks(api, head)
     matches = [check for check in own if check.get("name") == "CI complete"]
     # These two gates consume the writer's future attestation. All other
     # existing Actions checks, including performance, must finish without a
@@ -451,32 +465,121 @@ def dispatch(api, request: dict) -> dict:
     return result
 
 
-def open_catch_up(api, base: str) -> dict:
-    """Create one empty commit on main, point the bot branch at it and open a PR."""
+BOT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "github-actions[bot]",
+    "GIT_AUTHOR_EMAIL": "41898282+github-actions[bot]@users.noreply.github.com",
+    "GIT_COMMITTER_NAME": "github-actions[bot]",
+    "GIT_COMMITTER_EMAIL": "41898282+github-actions[bot]@users.noreply.github.com",
+}
+
+
+def catch_up_commit(repo: Path, base: str) -> str:
+    """The empty request commit: main's tree with main as its only parent."""
+    return integration._git(repo, "commit-tree", base + "^{tree}", "-p", base,
+                            input_text="Request native-retirement catch-up for " + base + "\n",
+                            extra_env=BOT_IDENTITY).stdout.strip()
+
+
+def lease_catch_up_branch(repo: Path, token: str, commit: str, expected: str | None,
+                          remote: str = "origin") -> bool:
+    """Compare-and-swap the catch-up branch from `expected` (None: absent) to `commit`.
+
+    The writer publishes with a lease on the exact head it was requested for,
+    so the branch is the one point both mutate: exactly one of two racing
+    updates wins, and the loser's push is refused without moving it. A
+    transport failure is decided by the live branch value, not the exit code.
+    """
     import native_retirement_merge_gate as gate
-    tree = api.request("git/commits/" + base)["tree"]["sha"]
-    commit = api.request("git/commits", method="POST", body={
-        "message": "Request native-retirement catch-up for " + base + "\n",
-        "tree": tree, "parents": [base]})
-    sha = automation.hex_value(commit.get("sha"), 40, "catch-up commit")
-    reference = "heads/" + gate.CATCH_UP_BRANCH
-    exists = True
+    reference = "refs/heads/" + gate.CATCH_UP_BRANCH
+    credential = base64.b64encode(("x-access-token:" + token).encode()).decode()
+    # Environment-only git config keeps the credential out of argv and disk.
+    environment = {"GIT_CONFIG_COUNT": "1",
+                   "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+                   "GIT_CONFIG_VALUE_0": "AUTHORIZATION: basic " + credential}
+    integration._git(repo, "push", "--porcelain",
+                     "--force-with-lease=" + reference + ":" + (expected or ""),
+                     remote, commit + ":" + reference, check=False, extra_env=environment)
+    live = integration._git(repo, "ls-remote", "--refs", remote, reference,
+                            extra_env=environment).stdout.split("\t", 1)[0]
+    return live == commit
+
+
+def catch_up_branch(api) -> str | None:
+    import native_retirement_merge_gate as gate
+    head = None
     try:
-        api.request("git/ref/" + reference)
+        head = api.request("git/ref/heads/" + gate.CATCH_UP_BRANCH)["object"]["sha"]
     except urllib.error.HTTPError as error:
         if error.code != 404:
             raise
-        exists = False
-    if exists:
-        api.request("git/refs/" + reference, method="PATCH", body={"sha": sha, "force": True})
-    else:
-        api.request("git/refs", method="POST", body={"ref": "refs/" + reference, "sha": sha})
-    pr = api.request("pulls", method="POST", body={
-        "title": CATCH_UP_TITLE, "head": gate.CATCH_UP_BRANCH, "base": "main",
-        "body": CATCH_UP_BODY, "maintainer_can_modify": False})
-    number = automation.positive(pr.get("number"), "catch-up PR")
-    # No auto-merge here: a GITHUB_TOKEN enqueue starts no merge_group CI.
-    return {"status": "opened", "pull_request": number, "head": sha}
+    return head
+
+
+def open_catch_up(api, repo: Path, base: str, expected: str | None) -> dict:
+    """Lease the bot branch from `expected` to a fresh empty commit and open a PR."""
+    import native_retirement_merge_gate as gate
+    commit = catch_up_commit(repo, base)
+    result = {"status": "lease-refused", "expected": expected}
+    if lease_catch_up_branch(repo, api.token, commit, expected):
+        pr = api.request("pulls", method="POST", body={
+            "title": CATCH_UP_TITLE, "head": gate.CATCH_UP_BRANCH, "base": "main",
+            "body": CATCH_UP_BODY, "maintainer_can_modify": False})
+        number = automation.positive(pr.get("number"), "catch-up PR")
+        # No auto-merge here: a GITHUB_TOKEN enqueue starts no merge_group CI.
+        result = {"status": "opened", "pull_request": number, "head": commit}
+    return result
+
+
+def failed_catch_up(api, pull: dict, base: str) -> bool:
+    """Is this a published catch-up whose exact head failed CI, built for an older main?
+
+    Only a completed, non-passing latest `CI complete` counts; pending or
+    missing CI does not. The recorded base must be a strict ancestor of the
+    opener's main, so the replacement is built from new inputs: an unchanged
+    main keeps the failed request open for owner reconciliation instead of
+    rebuilding identical inputs until a test passes. The replacement records
+    the new main, so each main revision allows at most one replacement.
+    """
+    import native_retirement_merge_gate as gate
+    head = automation.hex_value(pull["head"]["sha"], 40, "catch-up head")
+    commit = api.request("git/commits/" + head)
+    parents = commit.get("parents")
+    message = commit.get("message")
+    recorded = None
+    if isinstance(parents, list) and len(parents) == 2 and isinstance(message, str):
+        try:
+            recorded = gate.parse_trailers(message).get(gate.TRAILER_BASE)
+        except gate.AdmissionError:
+            recorded = None
+    result = False
+    if isinstance(recorded, str) and gate.HEX40.fullmatch(recorded) and recorded != base:
+        matches = [check for check in actions_checks(api, head) if check.get("name") == "CI complete"]
+        failed = bool(matches) and all(check.get("status") == "completed" and
+                                       check.get("conclusion") not in CI_PASSING
+                                       for check in matches)
+        if failed:
+            # Main may have moved again after this run started; only an
+            # ancestor recorded base proves this run's main is newer.
+            comparison = api.request("compare/" + recorded + "..." + base)
+            result = comparison.get("status") == "ahead"
+    return result
+
+
+def close_failed_catch_up(api, pull: dict) -> bool:
+    """Close a failed catch-up while its live PR is still at the failed head.
+
+    Closing makes a writer that has not yet authorized refuse. It is not the
+    serialization point: the replacement leases the branch from this exact
+    failed head, so a writer publication at any later moment refuses it.
+    """
+    number = automation.positive(pull.get("number"), "catch-up PR")
+    path = "pulls/" + str(number)
+    closed = False
+    live = api.request(path)
+    if is_catch_up_pr(live, api.repository) and live["head"]["sha"] == pull["head"]["sha"]:
+        api.request(path, method="PATCH", body={"state": "closed"})
+        closed = True
+    return closed
 
 
 def catch_up(api, repo: Path, base: str, run_id: int) -> dict:
@@ -496,13 +599,39 @@ def catch_up(api, repo: Path, base: str, run_id: int) -> dict:
             for pull in pulls:
                 api.request("pulls/" + str(pull["number"]), method="PATCH", body={"state": "closed"})
             result = {"status": "current", "closed": [pull["number"] for pull in pulls]}
-        elif pulls:
-            result = {"status": "pending", "pull_requests": [pull["number"] for pull in pulls]}
         else:
-            # Re-read main last: never open a request for a revision already replaced.
-            if api.request("git/ref/heads/main")["object"]["sha"] != base:
+            failed = [pull for pull in pulls if failed_catch_up(api, pull, base)]
+            # Every open request shares the one bot branch. An active writer
+            # may be publishing it again; that head's own CI decides next.
+            if len(failed) != len(pulls) or (failed and active_writer(api)):
+                failed = []
+            # Re-read main before any write: never replace or open a request
+            # for a revision already replaced; its successor run does that.
+            if (failed or not pulls) and api.request("git/ref/heads/main")["object"]["sha"] != base:
                 raise automation.AutomationMoved("main moved before opening a catch-up", 75)
-            result = open_catch_up(api, base)
+            closed = [pull for pull in failed if close_failed_catch_up(api, pull)]
+            numbers = [pull["number"] for pull in pulls]
+            if pulls and len(closed) != len(pulls):
+                for pull in closed:
+                    api.request("pulls/" + str(pull["number"]), method="PATCH", body={"state": "open"})
+                result = {"status": "pending", "pull_requests": numbers}
+            else:
+                # The lease is the serialization point with the writer: it
+                # replaces exactly the failed head, or the branch it found.
+                expected = closed[0]["head"]["sha"] if closed else catch_up_branch(api)
+                result = open_catch_up(api, repo, base, expected)
+                for pull in closed:
+                    if result["status"] == "opened":
+                        api.request("issues/" + str(pull["number"]) + "/comments", method="POST", body={
+                            "body": "Closed by the catch-up opener (#1893): `CI complete` failed on "
+                                    "published head " + pull["head"]["sha"] + " and main has advanced "
+                                    "to " + base + ". Replaced by #" + str(result["pull_request"]) +
+                                    "; this PR keeps the failure for inspection.\n"})
+                    else:
+                        # A writer published first: keep its fresh head open.
+                        api.request("pulls/" + str(pull["number"]), method="PATCH", body={"state": "open"})
+                if closed:
+                    result["replaced" if result["status"] == "opened" else "kept"] = numbers
     return result
 
 

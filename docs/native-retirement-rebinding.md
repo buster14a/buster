@@ -503,7 +503,9 @@ Two requirements are part of the decision:
    - **Route to `main`.** The writer publishes the usual two-parent
      integration head on that PR, then enables auto-merge with its
      publication credential, which queues it in the same native queue. The writer gets no direct write path to `main` and no ruleset
-     bypass.
+     bypass. If `main` moves during the run, the writer still publishes
+     for its expected base while that head would be admitted below;
+     see [staleness](native-retirement-automation.md#staleness-failure-and-cancellation).
    - **Admission.** A catch-up is a writer integration of an empty candidate.
      It is admitted when all of these hold:
      - its generated pair is byte-identical to a trusted reconstruction at
