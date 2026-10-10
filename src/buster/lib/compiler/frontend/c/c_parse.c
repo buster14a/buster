@@ -36409,8 +36409,13 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     // The stable header survives rollback even before the first tag owner.
     result.aggregate_lookup = arena_allocate(arena, CAggregateLookup, 1);
     *result.aggregate_lookup = (CAggregateLookup){0};
-    result.aggregate_lookup->type_interning = arena_allocate(arena, CTypeInterning, 1);
-    *result.aggregate_lookup->type_interning = (CTypeInterning){0};
+    // Interned rows only where the caller asked for them; without the header
+    // every builder appends (CParserResult.type_interning).
+    if (syntax.type_interning)
+    {
+        result.aggregate_lookup->type_interning = arena_allocate(arena, CTypeInterning, 1);
+        *result.aggregate_lookup->type_interning = (CTypeInterning){0};
+    }
     {
         u32 definition_slot_count = 1024;
         result.definition_index = arena_allocate(arena, CDefinitionIndex, 1);

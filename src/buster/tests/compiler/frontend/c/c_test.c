@@ -39567,12 +39567,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_literal_expression_queries(UnitTestArg
 }
 
 // Interned primitive and pointer rows (CTypeInterning) must be observable only
-// as the type table's size: every source compiles to the same object with the
-// interning window shut, at `-g0` and `-g`, with and without the syntax tree.
-// The second source defines aggregates inside body type names, which the
-// declaration pass leaves to the machine; their member rows must still follow
-// the aggregate's row, or lowering resolves the aggregate a pass earlier and
-// the `-g` type entries come out in another order (#3102).
+// as the type table's size. The pilot interns them (-fc-ast-pilot) and the
+// default path does not, so every source compiles to the same object by
+// default, under the pilot, and under the pilot with the interning window
+// shut, at `-g0` and `-g`. The second source defines aggregates inside body
+// type names, which the declaration pass leaves to the machine; their member
+// rows must still follow the aggregate's row, or lowering resolves the
+// aggregate a pass earlier and the `-g` type entries come out in another
+// order (#3102).
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -39605,34 +39607,38 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArgumen
         Arena* arena = temporary.arena;
         String8 input = buster_test_temporary_path(arena, S8("buster-type-interning"), S8(".c"));
         BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(sources[source_index])));
-        for (u32 variant = 0; variant < 4; variant += 1)
+        for (u32 level = 0; level < BUSTER_ARRAY_LENGTH(debug); level += 1)
         {
-            ByteSlice objects[2] = {0};
-            String8 diagnostics[2] = {0};
-            CompilerDriverError errors[2] = {0};
-            for (u32 mode = 0; mode < 2; mode += 1)
+            // The default compile, the pilot, and the pilot without interned rows.
+            ByteSlice objects[3] = {0};
+            String8 diagnostics[3] = {0};
+            CompilerDriverError errors[3] = {0};
+            for (u32 mode = 0; mode < 3; mode += 1)
             {
                 String8 output = buster_test_temporary_path(arena, string_format(arena, S8("buster-type-interning-{u32}-{u32}-{u32}"), source_index,
-                                                                                 variant, mode),
+                                                                                 level, mode),
                                                             S8(".o"));
-                String8 plain[] = {S8("-nostdinc"), debug[variant & 1], S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"), output, input};
-                String8 pilot[] = {S8("-nostdinc"), debug[variant & 1], S8("-fc-ast-pilot"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"),
+                String8 plain[] = {S8("-nostdinc"), debug[level], S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"), output, input};
+                String8 pilot[] = {S8("-nostdinc"), debug[level], S8("-fc-ast-pilot"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"),
                                    S8("-o"), output, input};
-                SliceString8 command = variant >> 1 ? (SliceString8)BUSTER_ARRAY_TO_SLICE(pilot) : (SliceString8)BUSTER_ARRAY_TO_SLICE(plain);
-                c_test_set_type_interning_off(mode == 1);
+                SliceString8 command = mode ? (SliceString8)BUSTER_ARRAY_TO_SLICE(pilot) : (SliceString8)BUSTER_ARRAY_TO_SLICE(plain);
+                c_test_set_type_interning_off(mode == 2);
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, command));
                 c_test_set_type_interning_off(false);
                 errors[mode] = compiled.error;
                 diagnostics[mode] = compiled.diagnostic;
                 objects[mode] = compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
             }
-            BUSTER_TEST(arguments, errors[0] == COMPILER_DRIVER_ERROR_NONE && errors[1] == COMPILER_DRIVER_ERROR_NONE);
-            BUSTER_STRING_TEST(arguments, diagnostics[0], diagnostics[1]);
-            BUSTER_TEST_RAW(arguments,
-                            objects[0].length && objects[0].length == objects[1].length &&
-                                memcmp(objects[0].pointer, objects[1].pointer, objects[0].length) == 0,
-                            string_format(arena, S8("source={u32} {S8}{S8}: the object differs without interned rows"), source_index,
-                                          debug[variant & 1], variant >> 1 ? S8(" -fc-ast-pilot") : S8("")));
+            for (u32 mode = 1; mode < 3; mode += 1)
+            {
+                BUSTER_TEST(arguments, errors[0] == COMPILER_DRIVER_ERROR_NONE && errors[mode] == COMPILER_DRIVER_ERROR_NONE);
+                BUSTER_STRING_TEST(arguments, diagnostics[0], diagnostics[mode]);
+                BUSTER_TEST_RAW(arguments,
+                                objects[0].length && objects[0].length == objects[mode].length &&
+                                    memcmp(objects[0].pointer, objects[mode].pointer, objects[0].length) == 0,
+                                string_format(arena, S8("source={u32} {S8}: the default object differs from the pilot's{S8}"), source_index, debug[level],
+                                              mode == 2 ? S8(" without interned rows") : S8("")));
+            }
         }
         c_test_scratch_end(temporary);
     }

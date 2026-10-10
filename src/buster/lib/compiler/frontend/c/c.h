@@ -1464,6 +1464,11 @@ struct CParserResult
     u32 diagnostic_count;
     u32 declaration_capacity;
     u32 diagnostic_capacity;
+    // Share the primitive and pointer rows the function-body queries mint
+    // (CTypeInterning in c_internal.h), which the tree's answers for casts and
+    // `&` need. The driver asks for it with the tree (-fc-ast-pilot); without
+    // it every row is appended, as the default path always has.
+    bool type_interning;
 };
 
 // Definition token -> lowest type id ever given that definition_start.

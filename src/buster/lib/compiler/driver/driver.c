@@ -5554,6 +5554,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     {
         syntax.ast = &pilot_tree;
         syntax.ast_type_statistics = &result.c_ast.types;
+        syntax.type_interning = true;
     }
     result.parser_diagnostic_count = syntax.diagnostic_count;
     if (syntax.diagnostic_count)

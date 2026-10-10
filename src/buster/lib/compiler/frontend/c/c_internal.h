@@ -1368,7 +1368,10 @@ typedef enum CConstantEvaluationMode
 // read once per operator-scan level and again by its leaf, so nearly all the
 // rows the per-body validation queries mint are copies. While `enabled` --
 // only inside c_parse_validate_lowering_constraints' loop over function
-// bodies -- c_parse_intern_type returns the earlier row instead.
+// bodies -- c_parse_intern_type returns the earlier row instead. The header
+// exists only when the caller asked for it (CParserResult.type_interning,
+// which the driver sets with the tree under -fc-ast-pilot), so the default
+// path appends every row as before.
 //
 // The window is what keeps the copies unobservable but for the table's size.
 // Such a row is immutable, carries no tag, link, bound or alignment record,

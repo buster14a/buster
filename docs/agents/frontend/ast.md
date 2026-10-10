@@ -331,15 +331,23 @@ unchanged.
 
 ### Interned rows
 
-Stage 3 changes the default path on purpose. `c_parse_primitive_type`,
-`c_parse_pointer_chain` and the machine's `&` append a fresh row for every
-type name or address they read, and a cast's type name is read once per
-operator-scan level and again by its leaf. On the unity self-host 93.8% of the
-96,717 pointer rows and nearly all of the 37,000 primitive rows were copies.
-Inside `c_parse_validate_lowering_constraints`' loop over function bodies,
-where the per-body queries mint them, those builders now go through
-`c_parse_intern_type`. It returns the live row equal to the one it would append
-(`CTypeInterning` in `c_internal.h`).
+`c_parse_primitive_type`, `c_parse_pointer_chain` and the machine's `&` append
+a fresh row for every type name or address they read, and a cast's type name
+is read once per operator-scan level and again by its leaf. On the unity
+self-host 93.8% of the 96,717 pointer rows and nearly all of the 37,000
+primitive rows were copies. Under the pilot, inside
+`c_parse_validate_lowering_constraints`' loop over function bodies, where the
+per-body queries mint them, those builders go through `c_parse_intern_type`.
+It returns the live row equal to the one it would append (`CTypeInterning` in
+`c_internal.h`). The tree's answers for casts and `&` read those rows.
+
+Interning is part of the pilot, not the default path. Semantic analysis keeps
+the interning header only when the caller asks for it
+(`CParserResult.type_interning`), and the driver asks only with the tree
+(`-fc-ast-pilot`). Without it every builder appends as before. The first
+version of stage 3 interned on the default path too. Review held it because a
+default-path change needs 9700X acceptance, so it was narrowed
+([#3321](https://github.com/buster14a/buster/pull/3321)).
 
 A row interned there is observable only as table size:
 - It is never mutated in place. Only aggregate and enum rows are completed in
@@ -581,9 +589,10 @@ and the budgets above apply unchanged to what remains.
 Stage 3's hosted census is
 [`2026-10-10T014058Z`](../../performance-audits/2026-10-10T014058Z.md), taken
 the same way and diagnostic only:
-- Every budget passes. The default path is −0.064% on `-fsyntax-only` and
-  −0.114% on `-c`, and the type table at the end of body validation shrinks
-  from 190,076 to 133,389 rows.
+- That census measured the first version, which interned on the default
+  path. Its hosted budgets passed: the default path was −0.064% on
+  `-fsyntax-only` and −0.114% on `-c`, and the type table at the end of body
+  validation shrank from 190,076 to 133,389 rows.
 - Stage 3 removes 0.72% of the pilot's instructions. Machine runs from queries
   fall from 205,248 to 179,293. Most of the gain is the replay of `S8()`'s
   `(char8*)("text")` casts.
@@ -592,5 +601,22 @@ the same way and diagnostic only:
 - In bodies the machine still answers string literals (10,940 queries), `&`
   and `*` levels whose pointer row is minted later in the same body (about
   3,600), and checked casts over a declined or unsafe operand (about 850).
+
+Stage 3 was then narrowed so that interning runs only under the pilot
+(above), and the default path no longer changes. For that version, these
+budgets were declared before its measured runs, on the same input, flags and
+four arms. The base is now main `f01f5523`, which the branch merges.
+- correctness: as above, with every run of the corpus gate interning, and with
+  byte-identical `-c` objects (`-g0` and `-g`) across the four arms and
+  between the pilot with and without interned rows
+  (`c_test_type_interning_objects`).
+- the default path (D against A): unchanged, so within ±0.05% Ir on
+  `-fsyntax-only` and on `-c` (`-g0`).
+- stage 3's own effect on the pilot: C against B removes instructions, with
+  the larger eager pass charged, and fewer machine runs from queries.
+- performance acceptance: the hosted counts are diagnostic and claim nothing
+  for production. An exact-head 9700X compiler comparison is requested in the
+  PR head. Until it publishes, performance validation is incomplete (#2761),
+  and the hook stays opt-in.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.

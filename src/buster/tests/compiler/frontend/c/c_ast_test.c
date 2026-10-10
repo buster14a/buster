@@ -1855,7 +1855,9 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_analyses_differ(Arena* arena, CAnalysis
 // three times on fresh declaration splits: without the tree, with it, and with
 // it in verify mode, where the type machine also answers every query the tree
 // answered. The tree may not change a diagnostic or the size of a type table,
-// and the machine must agree with every tree answer.
+// and the machine must agree with every tree answer. Every run interns rows
+// (CParserResult.type_interning), as the pilot does, so the tables compared
+// are the interned ones.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* arguments, String8 label, CPreprocessResult preprocess, CAst const* ast,
                                                       CAstCorpusTally* tally)
 {
@@ -1866,11 +1868,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
     Arena* arena = arena_create(creation);
     if (BUSTER_REQUIRE(arguments, arena != 0))
     {
-        CAnalysisResult plain = c_analyze_semantics_only(arena, preprocess, c_parse_ast(arena, preprocess));
+        CParserResult plain_syntax = c_parse_ast(arena, preprocess);
+        plain_syntax.type_interning = true;
+        CAnalysisResult plain = c_analyze_semantics_only(arena, preprocess, plain_syntax);
         CAstTypeStatistics statistics = {0};
         CParserResult typed_syntax = c_parse_ast(arena, preprocess);
         typed_syntax.ast = ast;
         typed_syntax.ast_type_statistics = &statistics;
+        typed_syntax.type_interning = true;
         CAnalysisResult typed = c_analyze_semantics_only(arena, preprocess, typed_syntax);
         String8 difference = c_ast_corpus_analyses_differ(arguments->arena, &plain, &typed);
         BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(arguments->arena, S8("{S8}: {S8}"), label, difference));
@@ -1880,6 +1885,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
         {
             CParserResult verified_syntax = c_parse_ast(arena, preprocess);
             verified_syntax.ast = ast;
+            verified_syntax.type_interning = true;
             c_test_ast_type_verify_take();
             c_test_ast_type_verify_set(true);
             c_analyze_semantics_only(arena, preprocess, verified_syntax);
@@ -3372,7 +3378,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, type_case->source, C_PREPROCESS_DIALECT_GNU17);
         CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
-        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+        // The rows the probes' casts and `&` read are interned, as under the
+        // pilot (CParserResult.type_interning).
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        syntax.type_interning = true;
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
         u32 start = c_ast_test_token_index(preprocess, type_case->first, type_case->occurrence);
         if (BUSTER_REQUIRE(arguments, built.complete && !analysis.diagnostic_count && analysis.analysis_complete && start != UINT32_MAX))
         {
@@ -3407,6 +3417,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
                                    C_TEST_AST_TYPE_PROBE_NO_BODY);
         CTestAstTypeProbe probe = c_test_ast_type_probe(temporary.arena, preprocess, &analysis, &built.ast, S8("g"), start, start + 3, false);
         BUSTER_TEST(arguments, probe.status == C_TEST_AST_TYPE_PROBE_ANSWER && probe.kind == C_TYPE_INT);
+    }
+    scratch_end(temporary);
+    // Without interned rows, the default path, the typer finds no `int *` row
+    // for `&` to answer with, and declines it.
+    temporary = scratch_begin(&arguments->arena, 1);
+    preprocess = c_ast_test_preprocess(temporary.arena, S8("int* f(int a) { return &a; }"), C_PREPROCESS_DIALECT_GNU17);
+    built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+    analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+    u32 address = c_ast_test_token_index(preprocess, S8("&"), 0);
+    if (BUSTER_REQUIRE(arguments, built.complete && !analysis.diagnostic_count && address != UINT32_MAX))
+    {
+        for (u32 checked = 0; checked < 2; checked += 1)
+        {
+            CTestAstTypeProbe probe = c_test_ast_type_probe(temporary.arena, preprocess, &analysis, &built.ast, S8("f"), address, address + 2,
+                                                            checked != 0);
+            BUSTER_TEST(arguments, probe.status == C_TEST_AST_TYPE_PROBE_DECLINE);
+        }
     }
     scratch_end(temporary);
     return result;
