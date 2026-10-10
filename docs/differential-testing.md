@@ -203,14 +203,17 @@ exact floating-point conversions. `main` hashes every global, the aggregate and
 the call trace into its output and exit status. The independent host compiler
 at O0 and O2 supplies the expected observation.
 
-Programs are free of undefined behavior even without `-fwrapv`. Narrow signed
-arithmetic is computed in a wider signed type. 64-bit signed `+`, `-`, `*` and
-`<<` use unsigned arithmetic, and divisors exclude 0 and −1. Floating-point
+Programs are free of undefined behavior even without `-fwrapv`. Each lane's
+`+`, `-`, `*`, and function-result sums are computed in a wider type: narrow
+signed lanes use `int`, `int` uses `long long`, and 64-bit signed lanes use
+unsigned arithmetic, as does 64-bit signed `<<`. Divisors exclude 0 and −1. Floating-point
 values are small exact dyadic numbers. Out-of-range signed narrowing is
 implementation-defined; every supported target defines it as modulo. The
-generator is iterative, and its self-test checks that output is reproducible,
-that program shape varies by seed, and that sixteen seeds together reach every
-listed construct. The exact source is saved as `seed-<value>.c` in the output
+generator is iterative, and every random draw is its own statement, so a seed
+yields the same source whichever compiler built the driver. Its self-test
+checks the wide-type invariant and the shape of function results. It also
+checks that output is reproducible, that program shape varies by seed, and
+that sixteen seeds together reach every listed construct. The exact source is saved as `seed-<value>.c` in the output
 directory.
 
 This runner executes the **native target**. It does not pretend a successfully
