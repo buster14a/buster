@@ -7,6 +7,7 @@ candidate execution occurs while exercising request lifecycle decisions.
 import base64
 import copy
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import tempfile
 import unittest
 from unittest import mock
 import urllib.error
+import zipfile
 
 from native_retirement_automation_test import (API, BASE, HEAD, SOURCE, BOT,
                                               REPOSITORY, CLASSIFICATION, ROOT, a, c, i,
@@ -103,6 +105,59 @@ class ControllerTests(unittest.TestCase):
         request = a.new_request(REPOSITORY, 1791, "e" * 40, HEAD, SOURCE, "ordinary",
                                 self.api.policy_digest, 101)
         self.assertEqual(c.disposition([record], request), "failed-or-cancelled-source")
+
+    def test_catch_up_block_before_post_bars_only_its_main_revision(self):
+        # #3327: a catch-up keeps its empty source head while its PR stays
+        # open; a block positively recorded before the POST may retry on the
+        # next main revision, never on the same one.
+        record = c.save(self.api, self.api.claim(), "blocked", c.NOT_DISPATCHED + "fixture refusal")
+        same_main = a.new_request(REPOSITORY, 1791, BASE, HEAD, SOURCE, "ordinary",
+                                  self.api.policy_digest, 101)
+        next_main = a.new_request(REPOSITORY, 1791, "e" * 40, HEAD, SOURCE, "ordinary",
+                                  self.api.policy_digest, 101)
+        self.assertEqual(c.disposition([record], same_main, True), "failed-or-cancelled-source")
+        self.assertEqual(c.disposition([record], next_main, True), "eligible")
+        self.assertEqual(c.disposition([record], next_main), "failed-or-cancelled-source")
+
+    def test_uncertain_or_writer_blocked_catch_up_stays_blocked_after_main_advances(self):
+        # A changed key and no active writer do not prove an uncertain POST was
+        # never accepted; cancellations and writer failures are not retried.
+        next_main = a.new_request(REPOSITORY, 1791, "e" * 40, HEAD, SOURCE, "ordinary",
+                                  self.api.policy_digest, 101)
+        uncertain = self.api.claim()
+        self.api.dispatch_error = OSError("response lost")
+        with self.assertRaises(OSError):
+            c.dispatch(self.api, self.api.request_data)
+        self.api.runs[100].update(status="completed", conclusion="failure")
+        uncertain = c.reconcile(self.api, c.ledger(self.api, 1791)[0])
+        self.assertEqual(uncertain["state"], "blocked")
+        self.assertEqual(c.disposition([uncertain], next_main, True), "failed-or-cancelled-source")
+        for conclusion in ("cancelled", "timed_out", "failure"):
+            record = self.api.claim()
+            self.api.writer_visible = True
+            self.api.runs[200].update(status="completed", conclusion=conclusion)
+            record = c.reconcile(self.api, record)
+            self.assertEqual(record["state"], "blocked", conclusion)
+            self.assertEqual(c.disposition([record], next_main, True), "failed-or-cancelled-source",
+                             conclusion)
+
+    def test_rejected_request_artifact_is_blocked_before_any_post(self):
+        # #3327: machine records added to the sealed request made every
+        # dispatch fail; the refusal precedes the POST, so record it as such.
+        self.api.claim()
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as output:
+            output.writestr("request.json", a.canonical(self.api.request_data))
+            output.writestr("machine-specifications/report.json", b"{}")
+        self.api.raw_archive = stream.getvalue()
+        self.api.artifact.update(size_in_bytes=len(self.api.raw_archive),
+                                 digest="sha256:" + a.digest(self.api.raw_archive))
+        with self.assertRaises(a.AutomationError):
+            c.dispatch(self.api, self.api.request_data)
+        record = c.ledger(self.api, 1791)[0]
+        self.assertEqual(record["state"], "blocked")
+        self.assertTrue(record["detail"].startswith(c.NOT_DISPATCHED))
+        self.assertEqual(self.api.posts, [])
 
     def test_real_failure_cannot_claim_supersession_from_arbitrary_job(self):
         self.api.runs[200].update(status="completed", conclusion="failure")
@@ -640,6 +695,18 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("self-hosted", text)
         self.assertLess(text.index("Seal the trusted request"), text.index("Dispatch the existing single writer once"))
         self.assertIn("Native retirement catch-up]", text)
+
+    def test_sealed_request_artifact_holds_only_request_json(self):
+        # The writer and dispatch accept exactly one request.json (#3327).
+        text = (ROOT / a.CONTROLLER_PATH).read_text()
+        seal = text.split("- name: Seal the trusted request before dispatch\n", 1)[1]
+        seal = seal.split("\n      - name:", 1)[0]
+        self.assertIn("name: native-retirement-automation-request-${{ github.run_id }}", seal)
+        self.assertIn("\n          path: ${{ runner.temp }}/native-retirement-request/request.json\n", seal)
+        self.assertNotIn("machine-specifications", seal)
+        self.assertEqual(text.count("native-retirement-automation-request-"), 1)
+        self.assertNotIn("retention-directory: ${{ runner.temp }}/native-retirement-request", text)
+        self.assertLess(text.index("Seal the trusted request"), text.index("mode: retain"))
 
     def test_catch_up_opener_is_trusted_main_only_and_cannot_publish_or_dispatch(self):
         text = (ROOT / c.CATCH_UP_PATH).read_text()
