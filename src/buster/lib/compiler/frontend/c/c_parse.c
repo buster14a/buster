@@ -25437,20 +25437,50 @@ BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* mac
 // An enumerator's scope begins just after its own definition (C17 6.2.1p7),
 // but the file-scope publication runs after every declaration, so a use of an
 // expression-defined enumerator before that definition would still resolve.
-// Scan the file-scope declarations that are not function definitions (a
-// body's own binding already refuses it) for an identifier that resolves to
-// such an enumerator at a later token, and diagnose it as undeclared, as GCC
-// and Clang do. A token is read as a use by what precedes it. These are not
-// uses: a member selection; a declarator after a type word or `*`; a name
-// after the `)` that closes an operator group such as `_Atomic(int)` or
-// `__attribute__((...))`; and a name after a list separator at depth 0 or in
-// a record body, which is a declarator. A declarator inside a parenthesised
-// list before the initializer is a parameter, so it shadows the enumerator
-// for the rest of that list (`void f(int R, int a[R]);`). The open
-// delimiters and the shadows are stacks bounded by the declaration's token
-// count, so nesting has no limit and the scan stays linear.
+// Scan the file-scope declarations, and the headers of function definitions
+// (a body's own binding already refuses it), for an identifier that resolves
+// to such an enumerator at a later token, and diagnose it as undeclared, as
+// GCC and Clang do.
+//
+// Each open delimiter records whether it encloses an expression: a `[`; a
+// parenthesis after an operator word such as `sizeof`, `_Alignas` or
+// `typeof`; an attribute's argument list; and every delimiter opened inside
+// an expression. An initializer at depth 0, an enumerator value after `=`
+// and a bit-field width after `:` in a body are expressions until the next
+// separator. Inside an expression every identifier is a use except a member
+// name after `.` or `->` and a tag after `struct`, `union` or `enum`.
+// Outside one, a token is read as a use by what precedes it; these are not
+// uses: a member selection; a tag; a declarator after a type word or `*`; a
+// name after the `)` that closes an operator group such as `_Atomic(int)` or
+// `__attribute__((...))`; a name after a list separator at depth 0 or in a
+// record body; an attribute name; a `__builtin_offsetof` member designator;
+// and an identifier-list parameter. A declarator inside a parenthesised list
+// is a parameter, so it shadows the enumerator for the rest of that list
+// (`void f(int R, int a[R]);`). The open delimiters and the shadows are stacks
+// bounded by the declaration's token count, so nesting has no limit and the
+// scan stays linear.
+enum
+{
+    C_PARSE_EARLY_USE_EXPRESSION = 1u << 0,
+    C_PARSE_EARLY_USE_CLAUSE = 1u << 1,
+    C_PARSE_EARLY_USE_ATTRIBUTE = 1u << 2,
+    C_PARSE_EARLY_USE_DESIGNATOR = 1u << 3,
+};
+
+BUSTER_GLOBAL_LOCAL bool c_parse_early_use_word_in(String8 word, String8 const* words, u32 count)
+{
+    bool found = false;
+    for (u32 index = 0; !found && index < count; index += 1)
+    {
+        found = string_equal(word, words[index]);
+    }
+    return found;
+}
+
 BUSTER_GLOBAL_LOCAL void c_parse_diagnose_early_expression_enum_uses(CParseResult* result, Arena* arena, CPreprocessResult const* preprocess)
 {
+    String8 const attribute_words[] = {S8("__attribute__"), S8("__attribute"), S8("__declspec"), S8("__asm__"), S8("__asm"), S8("asm")};
+    String8 const tag_words[] = {S8("struct"), S8("union"), S8("enum")};
     bool any_expression_enum = false;
     for (u32 member_index = 0; !any_expression_enum && member_index < result->enum_member_count; member_index += 1)
     {
@@ -25464,16 +25494,20 @@ BUSTER_GLOBAL_LOCAL void c_parse_diagnose_early_expression_enum_uses(CParseResul
     }
     TemporalArena temporary = scratch_begin(&arena, 1);
     u32* open_tokens = any_expression_enum ? arena_allocate(temporary.arena, u32, stack_capacity) : 0;
+    u8* open_flags = any_expression_enum ? arena_allocate(temporary.arena, u8, stack_capacity) : 0;
     u32* shadow_entities = any_expression_enum ? arena_allocate(temporary.arena, u32, stack_capacity) : 0;
     u32* shadow_depths = any_expression_enum ? arena_allocate(temporary.arena, u32, stack_capacity) : 0;
     for (u32 declaration_index = 0; any_expression_enum && declaration_index < result->declaration_count; declaration_index += 1)
     {
         CDeclaration const* declaration = result->declarations + declaration_index;
-        if (declaration->kind == C_DECLARATION_FUNCTION && declaration->is_definition)
-        {
-            continue;
-        }
         u32 end = declaration->token_start + declaration->token_count;
+        // A function definition's header ends where its body begins.
+        bool is_function_definition = declaration->kind == C_DECLARATION_FUNCTION && declaration->is_definition;
+        if (is_function_definition)
+        {
+            end = declaration->body_start > declaration->token_start && declaration->body_start < end ? declaration->body_start : declaration->token_start;
+        }
+        u32 identifier_list_end = declaration->identifier_list_start + declaration->identifier_list_token_count;
         u32 depth = 0;
         u32 shadow_count = 0;
         u32 last_closed_open = UINT32_MAX;
@@ -25481,10 +25515,61 @@ BUSTER_GLOBAL_LOCAL void c_parse_diagnose_early_expression_enum_uses(CParseResul
         for (u32 index = declaration->token_start; index < end && index < preprocess->token_count; index += 1)
         {
             CToken token = preprocess->tokens[index];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
-                c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+            bool has_previous = index > declaration->token_start;
+            CToken previous = has_previous ? preprocess->tokens[index - 1] : (CToken){0};
+            String8 previous_word = has_previous && previous.kind == C_TOKEN_IDENTIFIER ? c_token_spelling(preprocess->spelling_base, previous) : (String8){0};
+            u8 top = depth ? open_flags[depth - 1] : 0;
+            bool in_expression = depth ? (top & (C_PARSE_EARLY_USE_EXPRESSION | C_PARSE_EARLY_USE_CLAUSE)) != 0 : initializer_seen;
+            bool is_parenthesis = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS);
+            if (is_parenthesis || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
             {
+                bool in_attribute = depth && (top & C_PARSE_EARLY_USE_ATTRIBUTE) && !(top & C_PARSE_EARLY_USE_EXPRESSION);
+                // A record or enum body opened inside an expression still
+                // declares members and enumerators: `sizeof(struct{int a,R;})`.
+                bool tag_head = previous_word.length && c_parse_early_use_word_in(previous_word, tag_words, BUSTER_ARRAY_LENGTH(tag_words));
+                tag_head |= previous.kind == C_TOKEN_IDENTIFIER && index >= declaration->token_start + 2 &&
+                            preprocess->tokens[index - 2].kind == C_TOKEN_IDENTIFIER &&
+                            c_parse_early_use_word_in(c_token_spelling(preprocess->spelling_base, preprocess->tokens[index - 2]), tag_words,
+                                                      BUSTER_ARRAY_LENGTH(tag_words));
+                tag_head |= c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_PARENTHESIS) && last_closed_open >= declaration->token_start + 2 &&
+                            last_closed_open < index && preprocess->tokens[last_closed_open - 1].kind == C_TOKEN_IDENTIFIER &&
+                            preprocess->tokens[last_closed_open - 2].kind == C_TOKEN_IDENTIFIER &&
+                            c_parse_early_use_word_in(c_token_spelling(preprocess->spelling_base, preprocess->tokens[last_closed_open - 1]), attribute_words,
+                                                      BUSTER_ARRAY_LENGTH(attribute_words)) &&
+                            c_parse_early_use_word_in(c_token_spelling(preprocess->spelling_base, preprocess->tokens[last_closed_open - 2]), tag_words,
+                                                      BUSTER_ARRAY_LENGTH(tag_words));
+                u8 flags = in_expression && !(tag_head && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE)) ? C_PARSE_EARLY_USE_EXPRESSION : 0;
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+                {
+                    flags = C_PARSE_EARLY_USE_EXPRESSION;
+                }
+                else if (is_parenthesis && string_equal(previous_word, S8("__builtin_offsetof")))
+                {
+                    // A type name and a member designator, even inside an
+                    // expression; a subscript in the designator is one again.
+                    flags = C_PARSE_EARLY_USE_DESIGNATOR;
+                }
+                else if (is_parenthesis && !in_expression)
+                {
+                    if (previous_word.length && c_parse_early_use_word_in(previous_word, attribute_words, BUSTER_ARRAY_LENGTH(attribute_words)))
+                    {
+                        flags = C_PARSE_EARLY_USE_ATTRIBUTE;
+                    }
+                    else if (in_attribute && c_token_is_punctuator(&previous, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        flags = C_PARSE_EARLY_USE_ATTRIBUTE;
+                    }
+                    else if (in_attribute && previous.kind == C_TOKEN_IDENTIFIER)
+                    {
+                        flags = C_PARSE_EARLY_USE_EXPRESSION;
+                    }
+                    else if (previous_word.length && c_parse_operator_group_word(previous_word))
+                    {
+                        flags = C_PARSE_EARLY_USE_EXPRESSION;
+                    }
+                }
                 open_tokens[depth] = index;
+                open_flags[depth] = flags;
                 depth += depth + 1 < stack_capacity;
             }
             else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
@@ -25505,18 +25590,36 @@ BUSTER_GLOBAL_LOCAL void c_parse_diagnose_early_expression_enum_uses(CParseResul
             {
                 initializer_seen = false;
             }
-            if (token.kind != C_TOKEN_IDENTIFIER || index == declaration->token_start)
+            else if (depth && !(top & C_PARSE_EARLY_USE_EXPRESSION) && c_token_is_punctuator(&preprocess->tokens[open_tokens[depth - 1]], C_PUNCTUATOR_LEFT_BRACE) &&
+                     (c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN) || c_token_is_punctuator(&token, C_PUNCTUATOR_COLON)))
+            {
+                // An enumerator value or a bit-field width.
+                open_flags[depth - 1] |= C_PARSE_EARLY_USE_CLAUSE;
+            }
+            else if (depth && (c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA) || c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON)))
+            {
+                open_flags[depth - 1] &= (u8)~C_PARSE_EARLY_USE_CLAUSE;
+            }
+            if (token.kind != C_TOKEN_IDENTIFIER || !has_previous)
             {
                 continue;
             }
-            CToken previous = preprocess->tokens[index - 1];
+            bool member_name = c_token_is_punctuator(&previous, C_PUNCTUATOR_DOT) || c_token_is_punctuator(&previous, C_PUNCTUATOR_ARROW);
+            bool tag_name = previous_word.length && c_parse_early_use_word_in(previous_word, tag_words, BUSTER_ARRAY_LENGTH(tag_words));
+            bool named_elsewhere = member_name || tag_name || (depth && (top & C_PARSE_EARLY_USE_DESIGNATOR)) ||
+                                   (depth && !in_expression && (top & C_PARSE_EARLY_USE_ATTRIBUTE)) ||
+                                   (is_function_definition && index >= declaration->identifier_list_start && index < identifier_list_end);
             CToken const* innermost = depth ? &preprocess->tokens[open_tokens[depth - 1]] : 0;
-            bool in_record_body = innermost && c_token_is_punctuator(innermost, C_PUNCTUATOR_LEFT_BRACE) && !initializer_seen;
-            bool in_parameter_list = innermost && c_token_is_punctuator(innermost, C_PUNCTUATOR_LEFT_PARENTHESIS) && !initializer_seen;
+            bool in_record_body = innermost && c_token_is_punctuator(innermost, C_PUNCTUATOR_LEFT_BRACE) && !in_expression;
+            bool in_parameter_list = innermost && c_token_is_punctuator(innermost, C_PUNCTUATOR_LEFT_PARENTHESIS) && !in_expression;
             bool use = false;
-            if (previous.kind == C_TOKEN_IDENTIFIER)
+            if (in_expression)
             {
-                use = c_parse_operator_group_word(c_token_spelling(preprocess->spelling_base, previous));
+                use = true;
+            }
+            else if (previous.kind == C_TOKEN_IDENTIFIER)
+            {
+                use = c_parse_operator_group_word(previous_word);
             }
             else if (c_token_is_punctuator(&previous, C_PUNCTUATOR_COMMA))
             {
@@ -25530,13 +25633,12 @@ BUSTER_GLOBAL_LOCAL void c_parse_diagnose_early_expression_enum_uses(CParseResul
             }
             else
             {
-                use = previous.kind == C_TOKEN_PUNCTUATOR && !c_token_is_punctuator(&previous, C_PUNCTUATOR_DOT) &&
-                      !c_token_is_punctuator(&previous, C_PUNCTUATOR_ARROW) && !c_token_is_punctuator(&previous, C_PUNCTUATOR_STAR) &&
+                use = previous.kind == C_TOKEN_PUNCTUATOR && !c_token_is_punctuator(&previous, C_PUNCTUATOR_STAR) &&
                       !c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_BRACKET) && !c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_BRACE) &&
                       !c_token_is_punctuator(&previous, C_PUNCTUATOR_SEMICOLON);
             }
-            bool declares_parameter = !use && in_parameter_list && !c_token_is_punctuator(&previous, C_PUNCTUATOR_DOT) &&
-                                      !c_token_is_punctuator(&previous, C_PUNCTUATOR_ARROW);
+            use = use && !named_elsewhere;
+            bool declares_parameter = !use && !named_elsewhere && in_parameter_list;
             if (!use && !declares_parameter)
             {
                 continue;

@@ -9143,6 +9143,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_expression_enum_scope(UnitT
         S8("struct S{int __attribute__((aligned(4))) R;};unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
         S8("void f(int R,int a[R]);unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
         S8("typedef __typeof__(sizeof(struct{int a,R;})) T;unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
+        // A tag, a pointer member after a bit-field, an offsetof member
+        // designator, an attribute name, and the parameters of a function
+        // definition's header, prototype or identifier list are not uses.
+        S8("struct R{int x;};void f(struct R*p);unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
+        S8("struct S{int a:2,*R;};unsigned long x=sizeof(enum{R=2});int y=R;int main(void){return y-2;}"),
+        S8("struct S{int a,R;};unsigned long o=__builtin_offsetof(struct S,R);unsigned long x=sizeof(enum{R=2});int main(void){return (int)o-4+R-2;}"),
+        S8("int v __attribute__((aligned(4)));unsigned long x=sizeof(enum{aligned=2});int main(void){return aligned-2;}"),
+        S8("int f(int R,int a[R]){return a[0]-R;}unsigned long x=sizeof(enum{R=2});int main(void){return R-2;}"),
+        S8("int g(R)int R;{return R;}unsigned long x=sizeof(enum{R=2});int main(void){return g(2)-R;}"),
     };
     String8 rejected[] = {
         S8("enum{R=9};unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
@@ -9161,12 +9170,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_expression_enum_scope(UnitT
         S8("unsigned long x=R+sizeof(enum{R=2});int main(void){return 0;}"),
         S8("int a[R];int b[sizeof(enum{R=2})];int main(void){return 0;}"),
         S8("_Static_assert(R==2,\"early\");unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
+        // An operand of `*`, a bound or a parameter tag name in a prototype,
+        // a function definition's header, an alignment, a bit-field width
+        // and an enumerator value are uses too.
+        S8("int y=2*R;unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
+        S8("int a[2*R];int b[sizeof(enum{R=2})];int main(void){return 0;}"),
+        S8("struct R{int x;};void f(struct R*p,int a[sizeof(R)]);unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
+        S8("int f(int a[sizeof(R)]){return 0;}unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
+        S8("_Alignas(2*R) char c;unsigned long x=sizeof(enum{R=4});int main(void){return 0;}"),
+        S8("struct S{int b:1*R;};unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
+        S8("enum{A=2*R};unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
     };
     CDiagnosticKind rejected_kinds[] = {
         C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION,
         C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION,
         C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
-        C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+        C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+        C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+        C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
     };
     Target targets[] = {target_native, target_native, target_native};
     targets[0].cpu_arch = CPU_ARCH_X86_64;
