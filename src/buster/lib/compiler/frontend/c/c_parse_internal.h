@@ -72,7 +72,8 @@ struct CTestAstTypeProbe
     u32 node_kind;
     bool nonplace_projection;
     // The answer replays a string-literal token: a checked cast's operand,
-    // or with replay_answer the queried literal, whose row is the answer.
+    // or with replay_answer the queried literal (C_AST_TYPE_STRING), whose
+    // row is the answer.
     bool replay;
     bool replay_answer;
 };

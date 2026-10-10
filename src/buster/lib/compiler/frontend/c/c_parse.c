@@ -8249,51 +8249,77 @@ BUSTER_C_INTERNAL bool c_parse_expression_literal_query(CTypeParseMachine* machi
     return valid;
 }
 
-// The one append a tree answer replays (CAstTypeAnswer.replay_*, from
-// c_ast_types.c): a string-literal token, which the machine types in a SIZEOF
-// task. The task strips enclosing parentheses, consults the per-body memo for
-// the token under the query's scope and flags and, when the memo does not hold
-// it, hands it to c_parse_expression_leaf_without_cast with the frame's arena;
-// the frame's completion rewinds the machine's scratch arena. It publishes
-// nothing. The literal's type is returned: for a checked cast's operand the
-// answer already holds the cast's, and for the queried literal alone
-// (replay_answer) this is the answer. A leaf that fails appends nothing the
-// caller keeps: the counts go back as the machine's rollback puts them, and
-// the query is left to the machine, which fails the same way.
-BUSTER_C_INTERNAL CTypeId c_parse_expression_tree_replay(CTypeParseMachine* machine, Arena* arena, CPreprocessResult const* preprocess, CParseResult* result,
-                                                          CScopeId scope, u32 flags, CAstTypeAnswer tree)
+// The one append a tree answer replays (C_AST_TYPE_FLAG_REPLAY in
+// c_ast_types.c): a checked cast's string-literal operand. The machine types
+// it in a SIZEOF task of its own, which strips enclosing parentheses, consults
+// the per-body memo for the token under the query's scope and flags, hands it to
+// c_parse_expression_leaf_without_cast when the memo does not hold it, and
+// publishes nothing.
+BUSTER_C_INTERNAL void c_parse_expression_tree_replay(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
+                                                       u32 flags, CAstTypeAnswer tree)
 {
-    CTypeId type = C_TYPE_ID_INVALID;
     if (tree.replay_end > tree.replay_start)
     {
         u32 slot = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL && machine->expression_queries &&
             machine->expression_query_result == result && machine->expression_query_tokens == preprocess->tokens &&
             tree.replay_start >= machine->expression_query_start && tree.replay_end <= machine->expression_query_end
                 ? tree.replay_start - machine->expression_query_start : UINT32_MAX;
-        // A stored answer needs the query table, which a slot already
-        // implies; the explicit test lets the analyzer see that too.
-        if (c_parse_expression_query_lookup(machine, result, slot, tree.replay_end, scope, flags) && machine->expression_queries)
+        if (!c_parse_expression_query_lookup(machine, result, slot, tree.replay_end, scope, flags))
         {
-            type = machine->expression_queries[slot].type;
-        }
-        else
-        {
+            // The leaf takes scratch only to decode a wide literal, into the
+            // query's arena; the decode goes to the machine's scratch here,
+            // rewound as the operand's SIZEOF frame rewinds it.
             Arena* scratch = machine->scratch_arena;
             u64 scratch_mark = scratch->position;
-            u64 arena_mark = arena->position;
-            u32 type_count = result->type_count;
-            u32 array_bound_count = result->array_bound_count;
-            type = c_parse_expression_leaf_without_cast(arena, *preprocess, result, scope, tree.replay_start, tree.replay_end);
-            if (type.value >= result->type_count)
-            {
-                result->type_count = type_count;
-                result->array_bound_count = array_bound_count;
-                arena_set_position(arena, arena_mark);
-            }
+            c_parse_expression_leaf_without_cast(scratch, *preprocess, result, scope, tree.replay_start, tree.replay_end);
             if (scratch->position != scratch_mark)
             {
                 arena_set_position(scratch, scratch_mark);
             }
+        }
+    }
+}
+
+// The answer to a query of one string-literal token alone, perhaps
+// parenthesized (C_AST_TYPE_STRING from c_ast_types_answer): the machine's
+// root SIZEOF task strips the parentheses, consults the per-body memo for the
+// token under the query's scope and flags and, when the memo does not hold
+// it, hands it to c_parse_expression_leaf_without_cast with the query's arena,
+// which appends the literal's array row and bound; the frame's completion
+// rewinds the machine's scratch arena. That row is the answer. A leaf that
+// fails is undone, as the machine's rollback undoes it, and the invalid type
+// returned leaves the query to the machine, which fails the same way.
+BUSTER_C_INTERNAL CTypeId c_parse_expression_tree_string(CTypeParseMachine* machine, Arena* arena, CPreprocessResult const* preprocess, CParseResult* result,
+                                                          CScopeId scope, u32 flags, CAstTypeAnswer tree)
+{
+    CTypeId type = C_TYPE_ID_INVALID;
+    u32 slot = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL && machine->expression_queries &&
+        machine->expression_query_result == result && machine->expression_query_tokens == preprocess->tokens &&
+        tree.replay_start >= machine->expression_query_start && tree.replay_end <= machine->expression_query_end
+            ? tree.replay_start - machine->expression_query_start : UINT32_MAX;
+    // A stored answer needs the query table, which a slot already implies;
+    // the explicit test lets the analyzer see that too.
+    if (c_parse_expression_query_lookup(machine, result, slot, tree.replay_end, scope, flags) && machine->expression_queries)
+    {
+        type = machine->expression_queries[slot].type;
+    }
+    else
+    {
+        Arena* scratch = machine->scratch_arena;
+        u64 scratch_mark = scratch->position;
+        u64 arena_mark = arena->position;
+        u32 type_count = result->type_count;
+        u32 array_bound_count = result->array_bound_count;
+        type = c_parse_expression_leaf_without_cast(arena, *preprocess, result, scope, tree.replay_start, tree.replay_end);
+        if (type.value >= result->type_count)
+        {
+            result->type_count = type_count;
+            result->array_bound_count = array_bound_count;
+            arena_set_position(arena, arena_mark);
+        }
+        if (scratch->position != scratch_mark)
+        {
+            arena_set_position(scratch, scratch_mark);
         }
     }
     return type;
@@ -8308,50 +8334,66 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_tree_replay(CTypeParseMachine* mach
 // held in *pending instead and false is returned, so the caller's literal path
 // or machine run answers the same range and c_parse_expression_type_query
 // compares the two at its end. A replayed answer's appends are made here too
-// (c_parse_expression_tree_replay); a literal answered by its own replay is
-// typed first, and a failed replay leaves the query to the machine.
+// (c_parse_expression_tree_replay), and a string literal's answer is its own
+// replay (c_parse_expression_tree_string), which may fail and leave the query
+// to the machine.
 BUSTER_C_INTERNAL bool c_parse_expression_tree_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult const* preprocess, CParseResult* result,
                                                        CScopeId scope, u32 start, u32 end, u32 slot, u32 flags, CTypeId* type_out,
                                                        CAstTypePending* pending)
 {
     CAstTypeAnswer tree = c_ast_types_answer(machine, preprocess, result, scope, start, end);
     bool answered = tree.status == C_AST_TYPE_ANSWER;
-    // Where the machine's checkpoint leaves the mutation limit: the table size
-    // before anything the replay appends.
-    u32 type_limit = result->type_count;
-#if BUSTER_INCLUDE_TESTS
-    CAstTypeVerifyMark mark = c_ast_types_verify_begin(result);
-#else
+#if !BUSTER_INCLUDE_TESTS
     BUSTER_UNUSED(pending);
 #endif
-    if (answered && tree.replay_answer)
+    if (tree.status == C_AST_TYPE_STRING)
     {
-        tree.type = c_parse_expression_tree_replay(machine, arena, preprocess, result, scope, flags, tree);
+        // The replay types the answer, so it runs first; the mutation limit
+        // and the verify mark are taken before it, where the machine's
+        // checkpoint takes them.
+        u32 type_limit = result->type_count;
+#if BUSTER_INCLUDE_TESTS
+        CAstTypeVerifyMark mark = c_ast_types_verify_begin(result);
+#endif
+        tree.type = c_parse_expression_tree_string(machine, arena, preprocess, result, scope, flags, tree);
+        tree.status = C_AST_TYPE_ANSWER;
+        tree.replay_start = 0;
+        tree.replay_end = 0;
         answered = tree.type.value < result->type_count;
+#if BUSTER_INCLUDE_TESTS
+        if (answered && c_ast_types_verifying())
+        {
+            *pending = (CAstTypePending){.answer = tree, .mark = mark};
+            c_ast_types_verify_hold_replay(result, pending);
+            answered = false;
+        }
+#endif
+        if (answered)
+        {
+            c_ast_types_publish(machine, result, tree, end);
+            machine->mutation_type_limit = type_limit;
+            *type_out = tree.type;
+            if (slot != UINT32_MAX && !machine->expression_constraint.length)
+                c_parse_expression_query_publish(machine, slot, end, scope, tree.type, flags);
+        }
     }
 #if BUSTER_INCLUDE_TESTS
-    if (answered && c_ast_types_verifying())
+    else if (answered && c_ast_types_verifying())
     {
         // A replay runs here and its rows are taken back, so the machine run
         // that follows must append the same rows again.
-        *pending = (CAstTypePending){.answer = tree, .mark = mark};
-        if (!tree.replay_answer && tree.replay_end > tree.replay_start)
-        {
-            c_parse_expression_tree_replay(machine, arena, preprocess, result, scope, flags, tree);
-        }
+        *pending = (CAstTypePending){.answer = tree, .mark = c_ast_types_verify_begin(result)};
+        c_parse_expression_tree_replay(machine, preprocess, result, scope, flags, tree);
         c_ast_types_verify_hold_replay(result, pending);
         answered = false;
     }
 #endif
-    if (answered)
+    else if (answered)
     {
         c_ast_types_publish(machine, result, tree, end);
-        machine->mutation_type_limit = type_limit;
-        // Most answers replay nothing; only a cast's literal operand does here.
-        if (!tree.replay_answer && tree.replay_end > tree.replay_start)
-        {
-            c_parse_expression_tree_replay(machine, arena, preprocess, result, scope, flags, tree);
-        }
+        // After the publication, which leaves the mutation limit at the table
+        // size before the replay, where the machine's checkpoint leaves it.
+        c_parse_expression_tree_replay(machine, preprocess, result, scope, flags, tree);
         *type_out = tree.type;
         if (slot != UINT32_MAX && !machine->expression_constraint.length)
             c_parse_expression_query_publish(machine, slot, end, scope, tree.type,

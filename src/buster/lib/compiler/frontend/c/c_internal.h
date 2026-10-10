@@ -1601,6 +1601,9 @@ typedef enum CAstTypeStatus
     C_AST_TYPE_MISS,
     C_AST_TYPE_DECLINE,
     C_AST_TYPE_ANSWER,
+    // An answer that is the row a replay of the queried string literal
+    // appends; `type` is invalid until c_parse_expression_tree_query replays it.
+    C_AST_TYPE_STRING,
 } CAstTypeStatus;
 
 typedef struct CAstTypeAnswer CAstTypeAnswer;
@@ -1612,13 +1615,11 @@ struct CAstTypeAnswer
     u32 node_kind;
     // [replay_start, replay_end), when not empty, is a string-literal token
     // whose typing the answer must replay exactly as the machine's task would
-    // (c_parse_expression_tree_query): a checked cast's operand, or with
-    // replay_answer the queried literal itself, whose replayed row is the
-    // answer (`type` is invalid until the replay).
+    // (c_parse_expression_tree_query): a checked cast's operand, or under
+    // C_AST_TYPE_STRING the queried literal itself.
     u32 replay_start;
     u32 replay_end;
     bool nonplace_projection;
-    bool replay_answer;
 };
 
 BUSTER_C_EXTERN void c_ast_types_bodies_prepare(CTypeParseMachine* machine, CParseResult const* result);

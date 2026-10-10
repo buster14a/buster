@@ -30,7 +30,7 @@
 // `BUSTER_ARRAY_LENGTH` writes it, is the literal. The answer then carries
 // that token (CAstTypeAnswer.replay_*), and c_parse_expression_tree_query makes
 // exactly the machine's task: the memo probe and, on a miss, the string leaf.
-// For the token alone the replay's row is the answer (replay_answer).
+// For the token alone the replay's row is the answer (C_AST_TYPE_STRING).
 //
 // Ownership and lifetime. A caller that built the tree (the driver's
 // -fc-ast-pilot) passes it in CParserResult.ast; c_analyze_semantics_core puts
@@ -220,7 +220,7 @@
 // A string literal of one token. It is not ACCEPTED, since its machine answer
 // appends its array row, so every parent declines it; a query of the node
 // alone is answered by replaying the machine's leaf call, whose row is the
-// answer (CAstTypeAnswer.replay_answer).
+// answer (C_AST_TYPE_STRING).
 #define C_AST_TYPE_FLAG_STRING (1u << 6)
 
 // INIT_DECLARATOR's presence bit for an initializer, its last child (c_ast.h).
@@ -1816,9 +1816,8 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
             u32 flags = body->flags[relative];
             u32 node = body->begin + relative;
             bool checked = machine->validate_expression_constraints;
-            bool string = (flags & C_AST_TYPE_FLAG_STRING) != 0;
-            bool replay = string || (checked && !(flags & C_AST_TYPE_FLAG_SAFE) && (flags & C_AST_TYPE_FLAG_REPLAY));
-            bool vouched = (string || ((flags & C_AST_TYPE_FLAG_ACCEPTED) && (!checked || (flags & C_AST_TYPE_FLAG_SAFE) || replay))) &&
+            bool replay = checked && !(flags & C_AST_TYPE_FLAG_SAFE) && (flags & C_AST_TYPE_FLAG_REPLAY);
+            bool vouched = (flags & C_AST_TYPE_FLAG_ACCEPTED) && (!checked || (flags & C_AST_TYPE_FLAG_SAFE) || replay) &&
                            !c_parse_pending_enum_possible(result) && c_parse_type_identity_sites_absent(result, start, end);
             if (vouched && (flags & C_AST_TYPE_FLAG_LOOKUP_BELOW))
             {
@@ -1831,13 +1830,20 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
                 answer.status = C_AST_TYPE_ANSWER;
                 answer.type = body->types[relative];
                 answer.nonplace_projection = (flags & C_AST_TYPE_FLAG_NONPLACE) != 0;
-                // The literal operand's token (C_AST_TYPE_FLAG_REPLAY), or the
-                // literal's own (C_AST_TYPE_FLAG_STRING), whose replay types
-                // the answer.
-                u32 literal = string ? node : node - 1;
-                answer.replay_start = replay ? body->ast->tokens[literal] : 0;
-                answer.replay_end = replay ? body->ast->tokens[literal] + 1 : 0;
-                answer.replay_answer = string;
+                // The literal operand's token (C_AST_TYPE_FLAG_REPLAY).
+                answer.replay_start = replay ? body->ast->tokens[node - 1] : 0;
+                answer.replay_end = replay ? body->ast->tokens[node - 1] + 1 : 0;
+                WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_ANSWERS, 1);
+            }
+            else if ((flags & C_AST_TYPE_FLAG_STRING) && !c_parse_pending_enum_possible(result) &&
+                     c_parse_type_identity_sites_absent(result, start, end))
+            {
+                // Off the answer path above, which nearly every query takes:
+                // the literal's own token, whose replay types the answer.
+                body->statistics->answers += 1;
+                answer.status = C_AST_TYPE_STRING;
+                answer.replay_start = body->ast->tokens[node];
+                answer.replay_end = body->ast->tokens[node] + 1;
                 WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_ANSWERS, 1);
             }
             else
@@ -2172,13 +2178,13 @@ CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult prepro
             CAstTypeAnswer answer = c_ast_types_answer(&machine, &preprocess, result, scope, start, end);
             probe.nodes_typed = machine.ast_types->local_statistics.nodes_typed;
             probe.nodes_accepted = machine.ast_types->local_statistics.nodes_accepted;
-            probe.status = (u32)answer.status;
+            probe.status = answer.status == C_AST_TYPE_STRING ? (u32)C_AST_TYPE_ANSWER : (u32)answer.status;
             probe.node_kind = answer.node_kind;
             probe.type = answer.type;
             probe.kind = answer.type.value < result->type_count ? result->types[answer.type.value].kind : C_TYPE_INVALID;
             probe.nonplace_projection = answer.nonplace_projection;
             probe.replay = answer.replay_end > answer.replay_start;
-            probe.replay_answer = answer.replay_answer;
+            probe.replay_answer = answer.status == C_AST_TYPE_STRING;
         }
         c_ast_types_body_end(&machine);
         result->expression_scalar_types = previous_scalars;
