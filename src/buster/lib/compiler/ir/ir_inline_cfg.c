@@ -618,7 +618,7 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, Ir
         if (old_debug_scope_count) memcpy(scopes, caller->debug_scopes, sizeof(*scopes) * old_debug_scope_count);
         // Give the inlined body a separate lexical parent; the IR debug model
         // has no inline call-stack record to represent the callee function.
-        scopes[old_debug_scope_count] = (IrDebugScope){.extent = callee->source, .parent = 0};
+        scopes[old_debug_scope_count] = (IrDebugScope){.extent = callee->source, .parent = old_debug_scope_count};
         for (u32 i = 0; i < callee->debug_scope_count; i += 1)
         {
             IrDebugScope scope = callee->debug_scopes[i];
