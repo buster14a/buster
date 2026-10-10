@@ -1364,37 +1364,36 @@ typedef enum CConstantEvaluationMode
 
 // Interned primitive and pointer rows (GitHub #3102). c_parse_primitive_type,
 // c_parse_pointer_chain and the type machine's `&` each build a fresh row for
-// every type name or address they read, and an expression's type name is
-// read once per operator-scan level and again by its leaf, so nearly all the
-// rows the static-initializer and per-body validation queries mint are copies.
-// While `enabled` -- only in c_parse_validate_lowering_constraints, from the
+// every type name or address they read, and an expression's type name is read
+// once per operator-scan level and again by its leaf, so nearly all the rows
+// the static-initializer and per-body validation queries mint are copies. While
+// `enabled` -- only in c_parse_validate_lowering_constraints, from the
 // static-initializer walk through the loop over function bodies --
-// c_parse_intern_type returns the earlier row instead. The header
-// exists only when the caller asked for it (CParserResult.type_interning,
-// which the driver sets with the tree under -fc-ast-pilot), so the default
-// path appends every row as before.
+// c_parse_intern_type returns the earlier row instead. The header exists only
+// when the caller asked for it (CParserResult.type_interning, which the driver
+// sets with the tree under -fc-ast-pilot), so the default path appends every
+// row as before.
 //
 // The window is what keeps the copies unobservable but for the table's size.
-// Such a row is immutable, carries no tag, link, bound or alignment record,
-// and lowers to a scalar or pointer IR type that lowering interns itself; and
-// the window opens after every declaration has its rows, and nothing in it
-// rewrites a declaration's, so a row it interns follows every row that can
-// refer to it. Lowering maps rows in passes, in
-// table order, and a struct resolves only once the rows of its members are
-// mapped: interning a member's row would move it ahead of its struct and
-// resolve the struct a pass earlier, which reorders the IR types and so the
-// `-g` type entries. Within the window an interned row only ever replaces a
-// later copy of itself, which resolves in the same pass. Every aggregate a
-// body or file-scope initializer type name defines, qualified ones such as
-// `(const struct { char *p; })` included, gets its row and its members' rows
-// from the declaration pass before the window opens; c_type_parse_core_step
-// steps over the leading qualifiers and reads that row back, so no member
-// segment is read while the window is open. `suspended` is a defensive guard for the member-row order
-// should a later change define an aggregate inside the window: it counts the
-// member segments the machine is reading, and nothing is interned while any
-// is. Restrict-qualified rows are never interned, because
-// c_type_parse_root_finish diagnoses an invalid `restrict` only on rows a
-// query appends.
+// Such a row is immutable, carries no tag, link, bound or alignment record, and
+// lowers to a scalar or pointer IR type that lowering interns itself; and the
+// window opens after every declaration has its rows, and nothing in it rewrites
+// a declaration's, so a row it interns follows every row that can refer to it.
+// Lowering maps rows in passes, in table order, and a struct resolves only once
+// the rows of its members are mapped: interning a member's row would move it
+// ahead of its struct and resolve the struct a pass earlier, which reorders the
+// IR types and so the `-g` type entries. Within the window an interned row only
+// ever replaces a later copy of itself, which resolves in the same pass. Every
+// aggregate a body or file-scope initializer type name defines, qualified ones
+// such as `(const struct { char *p; })` included, gets its row and its members'
+// rows from the declaration pass before the window opens;
+// c_type_parse_core_step steps over the leading qualifiers and reads that row
+// back, so no member segment is read while the window is open. `suspended` is a
+// defensive guard for the member-row order should a later change define an
+// aggregate inside the window: it counts the member segments the machine is
+// reading, and nothing is interned while any is. Restrict-qualified rows are
+// never interned, because c_type_parse_root_finish diagnoses an invalid
+// `restrict` only on rows a query appends.
 //
 // The header hangs off CAggregateLookup.type_interning, outside the
 // checkpointed CParseResult that every query copies. `rows` is an append-only

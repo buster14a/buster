@@ -7,6 +7,7 @@
 // has returned and released its exact-PID reservation. No group is signalled.
 // Map: *_children reads a complete bounded kernel child list; *_owned uses
 // WNOWAIT while single-thread/default-SIGCHLD guarantees forbid a competing reap;
+// *_describe names each adopted descendant on stderr before cleanup (#3372);
 // *_self_test proves adoption of descendants in independent private groups.
 // Any uncertain cleanup retains the subreaper and blocks further admission.
 
@@ -182,6 +183,41 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_owned(u64 pid, u64 deadl
     return result;
 }
 
+// Reads at most capacity bytes of a /proc record, mapping NULs to spaces.
+BUSTER_GLOBAL_LOCAL String8 compiler_experiment_supervisor_proc_text(String8 path, char8* buffer, u64 capacity)
+{
+    String8 result = {buffer, 0};
+    int descriptor = open((char const*)path.pointer, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    bool reading = descriptor >= 0;
+    while (reading && result.length < capacity)
+    {
+        ssize_t got = read(descriptor, buffer + result.length, capacity - result.length);
+        if (got > 0) result.length += (u64)got;
+        else reading = got < 0 && errno == EINTR;
+    }
+    if (descriptor >= 0) close(descriptor);
+    for (u64 i = 0; i < result.length; i += 1)
+    {
+        if (buffer[i] == 0 || buffer[i] == '\n') buffer[i] = ' ';
+    }
+    return result;
+}
+
+// Diagnostic only (#3372): names each adopted descendant before it is reaped
+// or signalled so failed host evidence identifies it. It never changes the
+// cleanup verdict, and a clean run with no adopted descendant prints nothing.
+BUSTER_GLOBAL_LOCAL void compiler_experiment_supervisor_describe(Arena* arena, u64 pid, bool exited)
+{
+    char8 stat_bytes[160];
+    char8 command_bytes[256];
+    String8 stat = compiler_experiment_supervisor_proc_text(
+        string_format_z(arena, S8("/proc/{u64}/stat"), pid), stat_bytes, sizeof(stat_bytes));
+    String8 command = compiler_experiment_supervisor_proc_text(
+        string_format_z(arena, S8("/proc/{u64}/cmdline"), pid), command_bytes, sizeof(command_bytes));
+    string_print_error(S8("COMPILER_EXPERIMENT_ADOPTED pid={u64} exited={u64} stat=[{S8}] cmdline=[{S8}]\n"),
+        pid, exited ? 1ull : 0ull, stat, command);
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_no_children(u64 deadline)
 {
     siginfo_t information = {0};
@@ -252,7 +288,6 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_begin(Arena* arena, Comp
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_end_known(Arena* arena, CompilerExperimentSupervisor* state, bool manager_cleanup_proven)
 {
     bool result = false;
-    BUSTER_UNUSED(arena);
     BUSTER_UNUSED(manager_cleanup_proven);
 #if BUSTER_LINUX && !BUSTER_ANDROID
     if (state && state->active && !state->cleanup_failed && state->owner_pid == (u64)getpid())
@@ -273,6 +308,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_end_known(Arena* arena, 
                 bool exited = false;
                 result = masked && compiler_experiment_supervisor_single_thread(state->owner_pid) &&
                     compiler_experiment_supervisor_owned(pid, deadline, &exited);
+                if (result) compiler_experiment_supervisor_describe(arena, pid, exited);
                 if (result && !exited)
                 {
                     result = kill((pid_t)pid, SIGKILL) == 0;

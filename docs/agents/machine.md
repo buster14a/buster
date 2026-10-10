@@ -218,6 +218,17 @@ fixture as well as compiling both architectures.
   do not introduce a third permanent graph IR. The unused declarative selector
   was removed in [#269](https://github.com/buster14a/buster/pull/269), resolving
   [#42](https://github.com/buster14a/buster/issues/42).
+- Each target selector decodes canonical operands once per function, in its
+  first target-order row walk. That walk accumulates value/use,
+  local-promotion and direct-call facts and the aliasing/fusion candidate
+  rows, and later prepasses consume those. The classification pass
+  re-reads full rows in layout order. A compact result-row projection that
+  removed that re-read was measured with no 9700X gain and was not merged
+  ([audit](../performance-audits/2026-10-10T170504Z.md),
+  [#132](https://github.com/buster14a/buster/issues/132)). Do not
+  reintroduce it without selection-scoped hardware counters showing it pays
+  for its walk cost; `machine_selection_test_classification_layout_order`
+  pins the numbering any such projection must preserve.
 - `MachineSelectResult.signature_rejected` is set only inside target function
   signature gates; other unclassified selection failures remain distinct.
   Native dispatch maps signature, opcode, verification, placement, encoding,
@@ -366,7 +377,8 @@ fixture as well as compiling both architectures.
   `.text` under FAST and QUALITY. Switch
   and cold edges, vector/mask parameters and the slot-zero scratch keep the
   memory form. Except at a loop header, the same contract also carries each live, escaping,
-  immutable, non-pinned general value the designated predecessor holds dirty,
+  non-pinned general value the designated predecessor holds dirty (mutable
+  values included, as plain joins already carried them),
   in the register it already occupies; an edge that delivers it there keeps
   it across the parameter publication, and any other edge stores and reloads
   it as before. The carried value's dirtiness is the OR over the edges. A
