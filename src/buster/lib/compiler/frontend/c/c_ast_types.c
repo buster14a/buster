@@ -125,7 +125,10 @@
 //                parameter or local of function or pointer-to-function type
 //                and not a builtin, vendor builtin or sizeof-like spelling: the
 //                function's return type. Arguments are not typed by the
-//                machine and are not inspected here.
+//                machine and are not inspected here. An unbound void
+//                `__builtin_` callee with no arguments (`__builtin_debugtrap()`)
+//                is the published void row, which the leaf reads by spelling
+//                (c_ast_types_builtin_call).
 //   binary       `* / % + - << >> < > <= >= == != & ^ | && ||`: the operation
 //                switch of c_type_parse_sizeof_step (c_ast_types_binary), with
 //                c_parse_expression_arithmetic_type, the bit-field widths it
@@ -151,6 +154,13 @@
 //                operand must have a place's shape, the machine's `&` rule.
 //   SIZEOF_*,    size_t for exactly the spellings the machine's leaf reads; it
 //   ALIGNOF_*    types nothing inside.
+// Failing nodes. A few nodes the machine types to nothing, without a row or a
+// constraint, are never accepted but carry C_AST_TYPE_FLAG_FAILS: `__func__`,
+// `__FUNCTION__` and `__PRETTY_FUNCTION__`, which name no entity, and an
+// unbound `__builtin_expect(...)` call, which reaches no typed leaf. A checked
+// cast tests its conversion, and a conditional its condition, only when the
+// operand has a type, so either is checked-safe over such an operand. The
+// query repeats the name's lookup and requires it to find nothing.
 // An operand the machine scans but does not type (a cast's operand without
 // constraint checks, a `sizeof` expression) must hold no type name, because
 // the operator scan reads parenthesized type names at cast positions through
@@ -179,6 +189,7 @@
 //   c_ast_types_looked_up_entity                 an initializer's unbound names
 //   c_ast_types_span, c_ast_types_expand         span rules
 //   c_ast_types_type_body, c_ast_types_type_node the eager pass and its rules
+//   c_ast_types_builtin_call                     void builtins, failing calls
 //   c_ast_types_binary, c_ast_types_unary,       stage-2 operator rules
 //   c_ast_types_conditional
 //   c_ast_types_interned, c_ast_types_type_name,  stage-3 rules over interned
@@ -217,6 +228,13 @@
 // call (c_parse_expression_tree_query). The node is never SAFE through it: a
 // parent's machine run would type the literal too.
 #define C_AST_TYPE_FLAG_REPLAY (1u << 5)
+// Never with ACCEPTED: the machine types the node to nothing, appending no row
+// and raising no constraint. `__func__` and its GNU spellings name no entity,
+// and an unbound `__builtin_expect` call reaches no typed leaf, so each
+// resolves to nothing once the query's lookup also finds nothing (the LOOKUP
+// mark). A checked cast and a conditional's condition test their operand only
+// when it has a type, so such an operand is safe for them.
+#define C_AST_TYPE_FLAG_FAILS (1u << 6)
 // A string literal of one token. It is not ACCEPTED, since its machine answer
 // appends its array row, so every parent declines it; a query of the node
 // alone is answered by replaying the machine's leaf call, whose row is the
@@ -740,6 +758,15 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_identifier(CAstTypeBody* body, CPreprocessR
     {
         c_ast_types_accept(body, relative, entity->type, flags);
     }
+    else if (identifier && !entity)
+    {
+        // The machine's leaf answers a lone name it cannot resolve with
+        // nothing, and its typedef check needs an entity.
+        String8 name = c_token_spelling(preprocess->spelling_base, preprocess->tokens[token]);
+        bool function_name = name.length >= 8 && (string_equal(name, S8("__func__")) || string_equal(name, S8("__FUNCTION__")) ||
+                                                  string_equal(name, S8("__PRETTY_FUNCTION__")));
+        body->flags[relative] = (u8)(function_name ? C_AST_TYPE_FLAG_FAILS | C_AST_TYPE_FLAG_LOOKUP | C_AST_TYPE_FLAG_LOOKUP_BELOW : 0);
+    }
 }
 
 // A number or character literal, typed by the leaf the machine's literal path
@@ -866,6 +893,36 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_callee_reserved(CPreprocessResult const* pr
     return reserved;
 }
 
+// An unbound `__builtin_` callee directly before its `(`. The machine's leaf
+// (c_parse_expression_leaf_without_cast, reached through
+// c_type_parse_expression_leaf_step once the vendor generic builtins are
+// ruled out) reads a builtin by spelling:
+// - one that returns void, called with no arguments, is the published void
+//   row, read before any entity, so it needs no lookup;
+// - `__builtin_expect` has no rule there, so the leaf looks the callee up in
+//   the query's scope and, finding nothing, ends in
+//   c_parse_direct_expression_base, which answers an unresolved callee with
+//   nothing. The node fails (C_AST_TYPE_FLAG_FAILS), and the query repeats
+//   the lookup (the call's LOOKUP mark).
+BUSTER_GLOBAL_LOCAL void c_ast_types_builtin_call(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node, u32 relative, u32 callee_token)
+{
+    String8 name = c_token_spelling(preprocess->spelling_base, preprocess->tokens[callee_token]);
+    if (string_starts_with_sequence(name, S8("__builtin_")) && c_vendor_generic_builtin(name).operation == C_VENDOR_GENERIC_NONE)
+    {
+        CSymbolBuiltin builtin = c_symbol_builtin_from_spelling(name);
+        bool empty = body->ast->tokens[node] == callee_token + 1 && c_ast_types_match(body, callee_token + 1) == callee_token + 2;
+        CTypeId type = empty && c_semantic_builtin_returns_void(builtin) ? c_ast_types_scalar(body, C_TYPE_VOID) : C_TYPE_ID_INVALID;
+        if (type.value < body->result->type_count)
+        {
+            c_ast_types_accept(body, relative, type, C_AST_TYPE_FLAG_SAFE);
+        }
+        else if (builtin == C_SYMBOL_BUILTIN_EXPECT)
+        {
+            body->flags[relative] = (u8)(C_AST_TYPE_FLAG_FAILS | C_AST_TYPE_FLAG_LOOKUP | C_AST_TYPE_FLAG_LOOKUP_BELOW);
+        }
+    }
+}
+
 // `name(arguments)` where `name` is a bound value of function or
 // pointer-to-function type. The machine finds the callee by spelling in the
 // query's scope first; c_ast_types_answer checks at query time that this finds
@@ -895,6 +952,10 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_call(CAstTypeBody* body, CPreprocessResult 
                 c_ast_types_accept(body, relative, function->return_type,
                                    C_AST_TYPE_FLAG_SAFE | C_AST_TYPE_FLAG_LOOKUP | C_AST_TYPE_FLAG_LOOKUP_BELOW);
             }
+        }
+        else if (!entity)
+        {
+            c_ast_types_builtin_call(body, preprocess, node, relative, callee_token);
         }
     }
 }
@@ -1206,8 +1267,10 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_conditional(CAstTypeBody* body, u32 node, u
     {
         CTypeKind condition_kind = (condition_flags & C_AST_TYPE_FLAG_ACCEPTED) ? result->types[body->types[condition - body->begin].value].kind
                                                                               : C_TYPE_INVALID;
-        bool condition_safe = (condition_flags & C_AST_TYPE_FLAG_ACCEPTED) && (condition_flags & C_AST_TYPE_FLAG_SAFE) &&
-                              !c_ast_types_aggregate_kind(condition_kind) && condition_kind != C_TYPE_VOID;
+        // The scalar-condition rule tests only a condition that has a type.
+        bool condition_safe = ((condition_flags & C_AST_TYPE_FLAG_ACCEPTED) && (condition_flags & C_AST_TYPE_FLAG_SAFE) &&
+                               !c_ast_types_aggregate_kind(condition_kind) && condition_kind != C_TYPE_VOID) ||
+                              (condition_flags & C_AST_TYPE_FLAG_FAILS) != 0;
         u32 flags = c_ast_types_inherit(then_flags, else_flags) | (condition_flags & C_AST_TYPE_FLAG_LOOKUP_BELOW);
         c_ast_types_accept(body, relative, type, condition_safe ? flags : flags & ~(u32)C_AST_TYPE_FLAG_SAFE);
     }
@@ -1372,7 +1435,9 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_cast(CAstTypeBody* body, CPreprocessResult 
         bool aggregates = c_ast_types_aggregate_kind(to) || c_ast_types_aggregate_kind(from);
         bool clean = from != C_TYPE_INVALID && !aggregates && !c_parse_scalar_conversion_message(body->target, to, from, false).length &&
                      !c_parse_scalar_conversion_message(body->target, to, from, true).length;
-        flags |= clean && operand && (operand_flags & C_AST_TYPE_FLAG_SAFE) ? C_AST_TYPE_FLAG_SAFE : 0;
+        // An operand that types to nothing skips the conversion rule.
+        bool fails = (operand_flags & C_AST_TYPE_FLAG_FAILS) != 0;
+        flags |= (clean && operand && (operand_flags & C_AST_TYPE_FLAG_SAFE)) || fails ? C_AST_TYPE_FLAG_SAFE : 0;
         flags |= clean && literal ? C_AST_TYPE_FLAG_REPLAY : 0;
         c_ast_types_accept(body, relative, type, flags);
     }
@@ -1774,7 +1839,10 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_agree(CAstTypeBody const* body, CPr
             u32 expected = body->entities && !call ? body->entities[cursor - body->begin]
                            : bound                ? (u32)(bound - result->entities)
                                                   : C_AST_TYPE_NONE;
-            agree = (call && looked.value >= result->entity_count) || (expected < result->entity_count && looked.value == expected);
+            // A call, and a node that types to nothing, also agree when the
+            // lookup finds nothing.
+            agree = ((call || (flags & C_AST_TYPE_FLAG_FAILS)) && looked.value >= result->entity_count) ||
+                    (expected < result->entity_count && looked.value == expected);
         }
         // Into the children when one carries a mark, else past the subtree.
         u32 next = (flags & C_AST_TYPE_FLAG_LOOKUP_BELOW) ? cursor : c_ast_subtree_begin(ast, cursor);

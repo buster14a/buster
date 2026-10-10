@@ -588,6 +588,19 @@ does not grant `__has_builtin` or permit a reachable unsupported operation.
 The all-context semantic pass checks arguments and source integer constants,
 including unused inline bodies, globals and unevaluated operands.
 
+Clang 23.1.2's F16C wrappers use bare `__fp16` as a bit-cast destination and
+as the element type of local four- and eight-lane GNU vector typedefs. The
+frontend keeps its two-byte storage identity distinct from `_Float16` and
+admits those vector sizes and alignments, type identity and `typeof` queries,
+and eager equal-lane `__builtin_convertvector` validation in unused wrappers.
+Ordinary storage-half objects, members, parameters and function results receive
+a named semantic refusal; reached scalar casts, bit-casts and vector
+conversions receive a named canonical-lowering refusal. The lowering budget
+skips known `sizeof`, `_Alignof` and `typeof` operands; its `_Generic`
+evaluation-context handling is not complete. No scalar arithmetic, promotion,
+or ABI support is implied. `c_test_vendor_storage_half_admission` covers this bounded
+slice in both frontend forms.
+
 Generic operators have their own explicit type-machine stages: bit-cast and
 vector conversion parse their type-name slots, elementwise operators preserve
 narrow integer operands, reductions return a lane, and shuffles retain logical
@@ -638,6 +651,53 @@ SSA parameters at their joins for ambient named locals and function
 parameters. Generic lane conversions reserve the existing software floating
 conversion paths. Every sum/product is checked against the canonical row
 limits; unused wrapper bodies receive no expansion reservation.
+
+Scalar `__builtin_ia32_lzcnt_u16/u32/u64` use canonical CLZ with defined
+zero-input handling. The operand converts once to its prototype's unsigned
+width; a zero bit makes the CLZ operand nonzero, then restores the zero result
+to 16/32/64. The 16-bit form widens to the native 32-bit count width and removes
+its sixteen padding bits. These public Clang intrinsics intentionally permit
+baseline x86 targets, so the lowering needs no LZCNT target feature or library
+call. Results retain unsigned short/int/long long rank on LP64 and LLP64.
+`c_test_vendor_lzcnt` checks all 16-bit inputs, 32/64-bit powers and sampled
+patterns, truncation, arithmetic conversions, argument effects, both frontend
+forms and FAST/QUALITY; invalid calls retain all-context diagnostics and
+non-x86 capability queries remain false. The external Clang suite's LZCNT
+family lane separately checks all five public stock-header spellings against
+the pinned Clang 23.1.2 contract; neither lane completes the Zen 5 census.
+
+The pinned Clang 23 `__builtin_ia32_pmulhuw128` header contract admits exactly two matching
+16-byte vectors of signed or unsigned 16-bit lanes on x86-64. The result type
+follows the first operand, preserving both wrapper contracts while the frozen
+LLVM 21 signature remains signed. This is signature admission only: `__has_builtin`
+stays false and reached calls retain the existing unsupported-lowering refusal.
+`compiler_driver_test_pmulhuw_header_contracts` checks both result types,
+valid and invalid shapes, unevaluated/unused calls, target refusal, and all
+three frontend forms.
+
+Clang 23.1.2 changed the parameter types of 65 other pinned x86 builtins and
+added new ones that its `<immintrin.h>` spells. `c_vendor_builtin.c.in` keeps
+a hand-written LLVM 23.1.2 supplement beside the generated LLVM 21.1.8 tables,
+whose metadata and provenance stay untouched. For a changed name (PAVGB/W,
+PMULHUW256/512, PSADBW, the immediate byte shifts and the VNNI dot products)
+`c_parse_validate_vendor_builtin_calls` tries the pinned contract first and
+then the LLVM 23 one. A call must match one whole contract; mixing the two is
+rejected, and the contract that matched more arguments reports the diagnostic.
+The call keeps its pinned result type, which those headers always cast. When
+lowering a supported changed builtin, an operand of the other contract is a
+same-size vector of another lane shape. It is reinterpreted bitwise, as a C
+vector cast would be, through `c_ir_vendor_argument_value`. The
+`__builtin_ia32_bmac*16x16x16_*` names exist only in the supplement and take
+their type from it. The LLVM 23 generic
+`__builtin_elementwise_{fma,sqrt,fshl,fshr,clzg,bitreverse}` contracts accept
+scalars or vectors with the floating/integer category and same-type operands
+of Clang's SemaChecking. Apart from the already lowered byte shifts, all of
+this is signature admission only: `__has_builtin` stays false and reached
+calls receive the unsupported-builtin refusal.
+`compiler_driver_test_llvm23_header_contracts` covers both contracts, mixed
+and invalid calls in unused and unevaluated contexts, reached refusals and
+off-target unavailability in all three frontend forms.
+`c_test_vendor_immediate_byte_shifts` runs LLVM 23 `char`-lane byte shifts.
 
 The five preexisting SSE2 scalar-count shift spellings accept ordinary `int`
 arguments. Both operands are evaluated once, including count copy conversion;

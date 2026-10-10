@@ -68,7 +68,10 @@
 // refuses the link; link_initializer_plan_empty is that refusal. A dynamic
 // ELF executable first moves its `.preinit_array` entries into writable data
 // for DT_PREINIT_ARRAY (link_elf_preinit_array_split), because only the loader
-// can run them before its shared libraries' constructors.
+// can run them before its shared libraries' constructors. A GNU IFUNC is
+// rebound before writer dispatch into a thunk and a slot, filled by a resolver
+// runner that is an executable's first initializer or by a shared object's
+// R_X86_64_IRELATIVE (link_elf_indirect_functions_rebind).
 //
 // A second rule crosses the dynamic ELF writers: imported data reaches an
 // executable through a copy relocation (every imported object in a
@@ -4895,6 +4898,7 @@ enum
     ELF_RELOCATION_TYPE_X86_64_DTPMOD64 = 16,
     ELF_RELOCATION_TYPE_X86_64_DTPOFF64 = 17,
     ELF_RELOCATION_TYPE_X86_64_TPOFF64 = 18,
+    ELF_RELOCATION_TYPE_X86_64_IRELATIVE = 37,
     ELF_RELOCATION_TYPE_AARCH64_COPY = 1024,
     ELF_RELOCATION_TYPE_AARCH64_JUMP_SLOT = 1026,
 };
@@ -7898,7 +7902,10 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_relocate(LinkElfPicImage* image, u8* bytes
                 }
                 else if (!zero)
                 {
-                    link_elf_write_relocation(bytes, relocation_cursor, place, 0, ELF_RELOCATION_TYPE_X86_64_RELATIVE, value);
+                    // An indirect function's resolver (a shared object's
+                    // IFUNC slot): the loader calls it and stores the result.
+                    link_elf_write_relocation(bytes, relocation_cursor, place, 0,
+                                              symbol->indirect ? ELF_RELOCATION_TYPE_X86_64_IRELATIVE : ELF_RELOCATION_TYPE_X86_64_RELATIVE, value);
                 }
             }
         }
@@ -15279,6 +15286,253 @@ bool link_validate_linker_arguments(Target target, NativeExecutableLinkOptions o
     return valid;
 }
 
+// GNU IFUNC (issue 1243). An indirect definition's value is a resolver that
+// returns the function every reference wants, and `ld` and `lld` never let a
+// reference reach the resolver: they give the name a PLT entry whose GOT slot
+// an R_*_IRELATIVE fills at startup, and that entry is the name's canonical
+// address. This hands back the same object with every indirect definition
+// rebound to that shape in ordinary code and data, so each writer needs nothing
+// new:
+//   - the name now defines a thunk appended to .text that jumps through an
+//     8-byte slot appended to .data, and every relocation that named the
+//     IFUNC -- call, address taken, GOT load -- therefore reaches the thunk,
+//     one canonical address;
+//   - the resolver keeps its address under a new local name;
+//   - in an executable, a runner appended to .text calls each resolver once
+//     and stores what it returns in its slot, and a `.preinit_array` entry
+//     prepended to the constructor array runs it first: a dynamic image
+//     publishes it through DT_PREINIT_ARRAY, so ld.so runs it after relocation
+//     and before every constructor, as it applies IRELATIVE, and a static
+//     image calls it first from its stub;
+//   - a shared object's slot instead takes an absolute reference to its
+//     resolver, which stays indirect, and the position-independent writer
+//     publishes that as R_X86_64_IRELATIVE. The loader then fills the slot
+//     while it relocates the library, before any initializer anywhere runs --
+//     an executable's DT_PREINIT_ARRAY included, which runs before its
+//     dependencies' DT_INIT_ARRAY. These references are the object's last, so
+//     they are the last dynamic relocations and every other one is applied
+//     before a resolver runs.
+// The AArch64 runner passes hwcap 0 (and no __ifunc_arg_t), the convention of
+// a loader that predates hwcap arguments, so a resolver that dispatches on
+// hwcap selects its baseline implementation.
+enum
+{
+    LINK_IFUNC_X86_THUNK_SIZE = 8,
+    LINK_IFUNC_X86_RUNNER_STEP = 12,
+    LINK_IFUNC_X86_RUNNER_FRAME = 9,
+    LINK_IFUNC_AARCH64_THUNK_SIZE = 16,
+    LINK_IFUNC_AARCH64_RUNNER_STEP = 20,
+    LINK_IFUNC_AARCH64_RUNNER_FRAME = 16,
+};
+
+BUSTER_GLOBAL_LOCAL bool link_elf_indirect_functions_rebind(Arena* arena, ObjectFile* object, bool shared, ObjectFile* rebound, String8* message)
+{
+    *rebound = *object;
+    bool result = true;
+    u32 count = 0;
+    u32 first = UINT32_MAX;
+    for (u32 index = 0; index < object->symbol_count; index += 1)
+    {
+        if (object->symbols[index].indirect && object->symbols[index].section != OBJECT_SECTION_UNDEFINED)
+        {
+            first = count ? first : index;
+            count += 1;
+        }
+    }
+    bool elf = (object->target.os == OPERATING_SYSTEM_LINUX || object->target.os == OPERATING_SYSTEM_ANDROID) &&
+               (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64);
+    if (count && (!elf || object->symbol_count > UINT32_MAX - count - 2 || object->relocation_count > UINT32_MAX - 5 * count - 1 || count > UINT32_MAX / 32))
+    {
+        result = false;
+        *message = string_format(arena, S8("GNU IFUNC symbol {S8} is unsupported for this target"), object->symbols[first].name);
+    }
+    else if (count)
+    {
+        bool x86 = object->target.cpu_arch == CPU_ARCH_X86_64;
+        u64 thunk_size = x86 ? LINK_IFUNC_X86_THUNK_SIZE : LINK_IFUNC_AARCH64_THUNK_SIZE;
+        u64 runner_size = shared ? 0
+                          : x86  ? LINK_IFUNC_X86_RUNNER_FRAME + (u64)count * LINK_IFUNC_X86_RUNNER_STEP
+                                 : LINK_IFUNC_AARCH64_RUNNER_FRAME + (u64)count * LINK_IFUNC_AARCH64_RUNNER_STEP;
+        ObjectSection* sections = arena_allocate(arena, ObjectSection, object->section_count);
+        memcpy(sections, object->sections, (u64)object->section_count * sizeof(*sections));
+        // .text: thunks, then the runner, each at a 16-byte boundary.
+        ObjectSection* text = sections + OBJECT_SECTION_TEXT;
+        u64 thunk_base = align_forward(BUSTER_MAX(text->data.length, text->virtual_size), 16);
+        u64 runner_base = thunk_base + (u64)count * thunk_size;
+        u8* code = arena_allocate_zeroed(arena, u8, runner_base + runner_size);
+        if (text->data.length) memcpy(code, text->data.pointer, text->data.length);
+        text->data = (ByteSlice){.pointer = code, .length = runner_base + runner_size};
+        if (text->virtual_size) text->virtual_size = text->data.length;
+        text->alignment = BUSTER_MAX(text->alignment, 16u);
+        // .data: one zeroed slot per indirect function.
+        ObjectSection* data_section = sections + OBJECT_SECTION_DATA;
+        u64 slot_base = align_forward(BUSTER_MAX(data_section->data.length, data_section->virtual_size), 8);
+        u8* data = arena_allocate_zeroed(arena, u8, slot_base + (u64)count * 8);
+        if (data_section->data.length) memcpy(data, data_section->data.pointer, data_section->data.length);
+        data_section->data = (ByteSlice){.pointer = data, .length = slot_base + (u64)count * 8};
+        if (data_section->virtual_size) data_section->virtual_size = data_section->data.length;
+        data_section->alignment = BUSTER_MAX(data_section->alignment, 8u);
+        // An executable's constructor array gains the runner's preinit entry
+        // in front.
+        u64 runner_entry = shared ? 0 : OBJECT_INITIALIZER_ENTRY_SIZE;
+        if (!shared)
+        {
+            ObjectSection* array = sections + OBJECT_SECTION_INIT_ARRAY;
+            u64 entries = array->data.length / OBJECT_INITIALIZER_ENTRY_SIZE;
+            u8* array_bytes = arena_allocate_zeroed(arena, u8, array->data.length + OBJECT_INITIALIZER_ENTRY_SIZE);
+            if (array->data.length) memcpy(array_bytes + OBJECT_INITIALIZER_ENTRY_SIZE, array->data.pointer, array->data.length);
+            array->data = (ByteSlice){.pointer = array_bytes, .length = array->data.length + OBJECT_INITIALIZER_ENTRY_SIZE};
+            if (array->virtual_size) array->virtual_size = array->data.length;
+            array->alignment = BUSTER_MAX(array->alignment, (u32)OBJECT_INITIALIZER_ENTRY_SIZE);
+            u32* priorities = arena_allocate(arena, u32, entries + 1);
+            priorities[0] = IR_INITIALIZER_PRIORITY_PREINIT;
+            for (u64 entry = 0; entry < entries; entry += 1)
+            {
+                priorities[entry + 1] = object->initializer_priorities[0] ? object->initializer_priorities[0][entry] : IR_INITIALIZER_PRIORITY_NONE;
+            }
+            rebound->initializer_priorities[0] = priorities;
+        }
+        rebound->sections = sections;
+        // Symbols: the inputs, one resolver per indirect function, the runner
+        // and the slot base.
+        u32 runner_symbol = object->symbol_count + count;
+        u32 slot_symbol = runner_symbol + 1;
+        ObjectSymbol* symbols = arena_allocate(arena, ObjectSymbol, (u64)slot_symbol + 1);
+        if (object->symbol_count) memcpy(symbols, object->symbols, (u64)object->symbol_count * sizeof(*symbols));
+        symbols[runner_symbol] = (ObjectSymbol){.name = S8(".Lbuster.ifunc.runner"), .value = runner_base, .size = runner_size,
+                                                .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION,
+                                                .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO};
+        symbols[slot_symbol] = (ObjectSymbol){.name = S8(".Lbuster.ifunc.slots"), .value = slot_base, .size = (u64)count * 8,
+                                              .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA,
+                                              .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO};
+        for (u32 index = 0; index < object->symbol_count; index += 1)
+        {
+            if (symbols[index].section == OBJECT_SECTION_INIT_ARRAY) symbols[index].value += runner_entry;
+        }
+        ObjectRelocation* relocations = arena_allocate(arena, ObjectRelocation, (u64)object->relocation_count + 5 * (u64)count + 1);
+        u32 relocation_count = 0;
+        for (u32 index = 0; index < object->relocation_count; index += 1)
+        {
+            ObjectRelocation relocation = object->relocations[index];
+            if (relocation.section == OBJECT_SECTION_INIT_ARRAY) relocation.offset += runner_entry;
+            relocations[relocation_count++] = relocation;
+        }
+        if (!shared)
+        {
+            relocations[relocation_count++] = (ObjectRelocation){.offset = 0, .section = OBJECT_SECTION_INIT_ARRAY, .symbol = runner_symbol,
+                                                                 .kind = OBJECT_RELOCATION_ABSOLUTE64};
+        }
+        u64 cursor = runner_base;
+        if (!shared && x86)
+        {
+            // sub rsp, 8: the runner is entered with rsp 8 below a 16-byte
+            // boundary, and each resolver call needs the boundary.
+            u8 prologue[] = {0x48, 0x83, 0xec, 0x08};
+            memcpy(code + cursor, prologue, sizeof(prologue));
+            cursor += sizeof(prologue);
+        }
+        else if (!shared)
+        {
+            link_write_u32(code, cursor, 0xa9bf7bfd); // stp x29, x30, [sp, #-16]!
+            link_write_u32(code, cursor + 4, 0x910003fd); // mov x29, sp
+            cursor += 8;
+        }
+        u32 slot = 0;
+        for (u32 index = 0; index < object->symbol_count; index += 1)
+        {
+            ObjectSymbol* symbol = symbols + index;
+            if (!symbol->indirect || symbol->section == OBJECT_SECTION_UNDEFINED)
+            {
+                continue;
+            }
+            u32 resolver = object->symbol_count + slot;
+            symbols[resolver] = *symbol;
+            symbols[resolver].name = string_format(arena, S8("{S8}.ifunc.resolver"), symbol->name);
+            symbols[resolver].global = false;
+            symbols[resolver].weak = false;
+            symbols[resolver].hidden = false;
+            // A shared object's resolver stays indirect: its slot's absolute
+            // reference becomes R_X86_64_IRELATIVE.
+            symbols[resolver].indirect = shared;
+            u64 thunk = thunk_base + (u64)slot * thunk_size;
+            s64 slot_offset = (s64)slot * 8;
+            symbol->section = OBJECT_SECTION_TEXT;
+            symbol->value = thunk;
+            symbol->size = thunk_size;
+            symbol->kind = OBJECT_SYMBOL_FUNCTION;
+            symbol->indirect = false;
+            symbol->comdat = 0;
+            if (shared)
+            {
+                relocations[relocation_count++] = (ObjectRelocation){.offset = slot_base + (u64)slot_offset, .section = OBJECT_SECTION_DATA,
+                                                                     .symbol = resolver, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+            }
+            if (x86)
+            {
+                // jmp [rip + slot]; int3 padding.
+                u8 jump[] = {0xff, 0x25, 0, 0, 0, 0, 0xcc, 0xcc};
+                memcpy(code + thunk, jump, sizeof(jump));
+                relocations[relocation_count++] = (ObjectRelocation){.addend = slot_offset - 4, .offset = thunk + 2, .section = OBJECT_SECTION_TEXT,
+                                                                     .symbol = slot_symbol, .kind = OBJECT_RELOCATION_X86_64_PC32};
+            }
+            else
+            {
+                link_write_u32(code, thunk, 0x90000010); // adrp x16, slot
+                link_write_u32(code, thunk + 4, 0xf9400210); // ldr x16, [x16, :lo12:slot]
+                link_write_u32(code, thunk + 8, 0xd61f0200); // br x16
+                link_write_u32(code, thunk + 12, 0xd4200000); // brk #0
+                relocations[relocation_count++] = (ObjectRelocation){.addend = slot_offset, .offset = thunk, .section = OBJECT_SECTION_TEXT,
+                                                                     .symbol = slot_symbol, .kind = OBJECT_RELOCATION_AARCH64_ELF_PAGE21};
+                relocations[relocation_count++] = (ObjectRelocation){.addend = slot_offset, .offset = thunk + 4, .section = OBJECT_SECTION_TEXT,
+                                                                     .symbol = slot_symbol, .kind = OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12};
+            }
+            if (!shared && x86)
+            {
+                // call resolver; mov [rip + slot], rax
+                u8 step[] = {0xe8, 0, 0, 0, 0, 0x48, 0x89, 0x05, 0, 0, 0, 0};
+                memcpy(code + cursor, step, sizeof(step));
+                relocations[relocation_count++] = (ObjectRelocation){.addend = -4, .offset = cursor + 1, .section = OBJECT_SECTION_TEXT,
+                                                                     .symbol = resolver, .kind = OBJECT_RELOCATION_X86_64_PLT32};
+                relocations[relocation_count++] = (ObjectRelocation){.addend = slot_offset - 4, .offset = cursor + 8, .section = OBJECT_SECTION_TEXT,
+                                                                     .symbol = slot_symbol, .kind = OBJECT_RELOCATION_X86_64_PC32};
+                cursor += LINK_IFUNC_X86_RUNNER_STEP;
+            }
+            else if (!shared)
+            {
+                link_write_u32(code, cursor, 0xd2800000); // mov x0, #0 (hwcap)
+                link_write_u32(code, cursor + 4, 0xd2800001); // mov x1, #0
+                link_write_u32(code, cursor + 8, 0x94000000); // bl resolver
+                link_write_u32(code, cursor + 12, 0x90000010); // adrp x16, slot
+                link_write_u32(code, cursor + 16, 0xf9000200); // str x0, [x16, :lo12:slot]
+                relocations[relocation_count++] = (ObjectRelocation){.offset = cursor + 8, .section = OBJECT_SECTION_TEXT,
+                                                                     .symbol = resolver, .kind = OBJECT_RELOCATION_AARCH64_CALL26};
+                relocations[relocation_count++] = (ObjectRelocation){.addend = slot_offset, .offset = cursor + 12, .section = OBJECT_SECTION_TEXT,
+                                                                     .symbol = slot_symbol, .kind = OBJECT_RELOCATION_AARCH64_ELF_PAGE21};
+                relocations[relocation_count++] = (ObjectRelocation){.addend = slot_offset, .offset = cursor + 16, .section = OBJECT_SECTION_TEXT,
+                                                                     .symbol = slot_symbol, .kind = OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12};
+                cursor += LINK_IFUNC_AARCH64_RUNNER_STEP;
+            }
+            slot += 1;
+        }
+        if (!shared && x86)
+        {
+            u8 epilogue[] = {0x48, 0x83, 0xc4, 0x08, 0xc3}; // add rsp, 8; ret
+            memcpy(code + cursor, epilogue, sizeof(epilogue));
+        }
+        else if (!shared)
+        {
+            link_write_u32(code, cursor, 0xa8c17bfd); // ldp x29, x30, [sp], #16
+            link_write_u32(code, cursor + 4, 0xd65f03c0); // ret
+        }
+        rebound->symbols = symbols;
+        rebound->symbol_count = slot_symbol + 1;
+        rebound->relocations = relocations;
+        rebound->relocation_count = relocation_count;
+    }
+
+    return result;
+}
+
 // Whether the merged constructor array holds a `.preinit_array` entry
 // (IR_INITIALIZER_PRIORITY_PREINIT).  The ELF gABI runs DT_PREINIT_ARRAY only
 // in an executable and `ld` refuses it in a shared object, where this linker
@@ -15300,6 +15554,7 @@ BUSTER_GLOBAL_LOCAL bool link_object_has_preinit_entry(ObjectFile* object)
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scratch(Arena* arena, Arena* temporary, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
+    ObjectFile rebound = {0};
     LinkElfIndex elf_index = {0};
     LinkElfIndex* exports = &elf_index;
     if (!arena || !object || object->error != OBJECT_ERROR_NONE || object->section_count != OBJECT_SECTION_COUNT || !object->sections ||
@@ -15325,6 +15580,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
         result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
         result.symbol = S8(".preinit_array entry is not valid in a shared object (DT_PREINIT_ARRAY runs only in an executable)");
     }
+    else if (!link_elf_indirect_functions_rebind(arena, object, options.image_kind == NATIVE_IMAGE_SHARED, &rebound, &result.symbol))
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+    }
     else if ((object->target.os == OPERATING_SYSTEM_LINUX || object->target.os == OPERATING_SYSTEM_ANDROID) &&
              !link_elf_index_initialize(temporary, options, exports))
     {
@@ -15333,6 +15592,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
     else if (object->target.os == OPERATING_SYSTEM_LINUX &&
              (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
+        object = &rebound;
         LinkObjectResult normalized = {.object = *object};
         if (object->target.cpu_arch == CPU_ARCH_X86_64)
         {
@@ -15394,7 +15654,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
     }
     else if (object->target.os == OPERATING_SYSTEM_ANDROID && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
-        result = link_native_executable_android_elf64(arena, object, options, exports);
+        result = link_native_executable_android_elf64(arena, &rebound, options, exports);
     }
     else
     {
