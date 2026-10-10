@@ -11806,11 +11806,16 @@ BUSTER_C_SHARED bool c_ir_number_imaginary_spelling(Arena* arena, String8 spelli
         *real_out = (String8){.pointer = spelling.pointer, .length = spelling.length - 1};
         return true;
     }
-    char8* copy = arena_allocate(arena, char8, spelling.length - 1);
-    memcpy(copy, spelling.pointer, imaginary_index);
-    memcpy(copy + imaginary_index, spelling.pointer + imaginary_index + 1, spelling.length - imaginary_index - 1);
-    *real_out = (String8){.pointer = copy, .length = spelling.length - 1};
-    return true;
+    // Guarded while a function body is validated (#1256): a miss answers
+    // "not imaginary", and the body reports its exhaustion.
+    char8* copy = C_PARSE_BODY_SCRATCH_ARRAY(arena, char8, spelling.length - 1);
+    if (copy)
+    {
+        memcpy(copy, spelling.pointer, imaginary_index);
+        memcpy(copy + imaginary_index, spelling.pointer + imaginary_index + 1, spelling.length - imaginary_index - 1);
+        *real_out = (String8){.pointer = copy, .length = spelling.length - 1};
+    }
+    return copy != 0;
 }
 
 // The suffix of a floating constant: how many trailing bytes it occupies and
@@ -15489,7 +15494,9 @@ BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 del
                   spelling.length >= opening + 2 && spelling.pointer[spelling.length - 1] == delimiter;
     if (result)
     {
-        u8* bytes = arena_allocate(arena, u8, spelling.length);
+        // Guarded while a function body is validated (#1256): a miss fails the decode.
+        u8* bytes = C_PARSE_BODY_SCRATCH_ARRAY(arena, u8, spelling.length);
+        result = bytes != 0;
         u8 const* source = (u8 const*)spelling.pointer;
         u64 count = 0;
         u64 index = opening + 1;
@@ -15955,7 +15962,9 @@ BUSTER_C_INTERNAL bool c_ir_decode_wide_quoted(Arena* arena, String8 spelling, u
     if (result)
     {
         u64 capacity = spelling.length * 4;
-        u8* bytes = arena_allocate(arena, u8, capacity);
+        // Guarded while a function body is validated (#1256): a miss fails the decode.
+        u8* bytes = C_PARSE_BODY_SCRATCH_ARRAY(arena, u8, capacity);
+        result = bytes != 0;
         u64 byte_count = 0;
         u64 element_count = 0;
         u64 index = opening + 1;
@@ -16240,8 +16249,10 @@ BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
         u64* fragment_elements = &decoded.element_count;
         if (fragment_count > 1)
         {
-            fragments = arena_allocate(arena, ByteSlice, fragment_count);
-            fragment_elements = arena_allocate(arena, u64, fragment_count);
+            // Guarded while a function body is validated (#1256): a miss fails the decode.
+            fragments = C_PARSE_BODY_SCRATCH_ARRAY(arena, ByteSlice, fragment_count);
+            fragment_elements = C_PARSE_BODY_SCRATCH_ARRAY(arena, u64, fragment_count);
+            result = fragments && fragment_elements;
         }
         u64 byte_length = 0;
         u64 element_count = 0;
@@ -16292,9 +16303,10 @@ BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
             decoded.element_count = element_count;
             *decoded_out = decoded;
         }
-        else if (result)
+        u8* bytes = result && fragment_count != 1 ? C_PARSE_BODY_SCRATCH_ARRAY(arena, u8, byte_length ? byte_length : 1) : 0;
+        result = result && (fragment_count == 1 || bytes);
+        if (result && fragment_count != 1)
         {
-            u8* bytes = arena_allocate(arena, u8, byte_length ? byte_length : 1);
             u64 byte_offset = 0;
             for (u32 fragment_index = 0; fragment_index < fragment_count; fragment_index += 1)
             {

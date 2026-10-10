@@ -592,8 +592,14 @@ BUSTER_C_SHARED CSpellingSpace c_space_local(Arena* arena, u64 capacity)
     };
     C_CENSUS_PHASE_RECORD(TEMP_SPACES, 1);
     C_CENSUS_PHASE_RECORD(TEMP_SPACE_BYTES, space.capacity);
-    space.base = arena_allocate(arena, char8, space.capacity);
-    memcpy(c_space_allocate(&space, C_SPELLING_PRELUDE_LENGTH), C_SPELLING_PRELUDE_TEXT, C_SPELLING_PRELUDE_LENGTH);
+    // Guarded while a function body is validated (#1256): a miss returns a
+    // space with no base and no capacity, which the caller must not write.
+    space.base = C_PARSE_BODY_SCRATCH_ARRAY(arena, char8, space.capacity);
+    space.capacity = space.base ? space.capacity : 0;
+    if (space.base)
+    {
+        memcpy(c_space_allocate(&space, C_SPELLING_PRELUDE_LENGTH), C_SPELLING_PRELUDE_TEXT, C_SPELLING_PRELUDE_LENGTH);
+    }
     return space;
 }
 
@@ -8415,11 +8421,12 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
             }
             argument_count += 1;
         }
-        if (!close)
+        // Guarded while a function body is validated (#1256).
+        CToken* arguments = close ? C_PARSE_BODY_SCRATCH_ARRAY(arena, CToken, argument_count) : 0;
+        if (!arguments)
         {
             return false;
         }
-        CToken* arguments = arena_allocate(arena, CToken, argument_count);
         u32 argument_index = 0;
         bool literal_header = open->next && open->next->token.no_expand;
         for (scan = open->next; scan != close; scan = scan->next)
@@ -8501,7 +8508,10 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     IR_SEMANTIC_RECORD(PREPROCESSOR_EVALUATIONS, 1);
     bool valid = true;
     char8 const* base = space->base;
-    CPpToken* transformed = arena_allocate(arena, CPpToken, token_count);
+    // Guarded while a function body is validated (#1256): a miss fails the
+    // evaluation, and the body reports its exhaustion.
+    CPpToken* transformed = C_PARSE_BODY_SCRATCH_ARRAY(arena, CPpToken, token_count);
+    valid = transformed != 0;
     u32 transformed_count = 0;
     for (u32 token_index = 0; valid && token_index < token_count; token_index += 1)
     {
@@ -8541,12 +8551,32 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     CPreprocessTokenNode* first_expanded = 0;
     CPreprocessTokenNode* last_expanded = 0;
     u64 expanded_count = 0;
-    if (valid)
+    if (valid && preprocessor_arithmetic)
     {
         CMacroExpansionStorage expansion_storage = {0};
         valid = c_preprocess_expand(arena, &expansion_storage, space, symbols, first_macro, 0, 0, stamps, transformed, transformed_count, &first_expanded,
                                     &last_expanded, &expanded_count, expansion_limit, result, 0);
         c_macro_expansion_storage_destroy(&expansion_storage, result->detail);
+    }
+    else if (valid)
+    {
+        // A parse-side query has no macro table and no pragma context, so
+        // expansion would copy every token through unchanged; the list is
+        // linked over one guarded array instead (#1256). The one token that
+        // expansion would diagnose there, a stray `__VA_OPT__`, fails the
+        // evaluation as that diagnostic does for every parse-side caller.
+        CPreprocessTokenNode* nodes = C_PARSE_BODY_SCRATCH_ARRAY(arena, CPreprocessTokenNode, transformed_count);
+        valid = nodes != 0;
+        for (u32 token_index = 0; valid && token_index < transformed_count; token_index += 1)
+        {
+            valid = !c_macro_is_va_opt(transformed[token_index].token);
+            nodes[token_index] = (CPreprocessTokenNode){
+                .token = transformed[token_index],
+                .next = token_index + 1 < transformed_count ? nodes + token_index + 1 : 0,
+            };
+        }
+        first_expanded = valid && transformed_count ? nodes : 0;
+        expanded_count = transformed_count;
     }
     if (valid)
     {
@@ -8554,9 +8584,10 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     }
     if (valid)
     {
-        u64* values = arena_allocate(arena, u64, expanded_count + 1);
-        u8* value_flags = arena_allocate(arena, u8, expanded_count + 1);
-        CConditionalOperator* operations = arena_allocate(arena, CConditionalOperator, expanded_count + 1);
+        u64* values = C_PARSE_BODY_SCRATCH_ARRAY(arena, u64, expanded_count + 1);
+        u8* value_flags = C_PARSE_BODY_SCRATCH_ARRAY(arena, u8, expanded_count + 1);
+        CConditionalOperator* operations = C_PARSE_BODY_SCRATCH_ARRAY(arena, CConditionalOperator, expanded_count + 1);
+        valid = values && value_flags && operations;
         u32 value_count = 0;
         u32 operation_count = 0;
         bool expect_operand = true;
@@ -8732,14 +8763,17 @@ BUSTER_C_SHARED bool c_integer_expression_evaluate(Arena* arena, char8 const* sp
     CSpellingSpace view = {
         .base = (char8*)spelling_base,
     };
-    CPpToken* wrapped = arena_allocate(arena, CPpToken, token_count);
-    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    // Guarded while a function body is validated (#1256): a miss fails the
+    // evaluation, and the body reports its exhaustion.
+    CPpToken* wrapped = C_PARSE_BODY_SCRATCH_ARRAY(arena, CPpToken, token_count);
+    for (u32 token_index = 0; wrapped && token_index < token_count; token_index += 1)
     {
         wrapped[token_index] = (CPpToken){
             .token = tokens[token_index],
         };
     }
-    return c_integer_expression_evaluate_with_features(arena, &view, 0, 0, 0, wrapped, token_count, expansion_limit, false, result, 0, 0, (String8){0},
+    return wrapped &&
+           c_integer_expression_evaluate_with_features(arena, &view, 0, 0, 0, wrapped, token_count, expansion_limit, false, result, 0, 0, (String8){0},
                                                        (CIncludeSearchOrigin){0}, value_out);
 }
 
@@ -11156,6 +11190,7 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
     }
     else if (token_count >= 3 && c_token_is_punctuator(&tokens[0], C_PUNCTUATOR_LESS) && c_token_is_punctuator(&tokens[token_count - 1], C_PUNCTUATOR_GREATER))
     {
+        bool named = true;
         u64 end = (u64)tokens[0].offset + 1;
         for (u32 index = 1; preserve_characters && index < token_count; index += 1)
         {
@@ -11180,9 +11215,11 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
             {
                 length += c_token_length(base, tokens[index]);
             }
-            char8* name = arena_allocate(arena, char8, length + 1);
+            // Guarded while a function body is validated (#1256): a miss
+            // leaves the name unrecognized.
+            char8* name = C_PARSE_BODY_SCRATCH_ARRAY(arena, char8, length + 1);
             u64 output = 0;
-            for (u32 index = 1; index + 1 < token_count; index += 1)
+            for (u32 index = 1; name && index + 1 < token_count; index += 1)
             {
                 String8 spelling = c_token_spelling(base, tokens[index]);
                 if (spelling.length)
@@ -11191,14 +11228,18 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
                 }
                 output += spelling.length;
             }
-            name[output] = 0;
+            if (name)
+            {
+                name[output] = 0;
+            }
+            named = name != 0;
             *name_out = (String8){
                 .pointer = name,
                 .length = output,
             };
         }
         *quoted_out = false;
-        recognized = true;
+        recognized = named;
     }
     return recognized;
 }
