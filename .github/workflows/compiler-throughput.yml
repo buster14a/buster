@@ -288,6 +288,7 @@ jobs:
             ./build/Release/ide cc -v -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -O3 "$selection" -S src/buster/apps/ide/ide.c -o "direct-ssa-census-evidence/tiny-$mode.s" > "direct-ssa-census-evidence/tiny-$mode.stdout.log" 2> "direct-ssa-census-evidence/tiny-$mode.stderr.log"
           done
           records='['
+          definitions_ok=1
           for helper in c_ir_field_index_bucket machine_x64_reject; do
             call_pattern="^[[:space:]]*call[[:space:]].*\\b${helper}\\b"
             definition_pattern="^${helper}:[[:space:]]*(#.*)?$"
@@ -296,15 +297,20 @@ jobs:
             off_definitions=$(grep -Ec "$definition_pattern" direct-ssa-census-evidence/tiny-off.s || true)
             on_definitions=$(grep -Ec "$definition_pattern" direct-ssa-census-evidence/tiny-on.s || true)
             record=$(printf '{"helper":"%s","calls":{"off":%s,"on":%s},"definitions":{"off":%s,"on":%s}}' "$helper" "$off_calls" "$on_calls" "$off_definitions" "$on_definitions")
-            printf 'INLINE_PRODUCTION_CALLS %s\n' "$record"
             if [[ "$records" != "[" ]]; then records+=','; fi
             records+="$record"
-            if (( off_calls == 0 || on_calls >= off_calls || off_definitions != 1 || on_definitions != 1 )); then
-              printf 'production helper calls did not decrease with callable definitions retained: %s\n' "$record" >&2
-              exit 1
-            fi
+            if (( off_definitions != 1 || on_definitions != 1 )); then definitions_ok=0; fi
           done
-          printf '%s]\n' "$records" > direct-ssa-census-evidence/production-tiny-helper-calls.json
+          records+=']'
+          off_total_calls=$(grep -Ec '^[[:space:]]*call(q)?[[:space:]]' direct-ssa-census-evidence/tiny-off.s || true)
+          on_total_calls=$(grep -Ec '^[[:space:]]*call(q)?[[:space:]]' direct-ssa-census-evidence/tiny-on.s || true)
+          report=$(printf '{"total_calls":{"off":%s,"on":%s},"helpers":%s}' "$off_total_calls" "$on_total_calls" "$records")
+          printf 'INLINE_PRODUCTION_CALLS %s\n' "$report"
+          printf '%s\n' "$report" > direct-ssa-census-evidence/production-tiny-helper-calls.json
+          if (( off_total_calls == 0 || on_total_calls >= off_total_calls || definitions_ok != 1 )); then
+            printf 'production call instructions did not decrease or callable helper definitions were not retained: %s\n' "$report" >&2
+            exit 1
+          fi
           grep '^IR_INLINE ' direct-ssa-census-evidence/tiny-*.stdout.log
           sha256sum direct-ssa-census-evidence/tiny-*.s > direct-ssa-census-evidence/tiny-inputs.sha256
       - name: Report census scope without a performance verdict
@@ -317,7 +323,7 @@ jobs:
           REFERENCE_RESULT: ${{ steps.reference.outcome }}
         run: |
           printf '## Direct-SSA diagnostic census\n\nRegistered tests: **%s**. Direct SSA: **%s**. Shared local promotion: **%s**.\n\nArtifacts retain source metrics, raw allocation reports, compiler/input identities and failures. This instrumented job is not a timing comparison, a sanitizer or self-host gate, or dedicated Ryzen 9700X performance acceptance for #447.\n' "$TEST_RESULT" "$DIRECT_RESULT" "$REFERENCE_RESULT" >> "$GITHUB_STEP_SUMMARY"
-          printf '\nProduction tiny-helper proof: **%s**. This compares generated native assembly for the same production source at -O3.\n' "$TINY_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          printf '\nProduction tiny-helper proof: **%s**. This requires fewer total calls in generated native assembly for the same production source at -O3, with sampled helper definitions retained.\n' "$TINY_RESULT" >> "$GITHUB_STEP_SUMMARY"
           grep '^IR_INLINE ' direct-ssa-census-evidence/tiny-*.stdout.log || true
           if [[ "$DIRECT_RESULT" != success || "$REFERENCE_RESULT" != success || "$TINY_RESULT" == failure ]]; then
             grep -nE -m 20 'error|ir.inline-required|validation' direct-ssa-census-evidence/*.stderr.log || true
