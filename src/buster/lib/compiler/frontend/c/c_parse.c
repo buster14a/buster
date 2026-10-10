@@ -4176,6 +4176,27 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                                 close += 1;
                             }
                         }
+                        else if (bound_word_is_sizeof)
+                        {
+                            // An unparenthesized operand is a unary
+                            // expression: `sizeof *a` and `sizeof a[0]` take
+                            // the indirections and subscripts with the name.
+                            u32 operand_end = operand_start;
+                            while (operand_end < bound_end && c_token_is_punctuator(&preprocess.tokens[operand_end], C_PUNCTUATOR_STAR))
+                            {
+                                operand_end += 1;
+                            }
+                            if (operand_end < bound_end && preprocess.tokens[operand_end].kind == C_TOKEN_IDENTIFIER)
+                            {
+                                operand_end += 1;
+                                while (operand_end < bound_end && c_token_is_punctuator(&preprocess.tokens[operand_end], C_PUNCTUATOR_LEFT_BRACKET))
+                                {
+                                    operand_end = c_parse_matching_delimiter(preprocess, operand_end, bound_end, C_PUNCTUATOR_LEFT_BRACKET,
+                                                                             C_PUNCTUATOR_RIGHT_BRACKET) + 1;
+                                }
+                                close = BUSTER_MIN(operand_end, bound_end);
+                            }
+                        }
                         // A bound reads the object bound at its declaration,
                         // including block shadowing, rather than a type name at
                         // file scope. Read its existing layout in this solve;
@@ -4190,11 +4211,43 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                             object_start += 1;
                             object_end -= 1;
                         }
-                        CEntityId object = C_ENTITY_ID_INVALID;
-                        if (!depth && object_end == object_start + 1 && preprocess.tokens[object_start].kind == C_TOKEN_IDENTIFIER &&
-                            !c_parse_type_word_for_dialect_token(preprocess, preprocess.tokens[object_start]))
+                        // A sizeof operand may also reach an element of the
+                        // object, `*a`, `a[0]` or `(a)[0]` as BUSTER_ARRAY_LENGTH
+                        // spells it: each `*` or subscript names one array or
+                        // pointer level down, whose layout the solve already
+                        // holds. Without it an array sized that way has no
+                        // layout here, and a later bound's `sizeof` of that
+                        // array is not a constant (#3375).
+                        u32 object_name = object_start;
+                        u32 object_levels = 0;
+                        u32 object_suffix = object_name + 1;
+                        if (bound_word_is_sizeof)
                         {
-                            u32 use_index = c_parse_identifier_use_index(result, object_start);
+                            while (object_name < object_end && c_token_is_punctuator(&preprocess.tokens[object_name], C_PUNCTUATOR_STAR))
+                            {
+                                object_levels += 1;
+                                object_name += 1;
+                            }
+                            object_suffix = object_name + 1;
+                            if (object_name + 2 < object_end && c_token_is_punctuator(&preprocess.tokens[object_name], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                                c_token_is_punctuator(&preprocess.tokens[object_name + 2], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                            {
+                                object_name += 1;
+                                object_suffix = object_name + 2;
+                            }
+                            while (object_suffix < object_end &&
+                                   c_token_is_punctuator(&preprocess.tokens[object_suffix], C_PUNCTUATOR_LEFT_BRACKET))
+                            {
+                                object_suffix = c_parse_matching_delimiter(preprocess, object_suffix, object_end, C_PUNCTUATOR_LEFT_BRACKET,
+                                                                           C_PUNCTUATOR_RIGHT_BRACKET) + 1;
+                                object_levels += 1;
+                            }
+                        }
+                        CEntityId object = C_ENTITY_ID_INVALID;
+                        if (!depth && object_suffix == object_end && preprocess.tokens[object_name].kind == C_TOKEN_IDENTIFIER &&
+                            !c_parse_type_word_for_dialect_token(preprocess, preprocess.tokens[object_name]))
+                        {
+                            u32 use_index = c_parse_identifier_use_index(result, object_name);
                             if (use_index != C_ID_UNDERLYING_INVALID)
                             {
                                 object = result->identifier_uses[use_index].entity;
@@ -4202,8 +4255,8 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                             else
                             {
                                 CScopeId scope = c_parse_scope_for_token(result, result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID,
-                                                                        object_start);
-                                object = c_parse_lookup_entity_at_token(result, preprocess, scope, object_start);
+                                                                        object_name);
+                                object = c_parse_lookup_entity_at_token(result, preprocess, scope, object_name);
                             }
                         }
                         CEntity const* object_entity = object.value < result->entity_count ? result->entities + object.value : 0;
@@ -4228,6 +4281,12 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         {
                             operand_type = object_entity->type;
                             operand_type_index = close;
+                            for (u32 level = 0; level < object_levels && operand_type.value != C_ID_UNDERLYING_INVALID; level += 1)
+                            {
+                                CTypeKind level_kind = operand_type.value < operand_parse.type_count ? operand_parse.types[operand_type.value].kind : C_TYPE_INVALID;
+                                operand_type = level_kind == C_TYPE_ARRAY || level_kind == C_TYPE_POINTER ? operand_parse.types[operand_type.value].element_type
+                                                                                                         : C_TYPE_ID_INVALID;
+                            }
                         }
                         else if (parenthesized && !depth && close > operand_start)
                         {
@@ -4242,7 +4301,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         {
                             operand_type = C_TYPE_ID_INVALID;
                         }
-                        bool pointer_type = object_operand && object_entity->kind == C_ENTITY_PARAMETER &&
+                        bool pointer_type = object_operand && !object_levels && object_entity->kind == C_ENTITY_PARAMETER &&
                                             operand_type.value < operand_parse.type_count &&
                                             (operand_parse.types[operand_type.value].kind == C_TYPE_ARRAY ||
                                              operand_parse.types[operand_type.value].kind == C_TYPE_FUNCTION);
