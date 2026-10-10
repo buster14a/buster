@@ -9152,6 +9152,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_expression_enum_scope(UnitT
         S8("int v __attribute__((aligned(4)));unsigned long x=sizeof(enum{aligned=2});int main(void){return aligned-2;}"),
         S8("int f(int R,int a[R]){return a[0]-R;}unsigned long x=sizeof(enum{R=2});int main(void){return R-2;}"),
         S8("int g(R)int R;{return R;}unsigned long x=sizeof(enum{R=2});int main(void){return g(2)-R;}"),
+        // A prototype inside a type name in an expression declares its
+        // parameters too.
+        // (sizeof of such a type name does not evaluate yet: #3324.)
+        S8("typedef __typeof__(int (*)(int R,int a[R])) F;unsigned long y=sizeof(enum{R=2});int main(void){return R-2;}"),
+        S8("typedef __typeof__(void (*)(int R)) G;unsigned long y=sizeof(enum{R=2});int main(void){return R-2;}"),
     };
     String8 rejected[] = {
         S8("enum{R=9};unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
@@ -9180,6 +9185,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_expression_enum_scope(UnitT
         S8("_Alignas(2*R) char c;unsigned long x=sizeof(enum{R=4});int main(void){return 0;}"),
         S8("struct S{int b:1*R;};unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
         S8("enum{A=2*R};unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
+        // A cast operand and a bound in a nested prototype that names no
+        // parameter R are uses.
+        S8("unsigned long x=sizeof((int)R);unsigned long y=sizeof(enum{R=2});int main(void){return 0;}"),
+        S8("unsigned long x=sizeof(int (*)(int a[R]));unsigned long y=sizeof(enum{R=2});int main(void){return 0;}"),
     };
     CDiagnosticKind rejected_kinds[] = {
         C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION,
@@ -9188,6 +9197,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_expression_enum_scope(UnitT
         C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
         C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
         C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+        C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
     };
     Target targets[] = {target_native, target_native, target_native};
     targets[0].cpu_arch = CPU_ARCH_X86_64;

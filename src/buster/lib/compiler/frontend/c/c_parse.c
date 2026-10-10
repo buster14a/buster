@@ -25456,7 +25456,9 @@ BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* mac
 // record body; an attribute name; a `__builtin_offsetof` member designator;
 // and an identifier-list parameter. A declarator inside a parenthesised list
 // is a parameter, so it shadows the enumerator for the rest of that list
-// (`void f(int R, int a[R]);`). The open delimiters and the shadows are stacks
+// (`void f(int R, int a[R]);`), and a parenthesis inside an expression that
+// starts with a declaration specifier is such a list or a cast's type, not an
+// expression. The open delimiters and the shadows are stacks
 // bounded by the declaration's token count, so nesting has no limit and the
 // scan stays linear.
 enum
@@ -25475,6 +25477,25 @@ BUSTER_GLOBAL_LOCAL bool c_parse_early_use_word_in(String8 word, String8 const* 
         found = string_equal(word, words[index]);
     }
     return found;
+}
+
+// Whether `token` can begin a parameter declaration or a type name: a type
+// or qualifier keyword, a tag keyword, a typedef name, `...` or the `)` of an
+// empty list.
+BUSTER_GLOBAL_LOCAL bool c_parse_early_use_declaration_start(CParseResult* result, CPreprocessResult const* preprocess, CToken token)
+{
+    bool start = c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_ELLIPSIS);
+    if (!start && token.kind == C_TOKEN_IDENTIFIER)
+    {
+        CType qualifiers = {0};
+        String8 word = c_token_spelling(preprocess->spelling_base, token);
+        CEntityId named = c_parse_lookup_typedef_name_token(result, preprocess->spelling_base, token, false);
+        start = c_parse_type_word_for_dialect_token(*preprocess, token) || c_parse_type_qualifier_word_token(*preprocess, token, &qualifiers) ||
+                string_equal(word, S8("struct")) || string_equal(word, S8("union")) || string_equal(word, S8("enum")) ||
+                string_equal(word, S8("register")) ||
+                (named.value < result->entity_count && result->entities[named.value].kind == C_ENTITY_TYPEDEF);
+    }
+    return start;
 }
 
 BUSTER_GLOBAL_LOCAL void c_parse_diagnose_early_expression_enum_uses(CParseResult* result, Arena* arena, CPreprocessResult const* preprocess)
@@ -25548,6 +25569,15 @@ BUSTER_GLOBAL_LOCAL void c_parse_diagnose_early_expression_enum_uses(CParseResul
                     // A type name and a member designator, even inside an
                     // expression; a subscript in the designator is one again.
                     flags = C_PARSE_EARLY_USE_DESIGNATOR;
+                }
+                else if (is_parenthesis && in_expression && !(previous_word.length && c_parse_operator_group_word(previous_word)) &&
+                         index + 1 < end && c_parse_early_use_declaration_start(result, preprocess, preprocess->tokens[index + 1]))
+                {
+                    // A parenthesis inside a type name that starts with a
+                    // declaration specifier is a prototype's parameter list
+                    // (`sizeof(int (*)(int R, int a[R]))`) or a cast's type:
+                    // its declarators are names, not uses.
+                    flags = 0;
                 }
                 else if (is_parenthesis && !in_expression)
                 {
