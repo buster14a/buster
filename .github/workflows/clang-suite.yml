@@ -2,10 +2,10 @@ name: Clang suite foundation
 
 on:
   pull_request:
-    paths: ['tools/clang_suite*', 'build.c', 'src/buster/lib/compiler/**', 'src/buster/tests/compiler/driver/**', 'tests/basic_c_preprocess_*boundaries*', 'docs/agents/compatibility/clang-suite.md', '.github/workflows/clang-suite.yml']
+    paths: ['tools/clang_suite*', 'tools/fixtures/zen5_lzcnt.c', 'build.c', 'src/buster/lib/compiler/**', 'src/buster/tests/compiler/driver/**', 'tests/basic_c_preprocess_*boundaries*', 'docs/agents/compatibility/clang-suite.md', '.github/workflows/clang-suite.yml']
   push:
     branches: [main]
-    paths: ['tools/clang_suite*', 'build.c', 'src/buster/lib/compiler/**', 'src/buster/tests/compiler/driver/**', 'tests/basic_c_preprocess_*boundaries*', '.github/workflows/clang-suite.yml']
+    paths: ['tools/clang_suite*', 'tools/fixtures/zen5_lzcnt.c', 'build.c', 'src/buster/lib/compiler/**', 'src/buster/tests/compiler/driver/**', 'tests/basic_c_preprocess_*boundaries*', '.github/workflows/clang-suite.yml']
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
@@ -52,6 +52,7 @@ jobs:
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: |
+            /clang/lib/Headers/
             /clang/test/
             /clang/unittests/
             /clang/tools/scan-build-py/tests/
@@ -64,6 +65,12 @@ jobs:
           mode: source
           source-directory: .clang-suite-upstream
           source-repository: llvm/llvm-project
+      - name: Install the pinned Clang 23.1.2 oracle
+        env:
+          BUSTER_CI_LLVM_VERSION: 23.1.2
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 tools/ci_llvm.py --target x86_64-linux --work-directory "$RUNNER_TEMP/clang-suite-llvm" --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV"
       - name: Bootstrap native driver and retain source identity
         shell: bash
         run: |
@@ -93,6 +100,9 @@ jobs:
           export BUSTER_CLANG_SUITE_CLANG
           export BUSTER_CLANG_SUITE_RESULTS="$RUNNER_TEMP/clang-suite-evidence"
           python3 tools/clang_suite_test.py -v 2>&1 | tee "$RUNNER_TEMP/clang-suite-evidence/controls.log"
+      - name: Exercise the public LZCNT intrinsic family
+        run: |
+          "$RUNNER_TEMP/clang-suite-evidence/build-driver" test_clang_suite --intrinsics "$GITHUB_WORKSPACE/.clang-suite-upstream" "$RUNNER_TEMP/clang-suite-evidence/intrinsics" "$GITHUB_WORKSPACE/build/Release/ide" "$BUSTER_CI_LLVM_BIN/clang"
       - name: Retain machine records in existing evidence
         if: ${{ always() }}
         # Keep the report with the existing evidence root and upload.
