@@ -377,6 +377,16 @@ def preparation_data(repository: str, token: str, run: dict, pull: dict, head: s
     return True
 
 
+def utility_trusted_ancestry(repository: str, token: str, plan_text: str, policy_revision: str) -> None:
+    """A plan's trusted harness revision runs with checks: write and on the host; require it on protected main."""
+    trusted = [row.split("\t", 1)[1] for row in plan_text.splitlines() if row.startswith("trusted_revision\t")]
+    if len(trusted) == 1 and COMMIT.fullmatch(trusted[0]):
+        compared = fetch(f"/repos/{repository}/compare/{trusted[0]}...{policy_revision}", token)
+        if not isinstance(compared, dict) or compared.get("status") not in ("identical", "ahead"):
+            raise ValueError("utility trusted revision is not an ancestor of the protected workflow revision")
+    # Any other value stays a native admission refusal; it can never select a revision.
+
+
 def utility_data(repository: str, token: str, run: dict, pull: dict, head: str, attempt: str,
                      marker: str, compared_parents: list, directory: Path) -> bool:
     """Observe five bounded records for the distinct native utility policy."""
@@ -391,6 +401,7 @@ def utility_data(repository: str, token: str, run: dict, pull: dict, head: str, 
     allowlist_text = sampling_content(repository, UTILITY_ALLOWLIST, policy_revision, token)
     plan_text = sampling_content(repository, UTILITY_PLAN, revision, token)
     allowlist = dict(row.split("\t") for row in allowlist_text.splitlines() if "\t" in row)
+    utility_trusted_ancestry(repository, token, plan_text, policy_revision)
     history = sampling_attempt_history(repository, token, str(run["id"]), allowlist.get("history_since", "-"),
                                       revision, allowlist.get("freeze_sha256", "-"), "-", "-", utility=True)
     facts = qualification_facts(repository, run, pull, head, attempt, line, compared_parents)

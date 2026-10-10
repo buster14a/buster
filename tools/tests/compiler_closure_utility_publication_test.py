@@ -476,6 +476,30 @@ class MainRouteIdentityTests(unittest.TestCase):
             self.assertIs(publisher.main_route(Api(), REPOSITORY, "200", "3")["main_owned"], False)
             runtime.assert_not_called()
 
+    def test_untitled_original_recovers_only_when_routing_is_absent_at_P(self):
+        import authorize_compiler
+        run = self.original_run()
+        run["display_title"] = "9700X direct workload benchmark"
+        class Api:
+            def request(inner, unused):
+                return run
+        for historical in (True, False):
+            with self.subTest(historical=historical), \
+                    patch.object(authorize_compiler, "resolve_main_route", return_value=self.route(False), create=True), \
+                    patch.object(publisher, "main_route_historical", return_value=historical) as history:
+                if historical:
+                    route = publisher.main_route(Api(), REPOSITORY, "200", "3")
+                    self.assertEqual((route["request_run"], route["request_head"]), ("-", "-"))
+                else:
+                    with self.assertRaisesRegex(ValueError, "request identity"):
+                        publisher.main_route(Api(), REPOSITORY, "200", "3")
+                history.assert_called_once_with(unittest.mock.ANY, "a" * 40)
+        with patch.object(authorize_compiler, "resolve_main_route", return_value=self.route(), create=True), \
+                patch.object(publisher, "main_runtime_pins"), \
+                patch.object(publisher, "main_route_historical", return_value=True), \
+                self.assertRaisesRegex(ValueError, "request identity"):
+            publisher.main_route(Api(), REPOSITORY, "200", "3")
+
 
 
 class MainRuntimeAndArchiveTests(unittest.TestCase):

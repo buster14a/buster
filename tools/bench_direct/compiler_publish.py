@@ -54,6 +54,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -340,6 +341,13 @@ def main_runtime_pins(api: Api, route: dict) -> None:
     route["runtime_source_bytes"] = source_bytes
 
 
+def main_route_historical(api: Api, revision: str) -> bool:
+    """Whether original policy revision P predates native MAIN routing (both files absent)."""
+    from authorize_compiler import MAIN_ROUTE_MODULE_PATH, MAIN_ROUTE_PATH, main_route_content
+    return all(main_route_content(api, path, revision, absent_ok=True) is None
+               for path in (MAIN_ROUTE_PATH, MAIN_ROUTE_MODULE_PATH))
+
+
 def main_route(api: Api, repository: str, executor_run: str, attempt: str) -> dict:
     """Authenticate original executor N -> policy P -> measurement H through GitHub and the native resolver."""
     from authorize_compiler import resolve_main_route
@@ -378,10 +386,13 @@ def main_route(api: Api, repository: str, executor_run: str, attempt: str) -> di
         raise ValueError("historical Main route changed the original long baseline recipe")
     title = original.get("display_title")
     request = re.fullmatch(r"9700X request ([1-9][0-9]*)\.([1-9][0-9]*) head ([0-9a-f]{40})", title) if isinstance(title, str) else None
-    if request is None:
+    # A routed revision already required this title in resolve_main_route; only a pre-routing
+    # historical run (absent policy at original P) predates the canonical request title.
+    if request is None and (route["main_owned"] or not main_route_historical(api, original["head_sha"])):
         raise ValueError("Main original executor lacks its independently reverified request identity")
     route.update(executor_run=executor_run, executor_attempt=attempt,
-                 request_run=request[1], request_attempt=request[2], request_head=request[3])
+                 **({"request_run": "-", "request_attempt": "-", "request_head": "-"} if request is None else
+                    {"request_run": request[1], "request_attempt": request[2], "request_head": request[3]}))
     if route["main_owned"]:
         from authorize_compiler import main_route_attempt
         unused_run, original_request, original_head = main_route_attempt(api, repository, original, attempt)
@@ -4941,7 +4952,7 @@ def main() -> int:
             try:
                 route = main_route(api, repository, run_id, attempt)
                 expected["trusted_revision"] = route["main_measurement_revision"]
-            except (OSError, ValueError, TypeError, urllib.error.URLError) as error:
+            except (OSError, ValueError, TypeError, urllib.error.URLError, subprocess.SubprocessError) as error:
                 authorized = False
                 problem = "Main route refused: " + str(error)
                 notes.append(problem)

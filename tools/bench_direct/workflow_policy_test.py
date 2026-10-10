@@ -665,7 +665,10 @@ REPORT_BLOCKS = {
     "validate": (
         ("    if: ${{ " + REPORT_OWNER + " }}", "    runs-on: ubuntu-24.04", "    permissions:", "      actions: read",
          "      checks: read", "      contents: read", "      pull-requests: read", "    timeout-minutes: 10"),
-        TRUSTED_TOOLS_CHECKOUT,
+        ("        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683", "        with:",
+         "          ref: ${{ github.sha }}", "          persist-credentials: false"),
+        MAIN_TINYCC_CHECKOUT,
+        ("        working-directory: .tools/tinycc", "        shell: bash", "        run: |", *MAIN_TINYCC_SCRIPT),
         ("          BQ_RECOVER_RUN_ID: ${{ inputs.run_id }}", "          BQ_RECOVER_ATTEMPT: ${{ inputs.run_attempt }}",
          "          BQ_REGRESSION_POLICY: ${{ vars.BENCH_COMPILER_REGRESSION_POLICY }}",
          "        run: python3 -B tools/bench_direct/compiler_publish.py"),
@@ -1428,8 +1431,12 @@ def check_visibility(errors: list[str], jobs: dict[str, list[str]]) -> None:
         for block in blocks:
             if not contains_block(job, block):
                 errors.append(f"report recovery {name} job is missing exact block starting: {block[0].strip()}")
-        if len([line for line in job if "uses:" in line]) != 1 or len([line for line in job if "run:" in line]) != 1:
-            errors.append(f"report recovery {name} job must be one trusted checkout and one trusted script call")
+        # Validation adds only the pinned TinyCC checkout/install used by the native main-route resolver.
+        expected_steps = (2, 2) if name == "validate" else (1, 1)
+        if (len([line for line in job if "uses:" in line]), len([line for line in job if "run:" in line])) != expected_steps:
+            errors.append(f"report recovery {name} job must be its trusted checkouts and trusted script calls only")
+        if name == "validate" and any("sparse-checkout:" in line for line in job):
+            errors.append("report recovery validation needs the full trusted checkout for native main routing")
         for marker in (*HOSTED_FORBIDDEN, *(("actions: read", "checks:", "pull-requests:") if name == "comment"
                                             else ("contents: write", "checks: write"))):
             if any(marker in line for line in job):

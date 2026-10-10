@@ -96,7 +96,7 @@ BUSTER_GLOBAL_LOCAL CompilerClosurePhaseResult compiler_closure_phase_run_bounde
         u64 cleanup_start = os_now_microseconds();
         result.manager_terminal = result.manager_launched && result.wait.result != PROCESS_RESULT_UNKNOWN;
         bool manager_clean = released && !result.wait.process_tree_cleanup_failed &&
-            (!result.launch_attempted || result.manager_terminal);
+            (!result.launch_attempted || !result.manager_launched || result.manager_terminal);
         bool descendants_clean = compiler_experiment_supervisor_end_known(arena, &supervisor, manager_clean);
         result.cleanup_proven = descendants_clean && manager_clean;
         result.cleanup_us = os_now_microseconds() - cleanup_start;

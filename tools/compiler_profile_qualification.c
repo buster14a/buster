@@ -725,7 +725,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
         }
     }
     bool cleanup = contained && compiler_experiment_supervisor_end_known(arena, &supervisor,
-        (!launch_attempted || (spawn.handle && wait.result != PROCESS_RESULT_UNKNOWN)) && !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost);
+        (!launch_attempted || !spawn.handle || wait.result != PROCESS_RESULT_UNKNOWN) && !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost);
     bool cancelled = false;
 #if BUSTER_LINUX && !BUSTER_ANDROID
     cancelled = process_control_atomic_load(&compiler_sampling_cancel_signal) != 0;

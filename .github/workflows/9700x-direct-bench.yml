@@ -282,7 +282,7 @@ jobs:
         with:
           mode: source
           source-directory: .tools/tinycc
-          source-repository: ${{ github.repository }}
+          source-repository: TinyCC/tinycc
       - name: Install the pinned utility bootstrap compiler
         working-directory: .tools/tinycc
         shell: bash
@@ -491,7 +491,7 @@ jobs:
         with:
           mode: source
           source-directory: .tools/tinycc
-          source-repository: ${{ github.repository }}
+          source-repository: TinyCC/tinycc
       - name: Install the pinned utility bootstrap compiler
         working-directory: .tools/tinycc
         shell: bash
@@ -1459,7 +1459,7 @@ jobs:
         with:
           mode: source
           source-directory: .tools/tinycc
-          source-repository: ${{ github.repository }}
+          source-repository: TinyCC/tinycc
       - name: Install the pinned MAIN policy bootstrap compiler
         working-directory: .tools/tinycc
         shell: bash
@@ -1761,7 +1761,7 @@ jobs:
         with:
           mode: source
           source-directory: .tools/tinycc
-          source-repository: ${{ github.repository }}
+          source-repository: TinyCC/tinycc
       - name: Install the pinned MAIN policy bootstrap compiler
         working-directory: .tools/tinycc
         shell: bash

@@ -460,7 +460,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_self_test(Arena* arena)
         flag_read ? 1ull : 0ull, refused ? 1ull : 0ull, unrelated_live ? 1ull : 0ull,
         unrelated_reaped ? 1ull : 0ull, rejected.active ? 1ull : 0ull, result ? 1ull : 0ull);
     CompilerExperimentSupervisor supervisor = {0};
-    bool began = compiler_experiment_supervisor_begin(arena, &supervisor);
+    // result implies fixture_host: the physical host never reaches the durable guard,
+    // so a self-test there cannot latch host-wide UNKNOWN or leave ACTIVE behind.
+    bool began = result && fixture_host && compiler_experiment_supervisor_begin(arena, &supervisor);
     result = result && began;
     string_print(S8("COMPILER_EXPERIMENT_SUPERVISOR step=begin began={u64} active={u64} cleanup_failed={u64} children={u64}\n"),
         began ? 1ull : 0ull, supervisor.active ? 1ull : 0ull, supervisor.cleanup_failed ? 1ull : 0ull, supervisor.child_count);

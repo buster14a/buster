@@ -594,7 +594,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_owned(Arena* a
             wait = os_process_wait_deadline(arena, spawn, remaining ? remaining : 1);
         }
     }
-    bool released = (!launch_attempted || (spawn.handle && wait.result != PROCESS_RESULT_UNKNOWN)) &&
+    // A failed spawn left no manager (glibc reaps an exec-failed child); the supervisor still proves no children.
+    bool released = (!launch_attempted || !spawn.handle || wait.result != PROCESS_RESULT_UNKNOWN) &&
         !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
     bool cleanup = contained && compiler_experiment_supervisor_end_known(arena, &supervisor, released);
     bool cancelled = compiler_sampling_controller_cancelled();

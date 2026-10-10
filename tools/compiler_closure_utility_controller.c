@@ -1057,7 +1057,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_owned(Aren
         }
     }
     bool wait_observed=spawn.handle && wait.result!=PROCESS_RESULT_UNKNOWN;
-    bool manager_proven=(!launch_attempted || wait_observed) &&
+    // A failed spawn left no manager; the supervisor still proves an empty kernel child list.
+    bool manager_proven=(!launch_attempted || !spawn.handle || wait_observed) &&
         !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
     bool released=manager_proven;
     bool quiet = contained && compiler_experiment_supervisor_end_known(arena, &supervisor, released);

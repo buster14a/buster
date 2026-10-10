@@ -823,5 +823,36 @@ class SamplingTransportTest(unittest.TestCase):
                                                        BASE, "c" * 64, "-", "-")
 
 
+class UtilityTrustedAncestryTest(unittest.TestCase):
+    """The plan-selected Utility harness revision must already be on protected main."""
+
+    POLICY = "c" * 40
+
+    def check(self, plan: str, reply: object) -> list[str]:
+        paths = []
+        def read(path, token):
+            paths.append(path)
+            return reply
+        with mock.patch.object(authorize, "fetch", side_effect=read):
+            authorize.utility_trusted_ancestry("buster14a/buster", "token", plan, self.POLICY)
+        return paths
+
+    def test_ancestor_or_identical_revision_is_accepted(self):
+        for status in ("identical", "ahead"):
+            with self.subTest(status=status):
+                paths = self.check("trusted_revision\t" + "a" * 40 + "\n", {"status": status})
+                self.assertEqual(paths, ["/repos/buster14a/buster/compare/" + "a" * 40 + "..." + self.POLICY])
+
+    def test_off_main_or_unavailable_revision_is_refused(self):
+        for reply in ({"status": "diverged"}, {"status": "behind"}, {}, None, []):
+            with self.subTest(reply=reply), self.assertRaises(ValueError):
+                self.check("trusted_revision\t" + "a" * 40 + "\n", reply)
+
+    def test_placeholder_or_ambiguous_revision_is_left_to_native_refusal(self):
+        for plan in ("trusted_revision\t-\n", "", "trusted_revision\t" + "a" * 40 + "\ntrusted_revision\t" + "b" * 40 + "\n"):
+            with self.subTest(plan=plan):
+                self.assertEqual(self.check(plan, {"status": "ahead"}), [])
+
+
 if __name__ == "__main__":
     unittest.main()

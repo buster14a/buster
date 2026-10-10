@@ -191,9 +191,8 @@ def main_route_content(api, path: str, revision: str, *, absent_ok: bool = False
     return payload.decode("utf-8")
 
 
-def main_route_attempt(api, repository: str, executor_run: dict, attempt: str) -> tuple[dict, dict, str]:
-    """Independently select original attempt N and its exact request from the canonical run title."""
-    import re
+def main_route_executor(api, repository: str, executor_run: dict, attempt: str) -> dict:
+    """Independently reload original executor attempt N from the API and bind the caller to it."""
     if not REPOSITORY.fullmatch(repository) or not isinstance(attempt, str) or not DECIMAL.fullmatch(attempt) or \
             not isinstance(executor_run, dict) or type(executor_run.get("id")) is not int or executor_run["id"] <= 0:
         raise ValueError("Main route executor inputs are malformed")
@@ -208,6 +207,18 @@ def main_route_attempt(api, repository: str, executor_run: dict, attempt: str) -
     for key in ("id", "run_attempt", "head_sha", "path", "event", "head_branch", "repository", "head_repository", "display_title"):
         if executor_run.get(key) != actual.get(key):
             raise ValueError("Main route caller differs from the original API attempt")
+    triggering = actual.get("triggering_actor")
+    if actual["run_attempt"] > 1 and (not isinstance(triggering, dict) or
+                                      triggering.get("login") != "davidgmbb" or
+                                      type(triggering.get("id")) is not int or triggering["id"] != 39247043):
+        raise ValueError("Main route executor rerun lacks the existing owner authority")
+    return actual
+
+
+def main_route_attempt(api, repository: str, executor_run: dict, attempt: str) -> tuple[dict, dict, str]:
+    """Independently select original attempt N and its exact request from the canonical run title."""
+    import re
+    actual = main_route_executor(api, repository, executor_run, attempt)
     title = actual.get("display_title")
     match = re.fullmatch(r"9700X request ([1-9][0-9]*)\.([1-9][0-9]*) head ([0-9a-f]{40})", title) \
         if isinstance(title, str) else None
@@ -221,11 +232,6 @@ def main_route_attempt(api, repository: str, executor_run: dict, attempt: str) -
             request.get("status") != "completed" or request.get("conclusion") != "success" or \
             full_name(request.get("repository")) != repository or full_name(request.get("head_repository")) != repository:
         raise ValueError("Main route original API request is not the successful exact main push")
-    triggering = actual.get("triggering_actor")
-    if actual["run_attempt"] > 1 and (not isinstance(triggering, dict) or
-                                      triggering.get("login") != "davidgmbb" or
-                                      type(triggering.get("id")) is not int or triggering["id"] != 39247043):
-        raise ValueError("Main route executor rerun lacks the existing owner authority")
     return actual, request, match[3]
 
 
@@ -243,8 +249,12 @@ def main_route_native(root, records: dict[str, str]) -> dict[str, str]:
         command = [str(root / "build.sh"), "compiler_profile_qualification", "--resolve-main-route",
                    *(str(directory / f"{name}.tsv") for name in names), str(output)]
         with (directory / "native.log").open("xb") as log:
-            completed = subprocess.run(command, cwd=root, stdin=subprocess.DEVNULL, stdout=log,
-                                       stderr=subprocess.STDOUT, timeout=120, check=False)
+            try:
+                completed = subprocess.run(command, cwd=root, stdin=subprocess.DEVNULL, stdout=log,
+                                           stderr=subprocess.STDOUT, timeout=120, check=False)
+            except subprocess.TimeoutExpired as error:
+                # Callers refuse ValueError; an expired resolver must never crash publication.
+                raise ValueError("Main route trusted native eligibility timed out") from error
         if completed.returncode != 0 or not output.is_file() or output.stat().st_size > 8192:
             raise ValueError("Main route trusted native eligibility refused the original policy")
         rows = output.read_text(encoding="utf-8").splitlines()
@@ -263,7 +273,7 @@ def resolve_main_route(api, repository: str, executor_run: dict, attempt: str) -
     """Original API executor attempt N selects protected P, which selects immutable H and the native policy."""
     import hashlib
     from pathlib import Path
-    actual, request, head = main_route_attempt(api, repository, executor_run, attempt)
+    actual = main_route_executor(api, repository, executor_run, attempt)
     policy_revision = actual["head_sha"]
     on_main = api.request(f"/compare/{policy_revision}...main")
     if not isinstance(on_main, dict) or on_main.get("status") not in ("identical", "ahead"):
@@ -278,6 +288,8 @@ def resolve_main_route(api, repository: str, executor_run: dict, attempt: str) -
                 "main_measurement_revision": policy_revision, "main_policy_revision": policy_revision,
                 "main_certificate_revision": "-", "main_certificate_sha256": "-",
                 **{name: "-" for name in MAIN_ROUTE_OUTPUT_FIELDS[7:]}}
+    # A routed revision also requires the canonical request identity in the executor title.
+    actual, request, head = main_route_attempt(api, repository, executor_run, attempt)
     policy = main_route_record(policy_text, MAIN_ROUTE_FIELDS)
     facts = {"schema": "buster-compiler-main-route-github-facts-v1", "repository": repository,
              "executor_run": str(actual["id"]), "executor_attempt": str(actual["run_attempt"]),

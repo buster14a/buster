@@ -10,7 +10,12 @@ P selects the immutable measurement harness H, expected profile, preparation
 policy, owned-phase schema and any reviewed certificate. Recovery uses the
 same original N/P/H. It never substitutes the current policy or interprets a
 missing proof as historical legacy. Only a genuine pre-routing revision
-without the policy and native module keeps historical receipt interpretation.
+without the policy and native module keeps historical receipt interpretation;
+such a run may also predate the canonical `9700X request N.M head H` executor
+title, which every routed revision requires. Publication-only recovery
+(`9700x-compiler-report.yml`) uses a full trusted checkout and the pinned
+TinyCC so it runs the same native resolver as terminal publication; a resolver
+failure or timeout is a refusal, never a historical downgrade.
 
 The supported owned LONG route retains the original main BASE→HEAD→BASE
 build recipe and complete default corpus. The proposed fixed-40 route uses

@@ -203,7 +203,8 @@ class MainRouteApiTests(unittest.TestCase):
         self.assertIs(result["main_owned"], False)
         self.assertEqual(result["main_policy_revision"], "d" * 40)
         self.assertEqual(result["main_measurement_revision"], "d" * 40)
-        self.assertEqual(calls[0:2], ["/actions/runs/321/attempts/3", "/actions/runs/319/attempts/1"])
+        self.assertEqual(calls[0], "/actions/runs/321/attempts/3")
+        self.assertIn("/actions/runs/319/attempts/1", calls)
         self.assertNotIn("/actions/runs/321", calls)
         data = native.call_args.args[1]
         self.assertIn("executor_attempt\t3\n", data["facts"])
@@ -305,6 +306,37 @@ class MainRouteApiTests(unittest.TestCase):
         value[3]["/compare/" + "d" * 40 + "...main"] = {"status": "diverged"}
         with self.assertRaises(ValueError):
             self.route(value)
+
+    def test_pre_routing_run_without_canonical_title_recovers_historically(self):
+        # Publication-only recovery of runs that predate both the routing policy and the request title.
+        for title in (None, "9700X direct workload benchmark"):
+            value = self.fixture(attempt=1)
+            path = f"/contents/{authorize_compiler.MAIN_ROUTE_PATH}?ref=" + "d" * 40
+            value[3][path] = urllib.error.HTTPError(path, 404, "missing", {}, None)
+            value[1]["display_title"] = title
+            value[3]["/actions/runs/321/attempts/1"] = dict(value[1])
+            with self.subTest(title=title):
+                result, native, calls = self.route(value)
+                self.assertFalse(result["main_owned"])
+                self.assertEqual(result["main_profile"], "compiler-compare-v1")
+                native.assert_not_called()
+                self.assertNotIn("/actions/runs/319/attempts/1", calls)
+
+    def test_routed_run_without_canonical_title_is_refused_before_native(self):
+        value = self.fixture()
+        value[1]["display_title"] = "9700X direct workload benchmark"
+        value[3]["/actions/runs/321/attempts/3"] = dict(value[1])
+        with self.assertRaises(ValueError):
+            self.route(value)
+
+    def test_expired_native_resolver_is_a_refusal_not_a_crash(self):
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as root, \
+                mock.patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired(["build.sh"], 120)):
+            with self.assertRaisesRegex(ValueError, "timed out"):
+                authorize_compiler.main_route_native(Path(root), {"policy": "", "facts": ""})
 
 if __name__ == "__main__":
     unittest.main()

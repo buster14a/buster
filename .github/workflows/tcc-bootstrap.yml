@@ -324,7 +324,7 @@ jobs:
         with:
           mode: source
           source-directory: .tools/tinycc
-          source-repository: ${{ github.repository }}
+          source-repository: TinyCC/tinycc
       - name: Install pinned TCC on the hosted runner
         working-directory: .tools/tinycc
         shell: bash
@@ -431,7 +431,7 @@ jobs:
         with:
           mode: source
           source-directory: .tools/tinycc
-          source-repository: ${{ github.repository }}
+          source-repository: TinyCC/tinycc
       - name: Install pinned TCC on the hosted runner
         working-directory: .tools/tinycc
         shell: bash
