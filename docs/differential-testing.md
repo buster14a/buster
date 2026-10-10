@@ -13,7 +13,7 @@ From the repository root, build `ide` normally and use a **new** output director
 ./build.sh test_differential --ide build/Release/ide --cc clang --out build/differential-release --sanitize-oracle
 ```
 
-On desktop SysV x86-64, the defaults use fourteen successful permanent cases,
+On desktop SysV x86-64, the defaults use fifteen successful permanent cases,
 two rejection controls, and four [generated cases](#generated-cases), seed 1, a
 10-second deadline per child, and at most 64 reduction trials for the first
 runtime mismatch in each case. A reference compiler must be available; its
@@ -160,7 +160,7 @@ QUALITY exercises its scheduling policy; there is no invented scheduler flag.
 ## Distinct objects
 
 Many rows produce byte-identical output: on Linux x86-64, measured with this
-change on `3f3b88b1`, the default corpus of 20 cases × 216 rows produced 79 distinct candidate
+change on `3f3b88b1`, the default corpus of 21 cases × 216 rows produced 86 distinct candidate
 artifacts. Each row still compiles, verifies and compares its diagnostics. The
 artifact the candidate wrote is its identity: the object for cases with a fixed
 host caller, otherwise the executable it linked itself. A row whose artifact
@@ -169,6 +169,15 @@ confirmed equal, reuses that row's link and run observation instead of linking
 and executing it again. Classification still runs per row, so a failing object
 names every row that produced it. Platforms whose linkers write timestamps or
 paths into executables simply find fewer matches.
+
+Reuse is exact because no execution input depends on the row. The first row
+to produce an artifact moves it to `<case>/objects/<index>/`, where it is
+linked and run. Its argv, output paths and sanitizer report environment
+therefore belong to the artifact, and a reusing row would have issued the same
+command. The `run-identity` control
+(`tools/fixtures/differential_run_identity.c`) exits nonzero when its
+executable's parent directory is a matrix-row directory. A runner that executed
+candidates in place would fail every row.
 
 Each tracked row writes `object.txt` with the artifact's index, the first row
 that produced it, whether this row reused it, and its hash and size.

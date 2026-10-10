@@ -35,6 +35,7 @@ BUSTER_GLOBAL_LOCAL DCase const d_builtin_cases[] = {
     {S8("native-variadic"), S8("tests/differential/native_variadic.c"), S8("tests/differential/native_variadic_host.c"), false, {0}, true},
     {S8("va-list-places"), S8("tests/basic_c_va_list_places.c"), {0}, false, {0}, true},
     {S8("native-aggregate"), S8("tests/differential/native_aggregate.c"), S8("tests/differential/native_aggregate_host.c"), false, {0}, true},
+    {S8("run-identity"), S8("tools/fixtures/differential_run_identity.c"), {0}, false, {0}, true},
 #if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
     {S8("sysv-va-list"), S8("tests/differential/sysv_va_list.c"), S8("tests/differential/sysv_va_list_host.c"), false, {0}, true, true},
     {S8("sysv-sseup"), S8("tests/basic_c_sysv_sseup.c"), S8("tests/host_sysv_sseup.c"), false, {0}, true, true},
@@ -77,11 +78,13 @@ struct DResult
 };
 // Distinct candidate artifacts of one case. Matrix rows that produce a
 // byte-identical object or executable share its link and run observation, so
-// redundant rows are counted and compared without being executed again.
+// redundant rows are counted and compared without being executed again. Each
+// distinct artifact is moved to directory/<index> and linked and run there, so
+// its argv, paths and sanitizer environment never depend on a matrix row.
 typedef struct DObject DObject;
 struct DObject { u64 hash; u64 size; String8 path; String8 row; DResult result; };
 typedef struct DObjects DObjects;
-struct DObjects { DObject* entries; u32 count; u32 capacity; };
+struct DObjects { DObject* entries; u32 count; u32 capacity; String8 directory; };
 typedef struct DOracleFailure DOracleFailure;
 struct DOracleFailure { String8 reason; String8 failure_phase; };
 typedef enum DReferenceDialect { D_REFERENCE_GNU, D_REFERENCE_MSVC } DReferenceDialect;
@@ -1284,6 +1287,34 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
             result = reused;
         }
     }
+    // A new artifact leaves its row directory before any link or run.
+    String8 run_directory = directory;
+    if (artifact_hashed && !result.object_reused && objects->count < objects->capacity)
+    {
+        run_directory = path_join(arena, objects->directory, string_format(arena, S8("{u32}"), objects->count + 1));
+        make_directory_recursive(arena, run_directory);
+        String8 moved_object = path_join(arena, run_directory, settings->reference_dialect == D_REFERENCE_MSVC ? S8("subject.obj") : S8("subject.o"));
+#if BUSTER_WINDOWS
+        String8 moved_executable = path_join(arena, run_directory, S8("program.exe"));
+#else
+        String8 moved_executable = path_join(arena, run_directory, S8("program"));
+#endif
+        String8 moved = test.host.length ? moved_object : moved_executable;
+        String8 artifact_z = string_duplicate_arena(arena, artifact, true);
+        String8 moved_z = string_duplicate_arena(arena, moved, true);
+        artifact_hashed = !path_exists(arena, moved) && rename((char*)artifact_z.pointer, (char*)moved_z.pointer) == 0;
+        if (artifact_hashed)
+        {
+            object = moved_object;
+            executable = moved_executable;
+            artifact = moved;
+        }
+        else
+        {
+            settings->io_failed = true;
+            run_directory = directory;
+        }
+    }
     if (!test.reject && d_success(result.compile) && !result.object_reused)
     {
         bool executable_ready = path_exists(arena, executable);
@@ -1298,7 +1329,7 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
                 os_file_delete(link_caller);
                 count = d_reference_compile_arguments(settings, test, test.host, link_caller, optimize, argv);
                 result.caller_compile = d_observe_with_timeout(settings, (SliceString8){.pointer = argv, .length = count},
-                    path_join(arena, directory, S8("caller-compile")), timeout_seconds);
+                    path_join(arena, run_directory, S8("caller-compile")), timeout_seconds);
                 result.caller_compiled = true;
                 result.caller_output_ready = path_exists(arena, link_caller);
                 result.caller_ready = d_caller_ready(result.caller_compile, result.caller_output_ready, settings->io_failed);
@@ -1316,7 +1347,7 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
                         object, executable, !link_caller.length, argv);
                 }
                 result.link = d_observe_with_timeout(settings, (SliceString8){.pointer = argv, .length = count},
-                    path_join(arena, directory, S8("link")), timeout_seconds);
+                    path_join(arena, run_directory, S8("link")), timeout_seconds);
             }
             executable_ready = caller_ready && d_success(result.link) && path_exists(arena, executable);
         }
@@ -1324,7 +1355,7 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
         {
             argv[0] = executable;
             result.run = d_observe_with_timeout(settings, (SliceString8){.pointer = argv, .length = 1},
-                path_join(arena, directory, S8("run")), timeout_seconds);
+                path_join(arena, run_directory, S8("run")), timeout_seconds);
             result.ran = true;
         }
     }
@@ -1654,7 +1685,8 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
             d_log(settings, string_format(arena, S8("DIFFERENTIAL_FAIL case={S8} caller_compile=invalid\n"), test.name));
         }
     }
-    DObjects objects = {.entries = arena_allocate(arena, DObject, config_count), .capacity = config_count};
+    DObjects objects = {.entries = arena_allocate(arena, DObject, config_count), .capacity = config_count,
+        .directory = path_join(arena, directory, S8("objects"))};
     for (u32 index = 0; ready && index < config_count && !d_atomic_load(&d_cancellation_signal); index += 1)
     {
         u64 scratch = arena->position;
