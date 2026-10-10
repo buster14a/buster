@@ -197,7 +197,9 @@ in the unit's arena. The driver then takes the unit's declaration records from
 ([declaration split](#declaration-split-from-the-tree)), and hands the tree to
 semantic analysis in `CParserResult.ast`, where the
 [tree expression typer](#tree-expression-typer) reads it; nothing else does.
-The object, every diagnostic and every later stage are unchanged. The driver has no phase arena to lend (`c_preprocess` is not
+With it the driver sets `CParserResult.type_interning`, which the typer's
+answers for casts and `&` need ([interned rows](#interned-rows)). The object,
+every diagnostic and every later stage are unchanged. The driver has no phase arena to lend (`c_preprocess` is not
 given one either), so the builder creates and retires its own. A build that is
 not complete fails the unit with the parse error class; its diagnostic is
 published exactly as a `c_parse_ast` diagnostic is. `-E` and assembly inputs
@@ -237,10 +239,10 @@ evidence.
 bodies from the tree, in place of the speculative type machine
 (`CTypeParseMachine` in `c_parse.c`). Stage 1 covers names, literals and
 postfix chains; stage 2 adds the operators; stage 3 adds `&` and casts to
-primitive and pointer type names, over rows the machine now interns. It runs
-only when the caller supplies a tree in `CParserResult.ast`, which today only
-the [driver hook](#driver-pilot-hook) does; without one, analysis is
-unchanged.
+primitive and pointer type names, over rows the machine interns under the
+pilot. It runs only when the caller supplies a tree in `CParserResult.ast`,
+which today only the [driver hook](#driver-pilot-hook) does; without one,
+analysis is unchanged.
 
 - **When it types.** `c_parse_validate_lowering_constraints` indexes the
   tree's top-level function definitions once (`c_ast_types_bodies_prepare`).
@@ -724,6 +726,18 @@ four arms. The base is now main `f01f5523`, which the branch merges.
   for production. An exact-head 9700X compiler comparison is requested in the
   PR head. Until it publishes, performance validation is incomplete (#2761),
   and the hook stays opt-in.
+
+The same audit records that version's hosted census, diagnostic only:
+- The correctness and object-identity budgets pass.
+- The default path interns nothing and its objects are unchanged, but its
+  count moved by −0.069% on `-fsyntax-only`, outside the ±0.05% band on the
+  cheaper side. The cause is the code around the changed functions, compiled
+  differently, not saved work. `-c` is within the band at −0.031%.
+- Stage 3 removes 0.80% of the pilot's instructions. Machine runs from queries
+  fall from 207,217 to 181,003.
+- On the merge with main `f6e8d25f`, the same arms read −0.077% on the
+  default path and −0.84% under the pilot.
+- The requested 9700X comparison decides the performance disposition (#2761).
 
 For the [declaration split](#declaration-split-from-the-tree), these budgets
 were declared before its measured runs. The input and flags are the same as
