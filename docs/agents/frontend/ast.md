@@ -411,12 +411,11 @@ unchanged.
     declarator. Their readers append rows that are not interned.
   - `&` or a type name whose interned rows do not exist yet when the body is
     typed;
-  - a string literal. Its array row is not interned, because lowering gives
-    each array row its own IR array type and `-g` describes every IR type.
-    A query on one costs the machine little: the unity self-host makes about
-    6,650, against 2.19 million queries. A literal path that answered them
-    before the machine saved about 1 million instructions there, and its
-    check on every query cost more than that, so it was dropped.
+  - a string literal as an operand. Its array row is not interned, because
+    lowering gives each array row its own IR array type and `-g` describes
+    every IR type. A query of one string-literal token alone is answered by
+    replaying the machine's leaf instead (below), and a run of several tokens
+    stays with the machine.
 
   An operand the machine scans but does not type (a cast's operand without
   constraint checks, a `sizeof` expression) must therefore hold no type name
@@ -432,6 +431,21 @@ unchanged.
   miss, calls the machine's string leaf, which appends the same row. The node
   is never constraint-safe for its parents, whose machine runs would type the
   literal too. An operand of several literal tokens is not replayed.
+
+  A query of one string-literal token alone, perhaps parenthesized, is
+  replayed the same way. `S8()`'s length spells it `(("text"))[0]` inside
+  `BUSTER_ARRAY_LENGTH`. The eager pass flags the node
+  (`C_AST_TYPE_FLAG_STRING`) without accepting it, so every parent declines.
+  `c_ast_types_answer` reports it from its decline branch as
+  `C_AST_TYPE_STRING`, off the path ordinary answers take.
+  `c_parse_expression_tree_string_answer` then makes the machine's root task:
+  - it strips the parentheses;
+  - it probes the memo for the token and, on a miss, calls the string leaf
+    with the query's arena;
+  - it rewinds the machine's scratch arena.
+
+  The replayed row is the answer. A leaf that fails is undone, and the query
+  runs the machine.
 - **Constraint checks.** A checked query is answered only from a node whose
   operands are safe and whose own checked-mode rule cannot fire. For the
   binary operators that is the machine's operand rule. The cases it settles by
@@ -1040,5 +1054,22 @@ with the base at main `f38a7716`, which carries the `S8()` replay.
   loss, is recorded as a negative result and the code does not ship.
 - **Acceptance.** Hosted counts are diagnostic; Zen 5 validation (#2761)
   stays incomplete and the hook stays opt-in.
+
+The string-literal queries' hosted census is
+[`2026-10-10T200424Z`](../../performance-audits/2026-10-10T200424Z.md),
+diagnostic only:
+- **Census.** 17,765 queries at 43.2 M Ir, not the 6,650 and 1 M the old
+  literal path saw. 10,230 are `S8()`'s parenthesized length operand, and
+  26 M of the 43.2 M is the literal's decode, which a replay must repeat.
+- **Correctness.** 0 verify mismatches. Objects are byte-identical at `-g0`
+  and `-g` across the four arms.
+- **Ship.** C against B is −13.30 M (−0.140%). Machine runs from validation
+  queries fall from 55,593 to 38,724.
+- **Default path.** −0.062% on `-fsyntax-only`, outside the band on the
+  cheaper side, and −0.024% on `-c`. The work is unchanged; the difference
+  is the query function's own code, compiled again.
+- **History.** The first two versions lost instructions: tests on the path
+  every answer takes cost more than the replay saves. The shipped version
+  keeps the string case off that path.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
