@@ -219,7 +219,7 @@ def latest_runs(rows: list, candidate: dict, checks: dict = CHECKS) -> dict:
 
 
 def check_results(runs: dict, jobs: dict, candidate: dict,
-                  checks: dict = CHECKS) -> tuple[list, list]:
+                  checks: dict = CHECKS, publications: frozenset = frozenset()) -> tuple[list, list]:
     evidence, pending = [], []
     for filename, context in checks.items():
         run = runs.get(".github/workflows/" + filename)
@@ -259,7 +259,12 @@ def check_results(runs: dict, jobs: dict, candidate: dict,
                     context + ": missing exact-attempt classification")
             if expected == "skipped":
                 for row in jobs.get(key, []):
-                    if row.get("name") != "No-code plan / Classify no-code changes":
+                    # GitHub lists this reconciler's own marker-bound admission
+                    # checks among an arbitrary Actions run's jobs. They have no
+                    # runner or steps and are publications, not workloads.
+                    published = (row.get("id") in publications and not row.get("runner_id") and
+                                 not row.get("steps"))
+                    if row.get("name") != "No-code plan / Classify no-code changes" and not published:
                         require(row.get("status") == "completed" and row.get("conclusion") == "skipped" and
                                 not row.get("runner_id") and not row.get("steps"),
                                 context + ": no-code workload was selected or allocated a runner")
@@ -467,7 +472,13 @@ def collect(api: GitHub, candidate: dict, checks: dict = CHECKS) -> tuple[list, 
             key = (run["id"], run["run_attempt"])
             path = f"actions/runs/{key[0]}/attempts/{key[1]}/jobs"
             jobs[key] = api.pages(path, "jobs")
-    return check_results(runs, jobs, candidate, checks)
+    publications = frozenset()
+    if candidate.get("no_code") is True:
+        ours = (published_checks(api, candidate["head"])[0],
+                published_checks(api, candidate["head"], RETIREMENT_CONTEXT,
+                                 native_marker(candidate["head"]))[0])
+        publications = frozenset(row["id"] for row in ours if row is not None)
+    return check_results(runs, jobs, candidate, checks, publications)
 
 
 def trusted_no_code(arguments, candidate: dict) -> dict | None:
