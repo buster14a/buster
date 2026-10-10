@@ -220,8 +220,10 @@
 // A string literal of one token. It is not ACCEPTED, since its machine answer
 // appends its array row, so every parent declines it; a query of the node
 // alone is answered by replaying the machine's leaf call, whose row is the
-// answer (C_AST_TYPE_STRING).
-#define C_AST_TYPE_FLAG_STRING (1u << 6)
+// answer (C_AST_TYPE_STRING). Bit 6 is C_AST_TYPE_FLAG_FAILS's (#3377); the
+// flags are a u8, so this is the last free bit.
+#define C_AST_TYPE_FLAG_STRING (1u << 7)
+BUSTER_CT_CHECK(C_AST_TYPE_FLAG_STRING <= UINT8_MAX);
 
 // INIT_DECLARATOR's presence bit for an initializer, its last child (c_ast.h).
 #define C_AST_TYPE_INIT_DECLARATOR_INITIALIZER (1u << 2)
@@ -1461,7 +1463,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_node(CAstTypeBody* body, CTypeParseMac
     break;
     case C_AST_STRING:
     {
-        body->flags[relative] = body->ast->data[node] == 1 ? C_AST_TYPE_FLAG_STRING : 0;
+        body->flags[relative] = (u8)(body->ast->data[node] == 1 ? C_AST_TYPE_FLAG_STRING : 0);
     }
     break;
     case C_AST_MEMBER:
