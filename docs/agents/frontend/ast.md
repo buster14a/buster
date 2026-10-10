@@ -1017,4 +1017,31 @@ the same way and diagnostic only:
   A/A control itself exceeded its ±0.5% bound.
 - **Decision.** Fusion does not ship. The token array and the array build stay.
 
+For a cheaper eager pass (`c_ast_types_type_body`, the tree typer's
+per-body and per-initializer typing), these budgets were declared before its
+measured runs. They use the stage-2 input, flags and four Callgrind arms on
+tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `f38a7716`, which the candidate branches from. The budgets:
+- **Correctness.** No answer changes:
+  - no verify mismatch over the corpus;
+  - the typer's `-v` counters on the self-host are identical in B and C: bodies,
+    initializers, nodes typed and accepted, answers, declines, misses and gated
+    queries;
+  - identical diagnostics with and without the flag;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **The pass's own cost (C against B).** `c_ast_types_type_body`'s inclusive
+  instructions fall by at least 5%, and the whole compile falls by at least
+  the pass's saving less 1 M, so the saving is not moved elsewhere.
+- **Default path (D against A).** The change is confined to the typer, so
+  the default path stays within ±0.05% Ir on `-fsyntax-only` and on `-c`
+  (`-g0`).
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested for this change, so Zen 5 validation stays
+  incomplete (#2761) and the hook stays opt-in.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
