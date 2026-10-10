@@ -2198,6 +2198,32 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_android_preinit_field(ByteSlice bytes, 
     return result;
 }
 
+// The DT_PREINIT_ARRAY/DT_PREINIT_ARRAYSZ tags (bits 0 and 1 of the result)
+// that precede the first DT_NULL, which is where the loader stops reading.
+BUSTER_GLOBAL_LOCAL u32 compiler_driver_android_preinit_dynamic(ByteSlice bytes, u64 offset, u64 size, u64* address, u64* length)
+{
+    u32 tags = 0;
+    bool terminated = false;
+    for (u64 entry = 0; !terminated && entry + 16 <= size; entry += 16)
+    {
+        u64 tag = 0;
+        u64 value = 0;
+        terminated = !compiler_driver_android_preinit_field(bytes, offset + entry, 8, &tag) ||
+                     !compiler_driver_android_preinit_field(bytes, offset + entry + 8, 8, &value) || tag == 0;
+        if (!terminated && tag == 32)
+        {
+            *address = value;
+            tags |= 1;
+        }
+        else if (!terminated && tag == 33)
+        {
+            *length = value;
+            tags |= 2;
+        }
+    }
+    return tags;
+}
+
 // Issue 1243: an Android executable is staged through the Linux dynamic
 // writers, so it publishes `.preinit_array` through DT_PREINIT_ARRAY for the
 // bionic linker too. The emulator suite cannot execute a freshly linked file
@@ -2215,6 +2241,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTest
         "static void early(int argc, char **argv, char **envp) { (void)argc; (void)argv; (void)envp; }\n"
         "__attribute__((section(\".preinit_array\"), used)) static void (*entry)(int, char **, char **) = early;\n"
         "int main(void) { return puts(\"x\") < 0; }\n"))));
+    // Tags past the first DT_NULL are invisible to the loader and must not count.
+    u8 tail[48] = {0};
+    tail[16] = 32;
+    tail[32] = 33;
+    tail[40] = 8;
+    u64 tail_address = 0;
+    u64 tail_size = 0;
+    BUSTER_TEST(arguments, compiler_driver_android_preinit_dynamic((ByteSlice)BUSTER_ARRAY_TO_SLICE(tail), 0, sizeof(tail), &tail_address, &tail_size) == 0);
+    tail[0] = 32;
+    BUSTER_TEST(arguments, compiler_driver_android_preinit_dynamic((ByteSlice)BUSTER_ARRAY_TO_SLICE(tail), 0, sizeof(tail), &tail_address, &tail_size) == 3);
     String8 targets[] = {S8("x86_64-linux-android"), S8("aarch64-linux-android")};
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
     {
@@ -2245,23 +2281,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTest
                         compiler_driver_android_preinit_field(bytes, base + 32, 8, &dynamic_size);
             }
         }
-        for (u64 entry = 0; valid && entry + 16 <= dynamic_size; entry += 16)
-        {
-            u64 tag = 0;
-            u64 value = 0;
-            valid = compiler_driver_android_preinit_field(bytes, dynamic_offset + entry, 8, &tag) &&
-                    compiler_driver_android_preinit_field(bytes, dynamic_offset + entry + 8, 8, &value);
-            if (tag == 32)
-            {
-                preinit_address = value;
-                tags |= 1;
-            }
-            else if (tag == 33)
-            {
-                preinit_size = value;
-                tags |= 2;
-            }
-        }
+        if (valid) tags = compiler_driver_android_preinit_dynamic(bytes, dynamic_offset, dynamic_size, &preinit_address, &preinit_size);
         BUSTER_TEST(arguments, valid && tags == 3 && preinit_size == 8);
         // Map the array through the load that holds it, then the entry
         // through the load that executes it.
