@@ -247,7 +247,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_no_code_main(Arena* arena, SliceString8 arg
             policy_change = ci_no_code_compare(arena, repo, policy, base);
             bool complete = integrated.valid && contribution.valid && policy_change.valid;
             no_code = complete && integrated.prose_only && contribution.prose_only && policy_change.prose_only;
-            reason = !complete ? S8("incomplete-diff") : no_code ? S8("reviewed-prose-only") : S8("execution-affecting-or-unknown-input");
+            // A prose-only group stacked on queued code still runs full; name that
+            // cause separately so the receipt explains its own decision.
+            bool own_prose = integrated.prose_only && contribution.prose_only;
+            reason = !complete ? S8("incomplete-diff") : no_code ? S8("reviewed-prose-only") :
+                own_prose ? S8("execution-affecting-base-drift") : S8("execution-affecting-or-unknown-input");
         }
         string_print(S8("{{\"schema\":\"" CI_NO_CODE_SCHEMA "\",\"profile\":\"{S8}\",\"no_code\":{S8},"
             "\"base\":\"{S8}\",\"head\":\"{S8}\",\"tested\":\"{S8}\",\"policy\":\"{S8}\","
