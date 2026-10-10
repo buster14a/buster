@@ -704,6 +704,17 @@ once producers declare no-code plans, deliberately omitted gates must be skipped
 without runner allocation and their exact-attempt classifier must succeed. A
 trusted rollback or conservative full fallback may still execute the original
 gates; those are recorded as executed, never as omitted.
+The reusable planner builds the classifier from an independent depth-1
+checkout of trusted main. The candidate is fetched as data only: a bare
+`--filter=blob:none` repository holding exactly the tested commit and the
+trusted policy commit with their commit/tree history, with no working tree,
+other branches or tags, and no persisted credentials. The classifier reads only
+commits and trees (raw-diff modes and object IDs, parents, merge-base) and runs
+with `GIT_NO_LAZY_FETCH=1`, so a missing commit or tree fails its bounded Git
+capture and selects full validation instead of being fetched mid-decision. A
+failed fetch fails the planner job, which consumers also treat as full. Hosted
+controls repeat that fetch against the fixture: `blob:none` still classifies
+prose as no-code and `tree:0` selects full.
 Normal code changes still require every current gate. No-code records cannot
 substitute for native-retirement execution, benchmarks or full queue-to-main
 coverage. Explicit workflow dispatch continues to request normal/full work.
