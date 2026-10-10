@@ -103,14 +103,19 @@ The catch-up is fully automatic:
    `snapshot_stale` compares the committed snapshot with admitted source bytes
    read from Git objects, with no pinned closure needed. It only does the following:
    - When the snapshot is stale and no request is open, it creates one empty
-     commit on `main`, points the bot-owned `native-retirement/catch-up` branch
-     at it and opens the PR. Its token has `contents: write` and
-     `pull-requests: write` for exactly this. It publishes no generated state,
+     commit on `main`, moves the bot-owned `native-retirement/catch-up` branch
+     to it with a leased push from the value it read, and opens the PR. Its
+     token has `contents: write` and `pull-requests: write` for exactly this. It publishes no generated state,
      cannot merge and does not enable auto-merge: GitHub starts no workflows
      for events caused by `GITHUB_TOKEN`, including the `merge_group` event of
      a queue entry that token enqueued, so every required check would wait
      forever (seen on #1966).
    - When `main` is current, it closes any open catch-up request.
+   - When a published catch-up's exact head has a completed, failed latest
+     `CI complete` and `main` has since advanced past the base recorded in
+     its integration trailer, it comments the reason on that PR, closes it
+     and opens a fresh request for the new `main` (see step 4). Its token
+     has `checks: read` for this.
 2. The controller treats that bot-owned PR as an ordinary request with an empty
    classification. It skips prerequisite CI, because nothing on a bot-created
    empty head needs testing. GitHub still records that head's `pull_request`
@@ -134,6 +139,33 @@ The catch-up is fully automatic:
    groups. A published catch-up that is still admissible is not rebuilt when
    `main` moves. If sources moved on, the next run opens a new catch-up after
    this one lands.
+4. A published catch-up whose PR CI fails can never merge, and neither the
+   controller nor the opener would otherwise act: the controller treats the
+   still-admissible head as already current, and the opener sees an open
+   request (#3271 failed `CI complete` at `ba667d8` and sat open until it was
+   closed by hand). The opener therefore replaces it, but only after `main`
+   advances strictly past the head's recorded base, confirmed by the compare
+   API. A same-`main` replacement would rebuild identical inputs, which is
+   rerun-until-green, so the failed request stays open on an unchanged `main`
+   for owner inspection. Pending, missing or passing CI and an unpublished
+   empty head are never replaced. The opener and writer have separate
+   concurrency groups, so they serialize on the branch itself: the writer
+   publishes with `--force-with-lease` on the head it was requested for, and
+   the opener moves the bot branch only with a leased push from the value it
+   read (the exact failed head, or absent), never with a forced ref update.
+   Exactly one of two racing updates wins. If the writer wins, the opener's
+   lease is refused, it reopens the PR at the fresh head and opens nothing;
+   if the opener wins, the writer's lease is refused. Retirement also waits
+   while a writer is active and closes the PR only while its live head is
+   the failed one, which makes a writer that has not yet authorized refuse.
+   The replacement records the `main` it was
+   built for, so a deterministic failure costs at most one writer run and one
+   CI run per `main` revision and cannot create a writer loop. Each closed PR
+   keeps its failed checks and an explanatory comment as evidence. No test
+   is skipped, rerun or quarantined: the new head is new generated state for
+   new inputs, tested in full. Recording the failure in the ledger for owner
+   reconciliation was rejected because main's snapshot would stay stale
+   until an owner acted, even when the next `main` already fixed the cause.
 
 Prerequisites beyond the standing-grant activation below:
 - Settings -> Actions -> General must allow GitHub Actions to create pull
