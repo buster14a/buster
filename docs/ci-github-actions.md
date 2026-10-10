@@ -731,7 +731,11 @@ There is no platform-shaped no-op replacement.
 
 The trusted reconciler accepts conditionally skipped independent jobs only
 after its own native no-code classification, with successful matching planner
-identity and a complete zero-allocation inventory. A failed or missing selected
+identity and a complete zero-allocation inventory. GitHub may list the
+reconciler's own published admission checks among an Actions run's jobs; the
+inventory excludes only rows whose IDs match its exact-head marker-bound
+publications and that have no runner or steps (first live no-code group,
+#3343). A failed or missing selected
 obligation cannot be explained by another job's deliberate omission. The
 fail-fast watcher defers conditional skips for trusted adjudication and reports
 no-code completion only from the exact reconciler receipt. It still cancels
