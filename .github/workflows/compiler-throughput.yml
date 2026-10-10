@@ -224,7 +224,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes mold llvm-18
+          sudo apt-get install --no-install-recommends --yes mold
       - name: Build diagnostic compiler with bounded parallelism
         id: compiler
         shell: bash
@@ -281,22 +281,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          llvm-dis-18 --version
-          # LLVM bitcode has no exact AVX-512 IR lowering; exercise simd.h's scalar source fallback.
+          # The native assembler path supports production SIMD and avoids intentionally unsupported LLVM SIMD records.
           for mode in off on; do
             selection=-fno-canonical-inline
             if [[ "$mode" == on ]]; then selection=-fcanonical-inline; fi
-            ./build/Release/ide cc -v -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -U__AVX512F__ -U__AVX512BW__ -U__AVX512VBMI__ -U__AVX512VBMI2__ -O3 "$selection" -emit-llvm -c src/buster/apps/ide/ide.c -o "direct-ssa-census-evidence/tiny-$mode.bc" > "direct-ssa-census-evidence/tiny-$mode.stdout.log" 2> "direct-ssa-census-evidence/tiny-$mode.stderr.log"
-            llvm-dis-18 "direct-ssa-census-evidence/tiny-$mode.bc" -o "direct-ssa-census-evidence/tiny-$mode.ll"
+            ./build/Release/ide cc -v -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -O3 "$selection" -S src/buster/apps/ide/ide.c -o "direct-ssa-census-evidence/tiny-$mode.s" > "direct-ssa-census-evidence/tiny-$mode.stdout.log" 2> "direct-ssa-census-evidence/tiny-$mode.stderr.log"
           done
           records='['
           for helper in c_ir_field_index_bucket machine_x64_reject; do
-            call_pattern="(^|[[:space:]])(musttail[[:space:]]+|tail[[:space:]]+|notail[[:space:]]+)?call[[:space:]].*@\"?${helper}\"?[[:space:]]*\\("
-            definition_pattern="^define[[:space:]].*@\"?${helper}\"?[[:space:]]*\\("
-            off_calls=$(grep -Ec "$call_pattern" direct-ssa-census-evidence/tiny-off.ll || true)
-            on_calls=$(grep -Ec "$call_pattern" direct-ssa-census-evidence/tiny-on.ll || true)
-            off_definitions=$(grep -Ec "$definition_pattern" direct-ssa-census-evidence/tiny-off.ll || true)
-            on_definitions=$(grep -Ec "$definition_pattern" direct-ssa-census-evidence/tiny-on.ll || true)
+            call_pattern="^[[:space:]]*call[[:space:]].*\\b${helper}\\b"
+            definition_pattern="^${helper}:[[:space:]]*(#.*)?$"
+            off_calls=$(grep -Ec "$call_pattern" direct-ssa-census-evidence/tiny-off.s || true)
+            on_calls=$(grep -Ec "$call_pattern" direct-ssa-census-evidence/tiny-on.s || true)
+            off_definitions=$(grep -Ec "$definition_pattern" direct-ssa-census-evidence/tiny-off.s || true)
+            on_definitions=$(grep -Ec "$definition_pattern" direct-ssa-census-evidence/tiny-on.s || true)
             record=$(printf '{"helper":"%s","calls":{"off":%s,"on":%s},"definitions":{"off":%s,"on":%s}}' "$helper" "$off_calls" "$on_calls" "$off_definitions" "$on_definitions")
             printf 'INLINE_PRODUCTION_CALLS %s\n' "$record"
             if [[ "$records" != "[" ]]; then records+=','; fi
@@ -308,7 +306,7 @@ jobs:
           done
           printf '%s]\n' "$records" > direct-ssa-census-evidence/production-tiny-helper-calls.json
           grep '^IR_INLINE ' direct-ssa-census-evidence/tiny-*.stdout.log
-          sha256sum direct-ssa-census-evidence/tiny-*.bc direct-ssa-census-evidence/tiny-*.ll > direct-ssa-census-evidence/tiny-inputs.sha256
+          sha256sum direct-ssa-census-evidence/tiny-*.s > direct-ssa-census-evidence/tiny-inputs.sha256
       - name: Report census scope without a performance verdict
         if: always()
         shell: bash
@@ -319,7 +317,7 @@ jobs:
           REFERENCE_RESULT: ${{ steps.reference.outcome }}
         run: |
           printf '## Direct-SSA diagnostic census\n\nRegistered tests: **%s**. Direct SSA: **%s**. Shared local promotion: **%s**.\n\nArtifacts retain source metrics, raw allocation reports, compiler/input identities and failures. This instrumented job is not a timing comparison, a sanitizer or self-host gate, or dedicated Ryzen 9700X performance acceptance for #447.\n' "$TEST_RESULT" "$DIRECT_RESULT" "$REFERENCE_RESULT" >> "$GITHUB_STEP_SUMMARY"
-          printf '\nProduction tiny-helper proof: **%s**. This compares prepared canonical output for the same production source at -O3.\n' "$TINY_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          printf '\nProduction tiny-helper proof: **%s**. This compares generated native assembly for the same production source at -O3.\n' "$TINY_RESULT" >> "$GITHUB_STEP_SUMMARY"
           grep '^IR_INLINE ' direct-ssa-census-evidence/tiny-*.stdout.log || true
           if [[ "$DIRECT_RESULT" != success || "$REFERENCE_RESULT" != success || "$TINY_RESULT" == failure ]]; then
             grep -nE -m 20 'error|ir.inline-required|validation' direct-ssa-census-evidence/*.stderr.log || true
