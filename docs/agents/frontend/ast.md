@@ -1017,4 +1017,28 @@ the same way and diagnostic only:
   A/A control itself exceeded its ±0.5% bound.
 - **Decision.** Fusion does not ship. The token array and the array build stay.
 
+For the typer's string-literal queries (a bare string literal or run of them,
+perhaps parenthesized, that the tree declines today), these budgets were
+declared before any measured run. The input and flags are stage 3's; the four
+Callgrind arms (A base default, B base with `-fc-ast-pilot`, C candidate with
+it, D candidate default) are counted on tests-off `-march=x86-64-v3` builds,
+with the base at main `f38a7716`, which carries the `S8()` replay.
+- **Census first.** A throwaway build of the base counts the declined
+  string-literal queries on the self-host by shape (one token, parenthesized,
+  a run of several tokens) and charges their machine runs' inclusive Ir. If
+  that total is below 1 M Ir, no candidate is built and the negative result
+  is recorded.
+- **Correctness.** No verify mismatch over the corpus; every replayed answer's
+  rows are taken back and the machine appends the same rows again. Identical
+  diagnostics and type-table sizes with and without the tree, and
+  byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **Default path (D against A).** Within ±0.05% Ir on `-fsyntax-only` and on
+  `-c` (`-g0`). The answer must add no check to queries outside the typer.
+- **The gain that ships it (C against B).** At least 1 M fewer instructions
+  (about 0.01% of the pilot compile), with the eager pass, the answer and the
+  replay charged, and fewer machine runs from queries. A smaller gain, or a
+  loss, is recorded as a negative result and the code does not ship.
+- **Acceptance.** Hosted counts are diagnostic; Zen 5 validation (#2761)
+  stays incomplete and the hook stays opt-in.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
