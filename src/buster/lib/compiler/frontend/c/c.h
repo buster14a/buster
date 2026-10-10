@@ -595,6 +595,11 @@ struct CPreprocessOptions
     String8* undefinitions;
     String8* include_paths;
     String8* system_include_paths;
+    // `-include FILE` names in command-line order. The preprocessor processes
+    // them as `#include "FILE"` lines of a synthetic `<command-line>` file
+    // that precedes the primary source, after command-line macros and without
+    // shifting the primary source's lines or __FILE__.
+    String8* forced_includes;
     String8 source_path;
     // Identity of the descriptor that supplied source, when available.
     // In-memory callers retain the path namespace by leaving this invalid.
@@ -606,6 +611,7 @@ struct CPreprocessOptions
     u32 undefinition_count;
     u32 include_path_count;
     u32 system_include_path_count;
+    u32 forced_include_count;
     u32 expansion_limit;
     u32 include_depth_limit;
     CPreprocessDialect dialect;
@@ -1148,7 +1154,15 @@ struct CEnumMember
     // Once published, ordinary lookup is authoritative; this avoids scanning
     // completed lists for unresolved non-enum identifiers and keywords.
     bool is_published;
-    u8 reserved[6];
+    // Defined inside a function declarator's parameter list, so the name
+    // lives in that prototype's scope (C17 6.2.1p4) and is never published
+    // at file scope nor found by pending lookup from outside it.
+    bool is_prototype_scope;
+    // Defined by an enum type name inside a file-scope declaration's
+    // initializer, bound or static assertion. Its scope begins at its own
+    // definition (C17 6.2.1p7), so an earlier file-scope use is diagnosed.
+    bool is_expression_defined;
+    u8 reserved[4];
 };
 BUSTER_CT_CHECK(sizeof(CEnumMember) == 96);
 
@@ -1618,6 +1632,7 @@ typedef struct CStringLiteralMemo CStringLiteralMemo;
 // exists. Counts of actual operations, not timings; see
 // docs/agents/frontend/layout.md for each field's exact meaning.
 typedef struct CMemberLookup CMemberLookup;
+typedef struct CObjectSizeFacts CObjectSizeFacts;
 typedef struct CTypeLayoutStatistics CTypeLayoutStatistics;
 struct CTypeLayoutStatistics
 {
@@ -1705,6 +1720,9 @@ struct CParseResult
     // by-value operand copy keeps counting into the same record. Null for
     // hand-built results, which then count nothing.
     CTypeLayoutStatistics* type_layout_statistics;
+    // Outside the checkpointed body for the same reason (CObjectSizeFacts in
+    // c_internal.h). Null for hand-built results, which record nothing.
+    CObjectSizeFacts* object_size_facts;
     // Name index of wide aggregates for c_parse_member_type (CMemberLookup in
     // c_internal.h). Outside the checkpointed body too: entries are validated
     // against the live rows on every use, so a rollback or a by-value copy may
@@ -1981,6 +1999,59 @@ BUSTER_F_DECL CAggregateAttributes c_parse_aggregate_attributes(CParseResult con
 // translation unit, so the scan is a count test in the common case.
 BUSTER_F_DECL CTypeAlignment const* c_parse_type_alignment(CParseResult const* result, CTypeId type);
 BUSTER_F_DECL CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess);
+
+// Why c_parse_ast_from_tree handed a unit to the token walker (GitHub #3102).
+typedef enum CParserTreeFallback
+{
+    C_PARSER_TREE_FALLBACK_NONE,
+    // The walker's own preconditions fail, or the tree is not complete.
+    C_PARSER_TREE_FALLBACK_INPUT,
+    // One of the walker's token validators would report a diagnostic.
+    C_PARSER_TREE_FALLBACK_DIAGNOSTIC,
+    // A parenthesized specifier (typeof, _Atomic(T), _Alignas, _BitInt) or
+    // an enum's fixed underlying type.
+    C_PARSER_TREE_FALLBACK_SPECIFIERS,
+    // Redundant parentheses (#3215's family), attributes inside the
+    // declarator, a function derivation followed by a suffix, or no name.
+    C_PARSER_TREE_FALLBACK_DECLARATOR,
+    // An old-style definition with a declaration list.
+    C_PARSER_TREE_FALLBACK_OLD_STYLE,
+    // A token next to an anchor is not the one the shape requires, or a
+    // comma operator in an initializer.
+    C_PARSER_TREE_FALLBACK_TOKENS,
+    // A _Static_assert spelled otherwise, with a comma operator in its
+    // condition, or a body assertion behind an attribute list.
+    C_PARSER_TREE_FALLBACK_ASSERTION,
+    // A top-level node kind with no record rule (a pragma).
+    C_PARSER_TREE_FALLBACK_EXTERNAL,
+    C_PARSER_TREE_FALLBACK_COUNT,
+} CParserTreeFallback;
+
+typedef struct CParserTreeStatistics CParserTreeStatistics;
+struct CParserTreeStatistics
+{
+    // Units whose records the tree produced, and units handed to the walker.
+    u64 units;
+    u64 fallbacks;
+    // Records and body assertion ranges the tree produced.
+    u64 records;
+    u64 assertions;
+    u64 fallback_counts[C_PARSER_TREE_FALLBACK_COUNT];
+    // The last fallback: its reason and the first token of the external
+    // declaration that caused it (UINT32_MAX when no declaration did).
+    CParserTreeFallback reason;
+    u32 fallback_token;
+};
+
+// c_parse_ast for a unit whose complete syntax tree the caller holds (the
+// driver's -fc-ast-pilot): the same CParserResult, with the declaration
+// split, names, bodies and body assertions read from the tree's nodes. It
+// falls back to c_parse_ast's token walker for the whole unit when that
+// walker would report a diagnostic or read a shape differently from the
+// grammar, so its result is always the walker's. `statistics` may be null.
+BUSTER_F_DECL CParserResult c_parse_ast_from_tree(Arena* arena, CPreprocessResult preprocess, CAst const* ast, CParserTreeStatistics* statistics);
+// The CParserTreeFallback in lower case without its prefix ("none", "input", ...).
+BUSTER_F_DECL String8 c_parser_tree_fallback_name(CParserTreeFallback reason);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 // Complete syntax and semantic analysis without constructing canonical IR.
 BUSTER_F_DECL CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax);
