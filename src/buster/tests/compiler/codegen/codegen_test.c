@@ -1986,6 +1986,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_local_seed_coverage(UnitTe
                                                !codegen_test_local_seed_at(&generated, path_function, S8("t"), join_line, true),
                                     path_label);
                 }
+                // dbg6 (#3338): a copy feeds `once` into a destructive add that
+                // overwrites the copy's destination, but the copy's source still
+                // holds the value through its second read.
+                IrFunction* reassigned_function = codegen_test_c_function_find(module, S8("reassigned"));
+                CodegenFunctionDescriptor* reassigned_descriptor =
+                    reassigned_function && generated.error == CODEGEN_ERROR_NONE
+                        ? codegen_test_c_descriptor_find(&generated, reassigned_function->symbol)
+                        : 0;
+                u32 first_read_line = codegen_test_line_offset(&generated, reassigned_descriptor, 30);
+                u32 second_read_line = codegen_test_line_offset(&generated, reassigned_descriptor, 32);
+                String8 reassigned_label = string_format(temporary.arena, S8("frontend={u32} allocator={u32} reassigned.once"), frontend,
+                                                         allocator);
+                BUSTER_TEST_RAW(arguments, reassigned_descriptor && first_read_line != UINT32_MAX && second_read_line != UINT32_MAX &&
+                                           codegen_test_local_seed_at(&generated, reassigned_function, S8("once"), first_read_line, false) &&
+                                           codegen_test_local_seed_at(&generated, reassigned_function, S8("once"), second_read_line, false),
+                                reassigned_label);
             }
         }
         scratch_end(temporary);

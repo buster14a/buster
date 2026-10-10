@@ -11,6 +11,8 @@
 // that same pin, plus the exact no-prefix __rdtsc builtin from ia32intrin.h.
 // Conditional branches contribute signatures; they do not change semantics.
 // Generic custom-type-checked names use the separate finite operation metadata.
+// A hand-written LLVM 23.1.2 supplement (c_vendor_builtin_llvm23_supplement,
+// c_vendor_generic_llvm23_definitions) admits Clang 23 header contracts.
 //
 // This module describes types only. It neither emits an operation nor marks
 // it available to __has_builtin. A reachable call still needs genuine
@@ -3136,6 +3138,146 @@ BUSTER_C_DATA CVendorBuiltinDefinition const c_vendor_builtin_definitions[] = {
     {S8_INITIALIZER("xtest"), 864},
 };
 
+// LLVM 23.1.2 supplement, written by hand from llvmorg-23.1.2
+// clang/include/clang/Basic/BuiltinsX86.td (same license as above). That
+// release changed the parameter types of the pinned names below: PAVG and
+// PMULHUW lanes became unsigned, PSADBW sources unsigned bytes, the immediate
+// byte shifts take char lanes, and the VNNI dot products take their narrow
+// source lanes. It also added the AVX512 BMM bmac builtins. Clang 23 resource
+// headers spell those contracts, so a call matching either contract is
+// admitted. A pinned name keeps its pinned result type, which those headers
+// always cast; a new name takes its type from here. PMULHUW128 keeps its own
+// operand-typed contract. Admission adds no lowering or __has_builtin answer.
+typedef struct CVendorBuiltinSupplement CVendorBuiltinSupplement;
+struct CVendorBuiltinSupplement
+{
+    String8 suffix;
+    u8 types[4]; // Indices into c_vendor_builtin_llvm23_types.
+    u8 parameter_count;
+    u8 constant_arguments;
+};
+
+BUSTER_C_DATA CVendorBuiltinType const c_vendor_builtin_llvm23_types[] = {
+    {.kind = C_TYPE_SHORT, .lanes = 16},
+    {.kind = C_TYPE_SHORT, .lanes = 32},
+    {.kind = C_TYPE_UNSIGNED_CHAR, .lanes = 16},
+    {.kind = C_TYPE_UNSIGNED_CHAR, .lanes = 32},
+    {.kind = C_TYPE_UNSIGNED_CHAR, .lanes = 64},
+    {.kind = C_TYPE_UNSIGNED_SHORT, .lanes = 8},
+    {.kind = C_TYPE_UNSIGNED_SHORT, .lanes = 16},
+    {.kind = C_TYPE_UNSIGNED_SHORT, .lanes = 32},
+    {.kind = C_TYPE_LONG_LONG, .lanes = 2},
+    {.kind = C_TYPE_LONG_LONG, .lanes = 4},
+    {.kind = C_TYPE_LONG_LONG, .lanes = 8},
+    {.kind = C_TYPE_CHAR, .lanes = 16},
+    {.kind = C_TYPE_INT},
+    {.kind = C_TYPE_CHAR, .lanes = 32},
+    {.kind = C_TYPE_CHAR, .lanes = 64},
+    {.kind = C_TYPE_INT, .lanes = 4},
+    {.kind = C_TYPE_INT, .lanes = 8},
+    {.kind = C_TYPE_INT, .lanes = 16},
+    {.kind = C_TYPE_SHORT, .lanes = 8},
+};
+
+BUSTER_C_DATA CVendorBuiltinSupplement const c_vendor_builtin_llvm23_supplement[] = {
+    {S8_INITIALIZER("bmacor16x16x16_v16hi"), {0, 0, 0, 0}, 3, 0},
+    {S8_INITIALIZER("bmacor16x16x16_v32hi"), {1, 1, 1, 1}, 3, 0},
+    {S8_INITIALIZER("bmacxor16x16x16_v16hi"), {0, 0, 0, 0}, 3, 0},
+    {S8_INITIALIZER("bmacxor16x16x16_v32hi"), {1, 1, 1, 1}, 3, 0},
+    {S8_INITIALIZER("pavgb128"), {2, 2, 2}, 2, 0},
+    {S8_INITIALIZER("pavgb256"), {3, 3, 3}, 2, 0},
+    {S8_INITIALIZER("pavgb512"), {4, 4, 4}, 2, 0},
+    {S8_INITIALIZER("pavgw128"), {5, 5, 5}, 2, 0},
+    {S8_INITIALIZER("pavgw256"), {6, 6, 6}, 2, 0},
+    {S8_INITIALIZER("pavgw512"), {7, 7, 7}, 2, 0},
+    {S8_INITIALIZER("pmulhuw256"), {6, 6, 6}, 2, 0},
+    {S8_INITIALIZER("pmulhuw512"), {7, 7, 7}, 2, 0},
+    {S8_INITIALIZER("psadbw128"), {8, 2, 2}, 2, 0},
+    {S8_INITIALIZER("psadbw256"), {9, 3, 3}, 2, 0},
+    {S8_INITIALIZER("psadbw512"), {10, 4, 4}, 2, 0},
+    {S8_INITIALIZER("pslldqi128_byteshift"), {11, 11, 12}, 2, 2},
+    {S8_INITIALIZER("pslldqi256_byteshift"), {13, 13, 12}, 2, 2},
+    {S8_INITIALIZER("pslldqi512_byteshift"), {14, 14, 12}, 2, 2},
+    {S8_INITIALIZER("psrldqi128_byteshift"), {11, 11, 12}, 2, 2},
+    {S8_INITIALIZER("psrldqi256_byteshift"), {13, 13, 12}, 2, 2},
+    {S8_INITIALIZER("psrldqi512_byteshift"), {14, 14, 12}, 2, 2},
+    {S8_INITIALIZER("vpdpbssd128"), {15, 15, 11, 11}, 3, 0},
+    {S8_INITIALIZER("vpdpbssd256"), {16, 16, 13, 13}, 3, 0},
+    {S8_INITIALIZER("vpdpbssd512"), {17, 17, 14, 14}, 3, 0},
+    {S8_INITIALIZER("vpdpbssds128"), {15, 15, 11, 11}, 3, 0},
+    {S8_INITIALIZER("vpdpbssds256"), {16, 16, 13, 13}, 3, 0},
+    {S8_INITIALIZER("vpdpbssds512"), {17, 17, 14, 14}, 3, 0},
+    {S8_INITIALIZER("vpdpbsud128"), {15, 15, 11, 2}, 3, 0},
+    {S8_INITIALIZER("vpdpbsud256"), {16, 16, 13, 3}, 3, 0},
+    {S8_INITIALIZER("vpdpbsud512"), {17, 17, 14, 4}, 3, 0},
+    {S8_INITIALIZER("vpdpbsuds128"), {15, 15, 11, 2}, 3, 0},
+    {S8_INITIALIZER("vpdpbsuds256"), {16, 16, 13, 3}, 3, 0},
+    {S8_INITIALIZER("vpdpbsuds512"), {17, 17, 14, 4}, 3, 0},
+    {S8_INITIALIZER("vpdpbusd128"), {15, 15, 2, 11}, 3, 0},
+    {S8_INITIALIZER("vpdpbusd256"), {16, 16, 3, 13}, 3, 0},
+    {S8_INITIALIZER("vpdpbusd512"), {17, 17, 4, 14}, 3, 0},
+    {S8_INITIALIZER("vpdpbusds128"), {15, 15, 2, 11}, 3, 0},
+    {S8_INITIALIZER("vpdpbusds256"), {16, 16, 3, 13}, 3, 0},
+    {S8_INITIALIZER("vpdpbusds512"), {17, 17, 4, 14}, 3, 0},
+    {S8_INITIALIZER("vpdpbuud128"), {15, 15, 2, 2}, 3, 0},
+    {S8_INITIALIZER("vpdpbuud256"), {16, 16, 3, 3}, 3, 0},
+    {S8_INITIALIZER("vpdpbuud512"), {17, 17, 4, 4}, 3, 0},
+    {S8_INITIALIZER("vpdpbuuds128"), {15, 15, 2, 2}, 3, 0},
+    {S8_INITIALIZER("vpdpbuuds256"), {16, 16, 3, 3}, 3, 0},
+    {S8_INITIALIZER("vpdpbuuds512"), {17, 17, 4, 4}, 3, 0},
+    {S8_INITIALIZER("vpdpwssd128"), {15, 15, 18, 18}, 3, 0},
+    {S8_INITIALIZER("vpdpwssd256"), {16, 16, 0, 0}, 3, 0},
+    {S8_INITIALIZER("vpdpwssd512"), {17, 17, 1, 1}, 3, 0},
+    {S8_INITIALIZER("vpdpwssds128"), {15, 15, 18, 18}, 3, 0},
+    {S8_INITIALIZER("vpdpwssds256"), {16, 16, 0, 0}, 3, 0},
+    {S8_INITIALIZER("vpdpwssds512"), {17, 17, 1, 1}, 3, 0},
+    {S8_INITIALIZER("vpdpwsud128"), {15, 15, 18, 5}, 3, 0},
+    {S8_INITIALIZER("vpdpwsud256"), {16, 16, 0, 6}, 3, 0},
+    {S8_INITIALIZER("vpdpwsud512"), {17, 17, 1, 7}, 3, 0},
+    {S8_INITIALIZER("vpdpwsuds128"), {15, 15, 18, 5}, 3, 0},
+    {S8_INITIALIZER("vpdpwsuds256"), {16, 16, 0, 6}, 3, 0},
+    {S8_INITIALIZER("vpdpwsuds512"), {17, 17, 1, 7}, 3, 0},
+    {S8_INITIALIZER("vpdpwusd128"), {15, 15, 5, 18}, 3, 0},
+    {S8_INITIALIZER("vpdpwusd256"), {16, 16, 6, 0}, 3, 0},
+    {S8_INITIALIZER("vpdpwusd512"), {17, 17, 7, 1}, 3, 0},
+    {S8_INITIALIZER("vpdpwusds128"), {15, 15, 5, 18}, 3, 0},
+    {S8_INITIALIZER("vpdpwusds256"), {16, 16, 6, 0}, 3, 0},
+    {S8_INITIALIZER("vpdpwusds512"), {17, 17, 7, 1}, 3, 0},
+    {S8_INITIALIZER("vpdpwuud128"), {15, 15, 5, 5}, 3, 0},
+    {S8_INITIALIZER("vpdpwuud256"), {16, 16, 6, 6}, 3, 0},
+    {S8_INITIALIZER("vpdpwuud512"), {17, 17, 7, 7}, 3, 0},
+    {S8_INITIALIZER("vpdpwuuds128"), {15, 15, 5, 5}, 3, 0},
+    {S8_INITIALIZER("vpdpwuuds256"), {16, 16, 6, 6}, 3, 0},
+    {S8_INITIALIZER("vpdpwuuds512"), {17, 17, 7, 7}, 3, 0},
+};
+
+BUSTER_C_INTERNAL CVendorBuiltinSupplement const* c_vendor_builtin_supplement(String8 name)
+{
+    CVendorBuiltinSupplement const* result = 0;
+    String8 prefix = S8("__builtin_ia32_");
+    if (string_starts_with_sequence(name, prefix))
+    {
+        String8 suffix = {.pointer = name.pointer + prefix.length, .length = name.length - prefix.length};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_vendor_builtin_llvm23_supplement) && !result; index += 1)
+        {
+            if (string_equal(suffix, c_vendor_builtin_llvm23_supplement[index].suffix))
+            {
+                result = c_vendor_builtin_llvm23_supplement + index;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL void c_vendor_builtin_supplement_signature(CVendorBuiltinSupplement const* stored, CVendorBuiltin* signature)
+{
+    *signature = (CVendorBuiltin){.parameter_count = stored->parameter_count, .constant_arguments = stored->constant_arguments};
+    for (u32 index = 0; index <= stored->parameter_count; index += 1)
+    {
+        signature->types[index] = c_vendor_builtin_llvm23_types[stored->types[index]];
+    }
+}
+
 BUSTER_C_INTERNAL u32 c_vendor_builtin_signature_index(String8 name)
 {
     u32 result = UINT32_MAX;
@@ -3178,7 +3320,7 @@ BUSTER_C_INTERNAL u32 c_vendor_builtin_signature_index(String8 name)
 
 BUSTER_C_SHARED bool c_vendor_builtin_spelling(String8 name)
 {
-    bool result = c_vendor_builtin_signature_index(name) != UINT32_MAX;
+    bool result = c_vendor_builtin_signature_index(name) != UINT32_MAX || c_vendor_builtin_supplement(name);
     return result;
 }
 
@@ -3214,6 +3356,29 @@ BUSTER_C_SHARED bool c_vendor_builtin_lookup(Target target, String8 name, CVendo
             }
             signature->types[index] = shape.type;
         }
+        result = true;
+    }
+    else if (target.cpu_arch == CPU_ARCH_X86_64 && c_vendor_builtin_signature_index(name) == UINT32_MAX)
+    {
+        CVendorBuiltinSupplement const* stored = c_vendor_builtin_supplement(name);
+        if (stored)
+        {
+            c_vendor_builtin_supplement_signature(stored, signature);
+            result = true;
+        }
+    }
+    return result;
+}
+
+BUSTER_C_SHARED bool c_vendor_builtin_lookup_alternate(Target target, String8 name, CVendorBuiltin* signature)
+{
+    bool result = false;
+    *signature = (CVendorBuiltin){0};
+    CVendorBuiltinSupplement const* stored = target.cpu_arch == CPU_ARCH_X86_64 &&
+        c_vendor_builtin_signature_index(name) != UINT32_MAX ? c_vendor_builtin_supplement(name) : 0;
+    if (stored)
+    {
+        c_vendor_builtin_supplement_signature(stored, signature);
         result = true;
     }
     return result;
@@ -3274,9 +3439,40 @@ BUSTER_C_DATA CVendorGenericDefinition const c_vendor_generic_definitions[] = {
      {C_VENDOR_GENERIC_SHUFFLE_VECTOR, C_VENDOR_GENERIC_CATEGORY_INTEGER_OR_FLOAT, C_VENDOR_GENERIC_RESULT_SHUFFLE, 2, UINT8_MAX, 0, true, false}},
 };
 
+// Hand-written from llvmorg-23.1.2 Builtins.td and SemaChecking.cpp, whose
+// x86 resource headers first spell these. Scalars or vectors are accepted;
+// fma and sqrt take floating elements, the rest integer elements. Ternary
+// operands share one unqualified type, as does clzg's optional fallback.
+BUSTER_C_DATA CVendorGenericDefinition const c_vendor_generic_llvm23_definitions[] = {
+    {S8_INITIALIZER("__builtin_elementwise_bitreverse"),
+     {C_VENDOR_GENERIC_ELEMENTWISE_BITREVERSE, C_VENDOR_GENERIC_CATEGORY_INTEGER, C_VENDOR_GENERIC_RESULT_FIRST_OPERAND, 1, 1, 0, false, false}},
+    {S8_INITIALIZER("__builtin_elementwise_clzg"),
+     {C_VENDOR_GENERIC_ELEMENTWISE_CLZG, C_VENDOR_GENERIC_CATEGORY_INTEGER, C_VENDOR_GENERIC_RESULT_FIRST_OPERAND, 1, 2, 0, false, true}},
+    {S8_INITIALIZER("__builtin_elementwise_fma"),
+     {C_VENDOR_GENERIC_ELEMENTWISE_FMA, C_VENDOR_GENERIC_CATEGORY_FLOAT, C_VENDOR_GENERIC_RESULT_FIRST_OPERAND, 3, 3, 0, false, true}},
+    {S8_INITIALIZER("__builtin_elementwise_fshl"),
+     {C_VENDOR_GENERIC_ELEMENTWISE_FSHL, C_VENDOR_GENERIC_CATEGORY_INTEGER, C_VENDOR_GENERIC_RESULT_FIRST_OPERAND, 3, 3, 0, false, true}},
+    {S8_INITIALIZER("__builtin_elementwise_fshr"),
+     {C_VENDOR_GENERIC_ELEMENTWISE_FSHR, C_VENDOR_GENERIC_CATEGORY_INTEGER, C_VENDOR_GENERIC_RESULT_FIRST_OPERAND, 3, 3, 0, false, true}},
+    {S8_INITIALIZER("__builtin_elementwise_sqrt"),
+     {C_VENDOR_GENERIC_ELEMENTWISE_SQRT, C_VENDOR_GENERIC_CATEGORY_FLOAT, C_VENDOR_GENERIC_RESULT_FIRST_OPERAND, 1, 1, 0, false, false}},
+};
+
 BUSTER_C_SHARED CVendorGenericBuiltin c_vendor_generic_builtin(String8 name)
 {
     CVendorGenericBuiltin result = {0};
+    if (string_equal(name, S8("__builtin_ia32_pmulhuw128")))
+    {
+        result = (CVendorGenericBuiltin){
+            .operation = C_VENDOR_GENERIC_PMULHUW128_SIGNATURE,
+            .category = C_VENDOR_GENERIC_CATEGORY_INTEGER,
+            .result = C_VENDOR_GENERIC_RESULT_FIRST_OPERAND,
+            .minimum_arguments = 2,
+            .maximum_arguments = 2,
+            .requires_vector = true,
+            .same_type_operands = true,
+        };
+    }
     if (string_starts_with_sequence(name, S8("__builtin_")))
     {
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_vendor_generic_definitions) && result.operation == C_VENDOR_GENERIC_NONE; index += 1)
@@ -3286,6 +3482,23 @@ BUSTER_C_SHARED CVendorGenericBuiltin c_vendor_generic_builtin(String8 name)
                 result = c_vendor_generic_definitions[index].builtin;
             }
         }
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_vendor_generic_llvm23_definitions) && result.operation == C_VENDOR_GENERIC_NONE; index += 1)
+        {
+            if (string_equal(name, c_vendor_generic_llvm23_definitions[index].name))
+            {
+                result = c_vendor_generic_llvm23_definitions[index].builtin;
+            }
+        }
     }
+    return result;
+}
+
+// Clang23 f16cintrin.h uses this storage-only type in an unused bit-cast
+// wrapper. This predicate admits that exact type slot, never a declaration.
+BUSTER_C_SHARED bool c_semantic_vendor_storage_half_argument(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    bool result = start < preprocess.token_count && end == start + 1 &&
+                  preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+                  string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("__fp16"));
     return result;
 }

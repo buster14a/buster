@@ -3668,6 +3668,24 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
      C_TYPE_INVALID, true},
     {S8_INITIALIZER("char* f(void) { return (char*)((\"a\")); }"), S8_INITIALIZER("("), 1, 9, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER, false,
      C_TYPE_INVALID, true},
+    // Operands the machine types to nothing: `__func__` and its GNU spellings
+    // name no entity, and an unbound `__builtin_expect` call reaches no typed
+    // leaf. A checked cast skips its conversion rule over them, and a
+    // conditional its scalar-condition rule, so both are answered with
+    // constraint checks too. A void builtin called with no arguments is the
+    // void row. The last case is BUSTER_CHECK's shape.
+    {S8_INITIALIZER("char* f(void) { return (char*)__func__; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("char* f(void) { return (char*)(__PRETTY_FUNCTION__); }"), S8_INITIALIZER("("), 1, 7, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_POINTER},
+    {S8_INITIALIZER("long f(void) { return (long)__FUNCTION__; }"), S8_INITIALIZER("("), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    {S8_INITIALIZER("int f(int x) { return (int)__builtin_expect(x, 0); }"), S8_INITIALIZER("("), 1, 9, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("int f(int x) { return __builtin_expect(x, 0) ? 1 : 2; }"), S8_INITIALIZER("__builtin_expect"), 0, 10,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("int f(void) { return (__builtin_unreachable(), 0); }"), S8_INITIALIZER("__builtin_unreachable"), 0, 3,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_VOID},
+    {S8_INITIALIZER("int f(void) { return (__builtin_debugtrap(), 0); }"), S8_INITIALIZER("("), 1, 7, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("void f(int x) { (void)(__builtin_expect(!x, 0) ? (__builtin_debugtrap(), 0) : 0); }"), S8_INITIALIZER("("), 1, 22,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_VOID},
     // Answered without constraint checks only. With them the machine also
     // types a cast's operand -- here several string tokens, which no replay
     // covers -- and it decides whether two pointers may be subtracted by
@@ -3701,6 +3719,8 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     {S8_INITIALIZER("long f(void) { return __builtin_expect(1, 1); }"), S8_INITIALIZER("__builtin_expect"), 0, 6, C_TEST_AST_TYPE_PROBE_DECLINE,
      C_TYPE_INVALID},
     {S8_INITIALIZER("int g(int); int f(void) { return (g)(1); }"), S8_INITIALIZER("("), 2, 6, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("void f(int* p) { __builtin_prefetch(p); }"), S8_INITIALIZER("__builtin_prefetch"), 0, 4, C_TEST_AST_TYPE_PROBE_DECLINE,
+     C_TYPE_INVALID},
     // A designator is not member access, and a declaration is not an
     // expression.
     {S8_INITIALIZER("struct S { int field; }; void f(void) { struct S s = {.field = 1}; }"), S8_INITIALIZER("."), 0, 2, C_TEST_AST_TYPE_PROBE_MISS,
@@ -3844,19 +3864,22 @@ struct CAstSplitCase
     CParserTreeFallback reason;
     // Body _Static_assert ranges the split publishes, when it publishes.
     u32 assertions;
+    // Records the walker marks typedef and constexpr (#3310).
+    u32 typedef_records;
+    u32 constexpr_records;
 };
 
 BUSTER_GLOBAL_LOCAL CAstSplitCase const c_ast_split_cases[] = {
     {S8_INITIALIZER("int a, *b, f(int), (*g)(int, ...); struct S { int x; }; enum { A, B }; _Static_assert(1, \"m\"); asm(\"nop\"); ; "
                     "int h(int x) { _Static_assert(1, \"n\"); struct T { _Static_assert(2, \"o\"); int a; } t = {x}; return t.a; }"),
      C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 2},
-    // `typedef` and `constexpr` words the walker reads outside the top-level
-    // specifiers make it record the whole declaration as a typedef or as
-    // constexpr (#3310). The split matches it by scanning such a declaration
-    // whole.
+    // Only the top-level specifiers' `typedef` and `constexpr` words mark a
+    // declaration (#3310): a statement expression's typedef and a constexpr
+    // compound literal in an initializer leave `sx`, `sy`, `cy` and `cz`
+    // ordinary objects, while `q9` and `cw` keep their own words.
     {S8_INITIALIZER("int sx = ({ typedef int T9; T9 t = 1; t; }), sy; struct Q9 { int a; } typedef q9;"), C_PREPROCESS_DIALECT_GNU17,
-     C_PARSER_TREE_FALLBACK_NONE, 0},
-    {S8_INITIALIZER("int cy = (constexpr int){3}, cz; constexpr int cw = 2;"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_NONE, 0},
+     C_PARSER_TREE_FALLBACK_NONE, 0, 1, 0},
+    {S8_INITIALIZER("int cy = (constexpr int){3}, cz; constexpr int cw = 2;"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_NONE, 0, 0, 1},
     {S8_INITIALIZER("int x = 0x;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DIAGNOSTIC},
     {S8_INITIALIZER("long long long y;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DIAGNOSTIC},
     // The probe skips a specifier run spelled like one that already
@@ -3910,6 +3933,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_split(UnitTestArguments* arguments
                                 label);
                 BUSTER_TEST_RAW(arguments, !published || (statistics.records == syntax.declaration_count && statistics.assertions == split_case->assertions),
                                 label);
+                u32 typedef_records = 0;
+                u32 constexpr_records = 0;
+                for (CParserDeclaration const* declaration = syntax.first_declaration; declaration; declaration = declaration->next)
+                {
+                    typedef_records += declaration->is_typedef;
+                    constexpr_records += declaration->is_constexpr;
+                }
+                BUSTER_TEST_RAW(arguments, typedef_records == split_case->typedef_records && constexpr_records == split_case->constexpr_records, label);
             }
             c_ast_release(&built.ast);
             scratch_end(temporary);

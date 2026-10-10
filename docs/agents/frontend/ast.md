@@ -412,6 +412,9 @@ unchanged.
       under interned pointer rows. Each is accepted only once every row it
       reads is already interned, so its machine run appends nothing at any
       task level.
+    - a call of an unbound void `__builtin_` with no arguments
+      (`__builtin_debugtrap()`, `__builtin_unreachable()`), whose answer is
+      the published `void` row (`c_ast_types_builtin_call`).
 - **What it declines.** Every shape whose machine answer appends a row stays
   with the machine:
   - a qualified member or array element;
@@ -451,6 +454,17 @@ unchanged.
   for two pointers to one unqualified element row. A cast whose conversion
   rule is clean is safe, and so is a conditional whose condition is a safe
   scalar.
+- **Failing operands.** The machine types a few nodes to nothing, with no row
+  and no constraint: `__func__`, `__FUNCTION__` and `__PRETTY_FUNCTION__`,
+  which name no entity, and an unbound `__builtin_expect(...)` call, which no
+  leaf rule types. Such a node is never accepted, but it carries
+  `C_AST_TYPE_FLAG_FAILS`. The machine's checked cast tests its conversion
+  only when the operand has a type, and its conditional tests the condition
+  only when that has a type. So a cast over a failing operand is safe, and so
+  is a conditional with a failing condition, such as `BUSTER_CHECK`'s
+  `(void)(__builtin_expect(!(ok), 0) ? (…, 0) : 0)`. The query repeats the
+  name's lookup in its own scope (`c_ast_types_lookups_agree`), and that
+  lookup must find nothing.
 - **Authority.** The machine remains the only producer of diagnostics. A query
   the typer declines, misses or leaves alone runs the machine as before.
 - **Designator probes.** Nearly every miss was one of two designator probes
@@ -613,11 +627,14 @@ two cases:
 A fallback discards everything derived and returns `c_parse_ast`'s result, so
 the records, the diagnostics and #3215's rejections are always the walker's.
 Neither #3215 nor #3143 is changed by this split. Where the walker's reading
-is wrong but the split can state it, the split reproduces it instead. For
-example, a `typedef` or `constexpr` word anywhere outside the body marks the
-whole declaration ([#3310](https://github.com/buster14a/buster/issues/3310)).
-The `typedef` and `constexpr` words are collected once per unit, so only a
-declaration that holds one outside its top-level specifiers is scanned whole.
+is wrong but the split can state it, the split reproduces it instead.
+A declaration is a typedef or constexpr only through its own top-level
+specifiers. The walker counts a `typedef` or `constexpr` word only outside
+every delimiter and before the first top-level `=` or `,`. The split counts a
+`SPECIFIER_WORD` item of the declaration's `DECL_SPECIFIERS`. A word inside an
+initializer, such as a statement expression's `typedef` or a C23 constexpr
+compound literal, marks neither the declaration nor its later declarators
+([#3310](https://github.com/buster14a/buster/issues/3310)).
 
 `c_ast_test_split` runs one shape per fallback reason, both #3215 inputs
 included, in every layout. It requires the walker's result and the named
@@ -1071,6 +1088,43 @@ the same way and diagnostic only:
   memo cuts the validated specifier runs from 29,649 to 3,299.
 - The default path is −0.0037%.
 - Acceptance stays with Zen 5 (#2761), so the default stays off.
+
+For the typer's [failing operands](#tree-expression-typer), these budgets
+were declared before the measured runs. The input and flags are those of
+stage 2 (`-g0 -fsyntax-only`, plus `-c` for the default path), and four
+Callgrind arms are counted on tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `f38a7716`, which the candidate branches from. The budgets:
+- correctness: no verify mismatch over the corpus, and identical diagnostics
+  and type-table sizes with and without the tree. `-c` objects (`-g0` and
+  `-g`) must be byte-identical across the four arms.
+- coverage: a throwaway census build, not committed, counts the checked casts
+  the typer declines over a declined or unsafe operand. On the base it counts
+  577 declined and 296 unsafe, plus 13 with an unclean conversion. On the
+  candidate the first two together must fall by at least 600.
+- the change's own effect (C against B): fewer instructions in the whole
+  compile, with the larger eager pass and the extra lookups charged, and
+  fewer machine runs from queries.
+- the default path (D against A): the typer runs only with the tree, so the
+  difference stays within ±0.05% Ir on `-fsyntax-only` and on `-c`.
+- performance acceptance: the hosted counts are diagnostic. Zen 5 validation
+  (#2761) stays incomplete, and the hook stays opt-in.
+
+The failing-operand rule's hosted census is
+[`2026-10-10T193402Z`](../../performance-audits/2026-10-10T193402Z.md). It
+was taken the same way and is diagnostic only. Every hosted budget passes:
+- 0 verify mismatches, and byte-identical objects across the four arms.
+- The declined and unsafe checked casts fall from 873 to 236. `__func__`
+  casts and `os.h`'s failure macros made up 637 of them.
+- The pilot's instructions fall by 0.076%, with 719 fewer machine runs from
+  queries.
+- The default path moves by at most +0.0011%.
+- Most of what remains is declined in the operand itself: members, string
+  runs and `&`.
 
 For a cheaper eager pass (`c_ast_types_type_body`, the tree typer's
 per-body and per-initializer typing), these budgets were declared before its

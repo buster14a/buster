@@ -786,6 +786,7 @@ BUSTER_C_EXTERN CIntegerTransformBuiltin c_semantic_integer_transform_builtin(Ta
 BUSTER_C_EXTERN u64 c_integer_transform_bits(CIntegerTransformBuiltin builtin, u64 value, u64 count);
 BUSTER_C_EXTERN u32 c_parse_constraint_expression_end(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_semantic_bfloat16_builtin_spelling(String8 name);
+BUSTER_C_EXTERN bool c_semantic_vendor_storage_half_argument(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_semantic_vendor_builtin_signature(Target target, String8 name, CVendorBuiltin* signature);
 BUSTER_C_EXTERN CTypeId c_semantic_vendor_builtin_type(CParseResult* result, Target target, CVendorBuiltinType descriptor);
 BUSTER_C_EXTERN bool c_semantic_vendor_builtin_supported(Target target, String8 name);
@@ -1382,12 +1383,15 @@ typedef enum CConstantEvaluationMode
 // mapped: interning a member's row would move it ahead of its struct and
 // resolve the struct a pass earlier, which reorders the IR types and so the
 // `-g` type entries. Within the window an interned row only ever replaces a
-// later copy of itself, which resolves in the same pass. The one exception
-// is a member's row: a type name inside the window may still define an
-// aggregate (`(const struct { char *p; })`, whose row the machine does not
-// find already defined), and that row precedes its members', so `suspended`
-// counts the member segments the machine is reading and nothing is interned
-// while any is. Restrict-qualified rows are never interned, because
+// later copy of itself, which resolves in the same pass. Every aggregate a
+// body type name defines, qualified ones such as `(const struct { char *p; })`
+// included, gets its row and its members' rows from the declaration pass
+// before the window opens; c_type_parse_core_step steps over the leading
+// qualifiers and reads that row back, so no member segment is read while the
+// window is open. `suspended` is a defensive guard for the member-row order
+// should a later change define an aggregate inside the window: it counts the
+// member segments the machine is reading, and nothing is interned while any
+// is. Restrict-qualified rows are never interned, because
 // c_type_parse_root_finish diagnoses an invalid `restrict` only on rows a
 // query appends.
 //
