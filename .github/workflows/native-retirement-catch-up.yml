@@ -4,10 +4,15 @@ name: Native retirement catch-up
 # repository-source snapshot falls behind its admitted sources (#1893).
 # It runs only trusted main code, writes no generated state and cannot merge:
 # the writer publishes the request through the existing standing grant and the
-# native merge queue admits it. Its only write is an empty commit on the
-# catch-up branch plus the PR that carries it. It never enables auto-merge:
+# native merge queue admits it. Its only writes are an empty commit leased onto
+# the catch-up branch, the PR that carries it, and closing (with a comment) a
+# request that is current or that failed CI. It never enables auto-merge:
 # GitHub starts no merge_group workflows for an entry GITHUB_TOKEN enqueued, so
 # the writer enables it with its publication credential after publishing.
+# A published request whose exact head failed CI complete is closed and
+# replaced only after main advances past its recorded base. The branch moves
+# only by a leased push from the head it was read at, the same lease the
+# writer publishes with, so a racing publication is never overwritten.
 
 on:
   push:
@@ -34,6 +39,9 @@ jobs:
       contents: write
       pull-requests: write
       actions: read
+      # Reads the exact published head's CI complete to replace a failed
+      # catch-up once main advances (one replacement per main revision).
+      checks: read
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
