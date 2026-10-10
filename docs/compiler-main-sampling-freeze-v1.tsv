@@ -1,0 +1,16 @@
+schema	buster-main-sampling-acquisition-v1
+phase	acquire
+base	942ee124bf41601a7ae81d8ae82dc5151e2ee2e0
+base_tree	075022a8dfc83b7cdd200f6bf4eca88d58ddb7bf
+request_head	76317155b48200cb56d025a1e9352b90bee7030f
+trusted_revision	76317155b48200cb56d025a1e9352b90bee7030f
+baseline_revision	942ee124bf41601a7ae81d8ae82dc5151e2ee2e0
+ab1_revision	7d962dff641aa3a340920f3720a5e1fc1d7e259a
+ab2_revision	b92dbd1b9e92a89c56ef7d5384a17be4789d2a91
+protocol_sha256	c7ed30c6df6b64071ef654401e13cb78b6a08126360a20345d3cc92d6ae1d34f
+source_root	/var/tmp/buster-3212-sampling-source
+store_root	/tmp
+closure_policy	snapshot-v1
+toolchain_policy	clang-release-tests-off-native-v1
+measurement	false
+physical_budget_seconds	1800
