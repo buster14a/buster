@@ -525,14 +525,32 @@ def failed_catch_up(api, pull: dict, base: str) -> bool:
     return result
 
 
-def retire_failed_catch_up(api, pull: dict, base: str) -> int:
+def retire_failed_catch_up(api, pull: dict, base: str) -> bool:
+    """Close a failed catch-up only while its live head is still the failed one.
+
+    The writer may publish a fresh head after the scan classified the old one.
+    The live PR is re-read before closing, and again after: a head that moved
+    in between is reopened and kept, so open_catch_up never force-updates the
+    branch over a fresh publication. A closed PR also fails the writer's live
+    authorization immediately before its leased update.
+    """
     number = automation.positive(pull.get("number"), "catch-up PR")
-    api.request("issues/" + str(number) + "/comments", method="POST", body={
-        "body": "Closed by the catch-up opener (#1893): `CI complete` failed on published head " +
-                pull["head"]["sha"] + " and main has advanced to " + base + ". A fresh catch-up "
-                "is opened for that revision; this PR keeps the failure for inspection.\n"})
-    api.request("pulls/" + str(number), method="PATCH", body={"state": "closed"})
-    return number
+    failed = pull["head"]["sha"]
+    path = "pulls/" + str(number)
+    retired = False
+    live = api.request(path)
+    if is_catch_up_pr(live, api.repository) and live["head"]["sha"] == failed:
+        api.request(path, method="PATCH", body={"state": "closed"})
+        if api.request(path).get("head", {}).get("sha") == failed:
+            api.request("issues/" + str(number) + "/comments", method="POST", body={
+                "body": "Closed by the catch-up opener (#1893): `CI complete` failed on published "
+                        "head " + failed + " and main has advanced to " + base + ". A fresh "
+                        "catch-up is opened for that revision; this PR keeps the failure for "
+                        "inspection.\n"})
+            retired = True
+        else:
+            api.request(path, method="PATCH", body={"state": "open"})
+    return retired
 
 
 def catch_up(api, repo: Path, base: str, run_id: int) -> dict:
@@ -554,12 +572,16 @@ def catch_up(api, repo: Path, base: str, run_id: int) -> dict:
             result = {"status": "current", "closed": [pull["number"] for pull in pulls]}
         else:
             failed = [pull for pull in pulls if failed_catch_up(api, pull, base)]
-            pending = [pull["number"] for pull in pulls if pull not in failed]
+            # An active writer may be publishing a fresh head for the request;
+            # its next opener run decides on that head's own CI instead.
+            if failed and active_writer(api):
+                failed = []
             # Re-read main before any write: never replace or open a request
             # for a revision already replaced; its successor run does that.
-            if (failed or not pending) and api.request("git/ref/heads/main")["object"]["sha"] != base:
+            if (failed or not pulls) and api.request("git/ref/heads/main")["object"]["sha"] != base:
                 raise automation.AutomationMoved("main moved before opening a catch-up", 75)
-            replaced = [retire_failed_catch_up(api, pull, base) for pull in failed]
+            replaced = [pull["number"] for pull in failed if retire_failed_catch_up(api, pull, base)]
+            pending = [pull["number"] for pull in pulls if pull["number"] not in replaced]
             if pending:
                 result = {"status": "pending", "pull_requests": pending}
             else:

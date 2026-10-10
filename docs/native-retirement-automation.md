@@ -148,7 +148,13 @@ The catch-up is fully automatic:
    API. A same-`main` replacement would rebuild identical inputs, which is
    rerun-until-green, so the failed request stays open on an unchanged `main`
    for owner inspection. Pending, missing or passing CI and an unpublished
-   empty head are never replaced. The replacement records the `main` it was
+   empty head are never replaced. The opener and writer have separate
+   concurrency groups, so replacement defers while any writer is active and
+   re-reads the live PR before and after closing it: a head that moved before
+   the close is left open, and one that moved during it is reopened, so a
+   fresh publication is never closed or overwritten by the new catch-up
+   branch. A closed PR also fails the writer's live authorization immediately
+   before its leased update. The replacement records the `main` it was
    built for, so a deterministic failure costs at most one writer run and one
    CI run per `main` revision and cannot create a writer loop. Each closed PR
    keeps its failed checks and an explanatory comment as evidence. No test

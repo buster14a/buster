@@ -444,6 +444,9 @@ class CatchUpAPI:
         # Published catch-up heads: sha -> (recorded base, CI complete check runs).
         self.published = {}
         self.ahead = True
+        self.writer_active = False
+        # Live PR heads returned by successive pulls/<n> reads, oldest first.
+        self.live_heads = []
 
     def all(self, path, **query):
         if path != "pulls" or query != {"state": "open", "base": "main"}:
@@ -478,6 +481,14 @@ class CatchUpAPI:
                                    for check in self.published.get(sha, ("", []))[1]]}
         if path.startswith("compare/"):
             return {"status": "ahead" if self.ahead else "behind"}
+        if path == "actions/workflows/" + Path(a.WRITER_PATH).name + "/runs":
+            active = self.writer_active and query.get("status") == "in_progress"
+            return {"workflow_runs": [{"id": 400}] if active else []}
+        if method == "GET" and path.startswith("pulls/"):
+            live = copy.deepcopy(next(pull for pull in self.pulls if path == "pulls/" + str(pull["number"])))
+            if self.live_heads:
+                live["head"]["sha"] = self.live_heads.pop(0)
+            return live
         if path == "git/ref/heads/native-retirement/catch-up":
             if not self.branch_exists:
                 raise urllib.error.HTTPError(path, 404, "Not Found", {}, None)
@@ -541,9 +552,32 @@ class CatchUpOpenerTests(unittest.TestCase):
         self.assertEqual(report, {"status": "opened", "pull_request": 1900, "head": "f" * 40,
                                   "replaced": [1899]})
         writes = [call[:2] for call in api.calls if call[0] != "GET"]
-        self.assertEqual(writes[:2], [("POST", "issues/1899/comments"), ("PATCH", "pulls/1899")])
+        self.assertEqual(writes[:2], [("PATCH", "pulls/1899"), ("POST", "issues/1899/comments")])
         self.assertIn(("POST", "pulls"), writes)
         self.assertIn(("GET", "compare/" + MOVED + "..." + BASE, None), api.calls)
+
+    def test_publication_between_scan_and_retirement_is_kept(self):
+        # A writer may publish a fresh head after the scan read the failed
+        # head's CI. An active writer defers retirement; a head that moved
+        # before the close is left alone; one that moved during the close is
+        # reopened. None of them is overwritten by a new catch-up branch.
+        fresh = "a" * 40
+        cases = {
+            "writer active": ([], True, []),
+            "published before close": ([fresh], False, []),
+            "published during close": ([HEAD, fresh], False,
+                                       [("PATCH", "pulls/1899", {"state": "closed"}),
+                                        ("PATCH", "pulls/1899", {"state": "open"})]),
+        }
+        for name, (heads, active, expected) in cases.items():
+            with self.subTest(name):
+                api = CatchUpAPI([self.catch_up_pr()])
+                api.published[HEAD] = (MOVED, [{"status": "completed", "conclusion": "failure"}])
+                api.live_heads = list(heads)
+                api.writer_active = active
+                report = self.run_catch_up(api, True)
+                self.assertEqual(report, {"status": "pending", "pull_requests": [1899]})
+                self.assertEqual([call for call in api.calls if call[0] != "GET"], expected)
 
     def test_failed_catch_up_on_superseded_main_run_writes_nothing(self):
         # A stale-main exit must precede every write (main-push-maintenance.md).
