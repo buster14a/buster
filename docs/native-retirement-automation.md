@@ -103,9 +103,9 @@ The catch-up is fully automatic:
    `snapshot_stale` compares the committed snapshot with admitted source bytes
    read from Git objects, with no pinned closure needed. It only does the following:
    - When the snapshot is stale and no request is open, it creates one empty
-     commit on `main`, points the bot-owned `native-retirement/catch-up` branch
-     at it and opens the PR. Its token has `contents: write` and
-     `pull-requests: write` for exactly this. It publishes no generated state,
+     commit on `main`, moves the bot-owned `native-retirement/catch-up` branch
+     to it with a leased push from the value it read, and opens the PR. Its
+     token has `contents: write` and `pull-requests: write` for exactly this. It publishes no generated state,
      cannot merge and does not enable auto-merge: GitHub starts no workflows
      for events caused by `GITHUB_TOKEN`, including the `merge_group` event of
      a queue entry that token enqueued, so every required check would wait
@@ -149,12 +149,16 @@ The catch-up is fully automatic:
    rerun-until-green, so the failed request stays open on an unchanged `main`
    for owner inspection. Pending, missing or passing CI and an unpublished
    empty head are never replaced. The opener and writer have separate
-   concurrency groups, so replacement defers while any writer is active and
-   re-reads the live PR before and after closing it: a head that moved before
-   the close is left open, and one that moved during it is reopened, so a
-   fresh publication is never closed or overwritten by the new catch-up
-   branch. A closed PR also fails the writer's live authorization immediately
-   before its leased update. The replacement records the `main` it was
+   concurrency groups, so they serialize on the branch itself: the writer
+   publishes with `--force-with-lease` on the head it was requested for, and
+   the opener moves the bot branch only with a leased push from the value it
+   read (the exact failed head, or absent), never with a forced ref update.
+   Exactly one of two racing updates wins. If the writer wins, the opener's
+   lease is refused, it reopens the PR at the fresh head and opens nothing;
+   if the opener wins, the writer's lease is refused. Retirement also waits
+   while a writer is active and closes the PR only while its live head is
+   the failed one, which makes a writer that has not yet authorized refuse.
+   The replacement records the `main` it was
    built for, so a deterministic failure costs at most one writer run and one
    CI run per `main` revision and cannot create a writer loop. Each closed PR
    keeps its failed checks and an explanatory comment as evidence. No test
