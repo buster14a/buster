@@ -3133,6 +3133,21 @@ BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_delete(UnitTestArguments* ar
     return result;
 }
 
+// Relinquish the owned root without removing it so a post-run CI collector can read failure bundles.
+BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_preserve(UnitTestArguments* arguments, bool report)
+{
+    String8 root = buster_test_temporary_root;
+    bool result = buster_test_temporary_root_owned && root.length;
+    if (result && report)
+    {
+        arguments->show(arguments, S8("TEST_TEMPORARY_ROOT_PRESERVED status=failed path={S8}\n"), root);
+    }
+    buster_test_temporary_root = (String8){0};
+    buster_test_temporary_root_owned = false;
+    buster_test_temporary_root_ready = false;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_test_temporary_component_is_safe(String8 component)
 {
     if (string_equal(component, S8(".")) || string_equal(component, S8("..")))
@@ -3667,6 +3682,22 @@ BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_failure_self_test(UnitTestAr
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_preservation_self_test(UnitTestArguments* arguments)
+{
+    bool created = buster_test_temporary_root_create();
+    String8 root = buster_test_temporary_root;
+    String8 marker = created ? string_format_z(buster_test_temporary_root_arena, S8("{S8}/preserve-probe"), root) : (String8){0};
+    String8 expected = S8("preserved");
+    bool written = created && file_write(marker, BUSTER_SLICE_TO_BYTE_SLICE(expected));
+    bool preserved = created && buster_test_temporary_root_preserve(arguments, false);
+    ByteSlice actual = preserved ? file_read(arguments->arena, marker, (FileReadOptions){0}) : (ByteSlice){0};
+    bool matches = actual.length == expected.length && memcmp(actual.pointer, expected.pointer, (size_t)expected.length) == 0;
+    bool marker_removed = !written || os_file_delete(marker);
+    bool root_removed = !created || os_directory_delete(root);
+    bool result = created && written && preserved && matches && marker_removed && root_removed;
+    return result;
+}
+
 BatchTestResult library_tests(UnitTestArguments* arguments)
 {
 #if BUSTER_IOS
@@ -3730,6 +3761,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     }
 
     BUSTER_CHECK(buster_test_temporary_root_failure_self_test(arguments));
+    BUSTER_CHECK(buster_test_temporary_root_preservation_self_test(arguments));
     BUSTER_VALIDATE(test_debugger_failure_self_test());
     BUSTER_VALIDATE(test_arena_self_test());
     BUSTER_VALIDATE(test_require_self_test());
@@ -3817,10 +3849,14 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
         result.unit_test_count += !selection_valid;
     }
 
+    String8 preserve_temporary_root = os_get_environment_variable(S8("BUSTER_TEST_PRESERVE_TEMPORARIES_ON_FAILURE"));
+    bool preserve_temporary_root_on_failure = string_equal(preserve_temporary_root, S8("1")) && !batch_test_succeeded(result);
     bool temporary_root_succeeded = true;
     if (buster_test_temporary_root.length)
     {
-        temporary_root_succeeded = buster_test_temporary_root_delete(arguments);
+        temporary_root_succeeded = preserve_temporary_root_on_failure ?
+                                   buster_test_temporary_root_preserve(arguments, true) :
+                                   buster_test_temporary_root_delete(arguments);
     }
     temporary_root_succeeded = temporary_root_succeeded && !buster_test_temporary_root_failed;
     if (!temporary_root_succeeded && !buster_test_temporary_root_failed)
