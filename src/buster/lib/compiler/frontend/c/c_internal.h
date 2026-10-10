@@ -1437,6 +1437,15 @@ struct CTypeParseMachine
     // the tree does not cover), and `ast_type_statistics` the optional counts.
     CAst const* syntax_tree;
     CAstTypeStatistics* ast_type_statistics;
+    // The body binder's statement plan (c_parse_statement_plan_build) reads
+    // the same tree: `ast_statement_bodies` holds the `{` of every top-level
+    // function definition, ascending, and its COMPOUND_STATEMENT node, built
+    // once before the declarations are bound (count in
+    // `ast_statement_body_count`); `ast_statement_statistics` the optional
+    // counts.
+    CAstStatementStatistics* ast_statement_statistics;
+    u32* ast_statement_bodies;
+    u32 ast_statement_body_count;
     CAstTypeBodyIndex* ast_bodies;
     CAstTypeBody* ast_types;
     CParseExpressionQuery* expression_queries;

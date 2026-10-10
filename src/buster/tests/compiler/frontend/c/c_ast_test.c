@@ -2044,6 +2044,14 @@ enum
     // each checked against the machine: about 1,400 (1,370 for
     // aarch64-windows).
     C_AST_CORPUS_TYPE_PROBE_FLOOR = 1200,
+    // Statement-plan segments the body binder bound in one pass, and the
+    // identifier uses they bound, in the analyses with the tree: about 6,800
+    // segments and 25,700 uses from the fixtures on Linux x86-64, and about
+    // 34,300 and 129,400 in all with the frontend's own sources.
+    C_AST_CORPUS_STATEMENT_SEGMENT_FLOOR = 5400,
+    C_AST_CORPUS_STATEMENT_USE_FLOOR = 20000,
+    C_AST_CORPUS_HOSTED_STATEMENT_SEGMENT_FLOOR = 27000,
+    C_AST_CORPUS_HOSTED_STATEMENT_USE_FLOOR = 100000,
 };
 
 BUSTER_GLOBAL_LOCAL bool c_ast_corpus_in(String8 const* paths, u32 count, String8 path)
@@ -2092,6 +2100,17 @@ struct CAstCorpusTally
     u64 split_fallbacks;
     u64 split_fallback_counts[C_PARSER_TREE_FALLBACK_COUNT];
     u64 split_compared;
+    // The body binder's statement plans over the same inputs (the analysis
+    // with the tree in c_ast_corpus_types): bodies planned, segments and the
+    // tokens and uses they bound, hints taken, bodies left to the token walk,
+    // and identifier uses compared field by field with the walk's own.
+    u64 statement_bodies;
+    u64 statement_segments;
+    u64 statement_segment_tokens;
+    u64 statement_uses;
+    u64 statement_hints;
+    u64 statement_fallbacks;
+    u64 statement_compared;
 };
 
 // c_parse_ast_from_tree on one input whose tree is complete, held to
@@ -2148,6 +2167,65 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_analyses_differ(Arena* arena, CAnalysis
     return difference;
 }
 
+// The first difference between the bindings of two analyses: every
+// identifier use (token, entity, scope) in order and the per-token use map,
+// every scope, and every entity's identity, place and declaration range.
+// Empty when there is none.
+BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_bindings_differ(Arena* arena, CAnalysisResult const* left, CAnalysisResult const* right)
+{
+    String8 difference = {0};
+    if (left->identifier_use_count != right->identifier_use_count || left->scope_count != right->scope_count ||
+        left->entity_count != right->entity_count || left->identifier_use_by_token_capacity != right->identifier_use_by_token_capacity)
+    {
+        difference = string_format(arena, S8("{u32} uses, {u32} scopes, {u32} entities without the tree; {u32}, {u32}, {u32} with it"),
+                                   left->identifier_use_count, left->scope_count, left->entity_count, right->identifier_use_count, right->scope_count,
+                                   right->entity_count);
+    }
+    for (u32 index = 0; index < left->identifier_use_count && !difference.length; index += 1)
+    {
+        CIdentifierUse a = left->identifier_uses[index];
+        CIdentifierUse b = right->identifier_uses[index];
+        if (a.token_index != b.token_index || a.entity.value != b.entity.value || a.scope.value != b.scope.value)
+        {
+            difference = string_format(arena, S8("use {u32} differs: token {u32} entity {u32} scope {u32} without the tree, token {u32} entity {u32} scope {u32} with it"),
+                                       index, a.token_index, a.entity.value, a.scope.value, b.token_index, b.entity.value, b.scope.value);
+        }
+    }
+    for (u32 index = 0; left->identifier_use_by_token_plus_one && index < left->identifier_use_by_token_capacity && !difference.length; index += 1)
+    {
+        if (left->identifier_use_by_token_plus_one[index] != right->identifier_use_by_token_plus_one[index])
+        {
+            difference = string_format(arena, S8("token {u32} maps to use {u32} without the tree, {u32} with it"), index,
+                                       left->identifier_use_by_token_plus_one[index], right->identifier_use_by_token_plus_one[index]);
+        }
+    }
+    for (u32 index = 0; index < left->scope_count && !difference.length; index += 1)
+    {
+        CScope a = left->scopes[index];
+        CScope b = right->scopes[index];
+        if (a.parent.value != b.parent.value || a.first_entity.value != b.first_entity.value || a.last_entity.value != b.last_entity.value ||
+            a.token_start != b.token_start || a.token_end != b.token_end || a.entity_count != b.entity_count)
+        {
+            difference = string_format(arena, S8("scope {u32} differs: [{u32}, {u32}) without the tree, [{u32}, {u32}) with it"), index, a.token_start,
+                                       a.token_end, b.token_start, b.token_end);
+        }
+    }
+    for (u32 index = 0; index < left->entity_count && !difference.length; index += 1)
+    {
+        CEntity const* a = left->entities + index;
+        CEntity const* b = right->entities + index;
+        if (!string_equal(a->name, b->name) || a->type.value != b->type.value || a->scope.value != b->scope.value || a->kind != b->kind ||
+            a->next_in_scope.value != b->next_in_scope.value || a->declaration_index != b->declaration_index ||
+            a->declaration_token_plus_one != b->declaration_token_plus_one || a->declaration_statement_start != b->declaration_statement_start ||
+            a->declaration_token_start != b->declaration_token_start || a->declaration_token_count != b->declaration_token_count ||
+            a->is_definition != b->is_definition || a->is_static_storage != b->is_static_storage || a->is_extern != b->is_extern)
+        {
+            difference = string_format(arena, S8("entity {u32} ('{S8}') differs"), index, a->name);
+        }
+    }
+    return difference;
+}
+
 // The tree expression typer (c_ast_types.c, #3102) on one input whose tree is
 // complete and whose declarations c_parse_ast accepted. Semantic analysis runs
 // three times on fresh declaration splits: without the tree, with it, and with
@@ -2166,12 +2244,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
     {
         CAnalysisResult plain = c_analyze_semantics_only(arena, preprocess, c_parse_ast(arena, preprocess));
         CAstTypeStatistics statistics = {0};
+        CAstStatementStatistics statements = {0};
         CParserResult typed_syntax = c_parse_ast(arena, preprocess);
         typed_syntax.ast = ast;
         typed_syntax.ast_type_statistics = &statistics;
+        typed_syntax.ast_statement_statistics = &statements;
         CAnalysisResult typed = c_analyze_semantics_only(arena, preprocess, typed_syntax);
         String8 difference = c_ast_corpus_analyses_differ(arguments->arena, &plain, &typed);
         BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(arguments->arena, S8("{S8}: {S8}"), label, difference));
+        // The body binder followed the tree's statement plans in the second
+        // analysis; its bindings must be the token walk's, field by field.
+        difference = c_ast_corpus_bindings_differ(arguments->arena, &plain, &typed);
+        BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(arguments->arena, S8("{S8}: statement plan: {S8}"), label, difference));
+        tally->statement_bodies += statements.bodies;
+        tally->statement_segments += statements.segments;
+        tally->statement_segment_tokens += statements.segment_tokens;
+        tally->statement_uses += statements.uses;
+        tally->statement_hints += statements.declaration_hints + statements.loop_hints;
+        tally->statement_fallbacks += statements.fallbacks;
+        tally->statement_compared += typed.identifier_use_count;
         arena_destroy(arena, 1);
         arena = arena_create(creation);
         if (BUSTER_REQUIRE(arguments, arena != 0))
@@ -2559,6 +2650,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_sources(UnitTestArguments* argum
     BUSTER_TEST(arguments, !hosted || tally->split_units == split_units_before + BUSTER_ARRAY_LENGTH(paths));
     BUSTER_TEST(arguments, !hosted || tally->split_records >= C_AST_CORPUS_HOSTED_SPLIT_RECORD_FLOOR);
     BUSTER_TEST(arguments, !hosted || tally->type_answers >= C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR);
+    BUSTER_TEST(arguments, !hosted || (tally->statement_segments >= C_AST_CORPUS_HOSTED_STATEMENT_SEGMENT_FLOOR &&
+                                       tally->statement_uses >= C_AST_CORPUS_HOSTED_STATEMENT_USE_FLOOR));
     return result;
 }
 #endif
@@ -2594,9 +2687,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
     BUSTER_TEST(arguments, tally.type_answers >= C_AST_CORPUS_TYPE_ANSWER_FLOOR && tally.type_compared == tally.type_answers);
     BUSTER_TEST(arguments, tally.type_probes >= C_AST_CORPUS_TYPE_PROBE_FLOOR);
     BUSTER_TEST(arguments, tally.split_records >= C_AST_CORPUS_SPLIT_RECORD_FLOOR && tally.split_compared >= tally.split_records);
+    BUSTER_TEST(arguments, tally.statement_segments >= C_AST_CORPUS_STATEMENT_SEGMENT_FLOOR && tally.statement_uses >= C_AST_CORPUS_STATEMENT_USE_FLOOR &&
+                               tally.statement_compared >= tally.statement_uses && tally.statement_hints);
 #if BUSTER_LINUX && !BUSTER_ANDROID
     c_ast_test_merge(&result, c_ast_corpus_sources(arguments, &tally));
 #endif
+    // Every body of the corpus follows its plan; none is left to the token walk.
+    BUSTER_TEST(arguments, tally.statement_fallbacks == 0 && tally.statement_bodies);
     return result;
 }
 #endif
@@ -3843,6 +3940,145 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_split(UnitTestArguments* arguments
     return result;
 }
 
+// The body binder's statement plan (c_parse.c, #3102) on chosen bodies, in
+// every layout: one body that uses every kind of plan entry, one whose
+// statements the plan leaves to the token walk, and one shape per
+// CAstStatementFallback -- a tree whose function body the record does not
+// have, and one whose expression statement is anchored off its `;`. Each
+// analysis with the tree must bind exactly as the analysis without it.
+typedef enum CAstStatementTamper
+{
+    C_AST_STATEMENT_TAMPER_NONE,
+    C_AST_STATEMENT_TAMPER_BRACE,
+    C_AST_STATEMENT_TAMPER_SEMICOLON,
+} CAstStatementTamper;
+
+typedef struct CAstStatementCase CAstStatementCase;
+struct CAstStatementCase
+{
+    String8 source;
+    CAstStatementTamper tamper;
+    CAstStatementFallback reason;
+    // Floors on what a planned body takes from its plan.
+    u32 segments;
+    u32 declaration_hints;
+    u32 loop_hints;
+    u32 declines;
+    // Segments handed back to the token walk at a token it reads itself
+    // (here `__builtin_offsetof`).
+    u32 bails;
+};
+
+#define C_AST_STATEMENT_CASE_EVERY                                                                                                             \
+    "int g(int);\n"                                                                                                                          \
+    "int f(int n)\n"                                                                                                                         \
+    "{\n"                                                                                                                                    \
+    "    int a = 1, b[2] = {1, 2};\n"                                                                                                        \
+    "    unsigned s = 0;\n"                                                                                                                  \
+    "    for (int i = 0; i < n; i++) s += (unsigned)i;\n"                                                                                    \
+    "    for (a = 0; a < n; a += 1) { b[0] = a; }\n"                                                                                         \
+    "    for (;;) break;\n"                                                                                                                  \
+    "    while (a > 0) a--;\n"                                                                                                               \
+    "    do { a++; continue; } while ((a < 3));\n"                                                                                           \
+    "    if (a) s = 1; else if (b[1]) s = 2; else { s = 3; }\n"                                                                              \
+    "    switch (n) { case 1: s = 4; break; case 2: default: s = 5; }\n"                                                                     \
+    "    goto done;\n"                                                                                                                       \
+    "    ;\n"                                                                                                                                \
+    "done:\n"                                                                                                                                \
+    "    return (int)s + g(a) + (int)sizeof(unsigned long);\n"                                                                               \
+    "}\n"
+
+BUSTER_GLOBAL_LOCAL CAstStatementCase const c_ast_statement_cases[] = {
+    {S8_INITIALIZER(C_AST_STATEMENT_CASE_EVERY), C_AST_STATEMENT_TAMPER_NONE, C_AST_STATEMENT_FALLBACK_NONE, 10, 2, 3, 1, 0},
+    {S8_INITIALIZER("struct P { int x; };\n"
+                    "int h(int v)\n"
+                    "{\n"
+                    "    struct Q { int q; } local = {v};\n"
+                    "    int w = ({ int t = v; t + 1; });\n"
+                    "    struct P p = (struct P){.x = w};\n"
+                    "    __asm__ volatile(\"\" ::: \"memory\");\n"
+                    "    __attribute__((unused)) int u;\n"
+                    "    w += __builtin_offsetof(struct P, x);\n"
+                    "    w = ({ int z = w; z; });\n"
+                    "again:\n"
+                    "    if (w < 0) goto again;\n"
+                    "    return p.x + local.q;\n"
+                    "}\n"),
+     C_AST_STATEMENT_TAMPER_NONE, C_AST_STATEMENT_FALLBACK_NONE, 1, 1, 0, 4, 1},
+    {S8_INITIALIZER(C_AST_STATEMENT_CASE_EVERY), C_AST_STATEMENT_TAMPER_BRACE, C_AST_STATEMENT_FALLBACK_INPUT},
+    {S8_INITIALIZER(C_AST_STATEMENT_CASE_EVERY), C_AST_STATEMENT_TAMPER_SEMICOLON, C_AST_STATEMENT_FALLBACK_TOKENS},
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statements(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ast_statement_cases); index += 1)
+    {
+        CAstStatementCase const* statement_case = &c_ast_statement_cases[index];
+        for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 label = string_format(temporary.arena, S8("statement case {u32}, layout {u32}"), index, layout);
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, statement_case->source, C_PREPROCESS_DIALECT_GNU17);
+            CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
+            if (BUSTER_REQUIRE(arguments, preprocess.error_count == 0 && built.complete))
+            {
+                CAst tree = c_ast_test_copy(temporary.arena, &built.ast);
+                u32 definition = c_ast_test_find_kind(&tree, C_AST_FUNCTION_DEFINITION);
+                u32 statement = c_ast_test_find_kind(&tree, C_AST_EXPRESSION_STATEMENT);
+                if (statement_case->tamper == C_AST_STATEMENT_TAMPER_BRACE && BUSTER_REQUIRE(arguments, definition != C_AST_NODE_INVALID))
+                {
+                    tree.tokens[definition - 1] += 1;
+                }
+                if (statement_case->tamper == C_AST_STATEMENT_TAMPER_SEMICOLON && BUSTER_REQUIRE(arguments, statement != C_AST_NODE_INVALID))
+                {
+                    tree.tokens[statement] -= 1;
+                }
+                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+                CAstStatementStatistics statistics = {0};
+                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                syntax.ast = &tree;
+                syntax.ast_statement_statistics = &statistics;
+                CAnalysisResult planned = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                BUSTER_TEST_RAW(arguments, plain.diagnostic_count == 0 && planned.diagnostic_count == 0, label);
+                String8 difference = c_ast_corpus_bindings_differ(temporary.arena, &plain, &planned);
+                BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(temporary.arena, S8("{S8}: {S8}"), label, difference));
+                bool followed = statement_case->reason == C_AST_STATEMENT_FALLBACK_NONE;
+                BUSTER_TEST_RAW(arguments, statistics.bodies == (u64)followed && statistics.fallbacks == (u64)!followed, label);
+                BUSTER_TEST_RAW(arguments,
+                                followed || (statistics.reason == statement_case->reason && statistics.fallback_counts[statement_case->reason] == 1 &&
+                                             statistics.segments == 0 && statistics.declaration_hints == 0 && statistics.loop_hints == 0),
+                                label);
+                BUSTER_TEST_RAW(arguments,
+                                !followed || (statistics.segments >= statement_case->segments && statistics.declaration_hints >= statement_case->declaration_hints &&
+                                              statistics.loop_hints >= statement_case->loop_hints && statistics.declines >= statement_case->declines &&
+                                              statistics.uses && statistics.bails == statement_case->bails),
+                                label);
+            }
+            c_ast_release(&built.ast);
+            scratch_end(temporary);
+        }
+    }
+    // An empty tree has no function bodies: every body is left to the token walk.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, S8("int f(int a) { return a; } int g(void) { return 1; }"),
+                                                             C_PREPROCESS_DIALECT_GNU17);
+        CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+        CAst empty = {0};
+        CAstStatementStatistics statistics = {0};
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        syntax.ast = &empty;
+        syntax.ast_statement_statistics = &statistics;
+        CAnalysisResult planned = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST(arguments, c_ast_corpus_bindings_differ(temporary.arena, &plain, &planned).length == 0);
+        BUSTER_TEST(arguments, statistics.fallbacks == 2 && statistics.fallback_counts[C_AST_STATEMENT_FALLBACK_INPUT] == 2 && statistics.bodies == 0);
+        BUSTER_TEST(arguments, string_equal(c_ast_statement_fallback_name(C_AST_STATEMENT_FALLBACK_TOKENS), S8("tokens")));
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult c_ast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3860,6 +4096,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_uninterned);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_types);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_split);
+    BUSTER_TEST_FIXTURE(arguments, c_ast_test_statements);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_fixture_sweep);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_corpus);

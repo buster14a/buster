@@ -1440,6 +1440,47 @@ struct CAstTypeStatistics
     u64 gated;
 };
 
+// Why the body binder read a whole function body with its token walker
+// instead of the tree's statement plan (c_parse_statement_plan_build,
+// GitHub #3102).
+typedef enum CAstStatementFallback
+{
+    C_AST_STATEMENT_FALLBACK_NONE,
+    // The tree has no function definition whose body is the record's body.
+    C_AST_STATEMENT_FALLBACK_INPUT,
+    // A token the grammar puts next to a statement's anchor (its `;`, the
+    // `(` of a header, the `goto` before a label) is not that token.
+    C_AST_STATEMENT_FALLBACK_TOKENS,
+    C_AST_STATEMENT_FALLBACK_COUNT,
+} CAstStatementFallback;
+
+// What the statement plan did over one analysis. A segment is a statement,
+// or a header, whose tokens the plan vouches hold nothing but expression
+// syntax: the binder binds its identifiers and steps past it in one go
+// instead of running its token loop over it. A bail hands a segment back to
+// the token loop at the token where the loop would leave plain expression
+// handling (a label, a type start, `__builtin_offsetof`). Declaration and
+// loop hints replace the loop's own scans for a block declaration's end and
+// a `for` header's boundaries and loop end. A declined statement got none of
+// these, and the token loop read it as it always has.
+typedef struct CAstStatementStatistics CAstStatementStatistics;
+struct CAstStatementStatistics
+{
+    u64 bodies;
+    u64 fallbacks;
+    u64 fallback_counts[C_AST_STATEMENT_FALLBACK_COUNT];
+    u64 segments;
+    u64 segment_tokens;
+    u64 uses;
+    u64 bails;
+    u64 declaration_hints;
+    u64 loop_hints;
+    u64 declines;
+    // The last fallback: its reason, and the `{` of the body.
+    CAstStatementFallback reason;
+    u32 fallback_token;
+};
+
 typedef struct CParserResult CParserResult;
 struct CParserResult
 {
@@ -1461,6 +1502,9 @@ struct CParserResult
     CAst const* ast;
     // Optional: receives the typer's counts, added to what it already holds.
     CAstTypeStatistics* ast_type_statistics;
+    // Optional: receives the body binder's statement-plan counts, added to
+    // what it already holds. The plan runs whenever `ast` is set.
+    CAstStatementStatistics* ast_statement_statistics;
     u32 declaration_count;
     u32 diagnostic_count;
     u32 declaration_capacity;
@@ -2053,6 +2097,8 @@ struct CParserTreeStatistics
 BUSTER_F_DECL CParserResult c_parse_ast_from_tree(Arena* arena, CPreprocessResult preprocess, CAst const* ast, CParserTreeStatistics* statistics);
 // The CParserTreeFallback in lower case without its prefix ("none", "input", ...).
 BUSTER_F_DECL String8 c_parser_tree_fallback_name(CParserTreeFallback reason);
+// The CAstStatementFallback in lower case without its prefix ("none", "input", "tokens").
+BUSTER_F_DECL String8 c_ast_statement_fallback_name(CAstStatementFallback reason);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 // Complete syntax and semantic analysis without constructing canonical IR.
 BUSTER_F_DECL CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax);

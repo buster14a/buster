@@ -37,6 +37,11 @@
 //   file-scope initializer, to the tree expression typer (c_ast_types.c)
 //   before running the machine. c_parse_validate_const_assignments does not
 //   ask about designators it meets as operands (c_parse_designator_probe).
+//   With the tree, the body binder also follows each function body's
+//   statement plan (c_parse_statement_plan_build): statement boundaries,
+//   block declaration ends and `for` header boundaries read from the tree's
+//   COMPOUND_STATEMENT items, and plain expression segments bound in one
+//   pass (c_parse_bind_plan_segment) instead of by its token loop.
 //
 // Types and declarators are parsed by CTypeParseMachine (types in
 // c_internal.h), an explicit frame stack in place of recursion: each
@@ -116,6 +121,9 @@
 //                                                 linkage redeclarations
 //   c_parse_label_address_prefix_proven,          statement boundaries, asm
 //   c_parse_statement_end                         goto, label addresses
+//   c_parse_statement_plan_build,                 the statement plan read from
+//   c_parse_bind_plan_segment                     the syntax tree, and its
+//                                                 one-pass segment binding
 //   c_parse_bind_function_body                    binds body identifiers to
 //                                                 entities, indexes scopes
 //   c_parse_token_census_reference,               the token-shape census that
@@ -23043,9 +23051,10 @@ BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machi
                                            });
 }
 
+typedef struct CParseStatementPlan CParseStatementPlan;
 BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
                                                        CPreprocessResult preprocess, u32 declaration_index, CScopeId scope, u32 body_start,
-                                                       u32 body_token_count);
+                                                       u32 body_token_count, CParseStatementPlan* plan);
 
 // The GNU statement expression `({ ... })` opening at `index`, if one does.
 // `body_start` and `body_end` bound the block's tokens -- the braces excluded
@@ -23093,7 +23102,7 @@ BUSTER_C_INTERNAL void c_parse_bind_statement_expression_body(CTypeParseMachine*
     };
     if (body_start < body_end)
     {
-        c_parse_bind_block_statements(machine, result_arena, result, preprocess, declaration_index, child, body_start, body_end - body_start);
+        c_parse_bind_block_statements(machine, result_arena, result, preprocess, declaration_index, child, body_start, body_end - body_start, 0);
     }
 }
 
@@ -25003,6 +25012,889 @@ BUSTER_C_INTERNAL bool c_parse_controlling_expression_defines_tag(CTokenShape co
     return defines;
 }
 
+// ---- the statement plan: a body's statements read from the syntax tree ------
+//
+// Under -fc-ast-pilot (CTypeParseMachine.syntax_tree, GitHub #3102) the body
+// binder reads a function body's statement boundaries from the tree's
+// COMPOUND_STATEMENT items instead of rediscovering them from tokens. The
+// token loop below (c_parse_bind_block_statements) stays the engine and the
+// authority; the plan only tells it, at given tokens, what it would otherwise
+// scan for:
+//   SEGMENT      tokens [start, end] holding nothing but expression syntax: an
+//                expression, return, goto, break, continue or null statement,
+//                an if/while/switch header, a case or default label, a do-while
+//                tail, a `for` header after its first clause, and an `else` or
+//                `do` keyword. Adjacent segments merge. The loop binds their
+//                identifiers in one pass (c_parse_bind_plan_segment) with its
+//                own predicates and steps past them; nothing in them can open a
+//                scope, declare, or reach any other path of the loop.
+//   DECLARATION  a block declaration from its first token to its `;`, holding
+//                no statement expression: the loop's `;` scan and its GNU
+//                typeof statement-expression search are skipped.
+//   LOOP         a `for`: its header's first `;` and `)`, and one past its
+//                body, in place of the loop's scans and c_parse_statement_end.
+// Every boundary comes from node anchors (c_ast.h): a statement's anchor
+// token, the greatest anchor on a subtree's rightmost chain (a node's last
+// child is the node before it), or the least anchor of a plain subtree. The
+// punctuation between them has no node, and is read next to an anchor: the
+// closers after an expression's last anchor, then the `;`, `:` or `)` the
+// grammar puts there. A statement whose rule cannot state its boundaries
+// gets no entry, and the loop reads it as it always has. A token the
+// grammar fixes next to an anchor that is not that token sends the whole
+// body to the loop (CAstStatementFallback), as does a body with no tree.
+// Entries are emitted in token order by an explicit-stack preorder walk
+// over statements; expressions are scanned once, by the statement that owns
+// them.
+
+typedef enum CParseStatementPlanKind
+{
+    C_PARSE_STATEMENT_PLAN_SEGMENT,
+    C_PARSE_STATEMENT_PLAN_DECLARATION,
+    C_PARSE_STATEMENT_PLAN_LOOP,
+} CParseStatementPlanKind;
+
+typedef struct CParseStatementPlanEntry CParseStatementPlanEntry;
+struct CParseStatementPlanEntry
+{
+    u32 start;
+    // A segment's last token, a declaration's `;`, a loop header's `)`.
+    u32 end;
+    // A loop's first header `;`, and one past its body.
+    u32 separator;
+    u32 loop_end;
+    CParseStatementPlanKind kind;
+};
+
+struct CParseStatementPlan
+{
+    CParseStatementPlanEntry* entries;
+    u32 count;
+    u32 capacity;
+    CAstStatementStatistics* statistics;
+};
+
+// Node classes. PLAIN: expression syntax, or a type name without a member or
+// enumerator list, attributes or braces. CONTAINER: a node whose tokens hold
+// a `;` of their own, so a scan for a terminator could stop inside it.
+enum
+{
+    C_PARSE_PLAN_PLAIN = 1 << 0,
+    C_PARSE_PLAN_CONTAINER = 1 << 1,
+};
+
+BUSTER_GLOBAL_LOCAL u8 const c_parse_plan_kind_class[C_AST_KIND_COUNT] = {
+    [C_AST_IDENTIFIER] = C_PARSE_PLAN_PLAIN,
+    [C_AST_NUMBER] = C_PARSE_PLAN_PLAIN,
+    [C_AST_CHARACTER] = C_PARSE_PLAN_PLAIN,
+    [C_AST_STRING] = C_PARSE_PLAN_PLAIN,
+    [C_AST_BOOLEAN_CONSTANT] = C_PARSE_PLAN_PLAIN,
+    [C_AST_NULLPTR] = C_PARSE_PLAN_PLAIN,
+    [C_AST_LABEL_ADDRESS] = C_PARSE_PLAN_PLAIN,
+    [C_AST_GENERIC_SELECTION] = C_PARSE_PLAN_PLAIN,
+    [C_AST_GENERIC_ASSOCIATION] = C_PARSE_PLAN_PLAIN,
+    [C_AST_GENERIC_DEFAULT] = C_PARSE_PLAN_PLAIN,
+    [C_AST_CALL] = C_PARSE_PLAN_PLAIN,
+    [C_AST_INDEX] = C_PARSE_PLAN_PLAIN,
+    [C_AST_MEMBER] = C_PARSE_PLAN_PLAIN,
+    [C_AST_MEMBER_ARROW] = C_PARSE_PLAN_PLAIN,
+    [C_AST_POST_INCREMENT] = C_PARSE_PLAN_PLAIN,
+    [C_AST_POST_DECREMENT] = C_PARSE_PLAN_PLAIN,
+    [C_AST_PRE_INCREMENT] = C_PARSE_PLAN_PLAIN,
+    [C_AST_PRE_DECREMENT] = C_PARSE_PLAN_PLAIN,
+    [C_AST_ADDRESS] = C_PARSE_PLAN_PLAIN,
+    [C_AST_DEREFERENCE] = C_PARSE_PLAN_PLAIN,
+    [C_AST_PLUS] = C_PARSE_PLAN_PLAIN,
+    [C_AST_NEGATE] = C_PARSE_PLAN_PLAIN,
+    [C_AST_BIT_NOT] = C_PARSE_PLAN_PLAIN,
+    [C_AST_LOGICAL_NOT] = C_PARSE_PLAN_PLAIN,
+    [C_AST_SIZEOF_EXPRESSION] = C_PARSE_PLAN_PLAIN,
+    [C_AST_SIZEOF_TYPE] = C_PARSE_PLAN_PLAIN,
+    [C_AST_ALIGNOF_EXPRESSION] = C_PARSE_PLAN_PLAIN,
+    [C_AST_ALIGNOF_TYPE] = C_PARSE_PLAN_PLAIN,
+    [C_AST_REAL] = C_PARSE_PLAN_PLAIN,
+    [C_AST_IMAG] = C_PARSE_PLAN_PLAIN,
+    [C_AST_EXTENSION] = C_PARSE_PLAN_PLAIN,
+    [C_AST_CAST] = C_PARSE_PLAN_PLAIN,
+    [C_AST_MULTIPLY] = C_PARSE_PLAN_PLAIN,
+    [C_AST_DIVIDE] = C_PARSE_PLAN_PLAIN,
+    [C_AST_REMAINDER] = C_PARSE_PLAN_PLAIN,
+    [C_AST_ADD] = C_PARSE_PLAN_PLAIN,
+    [C_AST_SUBTRACT] = C_PARSE_PLAN_PLAIN,
+    [C_AST_SHIFT_LEFT] = C_PARSE_PLAN_PLAIN,
+    [C_AST_SHIFT_RIGHT] = C_PARSE_PLAN_PLAIN,
+    [C_AST_LESS] = C_PARSE_PLAN_PLAIN,
+    [C_AST_GREATER] = C_PARSE_PLAN_PLAIN,
+    [C_AST_LESS_EQUAL] = C_PARSE_PLAN_PLAIN,
+    [C_AST_GREATER_EQUAL] = C_PARSE_PLAN_PLAIN,
+    [C_AST_EQUAL] = C_PARSE_PLAN_PLAIN,
+    [C_AST_NOT_EQUAL] = C_PARSE_PLAN_PLAIN,
+    [C_AST_BIT_AND] = C_PARSE_PLAN_PLAIN,
+    [C_AST_BIT_XOR] = C_PARSE_PLAN_PLAIN,
+    [C_AST_BIT_OR] = C_PARSE_PLAN_PLAIN,
+    [C_AST_LOGICAL_AND] = C_PARSE_PLAN_PLAIN,
+    [C_AST_LOGICAL_OR] = C_PARSE_PLAN_PLAIN,
+    [C_AST_CONDITIONAL] = C_PARSE_PLAN_PLAIN,
+    [C_AST_CONDITIONAL_OMITTED] = C_PARSE_PLAN_PLAIN,
+    [C_AST_ASSIGN] = C_PARSE_PLAN_PLAIN,
+    [C_AST_MULTIPLY_ASSIGN] = C_PARSE_PLAN_PLAIN,
+    [C_AST_DIVIDE_ASSIGN] = C_PARSE_PLAN_PLAIN,
+    [C_AST_REMAINDER_ASSIGN] = C_PARSE_PLAN_PLAIN,
+    [C_AST_ADD_ASSIGN] = C_PARSE_PLAN_PLAIN,
+    [C_AST_SUBTRACT_ASSIGN] = C_PARSE_PLAN_PLAIN,
+    [C_AST_SHIFT_LEFT_ASSIGN] = C_PARSE_PLAN_PLAIN,
+    [C_AST_SHIFT_RIGHT_ASSIGN] = C_PARSE_PLAN_PLAIN,
+    [C_AST_BIT_AND_ASSIGN] = C_PARSE_PLAN_PLAIN,
+    [C_AST_BIT_XOR_ASSIGN] = C_PARSE_PLAN_PLAIN,
+    [C_AST_BIT_OR_ASSIGN] = C_PARSE_PLAN_PLAIN,
+    [C_AST_COMMA] = C_PARSE_PLAN_PLAIN,
+    [C_AST_TYPE_NAME] = C_PARSE_PLAN_PLAIN,
+    [C_AST_DECL_SPECIFIERS] = C_PARSE_PLAN_PLAIN,
+    [C_AST_SPECIFIER_WORD] = C_PARSE_PLAN_PLAIN,
+    [C_AST_TYPEDEF_NAME] = C_PARSE_PLAN_PLAIN,
+    [C_AST_TAG_NAME] = C_PARSE_PLAN_PLAIN,
+    [C_AST_STRUCT_SPECIFIER] = C_PARSE_PLAN_PLAIN,
+    [C_AST_UNION_SPECIFIER] = C_PARSE_PLAN_PLAIN,
+    [C_AST_ENUM_SPECIFIER] = C_PARSE_PLAN_PLAIN,
+    [C_AST_TYPEOF] = C_PARSE_PLAN_PLAIN,
+    [C_AST_TYPEOF_UNQUAL] = C_PARSE_PLAN_PLAIN,
+    [C_AST_ATOMIC_SPECIFIER] = C_PARSE_PLAN_PLAIN,
+    [C_AST_BITINT] = C_PARSE_PLAN_PLAIN,
+    [C_AST_DECLARATOR_NAME] = C_PARSE_PLAN_PLAIN,
+    [C_AST_DECLARATOR_POINTER] = C_PARSE_PLAN_PLAIN,
+    [C_AST_DECLARATOR_ARRAY] = C_PARSE_PLAN_PLAIN,
+    [C_AST_DECLARATOR_FUNCTION] = C_PARSE_PLAN_PLAIN,
+    [C_AST_PARAMETER_LIST] = C_PARSE_PLAN_PLAIN,
+    [C_AST_PARAMETER_LIST_VARIADIC] = C_PARSE_PLAN_PLAIN,
+    [C_AST_PARAMETER] = C_PARSE_PLAN_PLAIN,
+    [C_AST_MEMBER_LIST] = C_PARSE_PLAN_CONTAINER,
+    [C_AST_ENUMERATOR_LIST] = C_PARSE_PLAN_CONTAINER,
+    [C_AST_STATEMENT_EXPRESSION] = C_PARSE_PLAN_CONTAINER,
+};
+
+// Stack tags of the preorder walk: a statement, the `else` of an IF_ELSE once
+// its then-branch is planned, and a DO_WHILE's tail once its body is.
+enum
+{
+    C_PARSE_PLAN_VISIT_STATEMENT,
+    C_PARSE_PLAN_VISIT_ELSE,
+    C_PARSE_PLAN_VISIT_TAIL,
+};
+
+// The greatest anchor of n's subtree: children come in source order and a
+// node's last child is the node before it, so it lies on the chain n, n - 1,
+// ... down to the first leaf. A string run's anchor is its first token.
+BUSTER_GLOBAL_LOCAL u32 c_parse_plan_last_anchor(CAst const* ast, u32 node)
+{
+    u32 last = 0;
+    u32 cursor = node;
+    bool descending = true;
+    while (descending)
+    {
+        u32 token = ast->tokens[cursor] + (ast->kinds[cursor] == C_AST_STRING ? ast->data[cursor] - 1 : 0);
+        last = token > last ? token : last;
+        descending = ast->extents[cursor] > 1;
+        cursor -= descending;
+    }
+    return last;
+}
+
+// Whether every node of n's subtree is plain; `*first` receives its least
+// anchor, which is the subtree's first token apart from wrapping parentheses.
+BUSTER_GLOBAL_LOCAL bool c_parse_plan_plain(CAst const* ast, u32 node, u32* first)
+{
+    bool plain = true;
+    u32 least = UINT32_MAX;
+    for (u32 cursor = c_ast_subtree_begin(ast, node); cursor <= node && plain; cursor += 1)
+    {
+        plain = (c_parse_plan_kind_class[ast->kinds[cursor]] & C_PARSE_PLAN_PLAIN) != 0;
+        least = ast->tokens[cursor] < least ? ast->tokens[cursor] : least;
+    }
+    *first = least;
+    return plain;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_plan_contained(CAst const* ast, u32 node)
+{
+    bool contained = false;
+    for (u32 cursor = c_ast_subtree_begin(ast, node); cursor <= node && !contained; cursor += 1)
+    {
+        contained = (c_parse_plan_kind_class[ast->kinds[cursor]] & C_PARSE_PLAN_CONTAINER) != 0;
+    }
+    return contained;
+}
+
+// The first token after `token` that is not a `)` or `]` (or `}` with
+// `braces`), or `limit`: what follows an expression's last anchor.
+BUSTER_GLOBAL_LOCAL u32 c_parse_plan_after_closers(CPreprocessResult const* preprocess, u32 token, u32 limit, bool braces)
+{
+    u32 cursor = token + 1;
+    while (cursor < limit &&
+           (c_token_is_punctuator(&preprocess->tokens[cursor], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+            c_token_is_punctuator(&preprocess->tokens[cursor], C_PUNCTUATOR_RIGHT_BRACKET) ||
+            (braces && c_token_is_punctuator(&preprocess->tokens[cursor], C_PUNCTUATOR_RIGHT_BRACE))))
+    {
+        cursor += 1;
+    }
+    return cursor < limit ? cursor : limit;
+}
+
+// The `;` ending the expression or declaration at `node` when it holds no
+// container, else UINT32_MAX.
+BUSTER_GLOBAL_LOCAL u32 c_parse_plan_terminator(CAst const* ast, CPreprocessResult const* preprocess, u32 node, u32 limit)
+{
+    u32 terminator = UINT32_MAX;
+    if (!c_parse_plan_contained(ast, node))
+    {
+        u32 after = c_parse_plan_after_closers(preprocess, c_parse_plan_last_anchor(ast, node), limit, true);
+        terminator = after < limit && c_token_is_punctuator(&preprocess->tokens[after], C_PUNCTUATOR_SEMICOLON) ? after : UINT32_MAX;
+    }
+    return terminator;
+}
+
+// The last token of the statement at `node`, or UINT32_MAX when no rule
+// states it. Compound statements, and the statements whose last child is a
+// statement, are transparent: the chain runs node, node - 1, ... to a
+// statement whose last token an anchor gives, and each compound on the way
+// adds its `}`. `lasts` memoizes the answer per node - `begin` (last + 1,
+// UINT32_MAX for none, 0 for not yet known), so nested statements share one
+// descent. `limit` is the body's `}`.
+BUSTER_GLOBAL_LOCAL u32 c_parse_plan_statement_last(CAst const* ast, CPreprocessResult const* preprocess, u32* lasts, u32 begin, u32 node,
+                                                    u32 limit)
+{
+    u32 cursor = node;
+    u32 last = UINT32_MAX;
+    bool descending = true;
+    while (descending)
+    {
+        descending = false;
+        u32 memo = lasts[cursor - begin];
+        u32 kind = ast->kinds[cursor];
+        u32 anchor = ast->tokens[cursor];
+        bool terminal = true;
+        if (memo)
+        {
+            last = memo == UINT32_MAX ? UINT32_MAX : memo - 1;
+            terminal = false;
+        }
+        else if (kind == C_AST_COMPOUND_STATEMENT && ast->extents[cursor] == 1)
+        {
+            last = anchor + 1 <= limit && c_token_is_punctuator(&preprocess->tokens[anchor + 1], C_PUNCTUATOR_RIGHT_BRACE) ? anchor + 1 : UINT32_MAX;
+        }
+        else if (kind == C_AST_COMPOUND_STATEMENT || kind == C_AST_IF || kind == C_AST_IF_ELSE || kind == C_AST_WHILE || kind == C_AST_SWITCH ||
+                 kind == C_AST_FOR || kind == C_AST_ATTRIBUTED_STATEMENT || (kind == C_AST_LABELED && (ast->data[cursor] & 2)) ||
+                 (kind == C_AST_DEFAULT && ast->extents[cursor] > 1) ||
+                 (kind == C_AST_CASE && ast->extents[cursor] > 1 && c_ast_subtree_begin(ast, cursor - 1) != c_ast_subtree_begin(ast, cursor)) ||
+                 (kind == C_AST_CASE_RANGE && c_ast_child_count(ast, cursor) == 3))
+        {
+            cursor -= 1;
+            descending = true;
+            terminal = false;
+        }
+        else if (kind == C_AST_EXPRESSION_STATEMENT || kind == C_AST_NULL_STATEMENT || kind == C_AST_ATTRIBUTE_STATEMENT)
+        {
+            last = anchor;
+        }
+        else if (kind == C_AST_BREAK || kind == C_AST_CONTINUE || kind == C_AST_GOTO || (kind == C_AST_RETURN && ast->extents[cursor] == 1))
+        {
+            last = anchor + 1 < limit && c_token_is_punctuator(&preprocess->tokens[anchor + 1], C_PUNCTUATOR_SEMICOLON) ? anchor + 1 : UINT32_MAX;
+        }
+        else if (kind == C_AST_RETURN || kind == C_AST_GOTO_COMPUTED || kind == C_AST_DECLARATION)
+        {
+            last = c_parse_plan_terminator(ast, preprocess, cursor, limit);
+        }
+        else if (kind == C_AST_DO_WHILE)
+        {
+            // The condition is the last child; the body's tokens all come before it.
+            last = c_parse_plan_terminator(ast, preprocess, cursor - 1, limit);
+        }
+        if (terminal)
+        {
+            lasts[cursor - begin] = last == UINT32_MAX ? UINT32_MAX : last + 1;
+        }
+    }
+    // Back up the chain: each compound on it adds its `}`.
+    for (u32 up = cursor + 1; up <= node; up += 1)
+    {
+        if (last != UINT32_MAX && ast->kinds[up] == C_AST_COMPOUND_STATEMENT)
+        {
+            last = last + 1 <= limit && c_token_is_punctuator(&preprocess->tokens[last + 1], C_PUNCTUATOR_RIGHT_BRACE) ? last + 1 : UINT32_MAX;
+        }
+        lasts[up - begin] = last == UINT32_MAX ? UINT32_MAX : last + 1;
+    }
+    return last;
+}
+
+// Appends an entry in token order, merging a segment into the segment that
+// ends just before it. False when the entry is out of order or over
+// capacity, which the rules above never produce; the caller then sends the
+// body to the token loop.
+BUSTER_GLOBAL_LOCAL bool c_parse_plan_append(CParseStatementPlan* plan, CParseStatementPlanKind kind, u32 start, u32 end, u32 separator, u32 loop_end)
+{
+    CParseStatementPlanEntry* previous = plan->count ? plan->entries + plan->count - 1 : 0;
+    bool ordered = !previous || (previous->start < start && (previous->kind != C_PARSE_STATEMENT_PLAN_SEGMENT || previous->end < start));
+    if (ordered && kind == C_PARSE_STATEMENT_PLAN_SEGMENT && previous && previous->kind == C_PARSE_STATEMENT_PLAN_SEGMENT && previous->end + 1 == start)
+    {
+        previous->end = end;
+    }
+    else if (ordered && plan->count < plan->capacity)
+    {
+        plan->entries[plan->count++] = (CParseStatementPlanEntry){
+            .start = start,
+            .end = end,
+            .separator = separator,
+            .loop_end = loop_end,
+            .kind = kind,
+        };
+    }
+    else
+    {
+        ordered = false;
+    }
+    return ordered;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_plan_punctuator_at(CPreprocessResult const* preprocess, u32 token, u32 limit, CPunctuator punctuator)
+{
+    return token < limit && c_token_is_punctuator(&preprocess->tokens[token], punctuator);
+}
+
+// The plain expression at `node` as a segment ending at the `terminator`
+// punctuator after its last anchor's closers: from `start` (or, with
+// UINT32_MAX, from the expression's own first token) to that punctuator.
+// UINT32_MAX when the expression is not plain or no such punctuator follows.
+BUSTER_GLOBAL_LOCAL u32 c_parse_plan_expression_end(CAst const* ast, CPreprocessResult const* preprocess, u32 node, u32 limit, CPunctuator terminator,
+                                                    u32* first)
+{
+    u32 end = UINT32_MAX;
+    if (c_parse_plan_plain(ast, node, first))
+    {
+        u32 after = c_parse_plan_after_closers(preprocess, c_parse_plan_last_anchor(ast, node), limit, false);
+        end = c_parse_plan_punctuator_at(preprocess, after, limit, terminator) ? after : UINT32_MAX;
+    }
+    return end;
+}
+
+// The `{` of every top-level function definition, ascending, paired with its
+// COMPOUND_STATEMENT node, in the phase arena (CTypeParseMachine).
+BUSTER_GLOBAL_LOCAL void c_parse_statement_bodies_prepare(CTypeParseMachine* machine, Arena* arena)
+{
+    CAst const* ast = machine->syntax_tree;
+    machine->ast_statement_bodies = 0;
+    machine->ast_statement_body_count = 0;
+    if (ast && ast->node_count && ast->root < ast->node_count && ast->kinds[ast->root] == C_AST_TRANSLATION_UNIT)
+    {
+        u32 floor = c_ast_subtree_begin(ast, ast->root);
+        u32 count = 0;
+        for (u32 cursor = ast->root; cursor > floor; cursor = c_ast_subtree_begin(ast, cursor - 1))
+        {
+            count += ast->kinds[cursor - 1] == C_AST_FUNCTION_DEFINITION && cursor >= 2 && ast->kinds[cursor - 2] == C_AST_COMPOUND_STATEMENT;
+        }
+        u32* bodies = arena_allocate(arena, u32, 2 * (u64)count + 2);
+        u32 slot = count;
+        for (u32 cursor = ast->root; cursor > floor && slot; cursor = c_ast_subtree_begin(ast, cursor - 1))
+        {
+            if (ast->kinds[cursor - 1] == C_AST_FUNCTION_DEFINITION && cursor >= 2 && ast->kinds[cursor - 2] == C_AST_COMPOUND_STATEMENT)
+            {
+                slot -= 1;
+                bodies[2 * slot] = ast->tokens[cursor - 2];
+                bodies[2 * slot + 1] = cursor - 2;
+            }
+        }
+        machine->ast_statement_bodies = bodies;
+        machine->ast_statement_body_count = count;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL u32 c_parse_plan_body_node(CTypeParseMachine const* machine, u32 brace)
+{
+    u32 low = 0;
+    u32 high = machine->ast_statement_body_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (machine->ast_statement_bodies[2 * middle] < brace)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low < machine->ast_statement_body_count && machine->ast_statement_bodies[2 * low] == brace ? machine->ast_statement_bodies[2 * low + 1]
+                                                                                                        : C_AST_NODE_INVALID;
+}
+
+// The statement plan of the function body [body_start, body_start +
+// body_token_count), whose `{` and `}` bracket it, in `arena`. An empty plan
+// (with its CAstStatementFallback counted) leaves the token loop alone.
+BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseMachine const* machine, Arena* arena, CPreprocessResult preprocess,
+                                                                    u32 body_start, u32 body_token_count)
+{
+    CAst const* ast = machine->syntax_tree;
+    CParseStatementPlan plan = {
+        .statistics = machine->ast_statement_statistics,
+    };
+    u32 limit = body_start + body_token_count;
+    u32 compound = body_start && machine->ast_statement_bodies ? c_parse_plan_body_node(machine, body_start - 1) : C_AST_NODE_INVALID;
+    CAstStatementFallback fallback = compound == C_AST_NODE_INVALID || limit >= preprocess.token_count ? C_AST_STATEMENT_FALLBACK_INPUT
+                                                                                                         : C_AST_STATEMENT_FALLBACK_NONE;
+    if (!fallback && !c_token_is_punctuator(&preprocess.tokens[limit], C_PUNCTUATOR_RIGHT_BRACE))
+    {
+        fallback = C_AST_STATEMENT_FALLBACK_TOKENS;
+    }
+    u64 declines = 0;
+    if (!fallback)
+    {
+        u32 begin = c_ast_subtree_begin(ast, compound);
+        u32 stack_capacity = 2 * body_token_count + 4;
+        u32* stack = arena_allocate(arena, u32, stack_capacity);
+        u8* tags = arena_allocate(arena, u8, stack_capacity);
+        u32* lasts = arena_allocate_zeroed(arena, u32, compound + 1 - begin);
+        plan.capacity = body_token_count + 2;
+        plan.entries = arena_allocate(arena, CParseStatementPlanEntry, plan.capacity);
+        u32 stack_count = 0;
+        stack[stack_count] = compound;
+        tags[stack_count++] = C_PARSE_PLAN_VISIT_STATEMENT;
+        while (stack_count && !fallback)
+        {
+            stack_count -= 1;
+            u32 node = stack[stack_count];
+            u32 tag = tags[stack_count];
+            u32 kind = ast->kinds[node];
+            u32 anchor = ast->tokens[node];
+            u32 extent = ast->extents[node];
+            u32 first = 0;
+            bool ordered = true;
+            bool declined = false;
+            // Statements to plan after this one, in source order.
+            u32 children[3] = {C_AST_NODE_INVALID, C_AST_NODE_INVALID, C_AST_NODE_INVALID};
+            u8 child_tags[3] = {C_PARSE_PLAN_VISIT_STATEMENT, C_PARSE_PLAN_VISIT_STATEMENT, C_PARSE_PLAN_VISIT_STATEMENT};
+            if (tag == C_PARSE_PLAN_VISIT_ELSE)
+            {
+                u32 then_branch = c_ast_subtree_begin(ast, node - 1) - 1;
+                u32 then_last = c_parse_plan_statement_last(ast, &preprocess, lasts, begin, then_branch, limit);
+                if (then_last != UINT32_MAX && then_last + 1 < limit &&
+                    c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[then_last + 1], C_SYMBOL_WELL_KNOWN_ELSE))
+                {
+                    ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_SEGMENT, then_last + 1, then_last + 1, 0, 0);
+                }
+                else
+                {
+                    declined = true;
+                }
+            }
+            else if (tag == C_PARSE_PLAN_VISIT_TAIL)
+            {
+                u32 end = c_parse_plan_expression_end(ast, &preprocess, node - 1, limit, C_PUNCTUATOR_SEMICOLON, &first);
+                u32 open = first;
+                while (end != UINT32_MAX && open > body_start && c_token_is_punctuator(&preprocess.tokens[open - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    open -= 1;
+                }
+                if (end != UINT32_MAX && open > body_start + 1 && open < first &&
+                    c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[open - 1], C_SYMBOL_WELL_KNOWN_WHILE))
+                {
+                    ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_SEGMENT, open - 1, end, 0, 0);
+                }
+                else
+                {
+                    declined = true;
+                }
+            }
+            else
+            {
+                switch (kind)
+                {
+                case C_AST_COMPOUND_STATEMENT:
+                {
+                    // Items go on the stack directly, last first, so the first is planned first.
+                    u32 floor = c_ast_subtree_begin(ast, node);
+                    for (u32 cursor = node; cursor > floor && stack_count < stack_capacity; cursor = c_ast_subtree_begin(ast, cursor - 1))
+                    {
+                        stack[stack_count] = cursor - 1;
+                        tags[stack_count++] = C_PARSE_PLAN_VISIT_STATEMENT;
+                    }
+                    fallback = stack_count == stack_capacity ? C_AST_STATEMENT_FALLBACK_TOKENS : fallback;
+                    break;
+                }
+                case C_AST_EXPRESSION_STATEMENT:
+                {
+                    if (!c_parse_plan_punctuator_at(&preprocess, anchor, limit, C_PUNCTUATOR_SEMICOLON))
+                    {
+                        fallback = C_AST_STATEMENT_FALLBACK_TOKENS;
+                    }
+                    else if (c_parse_plan_plain(ast, node - 1, &first))
+                    {
+                        // Wrapping parentheses have no node; the token before
+                        // a statement ends the previous one and is never `(`.
+                        while (first > body_start && c_token_is_punctuator(&preprocess.tokens[first - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                        {
+                            first -= 1;
+                        }
+                        ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_SEGMENT, first, anchor, 0, 0);
+                    }
+                    else
+                    {
+                        declined = true;
+                    }
+                    break;
+                }
+                case C_AST_NULL_STATEMENT:
+                {
+                    if (c_parse_plan_punctuator_at(&preprocess, anchor, limit, C_PUNCTUATOR_SEMICOLON))
+                    {
+                        ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_SEGMENT, anchor, anchor, 0, 0);
+                    }
+                    else
+                    {
+                        fallback = C_AST_STATEMENT_FALLBACK_TOKENS;
+                    }
+                    break;
+                }
+                case C_AST_BREAK:
+                case C_AST_CONTINUE:
+                case C_AST_GOTO:
+                case C_AST_RETURN:
+                case C_AST_GOTO_COMPUTED:
+                {
+                    // The jump keyword: before a goto's label, else the anchor.
+                    u32 keyword = kind == C_AST_GOTO ? anchor - 1 : anchor;
+                    bool keyword_valid = kind != C_AST_GOTO ||
+                                         (anchor > body_start && c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[anchor - 1], C_SYMBOL_WELL_KNOWN_GOTO));
+                    u32 end = extent == 1 ? (c_parse_plan_punctuator_at(&preprocess, anchor + 1, limit, C_PUNCTUATOR_SEMICOLON) ? anchor + 1 : UINT32_MAX)
+                                          : c_parse_plan_expression_end(ast, &preprocess, node - 1, limit, C_PUNCTUATOR_SEMICOLON, &first);
+                    if (!keyword_valid || (extent == 1 && end == UINT32_MAX))
+                    {
+                        fallback = C_AST_STATEMENT_FALLBACK_TOKENS;
+                    }
+                    else if (end != UINT32_MAX)
+                    {
+                        ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_SEGMENT, keyword, end, 0, 0);
+                    }
+                    else
+                    {
+                        declined = true;
+                    }
+                    break;
+                }
+                case C_AST_IF:
+                case C_AST_IF_ELSE:
+                case C_AST_WHILE:
+                case C_AST_SWITCH:
+                {
+                    u32 last_child = node - 1;
+                    u32 body = kind == C_AST_IF_ELSE ? c_ast_subtree_begin(ast, last_child) - 1 : last_child;
+                    u32 condition = c_ast_subtree_begin(ast, body) - 1;
+                    if (!c_parse_plan_punctuator_at(&preprocess, anchor + 1, limit, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        fallback = C_AST_STATEMENT_FALLBACK_TOKENS;
+                    }
+                    else if (c_parse_plan_plain(ast, condition, &first))
+                    {
+                        // Past the condition's closers is the body's first
+                        // token, which is never a closer; the header's `)` is
+                        // just before it.
+                        u32 after = c_parse_plan_after_closers(&preprocess, c_parse_plan_last_anchor(ast, condition), limit, false);
+                        if (after < limit && after - 1 > anchor + 1 && c_token_is_punctuator(&preprocess.tokens[after - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                        {
+                            ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_SEGMENT, anchor, after - 1, 0, 0);
+                        }
+                        else
+                        {
+                            declined = true;
+                        }
+                    }
+                    else
+                    {
+                        declined = true;
+                    }
+                    children[0] = body;
+                    if (kind == C_AST_IF_ELSE)
+                    {
+                        children[1] = node;
+                        child_tags[1] = C_PARSE_PLAN_VISIT_ELSE;
+                        children[2] = last_child;
+                    }
+                    break;
+                }
+                case C_AST_DO_WHILE:
+                {
+                    if (c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[anchor], C_SYMBOL_WELL_KNOWN_DO))
+                    {
+                        ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_SEGMENT, anchor, anchor, 0, 0);
+                    }
+                    else
+                    {
+                        fallback = C_AST_STATEMENT_FALLBACK_TOKENS;
+                    }
+                    children[0] = c_ast_subtree_begin(ast, node - 1) - 1;
+                    children[1] = node;
+                    child_tags[1] = C_PARSE_PLAN_VISIT_TAIL;
+                    break;
+                }
+                case C_AST_FOR:
+                {
+                    u32 bits = ast->data[node];
+                    u32 body = node - 1;
+                    u32 cursor = c_ast_subtree_begin(ast, body);
+                    u32 step = bits & 4 ? cursor - 1 : C_AST_NODE_INVALID;
+                    cursor = step != C_AST_NODE_INVALID ? c_ast_subtree_begin(ast, step) : cursor;
+                    u32 condition = bits & 2 ? cursor - 1 : C_AST_NODE_INVALID;
+                    cursor = condition != C_AST_NODE_INVALID ? c_ast_subtree_begin(ast, condition) : cursor;
+                    u32 initializer = bits & 1 ? cursor - 1 : C_AST_NODE_INVALID;
+                    // The first `;`, then the `)`: after the step's closers
+                    // comes the body's first token, else the `;` before
+                    // the `)` ends the condition or the empty clause.
+                    u32 separator = initializer != C_AST_NODE_INVALID ? c_parse_plan_terminator(ast, &preprocess, initializer, limit)
+                                    : c_parse_plan_punctuator_at(&preprocess, anchor + 2, limit, C_PUNCTUATOR_SEMICOLON) ? anchor + 2
+                                                                                                                        : UINT32_MAX;
+                    u32 close = UINT32_MAX;
+                    if (step != C_AST_NODE_INVALID && !c_parse_plan_contained(ast, step))
+                    {
+                        u32 after = c_parse_plan_after_closers(&preprocess, c_parse_plan_last_anchor(ast, step), limit, true);
+                        close = after < limit && c_token_is_punctuator(&preprocess.tokens[after - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) ? after - 1 : UINT32_MAX;
+                    }
+                    else if (step == C_AST_NODE_INVALID)
+                    {
+                        u32 second = condition != C_AST_NODE_INVALID ? c_parse_plan_terminator(ast, &preprocess, condition, limit)
+                                     : separator != UINT32_MAX && c_parse_plan_punctuator_at(&preprocess, separator + 1, limit, C_PUNCTUATOR_SEMICOLON)
+                                         ? separator + 1
+                                         : UINT32_MAX;
+                        close = second != UINT32_MAX && c_parse_plan_punctuator_at(&preprocess, second + 1, limit, C_PUNCTUATOR_RIGHT_PARENTHESIS)
+                                    ? second + 1
+                                    : UINT32_MAX;
+                    }
+                    if (!c_parse_plan_punctuator_at(&preprocess, anchor + 1, limit, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        fallback = C_AST_STATEMENT_FALLBACK_TOKENS;
+                    }
+                    else if (separator != UINT32_MAX && close != UINT32_MAX && separator < close)
+                    {
+                        u32 body_last = c_parse_plan_statement_last(ast, &preprocess, lasts, begin, body, limit);
+                        if (body_last != UINT32_MAX)
+                        {
+                            ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_LOOP, anchor, close, separator, body_last + 1);
+                        }
+                        // The header's tokens after a declaration clause, or
+                        // all of them after the `for`, when they are plain.
+                        bool declaration = initializer != C_AST_NODE_INVALID && ast->kinds[initializer] == C_AST_DECLARATION;
+                        bool plain = (initializer == C_AST_NODE_INVALID || declaration || c_parse_plan_plain(ast, initializer, &first)) &&
+                                     (condition == C_AST_NODE_INVALID || c_parse_plan_plain(ast, condition, &first)) &&
+                                     (step == C_AST_NODE_INVALID || c_parse_plan_plain(ast, step, &first));
+                        if (ordered && plain)
+                        {
+                            ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_SEGMENT, declaration ? separator + 1 : anchor + 1, close, 0, 0);
+                        }
+                        declined = body_last == UINT32_MAX && !plain;
+                    }
+                    else
+                    {
+                        declined = true;
+                    }
+                    children[0] = body;
+                    break;
+                }
+                case C_AST_DECLARATION:
+                {
+                    u32 terminator = c_parse_plan_terminator(ast, &preprocess, node, limit);
+                    if (terminator != UINT32_MAX)
+                    {
+                        ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_DECLARATION, anchor, terminator, 0, 0);
+                    }
+                    else
+                    {
+                        declined = true;
+                    }
+                    break;
+                }
+                case C_AST_CASE:
+                {
+                    bool has_statement = extent > 1 && c_ast_subtree_begin(ast, node - 1) != c_ast_subtree_begin(ast, node);
+                    u32 value = has_statement ? c_ast_subtree_begin(ast, node - 1) - 1 : node - 1;
+                    u32 colon = c_parse_plan_expression_end(ast, &preprocess, value, limit, C_PUNCTUATOR_COLON, &first);
+                    if (colon != UINT32_MAX)
+                    {
+                        ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_SEGMENT, anchor, colon, 0, 0);
+                    }
+                    else
+                    {
+                        declined = true;
+                    }
+                    children[0] = has_statement ? node - 1 : C_AST_NODE_INVALID;
+                    break;
+                }
+                case C_AST_DEFAULT:
+                {
+                    if (c_parse_plan_punctuator_at(&preprocess, anchor + 1, limit, C_PUNCTUATOR_COLON))
+                    {
+                        ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_SEGMENT, anchor, anchor + 1, 0, 0);
+                    }
+                    else
+                    {
+                        fallback = C_AST_STATEMENT_FALLBACK_TOKENS;
+                    }
+                    children[0] = extent > 1 ? node - 1 : C_AST_NODE_INVALID;
+                    break;
+                }
+                case C_AST_LABELED:
+                case C_AST_ATTRIBUTED_STATEMENT:
+                case C_AST_CASE_RANGE:
+                {
+                    // The label, `case lo ... hi:` or attributes stay with
+                    // the loop; the statement they lead, the last child, is
+                    // planned.
+                    bool has_statement = kind == C_AST_LABELED ? (ast->data[node] & 2) != 0
+                                         : kind == C_AST_CASE_RANGE ? c_ast_child_count(ast, node) == 3
+                                                                    : true;
+                    children[0] = has_statement ? node - 1 : C_AST_NODE_INVALID;
+                    declined = true;
+                    break;
+                }
+                default:
+                {
+                    declined = true;
+                    break;
+                }
+                }
+            }
+            fallback = !ordered && !fallback ? C_AST_STATEMENT_FALLBACK_TOKENS : fallback;
+            declines += declined;
+            // Pushed last first, so they come off in source order.
+            for (u32 slot = 3; slot && !fallback; slot -= 1)
+            {
+                if (children[slot - 1] != C_AST_NODE_INVALID)
+                {
+                    if (stack_count < stack_capacity)
+                    {
+                        stack[stack_count] = children[slot - 1];
+                        tags[stack_count++] = child_tags[slot - 1];
+                    }
+                    else
+                    {
+                        fallback = C_AST_STATEMENT_FALLBACK_TOKENS;
+                    }
+                }
+            }
+        }
+    }
+    if (fallback)
+    {
+        plan.count = 0;
+    }
+    if (plan.statistics)
+    {
+        plan.statistics->bodies += !fallback;
+        plan.statistics->fallbacks += fallback != C_AST_STATEMENT_FALLBACK_NONE;
+        plan.statistics->fallback_counts[fallback] += 1;
+        plan.statistics->declines += fallback ? 0 : declines;
+        if (fallback)
+        {
+            plan.statistics->reason = fallback;
+            plan.statistics->fallback_token = body_start ? body_start - 1 : 0;
+        }
+    }
+    return plan;
+}
+
+// Binds the identifiers of the plan segment [start, end] as the token loop
+// would, token by token, with the loop's own predicates: the type-start probe
+// at a statement start, the label test and the use filter. The plan vouches
+// that no token of the segment reaches any other path of the loop -- no
+// brace, attribute, asm, member or enumerator list, `for`, or tag-defining
+// header -- and the caller that no scope ends, asm range or attribute resume
+// lies inside it. Returns the token the loop resumes at: one past the
+// segment, or the token the loop must read itself (a type start, which the
+// loop reads as a declaration, or __builtin_offsetof); `*statement_start` is
+// left as the loop would have left it there.
+BUSTER_GLOBAL_LOCAL u32 c_parse_bind_plan_segment(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CTokenShape const* token_shapes,
+                                                  CScopeId scope, u32 body_start, u32 body_end, u32 start, u32 end, bool* statement_start,
+                                                  u64* uses)
+{
+    u32 index = start;
+    bool at_start = *statement_start;
+    bool reading = true;
+    while (reading && index <= end)
+    {
+        CTokenShape shape = c_preprocess_token_shape_at(token_shapes, &preprocess, index);
+        CEntityId probed = C_ENTITY_ID_INVALID;
+        bool reuse = false;
+        if (at_start)
+        {
+            u32 type_start = c_parse_skip_attributes(preprocess, index, body_end);
+            bool type_word = false;
+            if (type_start < body_end && c_preprocess_token_shape_at(token_shapes, &preprocess, type_start) == C_TOKEN_IDENTIFIER)
+            {
+                reading = !c_parse_type_start_token_lookup(result, preprocess, scope, preprocess.tokens[type_start], &type_word, &probed);
+                reuse = type_start == index;
+            }
+        }
+        CToken token = preprocess.tokens[index];
+        reading = reading && !(shape == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BUILTIN_OFFSETOF) &&
+                               index + 1 < body_end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS));
+        if (reading && shape == C_TOKEN_IDENTIFIER)
+        {
+            bool label = c_ir_named_label_at(&preprocess, body_start, index, body_end) && c_parse_label_candidate_at(result, &preprocess, body_start, index);
+            bool member = index > body_start && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
+                                                 c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
+            bool previous_keyword = index > body_start && c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
+                                    c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 1],
+                                                              C_PARSE_AGGREGATE_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(GOTO));
+            if (!member && !previous_keyword && !label && !c_parse_declaration_keyword_at(result, preprocess, index) &&
+                !(index > body_start && c_parse_label_address_prefix_with_typedef(result, &preprocess, scope, body_start, index - 1)))
+            {
+                if (reuse)
+                {
+                    c_parse_bind_identifier_entity(arena, result, preprocess, scope, index, probed);
+                }
+                else
+                {
+                    c_parse_bind_identifier(arena, result, preprocess, scope, index);
+                }
+                *uses += 1;
+            }
+            at_start = label;
+            index += label ? 2 : 1;
+        }
+        else if (reading)
+        {
+            at_start = c_token_shape_punctuator(shape) == C_PUNCTUATOR_SEMICOLON;
+            index += 1;
+        }
+    }
+    *statement_start = at_start;
+    return index;
+}
+
+String8 c_ast_statement_fallback_name(CAstStatementFallback reason)
+{
+    String8 name;
+    switch (reason)
+    {
+    case C_AST_STATEMENT_FALLBACK_NONE:
+        name = S8("none");
+        break;
+    case C_AST_STATEMENT_FALLBACK_INPUT:
+        name = S8("input");
+        break;
+    case C_AST_STATEMENT_FALLBACK_TOKENS:
+        name = S8("tokens");
+        break;
+    default:
+        name = S8("?");
+        break;
+    }
+    return name;
+}
+
+// The token loop's next event: the resume point of the innermost pending
+// typeof declaration, or the next plan entry, whichever comes first.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 c_parse_block_walk_event(CParsePendingTypeofDeclaration const* pending, u32 pending_count, u32 plan_next)
+{
+    u32 resume = pending_count ? pending[pending_count - 1].resume_after : UINT32_MAX;
+    return resume < plan_next ? resume : plan_next;
+}
+
 // The block-statement walk of one brace-delimited range: `scope` is the scope
 // the range sits directly in, `body_start` and `body_token_count` bound its
 // tokens. It is separate from c_parse_bind_function_body because a GNU
@@ -25012,7 +25904,7 @@ BUSTER_C_INTERNAL bool c_parse_controlling_expression_defines_tag(CTokenShape co
 // statement over and resumes past its semicolon.
 BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
                                                        CPreprocessResult preprocess, u32 declaration_index, CScopeId scope, u32 body_start,
-                                                       u32 body_token_count)
+                                                       u32 body_token_count, CParseStatementPlan* plan)
 {
     CTokenShape const* token_shapes = c_preprocess_token_shapes(&preprocess);
     Arena* conflicts[] = {
@@ -25048,6 +25940,14 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
     u32 asm_goto_label_end = UINT32_MAX;
     u32 asm_operand_range_start = UINT32_MAX;
     u32 asm_operand_range_end = UINT32_MAX;
+    // The statement plan of a function body under -fc-ast-pilot, else none:
+    // its next entry, and the walk's next event -- that entry's token or the
+    // innermost pending typeof declaration's resume point, whichever comes
+    // first. `hint` is the declaration or loop entry of the token at its start.
+    u32 plan_cursor = 0;
+    u32 plan_next = plan && plan->count ? plan->entries[0].start : UINT32_MAX;
+    u32 walk_event = plan_next;
+    CParseStatementPlanEntry const* hint = 0;
     while (index < body_end)
     {
         while (scope_count > 1 && scope_end_stack[scope_count - 1] == index)
@@ -25056,46 +25956,90 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
             scope_count -= 1;
             result->binding_scope = scope_stack[scope_count - 1];
         }
-        if (pending_typeof_count && index >= pending_typeof[pending_typeof_count - 1].resume_after)
+        if (index >= walk_event)
         {
-            CParsePendingTypeofDeclaration* pending = pending_typeof + pending_typeof_count - 1;
-            u32 scheduled_body_start = 0;
-            u32 scheduled_body_end = 0;
-            u32 group_end = 0;
-            if (c_parse_typeof_statement_expression_after(result, preprocess, pending->start, pending->end, pending->search_from,
-                                                          &pending->operand_end, &scheduled_body_start, &scheduled_body_end,
-                                                          &group_end))
+            if (pending_typeof_count && index >= pending_typeof[pending_typeof_count - 1].resume_after)
             {
-                gnu_attribute_resume = pending->gnu_attribute_resume;
-                asm_goto_label_start = pending->asm_goto_label_start;
-                asm_goto_label_end = pending->asm_goto_label_end;
-                asm_operand_range_start = pending->asm_operand_range_start;
-                asm_operand_range_end = pending->asm_operand_range_end;
-                pending->search_from = group_end + 1;
-                pending->resume_after = group_end + 1;
-                index = scheduled_body_start - 1;
-                continue;
+                CParsePendingTypeofDeclaration* pending = pending_typeof + pending_typeof_count - 1;
+                u32 scheduled_body_start = 0;
+                u32 scheduled_body_end = 0;
+                u32 group_end = 0;
+                if (c_parse_typeof_statement_expression_after(result, preprocess, pending->start, pending->end, pending->search_from,
+                                                              &pending->operand_end, &scheduled_body_start, &scheduled_body_end,
+                                                              &group_end))
+                {
+                    gnu_attribute_resume = pending->gnu_attribute_resume;
+                    asm_goto_label_start = pending->asm_goto_label_start;
+                    asm_goto_label_end = pending->asm_goto_label_end;
+                    asm_operand_range_start = pending->asm_operand_range_start;
+                    asm_operand_range_end = pending->asm_operand_range_end;
+                    pending->search_from = group_end + 1;
+                    pending->resume_after = group_end + 1;
+                    walk_event = c_parse_block_walk_event(pending_typeof, pending_typeof_count, plan_next);
+                    index = scheduled_body_start - 1;
+                    continue;
+                }
+                CParsePendingTypeofDeclaration resumed = *pending;
+                pending_typeof_count -= 1;
+                walk_event = c_parse_block_walk_event(pending_typeof, pending_typeof_count, plan_next);
+                bool parsed = c_parse_local_declarations(machine, result_arena, result, preprocess, resumed.scope, declaration_index,
+                                                          resumed.start, resumed.end, resumed.is_for_initializer);
+                bool inferred_auto = false;
+                if (!parsed && !resumed.is_for_initializer)
+                {
+                    CAutoDeclarationInfo auto_info = {0};
+                    inferred_auto = c_parse_auto_declaration_info(result, preprocess, resumed.scope, resumed.start, resumed.end, &auto_info);
+                }
+                gnu_attribute_resume = resumed.gnu_attribute_resume;
+                asm_goto_label_start = resumed.asm_goto_label_start;
+                asm_goto_label_end = resumed.asm_goto_label_end;
+                asm_operand_range_start = resumed.asm_operand_range_start;
+                asm_operand_range_end = resumed.asm_operand_range_end;
+                if (parsed || inferred_auto)
+                {
+                    index = resumed.end + 1;
+                    statement_start = !resumed.is_for_initializer;
+                    continue;
+                }
             }
-            CParsePendingTypeofDeclaration resumed = *pending;
-            pending_typeof_count -= 1;
-            bool parsed = c_parse_local_declarations(machine, result_arena, result, preprocess, resumed.scope, declaration_index,
-                                                      resumed.start, resumed.end, resumed.is_for_initializer);
-            bool inferred_auto = false;
-            if (!parsed && !resumed.is_for_initializer)
+            else if (plan)
             {
-                CAutoDeclarationInfo auto_info = {0};
-                inferred_auto = c_parse_auto_declaration_info(result, preprocess, resumed.scope, resumed.start, resumed.end, &auto_info);
-            }
-            gnu_attribute_resume = resumed.gnu_attribute_resume;
-            asm_goto_label_start = resumed.asm_goto_label_start;
-            asm_goto_label_end = resumed.asm_goto_label_end;
-            asm_operand_range_start = resumed.asm_operand_range_start;
-            asm_operand_range_end = resumed.asm_operand_range_end;
-            if (parsed || inferred_auto)
-            {
-                index = resumed.end + 1;
-                statement_start = !resumed.is_for_initializer;
-                continue;
+                while (plan_cursor < plan->count && plan->entries[plan_cursor].start < index)
+                {
+                    plan_cursor += 1;
+                }
+                hint = plan_cursor < plan->count && plan->entries[plan_cursor].start == index ? plan->entries + plan_cursor : 0;
+                plan_cursor += hint != 0;
+                plan_next = plan_cursor < plan->count ? plan->entries[plan_cursor].start : UINT32_MAX;
+                walk_event = c_parse_block_walk_event(pending_typeof, pending_typeof_count, plan_next);
+                // A segment is bound in one pass unless a state of this walk the
+                // plan cannot see reaches into it: a pending typeof declaration,
+                // a live asm range, an attribute resume point, or the end of a
+                // statement scope inside it.
+                bool segment = hint && hint->kind == C_PARSE_STATEMENT_PLAN_SEGMENT && !pending_typeof_count &&
+                               (asm_goto_label_end == UINT32_MAX || index >= asm_goto_label_end) &&
+                               (asm_operand_range_end == UINT32_MAX || index >= asm_operand_range_end) &&
+                               (gnu_attribute_resume < index || gnu_attribute_resume > hint->end) &&
+                               !(scope_count > 1 && scope_end_stack[scope_count - 1] > index && scope_end_stack[scope_count - 1] <= hint->end);
+                u32 resume = index;
+                if (segment)
+                {
+                    u64 uses = 0;
+                    resume = c_parse_bind_plan_segment(result_arena, result, preprocess, token_shapes, scope_stack[scope_count - 1], body_start, body_end,
+                                                       index, hint->end, &statement_start, &uses);
+                    if (plan->statistics)
+                    {
+                        plan->statistics->segments += 1;
+                        plan->statistics->segment_tokens += resume - index;
+                        plan->statistics->uses += uses;
+                        plan->statistics->bails += resume <= hint->end;
+                    }
+                }
+                if (resume != index)
+                {
+                    index = resume;
+                    continue;
+                }
             }
         }
         if (asm_goto_label_end != UINT32_MAX && index >= asm_goto_label_end)
@@ -25294,9 +26238,12 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
         if (shape == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_FOR) && index + 1 < body_end &&
             c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, index + 1)) == C_PUNCTUATOR_LEFT_PARENTHESIS)
         {
-            u32 header_close = UINT32_MAX;
+            // The plan's loop entry states the header's `)` and first `;`
+            // and the loop's end, which the scans below find otherwise.
+            bool planned_loop = hint && hint->start == index && hint->kind == C_PARSE_STATEMENT_PLAN_LOOP;
+            u32 header_close = planned_loop ? hint->end : UINT32_MAX;
             u32 depth = 0;
-            for (u32 scan = index + 1; scan < body_end; scan += 1)
+            for (u32 scan = index + 1; !planned_loop && scan < body_end; scan += 1)
             {
                 if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_LEFT_PARENTHESIS))
                 {
@@ -25321,36 +26268,45 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                 // The loop scope covers the whole controlled statement, compound or not, so the
                 // init declaration stays visible across every form of body.
                 c_parse_position_index_ensure(result, preprocess);
-                // Created on the first loop: a body without one never pays for the memo.
-                if (!statement_ends.ends)
+                u32 loop_end = planned_loop ? hint->loop_end : UINT32_MAX;
+                u32 first_separator = planned_loop ? hint->separator : UINT32_MAX;
+                if (!planned_loop)
                 {
-                    statement_ends = c_parse_statement_ends_create(temporary.arena, body_start, body_token_count);
-                }
-                u32 loop_end = c_parse_statement_end(preprocess, c_parse_statement_delimiters(result), header_close + 1, body_end, statement_suffix,
-                                                     body_token_count + 1, &statement_ends);
-                u32 first_separator = UINT32_MAX;
-                depth = 0;
-                for (u32 scan = index + 2; scan < header_close; scan += 1)
-                {
-                    CToken scan_token = preprocess.tokens[scan];
-                    if (c_token_is_punctuator(&scan_token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&scan_token, C_PUNCTUATOR_LEFT_BRACKET) ||
-                        c_token_is_punctuator(&scan_token, C_PUNCTUATOR_LEFT_BRACE))
+                    // Created on the first loop: a body without one never pays for the memo.
+                    if (!statement_ends.ends)
                     {
-                        depth += 1;
+                        statement_ends = c_parse_statement_ends_create(temporary.arena, body_start, body_token_count);
                     }
-                    else if (c_token_is_punctuator(&scan_token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
-                             c_token_is_punctuator(&scan_token, C_PUNCTUATOR_RIGHT_BRACKET) || c_token_is_punctuator(&scan_token, C_PUNCTUATOR_RIGHT_BRACE))
+                    loop_end = c_parse_statement_end(preprocess, c_parse_statement_delimiters(result), header_close + 1, body_end, statement_suffix,
+                                                     body_token_count + 1, &statement_ends);
+                    depth = 0;
+                    for (u32 scan = index + 2; scan < header_close; scan += 1)
                     {
-                        if (depth)
+                        CToken scan_token = preprocess.tokens[scan];
+                        if (c_token_is_punctuator(&scan_token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                            c_token_is_punctuator(&scan_token, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&scan_token, C_PUNCTUATOR_LEFT_BRACE))
                         {
-                            depth -= 1;
+                            depth += 1;
+                        }
+                        else if (c_token_is_punctuator(&scan_token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                                 c_token_is_punctuator(&scan_token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                                 c_token_is_punctuator(&scan_token, C_PUNCTUATOR_RIGHT_BRACE))
+                        {
+                            if (depth)
+                            {
+                                depth -= 1;
+                            }
+                        }
+                        else if (!depth && c_token_is_punctuator(&scan_token, C_PUNCTUATOR_SEMICOLON))
+                        {
+                            first_separator = scan;
+                            break;
                         }
                     }
-                    else if (!depth && c_token_is_punctuator(&scan_token, C_PUNCTUATOR_SEMICOLON))
-                    {
-                        first_separator = scan;
-                        break;
-                    }
+                }
+                else if (plan && plan->statistics)
+                {
+                    plan->statistics->loop_hints += 1;
                 }
                 if (loop_end != UINT32_MAX && first_separator != UINT32_MAX)
                 {
@@ -25398,6 +26354,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                             .is_for_initializer = true,
                         };
                         pending_typeof_count += 1;
+                        walk_event = c_parse_block_walk_event(pending_typeof, pending_typeof_count, plan_next);
                         index = typeof_body_start - 1;
                         continue;
                     }
@@ -25432,9 +26389,12 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                                                declaration_type_entity);
                 declaration_type_identifier_bound = true;
             }
-            u32 end = index;
+            // The plan's declaration entry states the `;` the scan below finds,
+            // and that no statement expression precedes it.
+            bool planned_declaration = hint && hint->start == index && hint->kind == C_PARSE_STATEMENT_PLAN_DECLARATION;
+            u32 end = planned_declaration ? hint->end : index;
             u32 delimiter_depth = 0;
-            while (end < body_end)
+            while (!planned_declaration && end < body_end)
             {
                 CToken end_token = preprocess.tokens[end];
                 if (c_token_is_punctuator(&end_token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&end_token, C_PUNCTUATOR_LEFT_BRACKET) ||
@@ -25460,8 +26420,13 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
             u32 typeof_body_end = 0;
             u32 typeof_group_end = 0;
             u32 typeof_operand_end = UINT32_MAX;
-            if (end < body_end && c_parse_typeof_statement_expression_after(result, preprocess, index, end, index, &typeof_operand_end,
-                                                                            &typeof_body_start, &typeof_body_end, &typeof_group_end))
+            if (planned_declaration && plan && plan->statistics)
+            {
+                plan->statistics->declaration_hints += 1;
+            }
+            if (!planned_declaration && end < body_end &&
+                c_parse_typeof_statement_expression_after(result, preprocess, index, end, index, &typeof_operand_end, &typeof_body_start,
+                                                          &typeof_body_end, &typeof_group_end))
             {
                 BUSTER_VALIDATE(pending_typeof_count < body_token_count + 1);
                 *c_parse_pending_typeof_grow(temporary.arena, &pending_typeof, &pending_typeof_capacity,
@@ -25479,6 +26444,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                     .asm_operand_range_end = asm_operand_range_end,
                 };
                 pending_typeof_count += 1;
+                walk_event = c_parse_block_walk_event(pending_typeof, pending_typeof_count, plan_next);
                 index = typeof_body_start - 1;
                 continue;
             }
@@ -25548,8 +26514,24 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
     CDeclaration* declaration = &result->declarations[declaration_index];
     if (declaration->is_definition && declaration->body_token_count)
     {
+        // Under -fc-ast-pilot the walk follows the body's statement plan,
+        // read from the syntax tree; the plan lives as long as the walk.
+        Arena* conflicts[] = {
+            result_arena,
+        };
+        TemporalArena plan_temporary = {0};
+        CParseStatementPlan plan = {0};
+        if (machine->syntax_tree)
+        {
+            plan_temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+            plan = c_parse_statement_plan_build(machine, plan_temporary.arena, preprocess, declaration->body_start, declaration->body_token_count);
+        }
         c_parse_bind_block_statements(machine, result_arena, result, preprocess, declaration_index, declaration->scope, declaration->body_start,
-                                      declaration->body_token_count);
+                                      declaration->body_token_count, machine->syntax_tree ? &plan : 0);
+        if (machine->syntax_tree)
+        {
+            scratch_end(plan_temporary);
+        }
         // The body's scopes are closed and their bindings unwound, but the
         // bucket chains keep every entity they ever held, so the two passes
         // below -- which re-enter a scope through c_parse_scope_for_token,
@@ -37189,6 +38171,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         .expression_task_capacity = expression_task_capacity,
         .syntax_tree = syntax.ast,
         .ast_type_statistics = syntax.ast_type_statistics,
+        .ast_statement_statistics = syntax.ast_statement_statistics,
     };
     result.declaration_capacity = semicolon_count + open_brace_count + declarator_list_comma_count + 1;
     result.type_capacity = token_count * 2 + 1;
@@ -37836,6 +38819,9 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                                         .value = 0,
                                     });
     }
+    // The tree's function bodies, for the statement plans the body binder
+    // follows under -fc-ast-pilot; they stay until the analysis ends.
+    c_parse_statement_bodies_prepare(&machine, phase_arena);
     for (u32 declaration_index = 0; declaration_index < result.declaration_count; declaration_index += 1)
     {
         // Every parameter and local the previous definition bound leaves the
