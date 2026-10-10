@@ -49,6 +49,7 @@ typedef enum CVendorGenericOperation
     C_VENDOR_GENERIC_REDUCE_MUL,
     C_VENDOR_GENERIC_REDUCE_OR,
     C_VENDOR_GENERIC_SHUFFLE_VECTOR,
+    C_VENDOR_GENERIC_PMULHUW128_SIGNATURE,
 } CVendorGenericOperation;
 
 typedef enum CVendorGenericCategory

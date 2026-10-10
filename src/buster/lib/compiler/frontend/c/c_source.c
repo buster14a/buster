@@ -4267,6 +4267,7 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_ia32_psradi128"), C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT },
     { S8_INITIALIZER("__builtin_ia32_psrldi128"), C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT },
     { S8_INITIALIZER("__builtin_ia32_psrlqi128"), C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT },
+    { S8_INITIALIZER("__builtin_ia32_pmulhuw128"), C_SYMBOL_BUILTIN_VENDOR_GENERIC },
     { S8_INITIALIZER("__builtin_unreachable"), C_SYMBOL_BUILTIN_UNREACHABLE },
     { S8_INITIALIZER("__builtin_frame_address"), C_SYMBOL_BUILTIN_FRAME_ADDRESS },
     { S8_INITIALIZER("__builtin_return_address"), C_SYMBOL_BUILTIN_RETURN_ADDRESS },

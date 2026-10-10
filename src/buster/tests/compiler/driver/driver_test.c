@@ -29496,6 +29496,131 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_arena_reservation_f
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_diagnostic_contains(String8 diagnostic, String8 needle)
+{
+    return string_first_sequence(diagnostic, needle) != BUSTER_STRING_NO_MATCH;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pmulhuw_header_contracts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa"), S8("-fc-ast-pilot=implicit")};
+    String8 targets[] = {S8("x86_64-windows"), S8("x86_64-linux")};
+    String8 prefix = S8(
+        "typedef short v8s __attribute__((vector_size(16)));\n"
+        "typedef unsigned short v8u __attribute__((vector_size(16)));\n"
+        "typedef short v4s __attribute__((vector_size(8)));\n"
+        "typedef unsigned char v16c __attribute__((vector_size(16)));\n"
+        "typedef float v4f __attribute__((vector_size(16)));\n"
+        "#if __has_builtin(__builtin_ia32_pmulhuw128)\n#error unimplemented pmulhuw advertised\n#endif\n");
+    String8 positive = S8(
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_ia32_pmulhuw128((v8s){0}, (v8s){0})), v8s), \"signed result\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_ia32_pmulhuw128((v8u){0}, (v8u){0})), v8u), \"unsigned result\");\n"
+        "_Static_assert(sizeof(__builtin_ia32_pmulhuw128((v8s){0}, (v8s){0})) == 16, \"signed size\");\n"
+        "_Static_assert(sizeof(__builtin_ia32_pmulhuw128((v8u){0}, (v8u){0})) == 16, \"unsigned size\");\n"
+        "static __inline__ v8s unused_signed(v8s a, v8s b) { return __builtin_ia32_pmulhuw128(a, b); }\n"
+        "static __inline__ v8u unused_unsigned(v8u a, v8u b) { return __builtin_ia32_pmulhuw128(a, b); }\n"
+        "int header_admission(void) { return 16; }\n");
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-pmulhuw-header"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-pmulhuw-header"), S8(".obj"));
+            String8 source = string_format(arena, S8("{S8}{S8}"), prefix, positive);
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+            {
+                String8 command[] = {S8("-c"), S8("-O2"), S8("-g0"), S8("-nostdinc"), S8("-std=gnu11"),
+                    S8("-target"), targets[target], forms[form], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                    S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+            }
+            os_file_delete(output);
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+    struct { String8 call; String8 diagnostic; } invalid[] = {
+        {S8("__builtin_ia32_pmulhuw128((v8s){0}, (v8u){0})"), S8("same unqualified type")},
+        {S8("__builtin_ia32_pmulhuw128((short)0, (short)0)"), S8("invalid scalar or vector operand type")},
+        {S8("__builtin_ia32_pmulhuw128((v4f){0}, (v4f){0})"), S8("invalid scalar or vector operand type")},
+        {S8("__builtin_ia32_pmulhuw128((v16c){0}, (v16c){0})"), S8("invalid scalar or vector operand type")},
+        {S8("__builtin_ia32_pmulhuw128((v4s){0}, (v4s){0})"), S8("invalid scalar or vector operand type")},
+        {S8("__builtin_ia32_pmulhuw128()"), S8("too few arguments")},
+        {S8("__builtin_ia32_pmulhuw128((v8s){0})"), S8("too few arguments")},
+        {S8("__builtin_ia32_pmulhuw128((v8s){0}, (v8s){0}, (v8s){0})"), S8("too many arguments")},
+    };
+    for (u32 item = 0; item < BUSTER_ARRAY_LENGTH(invalid); item += 1)
+    {
+        for (u32 context = 0; context < 2; context += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                String8 body = context
+                    ? string_format(arena, S8("int invalid(void) {{ return sizeof(({S8}, 1)); }}\n"), invalid[item].call)
+                    : string_format(arena, S8("static __inline__ void unused(void) {{ {S8}; return; }}\nint admission(void) {{ return 0; }}\n"),
+                                    invalid[item].call);
+                String8 source = string_format(arena, S8("{S8}{S8}"), prefix, body);
+                String8 input = buster_test_temporary_path(arena, S8("buster-pmulhuw-invalid"), S8(".c"));
+                if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+                {
+                    String8 command[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"),
+                                         targets[0], forms[form], input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE &&
+                        compiler_driver_test_diagnostic_contains(compiled.diagnostic, S8("__builtin_ia32_pmulhuw128")) &&
+                        compiler_driver_test_diagnostic_contains(compiled.diagnostic, invalid[item].diagnostic), compiled.diagnostic);
+                }
+                os_file_delete(input);
+                scratch_end(temporary);
+            }
+        }
+    }
+    for (u32 contract = 0; contract < 2; contract += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 type = contract ? S8("v8u") : S8("v8s");
+            String8 source = string_format(arena, S8("{S8}{S8} reached({S8} a, {S8} b) {{ return __builtin_ia32_pmulhuw128(a, b); }}\n"),
+                                          prefix, type, type, type);
+            String8 input = buster_test_temporary_path(arena, S8("buster-pmulhuw-refusal"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-pmulhuw-refusal"), S8(".obj"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+            {
+                String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[0],
+                    forms[form], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE &&
+                    compiler_driver_test_diagnostic_contains(compiled.diagnostic, S8("__builtin_ia32_pmulhuw128")) &&
+                    compiler_driver_test_diagnostic_contains(compiled.diagnostic, S8("unsupported")), compiled.diagnostic);
+                String8 off_target[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-target"), S8("aarch64-windows"), forms[form], input};
+                CompilerDriverResult unavailable = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(off_target)));
+                BUSTER_TEST_RAW(arguments, unavailable.error != COMPILER_DRIVER_ERROR_NONE &&
+                    compiler_driver_test_diagnostic_contains(unavailable.diagnostic, S8("__builtin_ia32_pmulhuw128")) &&
+                    compiler_driver_test_diagnostic_contains(unavailable.diagnostic, S8("unavailable for this target")),
+                    unavailable.diagnostic);
+            }
+            os_file_delete(output);
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -29558,6 +29683,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_write_limits);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pmulhuw_header_contracts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_direct_emitter_preparation);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_borrowed_payloads);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_import_facts);

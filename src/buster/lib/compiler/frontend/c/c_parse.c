@@ -34774,6 +34774,18 @@ BUSTER_C_INTERNAL bool c_parse_vendor_generic_category(CParseResult* result, Tar
         valid &= integer || floating || value.kind == C_TYPE_POINTER;
     if (builtin.operation == C_VENDOR_GENERIC_NONDETERMINISTIC_VALUE)
         valid &= integer || floating;
+    if (builtin.operation == C_VENDOR_GENERIC_PMULHUW128_SIGNATURE)
+    {
+        CType vector = type.value < result->type_count ? result->types[type.value] : (CType){0};
+        CTypeKind element = vector.element_type.value < result->type_count ?
+            result->types[vector.element_type.value].kind : C_TYPE_INVALID;
+        u64 element_size = 0;
+        u32 element_alignment = 0;
+        bool element_layout = c_parse_builtin_type_layout(target, element, &element_size, &element_alignment);
+        valid &= target.cpu_arch == CPU_ARCH_X86_64 && vector.kind == C_TYPE_VECTOR && vector.is_complete &&
+            vector.vector_byte_size == 16 && (element == C_TYPE_SHORT || element == C_TYPE_UNSIGNED_SHORT) &&
+            element_layout && element_size == 2;
+    }
     return valid;
 }
 
@@ -34948,7 +34960,8 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
         u32 location = close;
         CVendorBuiltin signature = {0};
         CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
-        bool fixed = kind != C_SYMBOL_BUILTIN_VENDOR_GENERIC;
+        bool fixed = kind != C_SYMBOL_BUILTIN_VENDOR_GENERIC ||
+            (generic.operation == C_VENDOR_GENERIC_PMULHUW128_SIGNATURE && preprocess.target.cpu_arch != CPU_ARCH_X86_64);
         bool found = !fixed || c_semantic_vendor_builtin_signature(preprocess.target, name, &signature);
         u32 minimum = fixed ? signature.parameter_count : generic.minimum_arguments;
         u32 maximum = fixed ? minimum : generic.maximum_arguments == UINT8_MAX ? UINT32_MAX : generic.maximum_arguments;

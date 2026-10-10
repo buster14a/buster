@@ -666,6 +666,15 @@ non-x86 capability queries remain false. The external Clang suite's LZCNT
 family lane separately checks all five public stock-header spellings against
 the pinned Clang 23.1.2 contract; neither lane completes the Zen 5 census.
 
+The pinned Clang 23 `__builtin_ia32_pmulhuw128` header contract admits exactly two matching
+16-byte vectors of signed or unsigned 16-bit lanes on x86-64. The result type
+follows the first operand, preserving both wrapper contracts while the frozen
+LLVM 21 signature remains signed. This is signature admission only: `__has_builtin`
+stays false and reached calls retain the existing unsupported-lowering refusal.
+`compiler_driver_test_pmulhuw_header_contracts` checks both result types,
+valid and invalid shapes, unevaluated/unused calls, target refusal, and all
+three frontend forms.
+
 The five preexisting SSE2 scalar-count shift spellings accept ordinary `int`
 arguments. Both operands are evaluated once, including count copy conversion;
 the emitted scalar shifts use a bounded count. Logical shifts choose zero

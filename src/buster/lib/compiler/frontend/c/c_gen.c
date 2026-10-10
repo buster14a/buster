@@ -23967,7 +23967,8 @@ BUSTER_C_INTERNAL bool c_ir_vendor_result_type_attempt(CIntegerIrBuilder* builde
     CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
     IrTypeId type = IR_TYPE_ID_INVALID;
     bool valid = true;
-    if (c_semantic_vendor_builtin_signature(builder->target, name, &signature))
+    bool operand_signature = generic.operation == C_VENDOR_GENERIC_PMULHUW128_SIGNATURE;
+    if (!operand_signature && c_semantic_vendor_builtin_signature(builder->target, name, &signature))
         type = c_ir_vendor_signature_type(builder, signature.types[0]);
     else if (generic.operation)
     {
