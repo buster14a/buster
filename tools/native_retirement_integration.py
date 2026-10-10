@@ -93,6 +93,8 @@ TRUSTED_FILE_PATHS = (
 )
 STALE_MAIN_EXIT = 75
 STALE_HEAD_EXIT = 76
+# The catch-up opener uses this bot-owned branch only (#1893).
+CATCH_UP_BRANCH = "native-retirement/catch-up"
 MAX_API_PAGES = 10
 API_READ_ATTEMPTS = 4
 API_READ_BUDGET_SECONDS = 30
@@ -300,6 +302,28 @@ def changed_paths(repo: Path, base: str, head: str) -> tuple[str, ...]:
     result = _git(repo, "diff", "--name-only", "--no-renames", "-z",
                   base + "..." + head)
     return tuple(path for path in result.stdout.split("\0") if path)
+
+
+def generated_changed_between(repo: Path, old: str, new: str) -> bool:
+    result = _git(repo, "diff", "--name-only", "--no-renames", "-z", old, new, "--",
+                  *sorted(GENERATED_PATHS))
+    return any(path for path in result.stdout.split("\0"))
+
+
+def catch_up_main_admissible(repo: Path, base: str, source: str, live_main: str) -> bool:
+    """True when an empty catch-up for base may still publish at live_main.
+
+    Main may move during the writer run. While base is an ancestor of live main
+    and main published no generated state since base, the merge gate admits the
+    catch-up's integration head for base (#1893), so the move is not supersession.
+    """
+    _require_hex(base, HEX40, "catch-up base")
+    _require_hex(live_main, HEX40, "live main")
+    if _git(repo, "cat-file", "-e", live_main + "^{commit}", check=False).returncode != 0:
+        _git(repo, "fetch", "--no-tags", "--quiet", "origin", live_main, check=False)
+    ancestor = _git(repo, "merge-base", "--is-ancestor", base, live_main, check=False)
+    return (ancestor.returncode == 0 and not changed_paths(repo, base, source) and
+            not generated_changed_between(repo, base, live_main))
 
 
 def classify_candidate(repo: Path, base: str, head: str) -> Classification:
@@ -802,9 +826,16 @@ def authorize(api: GitHub, pull_request: int, expected_head: str, transition_kin
             raise IntegrationError("automation checkout differs from the trusted base")
         classification = classify_candidate(repo_root, base, source)
         enforce_classification(classification, transition_kind, True)
+        # Only a bot-owned empty catch-up may publish for base after main moved.
+        live_main = base
+        if (pr["head"].get("ref") == CATCH_UP_BRANCH and automation.is_bot(pr.get("user")) and
+                not classification.changed_paths):
+            current = api.request("git/ref/heads/main")["object"]["sha"]
+            if current != base and catch_up_main_admissible(repo_root, base, source, current):
+                live_main = current
         try:
             return automation.authorize_request(
-                api, pr, actor, context, classification.as_dict())
+                api, pr, actor, {**context, "live_main": live_main}, classification.as_dict())
         except automation.AutomationMoved as error:
             if error.exit_code == STALE_MAIN_EXIT:
                 raise StaleMain(str(error)) from error
@@ -953,6 +984,12 @@ def _parser() -> argparse.ArgumentParser:
     authorize_parser.add_argument("--repo-root", type=Path)
     authorize_parser.add_argument("--source-head", default="")
     authorize_parser.add_argument("--automation-publication", action="store_true")
+
+    catch_up_parser = subparsers.add_parser("catch-up-main")
+    catch_up_parser.add_argument("--repo-root", type=Path, required=True)
+    catch_up_parser.add_argument("--base", required=True)
+    catch_up_parser.add_argument("--source-head", required=True)
+    catch_up_parser.add_argument("--live-main", required=True)
     return parser
 
 
@@ -1036,6 +1073,12 @@ def main(argv=None) -> int:
                                    "run_id": os.environ.get("GITHUB_RUN_ID", ""),
                                })
             print(canonical_json(report), end="")
+        elif arguments.command == "catch-up-main":
+            if not catch_up_main_admissible(arguments.repo_root, arguments.base,
+                                            arguments.source_head, arguments.live_main):
+                raise StaleMain("main published generated state or diverged since the catch-up base")
+            print(canonical_json({"status": "admissible", "base": arguments.base,
+                                  "live_main": arguments.live_main}), end="")
         return 0
     except StaleMain as error:
         print("native-retirement integration stale main: " + str(error), file=sys.stderr)
