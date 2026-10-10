@@ -2962,10 +2962,13 @@ BUSTER_C_INTERNAL BUSTER_INLINE u32 c_parse_layout_next(CParseLayoutContext* con
     return agenda ? c_parse_layout_agenda_next(context) : c_parse_layout_pass_next(context, cursor);
 }
 
-// A typed query that the untyped evaluator cannot fold asks the protected
-// query, which solves the types its expression names on a private copy of the
-// model, and that solve asks again for their own member alignments and array
-// bounds. Three limits keep that nesting from running away on hostile input:
+// A typed query that neither c_parse_layout_alignment_fold nor the untyped
+// evaluator can fold asks the protected query, which solves the types its
+// expression names on a private copy of the model, and that solve asks again
+// for their own member alignments and array bounds. The fold answers the
+// `sizeof`/`_Alignof`-of-a-type-name shapes without a query, so only the other
+// shapes nest. Three limits keep that nesting from running away on hostile
+// input:
 //  - a type that reaches itself (`_Alignas(sizeof(struct A))` inside
 //    `struct A`) is refused while its own query is in flight;
 //  - the nesting depth is at most C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY;
@@ -3093,6 +3096,249 @@ BUSTER_GLOBAL_LOCAL bool c_parse_layout_typed_alignment_request(CParseLayoutCont
     return constant.valid && !constant.is_negative && !constant.magnitude_high;
 }
 
+// The most `sizeof`/`_Alignof` terms one folded request may hold; a longer
+// request goes to the typed query.
+#define C_PARSE_LAYOUT_ALIGNMENT_FOLD_TERM_CAPACITY 8u
+
+// How c_parse_layout_alignment_fold answered an expression request.
+typedef enum CLayoutAlignmentFold
+{
+    // Not a shape the fold reads; the typed query answers it.
+    C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED,
+    C_LAYOUT_ALIGNMENT_FOLD_VALUE,
+    // A type the request measures is still open in this solve.
+    C_LAYOUT_ALIGNMENT_FOLD_WAIT,
+} CLayoutAlignmentFold;
+
+// The layout of the type named by the `sizeof`/`_Alignof` operand [start,
+// end), read from this solve's own columns. A type name with trailing `*` and
+// qualifiers is all it reads; an object, a declarator suffix, a tag body or a
+// function or void type is left to the typed query.
+BUSTER_GLOBAL_LOCAL CLayoutAlignmentFold c_parse_layout_alignment_fold_operand(CParseLayoutContext* context, CParseLayoutAgenda* agenda, u32 start, u32 end,
+                                                                               u64* size_out, u32* alignment_out, bool* provisional_out)
+{
+    CLayoutAlignmentFold fold = C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED;
+    CParseResult* result = context->result;
+    CPreprocessResult preprocess = context->preprocess;
+    bool body = false;
+    for (u32 index = start; index < end && !body; index += 1)
+    {
+        body = c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE);
+    }
+    if (start < end && !body)
+    {
+        // The name is read on a copy, as the array-bound walk reads its
+        // operands, so a spelling the table lacks never becomes a row.
+        CParseResult operand_parse = *result;
+        operand_parse.deferred_bit_field_width_diagnostic_capacity = operand_parse.deferred_bit_field_width_diagnostic_count;
+        CScopeId scope = c_parse_scope_for_token(result, result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID, start);
+        u32 type_end = start;
+        // The machineless reader takes exactly the typedef names, tags and
+        // primitives the fold measures, and never reenters the caller's
+        // declaration machine.
+        CTypeId type = c_parse_machineless_base_type(&operand_parse, preprocess, scope, start, end, &type_end);
+        bool pointer = false;
+        bool named = type.value < operand_parse.type_count;
+        while (named && type_end < end)
+        {
+            CToken token = preprocess.tokens[type_end];
+            String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+            pointer |= c_token_is_punctuator(&token, C_PUNCTUATOR_STAR);
+            named = c_token_is_punctuator(&token, C_PUNCTUATOR_STAR) ||
+                    (token.kind == C_TOKEN_IDENTIFIER &&
+                     (string_equal(spelling, S8("const")) || string_equal(spelling, S8("volatile")) || string_equal(spelling, S8("restrict"))));
+            type_end += named;
+        }
+        CType named_type = named ? operand_parse.types[type.value] : (CType){0};
+        // A qualified copy the name parse appended past this solve's table
+        // (`const struct S`) has its base's layout, though `_Atomic` may
+        // promote it. A qualified copy of an aligned alias names the alias's
+        // own base, and the solve's row for such a copy does not carry the
+        // alias's alignment either, so in a unit with any aligned alias every
+        // qualified copy is left to the typed query.
+        bool aliased_copy = named_type.has_unqualified_type && operand_parse.type_alignment_count;
+        u32 layout_type = type.value;
+        if (named && !pointer && type.value >= context->type_count && named_type.has_unqualified_type && !named_type.is_atomic &&
+            named_type.unqualified_type.value < context->type_count)
+        {
+            layout_type = named_type.unqualified_type.value;
+        }
+        u64 builtin_size = 0;
+        u32 builtin_alignment = 0;
+        if (!named || (!pointer && (aliased_copy || named_type.kind == C_TYPE_VOID || named_type.kind == C_TYPE_FUNCTION)))
+        {
+            fold = C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED;
+        }
+        else if (pointer)
+        {
+            *size_out = c_preprocess_detail(preprocess)->data_layout.pointer.size;
+            *alignment_out = c_preprocess_detail(preprocess)->data_layout.pointer.alignment;
+            fold = C_LAYOUT_ALIGNMENT_FOLD_VALUE;
+        }
+        else if (layout_type < context->type_count)
+        {
+            // An open type sends the aggregate back to wait for it, as a
+            // spelled `_Alignas(type)` does: the agenda records it as the
+            // attempt's blocker, and the ordered passes retry next pass.
+            fold = c_parse_layout_resolved(context, agenda, layout_type) ? C_LAYOUT_ALIGNMENT_FOLD_VALUE : C_LAYOUT_ALIGNMENT_FOLD_WAIT;
+            if (fold == C_LAYOUT_ALIGNMENT_FOLD_VALUE)
+            {
+                *size_out = c_parse_layout_size(context, agenda, layout_type);
+                *alignment_out = c_parse_layout_alignment(context, agenda, layout_type);
+                *provisional_out |= c_parse_layout_provisional(context, agenda, layout_type);
+            }
+        }
+        else if (!named_type.is_atomic && c_parse_builtin_type_layout(preprocess.target, named_type.kind, &builtin_size, &builtin_alignment) && builtin_alignment)
+        {
+            // A qualified scalar the name parse appended past this solve's table.
+            *size_out = builtin_size;
+            *alignment_out = builtin_alignment;
+            fold = C_LAYOUT_ALIGNMENT_FOLD_VALUE;
+        }
+    }
+    return fold;
+}
+
+// Folds an expression alignment request whose `sizeof`/`_Alignof` operands
+// are type names from this solve's own layouts, so no typed query runs. Its
+// private model would otherwise solve each named type again and ask the same
+// query for that type's own requests: call nesting as deep as a chain of
+// `_Alignas(sizeof(struct S{n-1}))` records in the source (#3269).
+//
+// Only `+`, `*`, parentheses and integer literals may join the terms. For
+// non-negative a and b, both a + b and a * b are at most max(a, 2) * max(b, 2),
+// so every subexpression is at most the product of max(operand, 2) over all
+// operands. When that bound is below 2^31 no intermediate value can overflow
+// `int`, wrap an unsigned type of 32 bits or more, or wrap the untyped
+// evaluator's 64-bit arithmetic. The evaluator's answer is then the value the
+// typed rules give, whatever the operand types and suffixes, and it is used
+// only in that case. Any other shape, a larger bound, or an operand the fold
+// cannot read goes to the typed query.
+BUSTER_GLOBAL_LOCAL CLayoutAlignmentFold c_parse_layout_alignment_fold(CParseLayoutContext* context, CParseLayoutAgenda* agenda, CAlignmentSpecifier specifier,
+                                                                       u64* value_out, bool* provisional_out)
+{
+    CPreprocessResult preprocess = context->preprocess;
+    u32 start = specifier.token_start;
+    u32 end = specifier.token_start + specifier.token_count;
+    // The shape walk reads no layout, so a request the typed query answers
+    // anyway costs one pass over its tokens.
+    bool shaped = start < end;
+    u32 term_count = 0;
+    u64 spelling_capacity = 0;
+    for (u32 index = start; shaped && index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        spelling_capacity += spelling.length + 21;
+        if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            u32 close = index + 1 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)
+                            ? c_parse_matching_delimiter(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS)
+                            : end;
+            term_count += 1;
+            shaped = (c_parse_alignof_word(spelling) || string_equal(spelling, S8("sizeof"))) && close < end &&
+                     term_count <= C_PARSE_LAYOUT_ALIGNMENT_FOLD_TERM_CAPACITY;
+            index = shaped ? close : index;
+        }
+        else if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
+        {
+            bool hexadecimal = spelling.length > 1 && spelling.pointer[0] == '0' && (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X');
+            for (u64 digit = 0; digit < spelling.length && shaped; digit += 1)
+            {
+                u8 character = spelling.pointer[digit];
+                shaped = character != '.' && character != 'p' && character != 'P' && (hexadecimal || (character != 'e' && character != 'E'));
+            }
+        }
+        else
+        {
+            shaped = c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_STAR) ||
+                     c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        }
+    }
+    // Every operand is read even after one waits, so the solve learns its
+    // first open type; one the fold cannot read sends the whole request to
+    // the typed query.
+    CLayoutAlignmentFold fold = shaped && term_count ? C_LAYOUT_ALIGNMENT_FOLD_VALUE : C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED;
+    u64 term_values[C_PARSE_LAYOUT_ALIGNMENT_FOLD_TERM_CAPACITY] = {0};
+    u32 term_index = 0;
+    bool waiting = false;
+    bool provisional = false;
+    for (u32 index = start; fold == C_LAYOUT_ALIGNMENT_FOLD_VALUE && index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            u32 close = c_parse_matching_delimiter(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            u64 size = 0;
+            u32 alignment = 0;
+            CLayoutAlignmentFold operand = c_parse_layout_alignment_fold_operand(context, agenda, index + 2, close, &size, &alignment, &provisional);
+            fold = operand == C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED ? C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED : fold;
+            waiting |= operand == C_LAYOUT_ALIGNMENT_FOLD_WAIT;
+            term_values[term_index] = c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token)) ? (u64)alignment : size;
+            term_index += 1;
+            index = close;
+        }
+    }
+    if (fold == C_LAYOUT_ALIGNMENT_FOLD_VALUE && waiting)
+    {
+        fold = C_LAYOUT_ALIGNMENT_FOLD_WAIT;
+    }
+    else if (fold == C_LAYOUT_ALIGNMENT_FOLD_VALUE)
+    {
+        // The rewritten tokens and the evaluator's rows are this call's own;
+        // a type the ordered passes retry may fold once per pass.
+        Arena* arena = context->arena;
+        u64 position = arena->position;
+        CToken* tokens = arena_allocate(arena, CToken, specifier.token_count);
+        CSpellingSpace space = c_space_local(arena, spelling_capacity);
+        u32 token_count = 0;
+        term_index = 0;
+        u64 const bound_limit = UINT64_C(1) << 31;
+        u64 bound = 1;
+        CPreprocessResult evaluation = {
+            .target = preprocess.target,
+            .dialect = preprocess.dialect,
+        };
+        for (u32 index = start; index < end; index += 1)
+        {
+            CToken token = preprocess.tokens[index];
+            u64 operand = 1;
+            bool operand_read = true;
+            if (token.kind == C_TOKEN_IDENTIFIER)
+            {
+                operand = term_values[term_index];
+                tokens[token_count++] = c_space_token(&space, string_format(arena, S8("{u64}"), operand), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+                term_index += 1;
+                index = c_parse_matching_delimiter(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            }
+            else
+            {
+                tokens[token_count++] = c_space_retoken(&space, preprocess.spelling_base, token);
+                // A literal's own value enters the bound; one the evaluator
+                // cannot read alone saturates it.
+                operand_read = token.kind != C_TOKEN_PREPROCESSING_NUMBER ||
+                               (c_integer_expression_evaluate(arena, space.base, tokens + token_count - 1, 1, 65536, &evaluation, &operand) &&
+                                !evaluation.diagnostic_count);
+                operand = token.kind == C_TOKEN_PREPROCESSING_NUMBER ? (operand < 2 ? 2 : operand) : 1;
+            }
+            // Punctuators leave the bound as it is; every operand raises it
+            // by at least a factor of two.
+            operand = operand_read ? operand : bound_limit;
+            operand = token.kind == C_TOKEN_IDENTIFIER && operand < 2 ? 2 : operand;
+            bound = bound >= bound_limit || operand >= bound_limit ? bound_limit : bound * operand;
+            bound = bound > bound_limit ? bound_limit : bound;
+        }
+        u64 value = 0;
+        bool evaluated = bound < bound_limit && c_integer_expression_evaluate(arena, space.base, tokens, token_count, 65536, &evaluation, &value) &&
+                         !evaluation.diagnostic_count;
+        arena_set_position(arena, position);
+        fold = evaluated && value < bound_limit ? C_LAYOUT_ALIGNMENT_FOLD_VALUE : C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED;
+        *value_out = value;
+        *provisional_out |= fold == C_LAYOUT_ALIGNMENT_FOLD_VALUE && provisional;
+    }
+    return fold;
+}
+
 // Raises `*alignment` to each alignment specifier of [start, start + count),
 // which is what c_ir_alignment_evaluate does for the IR layout; the two run
 // over the same records and must agree on the number. Answers false only when
@@ -3139,8 +3385,11 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
         else if (context->member_alignment_out)
         {
             // A member query has no active declaration machine to reenter.
-            // Resolve its requests through the protected typed value query.
-            valid = c_parse_layout_typed_alignment_request(context, specifier, &requested_alignment);
+            // Fold what this solve's layouts answer, and resolve any other
+            // request through the protected typed value query.
+            CLayoutAlignmentFold fold = c_parse_layout_alignment_fold(context, agenda, specifier, &requested_alignment, provisional_out);
+            valid = fold == C_LAYOUT_ALIGNMENT_FOLD_VALUE ||
+                    (fold == C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED && c_parse_layout_typed_alignment_request(context, specifier, &requested_alignment));
             if (!valid)
             {
                 break;
@@ -3153,10 +3402,11 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
                                 c_parse_alignof_word(c_token_spelling(context->preprocess.spelling_base, context->preprocess.tokens[specifier.token_start])) &&
                                 c_token_is_punctuator(&context->preprocess.tokens[specifier.token_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                                 c_token_is_punctuator(&context->preprocess.tokens[specifier_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            // Set when the request needs the typed query: the untyped evaluator
-            // folded nothing, or the declaration machine could not name the type.
+            // Set when the declaration machine could not name the type of a
+            // bare `_Alignof(type)`, which then reads as an expression.
+            bool machine_spelling = alignof_type && context->machine;
             bool typed_request = false;
-            if (alignof_type && context->machine)
+            if (machine_spelling)
             {
                 u32 type_start = specifier.token_start + 2;
                 u32 type_end = specifier_end - 1;
@@ -3217,11 +3467,17 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
                 // A spelling the table cannot answer (a struct or function row
                 // appended after the solve's table) or the machine cannot read
                 // as a bare type name (`_Alignof(int) * 2`) is an expression;
-                // the typed query answers it. The untyped evaluator below reads
-                // identifiers as zero and must not see it.
+                // the fold or the typed query answers it. The untyped evaluator
+                // below reads identifiers as zero and must not see it.
                 typed_request = spelled == 2;
             }
-            else
+            // A request with a `sizeof`/`_Alignof` term reads this solve's
+            // layouts first: the untyped evaluator cannot read the term, and
+            // the typed query would solve its type again.
+            CLayoutAlignmentFold fold = machine_spelling && !typed_request
+                                            ? C_LAYOUT_ALIGNMENT_FOLD_VALUE
+                                            : c_parse_layout_alignment_fold(context, agenda, specifier, &requested_alignment, provisional_out);
+            if (!machine_spelling && fold == C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED)
             {
                 // The evaluator reports through c_preprocess_diagnostic_push, which
                 // reserves its own rows; only the count is read here.
@@ -3234,11 +3490,13 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
                 // need the protected typed query, which runs its own machine
                 // and never reenters this one. A machineless caller reaches it
                 // for `_Alignof(type)` too.
-                typed_request = !(c_integer_expression_evaluate(context->arena, context->preprocess.spelling_base, context->preprocess.tokens + specifier.token_start,
-                                                                specifier.token_count, 65536, &evaluation, &requested_alignment) &&
-                                  !evaluation.diagnostic_count);
+                bool evaluated = c_integer_expression_evaluate(context->arena, context->preprocess.spelling_base, context->preprocess.tokens + specifier.token_start,
+                                                               specifier.token_count, 65536, &evaluation, &requested_alignment) &&
+                                 !evaluation.diagnostic_count;
+                fold = evaluated ? C_LAYOUT_ALIGNMENT_FOLD_VALUE : C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED;
             }
-            if (typed_request && !c_parse_layout_typed_alignment_request(context, specifier, &requested_alignment))
+            if (fold == C_LAYOUT_ALIGNMENT_FOLD_WAIT ||
+                (fold == C_LAYOUT_ALIGNMENT_FOLD_UNFOLDED && !c_parse_layout_typed_alignment_request(context, specifier, &requested_alignment)))
             {
                 valid = false;
                 break;
