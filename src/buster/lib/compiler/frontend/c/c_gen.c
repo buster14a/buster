@@ -2730,6 +2730,13 @@ BUSTER_C_SHARED String8 c_ir_math_builtin_link_name(String8 name)
         {S8("__builtin_fmodf"), S8("fmodf")},   {S8("__builtin_fmod"), S8("fmod")},   {S8("__builtin_cosf"), S8("cosf")},   {S8("__builtin_cos"), S8("cos")},
         {S8("__builtin_acosf"), S8("acosf")},   {S8("__builtin_acos"), S8("acos")},   {S8("__builtin_fabsf"), S8("fabsf")}, {S8("__builtin_fabs"), S8("fabs")},
         {S8("__builtin_roundf"), S8("roundf")}, {S8("__builtin_round"), S8("round")},
+        {S8("__builtin_truncf"), S8("truncf")}, {S8("__builtin_trunc"), S8("trunc")}, {S8("__builtin_truncl"), S8("truncl")},
+        {S8("__builtin_rintf"), S8("rintf")}, {S8("__builtin_rint"), S8("rint")}, {S8("__builtin_rintl"), S8("rintl")},
+        {S8("__builtin_nearbyintf"), S8("nearbyintf")}, {S8("__builtin_nearbyint"), S8("nearbyint")}, {S8("__builtin_nearbyintl"), S8("nearbyintl")},
+        {S8("__builtin_fmaf"), S8("fmaf")}, {S8("__builtin_fma"), S8("fma")}, {S8("__builtin_fmal"), S8("fmal")},
+        {S8("__builtin_ldexpf"), S8("ldexpf")}, {S8("__builtin_ldexp"), S8("ldexp")}, {S8("__builtin_ldexpl"), S8("ldexpl")},
+        {S8("__builtin_lroundf"), S8("lroundf")}, {S8("__builtin_lround"), S8("lround")}, {S8("__builtin_lroundl"), S8("lroundl")},
+        {S8("__builtin_llroundf"), S8("llroundf")}, {S8("__builtin_llround"), S8("llround")}, {S8("__builtin_llroundl"), S8("llroundl")},
         {S8("__builtin_fabsl"), S8("fabsl")},
         {S8("__builtin_copysignf"), S8("copysignf")}, {S8("__builtin_copysign"), S8("copysign")}, {S8("__builtin_copysignl"), S8("copysignl")},
         {S8("__builtin_fmaxf"), S8("fmaxf")},   {S8("__builtin_fmax"), S8("fmax")},   {S8("__builtin_fmaxl"), S8("fmaxl")},
@@ -21069,25 +21076,45 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
                    ? IR_VALUE_ID_INVALID
                    : c_ir_emit_binary_value(builder, positive_s32, signed_negative, builder->s32_type, IR_BINARY_INTEGER_ADD, source);
     }
+    // The libm rounding, fma and ldexp family carries its parameter and
+    // result types in the shape table: ldexp's exponent is an `int` and
+    // lround/llround answer `long`/`long long`.
+    CMathLibmShape libm = c_semantic_math_libm_shape(link_name);
     u32 expected_count =
-        string_equal(link_name, S8("pow")) || string_equal(link_name, S8("powf")) || string_equal(link_name, S8("fmod")) || string_equal(link_name, S8("fmodf"))
+        libm.arity ? libm.arity
+        : string_equal(link_name, S8("pow")) || string_equal(link_name, S8("powf")) || string_equal(link_name, S8("fmod")) || string_equal(link_name, S8("fmodf"))
             ? 2
             : 1;
-    if (argument_count != expected_count)
+    // eBPF has no floating point or libm to import, and Wasm64 lowers no
+    // long double; refuse those calls instead of emitting an import the
+    // target cannot satisfy (#1394).
+    bool libm_refused = libm.arity && (builder->target.cpu_arch == CPU_ARCH_BPFEL ||
+                                       (builder->target.cpu_arch == CPU_ARCH_WASM64 && libm.argument_kind == C_TYPE_LONG_DOUBLE));
+    if (libm_refused)
+    {
+        builder->failure_message = string_format(builder->arena, S8("'__builtin_{S8}' is not supported on {S8}: {S8}"), link_name,
+                                                 builder->target.cpu_arch == CPU_ARCH_BPFEL ? S8("eBPF") : S8("Wasm64"),
+                                                 builder->target.cpu_arch == CPU_ARCH_BPFEL ? S8("the target has no floating point or libm")
+                                                                                            : S8("the target lowers no long double"));
+    }
+    if (argument_count != expected_count || libm_refused)
     {
         return IR_VALUE_ID_INVALID;
     }
-    IrTypeId value_type = string_ends_with_sequence(link_name, S8("f")) ? builder->f32_type : builder->f64_type;
+    IrTypeId value_type = libm.arity ? c_ir_builder_scalar_type(builder, libm.argument_kind)
+                          : string_ends_with_sequence(link_name, S8("f")) ? builder->f32_type : builder->f64_type;
+    IrTypeId result_type = libm.arity ? c_ir_builder_scalar_type(builder, libm.result_kind) : value_type;
     IrSourceRange source = c_ir_token_source_range(builder, token);
     IrTypeId* parameter_types = arena_allocate(builder->arena, IrTypeId, argument_count);
     for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
     {
-        arguments[argument_index] = c_ir_emit_cast(builder, arguments[argument_index], value_type, source);
+        IrTypeId parameter_type = libm.integer_second && argument_index == 1 ? builder->s32_type : value_type;
+        arguments[argument_index] = c_ir_emit_cast(builder, arguments[argument_index], parameter_type, source);
         if (arguments[argument_index].value == IR_ID_UNDERLYING_INVALID)
         {
             return IR_VALUE_ID_INVALID;
         }
-        parameter_types[argument_index] = value_type;
+        parameter_types[argument_index] = parameter_type;
     }
     IrSymbolId symbol = IR_SYMBOL_ID_INVALID;
     IrTypeId function_type = IR_TYPE_ID_INVALID;
@@ -21107,7 +21134,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
                                                                   .name = S8("C math function"),
                                                                   .parameter_types = parameter_types,
                                                                   .element_type = IR_TYPE_ID_INVALID,
-                                                                  .return_type = value_type,
+                                                                  .return_type = result_type,
                                                                       .layout =
                                                                       {
                                                                           .size = builder->program->data_layout.pointer.size,
@@ -21137,7 +21164,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
     reference.symbol = symbol;
     reference.result = reference_result;
     c_ir_append_instruction(builder, reference, reference_source);
-    IrValueId result = c_ir_add_result(builder, value_type);
+    IrValueId result = c_ir_add_result(builder, result_type);
     IrValueId* operands = arena_allocate(builder->arena, IrValueId, argument_count + 1);
     operands[0] = reference_result;
     for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
@@ -21145,7 +21172,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
         operands[argument_index + 1] = arguments[argument_index];
     }
     IrSourceRange call_source = source;
-    IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, value_type);
+    IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, result_type);
     call.operands = operands;
     call.operand_count = argument_count + 1;
     call.symbol = symbol;
@@ -33106,7 +33133,9 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
                          string_equal(math_link_name, S8("isinf")) || string_equal(math_link_name, S8("isinff")) ||
                          string_equal(math_link_name, S8("isinf_sign")) || string_equal(math_link_name, S8("isfinite")) ||
                          string_starts_with_sequence(math_link_name, S8("signbit")) || c_ir_math_builtin_is_generic_int(math_link_name);
-        *type_out = predicate ? builder->s32_type : c_ir_math_suffix_type(builder, math_link_name);
+        CMathLibmShape libm = c_semantic_math_libm_shape(math_link_name);
+        *type_out = predicate ? builder->s32_type : libm.arity ? c_ir_builder_scalar_type(builder, libm.result_kind)
+                                                              : c_ir_math_suffix_type(builder, math_link_name);
         return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
     }
 

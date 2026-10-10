@@ -22515,6 +22515,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__builtin_powi"), all_targets},
         {S8("__builtin_powif"), all_targets},
         {S8("__builtin_powil"), all_targets},
+        {S8("__builtin_trunc"), floating_targets},
+        {S8("__builtin_truncf"), floating_targets},
+        {S8("__builtin_truncl"), native_targets},
+        {S8("__builtin_rint"), floating_targets},
+        {S8("__builtin_rintf"), floating_targets},
+        {S8("__builtin_rintl"), native_targets},
+        {S8("__builtin_nearbyint"), floating_targets},
+        {S8("__builtin_nearbyintf"), floating_targets},
+        {S8("__builtin_nearbyintl"), native_targets},
+        {S8("__builtin_fma"), floating_targets},
+        {S8("__builtin_fmaf"), floating_targets},
+        {S8("__builtin_fmal"), native_targets},
+        {S8("__builtin_ldexp"), floating_targets},
+        {S8("__builtin_ldexpf"), floating_targets},
+        {S8("__builtin_ldexpl"), native_targets},
+        {S8("__builtin_lround"), floating_targets},
+        {S8("__builtin_lroundf"), floating_targets},
+        {S8("__builtin_lroundl"), native_targets},
+        {S8("__builtin_llround"), floating_targets},
+        {S8("__builtin_llroundf"), floating_targets},
+        {S8("__builtin_llroundl"), native_targets},
         {S8("__builtin_strcmp"), all_targets},
         {S8("__builtin_strcpy"), all_targets},
         {S8("__builtin_strchr"), all_targets},
@@ -22846,6 +22867,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         S8("int f(void) { return __builtin_clzll(1, 2); }"),
         S8("int f(void) { return __builtin_ctzl((int*)0); }"),
         S8("int f(void) { return __builtin_popcountll((struct Bad { int x; }){0}); }"),
+        S8("double f(void) { return __builtin_fma(1.0, 2.0); }"),
+        S8("double f(void) { return __builtin_ldexp(1.0); }"),
+        S8("long f(void) { return __builtin_lround(1.0, 2.0); }"),
+        S8("double f(void) { return __builtin_trunc(); }"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_count_sources); index += 1)
     {
@@ -46031,12 +46056,235 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_generic_float_builtins_source = S8_INIT
     "failed |= sizeof(__builtin_isgreater(f, d)) != sizeof(int) || sizeof(FPC(f)) != sizeof(int) || sizeof(__builtin_isnormal(l)) != sizeof(int);\n"
     "return failed;\n"
     "}\n"
+    "\n");
+
+// The libm rounding, fma and ldexp builtins (#1394) and the program main; the
+// text follows c_test_generic_float_builtins_source in one file.
+BUSTER_GLOBAL_LOCAL String8 const c_test_generic_float_builtins_libm_source = S8_INITIALIZER(
+    "static int libm_calls;\n"
+    "static int libm_next(int v) { libm_calls++; return v; }\n"
+    "#define LIBM_TEST(NAME, T, STEPS, TRUNC, RINT, NEARBY, FMA, LDEXP, LROUND, LLROUND) \\\n"
+    "static T NAME##_next(T v) { libm_calls++; return v; } \\\n"
+    "static int NAME(void) \\\n"
+    "{ \\\n"
+    "int failed = 0; \\\n"
+    "volatile T a = (T)-2.5, b = (T)2.5, c = (T)3.5, d = (T)-3.5, e = (T)1.5; \\\n"
+    "failed |= TRUNC(a) != (T)-2 || TRUNC(b) != (T)2 || TRUNC(d) != (T)-3 || TRUNC(2) != (T)2; \\\n"
+    "failed |= RINT(b) != (T)2 || RINT(c) != (T)4 || RINT(a) != (T)-2 || NEARBY(b) != (T)2 || NEARBY(c) != (T)4 || NEARBY(d) != (T)-4; \\\n"
+    "failed |= FMA((T)2, (T)3, (T)4) != (T)10 || FMA(e, e, a) != (T)-0.25 || FMA(2, 3, 4) != (T)10; \\\n"
+    "volatile T eps = 1; \\\n"
+    "for (int k = 0; k < STEPS; k++) eps = eps / 2; \\\n"
+    "T s = (T)1 + eps; \\\n"
+    "failed |= FMA(s, s, -((T)1 + eps + eps)) != eps * eps; \\\n"
+    "libm_calls = 0; \\\n"
+    "failed |= LDEXP(e, libm_next(4)) != (T)24 || libm_calls != 1 || LDEXP(e, -1) != (T)0.75 || LDEXP(1, 3) != (T)8; \\\n"
+    "failed |= LDEXP(e, 2.9) != (T)6; \\\n"
+    "failed |= LROUND(b) != 3L || LROUND(a) != -3L || LROUND(e) != 2L || LLROUND(b) != 3LL || LLROUND(a) != -3LL || LLROUND(e) != 2LL; \\\n"
+    "failed |= sizeof(LROUND(b)) != sizeof(long) || sizeof(LLROUND(b)) != sizeof(long long) || sizeof(TRUNC(b)) != sizeof(T); \\\n"
+    "failed |= sizeof(FMA(b, b, b)) != sizeof(T) || sizeof(LDEXP(b, 1)) != sizeof(T) || sizeof(RINT(b)) != sizeof(T) || sizeof(NEARBY(b)) != sizeof(T); \\\n"
+    "failed |= _Generic(LROUND(b), long: 0, default: 1) || _Generic(LLROUND(b), long long: 0, default: 1) || _Generic(TRUNC(b), T: 0, default: 1); \\\n"
+    "libm_calls = 0; \\\n"
+    "failed |= TRUNC(NAME##_next(b)) != (T)2 || RINT(NAME##_next(c)) != (T)4 || NEARBY(NAME##_next(c)) != (T)4 || libm_calls != 3; \\\n"
+    "failed |= FMA(NAME##_next(b), NAME##_next(c), NAME##_next(a)) != (T)6.25 || libm_calls != 6; \\\n"
+    "failed |= LROUND(NAME##_next(b)) != 3L || LLROUND(NAME##_next(a)) != -3LL || libm_calls != 8; \\\n"
+    "return failed; \\\n"
+    "}\n"
+    "LIBM_TEST(libm_float, float, 12, __builtin_truncf, __builtin_rintf, __builtin_nearbyintf, __builtin_fmaf, __builtin_ldexpf, __builtin_lroundf, __builtin_llroundf)\n"
+    "LIBM_TEST(libm_double, double, 27, __builtin_trunc, __builtin_rint, __builtin_nearbyint, __builtin_fma, __builtin_ldexp, __builtin_lround, __builtin_llround)\n"
+    "LIBM_TEST(libm_long_double, long double, 32, __builtin_truncl, __builtin_rintl, __builtin_nearbyintl, __builtin_fmal, __builtin_ldexpl, __builtin_lroundl, __builtin_llroundl)\n"
     "int main(void)\n"
     "{\n"
-    "int failed = flt_test() | dbl_test() | ldbl_test() | mixed_test();\n"
+    "int failed = flt_test() | dbl_test() | ldbl_test() | mixed_test() | libm_float() << 1 | libm_double() << 2 | libm_long_double() << 3;\n"
     "return failed;\n"
     "}\n");
 #endif
+
+// The libm rounding, fma and ldexp builtins (#1394) lower to runtime libm
+// imports. Prove, per target and without running anything, that a translation
+// unit calling all 21 spellings lowers to certified, valid canonical IR whose
+// import symbols carry the target's own long double and `long` types, and that
+// the native object writers accept it. eBPF has no floating point and Wasm64 no
+// long double, so those calls are refused with a diagnostic and __has_builtin
+// answers 0 there.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_libm_rounding_builtins_lowering(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CLibmTarget CLibmTarget;
+    struct CLibmTarget
+    {
+        Target target;
+        String8 triple;
+        u32 long_double_bits;
+        u32 long_bits;
+    };
+    CLibmTarget targets[] = {
+        {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX}, S8("x86_64-unknown-linux-gnu"), 80, 64},
+        {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS}, S8("x86_64-pc-windows-msvc"), 64, 32},
+        {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS}, S8("x86_64-apple-macos"), 80, 64},
+        {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_ANDROID}, S8("x86_64-unknown-linux-android"), 128, 64},
+        {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}, S8("aarch64-unknown-linux-gnu"), 128, 64},
+        {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS}, S8("aarch64-pc-windows-msvc"), 64, 32},
+        {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS}, S8("aarch64-apple-macos"), 64, 64},
+        {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_IOS}, S8("aarch64-apple-ios"), 64, 64},
+        {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_ANDROID}, S8("aarch64-unknown-linux-android"), 128, 64},
+        {{.cpu_arch = CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_FREESTANDING}, S8("wasm64-unknown-freestanding"), 0, 64},
+        {{.cpu_arch = CPU_ARCH_BPFEL, .os = OPERATING_SYSTEM_LINUX}, S8("bpfel-unknown-linux"), 0, 64},
+    };
+    typedef struct CLibmBase CLibmBase;
+    struct CLibmBase
+    {
+        String8 name;
+        u32 arity;
+        bool integer_second;
+        u32 result_integer_bits;
+    };
+    // result_integer_bits: 0 floating result, 1 `long`, 2 `long long`.
+    CLibmBase bases[] = {
+        {S8("trunc"), 1, false, 0}, {S8("rint"), 1, false, 0},   {S8("nearbyint"), 1, false, 0}, {S8("fma"), 3, false, 0},
+        {S8("ldexp"), 2, true, 0},  {S8("lround"), 1, false, 1}, {S8("llround"), 1, false, 2},
+    };
+    String8 suffixes[] = {S8("f"), S8(""), S8("l")};
+    String8 scalar_names[] = {S8("float"), S8("double"), S8("long double")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        CLibmTarget row = targets[target_index];
+        bool bpf = row.target.cpu_arch == CPU_ARCH_BPFEL;
+        bool wasm = row.target.cpu_arch == CPU_ARCH_WASM64;
+        u32 variant_count = wasm ? 2 : 3;
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        // One function per floating type; each makes the seven calls.
+        String8 source = S8("");
+        for (u32 variant = 0; variant < variant_count; variant += 1)
+        {
+            String8 type = scalar_names[variant];
+            String8 suffix = suffixes[variant];
+            source = string_format(arena, S8("{S8}{S8} variant{u32}({S8} a, {S8} b, {S8} c, int n)\n{{\n    return __builtin_trunc{S8}(a) + __builtin_rint{S8}(a) + "
+                                              "__builtin_nearbyint{S8}(a) + __builtin_fma{S8}(a, b, c) + __builtin_ldexp{S8}(a, n) + "
+                                              "({S8})__builtin_lround{S8}(a) + ({S8})__builtin_llround{S8}(a);\n}}\n"),
+                                   source, type, variant, type, type, type, suffix, suffix, suffix, suffix, suffix, type, suffix, type, suffix);
+        }
+        CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){.target = row.target});
+        CParseResult parse = c_parse(arena, preprocess);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0, source);
+        for (u32 memory_form = 0; memory_form < 2 && preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0; memory_form += 1)
+        {
+            CIRLowerResult lowered = c_lower_to_ir_with_options(arena, S8("libm-rounding-builtins.c"), preprocess, parse, row.target,
+                                                                (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            if (bpf)
+            {
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified,
+                                string_format(arena, S8("eBPF libm builtins must be refused: diagnostics={u32}"), lowered.diagnostic_count));
+                BUSTER_TEST(arguments, lowered.diagnostic_count != 0 && string_first_sequence(lowered.diagnostics[0].message, S8("not supported on eBPF")) != BUSTER_STRING_NO_MATCH);
+            }
+            else if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.canonical_ir_certified && lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                // Binary128 arithmetic adds soft-float runtime calls of its
+                // own, so count only the calls that name a libm import.
+                u32 calls = 0;
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    IrFunction* function = module->functions + function_index;
+                    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                    {
+                        IrInstruction* instruction = function->instructions + instruction_index;
+                        for (u32 symbol_index = 0; instruction->opcode == IR_OPCODE_CALL && symbol_index < lowered.program->symbols.count; symbol_index += 1)
+                        {
+                            IrSymbol* symbol = lowered.program->symbols.symbols + symbol_index;
+                            for (u32 base = 0; symbol->id.value == instruction->symbol.value && base < BUSTER_ARRAY_LENGTH(bases); base += 1)
+                            {
+                                for (u32 variant = 0; variant < 3; variant += 1)
+                                {
+                                    calls += string_equal(symbol->link_name, string_format(arena, S8("{S8}{S8}"), bases[base].name, suffixes[variant]));
+                                }
+                            }
+                        }
+                    }
+                }
+                BUSTER_TEST_RAW(arguments, calls == 7 * variant_count, string_format(arena, S8("{S8}: {u32} calls"), row.triple, calls));
+                for (u32 variant = 0; variant < variant_count; variant += 1)
+                {
+                    u32 floating_bits = variant == 0 ? 32 : variant == 1 ? 64 : row.long_double_bits;
+                    for (u32 base = 0; base < BUSTER_ARRAY_LENGTH(bases); base += 1)
+                    {
+                        String8 link_name = string_format(arena, S8("{S8}{S8}"), bases[base].name, suffixes[variant]);
+                        u32 matches = 0;
+                        IrType* function_type = 0;
+                        for (u32 symbol_index = 0; symbol_index < lowered.program->symbols.count; symbol_index += 1)
+                        {
+                            IrSymbol* symbol = lowered.program->symbols.symbols + symbol_index;
+                            if (symbol->kind == IR_SYMBOL_FUNCTION && symbol->linkage == IR_LINKAGE_IMPORT && string_equal(symbol->link_name, link_name))
+                            {
+                                matches += 1;
+                                function_type = ir_type_from_id(&lowered.program->types, symbol->type);
+                            }
+                        }
+                        BUSTER_TEST_RAW(arguments, matches == 1 && function_type && function_type->kind == IR_TYPE_FUNCTION,
+                                        string_format(arena, S8("{S8}: import '{S8}' x{u32}"), row.triple, link_name, matches));
+                        if (matches == 1 && function_type && function_type->kind == IR_TYPE_FUNCTION)
+                        {
+                            BUSTER_TEST_RAW(arguments, function_type->parameter_count == bases[base].arity,
+                                            string_format(arena, S8("{S8}: '{S8}' arity {u32}"), row.triple, link_name, function_type->parameter_count));
+                            for (u32 parameter = 0; parameter < function_type->parameter_count && parameter < bases[base].arity; parameter += 1)
+                            {
+                                IrType* type = ir_type_from_id(&lowered.program->types, function_type->parameter_types[parameter]);
+                                bool integer = bases[base].integer_second && parameter == 1;
+                                BUSTER_TEST_RAW(arguments, type && type->kind == (integer ? IR_TYPE_INTEGER : IR_TYPE_FLOAT) && type->bit_width == (integer ? 32 : floating_bits),
+                                                string_format(arena, S8("{S8}: '{S8}' parameter {u32} is {u32} bits"), row.triple, link_name, parameter,
+                                                              type ? type->bit_width : 0));
+                            }
+                            IrType* returned = ir_type_from_id(&lowered.program->types, function_type->return_type);
+                            u32 integer_bits = bases[base].result_integer_bits == 1 ? row.long_bits : 64;
+                            bool integer_result = bases[base].result_integer_bits != 0;
+                            BUSTER_TEST_RAW(arguments,
+                                            returned && returned->kind == (integer_result ? IR_TYPE_INTEGER : IR_TYPE_FLOAT) &&
+                                                returned->bit_width == (integer_result ? integer_bits : floating_bits),
+                                            string_format(arena, S8("{S8}: '{S8}' returns {u32} bits"), row.triple, link_name, returned ? returned->bit_width : 0));
+                        }
+                    }
+                }
+            }
+        }
+        // The object writers accept the same translation unit where the
+        // target supports it, and eBPF refuses it.
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            String8 input = buster_test_temporary_path(arena, S8("libm-rounding-builtins"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("libm-rounding-builtins"), S8(".o"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+            {
+                String8 command[] = {S8("-nostdinc"), S8("-O0"), modes[mode], S8("-target"), row.triple, S8("-c"), S8("-o"), output, input};
+                CompilerDriverResult compiled =
+                    compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, (compiled.error == COMPILER_DRIVER_ERROR_NONE) == !bpf,
+                                string_format(arena, S8("{S8} mode={u32}: {S8}"), row.triple, mode, compiled.diagnostic));
+                BUSTER_TEST(arguments, !bpf || compiled.diagnostic.length != 0);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+                BUSTER_TEST(arguments, os_file_delete(input));
+            }
+        }
+        c_test_scratch_end(temporary);
+    }
+    // The Wasm64 refusal of the long double variants, and the eBPF one of
+    // every variant, are diagnostics rather than silent imports.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = S8("double f(double x) { return (double)__builtin_truncl((long double)x); }\n");
+        Target wasm = {.cpu_arch = CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_FREESTANDING};
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = wasm});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("wasm-truncl.c"), preprocess, parse, wasm);
+        BUSTER_TEST(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_float_builtins_runtime(UnitTestArguments* arguments)
 {
@@ -46046,7 +46294,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_float_builtins_runtime(UnitTes
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     String8 input = buster_test_temporary_path(arguments->arena, S8("generic-float-builtins"), S8(".c"));
-    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(c_test_generic_float_builtins_source));
+    String8 program = string_format(arguments->arena, S8("{S8}{S8}"), c_test_generic_float_builtins_source, c_test_generic_float_builtins_libm_source);
+    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(program));
     if (BUSTER_REQUIRE(arguments, written))
     {
         for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
@@ -59741,6 +59990,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_word_class_token_kinds);
     C_TEST_FIXTURE(arguments, c_test_x87_classifier_runtime);
     C_TEST_FIXTURE(arguments, c_test_generic_float_builtins_lowering);
+    C_TEST_FIXTURE(arguments, c_test_libm_rounding_builtins_lowering);
     C_TEST_FIXTURE(arguments, c_test_generic_float_builtins_runtime);
     C_TEST_FIXTURE(arguments, c_test_gnu_library_builtins_runtime);
     C_TEST_FIXTURE(arguments, c_test_quiet_nan_compare_runtime);
