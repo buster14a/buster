@@ -111,6 +111,11 @@ The catch-up is fully automatic:
      a queue entry that token enqueued, so every required check would wait
      forever (seen on #1966).
    - When `main` is current, it closes any open catch-up request.
+   - When a published catch-up's exact head has a completed, failed latest
+     `CI complete` and `main` has since advanced past the base recorded in
+     its integration trailer, it comments the reason on that PR, closes it
+     and opens a fresh request for the new `main` (see step 4). Its token
+     has `checks: read` for this.
 2. The controller treats that bot-owned PR as an ordinary request with an empty
    classification. It skips prerequisite CI, because nothing on a bot-created
    empty head needs testing. GitHub still records that head's `pull_request`
@@ -134,6 +139,23 @@ The catch-up is fully automatic:
    groups. A published catch-up that is still admissible is not rebuilt when
    `main` moves. If sources moved on, the next run opens a new catch-up after
    this one lands.
+4. A published catch-up whose PR CI fails can never merge, and neither the
+   controller nor the opener would otherwise act: the controller treats the
+   still-admissible head as already current, and the opener sees an open
+   request (#3271 failed `CI complete` at `ba667d8` and sat open until it was
+   closed by hand). The opener therefore replaces it, but only after `main`
+   advances strictly past the head's recorded base, confirmed by the compare
+   API. A same-`main` replacement would rebuild identical inputs, which is
+   rerun-until-green, so the failed request stays open on an unchanged `main`
+   for owner inspection. Pending, missing or passing CI and an unpublished
+   empty head are never replaced. The replacement records the `main` it was
+   built for, so a deterministic failure costs at most one writer run and one
+   CI run per `main` revision and cannot create a writer loop. Each closed PR
+   keeps its failed checks and an explanatory comment as evidence. No test
+   is skipped, rerun or quarantined: the new head is new generated state for
+   new inputs, tested in full. Recording the failure in the ledger for owner
+   reconciliation was rejected because main's snapshot would stay stale
+   until an owner acted, even when the next `main` already fixed the cause.
 
 Prerequisites beyond the standing-grant activation below:
 - Settings -> Actions -> General must allow GitHub Actions to create pull

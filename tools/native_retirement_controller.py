@@ -22,6 +22,9 @@ superseded_push, which turns a main-push stale-main exit green only after an
 exact successor run exists (docs/main-push-maintenance.md). An uncertain POST
 is never retried. disposition bars a catch-up blocked before its POST only for
 its own main revision, since its empty source head never changes (#3327).
+failed_catch_up lets the opener replace a published catch-up whose exact head
+failed `CI complete` once main has advanced past its recorded base: at most
+one replacement per main revision, never a rerun of the same inputs.
 """
 from __future__ import annotations
 
@@ -50,6 +53,9 @@ NOT_DISPATCHED = "not dispatched: "
 CATCH_UP_PATH = ".github/workflows/native-retirement-catch-up.yml"
 CATCH_UP_EVENTS = frozenset(("push", "schedule", "workflow_dispatch"))
 CATCH_UP_TITLE = "Native retirement catch-up: publish generated state for main"
+# Published heads with these CI complete conclusions can never merge; success,
+# neutral and skipped are not failures and pending checks are not concluded.
+CI_PASSING = frozenset(("success", "neutral", "skipped"))
 CATCH_UP_BODY = (
     "Automatic catch-up (#1893). This PR's only commit is empty. The trusted "
     "native-retirement writer replaces it with generated state reconstructed for "
@@ -286,13 +292,18 @@ def resolve_candidate(repo: Path, base: str, pr: dict, api) -> dict:
     return record
 
 
+def actions_checks(api, head: str) -> list[dict]:
+    """Latest GitHub Actions check runs recorded for this exact head."""
+    checks = automation.collection(api, "commits/" + head + "/check-runs", "check_runs", filter="latest")
+    return [check for check in checks if check.get("head_sha") == head and
+            check.get("app", {}).get("id") == 15368]
+
+
 def prerequisite_ci(api, head: str) -> bool:
     # This is the ordinary build/test aggregate, not retirement admission or
     # generated-file preflight. Missing/running/failed/cancelled CI defers work;
     # it never dispatches a new writer merely to get another test attempt.
-    checks = automation.collection(api, "commits/" + head + "/check-runs", "check_runs", filter="latest")
-    own = [check for check in checks if check.get("head_sha") == head and
-           check.get("app", {}).get("id") == 15368]
+    own = actions_checks(api, head)
     matches = [check for check in own if check.get("name") == "CI complete"]
     # These two gates consume the writer's future attestation. All other
     # existing Actions checks, including performance, must finish without a
@@ -479,6 +490,51 @@ def open_catch_up(api, base: str) -> dict:
     return {"status": "opened", "pull_request": number, "head": sha}
 
 
+def failed_catch_up(api, pull: dict, base: str) -> bool:
+    """Is this a published catch-up whose exact head failed CI, built for an older main?
+
+    Only a completed, non-passing latest `CI complete` counts; pending or
+    missing CI does not. The recorded base must be a strict ancestor of the
+    opener's main, so the replacement is built from new inputs: an unchanged
+    main keeps the failed request open for owner reconciliation instead of
+    rebuilding identical inputs until a test passes. The replacement records
+    the new main, so each main revision allows at most one replacement.
+    """
+    import native_retirement_merge_gate as gate
+    head = automation.hex_value(pull["head"]["sha"], 40, "catch-up head")
+    commit = api.request("git/commits/" + head)
+    parents = commit.get("parents")
+    message = commit.get("message")
+    recorded = None
+    if isinstance(parents, list) and len(parents) == 2 and isinstance(message, str):
+        try:
+            recorded = gate.parse_trailers(message).get(gate.TRAILER_BASE)
+        except gate.AdmissionError:
+            recorded = None
+    result = False
+    if isinstance(recorded, str) and gate.HEX40.fullmatch(recorded) and recorded != base:
+        matches = [check for check in actions_checks(api, head) if check.get("name") == "CI complete"]
+        failed = bool(matches) and all(check.get("status") == "completed" and
+                                       check.get("conclusion") not in CI_PASSING
+                                       for check in matches)
+        if failed:
+            # Main may have moved again after this run started; only an
+            # ancestor recorded base proves this run's main is newer.
+            comparison = api.request("compare/" + recorded + "..." + base)
+            result = comparison.get("status") == "ahead"
+    return result
+
+
+def retire_failed_catch_up(api, pull: dict, base: str) -> int:
+    number = automation.positive(pull.get("number"), "catch-up PR")
+    api.request("issues/" + str(number) + "/comments", method="POST", body={
+        "body": "Closed by the catch-up opener (#1893): `CI complete` failed on published head " +
+                pull["head"]["sha"] + " and main has advanced to " + base + ". A fresh catch-up "
+                "is opened for that revision; this PR keeps the failure for inspection.\n"})
+    api.request("pulls/" + str(number), method="PATCH", body={"state": "closed"})
+    return number
+
+
 def catch_up(api, repo: Path, base: str, run_id: int) -> dict:
     run = api.request("actions/runs/" + str(run_id))
     automation.verify_run(run, api.repository, run_id, CATCH_UP_PATH, base, CATCH_UP_EVENTS)
@@ -496,13 +552,20 @@ def catch_up(api, repo: Path, base: str, run_id: int) -> dict:
             for pull in pulls:
                 api.request("pulls/" + str(pull["number"]), method="PATCH", body={"state": "closed"})
             result = {"status": "current", "closed": [pull["number"] for pull in pulls]}
-        elif pulls:
-            result = {"status": "pending", "pull_requests": [pull["number"] for pull in pulls]}
         else:
-            # Re-read main last: never open a request for a revision already replaced.
-            if api.request("git/ref/heads/main")["object"]["sha"] != base:
+            failed = [pull for pull in pulls if failed_catch_up(api, pull, base)]
+            pending = [pull["number"] for pull in pulls if pull not in failed]
+            # Re-read main before any write: never replace or open a request
+            # for a revision already replaced; its successor run does that.
+            if (failed or not pending) and api.request("git/ref/heads/main")["object"]["sha"] != base:
                 raise automation.AutomationMoved("main moved before opening a catch-up", 75)
-            result = open_catch_up(api, base)
+            replaced = [retire_failed_catch_up(api, pull, base) for pull in failed]
+            if pending:
+                result = {"status": "pending", "pull_requests": pending}
+            else:
+                result = open_catch_up(api, base)
+            if replaced:
+                result["replaced"] = replaced
     return result
 
 

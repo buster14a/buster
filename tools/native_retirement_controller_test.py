@@ -441,6 +441,9 @@ class CatchUpAPI:
         self.pulls = list(pulls)
         self.calls = []
         self.branch_exists = False
+        # Published catch-up heads: sha -> (recorded base, CI complete check runs).
+        self.published = {}
+        self.ahead = True
 
     def all(self, path, **query):
         if path != "pulls" or query != {"state": "open", "base": "main"}:
@@ -462,10 +465,25 @@ class CatchUpAPI:
             return {"tree": {"sha": "e" * 40}}
         if path == "git/commits" and method == "POST":
             return {"sha": "f" * 40}
+        if path.startswith("git/commits/"):
+            sha = path[len("git/commits/"):]
+            commit = {"parents": [{"sha": BASE}], "message": "Request native-retirement catch-up\n"}
+            if sha in self.published:
+                commit = {"parents": [{"sha": BASE}, {"sha": sha}],
+                          "message": "Publish\n\nNative-retirement-base: " + self.published[sha][0] + "\n"}
+            return commit
+        if path.startswith("commits/") and path.endswith("/check-runs"):
+            sha = path[len("commits/"):-len("/check-runs")]
+            return {"check_runs": [{"head_sha": sha, "app": {"id": 15368}, "name": "CI complete", **check}
+                                   for check in self.published.get(sha, ("", []))[1]]}
+        if path.startswith("compare/"):
+            return {"status": "ahead" if self.ahead else "behind"}
         if path == "git/ref/heads/native-retirement/catch-up":
             if not self.branch_exists:
                 raise urllib.error.HTTPError(path, 404, "Not Found", {}, None)
             return {"object": {"sha": "9" * 40}}
+        if method == "POST" and path.startswith("issues/") and path.endswith("/comments"):
+            return {"id": 7}
         if method in ("POST", "PATCH") and path.startswith(("git/refs", "pulls")):
             return {"number": 1900, "node_id": "PR_node"} if path == "pulls" else {}
         raise AssertionError((method, path, body, query))
@@ -512,6 +530,67 @@ class CatchUpOpenerTests(unittest.TestCase):
         report = self.run_catch_up(api, False)
         self.assertEqual(report, {"status": "current", "closed": [1899]})
         self.assertIn(("PATCH", "pulls/1899", {"state": "closed"}), api.calls)
+
+    def test_failed_published_catch_up_is_replaced_once_main_advances(self):
+        # #3271: a published catch-up whose exact head failed CI complete sat
+        # open forever. Once main advances past its recorded base, the opener
+        # closes it with an explanation and opens one fresh request.
+        api = CatchUpAPI([self.catch_up_pr()])
+        api.published[HEAD] = (MOVED, [{"status": "completed", "conclusion": "failure"}])
+        report = self.run_catch_up(api, True)
+        self.assertEqual(report, {"status": "opened", "pull_request": 1900, "head": "f" * 40,
+                                  "replaced": [1899]})
+        writes = [call[:2] for call in api.calls if call[0] != "GET"]
+        self.assertEqual(writes[:2], [("POST", "issues/1899/comments"), ("PATCH", "pulls/1899")])
+        self.assertIn(("POST", "pulls"), writes)
+        self.assertIn(("GET", "compare/" + MOVED + "..." + BASE, None), api.calls)
+
+    def test_failed_catch_up_on_superseded_main_run_writes_nothing(self):
+        # A stale-main exit must precede every write (main-push-maintenance.md).
+        api = CatchUpAPI([self.catch_up_pr()])
+        api.published[HEAD] = (MOVED, [{"status": "completed", "conclusion": "failure"}])
+        original = api.request
+
+        def moving(path, **kwargs):
+            if path == "git/ref/heads/main":
+                api.calls.append(("GET", path, None))
+                return {"object": {"sha": "d" * 40}}
+            return original(path, **kwargs)
+        api.request = moving
+        with self.assertRaises(a.AutomationMoved):
+            self.run_catch_up(api, True)
+        self.assertFalse([call for call in api.calls if call[0] != "GET"])
+
+    def test_failed_catch_up_is_not_rebuilt_without_new_main(self):
+        # Identical inputs would reproduce a deterministic failure: the same
+        # main revision, a newer recorded base, pending or passing CI and an
+        # unpublished empty head all leave the request pending.
+        cases = {
+            "same main": (BASE, "completed", "failure", True),
+            "recorded base newer than this run": (MOVED, "completed", "failure", False),
+            "pending CI": (MOVED, "in_progress", None, True),
+            "passing CI": (MOVED, "completed", "success", True),
+            "unpublished": (None, "completed", "failure", True),
+        }
+        for name, (recorded, status, conclusion, ahead) in cases.items():
+            with self.subTest(name):
+                api = CatchUpAPI([self.catch_up_pr()])
+                api.ahead = ahead
+                if recorded is not None:
+                    api.published[HEAD] = (recorded, [{"status": status, "conclusion": conclusion}])
+                report = self.run_catch_up(api, True)
+                self.assertEqual(report, {"status": "pending", "pull_requests": [1899]})
+                self.assertFalse([call for call in api.calls if call[0] != "GET"])
+
+    def test_replacement_failing_again_waits_for_the_next_main_revision(self):
+        # The replacement records the main it was built for, so a
+        # deterministic failure costs at most one writer run per main revision.
+        replacement = self.catch_up_pr(1900)
+        api = CatchUpAPI([replacement])
+        api.published[HEAD] = (BASE, [{"status": "completed", "conclusion": "failure"}])
+        self.assertEqual(self.run_catch_up(api, True), {"status": "pending", "pull_requests": [1900]})
+        api.published[HEAD] = (MOVED, [{"status": "completed", "conclusion": "failure"}])
+        self.assertEqual(self.run_catch_up(api, True)["replaced"], [1900])
 
     def test_human_pr_on_catch_up_branch_is_ignored(self):
         human = self.catch_up_pr()
@@ -719,6 +798,8 @@ class WorkflowTests(unittest.TestCase):
                           "statuses: write", "workflow_run", "native_retirement_rebind.py"):
             self.assertNotIn(forbidden, text)
         self.assertEqual(text.count("contents: write"), 1)
+        self.assertIn("checks: read", text)
+        self.assertNotIn("checks: write", text)
         self.assertIn("native_retirement_controller.py catch-up", text)
         self.assertIn("name: Native retirement catch-up\n", text)
         for module in (i.TRUST_IMPLEMENTATION_PATHS,):
