@@ -176,7 +176,7 @@ rejects cycles. Dynamic stack lifetime operations, computed labels,
 variadic bodies, returns-twice calls and unsupported ABI shapes are refused.
 Unsupported candidates remain calls when optional and diagnose when mandatory.
 Arguments are evaluated once before the splice. Expansion remaps canonical
-values, blocks, locals, source ranges, instruction extras and incoming edges.
+values, blocks, locals, debug scopes, source ranges, instruction extras and incoming edges.
 Expansion retains the original out-of-line definition, including when its
 address is observed. Cloned instruction ranges preserve supported source line
 information; the debug model does not gain inline call-stack records.

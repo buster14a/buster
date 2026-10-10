@@ -1872,6 +1872,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         };
         BUSTER_TEST(arguments, module->function_count == 11);
         BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+        IrFunction* debug_caller_before = ir_test_inline_find_function(module, S8("caller"));
+        IrFunction* debug_inlinee_before = ir_test_inline_find_function(module, S8("forced_cfg"));
+        u32 caller_debug_local_count_before = debug_caller_before ? debug_caller_before->debug_local_count : 0;
+        u32 caller_debug_scope_count_before = debug_caller_before ? debug_caller_before->debug_scope_count : 0;
+        u32 inlinee_debug_local_count = debug_inlinee_before ? debug_inlinee_before->debug_local_count : 0;
+        u32 inlinee_debug_scope_count = debug_inlinee_before ? debug_inlinee_before->debug_scope_count : 0;
+        BUSTER_TEST(arguments, debug_inlinee_before && inlinee_debug_local_count != 0);
         IrValidationResult prepared = ir_prepare_canonical_module(program, module, false);
         BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
         BUSTER_TEST(arguments, module->inline_complete);
@@ -1892,6 +1899,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         IrFunction* mutual_even = ir_test_inline_find_function(module, S8("mutual_even"));
         IrFunction* mutual_odd = ir_test_inline_find_function(module, S8("mutual_odd"));
         BUSTER_TEST(arguments, caller && tiny_leaf && blocked_leaf && recursive_leaf && mutual_even && mutual_odd);
+        if (caller)
+        {
+            BUSTER_TEST(arguments, caller->debug_local_count >= caller_debug_local_count_before + inlinee_debug_local_count);
+            BUSTER_TEST(arguments, caller->debug_scope_count >= caller_debug_scope_count_before + inlinee_debug_scope_count + 1);
+            for (u32 i = caller_debug_local_count_before; i < caller->debug_local_count; i += 1)
+                BUSTER_TEST(arguments, caller->debug_locals[i].scope <= caller->debug_scope_count);
+            for (u32 i = 0; i < caller->debug_scope_count; i += 1)
+                BUSTER_TEST(arguments, caller->debug_scopes[i].parent <= i);
+        }
         if (caller && blocked_leaf)
         {
             BUSTER_TEST(arguments, ir_test_direct_call_count(program, caller, S8("forced_leaf")) == 0);

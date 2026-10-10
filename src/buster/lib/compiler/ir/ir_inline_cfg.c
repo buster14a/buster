@@ -24,11 +24,18 @@ BUSTER_GLOBAL_LOCAL IrTypeId ir_inline_cfg_void_type(IrProgram* program)
 BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_storage_site_bytes(IrFunction const* caller, IrFunction const* callee)
 {
     bool valid = caller && callee && (!caller->block_count || (caller->blocks && caller->instructions)) &&
-                 (!callee->block_count || (callee->blocks && callee->instructions));
+                 (!callee->block_count || (callee->blocks && callee->instructions)) &&
+                 (!caller->debug_local_count || caller->debug_locals) &&
+                 (!callee->debug_local_count || callee->debug_locals) &&
+                 (!caller->debug_scope_count || caller->debug_scopes) &&
+                 (!callee->debug_scope_count || callee->debug_scopes);
     u64 cost = 0;
     u64 local_slots = valid ? (u64)caller->local_count + callee->local_count + 1 : 0;
     u64 block_rows = valid ? (u64)caller->block_count + callee->block_count + 1 : 0;
     u64 debug_rows = valid ? (u64)caller->debug_local_count + callee->debug_local_count : 0;
+    u64 debug_scope_rows = valid && (callee->debug_local_count || callee->debug_scope_count)
+                               ? (u64)caller->debug_scope_count + callee->debug_scope_count + 1 : 0;
+    if (debug_scope_rows > UINT32_MAX) valid = false;
     u64 edge_rows = 0;
     u64 parameter_rows = 0;
     u64 incoming_rows = 0;
@@ -89,6 +96,7 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_storage_site_bytes(IrFunction const* calle
     } while (0)
     IR_INLINE_CFG_COST(local_slots * 2, sizeof(IrValueId) + sizeof(bool));
     IR_INLINE_CFG_COST(debug_rows, sizeof(IrDebugLocal));
+    IR_INLINE_CFG_COST(debug_scope_rows, sizeof(IrDebugScope));
     IR_INLINE_CFG_COST(valid ? edge_rows + callee->block_count + 1 : 0, sizeof(IrPredecessor));
     IR_INLINE_CFG_COST(parameter_rows + 1, sizeof(IrBlockParameter));
     IR_INLINE_CFG_COST(valid ? incoming_rows + callee->instruction_count : 0, sizeof(IrIncoming));
@@ -275,6 +283,10 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_supported(IrProgram* program, IrFunction*
                  call_block.value < caller->block_count && call_id.value < caller->instruction_count &&
                  callee->block_count && callee->entry.value < callee->block_count &&
                  !callee->label_metadata_count && caller->symbol.value != callee->symbol.value &&
+                 (!caller->debug_local_count || caller->debug_locals) &&
+                 (!callee->debug_local_count || callee->debug_locals) &&
+                 (!caller->debug_scope_count || caller->debug_scopes) &&
+                 (!callee->debug_scope_count || callee->debug_scopes) &&
                  callee->local_count <= UINT32_MAX - caller->local_count &&
                  callee->debug_local_count <= UINT32_MAX - caller->debug_local_count;
     IrInstruction const* call = valid ? caller->instructions + call_id.value : 0;
@@ -413,16 +425,17 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_supported(IrProgram* program, IrFunction*
     if (valid && aggregate_slot &&
         (caller->local_count > UINT32_MAX - callee->local_count ||
          caller->local_count + callee->local_count == UINT32_MAX)) valid = false;
-    u32 scope = 0;
+    bool callee_has_debug = callee->debug_local_count != 0 || callee->debug_scope_count != 0;
+    if (valid && callee_has_debug &&
+        (u64)caller->debug_scope_count + callee->debug_scope_count + 1 > UINT32_MAX) valid = false;
     for (u32 i = 0; valid && i < caller->debug_local_count; i += 1)
-    {
-        if (caller->debug_locals[i].scope_depth > scope) scope = caller->debug_locals[i].scope_depth;
-    }
-    if (valid && scope == UINT32_MAX) valid = false;
+        if (caller->debug_locals[i].scope > caller->debug_scope_count) valid = false;
+    for (u32 i = 0; valid && i < caller->debug_scope_count; i += 1)
+        if (caller->debug_scopes[i].parent > i) valid = false;
     for (u32 i = 0; valid && i < callee->debug_local_count; i += 1)
-    {
-        if (callee->debug_locals[i].scope_depth > UINT32_MAX - scope - 1) valid = false;
-    }
+        if (callee->debug_locals[i].scope > callee->debug_scope_count) valid = false;
+    for (u32 i = 0; valid && i < callee->debug_scope_count; i += 1)
+        if (callee->debug_scopes[i].parent > i) valid = false;
     if (valid && aggregate_slot)
     {
         if (return_count > UINT32_MAX - 2 || return_count + 2 > UINT32_MAX - copied ||
@@ -557,6 +570,11 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, Ir
     u32 old_local_count = caller->local_count;
     u32 old_instruction_count = caller->instruction_count;
     u32 old_debug_count = caller->debug_local_count;
+    u32 old_debug_scope_count = caller->debug_scope_count;
+    bool has_callee_debug = callee->debug_local_count != 0 || callee->debug_scope_count != 0;
+    u32 scope_root = has_callee_debug ? old_debug_scope_count + 1 : 0;
+    u32 new_debug_scope_count = old_debug_scope_count +
+                                (has_callee_debug ? callee->debug_scope_count + 1 : 0);
     IrBlock original = caller->blocks[call_block.value];
     IrInstructionId suffix = caller->instructions[call_id.value].next;
     IrInstructionId original_last = original.last_instruction;
@@ -565,10 +583,6 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, Ir
                           return_type->kind == IR_TYPE_UNION || return_type->kind == IR_TYPE_SLICE);
     u32 new_local_count = old_local_count + callee->local_count + (aggregate_slot ? 1u : 0u);
     u32 new_debug_count = old_debug_count + callee->debug_local_count;
-    u32 scope_base = 0;
-    for (u32 i = 0; i < old_debug_count; i += 1)
-        if (caller->debug_locals[i].scope_depth > scope_base) scope_base = caller->debug_locals[i].scope_depth;
-    scope_base += 1;
 
     // Widen local snapshots before publishing the larger local-id universe.
     for (u32 b = 0; b < old_block_count; b += 1)
@@ -597,6 +611,22 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, Ir
         IrDebugLocal* debug = arena_allocate(arena, IrDebugLocal, new_debug_count);
         if (old_debug_count) memcpy(debug, caller->debug_locals, sizeof(*debug) * old_debug_count);
         caller->debug_locals = debug;
+    }
+    if (has_callee_debug)
+    {
+        IrDebugScope* scopes = arena_allocate(arena, IrDebugScope, new_debug_scope_count);
+        if (old_debug_scope_count) memcpy(scopes, caller->debug_scopes, sizeof(*scopes) * old_debug_scope_count);
+        // Give the inlined body a separate lexical parent; the IR debug model
+        // has no inline call-stack record to represent the callee function.
+        scopes[old_debug_scope_count] = (IrDebugScope){.extent = callee->source, .parent = 0};
+        for (u32 i = 0; i < callee->debug_scope_count; i += 1)
+        {
+            IrDebugScope scope = callee->debug_scopes[i];
+            scope.parent += scope_root;
+            scopes[old_debug_scope_count + 1 + i] = scope;
+        }
+        caller->debug_scopes = scopes;
+        caller->debug_scope_count = new_debug_scope_count;
     }
     caller->local_count = new_local_count;
 
@@ -921,7 +951,7 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, Ir
     {
         IrDebugLocal local = callee->debug_locals[i];
         local.id.value += old_local_count;
-        local.scope_depth += scope_base;
+        local.scope = local.scope ? scope_root + local.scope : scope_root;
         local.is_parameter = false;
         caller->debug_locals[old_debug_count + i] = local;
     }
