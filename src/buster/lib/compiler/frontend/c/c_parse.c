@@ -7673,8 +7673,8 @@ BUSTER_C_INTERNAL bool c_parse_expression_literal_query(CTypeParseMachine* machi
 
 // The one append a tree answer replays (C_AST_TYPE_FLAG_REPLAY in
 // c_ast_types.c): a checked cast's string-literal operand. The machine types
-// it in a SIZEOF task of its own, which consults the per-body memo under the
-// query's scope and flags, hands the one token to
+// it in a SIZEOF task of its own, which strips enclosing parentheses, consults
+// the per-body memo for the token under the query's scope and flags, hands it to
 // c_parse_expression_leaf_without_cast when the memo does not hold it, and
 // publishes nothing.
 BUSTER_C_INTERNAL void c_parse_expression_tree_replay(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
@@ -11307,6 +11307,26 @@ BUSTER_C_INTERNAL BUSTER_INLINE CTypeInterning* c_parse_type_interning(CParseRes
     return result->aggregate_lookup ? result->aggregate_lookup->type_interning : 0;
 }
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL bool c_parse_type_interning_off;
+
+void c_test_set_type_interning_off(bool off)
+{
+    c_parse_type_interning_off = off;
+}
+#endif
+
+// Counts an aggregate member segment in or out of flight (CTypeInterning's
+// `suspended`): a member's row must follow its aggregate's.
+BUSTER_C_INTERNAL void c_parse_type_interning_suspend(CParseResult const* result, u32 add, u32 remove)
+{
+    CTypeInterning* interning = c_parse_type_interning(result);
+    if (interning)
+    {
+        interning->suspended = interning->suspended + add - remove;
+    }
+}
+
 // A row c_parse_intern_type may share: a primitive kind (c_parse_primitive_type)
 // or a pointer (c_parse_pointer_chain and the machine's `&`). Those three
 // builders, and the typer's lookups, leave every field but the kind, the
@@ -11411,7 +11431,7 @@ BUSTER_C_SHARED CTypeId c_parse_intern_type(CParseResult* result, CType type)
 {
     CTypeInterning* interning = c_parse_type_interning(result);
     CTypeId id = C_TYPE_ID_INVALID;
-    if (!interning || !interning->enabled || !c_parse_type_internable(&type))
+    if (!interning || !interning->enabled || interning->suspended || !c_parse_type_internable(&type))
     {
         id = c_parse_add_type(result, type);
     }
@@ -14459,6 +14479,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_range_step(CTypeParseMachine* mach
     }
     else if (frame->stage == C_TYPE_PARSE_STAGE_CHILD)
     {
+        c_parse_type_interning_suspend(frame->result, 0, 1);
         if (!machine->result_valid)
         {
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
@@ -14499,6 +14520,9 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_range_step(CTypeParseMachine* mach
         if (frame->segment_start != frame->index)
         {
             frame->stage = C_TYPE_PARSE_STAGE_CHILD;
+            // Released when this frame resumes, or by the machine's failure
+            // path when it discards the frame first.
+            c_parse_type_interning_suspend(frame->result, 1, 0);
             if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                       .result = frame->result,
                                                       .preprocess = frame->preprocess,
@@ -14508,6 +14532,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_range_step(CTypeParseMachine* mach
                                                       .kind = C_TYPE_PARSE_FRAME_AGGREGATE_SEGMENT,
                                                   }))
             {
+                c_parse_type_interning_suspend(frame->result, 0, 1);
                 c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
             }
             return;
@@ -17204,13 +17229,21 @@ BUSTER_C_INTERNAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 
         // The discarded frames never complete, so the first expression frame
         // among them hands back the tasks and scratch they held; otherwise a
         // failure a speculative parse rolls back shrinks every later budget.
+        bool released = false;
         for (u32 index = frame_start; index < machine->frame_count; index += 1)
         {
-            if (machine->frames[index].kind == C_TYPE_PARSE_FRAME_SIZEOF)
+            CTypeParseFrame const* discarded = machine->frames + index;
+            if (!released && discarded->kind == C_TYPE_PARSE_FRAME_SIZEOF)
             {
-                machine->expression_task_count = machine->frames[index].task_mark;
-                arena_set_position(machine->scratch_arena, machine->frames[index].arena_mark);
-                break;
+                machine->expression_task_count = discarded->task_mark;
+                arena_set_position(machine->scratch_arena, discarded->arena_mark);
+                released = true;
+            }
+            // A range waiting on its member segment holds a suspension
+            // (c_type_parse_aggregate_range_step).
+            if (discarded->kind == C_TYPE_PARSE_FRAME_AGGREGATE_RANGE && discarded->stage == C_TYPE_PARSE_STAGE_CHILD)
+            {
+                c_parse_type_interning_suspend(discarded->result, 0, 1);
             }
         }
         machine->frame_count = frame_start;
@@ -34482,8 +34515,14 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
     c_ast_types_bodies_prepare(machine, result);
     // Every declaration has its rows by now: the body queries below may share
     // the primitive and pointer rows they mint (CTypeInterning).
-    if (c_parse_type_interning(result))
+    bool interning = c_parse_type_interning(result) != 0;
+#if BUSTER_INCLUDE_TESTS
+    interning &= !c_parse_type_interning_off;
+#endif
+    if (interning)
     {
+        // No machine frame is live here, so no member segment is either.
+        c_parse_type_interning(result)->suspended = 0;
         c_parse_type_interning(result)->enabled = true;
     }
     for (u32 declaration_index = 0; declaration_index < result->declaration_count; declaration_index += 1)

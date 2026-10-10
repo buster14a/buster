@@ -24,8 +24,9 @@
 // its qualifiers without a recorded unqualified row, and a cast or compound
 // literal to any other type name (a qualified typedef, a tag, another
 // declarator). The one exception is a replay: a checked query of a cast whose
-// operand is one string-literal token, where the machine also types the
-// literal and appends its array row. The answer then carries that token
+// operand is one string-literal token, perhaps parenthesized as `S8()` writes
+// it, where the machine also types the literal and appends its array row.
+// The answer then carries that token
 // (CAstTypeAnswer.replay_*), and c_parse_expression_tree_query makes exactly the
 // machine's operand task: the memo probe and, on a miss, the string leaf.
 //
@@ -176,7 +177,8 @@
 #define C_AST_TYPE_FLAG_LOOKUP (1u << 3)
 // The node or an operand below it carries C_AST_TYPE_FLAG_LOOKUP.
 #define C_AST_TYPE_FLAG_LOOKUP_BELOW (1u << 4)
-// A cast whose operand is one string-literal token. With constraint checks
+// A cast whose operand is one string-literal token, alone or parenthesized.
+// With constraint checks
 // the machine types that operand, which appends the literal's array row, so a
 // checked query of this node alone is answered by replaying that one leaf
 // call (c_parse_expression_tree_query). The node is never SAFE through it: a
@@ -1181,8 +1183,8 @@ BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody const* body, CPre
 // operand, so the cast's row is the answer; it still scans the operand's
 // tokens, so an operand the tree did not type must hold no type name.
 // Checked, the operand is typed and the scalar conversion rule applies; an
-// operand that is one string-literal token is the replayed exception
-// (C_AST_TYPE_FLAG_REPLAY).
+// operand that is one string-literal token, perhaps parenthesized, is the
+// replayed exception (C_AST_TYPE_FLAG_REPLAY).
 BUSTER_GLOBAL_LOCAL void c_ast_types_cast(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node, u32 relative)
 {
     CParseResult* result = body->result;
@@ -1195,10 +1197,20 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_cast(CAstTypeBody* body, CPreprocessResult 
     {
         u32 flags = (lookup ? C_AST_TYPE_FLAG_LOOKUP | C_AST_TYPE_FLAG_LOOKUP_BELOW : 0) | (operand_flags & C_AST_TYPE_FLAG_LOOKUP_BELOW);
         CTypeKind to = result->types[type.value].kind;
-        // The literal is the whole operand: its one token follows the `)`.
+        // The literal is the whole operand, its one token alone or inside
+        // parentheses (`S8()` spells `(char8*)("text")`): the machine's
+        // operand task strips enclosing parentheses before it probes the memo
+        // and hands the token to the leaf, so either replays the same way.
         u32 close = c_ast_types_match(body, ast->tokens[node]);
-        bool literal = ast->kinds[node - 1] == C_AST_STRING && ast->data[node - 1] == 1 && ast->tokens[node - 1] == close + 1 &&
-                       body->end[relative] == close + 2;
+        u32 literal_token = ast->tokens[node - 1];
+        u32 wraps = close != C_AST_TYPE_NONE && literal_token > close ? literal_token - (close + 1) : C_AST_TYPE_NONE;
+        bool literal = ast->kinds[node - 1] == C_AST_STRING && ast->data[node - 1] == 1 && wraps != C_AST_TYPE_NONE &&
+                       body->end[relative] == literal_token + 1 + wraps;
+        for (u32 level = 0; literal && level < wraps; level += 1)
+        {
+            literal = c_ast_types_punctuator_at(body, close + 1 + level, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                      c_ast_types_punctuator_at(body, literal_token + 1 + level, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        }
         CTypeKind from = operand ? result->types[body->types[relative - 1].value].kind : literal ? C_TYPE_ARRAY : C_TYPE_INVALID;
         bool aggregates = c_ast_types_aggregate_kind(to) || c_ast_types_aggregate_kind(from);
         bool clean = from != C_TYPE_INVALID && !aggregates && !c_parse_scalar_conversion_message(body->target, to, from, false).length &&

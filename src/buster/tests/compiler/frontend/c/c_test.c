@@ -37580,6 +37580,79 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_literal_expression_queries(UnitTestArg
     return result;
 }
 
+// Interned primitive and pointer rows (CTypeInterning) must be observable only
+// as the type table's size: every source compiles to the same object with the
+// interning window shut, at `-g0` and `-g`, with and without the syntax tree.
+// The second source defines aggregates inside body type names, which the
+// declaration pass leaves to the machine; their member rows must still follow
+// the aggregate's row, or lowering resolves the aggregate a pass earlier and
+// the `-g` type entries come out in another order (#3102).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("struct S { int a; char *name; } table[2];\n"
+           "void use(const void *p);\n"
+           "long f(char *p, int *ip, struct S *s)\n"
+           "{\n"
+           "    use((char *)p); use((const char *)p); use((int **)&ip); use(&s->a); use(&table[1]);\n"
+           "    long n = (long)*ip + (long)(unsigned char)*p;\n"
+           "    use((void *)\"text\"); use((char **)&p);\n"
+           "    return n + (long)(char *)p;\n"
+           "}\n"),
+        S8("struct F { char *p; int *x; } farr[2];\n"
+           "struct G { long *l; char **pp; } garr[3];\n"
+           "void use(const void *p);\n"
+           "void f(char *q, int *iq)\n"
+           "{\n"
+           "    use((char *)q); use((int *)iq); use((char **)&q);\n"
+           "    use((const struct { char *p; int *x; } [2]){ { q, 0 }, { q, 0 } });\n"
+           "    use(&(const struct { char *s; char **t; }){ q, 0 });\n"
+           "    use((const struct { char *p; } (*)[3])0);\n"
+           "    use((void *)(volatile union { char *a; int *b; } [4]){ { q } });\n"
+           "}\n"),
+    };
+    String8 debug[] = {S8("-g0"), S8("-g")};
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-type-interning"), S8(".c"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(sources[source_index])));
+        for (u32 variant = 0; variant < 4; variant += 1)
+        {
+            ByteSlice objects[2] = {0};
+            String8 diagnostics[2] = {0};
+            CompilerDriverError errors[2] = {0};
+            for (u32 mode = 0; mode < 2; mode += 1)
+            {
+                String8 output = buster_test_temporary_path(arena, string_format(arena, S8("buster-type-interning-{u32}-{u32}-{u32}"), source_index,
+                                                                                 variant, mode),
+                                                            S8(".o"));
+                String8 plain[] = {S8("-nostdinc"), debug[variant & 1], S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"), output, input};
+                String8 pilot[] = {S8("-nostdinc"), debug[variant & 1], S8("-fc-ast-pilot"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"),
+                                   S8("-o"), output, input};
+                SliceString8 command = variant >> 1 ? (SliceString8)BUSTER_ARRAY_TO_SLICE(pilot) : (SliceString8)BUSTER_ARRAY_TO_SLICE(plain);
+                c_test_set_type_interning_off(mode == 1);
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, command));
+                c_test_set_type_interning_off(false);
+                errors[mode] = compiled.error;
+                diagnostics[mode] = compiled.diagnostic;
+                objects[mode] = compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
+            }
+            BUSTER_TEST(arguments, errors[0] == COMPILER_DRIVER_ERROR_NONE && errors[1] == COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_STRING_TEST(arguments, diagnostics[0], diagnostics[1]);
+            BUSTER_TEST_RAW(arguments,
+                            objects[0].length && objects[0].length == objects[1].length &&
+                                memcmp(objects[0].pointer, objects[1].pointer, objects[0].length) == 0,
+                            string_format(arena, S8("source={u32} {S8}{S8}: the object differs without interned rows"), source_index,
+                                          debug[variant & 1], variant >> 1 ? S8(" -fc-ast-pilot") : S8("")));
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_expression_frames(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -58886,6 +58959,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
     C_TEST_FIXTURE(arguments, c_test_line_filename_escapes);
     C_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
+    C_TEST_FIXTURE(arguments, c_test_type_interning_objects);
     C_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
     C_TEST_FIXTURE(arguments, c_test_local_label_declarations);
     C_TEST_FIXTURE(arguments, c_test_local_labels);

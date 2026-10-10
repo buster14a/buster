@@ -1777,7 +1777,7 @@ enum
     // (c_ast_corpus_types): about 55,400 from the fixtures on Linux x86-64
     // (the fewest, about 50,300 with the fixtures preprocessed for Windows
     // AArch64, where fewer fixtures reach typed bodies; 49,900 there before
-    // stage 3), and about 312,600 in all with the frontend's own sources where
+    // stage 3), and about 316,100 in all with the frontend's own sources where
     // the host headers exist.
     C_AST_CORPUS_TYPE_ANSWER_FLOOR = 47000,
     C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR = 280000,
@@ -3304,17 +3304,21 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
      C_TYPE_POINTER, false, C_TYPE_INVALID, true},
     {S8_INITIALIZER("char const* f(void) { return (const char*)\"text\"; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER,
      C_TYPE_POINTER, false, C_TYPE_INVALID, true},
+    // The `S8()` shape: the machine's operand task strips the parentheses.
+    {S8_INITIALIZER("char* f(void) { return (char*)(\"a\"); }"), S8_INITIALIZER("("), 1, 7, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER, false,
+     C_TYPE_INVALID, true},
+    {S8_INITIALIZER("char* f(void) { return (char*)((\"a\")); }"), S8_INITIALIZER("("), 1, 9, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER, false,
+     C_TYPE_INVALID, true},
     // Answered without constraint checks only. With them the machine also
-    // types a cast's operand -- here several string tokens, or one wrapped
-    // in parentheses, which no replay covers -- and it decides whether two
-    // pointers may be subtracted by comparing their element types, where the
-    // tree vouches only for one shared row (each declared `char*` has its own
-    // `char` row; declarations are never interned).
+    // types a cast's operand -- here several string tokens, which no replay
+    // covers -- and it decides whether two pointers may be subtracted by
+    // comparing their element types, where the tree vouches only for one
+    // shared row (each declared `char*` has its own `char` row; declarations
+    // are never interned).
     {S8_INITIALIZER("long f(char* p, char* q) { return p - q; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, true,
      C_TYPE_LONG_LONG},
     {S8_INITIALIZER("char* f(void) { return (char*)\"a\" \"b\"; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER,
      true},
-    {S8_INITIALIZER("char* f(void) { return (char*)(\"a\"); }"), S8_INITIALIZER("("), 1, 7, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER, true},
     // Declined: whatever would make the machine append a type row (a
     // qualified member, a string, a cast to a type name with a qualified
     // typedef, a tag, a qualified or restrict pointer or a declarator other

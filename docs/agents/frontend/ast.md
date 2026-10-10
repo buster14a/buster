@@ -310,14 +310,15 @@ unchanged.
   the tree did not accept. The typer also declines a `?:` whose range holds a
   top-level comma or assignment, which the machine splits at instead.
 - **The replay.** With constraint checks the machine types a cast's operand.
-  When that operand is one string-literal token (`(char8*)"text"`, as `S8()`
-  spells it), its typing appends the literal's array row. The tree answers
-  such a query anyway: the answer carries the token, and
-  `c_parse_expression_tree_query` makes exactly the machine's operand task.
-  It probes the per-body memo under the query's scope and flags and, on a
+  When that operand is one string-literal token, alone or in parentheses
+  (`(char8*)("text")`, as `S8()` spells it), its typing appends the literal's
+  array row. The tree answers such a query anyway: the answer carries the
+  token, and `c_parse_expression_tree_query` makes exactly the machine's
+  operand task. That task strips the enclosing parentheses, probes the
+  per-body memo for the token under the query's scope and flags and, on a
   miss, calls the machine's string leaf, which appends the same row. The node
   is never constraint-safe for its parents, whose machine runs would type the
-  literal too. A wrapped or multi-token operand is not replayed.
+  literal too. An operand of several literal tokens is not replayed.
 - **Constraint checks.** A checked query is answered only from a node whose
   operands are safe and whose own checked-mode rule cannot fire. For the
   binary operators that is the machine's operand rule. The cases it settles by
@@ -358,6 +359,23 @@ in table order, and a struct resolves only once its members' rows are mapped.
 A member's interned `char *` row moved ahead of its struct, the struct resolved
 a pass earlier, and the `-g` type entries of the unity self-host came out in a
 different order.
+
+The same holds for an aggregate a body query defines. The machine reads most
+aggregate definitions written in expressions back from rows the declaration
+pass made. One whose type name puts a qualifier before the tag
+(`(const struct { char *p; })`) it defines itself, inside the window, with its
+row ahead of its members'. CTypeInterning's `suspended` counts the member
+segments the machine is reading (`c_type_parse_aggregate_range_step`), and
+nothing is interned while any is in flight. The machine's failure path takes
+back the segments it discards. Without that, a source of this shape kept its
+`-g0` object but its `-g` object changed. The unity self-host defines no
+aggregate inside the window. The c_ast corpus and the frontend fixtures define
+a few, but in none of them did interning move a member's row ahead of its
+aggregate, which is why the self-host checks missed it.
+`c_test_type_interning_objects` compiles
+both shapes with the window shut (`c_test_set_type_interning_off`) and open,
+at `-g0` and `-g`, with and without the tree, and requires identical objects
+and diagnostics.
 
 A `restrict`-qualified row is never interned, because
 `c_type_parse_root_finish` diagnoses an invalid `restrict` only on rows a
@@ -411,7 +429,7 @@ nonplace fact, diagnostics and table growth; a replayed answer's rows are
 taken back after the replay, and the machine must append the same rows again.
 The fixtures give about 55,400 checked answers on Linux x86-64 and about
 50,300 preprocessed for Windows AArch64, the fewest; the hosted frontend
-sources give about 257,300 more.
+sources give about 260,700 more.
 
 The compiler sources are preprocessed against the host's C library, so the
 differential also covers glibc's headers. It caught `__float128`, which glibc

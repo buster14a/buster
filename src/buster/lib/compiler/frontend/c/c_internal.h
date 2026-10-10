@@ -1354,9 +1354,14 @@ typedef enum CConstantEvaluationMode
 // mapped: interning a member's row would move it ahead of its struct and
 // resolve the struct a pass earlier, which reorders the IR types and so the
 // `-g` type entries. Within the window an interned row only ever replaces a
-// later copy of itself, which resolves in the same pass. Restrict-qualified
-// rows are never interned, because c_type_parse_root_finish diagnoses an
-// invalid `restrict` only on rows a query appends.
+// later copy of itself, which resolves in the same pass. The one exception
+// is a member's row: a type name inside the window may still define an
+// aggregate (`(const struct { char *p; })`, whose row the machine does not
+// find already defined), and that row precedes its members', so `suspended`
+// counts the member segments the machine is reading and nothing is interned
+// while any is. Restrict-qualified rows are never interned, because
+// c_type_parse_root_finish diagnoses an invalid `restrict` only on rows a
+// query appends.
 //
 // The header hangs off CAggregateLookup.type_interning, outside the
 // checkpointed CParseResult that every query copies. `rows` is an append-only
@@ -1377,6 +1382,9 @@ struct CTypeInterning
     u32 slot_count;
     // Slots written since the table was last built, stale ones included.
     u32 slot_used;
+    // Aggregate member segments in flight (c_type_parse_aggregate_range_step);
+    // the machine's failure path takes back those it discards.
+    u32 suspended;
     // The interning window (above); outside it every row is appended.
     bool enabled;
 };
