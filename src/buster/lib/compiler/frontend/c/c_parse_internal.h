@@ -20,6 +20,32 @@ BUSTER_F_DECL CTypeId c_test_aggregate_lookup_add(CParseResult* result, CType ty
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKind kind, String8 tag, CScopeId scope);
 BUSTER_F_DECL void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpoint);
 
+// Caps, on the calling thread, the scratch bytes each function body's guarded
+// validation allocations (c_parse_body_scratch_allocate) may claim past the
+// body's starting position, so a small fixture exhausts the same allocation
+// sites a multi-million-token body exhausts on the real arena. Zero restores
+// the arena's real remaining capacity.
+BUSTER_F_DECL void c_test_body_validation_scratch_limit(u64 bytes);
+// The same cap for the private model arena of each type-constant query a body
+// makes, measured from the model arena's position when the query opens it.
+BUSTER_F_DECL void c_test_body_validation_model_limit(u64 bytes);
+// Records, on the calling thread, every request the guard checks into
+// `entries` until `capacity` are held (zero capacity stops recording). Each
+// body opens with a separator row (element_size 0); a request row holds its
+// element size and count and the byte offset its end reaches past the body's
+// starting position (past the query's model position for a `model` row), or
+// UINT64_MAX for the request the guard refused.
+typedef struct CTestBodyScratchRequest CTestBodyScratchRequest;
+struct CTestBodyScratchRequest
+{
+    u64 element_size;
+    u64 count;
+    u64 end;
+    bool model;
+};
+BUSTER_F_DECL void c_test_body_validation_scratch_trace(CTestBodyScratchRequest* entries, u32 capacity);
+BUSTER_F_DECL u32 c_test_body_validation_scratch_trace_count(void);
+
 // The tree expression typer (c_ast_types.c). c_test_ast_type_probe answers one
 // range of an analyzed function body on a private machine. `status` is a
 // C_TEST_AST_TYPE_PROBE_* value: the function has no body, the body was not

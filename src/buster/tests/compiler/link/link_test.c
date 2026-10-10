@@ -3957,6 +3957,20 @@ enum
 {
     LINK_TEST_TLS_IE_HIGH = 1,
     LINK_TEST_TLS_IE_LOW = 2,
+    LINK_TEST_TLS_DESC_ADR = 3,
+    LINK_TEST_TLS_DESC_LDR = 4,
+    LINK_TEST_TLS_DESC_ADD = 5,
+    LINK_TEST_TLS_DESC_CALL = 6,
+};
+
+static ObjectRelocationKind const link_test_tls_kinds[] = {
+    OBJECT_RELOCATION_COUNT,
+    OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21,
+    OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12,
+    OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21,
+    OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12,
+    OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12,
+    OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL,
 };
 
 typedef struct LinkTestTlsIeSite LinkTestTlsIeSite;
@@ -3985,8 +3999,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_test_aarch64_tls_ie_link(Are
             .section = OBJECT_SECTION_TEXT,
             .symbol = sites[index].symbol,
             .addend = sites[index].addend,
-            .kind = sites[index].kind == LINK_TEST_TLS_IE_HIGH ? OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21
-                                                               : OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12,
+            .kind = link_test_tls_kinds[sites[index].kind],
         };
     }
     ObjectFile object = link_test_object_make(arena, (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
@@ -4054,6 +4067,87 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_tls_initial_exec_relaxation
         }
         scratch_end(temporary);
     }
+    {
+        // Clang 18 -O2 schedule: ADRP x11, an unrelated load, then LDR x11.
+        // The unrelated word is kept; the halves relax in place (tprel
+        // 0x11244). A second pair on x9 for tw (0x2018) interleaves with it,
+        // its sites listed out of order, and a pending x11 pair in another
+        // register is unaffected by the nearer x9 ADRP.
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 const load = UINT32_C(0xb9400140);
+        u32 text[] = {UINT32_C(0x9000000b), UINT32_C(0x90000009), load, UINT32_C(0xf9400129), load, UINT32_C(0xf940016b), UINT32_C(0xd65f03c0)};
+        LinkTestTlsIeSite sites[] = {{LINK_TEST_TLS_IE_LOW, 20, 1, 0}, {LINK_TEST_TLS_IE_HIGH, 4, 2, 0}, {LINK_TEST_TLS_IE_LOW, 12, 2, 0},
+                                     {LINK_TEST_TLS_IE_HIGH, 0, 1, 0}};
+        u64 text_offset = 0;
+        NativeExecutableLinkResult linked = link_test_aarch64_tls_ie_link(temporary.arena, text, 7, sites, 4, &text_offset);
+        if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE && text_offset && text_offset + 28 <= linked.executable.length))
+        {
+            u32 expected[] = {UINT32_C(0xd2a0002b), UINT32_C(0xd2a00009), load, UINT32_C(0xf2800000) | (0x2018u << 5) | 9, load,
+                              UINT32_C(0xf2800000) | (0x1244u << 5) | 11, UINT32_C(0xd65f03c0)};
+            for (u32 word = 0; word < BUSTER_ARRAY_LENGTH(expected); word += 1)
+            {
+                BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, text_offset + word * 4) == expected[word]);
+            }
+        }
+        scratch_end(temporary);
+    }
+    {
+        // Every word Clang and GCC schedule between the halves that leaves x9
+        // alone is accepted and kept: mrs x8, TPIDR_EL0; ldr w10, [x0];
+        // adrp x12; ldp w10, w11, [x0]; madd w8, w11, w10, w8; add x13, x0,
+        // #16; str x10, [sp, #8]; ldr d9, [x0] (an FP register numbered 9);
+        // ldr x10, [x13], #8; csel x10, x10, x13, eq; lsr x13, x10, #4;
+        // and x10, x10, #0xff; nop.
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 const gap[] = {UINT32_C(0xd53bd048), UINT32_C(0xb940000a), UINT32_C(0x9000000c), UINT32_C(0x29402c0a), UINT32_C(0x1b0a2168),
+                           UINT32_C(0x9100400d), UINT32_C(0xf90007ea), UINT32_C(0xfd400009), UINT32_C(0xf84085aa), UINT32_C(0x9a8d014a),
+                           UINT32_C(0xd344fd4d), UINT32_C(0x92401d4a), UINT32_C(0xd503201f)};
+        u32 text[BUSTER_ARRAY_LENGTH(gap) + 3];
+        text[0] = UINT32_C(0x90000009);
+        memcpy(text + 1, gap, sizeof(gap));
+        text[BUSTER_ARRAY_LENGTH(gap) + 1] = UINT32_C(0xf9400129);
+        text[BUSTER_ARRAY_LENGTH(gap) + 2] = UINT32_C(0xd65f03c0);
+        LinkTestTlsIeSite sites[] = {{LINK_TEST_TLS_IE_HIGH, 0, 1, 0}, {LINK_TEST_TLS_IE_LOW, (u32)(BUSTER_ARRAY_LENGTH(gap) + 1) * 4, 1, 0}};
+        u64 text_offset = 0;
+        NativeExecutableLinkResult linked = link_test_aarch64_tls_ie_link(temporary.arena, text, (u32)BUSTER_ARRAY_LENGTH(text), sites, 2, &text_offset);
+        if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE && text_offset && text_offset + sizeof(text) <= linked.executable.length))
+        {
+            BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, text_offset) == UINT32_C(0xd2a00029));
+            for (u32 word = 0; word < BUSTER_ARRAY_LENGTH(gap); word += 1)
+            {
+                BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, text_offset + (word + 1) * 4) == gap[word]);
+            }
+            BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, text_offset + (BUSTER_ARRAY_LENGTH(gap) + 1) * 4) ==
+                                       (UINT32_C(0xf2800000) | (0x1244u << 5) | 9));
+        }
+        scratch_end(temporary);
+    }
+    {
+        // The halves may enclose at most 64 words (LINK_AARCH64_TLS_IE_GAP_MAX):
+        // 64 NOPs relax, 65 refuse.
+        for (u32 gap = 64; gap <= 65; gap += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u32 text[68];
+            text[0] = UINT32_C(0x90000009);
+            for (u32 word = 1; word <= gap; word += 1)
+            {
+                text[word] = UINT32_C(0xd503201f);
+            }
+            text[gap + 1] = UINT32_C(0xf9400129);
+            text[gap + 2] = UINT32_C(0xd65f03c0);
+            LinkTestTlsIeSite sites[] = {{LINK_TEST_TLS_IE_HIGH, 0, 1, 0}, {LINK_TEST_TLS_IE_LOW, (gap + 1) * 4, 1, 0}};
+            u64 text_offset = 0;
+            NativeExecutableLinkResult linked = link_test_aarch64_tls_ie_link(temporary.arena, text, gap + 3, sites, 2, &text_offset);
+            BUSTER_TEST(arguments, (linked.error == LINK_ERROR_NONE) == (gap == 64));
+            if (linked.error == LINK_ERROR_NONE && text_offset && text_offset + (gap + 2) * 4 <= linked.executable.length)
+            {
+                BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, text_offset + (gap + 1) * 4) ==
+                                           (UINT32_C(0xf2800000) | (0x1244u << 5) | 9));
+            }
+            scratch_end(temporary);
+        }
+    }
     // Everything that is not the exact pair is refused instead of leaving a
     // GOT load or a half-rewritten sequence behind.
     enum
@@ -4070,7 +4164,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_tls_initial_exec_relaxation
         // ADRP alone, LDR alone, not adjacent.
         {{0x90000008, 0xf9400108, 0xd65f03c0, 0, 0}, {{IE_H, 0, 1, 0}}, 1},
         {{0x90000008, 0xf9400108, 0xd65f03c0, 0, 0}, {{IE_L, 4, 1, 0}}, 1},
-        {{0x90000008, 0xd503201f, 0xf9400108, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        // A non-adjacent pair is relaxed, but only when the registers, symbol
+        // and addend agree and the ADRP is the nearest and only partner.
+        {{0x90000008, 0xd503201f, 0xf9400109, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x90000009, 0xd503201f, 0xf9400108, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x90000008, 0xd503201f, 0xf9400108, 0xf9400108, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}, {IE_L, 12, 1, 0}}, 3},
+        {{0x90000008, 0x90000009, 0xf9400129, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_H, 4, 1, 0}, {IE_L, 8, 1, 0}}, 3},
+        {{0x90000008, 0x90000008, 0xf9400108, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_H, 4, 1, 0}, {IE_L, 8, 1, 0}}, 3},
+        {{0x90000008, 0xd503201f, 0xf9400108, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 2, 0}}, 2},
+        {{0x90000008, 0xd503201f, 0xf9400108, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 4}}, 2},
+        {{0x90000008, 0xd503201f, 0xf9400108, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 3, 0}}, 2},
         // Destination, base and offset mismatches inside the words.
         {{0x90000008, 0xf9400109, 0xd65f03c0, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 4, 1, 0}}, 2},
         {{0x90000008, 0xf9400128, 0xd65f03c0, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 4, 1, 0}}, 2},
@@ -4091,6 +4194,39 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_tls_initial_exec_relaxation
         {{0x90000002, 0xd2a00002, 0xf9400042, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 2, 0}}, 2},
         // HIGH at 0 and LOW at 4 for x1, plus a second LOW at 8 reusing the MOVZ.
         {{0x90000001, 0xf9400021, 0xf9400021, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 4, 1, 0}, {IE_L, 8, 1, 0}}, 3},
+        // `adrp x11` / X / `ldr x11, [x11]` with a matching pair, where X would
+        // observe or replace the GOT page in x11 or leave the straight line:
+        // add x9, x11, #0 reads it; mov x11, #1 and ldr x11, [x0] write it.
+        {{0x9000000b, 0x91000169, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xd280002b, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xf940000b, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        // x11 as a load base, a pre-index writeback base, an LDP Rt2, a MADD
+        // addend, a register-offset index, and an FP load base.
+        {{0x9000000b, 0xb940016a, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xf8008d6a, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xa9402c0a, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0x9b022c2a, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xf86b680a, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xfd400160, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        // Branches that name no x11: b, bl, b.eq, cbz x10, tbz x10, br x10,
+        // blr x10, ret.
+        {{0x9000000b, 0x14000000, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0x94000000, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0x54000000, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xb400000a, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0x3600000a, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xd61f0140, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xd63f0140, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xd65f03c0, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        // System and exception words: svc #0, msr TPIDR_EL0, x8, mrs x8,
+        // NZCV, dmb ish; and udf #0 and an unallocated logical-immediate
+        // bitmask (and x10, x0 with N=1, imms=111111).
+        {{0x9000000b, 0xd4000001, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xd51bd048, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xd53b4208, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0xd5033bbf, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0x00000000, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x9000000b, 0x9240fc0a, 0xf940016b, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
     {
@@ -4100,6 +4236,125 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_tls_initial_exec_relaxation
         memcpy(text, refused[index].words, sizeof(text));
         NativeExecutableLinkResult linked = link_test_aarch64_tls_ie_link(temporary.arena, text, 5, refused[index].sites, refused[index].site_count, &text_offset);
         BUSTER_TEST(arguments, linked.error != LINK_ERROR_NONE);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// AArch64 general-dynamic TLS descriptors (#2582) in a fixed-address
+// executable relax to local-exec as GNU ld and lld do: `adrp x0` / `ldr Xt,
+// [x0]` / `add x0, x0` / `blr Xt` becomes MOVZ x0 / MOVK x0 / NOP / NOP with
+// the same variant-I thread-pointer offset as initial-exec. The four steps
+// must be adjacent and in order, with one symbol and addend and one scratch
+// register; anything else fails the link by name.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_tls_descriptor_relaxation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 const nop = UINT32_C(0xd503201f);
+    u32 const ret = UINT32_C(0xd65f03c0);
+    u32 scratch_registers[] = {1, 2, 16, 30};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(scratch_registers); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 reg = scratch_registers[index];
+        u32 text[] = {UINT32_C(0x90000000), UINT32_C(0xf9400000) | reg, UINT32_C(0x91000000), UINT32_C(0xd63f0000) | (reg << 5), ret};
+        u32 original[5];
+        memcpy(original, text, sizeof(original));
+        LinkTestTlsIeSite sites[] = {{LINK_TEST_TLS_DESC_ADR, 0, 1, 0}, {LINK_TEST_TLS_DESC_LDR, 4, 1, 0}, {LINK_TEST_TLS_DESC_ADD, 8, 1, 0},
+                                     {LINK_TEST_TLS_DESC_CALL, 12, 1, 0}};
+        u64 text_offset = 0;
+        // tprel = 16 + 0x11234 = 0x11244: MOVZ x0, #1, LSL #16; MOVK x0, #0x1244.
+        NativeExecutableLinkResult linked = link_test_aarch64_tls_ie_link(temporary.arena, text, 5, sites, 4, &text_offset);
+        if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE && text_offset && text_offset + 20 <= linked.executable.length))
+        {
+            u32 expected[] = {UINT32_C(0xd2a00020), UINT32_C(0xf2824880), nop, nop, ret};
+            for (u32 word = 0; word < BUSTER_ARRAY_LENGTH(expected); word += 1)
+            {
+                BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, text_offset + word * 4) == expected[word]);
+            }
+        }
+        BUSTER_TEST(arguments, memcmp(text, original, sizeof(text)) == 0);
+        scratch_end(temporary);
+    }
+    {
+        // A descriptor for tw (0x2018) after an x8 initial-exec pair for tv
+        // with a +8 addend (0x1124c), relocations listed out of order.
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 text[] = {UINT32_C(0x90000008), UINT32_C(0xf9400108), UINT32_C(0x90000000), UINT32_C(0xf9400011),
+                      UINT32_C(0x91000000), UINT32_C(0xd63f0220), ret};
+        LinkTestTlsIeSite sites[] = {{LINK_TEST_TLS_DESC_CALL, 20, 2, 0}, {LINK_TEST_TLS_IE_LOW, 4, 1, 8},  {LINK_TEST_TLS_DESC_ADR, 8, 2, 0},
+                                     {LINK_TEST_TLS_DESC_ADD, 16, 2, 0},  {LINK_TEST_TLS_IE_HIGH, 0, 1, 8}, {LINK_TEST_TLS_DESC_LDR, 12, 2, 0}};
+        u64 text_offset = 0;
+        NativeExecutableLinkResult linked = link_test_aarch64_tls_ie_link(temporary.arena, text, 7, sites, 6, &text_offset);
+        if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE && text_offset && text_offset + 28 <= linked.executable.length))
+        {
+            u32 expected[] = {UINT32_C(0xd2a00028), UINT32_C(0xf2824988), UINT32_C(0xd2a00000), UINT32_C(0xf2840300), nop, nop, ret};
+            for (u32 word = 0; word < BUSTER_ARRAY_LENGTH(expected); word += 1)
+            {
+                BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, text_offset + word * 4) == expected[word]);
+            }
+        }
+        scratch_end(temporary);
+    }
+    enum
+    {
+        DA = LINK_TEST_TLS_DESC_ADR,
+        DL = LINK_TEST_TLS_DESC_LDR,
+        DD = LINK_TEST_TLS_DESC_ADD,
+        DC = LINK_TEST_TLS_DESC_CALL,
+        IH = LINK_TEST_TLS_IE_HIGH,
+    };
+    struct
+    {
+        u32 words[6];
+        LinkTestTlsIeSite sites[5];
+        u32 site_count;
+        String8 named;
+    } refused[] = {
+        // Missing CALL, missing ADRP, CALL alone.
+        {{0x90000000, 0xf9400001, 0x91000000, 0xd63f0020, 0xd65f03c0, 0}, {{DA, 0, 1, 0}, {DL, 4, 1, 0}, {DD, 8, 1, 0}}, 3,
+         S8_INITIALIZER("R_AARCH64_TLSDESC_ADR_PAGE21")},
+        {{0x90000000, 0xf9400001, 0x91000000, 0xd63f0020, 0xd65f03c0, 0}, {{DL, 4, 1, 0}, {DD, 8, 1, 0}, {DC, 12, 1, 0}}, 3,
+         S8_INITIALIZER("R_AARCH64_TLSDESC_LD64_LO12")},
+        {{0x90000000, 0xf9400001, 0x91000000, 0xd63f0020, 0xd65f03c0, 0}, {{DC, 12, 1, 0}}, 1, S8_INITIALIZER("R_AARCH64_TLSDESC_CALL")},
+        // The LDR loads x1 but the BLR calls x2; ADRP and ADD not on x0.
+        {{0x90000000, 0xf9400001, 0x91000000, 0xd63f0040, 0xd65f03c0, 0}, {{DA, 0, 1, 0}, {DL, 4, 1, 0}, {DD, 8, 1, 0}, {DC, 12, 1, 0}}, 4,
+         S8_INITIALIZER("R_AARCH64_TLSDESC_ADR_PAGE21")},
+        {{0x90000001, 0xf9400001, 0x91000000, 0xd63f0020, 0xd65f03c0, 0}, {{DA, 0, 1, 0}, {DL, 4, 1, 0}, {DD, 8, 1, 0}, {DC, 12, 1, 0}}, 4, {0}},
+        {{0x90000000, 0xf9400001, 0x91000021, 0xd63f0020, 0xd65f03c0, 0}, {{DA, 0, 1, 0}, {DL, 4, 1, 0}, {DD, 8, 1, 0}, {DC, 12, 1, 0}}, 4, {0}},
+        // A step naming a different symbol or addend, and a non-TLS symbol.
+        {{0x90000000, 0xf9400001, 0x91000000, 0xd63f0020, 0xd65f03c0, 0}, {{DA, 0, 1, 0}, {DL, 4, 1, 0}, {DD, 8, 2, 0}, {DC, 12, 1, 0}}, 4, {0}},
+        {{0x90000000, 0xf9400001, 0x91000000, 0xd63f0020, 0xd65f03c0, 0}, {{DA, 0, 1, 0}, {DL, 4, 1, 0}, {DD, 8, 1, 0}, {DC, 12, 1, 8}}, 4, {0}},
+        {{0x90000000, 0xf9400001, 0x91000000, 0xd63f0020, 0xd65f03c0, 0}, {{DA, 0, 3, 0}, {DL, 4, 3, 0}, {DD, 8, 3, 0}, {DC, 12, 3, 0}}, 4, {0}},
+        // ADD before LDR (words and relocations both swapped), and a NOP
+        // splitting the run.
+        {{0x90000000, 0x91000000, 0xf9400001, 0xd63f0020, 0xd65f03c0, 0}, {{DA, 0, 1, 0}, {DD, 4, 1, 0}, {DL, 8, 1, 0}, {DC, 12, 1, 0}}, 4, {0}},
+        {{0x90000000, 0xf9400001, 0xd503201f, 0x91000000, 0xd63f0020, 0}, {{DA, 0, 1, 0}, {DL, 4, 1, 0}, {DD, 12, 1, 0}, {DC, 16, 1, 0}}, 4, {0}},
+        // A duplicated first or last step, and an initial-exec ADRP heading
+        // the descriptor (it stays pending, so the orphaned LDR step is named).
+        {{0x90000000, 0xf9400001, 0x91000000, 0xd63f0020, 0xd65f03c0, 0}, {{DA, 0, 1, 0}, {DA, 0, 1, 0}, {DL, 4, 1, 0}, {DD, 8, 1, 0}, {DC, 12, 1, 0}}, 5, {0}},
+        {{0x90000000, 0xf9400001, 0x91000000, 0xd63f0020, 0xd65f03c0, 0}, {{DA, 0, 1, 0}, {DL, 4, 1, 0}, {DD, 8, 1, 0}, {DC, 12, 1, 0}, {DC, 12, 1, 0}}, 5, {0}},
+        {{0x90000000, 0xf9400001, 0x91000000, 0xd63f0020, 0xd65f03c0, 0}, {{IH, 0, 1, 0}, {DL, 4, 1, 0}, {DD, 8, 1, 0}, {DC, 12, 1, 0}}, 4,
+         S8_INITIALIZER("R_AARCH64_TLSDESC_LD64_LO12")},
+        // Two complete descriptors overlapping by one word.
+        {{0x90000000, 0xf9400001, 0x91000000, 0xd63f0020, 0xd65f03c0, 0},
+         {{DA, 0, 1, 0}, {DL, 4, 1, 0}, {DD, 8, 1, 0}, {DC, 12, 1, 0}, {DA, 12, 1, 0}}, 5, {0}},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 text[6];
+        memcpy(text, refused[index].words, sizeof(text));
+        u64 text_offset = 0;
+        NativeExecutableLinkResult linked =
+            link_test_aarch64_tls_ie_link(temporary.arena, text, 6, refused[index].sites, refused[index].site_count, &text_offset);
+        BUSTER_TEST(arguments, linked.error == LINK_ERROR_RELOCATION);
+        if (refused[index].named.length)
+        {
+            BUSTER_TEST_RAW(arguments, string_first_sequence(linked.symbol, refused[index].named) != BUSTER_STRING_NO_MATCH &&
+                                           string_first_sequence(linked.symbol, S8("tv")) == 0,
+                            linked.symbol);
+        }
         scratch_end(temporary);
     }
     return result;
@@ -6304,6 +6559,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     result.succeeded_test_count += hardened_layout.succeeded_test_count;
     result.test_count += hardened_layout.test_count;
     BUSTER_TEST_FIXTURE(arguments, link_test_aarch64_tls_initial_exec_relaxation);
+    BUSTER_TEST_FIXTURE(arguments, link_test_aarch64_tls_descriptor_relaxation);
     static u8 const sha256_abc[32] = {
         0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
         0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,

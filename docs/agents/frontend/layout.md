@@ -608,7 +608,22 @@ answered by `c_parse_layout_alignment_specifiers` itself: a builtin or pointer
 from the target layout, an array from its element, and a table element waits for
 its own layout like any other table type, which is also what keeps
 `_Alignas(_Alignof(struct A[1]))` inside `struct A` a diagnostic. A request that
-is an expression (`_Alignof(short) * 4`) goes to the typed query. Typed queries from
+is an expression is first offered to `c_parse_layout_alignment_fold` (#3269):
+when its `sizeof`/`_Alignof` terms (at most
+`C_PARSE_LAYOUT_ALIGNMENT_FOLD_TERM_CAPACITY`) name a typedef, tag or primitive
+with only trailing `*` and qualifiers, and the terms are joined by `+`, `*`,
+parentheses and integer literals, it reads the terms from the solve's own
+layout columns, waits like a spelled type when one is still open, and uses the
+untyped evaluator's answer only when the product of max(operand, 2) over every
+term and literal is below 2^31. That product bounds every subexpression, so no
+intermediate value overflows `int`, wraps an unsigned type, or wraps the
+evaluator's 64-bit arithmetic, and the answer is the typed one whatever the
+operand types (`c_test_alignas_fold_typed_width`). A chain of
+`_Alignas(sizeof(struct S{n-1}))` records therefore resolves one record per
+attempt with no typed query, at any depth, and a record that reaches itself
+waits on itself and ends in "invalid object alignment". Every other expression
+(`_Alignof(short) * 4` is folded; `sizeof(x) > 4 ? 4 : 1`, `sizeof(object)`, a
+cast, or `sizeof(struct S[2])` are not) goes to the typed query. Typed queries from
 a member `_Alignas` expression nest (the query's private solve asks again for
 the alignments of the types it names, as before this change) under three
 limits: a request from a type whose own query is in flight is refused
@@ -618,9 +633,8 @@ and one outermost query runs at most `C_PARSE_LAYOUT_TYPED_QUERY_BUDGET` nested
 queries. A valid answer is memoized for the rest of its outermost query, and a
 range refused by the depth or budget is remembered until the next
 `c_analyze_semantics_core` so an over-deep chain fails once per type instead of
-once per level. This is a cap on call nesting, not an explicit worklist; the
-call nesting of the `_Alignas` route is inherited from #2829 and is not removed
-here. An array bound does not nest: it asks the typed query only from the
+once per level. These limits now bound only the shapes the fold leaves to the
+typed query; the call nesting there is inherited from #2829. An array bound does not nest: it asks the typed query only from the
 outermost solve (`c_parse_layout_typed_array_bound`), and a bound inside a
 query stays unresolved. Most cast bounds never ask. The rewrite wraps an
 integer cast with a mask and sign flip, and treats a cast to `float`, `double`

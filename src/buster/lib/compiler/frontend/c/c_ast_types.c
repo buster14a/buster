@@ -1415,41 +1415,58 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_ready(CTypeParseMachine* machine, CParseRes
 // Reserves the arrays for the node interval of `node` over the tokens
 // [token_start, token_end) in the machine's scratch arena and makes it the
 // machine's region; c_ast_types_region_fill types it. An initializer
-// (`initializer` set) resolves unbound names in `scope`.
+// (`initializer` set) resolves unbound names in `scope`. The arrays come from
+// the guarded per-body scratch (#1256): in a body whose arrays do not fit,
+// nothing is reserved, null is returned and the body is left to the machine,
+// and the caller reports the exhaustion. Outside a body the guard allocates
+// as arena_allocate does.
 BUSTER_GLOBAL_LOCAL CAstTypeBody* c_ast_types_region_create(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
                                                             u32 node, u32 token_start, u32 token_end, CScopeId scope, bool initializer)
 {
     CAst const* ast = machine->syntax_tree;
     u32 count = ast->extents[node];
     u32 token_count = token_end - token_start;
-    CAstTypeBody* body = arena_allocate(machine->scratch_arena, CAstTypeBody, 1);
-    *body = (CAstTypeBody){
-        .ast = ast,
-        .result = result,
-        .tokens = preprocess->tokens,
-        .matches = result->position_index->matching_delimiters_plus_one,
-        .types = arena_allocate(machine->scratch_arena, CTypeId, count),
-        .first = arena_allocate(machine->scratch_arena, u32, count),
-        .end = arena_allocate(machine->scratch_arena, u32, count),
-        .entities = initializer ? arena_allocate(machine->scratch_arena, u32, count) : 0,
-        .link = arena_allocate(machine->scratch_arena, u32, count),
-        .start_head = arena_allocate(machine->scratch_arena, u32, token_count),
-        .flags = arena_allocate(machine->scratch_arena, u8, count),
-        .widths = arena_allocate(machine->scratch_arena, u8, count),
-        .target = preprocess->target,
-        .scope = scope,
-        .begin = c_ast_subtree_begin(ast, node),
-        .node = node,
-        .token_start = token_start,
-        .token_end = token_end,
-        .token_total = (u32)preprocess->token_count,
-        .scalars_published = machine->ast_bodies->scalars_published,
-        .gnu = c_preprocess_dialect_is_gnu(preprocess->dialect),
-        .waiting = initializer,
-    };
-    body->statistics = machine->ast_type_statistics ? machine->ast_type_statistics : &body->local_statistics;
-    machine->ast_types = body;
-    return body;
+    Arena* scratch = machine->scratch_arena;
+    CAstTypeBody* body = C_PARSE_BODY_SCRATCH_ARRAY(scratch, CAstTypeBody, 1);
+    CTypeId* types = C_PARSE_BODY_SCRATCH_ARRAY(scratch, CTypeId, count);
+    u32* first = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
+    u32* end = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
+    u32* entities = initializer ? C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count) : 0;
+    u32* link = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
+    u32* start_head = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, token_count);
+    u8* flags = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u8, count);
+    u8* widths = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u8, count);
+    bool reserved = body && types && first && end && (entities || !initializer) && link && start_head && flags && widths;
+    if (reserved)
+    {
+        *body = (CAstTypeBody){
+            .ast = ast,
+            .result = result,
+            .tokens = preprocess->tokens,
+            .matches = result->position_index->matching_delimiters_plus_one,
+            .types = types,
+            .first = first,
+            .end = end,
+            .entities = entities,
+            .link = link,
+            .start_head = start_head,
+            .flags = flags,
+            .widths = widths,
+            .target = preprocess->target,
+            .scope = scope,
+            .begin = c_ast_subtree_begin(ast, node),
+            .node = node,
+            .token_start = token_start,
+            .token_end = token_end,
+            .token_total = (u32)preprocess->token_count,
+            .scalars_published = machine->ast_bodies->scalars_published,
+            .gnu = c_preprocess_dialect_is_gnu(preprocess->dialect),
+            .waiting = initializer,
+        };
+        body->statistics = machine->ast_type_statistics ? machine->ast_type_statistics : &body->local_statistics;
+        machine->ast_types = body;
+    }
+    return reserved ? body : 0;
 }
 
 // The eager pass over a created region, into the arrays it reserved, so it
@@ -1475,8 +1492,11 @@ BUSTER_C_SHARED void c_ast_types_body_begin(CTypeParseMachine* machine, CParseRe
         result->position_index->matching_delimiters_plus_one[token_start - 1] - 1 == token_end)
     {
         CAstTypeBody* body = c_ast_types_region_create(machine, result, preprocess, definition - 1, token_start, (u32)token_end, (CScopeId){0}, false);
-        c_ast_types_region_fill(body, machine, preprocess);
-        body->statistics->bodies += 1;
+        if (body)
+        {
+            c_ast_types_region_fill(body, machine, preprocess);
+            body->statistics->bodies += 1;
+        }
     }
 }
 

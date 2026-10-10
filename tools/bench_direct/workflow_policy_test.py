@@ -464,12 +464,19 @@ jobs:
       - name: Machine specifications
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
-          requested-runner: ubuntu-24.04
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the trusted lifecycle controller
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Compile the trusted native controller
         run: clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/lifecycle.c -lm -o "$RUNNER_TEMP/9700x-lifecycle"
       - name: Reconcile terminal checks and record separate Actions costs
@@ -481,12 +488,20 @@ jobs:
         run: |
           set -o pipefail
           "$RUNNER_TEMP/9700x-lifecycle" recover "$LC_RUN_ID" "$LC_ATTEMPT" | tee "$RUNNER_TEMP/9700x-lifecycle.jsonl"
+      - name: Retain safe machine records
+        if: ${{ always() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}
       - name: Retain bounded lifecycle observations
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: 9700x-lifecycle-${{ github.event.workflow_run.id || inputs.run_id }}-${{ github.event.workflow_run.run_attempt || inputs.run_attempt }}
-          path: ${{ runner.temp }}/9700x-lifecycle.jsonl
+          path: |
+            ${{ runner.temp }}/9700x-lifecycle.jsonl
+            ${{ runner.temp }}/machine-specifications/
           if-no-files-found: warn
           retention-days: 90"""
 
@@ -718,7 +733,7 @@ def check_direct_workflow(errors: list[str]) -> None:
             errors.append(f"missing direct workload file: {path.relative_to(ROOT)}")
     if any(not path.is_file() for path in (DIRECT, DIRECT_REQUEST, authorizer, harness)):
         return
-    direct = DIRECT.read_text(encoding="utf-8")
+    direct = remove_reviewed_machine_steps(DIRECT.read_text(encoding="utf-8"))
     lines = direct.splitlines()
     jobs = job_blocks(direct)
     if list(jobs) != ["authorize", "preparation-queue", "preparation", "preparation-publish", "sampling-queue", "sampling", "sampling-publish", "bench", "compare-pull", "start-pull", "publish-pull", "authorize-compiler",
@@ -778,7 +793,7 @@ def check_direct_workflow(errors: list[str]) -> None:
         if marker in direct:
             errors.append(f"direct workflow contains forbidden path: {marker}")
 
-    request = DIRECT_REQUEST.read_text(encoding="utf-8")
+    request = remove_reviewed_machine_steps(DIRECT_REQUEST.read_text(encoding="utf-8"))
     request_lines = request.splitlines()
     if "name: 9700X direct workload request" not in request_lines:
         errors.append("request workflow name must match the direct workflow's trigger")
@@ -800,6 +815,25 @@ def check_direct_workflow(errors: list[str]) -> None:
         errors.append("request workflow must not interpolate an expression inside a run script")
 
 
+def remove_reviewed_machine_steps(text: str) -> str:
+    """The separate startup policy verifies these read-only pinned C steps.
+    Strip only the reviewed literal reference before applying the unchanged
+    workload/checkouts/authority contract; never strip arbitrary uses or runs.
+    """
+    pin = "buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768"
+    pieces = re.split(r"(?=^      - (?:name|uses|id):)", text, flags=re.MULTILINE)
+    result = []
+    for piece in pieces:
+        if ("        uses: " + pin + "\n") in piece:
+            lines = piece.splitlines(keepends=True)
+            end = next((i for i, line in enumerate(lines)
+                        if i and line.strip() and not line.startswith("        ")), len(lines))
+            result.extend(lines[end:])
+        else:
+            result.append(piece)
+    return "".join(result)
+
+
 def check_compiler_path(errors: list[str]) -> None:
     """The landed-main comparison: trusted gate, unprivileged host, hosted publication."""
     authorizer = ROOT / "tools" / "bench_direct" / "authorize_compiler.py"
@@ -810,7 +844,7 @@ def check_compiler_path(errors: list[str]) -> None:
             errors.append(f"missing compiler comparison file: {path.relative_to(ROOT)}")
     if any(not path.is_file() for path in required):
         return
-    jobs = job_blocks(DIRECT.read_text(encoding="utf-8"))
+    jobs = job_blocks(remove_reviewed_machine_steps(DIRECT.read_text(encoding="utf-8")))
     authorize, compare, publish = (jobs.get(name, []) for name in ("authorize-compiler", "compare", "publish-compiler"))
     for name, job, condition in (("authorize-compiler", authorize, COMPILER_AUTHORIZE_IF),
                                  ("compare", compare, COMPILER_RUN_IF), ("publish-compiler", publish, COMPILER_PUBLISH_IF)):
@@ -881,13 +915,13 @@ def check_compiler_path(errors: list[str]) -> None:
             errors.append(f"pull publish job must not use: {marker}")
     check_visibility(errors, jobs)
 
-    request = COMPILER_REQUEST.read_text(encoding="utf-8")
+    request = remove_reviewed_machine_steps(COMPILER_REQUEST.read_text(encoding="utf-8"))
     request_lines = request.splitlines()
     if "name: 9700X compiler benchmark request" not in request_lines:
         errors.append("compiler request workflow name must match the direct workflow's trigger")
     if trigger_block("\n".join(request_lines)) != COMPILER_REQUEST_TRIGGER:
         errors.append("compiler request workflow trigger must be exactly the reviewed push-to-main block")
-    if not contains_block(DIRECT.read_text(encoding="utf-8").splitlines(), DIRECT_CONCURRENCY):
+    if not contains_block(remove_reviewed_machine_steps(DIRECT.read_text(encoding="utf-8")).splitlines(), DIRECT_CONCURRENCY):
         errors.append("direct workflow concurrency must never cancel a main measurement in progress")
     if [line.rstrip() for line in request_lines if line.lstrip().startswith("permissions:")] != \
             ["permissions: {}", "    permissions:"]:
@@ -957,7 +991,7 @@ def check_visibility(errors: list[str], jobs: dict[str, list[str]]) -> None:
     if not COMPILER_REPORT.is_file():
         errors.append(f"missing report recovery workflow: {COMPILER_REPORT.relative_to(ROOT)}")
         return
-    report_text = COMPILER_REPORT.read_text(encoding="utf-8")
+    report_text = remove_reviewed_machine_steps(COMPILER_REPORT.read_text(encoding="utf-8"))
     lines = report_text.splitlines()
     if trigger_block(report_text) != REPORT_TRIGGER:
         errors.append("report recovery trigger must be exactly the reviewed workflow_dispatch block")

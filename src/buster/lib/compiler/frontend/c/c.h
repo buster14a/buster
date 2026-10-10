@@ -595,6 +595,11 @@ struct CPreprocessOptions
     String8* undefinitions;
     String8* include_paths;
     String8* system_include_paths;
+    // `-include FILE` names in command-line order. The preprocessor processes
+    // them as `#include "FILE"` lines of a synthetic `<command-line>` file
+    // that precedes the primary source, after command-line macros and without
+    // shifting the primary source's lines or __FILE__.
+    String8* forced_includes;
     String8 source_path;
     // Identity of the descriptor that supplied source, when available.
     // In-memory callers retain the path namespace by leaving this invalid.
@@ -606,6 +611,7 @@ struct CPreprocessOptions
     u32 undefinition_count;
     u32 include_path_count;
     u32 system_include_path_count;
+    u32 forced_include_count;
     u32 expansion_limit;
     u32 include_depth_limit;
     CPreprocessDialect dialect;
@@ -1619,6 +1625,7 @@ typedef struct CStringLiteralMemo CStringLiteralMemo;
 // exists. Counts of actual operations, not timings; see
 // docs/agents/frontend/layout.md for each field's exact meaning.
 typedef struct CMemberLookup CMemberLookup;
+typedef struct CObjectSizeFacts CObjectSizeFacts;
 typedef struct CTypeLayoutStatistics CTypeLayoutStatistics;
 struct CTypeLayoutStatistics
 {
@@ -1706,6 +1713,9 @@ struct CParseResult
     // by-value operand copy keeps counting into the same record. Null for
     // hand-built results, which then count nothing.
     CTypeLayoutStatistics* type_layout_statistics;
+    // Outside the checkpointed body for the same reason (CObjectSizeFacts in
+    // c_internal.h). Null for hand-built results, which record nothing.
+    CObjectSizeFacts* object_size_facts;
     // Name index of wide aggregates for c_parse_member_type (CMemberLookup in
     // c_internal.h). Outside the checkpointed body too: entries are validated
     // against the live rows on every use, so a rollback or a by-value copy may
