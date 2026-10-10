@@ -1382,12 +1382,15 @@ typedef enum CConstantEvaluationMode
 // mapped: interning a member's row would move it ahead of its struct and
 // resolve the struct a pass earlier, which reorders the IR types and so the
 // `-g` type entries. Within the window an interned row only ever replaces a
-// later copy of itself, which resolves in the same pass. The one exception
-// is a member's row: a type name inside the window may still define an
-// aggregate (`(const struct { char *p; })`, whose row the machine does not
-// find already defined), and that row precedes its members', so `suspended`
-// counts the member segments the machine is reading and nothing is interned
-// while any is. Restrict-qualified rows are never interned, because
+// later copy of itself, which resolves in the same pass. Every aggregate a
+// body type name defines, qualified ones such as `(const struct { char *p; })`
+// included, gets its row and its members' rows from the declaration pass
+// before the window opens; c_type_parse_core_step steps over the leading
+// qualifiers and reads that row back, so no member segment is read while the
+// window is open. `suspended` is a defensive guard for the member-row order
+// should a later change define an aggregate inside the window: it counts the
+// member segments the machine is reading, and nothing is interned while any
+// is. Restrict-qualified rows are never interned, because
 // c_type_parse_root_finish diagnoses an invalid `restrict` only on rows a
 // query appends.
 //
