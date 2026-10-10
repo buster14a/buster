@@ -688,6 +688,19 @@ walk. Member sums, array-index multiplication and accumulated array offsets
 are checked before publication. Array-index expressions are constant-query
 children on the explicit query stack; a dot must separate member selections.
 
+A runtime `__builtin_offsetof` may index with expressions that are not
+constant, at any position in the designator, as GNU C and Clang accept
+(`offsetof(T, a[i].b[j])`). `c_ir_offsetof_runtime_index` runs the same walk
+in runtime mode: each such subscript counts as index 0 in the returned
+constant offset, and the query reports the first one after a given token with
+its element type. The `__builtin_offsetof` arm of
+`c_ir_lower_expression_core_step` lowers that subscript as a child expression;
+its `OFFSETOF_INDEX` resume adds `index * sizeof(element)` in `size_t` and asks
+for the next one. Constant subscripts keep the checked admission below, so a
+negative or overflowing constant index is refused here too.
+`c_test_offsetof_runtime_index` covers final, non-final and multiple runtime
+subscripts.
+
 Parser enumerators and static assertions use `c_parse_constant_offsetof` as
 states 8/9 of the existing `CParseConstantTask` stack. Each array index is a
 typed child over its original token range, so nested `offsetof`, `sizeof` and
