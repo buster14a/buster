@@ -159,6 +159,12 @@ fixture as well as compiling both architectures.
   A call row names no clobber mask, so replay retires every allocatable register
   outside the callee-saved set at it (`codegen_machine_debug_row_clobbers`); the
   value is then located in its spill home or unavailable (#3214).
+  A `MACHINE_EDIT_COPY` of the tracked register moves tracking to its
+  destination and keeps the source as a fallback
+  (`CodegenMachineDebugReference.alternate_register`). When the destination is
+  overwritten (for example as a destructive operand's result), the location
+  falls back to the source until that register is written, clobbered or a
+  block boundary passes (#3338). Both replays apply the same rule.
   Certified registers retain their clobber tracking after the final operand;
   replay stops only when neither a register nor a recovery event can remain.
   An unshared home may retain a dead value. The independent dense test model
