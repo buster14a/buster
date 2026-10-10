@@ -1707,9 +1707,11 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
 // only earlier functions outside loops. Out-of-range signed narrowing is
 // implementation-defined modulo on every supported target. Generation is
 // iterative: expressions are chains and statement nesting uses d_gen_open.
+// Tables passed to string_format are not const: TCC rejects a const struct
+// passed in a stack-slot variadic argument as an assignment to read-only data.
 typedef struct DGenType DGenType;
 struct DGenType { String8 name; String8 wide; String8 shift; u32 bits; bool is_signed; };
-BUSTER_GLOBAL_LOCAL DGenType const d_gen_types[] = {
+BUSTER_GLOBAL_LOCAL DGenType d_gen_types[] = {
     {S8("signed char"), S8("int"), S8("unsigned"), 8, true},
     {S8("unsigned char"), S8("unsigned"), S8("unsigned"), 8, false},
     {S8("short"), S8("int"), S8("unsigned"), 16, true},
@@ -1816,7 +1818,7 @@ BUSTER_GLOBAL_LOCAL String8 d_gen_leaf(DGen* g, u32 type)
 
 BUSTER_GLOBAL_LOCAL String8 d_gen_condition(DGen* g)
 {
-    String8 const comparisons[] = {S8("<"), S8("<="), S8(">"), S8(">="), S8("=="), S8("!=")};
+    String8 comparisons[] = {S8("<"), S8("<="), S8(">"), S8(">="), S8("=="), S8("!=")};
     u32 type = d_gen_below(g, D_GEN_TYPE_COUNT);
     String8 left = d_gen_leaf(g, type);
     String8 comparison = comparisons[d_gen_below(g, BUSTER_ARRAY_LENGTH(comparisons))];
@@ -1825,7 +1827,7 @@ BUSTER_GLOBAL_LOCAL String8 d_gen_condition(DGen* g)
 
 BUSTER_GLOBAL_LOCAL String8 d_gen_expression(DGen* g, u32 type)
 {
-    String8 const binary[] = {S8("+"), S8("-"), S8("*"), S8("&"), S8("|"), S8("^")};
+    String8 binary[] = {S8("+"), S8("-"), S8("*"), S8("&"), S8("|"), S8("^")};
     DGenType t = d_gen_types[type];
     String8 accumulator = d_gen_leaf(g, type);
     u32 steps = 1 + d_gen_below(g, 5);
@@ -1856,7 +1858,7 @@ BUSTER_GLOBAL_LOCAL String8 d_gen_expression(DGen* g, u32 type)
         }
         else if (shape == 10)
         {
-            String8 const unary[] = {S8("-"), S8("~"), S8("!")};
+            String8 unary[] = {S8("-"), S8("~"), S8("!")};
             accumulator = string_format(g->arena, S8("(({S8})({S8}({S8}){S8}))"), t.name, unary[d_gen_below(g, 3)], t.wide, accumulator);
         }
         else if (shape == 11)
@@ -1892,7 +1894,7 @@ BUSTER_GLOBAL_LOCAL String8 d_gen_assignment(DGen* g)
     {
         // Compound forms avoid signed int/long long overflow and promoted
         // unsigned short products; narrow left shifts stay within int.
-        String8 const operators[] = {S8("+="), S8("-="), S8("^="), S8("|="), S8("&="), S8(">>="), S8("*="), S8("<<=")};
+        String8 operators[] = {S8("+="), S8("-="), S8("^="), S8("|="), S8("&="), S8(">>="), S8("*="), S8("<<=")};
         u32 index;
         if (t.is_signed && t.bits >= 32) { index = 2 + d_gen_below(g, 4); }
         else if (t.is_signed) { index = d_gen_below(g, 6); }
@@ -1946,7 +1948,7 @@ BUSTER_GLOBAL_LOCAL String8 d_gen_statement(DGen* g, u32 function, u32* calls)
     else if (shape == 5)
     {
         result = string_format(g->arena, S8("switch ((int)({S8} & 3))\n{{\n"), d_gen_atom(g, d_gen_below(g, D_GEN_TYPE_COUNT)));
-        String8 const labels[] = {S8("case 0:\n"), S8("case 1:\n"), S8("case 2:\n"), S8("default:\n")};
+        String8 labels[] = {S8("case 0:\n"), S8("case 1:\n"), S8("case 2:\n"), S8("default:\n")};
         for (u32 label = 0; label < BUSTER_ARRAY_LENGTH(labels); label += 1)
         {
             bool fallthrough = label + 1 < BUSTER_ARRAY_LENGTH(labels) && d_gen_below(g, 2);
@@ -2034,7 +2036,7 @@ BUSTER_GLOBAL_LOCAL String8 d_generated_source(Arena* arena, u32 seed)
     g->state = g->state ? g->state : 1;
     g->parts = arena_allocate(arena, String8, D_GEN_PART_CAPACITY);
     d_gen_emit(g, string_format(arena, S8("// test_differential structural generator v1, seed {u32}.\nextern int printf(const char *, ...);\n"), seed));
-    String8 const fields[] = {S8("a"), S8("b"), S8("c[0]"), S8("c[1]"), S8("c[2]"), S8("d")};
+    String8 fields[] = {S8("a"), S8("b"), S8("c[0]"), S8("c[1]"), S8("c[2]"), S8("d")};
     u32 field_types[] = {d_gen_below(g, D_GEN_TYPE_COUNT), d_gen_below(g, D_GEN_TYPE_COUNT), d_gen_below(g, D_GEN_TYPE_COUNT), 0, 0, d_gen_below(g, D_GEN_TYPE_COUNT)};
     field_types[3] = field_types[2];
     field_types[4] = field_types[2];
