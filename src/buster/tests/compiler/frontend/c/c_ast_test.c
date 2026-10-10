@@ -3658,6 +3658,24 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
      C_TYPE_INVALID, true},
     {S8_INITIALIZER("char* f(void) { return (char*)((\"a\")); }"), S8_INITIALIZER("("), 1, 9, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER, false,
      C_TYPE_INVALID, true},
+    // Operands the machine types to nothing: `__func__` and its GNU spellings
+    // name no entity, and an unbound `__builtin_expect` call reaches no typed
+    // leaf. A checked cast skips its conversion rule over them, and a
+    // conditional its scalar-condition rule, so both are answered with
+    // constraint checks too. A void builtin called with no arguments is the
+    // void row. The last case is BUSTER_CHECK's shape.
+    {S8_INITIALIZER("char* f(void) { return (char*)__func__; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("char* f(void) { return (char*)(__PRETTY_FUNCTION__); }"), S8_INITIALIZER("("), 1, 7, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_POINTER},
+    {S8_INITIALIZER("long f(void) { return (long)__FUNCTION__; }"), S8_INITIALIZER("("), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    {S8_INITIALIZER("int f(int x) { return (int)__builtin_expect(x, 0); }"), S8_INITIALIZER("("), 1, 9, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("int f(int x) { return __builtin_expect(x, 0) ? 1 : 2; }"), S8_INITIALIZER("__builtin_expect"), 0, 10,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("int f(void) { return (__builtin_unreachable(), 0); }"), S8_INITIALIZER("__builtin_unreachable"), 0, 3,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_VOID},
+    {S8_INITIALIZER("int f(void) { return (__builtin_debugtrap(), 0); }"), S8_INITIALIZER("("), 1, 7, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("void f(int x) { (void)(__builtin_expect(!x, 0) ? (__builtin_debugtrap(), 0) : 0); }"), S8_INITIALIZER("("), 1, 22,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_VOID},
     // Answered without constraint checks only. With them the machine also
     // types a cast's operand -- here several string tokens, which no replay
     // covers -- and it decides whether two pointers may be subtracted by
@@ -3691,6 +3709,8 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     {S8_INITIALIZER("long f(void) { return __builtin_expect(1, 1); }"), S8_INITIALIZER("__builtin_expect"), 0, 6, C_TEST_AST_TYPE_PROBE_DECLINE,
      C_TYPE_INVALID},
     {S8_INITIALIZER("int g(int); int f(void) { return (g)(1); }"), S8_INITIALIZER("("), 2, 6, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("void f(int* p) { __builtin_prefetch(p); }"), S8_INITIALIZER("__builtin_prefetch"), 0, 4, C_TEST_AST_TYPE_PROBE_DECLINE,
+     C_TYPE_INVALID},
     // A designator is not member access, and a declaration is not an
     // expression.
     {S8_INITIALIZER("struct S { int field; }; void f(void) { struct S s = {.field = 1}; }"), S8_INITIALIZER("."), 0, 2, C_TEST_AST_TYPE_PROBE_MISS,

@@ -400,6 +400,9 @@ unchanged.
       under interned pointer rows. Each is accepted only once every row it
       reads is already interned, so its machine run appends nothing at any
       task level.
+    - a call of an unbound void `__builtin_` with no arguments
+      (`__builtin_debugtrap()`, `__builtin_unreachable()`), whose answer is
+      the published `void` row (`c_ast_types_builtin_call`).
 - **What it declines.** Every shape whose machine answer appends a row stays
   with the machine:
   - a qualified member or array element;
@@ -439,6 +442,17 @@ unchanged.
   for two pointers to one unqualified element row. A cast whose conversion
   rule is clean is safe, and so is a conditional whose condition is a safe
   scalar.
+- **Failing operands.** The machine types a few nodes to nothing, with no row
+  and no constraint: `__func__`, `__FUNCTION__` and `__PRETTY_FUNCTION__`,
+  which name no entity, and an unbound `__builtin_expect(...)` call, which no
+  leaf rule types. Such a node is never accepted, but it carries
+  `C_AST_TYPE_FLAG_FAILS`. The machine's checked cast tests its conversion
+  only when the operand has a type, and its conditional tests the condition
+  only when that has a type. So a cast over a failing operand is safe, and so
+  is a conditional with a failing condition, such as `BUSTER_CHECK`'s
+  `(void)(__builtin_expect(!(ok), 0) ? (…, 0) : 0)`. The query repeats the
+  name's lookup in its own scope (`c_ast_types_lookups_agree`), and that
+  lookup must find nothing.
 - **Authority.** The machine remains the only producer of diagnostics. A query
   the typer declines, misses or leaves alone runs the machine as before.
 - **Designator probes.** Nearly every miss was one of two designator probes
@@ -1016,5 +1030,30 @@ the same way and diagnostic only:
   (5.2%) slower, with 4 of 15 pairs favouring fusion, and a repeat agreed. The
   A/A control itself exceeded its ±0.5% bound.
 - **Decision.** Fusion does not ship. The token array and the array build stay.
+
+For the typer's [failing operands](#tree-expression-typer), these budgets
+were declared before the measured runs. The input and flags are those of
+stage 2 (`-g0 -fsyntax-only`, plus `-c` for the default path), and four
+Callgrind arms are counted on tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `f38a7716`, which the candidate branches from. The budgets:
+- correctness: no verify mismatch over the corpus, and identical diagnostics
+  and type-table sizes with and without the tree. `-c` objects (`-g0` and
+  `-g`) must be byte-identical across the four arms.
+- coverage: a throwaway census build, not committed, counts the checked casts
+  the typer declines over a declined or unsafe operand. On the base it counts
+  577 declined and 296 unsafe, plus 13 with an unclean conversion. On the
+  candidate the first two together must fall by at least 600.
+- the change's own effect (C against B): fewer instructions in the whole
+  compile, with the larger eager pass and the extra lookups charged, and
+  fewer machine runs from queries.
+- the default path (D against A): the typer runs only with the tree, so the
+  difference stays within ±0.05% Ir on `-fsyntax-only` and on `-c`.
+- performance acceptance: the hosted counts are diagnostic. Zen 5 validation
+  (#2761) stays incomplete, and the hook stays opt-in.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
