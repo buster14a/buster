@@ -5210,7 +5210,7 @@ IrInstructionId ir_block_append_instruction(Arena* arena, IrFunction* function, 
     if (refusal == IR_COMMIT_ACCEPTED)
     {
         ir_function_invalidate_cfg(function);
-        result = ir_block_commit_accepted(arena, function, block, instruction, canonical_source);
+        result = ir_block_commit_accepted(arena, function, block, &instruction, canonical_source);
     }
     if (refusal_out)
     {
