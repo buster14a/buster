@@ -270,7 +270,8 @@ BUSTER_GLOBAL_LOCAL String8 compiler_closure_read(Arena* arena, String8 path, u6
 BUSTER_GLOBAL_LOCAL String8 compiler_closure_cache_path(Arena* arena, String8 build, String8 key)
 {
     String8 text = compiler_closure_read(arena, path_join(arena, build, S8("CMakeCache.txt")), BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
-    String8 prefix = string_format(arena, S8("{S8}:FILEPATH="), key);
+    // build.c passes -DCMAKE_C_COMPILER:STRING; CMake's own discovery records FILEPATH.
+    String8 prefixes[] = {string_format(arena, S8("{S8}:FILEPATH="), key), string_format(arena, S8("{S8}:STRING="), key)};
     String8 result = {0};
     u64 start = 0;
     for (u64 index = 0; index <= text.length && !result.length; index += 1)
@@ -279,10 +280,13 @@ BUSTER_GLOBAL_LOCAL String8 compiler_closure_cache_path(Arena* arena, String8 bu
         {
             String8 line = {.pointer = text.pointer + start, .length = index - start};
             start = index + 1;
-            if (string_starts_with_sequence(line, prefix))
+            for (u64 type = 0; type < BUSTER_ARRAY_LENGTH(prefixes) && !result.length; type += 1)
             {
-                String8 value = {.pointer = line.pointer + prefix.length, .length = line.length - prefix.length};
-                result = os_path_absolute(arena, value, true);
+                if (string_starts_with_sequence(line, prefixes[type]))
+                {
+                    String8 value = {.pointer = line.pointer + prefixes[type].length, .length = line.length - prefixes[type].length};
+                    result = os_path_absolute(arena, value, true);
+                }
             }
         }
     }
