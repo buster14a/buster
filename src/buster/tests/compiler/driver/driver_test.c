@@ -10145,13 +10145,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parallel_edge_moves(Unit
         "int main(void)\n"
         "{\n"
         "    int bad = 0;\n"
-        "    bad |= swap_loop(37) != 1819ll;\n"
-        "    bad |= rotate3(41) != 60318ll;\n"
-        "    bad |= rotate4_fanout(43) != 122175ll;\n"
-        "    bad |= mixed_sources(47) != 34865ll;\n"
-        "    bad |= wide(53) != 38176ll;\n"
-        "    bad |= mixed_class(29) != 0x1.1a12e82p+11;\n"
-        "    return bad | (sink != 2459);\n"
+        "    bad |= (swap_loop(37) != 1819ll) << 0;\n"
+        "    bad |= (rotate3(41) != 60318ll) << 1;\n"
+        "    bad |= (rotate4_fanout(43) != 122175ll) << 2;\n"
+        "    bad |= (mixed_sources(47) != 34865ll) << 3;\n"
+        "    bad |= (wide(53) != 38176ll) << 4;\n"
+        "    bad |= (mixed_class(29) != 0x1.1a12e82p+11) << 5;\n"
+        "    bad |= (sink != 2459) << 6;\n"
+        "    return bad;\n"
         "}\n");
     String8 input = buster_test_temporary_path(arguments->arena, S8("buster-parallel-edge-moves"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
@@ -10197,7 +10198,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parallel_edge_moves(Unit
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
                 {
-                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description);
+                    // Each subcase owns one exit-status bit, so a failure names
+                    // the function whose result was wrong.
+                    String8 run_arguments[] = {executable};
+                    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0},
+                        (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                    ProcessWaitResult waited = spawn.handle ? os_process_wait_deadline(temporary.arena, spawn, 30000000) : (ProcessWaitResult){0};
+                    String8 run_description = string_format(temporary.arena, S8("{S8}; run status {u32}"), description, waited.platform_status);
+                    BUSTER_TEST_RAW(arguments, spawn.handle && waited.result == PROCESS_RESULT_SUCCESS, run_description);
                 }
                 scratch_end(temporary);
             }
