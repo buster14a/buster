@@ -595,6 +595,11 @@ struct CPreprocessOptions
     String8* undefinitions;
     String8* include_paths;
     String8* system_include_paths;
+    // `-include FILE` names in command-line order. The preprocessor processes
+    // them as `#include "FILE"` lines of a synthetic `<command-line>` file
+    // that precedes the primary source, after command-line macros and without
+    // shifting the primary source's lines or __FILE__.
+    String8* forced_includes;
     String8 source_path;
     // Identity of the descriptor that supplied source, when available.
     // In-memory callers retain the path namespace by leaving this invalid.
@@ -606,6 +611,7 @@ struct CPreprocessOptions
     u32 undefinition_count;
     u32 include_path_count;
     u32 system_include_path_count;
+    u32 forced_include_count;
     u32 expansion_limit;
     u32 include_depth_limit;
     CPreprocessDialect dialect;
@@ -1148,7 +1154,15 @@ struct CEnumMember
     // Once published, ordinary lookup is authoritative; this avoids scanning
     // completed lists for unresolved non-enum identifiers and keywords.
     bool is_published;
-    u8 reserved[6];
+    // Defined inside a function declarator's parameter list, so the name
+    // lives in that prototype's scope (C17 6.2.1p4) and is never published
+    // at file scope nor found by pending lookup from outside it.
+    bool is_prototype_scope;
+    // Defined by an enum type name inside a file-scope declaration's
+    // initializer, bound or static assertion. Its scope begins at its own
+    // definition (C17 6.2.1p7), so an earlier file-scope use is diagnosed.
+    bool is_expression_defined;
+    u8 reserved[4];
 };
 BUSTER_CT_CHECK(sizeof(CEnumMember) == 96);
 

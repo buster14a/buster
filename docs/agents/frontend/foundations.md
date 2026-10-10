@@ -1756,16 +1756,81 @@ one publication per member, refusal neighbors and both canonical frontend
 forms on Linux x86-64/AArch64 and Windows x86-64. The registered
 `c_test_expression_enum_runtime` executes the same scope/order family on
 supported desktop native targets in FAST and QUALITY and both forms.
-The local initializer walk also publishes direct enum type names in explicitly
-typed scalar block initializers at that lexical point, before later operands
-and comma declarators. It uses only the owning enum's member range.
+The local initializer walk also publishes the definitions an initializer's type
+names make, at that lexical point, before later operands and comma declarators:
+an enum type name (also qualified, `const enum { ... }`, or with a fixed
+underlying type, `enum : char { ... }`), and the enumerators nested in a struct
+or union definition, in any explicitly typed initializer (scalar, aggregate or
+inferred array), in a `__builtin_offsetof` type operand and in a GNU
+`__auto_type` initializer. `c_parse_define_initializer_type`
+is the one producer. It registers the record, publishes its nested enumerators
+into the declaration's scope, and only then binds the record's member array
+bounds, so `sizeof(struct { enum { A = 3 } e; char c[A]; })` sizes `c` with the
+inner `A` even when an outer `A` is visible (C17 6.2.1p4); a clash in the same
+scope is a `redefinition of enumerator` diagnostic and never a silent miscompile.
+An enum uses only its own member range. `c_parse_type_definition_at` recognizes
+the definition; a definition with attributes between its keyword and its body
+(`enum __attribute__((packed)) { ... }`) is refused with an unsupported
+diagnostic in a block initializer, because the expression parser sizes such a
+type name wrongly and an unrecognized body would bind to an outer name of the
+same spelling. A `for` declaration in every dialect and a C23 `auto` or
+`constexpr` initializer publish the same way, at the definition's own point,
+as Clang does (#3252, maintainer decision 2026-10-09): `for (int i =
+sizeof(struct { enum { A = 3 } e; char c[A]; }); ...)` sizes `c` with the inner
+`A` and the loop's condition and body see it, and the name ends with the loop.
+Clang 18 accepts each of these, including the pre-C23 `for` form, and gives
+those values; GCC rejects the `auto` and `constexpr` forms and, under
+`-pedantic-errors`, the pre-C23 `for` one. C17 6.8.5p3 is read, as Clang
+reads it, as limiting the for declaration's declarators, not the type names in
+its initializer; a tag or enum defined in the declaration's own specifiers
+(`for (enum { Q = 3 } e = Q; ...)`) stays refused (#2392). A C23 `auto`
+initializer defines its types through `c_parse_bind_auto_initializer_identifiers`
+like GNU `__auto_type`, and a `constexpr` initializer is validated only after
+its definitions are published, so a constant it reads binds them.
 `c_test_initializer_enum_scope` checks acceptance/refusal, unique publication
-and both canonical frontend forms on the same three layouts.
+and both canonical frontend forms on the same three layouts, plus GNU17 and C23
+cases through `c_test_enum_scope_case`.
 `c_test_initializer_enum_runtime` executes initializer order, cast/literal,
-tag, static-local and later-declarator cases in FAST and QUALITY
-and both forms on supported desktop targets. Inferred array initializers,
-constexpr/GNU inferred declarations, for initializers, file-scope initializers, qualified type
-names and expression-defined record members remain pending under #1615.
+tag, static-local, aggregate, inferred-array, record-member-bound, qualified,
+offsetof and later-declarator cases in FAST and QUALITY
+and both forms on supported desktop targets.
+
+At file scope `c_analyze_semantics_core` walks each non-function declaration in
+source order, before parsing that declaration's own type, and
+`c_parse_bind_expression_aggregates` registers the enum, struct and union
+definitions in its expression type names (initializers, array and member bounds,
+`_Static_assert`). The ordinary file-scope publication loop then publishes their
+enumerators with the others, so a clash is diagnosed once, and a later enumerator
+or member bound, in the same declaration or a following one, reads an earlier one
+through `c_parse_pending_enum_member` (`_Static_assert(sizeof(enum { R = 2 }) == 4,
+""); enum { S = R + 1 };`). A definition inside a function declarator's parameter
+list (`int (*p)(int [sizeof(enum { R = 2 })])`) is in that prototype's scope
+(C17 6.2.1p4): the walk marks its members `is_prototype_scope`, a `(` that
+follows a `(*...)` declarator group, a parenthesised declarator name (`typedef int (F)(...)`) or a declarator name at the top of the declaration (`typedef int F(int a[...])`, with nothing open and before any initializer; attribute and operator groups such as `__attribute__((...))`, `sizeof`, `__alignof__` and `__builtin_*` never open one) opening the list, and neither publication
+nor pending lookup sees them, so they neither clash with nor reach the file.
+File-scope enumerators are still published together after the declarations, but an
+enumerator's scope begins at its own definition (C17 6.2.1p7), so
+`c_parse_diagnose_early_expression_enum_uses` then rereads the file-scope
+declarations that are not function definitions (a body's own binding already
+refuses) and diagnoses each identifier that resolves to an expression-defined
+enumerator defined at a later token as `use of undeclared identifier`
+(`int y = R; unsigned long x = sizeof(enum { R = 2 });` is refused, as GCC and
+Clang refuse it; a later use is accepted). A token counts as a use by what
+precedes it: a member selection, a declarator after a type word or `*`, a
+closing bracket and a list separator outside parentheses, brackets and
+initializers do not, so a record member or a local named like the enumerator is
+not a use. The scan is a heuristic over tokens, not a binding pass. A clash with a later
+declaration is reported at the enumerator. Classification of prototype lists keeps
+its open-parenthesis state in arena-allocated bit arrays sized by the range's
+token count, so nesting depth has no limit. Remaining under #1615: an enum defined as a later argument of a call-like group (`__builtin_types_compatible_p(int, enum { R = 2 })`) is not walked, only one that follows a `(`; prototype-scope
+names in a function definition's parameter bounds, which are also visible in its
+body (`int f(int a[sizeof(enum { R = 2 })]) { return R; }` is refused, and so is
+`int f(int a[sizeof(struct { enum { A = 3 } e; char c[A]; })])`), a prototype
+parameter that defines an enum directly (`int (*p)(enum { R = 2 } x)`) which still
+leaks to the file as before, `sizeof` of a fixed-underlying-type enum in a
+file-scope initializer (not folded), and attributes on a definition in a
+file-scope expression. `c_test_file_scope_expression_enum_scope` and
+`c_test_file_scope_expression_enum_runtime` cover this.
 
 `c_test_enumerator_types` pins both contracts across Linux x86-64/AArch64 and
 Windows x86-64. `c_test_msvc_enum_abi` pins the MSVC ordinary/fixed distinction,

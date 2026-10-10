@@ -1739,6 +1739,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     invocation.link_operations = arena_allocate(arena, CompilerDriverLinkOperation, arguments.length);
     invocation.include_paths = arena_allocate(arena, String8, arguments.length);
     invocation.system_include_paths = arena_allocate(arena, String8, arguments.length + default_include_capacity);
+    invocation.forced_includes = arena_allocate(arena, String8, arguments.length);
     invocation.macro_operations = arena_allocate(arena, CPreprocessorOperation, arguments.length);
     invocation.library_paths = arena_allocate(arena, String8, arguments.length);
     invocation.libraries = arena_allocate(arena, String8, arguments.length);
@@ -1893,6 +1894,56 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (string_equal(argument, S8("-nostdinc")))
         {
             invocation.no_standard_includes = true;
+            continue;
+        }
+        // GCC/Clang -include FILE or -includeFILE. Other -include-* spellings
+        // (-include-pch, ...) are different options and stay unsupported: a
+        // joined value that begins with '-' is never a file name here. The
+        // name becomes a quoted header name of a synthetic #include, so it may
+        // hold neither a double quote nor a line break.
+        if (string_equal(argument, S8("-include")) || (string_starts_with_sequence(argument, S8("-include")) && argument.length > 8 &&
+                                                       argument.pointer[8] != '-'))
+        {
+            String8 forced_name = {0};
+            bool forced_ok = true;
+            if (string_equal(argument, S8("-include")))
+            {
+                if (argument_index + 1 >= arguments.length)
+                {
+                    compiler_driver_argument_error(arena, &invocation, S8("missing argument after {S8}"), argument);
+                    forced_ok = false;
+                }
+                else
+                {
+                    forced_name = arguments.pointer[++argument_index];
+                }
+            }
+            else
+            {
+                forced_name = string_slice(argument, 8, argument.length);
+            }
+            if (forced_ok)
+            {
+                bool forced_valid = forced_name.length != 0;
+                for (u64 name_index = 0; name_index < forced_name.length; name_index += 1)
+                {
+                    char8 name_byte = forced_name.pointer[name_index];
+                    forced_valid &= name_byte != '"' && name_byte != '\n' && name_byte != '\r';
+                }
+                if (!forced_valid)
+                {
+                    compiler_driver_argument_error(arena, &invocation, S8("unsupported -include file name: {S8}"), forced_name);
+                    forced_ok = false;
+                }
+                else
+                {
+                    invocation.forced_includes[invocation.forced_include_count++] = forced_name;
+                }
+            }
+            if (!forced_ok)
+            {
+                break;
+            }
             continue;
         }
         if (string_equal(argument, S8("--save-temps")) || string_equal(argument, S8("-save-temps")))
@@ -2724,6 +2775,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         invocation.action != COMPILER_DRIVER_ACTION_PREPROCESS && invocation.action != COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
     {
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), S8("-fcommon"));
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.forced_include_count && invocation.has_gpu_target)
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for a GPU target"), S8("-include"));
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.dump_macros && invocation.has_gpu_target && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
@@ -5181,6 +5236,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
                                                     .undefinition_count = invocation.undefinition_count,
                                                     .include_path_count = invocation.include_path_count,
                                                     .system_include_path_count = invocation.system_include_path_count,
+                                                    .forced_includes = invocation.forced_includes,
+                                                    .forced_include_count = invocation.forced_include_count,
                                                     .assembly_comment_lines = true,
                                                     .retain_output_spacing = true,
                                                     .dump_macros = invocation.dump_macros && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
@@ -5413,6 +5470,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .undefinition_count = invocation.undefinition_count,
                                                     .include_path_count = invocation.include_path_count,
                                                     .system_include_path_count = invocation.system_include_path_count,
+                                                    .forced_includes = invocation.forced_includes,
+                                                    .forced_include_count = invocation.forced_include_count,
                                                     .already_preprocessed = compiler_driver_c_input_phase(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) == COMPILER_DRIVER_C_INPUT_PREPROCESSED,
                                                     .omit_spelled_bytes = invocation.omit_spelled_bytes,
                                                     .retain_output_spacing = invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
