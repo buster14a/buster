@@ -242,8 +242,6 @@ jobs:
           status=0
           ./build.sh source_size --rev "$GITHUB_SHA" --base "$GITHUB_SHA^1" >"$report" 2>&1 || status=$?
           cat "$report"
-          ./build.sh source_size --write-baseline --rev "$GITHUB_SHA"
-          cat docs/source-size-baseline.txt
           {
             printf '### Source size\n\n```text\n'
             cat "$report"
