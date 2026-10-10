@@ -27,33 +27,46 @@ static IR_APPEND_UNUSED BUSTER_COLD IR_APPEND_NOINLINE IrInstructionId ir_instru
 // function, an unpublished CFG, and valid instruction/source storage for the
 // current count and capacity. Callers that cannot prove those invariants must
 // use ir_function_add_instruction instead.
-static IR_APPEND_UNUSED BUSTER_INLINE IrInstructionId ir_instruction_append_trusted(Arena* arena, IrFunction* function,
-                                                                                    IrInstruction instruction,
-                                                                                    IrSourceRange canonical_source)
+//
+// The row is read through a pointer and copied straight into its slot. A
+// caller that needs a field changed patches the stored row afterwards rather
+// than editing a copy first: an edited by-value copy is rebuilt on the stack
+// with narrow stores and then reloaded as one 64-byte row, a load that cannot
+// be store-forwarded and stalled every C lowering append (#3291).
+static IR_APPEND_UNUSED BUSTER_INLINE IrInstructionId ir_instruction_append_trusted_from(Arena* arena, IrFunction* function,
+                                                                                         IrInstruction const* instruction,
+                                                                                         IrSourceRange canonical_source)
 {
     u32 instruction_count = function->instruction_count;
     IrInstructionId result;
     if (BUSTER_UNLIKELY(instruction_count >= function->instruction_capacity))
     {
-        result = ir_instruction_append_slow(arena, function, instruction, canonical_source);
+        result = ir_instruction_append_slow(arena, function, *instruction, canonical_source);
     }
     else
     {
         result = (IrInstructionId){.value = instruction_count};
-        function->instructions[instruction_count] = instruction;
+        function->instructions[instruction_count] = *instruction;
         function->instruction_count = instruction_count + 1;
-        if ((IR_OPCODE_SUMMARY_TRACKED >> instruction.opcode) & 1)
+        if ((IR_OPCODE_SUMMARY_TRACKED >> instruction->opcode) & 1)
         {
-            function->opcode_summary |= IR_OPCODE_BIT(instruction.opcode);
+            function->opcode_summary |= IR_OPCODE_BIT(instruction->opcode);
         }
         if (function->instruction_canonical_sources)
         {
             function->instruction_canonical_sources[instruction_count] = canonical_source;
         }
         IR_CONSTRUCTION_RECORD(INSTRUCTION_APPENDS, 1);
-        IR_CONSTRUCTION_RECORD(OPERAND_SLOTS_APPENDED, instruction.operand_count);
+        IR_CONSTRUCTION_RECORD(OPERAND_SLOTS_APPENDED, instruction->operand_count);
     }
     return result;
+}
+
+static IR_APPEND_UNUSED BUSTER_INLINE IrInstructionId ir_instruction_append_trusted(Arena* arena, IrFunction* function,
+                                                                                    IrInstruction instruction,
+                                                                                    IrSourceRange canonical_source)
+{
+    return ir_instruction_append_trusted_from(arena, function, &instruction, canonical_source);
 }
 
 // The row-level preconditions every commit shares: storage behind each count,
@@ -137,13 +150,19 @@ static IR_APPEND_UNUSED BUSTER_INLINE void ir_block_link_committed(IrFunction* f
     IR_CONSTRUCTION_RECORD(COMMIT_CLOSES, block->terminated);
 }
 
-// Stores and links a row whose commit was accepted.
+// Stores and links a row whose commit was accepted. The new tail's `next` is
+// cleared in the stored row, after the copy (see
+// ir_instruction_append_trusted_from); linking reads only the result and the
+// terminator shape, which the copy leaves unchanged.
 static IR_APPEND_UNUSED BUSTER_INLINE IrInstructionId ir_block_commit_accepted(Arena* arena, IrFunction* function, IrBlockId block,
-                                                                               IrInstruction instruction, IrSourceRange canonical_source)
+                                                                               IrInstruction const* instruction, IrSourceRange canonical_source)
 {
-    instruction.next = IR_INSTRUCTION_ID_INVALID;
-    IrInstructionId result = ir_instruction_append_trusted(arena, function, instruction, canonical_source);
-    ir_block_link_committed(function, block, &instruction, result);
+    IrInstructionId result = ir_instruction_append_trusted_from(arena, function, instruction, canonical_source);
+    if (result.value < function->instruction_count)
+    {
+        function->instructions[result.value].next = IR_INSTRUCTION_ID_INVALID;
+    }
+    ir_block_link_committed(function, block, instruction, result);
     return result;
 }
 
@@ -158,7 +177,7 @@ static IR_APPEND_UNUSED BUSTER_INLINE IrInstructionId ir_block_commit_trusted(Ar
     IrCommitRefusal refusal = arena ? ir_block_commit_refusal(function, block, &instruction) : IR_COMMIT_REFUSED_BLOCK;
     if (refusal == IR_COMMIT_ACCEPTED)
     {
-        result = ir_block_commit_accepted(arena, function, block, instruction, canonical_source);
+        result = ir_block_commit_accepted(arena, function, block, &instruction, canonical_source);
     }
     *refusal_out = refusal;
     return result;

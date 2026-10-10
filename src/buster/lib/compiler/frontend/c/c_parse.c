@@ -33,8 +33,10 @@
 //   query-local tables in the machine's phase arena and release them on
 //   return (docs/compiler-lifetime.md). When the caller supplies the unit's
 //   syntax tree (CParserResult.ast), c_parse_expression_type_query offers
-//   function-body ranges the per-body memo does not hold to the tree
-//   expression typer (c_ast_types.c) before running the machine.
+//   function-body ranges the per-body memo does not hold, and the ranges of a
+//   file-scope initializer, to the tree expression typer (c_ast_types.c)
+//   before running the machine. c_parse_validate_const_assignments does not
+//   ask about designators it meets as operands (c_parse_designator_probe).
 //
 // Types and declarators are parsed by CTypeParseMachine (types in
 // c_internal.h), an explicit frame stack in place of recursion: each
@@ -8322,9 +8324,11 @@ BUSTER_C_INTERNAL bool c_parse_expression_tree_query(CTypeParseMachine* machine,
 
 // One expression-type query: the per-body memo, then the tree expression typer
 // (c_ast_types.c), then the literal fast path, then a speculative run of the
-// explicit frame stack. Inside a function body whose syntax tree has been
-// typed, a range the memo does not hold that is exactly an accepted expression
-// node's tokens (parentheses aside) is answered from the tree. The answer
+// explicit frame stack. Inside a function body or a file-scope initializer
+// whose syntax tree has been typed, a range the memo does not hold that is
+// exactly an accepted expression node's tokens (parentheses aside) is answered
+// from the tree; an initializer not yet typed leaves a lone literal to the
+// literal path and is typed by the first other query. The answer
 // leaves the machine, and the memo entry, as the machine's valid,
 // constraint-free answer would, so a later machine run over an enclosing range
 // reads it as a task result exactly as it would have read the machine's.
@@ -8378,7 +8382,8 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
         machine->result_nonplace_projection = (stored & C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION) != 0;
         valid = true;
     }
-    else if (machine->ast_types && c_parse_expression_tree_query(machine, &preprocess, result, scope, start, end, slot, flags, type_out, pending_out))
+    else if (machine->ast_types && !(literal && c_ast_types_waiting(machine)) &&
+             c_parse_expression_tree_query(machine, &preprocess, result, scope, start, end, slot, flags, type_out, pending_out))
     {
         valid = true;
     }
@@ -31308,6 +31313,56 @@ BUSTER_C_INTERNAL u32 c_parse_update_prefix_operand_end(CParseResult* result, CP
     return cursor;
 }
 
+// Whether [start, end) is a designator that c_parse_validate_const_assignments
+// meets as an operand: a lone `{` or `,` (the member walk takes it for the
+// base of the `.name` designator after it) or a `.name` chain (the assignment
+// walk takes it for the place before a designator's `=`). No expression starts
+// with these tokens. The machine's direct reader, which a one-token or
+// operator-free range reaches, stops at the first one: a `{` without its `}`,
+// a comma with nothing after it, a postfix `.` with an empty base. So it
+// appends no row, raises neither a diagnostic nor a constraint, and publishes
+// no memo entry. Neither shape holds a _Generic or
+// __builtin_types_compatible_p site for the query to settle first.
+BUSTER_C_INTERNAL bool c_parse_designator_probe(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    bool probe = start < end && end <= preprocess.token_count;
+    if (probe && end == start + 1)
+    {
+        probe = c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE) ||
+                c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_COMMA);
+    }
+    else
+    {
+        probe = probe && (end - start) % 2 == 0;
+        for (u32 index = start; probe && index < end; index += 2)
+        {
+            probe = c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_DOT) && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER;
+        }
+    }
+    return probe;
+}
+
+// The const-assignment walk's operand query, which reads a failed answer only
+// as `false`: a designator probe is not asked. Under verify mode the machine
+// answers the probe as well, and it must fail without a diagnostic or a new
+// table row.
+BUSTER_C_INTERNAL bool c_parse_operand_type_query(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+                                                  u32 start, u32 end, CTypeId* type_out)
+{
+    bool probe = c_parse_designator_probe(preprocess, start, end);
+    bool typed = !probe && c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, start, end, type_out);
+#if BUSTER_INCLUDE_TESTS
+    if (probe && c_ast_types_verifying())
+    {
+        CAstTypeVerifyMark mark = c_ast_types_verify_begin(result);
+        CTypeId type = C_TYPE_ID_INVALID;
+        bool valid = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, start, end, &type);
+        c_ast_types_verify_probe(result, mark, valid);
+    }
+#endif
+    return typed;
+}
+
 BUSTER_C_INTERNAL u32 c_parse_constraint_postfix_start(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end)
 {
     u32 cursor = end;
@@ -31949,7 +32004,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
             if (cast_group) continue;
             CTypeId operand_type = C_TYPE_ID_INVALID;
             u64 query_mark = machine->scratch_arena->position;
-            bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, operand_start, index, &operand_type);
+            bool typed = c_parse_operand_type_query(machine, preprocess, result, scope, operand_start, index, &operand_type);
             arena_set_position(machine->scratch_arena, query_mark);
             if (typed && operand_type.value < result->type_count)
             {
@@ -32098,8 +32153,8 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
         u32 operand_end = prefix ? c_parse_update_prefix_operand_end(result, preprocess, index + 1, end) : index;
         CTypeId type_id = C_TYPE_ID_INVALID;
         u64 query_mark = machine->scratch_arena->position;
-        bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, operand_start, operand_end, &type_id);
-        bool nonplace_projection = machine->result_nonplace_projection;
+        bool typed = c_parse_operand_type_query(machine, preprocess, result, scope, operand_start, operand_end, &type_id);
+        bool nonplace_projection = typed && machine->result_nonplace_projection;
         arena_set_position(machine->scratch_arena, query_mark);
         CTypeId assignment_type_id = type_id;
         bool assignment_typed = typed && type_id.value < result->type_count;
@@ -33428,6 +33483,14 @@ BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* m
         if (declaration.kind == C_DECLARATION_OBJECT && c_ir_declaration_initializer_range(preprocess, declaration, &start, &end))
         {
             CScopeId scope = {.value = 0};
+            // With a syntax tree, the queries below about this initializer
+            // are offered to the tree expression typer.
+            u64 region_mark = machine->scratch_arena->position;
+            if (machine->ast_bodies)
+            {
+                c_ast_types_initializer_begin(machine, result, &preprocess, scope, start, end);
+            }
+            u64 region_end = machine->scratch_arena->position;
             String8 conversion_message = {0};
             bool braced = start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE);
             bool incompatible = !braced &&
@@ -33493,6 +33556,13 @@ BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* m
                                        c_parse_message(arena, S8("C IR lowering: cannot fold the call to '{S8}' in a static initializer"),
                                                        c_token_spelling(preprocess.spelling_base, preprocess.tokens[call])));
                 }
+            }
+            c_ast_types_initializer_end(machine);
+            // The region's arrays go back unless something allocated above
+            // them is still held.
+            if (machine->scratch_arena->position == region_end)
+            {
+                arena_set_position(machine->scratch_arena, region_mark);
             }
         }
     }
@@ -37067,6 +37137,10 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
     c_parse_validate_members(machine, arena, result, preprocess);
     c_parse_validate_deferred_assertions(machine, arena, result, preprocess);
     c_parse_validate_alias_targets(arena, result, preprocess);
+    // The syntax tree's function-definition and declaration index, when there
+    // is a tree, lives with the other tables built once outside the per-body
+    // checkpoints; the static initializers below are its first readers.
+    c_ast_types_bodies_prepare(machine, result);
     c_parse_validate_static_initializers(machine, arena, result, preprocess);
     for (u32 entity_index = 0; entity_index < result->entity_count; entity_index += 1)
     {
@@ -37107,9 +37181,6 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
             }
         }
     }
-    // The function-definition index of the syntax tree, when there is one,
-    // lives with the other tables built once outside the per-body checkpoints.
-    c_ast_types_bodies_prepare(machine, result);
     // The lazy position index sizes its build by the whole unit and builds in
     // a scratch arena, so it is forced here, before any body's guard opens,
     // rather than on a body's first delimiter query (#1256).

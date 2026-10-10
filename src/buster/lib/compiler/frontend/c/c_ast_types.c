@@ -1,7 +1,7 @@
 // The tree expression typer (GitHub #3102, stages 1 to 3): the types of
-// function-body expressions, computed once per body over the implicit
-// postorder syntax tree (c_ast.h) instead of by running the speculative type
-// machine on token ranges.
+// function-body and file-scope initializer expressions, computed once per body
+// or initializer over the implicit postorder syntax tree (c_ast.h) instead of
+// by running the speculative type machine on token ranges.
 //
 // The contract. The type machine (CTypeParseMachine in c_parse.c) is the
 // authority. This file may only ANSWER a type query when the answer is exactly
@@ -33,15 +33,34 @@
 // Ownership and lifetime. A caller that built the tree (the driver's
 // -fc-ast-pilot) passes it in CParserResult.ast; c_analyze_semantics_core puts
 // it in CTypeParseMachine.syntax_tree. c_parse_validate_lowering_constraints
-// builds the function-definition index once (c_ast_types_bodies_prepare, in the
-// machine's scratch arena beside the other tables built outside the per-body
-// checkpoints) and, per function body, calls c_ast_types_body_begin after the
-// binder has recorded every identifier use and c_ast_types_body_end when the
-// body is done. The per-body arrays are allocated in the machine's scratch
-// arena above the body's validation mark and are released with it: nothing
-// here outlives a body, because a speculative rollback may truncate the type
-// rows an entry refers to. A body is typed only while the machine is idle
-// (frame_count 0), and a query is answered only under the same condition.
+// builds the function-definition and declaration index once
+// (c_ast_types_bodies_prepare, in the machine's scratch arena beside the other
+// tables built outside the per-body checkpoints) and, per function body, calls
+// c_ast_types_body_begin after the binder has recorded every identifier use and
+// c_ast_types_body_end when the body is done. The per-body arrays are allocated
+// in the machine's scratch arena above the body's validation mark and are
+// released with it: nothing here outlives a body, because a speculative
+// rollback may truncate the type rows an entry refers to. A body is typed only
+// while the machine is idle (frame_count 0), and a query is answered only
+// under the same condition.
+//
+// File-scope initializers. c_parse_validate_static_initializers makes nearly
+// every query outside a body, so before it validates a file-scope object's
+// initializer it calls c_ast_types_initializer_begin, and
+// c_ast_types_initializer_end after. The begin reserves the arrays for that
+// initializer's subtree in the scratch arena (they go back after the
+// validation), and the subtree is typed as a body is, but only when the
+// first query the literal fast path does not take reaches it: an initializer
+// asked only about lone literals, a numeric table, is never typed, and those
+// queries keep the literal path (c_ast_types_waiting). The typing runs inside
+// a validator's scratch use, so it writes only the reserved arrays. The
+// binder records no identifier use there, and
+// where it records none the machine resolves an identifier, and a cast's or
+// compound literal's typedef name, by spelling in the query's scope. The pass
+// does the same lookup in the initializer's scope, keeps the entity it found
+// on the node (CAstTypeBody.entities) and marks it, so the query repeats the
+// lookup in its own scope (c_ast_types_lookups_agree). No memo exists at file
+// scope; an answer leaves only the machine state.
 //
 // The eager pass. c_ast_types_type_body is one forward loop over the body's
 // node interval in index order. Children precede parents in a postorder tree, so
@@ -80,6 +99,8 @@
 //   IDENTIFIER   bound through identifier_use_by_token_plus_one to an object,
 //                function, parameter, local or enumerator: the entity's type,
 //                as c_parse_direct_expression_base answers the single token.
+//                In an initializer, an unbound name is looked up instead, as
+//                that function falls back to doing.
 //   NUMBER,      c_parse_expression_leaf_without_cast itself, the leaf the
 //   CHARACTER    machine's literal path calls; it returns an immutable scalar
 //                row and appends none while every scalar row is published
@@ -143,21 +164,28 @@
 // unit tests.
 //
 // Layout map (search these symbols):
-//   CAstTypeBodyIndex, CAstTypeBody              function index, per-body arrays
-//   c_ast_types_bodies_prepare, c_ast_types_find_definition
+//   CAstTypeBodyIndex, CAstTypeBody              top-level index, per-region arrays
+//   c_ast_types_bodies_prepare, c_ast_types_find_definition,
+//   c_ast_types_find_initializer
+//   c_ast_types_region_create, _fill             reserves, then types, one region
 //   c_ast_types_body_begin, c_ast_types_body_end the per-body entry points
+//   c_ast_types_initializer_begin, _end,         the per-initializer entry points
+//   c_ast_types_waiting
+//   c_ast_types_looked_up_entity                 an initializer's unbound names
 //   c_ast_types_span, c_ast_types_expand         span rules
 //   c_ast_types_type_body, c_ast_types_type_node the eager pass and its rules
 //   c_ast_types_binary, c_ast_types_unary,       stage-2 operator rules
 //   c_ast_types_conditional
-//   c_ast_types_type_name, c_ast_types_cast,      stage-3 rules over interned
-//   c_ast_types_compound_literal,                 rows
+//   c_ast_types_interned, c_ast_types_type_name,  stage-3 rules over interned
+//   c_ast_types_cast,                             rows
+//   c_ast_types_compound_literal,
 //   c_ast_types_address
 //   c_ast_types_locate, c_ast_types_answer       query lookup and the decision
 //   c_ast_types_lookups_agree                    query-scope name checks
 //   c_ast_types_publish                          machine state after an answer
 //   c_ast_types_verify_*, c_test_*               the differential (tests builds),
-//                                                 c_ast_types_verify_hold_replay
+//                                                c_ast_types_verify_hold_replay
+//                                                and the skipped designator probes
 
 #include "c_internal.h"
 #include <buster/lib/compiler/frontend/c/c_ast.h>
@@ -185,19 +213,27 @@
 // parent's machine run would type the literal too.
 #define C_AST_TYPE_FLAG_REPLAY (1u << 5)
 
+// INIT_DECLARATOR's presence bit for an initializer, its last child (c_ast.h).
+#define C_AST_TYPE_INIT_DECLARATOR_INITIALIZER (1u << 2)
+
 // The `{` token of every top-level function definition, ascending, and the
-// FUNCTION_DEFINITION node it opens.
+// FUNCTION_DEFINITION node it opens; and the first token of every top-level
+// DECLARATION, ascending, with its node.
 struct CAstTypeBodyIndex
 {
     u32* braces;
     u32* nodes;
+    u32* declaration_tokens;
+    u32* declaration_nodes;
     u32 count;
+    u32 declaration_count;
     // Every scalar row is published (c_ast_types_scalars_published), so the
     // literal leaf cannot append one.
     bool scalars_published;
 };
 
-// One typed function body. Arrays are indexed by node - begin.
+// One typed function body, or one file-scope object's initializer. Arrays are
+// indexed by node - begin.
 struct CAstTypeBody
 {
     CAst const* ast;
@@ -208,6 +244,11 @@ struct CAstTypeBody
     CTypeId* types;
     u32* first;
     u32* end;
+    // An initializer only: the entity a name the binder recorded no use for
+    // resolved to by spelling in `scope`, kept on each node that carries
+    // C_AST_TYPE_FLAG_LOOKUP for an identifier, a cast or a compound literal.
+    // Null in a body, where those names are bound.
+    u32* entities;
     // The previous node (relative index + 1) that starts at the same token, 0
     // for none; start_head holds the newest, which is the outermost.
     u32* link;
@@ -217,16 +258,22 @@ struct CAstTypeBody
     // for MEMBER and MEMBER_ARROW nodes.
     u8* widths;
     Target target;
+    // An initializer's lookup scope.
+    CScopeId scope;
     u32 begin;
-    // The body's COMPOUND_STATEMENT.
+    // The body's COMPOUND_STATEMENT, or the initializer's root node.
     u32 node;
-    // The body's tokens: [token_start, token_end), the braces excluded.
+    // The body's tokens: [token_start, token_end), the braces excluded; or
+    // the initializer's.
     u32 token_start;
     u32 token_end;
     u32 token_total;
     bool scalars_published;
     // GNU dialect: the machine reads `c ?: b` as a conditional.
     bool gnu;
+    // An initializer whose eager pass waits for its first query that the
+    // literal fast path does not answer (c_ast_types_region_fill).
+    bool waiting;
     CAstTypeStatistics local_statistics;
 };
 
@@ -279,28 +326,40 @@ BUSTER_C_SHARED void c_ast_types_bodies_prepare(CTypeParseMachine* machine, CPar
     {
         u32 floor = c_ast_subtree_begin(ast, ast->root);
         u32 count = 0;
+        u32 declaration_count = 0;
         u32 cursor = ast->root;
         while (cursor > floor && ast->extents[cursor - 1] && ast->extents[cursor - 1] <= cursor)
         {
             u32 child = cursor - 1;
             count += c_ast_types_top_level_definition(ast, child);
+            declaration_count += ast->kinds[child] == C_AST_DECLARATION;
             cursor = c_ast_subtree_begin(ast, child);
         }
         CAstTypeBodyIndex* index = arena_allocate(machine->scratch_arena, CAstTypeBodyIndex, 1);
         index->braces = arena_allocate(machine->scratch_arena, u32, count + 1);
         index->nodes = arena_allocate(machine->scratch_arena, u32, count + 1);
+        index->declaration_tokens = arena_allocate(machine->scratch_arena, u32, declaration_count + 1);
+        index->declaration_nodes = arena_allocate(machine->scratch_arena, u32, declaration_count + 1);
         index->count = count;
+        index->declaration_count = declaration_count;
         index->scalars_published = c_ast_types_scalars_published(result);
         u32 slot = count;
+        u32 declaration_slot = declaration_count;
         cursor = ast->root;
-        while (slot && cursor > floor && ast->extents[cursor - 1] && ast->extents[cursor - 1] <= cursor)
+        while ((slot || declaration_slot) && cursor > floor && ast->extents[cursor - 1] && ast->extents[cursor - 1] <= cursor)
         {
             u32 child = cursor - 1;
-            if (c_ast_types_top_level_definition(ast, child))
+            if (slot && c_ast_types_top_level_definition(ast, child))
             {
                 slot -= 1;
                 index->braces[slot] = ast->tokens[child - 1];
                 index->nodes[slot] = child;
+            }
+            if (declaration_slot && ast->kinds[child] == C_AST_DECLARATION)
+            {
+                declaration_slot -= 1;
+                index->declaration_tokens[declaration_slot] = ast->tokens[child];
+                index->declaration_nodes[declaration_slot] = child;
             }
             cursor = c_ast_subtree_begin(ast, child);
         }
@@ -325,6 +384,48 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_types_find_definition(CAstTypeBodyIndex const* ind
         }
     }
     return low < index->count && index->braces[low] == brace ? index->nodes[low] : C_AST_TYPE_NONE;
+}
+
+// The initializer node of the top-level declarator whose initializer starts at
+// `start`: in the last top-level DECLARATION that starts at or before it, the
+// last INIT_DECLARATOR anchored (at its name) before it, whose initializer is
+// its last child. C_AST_TYPE_NONE when that declarator has none.
+BUSTER_GLOBAL_LOCAL u32 c_ast_types_find_initializer(CAst const* ast, CAstTypeBodyIndex const* index, u32 start)
+{
+    u32 low = 0;
+    u32 high = index->declaration_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (index->declaration_tokens[middle] <= start)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    u32 declaration = low ? index->declaration_nodes[low - 1] : C_AST_TYPE_NONE;
+    u32 initializer = C_AST_TYPE_NONE;
+    u32 floor = declaration != C_AST_TYPE_NONE ? c_ast_subtree_begin(ast, declaration) : 0;
+    u32 cursor = declaration != C_AST_TYPE_NONE ? declaration : 0;
+    bool searching = cursor > floor;
+    while (searching)
+    {
+        u32 child = cursor - 1;
+        if (ast->kinds[child] == C_AST_INIT_DECLARATOR && ast->tokens[child] < start)
+        {
+            initializer = (ast->data[child] & C_AST_TYPE_INIT_DECLARATOR_INITIALIZER) && child >= 1 ? child - 1 : C_AST_TYPE_NONE;
+            searching = false;
+        }
+        else
+        {
+            cursor = c_ast_subtree_begin(ast, child);
+            searching = cursor > floor;
+        }
+    }
+    return initializer;
 }
 
 // ---- spans -----------------------------------------------------------------
@@ -595,14 +696,37 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_value_entity(CEntity const* entity, bool al
                       entity->kind == C_ENTITY_LOCAL || (allow_enumerator && entity->kind == C_ENTITY_ENUMERATOR));
 }
 
-BUSTER_GLOBAL_LOCAL void c_ast_types_identifier(CAstTypeBody* body, u32 node, u32 relative)
+// In an initializer, the entity a name the binder recorded no use for (or
+// whose use resolved to nothing) resolves to by spelling in its scope, as the
+// machine falls back to that lookup; null in a body. The node keeps it for the
+// query's repeat of the lookup.
+BUSTER_GLOBAL_LOCAL CEntity const* c_ast_types_looked_up_entity(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 relative, u32 token)
+{
+    CEntity const* entity = 0;
+    if (body->entities)
+    {
+        CEntityId looked = c_parse_lookup_entity_token(body->result, preprocess->spelling_base, body->scope, &preprocess->tokens[token]);
+        entity = looked.value < body->result->entity_count ? body->result->entities + looked.value : 0;
+        body->entities[relative] = looked.value;
+    }
+    return entity;
+}
+
+BUSTER_GLOBAL_LOCAL void c_ast_types_identifier(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node, u32 relative)
 {
     CParseResult* result = body->result;
     u32 token = body->ast->tokens[node];
-    CEntity const* entity = token < body->token_total && body->tokens[token].kind == C_TOKEN_IDENTIFIER ? c_ast_types_bound_entity(result, token) : 0;
-    if (c_ast_types_value_entity(entity, true) && entity->type.value < result->type_count)
+    bool identifier = token < body->token_total && body->tokens[token].kind == C_TOKEN_IDENTIFIER;
+    CEntity const* entity = identifier ? c_ast_types_bound_entity(result, token) : 0;
+    u32 flags = C_AST_TYPE_FLAG_SAFE;
+    if (identifier && !entity && body->entities)
     {
-        c_ast_types_accept(body, relative, entity->type, C_AST_TYPE_FLAG_SAFE);
+        entity = c_ast_types_looked_up_entity(body, preprocess, relative, token);
+        flags |= C_AST_TYPE_FLAG_LOOKUP | C_AST_TYPE_FLAG_LOOKUP_BELOW;
+    }
+    if (entity && c_ast_types_value_entity(entity, true) && entity->type.value < result->type_count)
+    {
+        c_ast_types_accept(body, relative, entity->type, flags);
     }
 }
 
@@ -1077,6 +1201,16 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_conditional(CAstTypeBody* body, u32 node, u
     }
 }
 
+// The interned row equal to `type` (c_parse_interned_type), which a machine
+// run inside the interning window reads instead of appending. Only a body's
+// queries run there (c_parse_validate_lowering_constraints' body loop); an
+// initializer's run before the window opens, where the machine appends, so an
+// initializer reads none.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE CTypeId c_ast_types_interned(CAstTypeBody const* body, CType type)
+{
+    return body->entities ? C_TYPE_ID_INVALID : c_parse_interned_type(body->result, type);
+}
+
 // Whether a specifier word is one c_parse_primitive_type reads into a plain
 // row: the arithmetic and void words, `const` and `volatile`. `restrict` and
 // `_Atomic` are left out, and so is every word another reader handles.
@@ -1122,10 +1256,14 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_primitive_word(u32 word)
 // primitive and pointer rows are interned (CTypeInterning in c_internal.h),
 // so the name is accepted only when each of them is already interned. Any
 // other type name builds rows (a qualified typedef, a tag, an array or
-// function declarator, an attribute) and yields C_TYPE_ID_INVALID. *lookup_out
-// says whether a typedef name was read, which the query looks up again
-// (c_ast_types_lookups_agree).
-BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody const* body, CPreprocessResult const* preprocess, u32 node, bool* lookup_out)
+// function declarator, an attribute) and yields C_TYPE_ID_INVALID. The
+// typedef name is the binder's in a body; in an initializer it is the bound
+// one or, without a use, the spelling's in the initializer's scope, kept on the
+// node at `relative`. *lookup_out says whether a typedef name was read, which
+// the query looks up again (c_ast_types_lookups_agree). An initializer reads
+// no interned row (c_ast_types_interned), so there a primitive word or a `*`
+// declines.
+BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node, u32 relative, bool* lookup_out)
 {
     CAst const* ast = body->ast;
     CParseResult const* result = body->result;
@@ -1153,9 +1291,16 @@ BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody const* body, CPre
     bool lookup = false;
     if (words && ast->kinds[first] == C_AST_TYPEDEF_NAME)
     {
-        CEntity const* entity = open + 1 < body->token_total && body->tokens[open + 1].kind == C_TOKEN_IDENTIFIER
-                                    ? c_ast_types_bound_entity(body->result, open + 1)
-                                    : 0;
+        bool identifier = open + 1 < body->token_total && body->tokens[open + 1].kind == C_TOKEN_IDENTIFIER;
+        CEntity const* entity = identifier ? c_ast_types_bound_entity(body->result, open + 1) : 0;
+        if (entity && body->entities)
+        {
+            body->entities[relative] = (u32)(entity - result->entities);
+        }
+        else if (identifier && !entity)
+        {
+            entity = c_ast_types_looked_up_entity(body, preprocess, relative, open + 1);
+        }
         type = entity && entity->kind == C_ENTITY_TYPEDEF && entity->type.value < result->type_count ? entity->type : C_TYPE_ID_INVALID;
         lookup = true;
     }
@@ -1164,16 +1309,16 @@ BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody const* body, CPre
         CParsePrimitiveSpelling spelling = c_parse_primitive_type_read(*preprocess, open + 1, close);
         bool plain = spelling.seen_type && spelling.valid_specifiers && spelling.declarator_start == star && spelling.type.kind != C_TYPE_INVALID &&
                      spelling.type.kind != C_TYPE_VA_LIST;
-        type = plain ? c_parse_interned_type(result, spelling.type) : C_TYPE_ID_INVALID;
+        type = plain ? c_ast_types_interned(body, spelling.type) : C_TYPE_ID_INVALID;
     }
     for (u32 level = star; type.value < result->type_count && level < close; level += 1)
     {
-        type = c_parse_interned_type(result, (CType){
-                                                 .element_type = type,
-                                                 .return_type = C_TYPE_ID_INVALID,
-                                                 .array_bound = C_ARRAY_BOUND_INVALID,
-                                                 .kind = C_TYPE_POINTER,
-                                             });
+        type = c_ast_types_interned(body, (CType){
+                                              .element_type = type,
+                                              .return_type = C_TYPE_ID_INVALID,
+                                              .array_bound = C_ARRAY_BOUND_INVALID,
+                                              .kind = C_TYPE_POINTER,
+                                          });
     }
     *lookup_out = lookup;
     return type.value < result->type_count ? type : C_TYPE_ID_INVALID;
@@ -1190,7 +1335,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_cast(CAstTypeBody* body, CPreprocessResult 
     CParseResult* result = body->result;
     CAst const* ast = body->ast;
     bool lookup = false;
-    CTypeId type = c_ast_types_type_name(body, preprocess, node, &lookup);
+    CTypeId type = c_ast_types_type_name(body, preprocess, node, relative, &lookup);
     u32 operand_flags = body->flags[relative - 1];
     bool operand = (operand_flags & C_AST_TYPE_FLAG_ACCEPTED) != 0;
     if (type.value < result->type_count && (operand || !c_ast_types_holds_type_name(ast, node - 1)))
@@ -1226,7 +1371,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_cast(CAstTypeBody* body, CPreprocessResult 
 BUSTER_GLOBAL_LOCAL void c_ast_types_compound_literal(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node, u32 relative)
 {
     bool lookup = false;
-    CTypeId type = c_ast_types_type_name(body, preprocess, node, &lookup);
+    CTypeId type = c_ast_types_type_name(body, preprocess, node, relative, &lookup);
     if (type.value < body->result->type_count)
     {
         c_ast_types_accept(body, relative, type, C_AST_TYPE_FLAG_SAFE | (lookup ? C_AST_TYPE_FLAG_LOOKUP | C_AST_TYPE_FLAG_LOOKUP_BELOW : 0));
@@ -1242,12 +1387,12 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_address(CAstTypeBody* body, CPreprocessResu
 {
     CParseResult* result = body->result;
     u32 operand_flags = body->flags[relative - 1];
-    CTypeId type = (operand_flags & C_AST_TYPE_FLAG_ACCEPTED) ? c_parse_interned_type(result, (CType){
-                                                                                                  .element_type = body->types[relative - 1],
-                                                                                                  .return_type = C_TYPE_ID_INVALID,
-                                                                                                  .array_bound = C_ARRAY_BOUND_INVALID,
-                                                                                                  .kind = C_TYPE_POINTER,
-                                                                                              })
+    CTypeId type = (operand_flags & C_AST_TYPE_FLAG_ACCEPTED) ? c_ast_types_interned(body, (CType){
+                                                                                               .element_type = body->types[relative - 1],
+                                                                                               .return_type = C_TYPE_ID_INVALID,
+                                                                                               .array_bound = C_ARRAY_BOUND_INVALID,
+                                                                                               .kind = C_TYPE_POINTER,
+                                                                                           })
                                                               : C_TYPE_ID_INVALID;
     if (type.value < result->type_count)
     {
@@ -1291,7 +1436,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_node(CAstTypeBody* body, CTypeParseMac
     {
     case C_AST_IDENTIFIER:
     {
-        c_ast_types_identifier(body, node, relative);
+        c_ast_types_identifier(body, preprocess, node, relative);
     }
     break;
     case C_AST_NUMBER:
@@ -1401,6 +1546,10 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_body(CAstTypeBody* body, CTypeParseMac
         body->end[relative] = C_AST_TYPE_NONE;
         body->link[relative] = 0;
         body->widths[relative] = 0;
+        if (body->entities)
+        {
+            body->entities[relative] = C_AST_TYPE_NONE;
+        }
         if (c_ast_types_expression_kind(ast->kinds[node]))
         {
             visited += 1;
@@ -1417,76 +1566,139 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_body(CAstTypeBody* body, CTypeParseMac
             }
         }
     }
-    body->statistics->bodies += 1;
     body->statistics->nodes_typed += visited;
     body->statistics->nodes_accepted += accepted;
     WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_NODES, visited);
+}
+
+// Whether the typer may type now: a tree index, an idle machine and the
+// built delimiter index the span rules read.
+BUSTER_GLOBAL_LOCAL bool c_ast_types_ready(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess)
+{
+    bool ready = machine->ast_bodies && machine->frame_count == 0 && !machine->failed && result->position_index;
+    if (ready)
+    {
+        c_parse_position_index_ensure(result, *preprocess);
+        ready = result->position_index->built && result->position_index->matching_delimiters_plus_one;
+    }
+    return ready;
+}
+
+// Reserves the arrays for the node interval of `node` over the tokens
+// [token_start, token_end) in the machine's scratch arena and makes it the
+// machine's region; c_ast_types_region_fill types it. An initializer
+// (`initializer` set) resolves unbound names in `scope`. The arrays come from
+// the guarded per-body scratch (#1256): in a body whose arrays do not fit,
+// nothing is reserved, null is returned and the body is left to the machine,
+// and the caller reports the exhaustion. Outside a body the guard allocates
+// as arena_allocate does.
+BUSTER_GLOBAL_LOCAL CAstTypeBody* c_ast_types_region_create(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
+                                                            u32 node, u32 token_start, u32 token_end, CScopeId scope, bool initializer)
+{
+    CAst const* ast = machine->syntax_tree;
+    u32 count = ast->extents[node];
+    u32 token_count = token_end - token_start;
+    Arena* scratch = machine->scratch_arena;
+    CAstTypeBody* body = C_PARSE_BODY_SCRATCH_ARRAY(scratch, CAstTypeBody, 1);
+    CTypeId* types = C_PARSE_BODY_SCRATCH_ARRAY(scratch, CTypeId, count);
+    u32* first = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
+    u32* end = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
+    u32* entities = initializer ? C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count) : 0;
+    u32* link = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
+    u32* start_head = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, token_count);
+    u8* flags = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u8, count);
+    u8* widths = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u8, count);
+    bool reserved = body && types && first && end && (entities || !initializer) && link && start_head && flags && widths;
+    if (reserved)
+    {
+        *body = (CAstTypeBody){
+            .ast = ast,
+            .result = result,
+            .tokens = preprocess->tokens,
+            .matches = result->position_index->matching_delimiters_plus_one,
+            .types = types,
+            .first = first,
+            .end = end,
+            .entities = entities,
+            .link = link,
+            .start_head = start_head,
+            .flags = flags,
+            .widths = widths,
+            .target = preprocess->target,
+            .scope = scope,
+            .begin = c_ast_subtree_begin(ast, node),
+            .node = node,
+            .token_start = token_start,
+            .token_end = token_end,
+            .token_total = (u32)preprocess->token_count,
+            .scalars_published = machine->ast_bodies->scalars_published,
+            .gnu = c_preprocess_dialect_is_gnu(preprocess->dialect),
+            .waiting = initializer,
+        };
+        body->statistics = machine->ast_type_statistics ? machine->ast_type_statistics : &body->local_statistics;
+        machine->ast_types = body;
+    }
+    return reserved ? body : 0;
+}
+
+// The eager pass over a created region, into the arrays it reserved, so it
+// allocates nothing and may run while a validator holds scratch above them.
+BUSTER_GLOBAL_LOCAL void c_ast_types_region_fill(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess)
+{
+    memset(body->start_head, 0, sizeof(*body->start_head) * (body->token_end - body->token_start));
+    c_ast_types_type_body(body, machine, preprocess);
+    body->waiting = false;
 }
 
 BUSTER_C_SHARED void c_ast_types_body_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
                                             CDeclaration const* declaration)
 {
     machine->ast_types = 0;
-    CAstTypeBodyIndex const* bodies = machine->ast_bodies;
     u32 token_start = declaration->body_start;
     u64 token_end = (u64)declaration->body_start + declaration->body_token_count;
-    bool eligible = bodies && machine->frame_count == 0 && !machine->failed && token_start >= 1 && declaration->body_token_count &&
-                    token_end < preprocess->token_count && result->position_index;
-    if (eligible)
-    {
-        c_parse_position_index_ensure(result, *preprocess);
-        eligible = result->position_index->built && result->position_index->matching_delimiters_plus_one;
-    }
-    u32 definition = eligible ? c_ast_types_find_definition(bodies, token_start - 1) : C_AST_TYPE_NONE;
+    bool eligible = token_start >= 1 && declaration->body_token_count && token_end < preprocess->token_count &&
+                    c_ast_types_ready(machine, result, preprocess);
+    u32 definition = eligible ? c_ast_types_find_definition(machine->ast_bodies, token_start - 1) : C_AST_TYPE_NONE;
     CAst const* ast = machine->syntax_tree;
     if (definition != C_AST_TYPE_NONE && ast->kinds[definition - 1] == C_AST_COMPOUND_STATEMENT &&
         result->position_index->matching_delimiters_plus_one[token_start - 1] - 1 == token_end)
     {
-        u32 node = definition - 1;
-        u32 count = ast->extents[node];
-        // Guarded per-body scratch (#1256): a body whose arrays do not fit is
-        // left untyped from the tree, and the caller reports the exhaustion.
-        Arena* scratch = machine->scratch_arena;
-        CAstTypeBody* body = C_PARSE_BODY_SCRATCH_ARRAY(scratch, CAstTypeBody, 1);
-        CTypeId* types = C_PARSE_BODY_SCRATCH_ARRAY(scratch, CTypeId, count);
-        u32* first = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
-        u32* end = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
-        u32* link = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
-        u32* start_head = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, declaration->body_token_count);
-        u8* flags = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u8, count);
-        u8* widths = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u8, count);
-        if (body && types && first && end && link && start_head && flags && widths)
+        CAstTypeBody* body = c_ast_types_region_create(machine, result, preprocess, definition - 1, token_start, (u32)token_end, (CScopeId){0}, false);
+        if (body)
         {
-            *body = (CAstTypeBody){
-                .ast = ast,
-                .result = result,
-                .tokens = preprocess->tokens,
-                .matches = result->position_index->matching_delimiters_plus_one,
-                .types = types,
-                .first = first,
-                .end = end,
-                .link = link,
-                .start_head = start_head,
-                .flags = flags,
-                .widths = widths,
-                .target = preprocess->target,
-                .begin = c_ast_subtree_begin(ast, node),
-                .node = node,
-                .token_start = token_start,
-                .token_end = (u32)token_end,
-                .token_total = (u32)preprocess->token_count,
-                .scalars_published = bodies->scalars_published,
-                .gnu = c_preprocess_dialect_is_gnu(preprocess->dialect),
-            };
-            body->statistics = machine->ast_type_statistics ? machine->ast_type_statistics : &body->local_statistics;
-            memset(body->start_head, 0, sizeof(*body->start_head) * declaration->body_token_count);
-            c_ast_types_type_body(body, machine, preprocess);
-            machine->ast_types = body;
+            c_ast_types_region_fill(body, machine, preprocess);
+            body->statistics->bodies += 1;
         }
     }
 }
 
+// An initializer's region is created here but typed only when a query the
+// literal fast path does not answer reaches it (c_ast_types_answer): 61 of
+// the unity self-host's 2,777 initializers, its numeric tables, hold 75% of
+// their expression nodes and are only ever asked about lone literals.
+BUSTER_C_SHARED void c_ast_types_initializer_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess, CScopeId scope,
+                                                   u32 start, u32 end)
+{
+    machine->ast_types = 0;
+    bool eligible = start < end && end <= preprocess->token_count && c_ast_types_ready(machine, result, preprocess);
+    u32 initializer = eligible ? c_ast_types_find_initializer(machine->syntax_tree, machine->ast_bodies, start) : C_AST_TYPE_NONE;
+    if (initializer != C_AST_TYPE_NONE)
+    {
+        c_ast_types_region_create(machine, result, preprocess, initializer, start, end, scope, true);
+    }
+}
+
+BUSTER_C_SHARED bool c_ast_types_waiting(CTypeParseMachine const* machine)
+{
+    return machine->ast_types && machine->ast_types->waiting;
+}
+
 BUSTER_C_SHARED void c_ast_types_body_end(CTypeParseMachine* machine)
+{
+    machine->ast_types = 0;
+}
+
+BUSTER_C_SHARED void c_ast_types_initializer_end(CTypeParseMachine* machine)
 {
     machine->ast_types = 0;
 }
@@ -1519,9 +1731,11 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_types_locate(CAstTypeBody const* body, u32 start, 
 // the machine will resolve it: a callee by spelling to the entity the binder
 // bound it to (or to nothing, in which case the machine falls back to the
 // binding), and a cast's or compound literal's typedef name to the bound
-// typedef. The walk runs backward over the node's subtree and steps over
-// every child subtree that carries no lookup mark, so it visits the paths to
-// the marked nodes and their siblings' roots.
+// typedef. In an initializer, an unbound identifier and a cast's or compound
+// literal's typedef name must resolve to the entity the eager pass found. The
+// walk runs backward over the node's subtree and steps over every child
+// subtree that carries no lookup mark, so it visits the paths to the marked
+// nodes and their siblings' roots.
 BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_agree(CAstTypeBody const* body, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                    u32 node)
 {
@@ -1535,11 +1749,15 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_agree(CAstTypeBody const* body, CPr
         u32 flags = body->flags[cursor - body->begin];
         if (flags & C_AST_TYPE_FLAG_LOOKUP)
         {
-            bool call = ast->kinds[cursor] == C_AST_CALL;
-            u32 token = call ? ast->tokens[c_ast_types_first_child(ast, cursor)] : ast->tokens[cursor] + 1;
+            u32 kind = ast->kinds[cursor];
+            bool call = kind == C_AST_CALL;
+            u32 token = call ? ast->tokens[c_ast_types_first_child(ast, cursor)] : kind == C_AST_IDENTIFIER ? ast->tokens[cursor] : ast->tokens[cursor] + 1;
             CEntityId looked = c_parse_lookup_entity_token(result, preprocess->spelling_base, scope, &preprocess->tokens[token]);
             CEntity const* bound = c_ast_types_bound_entity(result, token);
-            agree = (call && looked.value >= result->entity_count) || (bound && looked.value == (u32)(bound - result->entities));
+            u32 expected = body->entities && !call ? body->entities[cursor - body->begin]
+                           : bound                ? (u32)(bound - result->entities)
+                                                  : C_AST_TYPE_NONE;
+            agree = (call && looked.value >= result->entity_count) || (expected < result->entity_count && looked.value == expected);
         }
         // Into the children when one carries a mark, else past the subtree.
         u32 next = (flags & C_AST_TYPE_FLAG_LOOKUP_BELOW) ? cursor : c_ast_subtree_begin(ast, cursor);
@@ -1566,6 +1784,11 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
     }
     else
     {
+        if (body->waiting)
+        {
+            c_ast_types_region_fill(body, machine, preprocess);
+            body->statistics->initializers += 1;
+        }
         u32 relative = c_ast_types_locate(body, start, end);
         if (relative == C_AST_TYPE_NONE)
         {
@@ -1853,22 +2076,36 @@ BUSTER_C_SHARED void c_ast_types_verify_end(CTypeParseMachine* machine, CParseRe
     *type_out = answer.type;
 }
 
-// Answers one range of an analyzed function body for a unit test, on a private
-// machine and a private typed body, as the validation loop would: the model is
-// the finished analysis, so the immutable scalar rows are published into it
-// first. The named function must have a body.
+BUSTER_C_SHARED void c_ast_types_verify_probe(CParseResult const* result, CAstTypeVerifyMark mark, bool machine_valid)
+{
+    CTestAstTypeVerify* state = &c_ast_types_verify_state;
+    state->probes += 1;
+    state->probe_mismatches += machine_valid || result->diagnostic_count != mark.diagnostics || result->type_count != mark.types ||
+                               result->array_bound_count != mark.array_bounds || result->member_count != mark.members ||
+                               result->enum_member_count != mark.enum_members || result->entity_count != mark.entities ||
+                               result->scope_count != mark.scopes || result->parameter_count != mark.parameters;
+}
+
+// Answers one range of an analyzed function body, or of a file-scope object's
+// initializer, for a unit test, on a private machine and a private typed
+// region, as the validation loop and the static-initializer walk would: the
+// model is the finished analysis, so the immutable scalar rows are published
+// into it first. The named function must have a body, or the named object an
+// initializer.
 CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CAst const* ast, String8 function, u32 start,
                                         u32 end, bool checked)
 {
     CTestAstTypeProbe probe = {.type = C_TYPE_ID_INVALID, .kind = C_TYPE_INVALID, .status = C_TEST_AST_TYPE_PROBE_NO_BODY};
     CDeclaration const* declaration = 0;
+    u32 initializer_start = 0;
+    u32 initializer_end = 0;
     for (u32 index = 0; index < result->declaration_count && !declaration; index += 1)
     {
         CDeclaration const* candidate = result->declarations + index;
-        declaration = candidate->kind == C_DECLARATION_FUNCTION && candidate->is_definition && candidate->body_token_count &&
-                              string_equal(candidate->name, function)
-                          ? candidate
-                          : 0;
+        bool body = candidate->kind == C_DECLARATION_FUNCTION && candidate->is_definition && candidate->body_token_count;
+        bool initialized = candidate->kind == C_DECLARATION_OBJECT &&
+                           c_ir_declaration_initializer_range(preprocess, *candidate, &initializer_start, &initializer_end);
+        declaration = (body || initialized) && string_equal(candidate->name, function) ? candidate : 0;
     }
     if (declaration)
     {
@@ -1899,14 +2136,22 @@ CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult prepro
             }
         }
         c_ast_types_bodies_prepare(&machine, result);
-        c_ast_types_body_begin(&machine, result, &preprocess, declaration);
+        bool body = declaration->kind == C_DECLARATION_FUNCTION;
+        if (body)
+        {
+            c_ast_types_body_begin(&machine, result, &preprocess, declaration);
+        }
+        else
+        {
+            c_ast_types_initializer_begin(&machine, result, &preprocess, (CScopeId){.value = 0}, initializer_start, initializer_end);
+        }
         probe.status = C_TEST_AST_TYPE_PROBE_UNTYPED;
         if (machine.ast_types)
         {
+            CScopeId scope = body ? c_parse_scope_for_token(result, declaration->scope, start) : (CScopeId){.value = 0};
+            CAstTypeAnswer answer = c_ast_types_answer(&machine, &preprocess, result, scope, start, end);
             probe.nodes_typed = machine.ast_types->local_statistics.nodes_typed;
             probe.nodes_accepted = machine.ast_types->local_statistics.nodes_accepted;
-            CScopeId scope = c_parse_scope_for_token(result, declaration->scope, start);
-            CAstTypeAnswer answer = c_ast_types_answer(&machine, &preprocess, result, scope, start, end);
             probe.status = (u32)answer.status;
             probe.node_kind = answer.node_kind;
             probe.type = answer.type;
