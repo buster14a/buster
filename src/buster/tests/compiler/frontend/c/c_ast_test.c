@@ -1391,6 +1391,67 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_split_differ(Arena* arena, CParserResul
     return difference;
 }
 
+// The first difference between the bindings of two analyses: every
+// identifier use (token, entity, scope) in order and the per-token use map,
+// every scope, and every entity's identity, place and declaration range.
+// Empty when there is none.
+BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_bindings_differ(Arena* arena, CAnalysisResult const* left, CAnalysisResult const* right)
+{
+    String8 difference = {0};
+    if (left->identifier_use_count != right->identifier_use_count || left->scope_count != right->scope_count ||
+        left->entity_count != right->entity_count || left->identifier_use_by_token_capacity != right->identifier_use_by_token_capacity)
+    {
+        difference = string_format(arena, S8("{u32} uses, {u32} scopes, {u32} entities without the tree; {u32}, {u32}, {u32} with it"),
+                                   left->identifier_use_count, left->scope_count, left->entity_count, right->identifier_use_count, right->scope_count,
+                                   right->entity_count);
+    }
+    for (u32 index = 0; index < left->identifier_use_count && !difference.length; index += 1)
+    {
+        CIdentifierUse a = left->identifier_uses[index];
+        CIdentifierUse b = right->identifier_uses[index];
+        if (a.token_index != b.token_index || a.entity.value != b.entity.value || a.scope.value != b.scope.value)
+        {
+            difference = string_format(arena,
+                                       S8("use {u32} differs: token {u32} entity {u32} scope {u32} without the tree, "
+                                          "token {u32} entity {u32} scope {u32} with it"),
+                                       index, a.token_index, a.entity.value, a.scope.value, b.token_index, b.entity.value, b.scope.value);
+        }
+    }
+    for (u32 index = 0; left->identifier_use_by_token_plus_one && index < left->identifier_use_by_token_capacity && !difference.length; index += 1)
+    {
+        if (left->identifier_use_by_token_plus_one[index] != right->identifier_use_by_token_plus_one[index])
+        {
+            difference = string_format(arena, S8("token {u32} maps to use {u32} without the tree, {u32} with it"), index,
+                                       left->identifier_use_by_token_plus_one[index], right->identifier_use_by_token_plus_one[index]);
+        }
+    }
+    for (u32 index = 0; index < left->scope_count && !difference.length; index += 1)
+    {
+        CScope a = left->scopes[index];
+        CScope b = right->scopes[index];
+        if (a.parent.value != b.parent.value || a.first_entity.value != b.first_entity.value || a.last_entity.value != b.last_entity.value ||
+            a.token_start != b.token_start || a.token_end != b.token_end || a.entity_count != b.entity_count)
+        {
+            difference = string_format(arena, S8("scope {u32} differs: [{u32}, {u32}) without the tree, [{u32}, {u32}) with it"), index, a.token_start,
+                                       a.token_end, b.token_start, b.token_end);
+        }
+    }
+    for (u32 index = 0; index < left->entity_count && !difference.length; index += 1)
+    {
+        CEntity const* a = left->entities + index;
+        CEntity const* b = right->entities + index;
+        if (!string_equal(a->name, b->name) || a->type.value != b->type.value || a->scope.value != b->scope.value || a->kind != b->kind ||
+            a->next_in_scope.value != b->next_in_scope.value || a->declaration_index != b->declaration_index ||
+            a->declaration_token_plus_one != b->declaration_token_plus_one || a->declaration_statement_start != b->declaration_statement_start ||
+            a->declaration_token_start != b->declaration_token_start || a->declaration_token_count != b->declaration_token_count ||
+            a->is_definition != b->is_definition || a->is_static_storage != b->is_static_storage || a->is_extern != b->is_extern)
+        {
+            difference = string_format(arena, S8("entity {u32} ('{S8}') differs"), index, a->name);
+        }
+    }
+    return difference;
+}
+
 #if !BUSTER_ANDROID && !BUSTER_IOS
 // Mobile test runs carry no repository tree, so the fixture-reading suites
 // below run only where the tests/ directory exists, as c_test.c's do.
@@ -2161,67 +2222,6 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_analyses_differ(Arena* arena, CAnalysis
             a->location.line != b->location.line || a->location.column != b->location.column || a->location.file != b->location.file)
         {
             difference = string_format(arena, S8("diagnostic {u32} differs: '{S8}' without the tree, '{S8}' with it"), index, a->message, b->message);
-        }
-    }
-    return difference;
-}
-
-// The first difference between the bindings of two analyses: every
-// identifier use (token, entity, scope) in order and the per-token use map,
-// every scope, and every entity's identity, place and declaration range.
-// Empty when there is none.
-BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_bindings_differ(Arena* arena, CAnalysisResult const* left, CAnalysisResult const* right)
-{
-    String8 difference = {0};
-    if (left->identifier_use_count != right->identifier_use_count || left->scope_count != right->scope_count ||
-        left->entity_count != right->entity_count || left->identifier_use_by_token_capacity != right->identifier_use_by_token_capacity)
-    {
-        difference = string_format(arena, S8("{u32} uses, {u32} scopes, {u32} entities without the tree; {u32}, {u32}, {u32} with it"),
-                                   left->identifier_use_count, left->scope_count, left->entity_count, right->identifier_use_count, right->scope_count,
-                                   right->entity_count);
-    }
-    for (u32 index = 0; index < left->identifier_use_count && !difference.length; index += 1)
-    {
-        CIdentifierUse a = left->identifier_uses[index];
-        CIdentifierUse b = right->identifier_uses[index];
-        if (a.token_index != b.token_index || a.entity.value != b.entity.value || a.scope.value != b.scope.value)
-        {
-            difference = string_format(arena,
-                                       S8("use {u32} differs: token {u32} entity {u32} scope {u32} without the tree, "
-                                          "token {u32} entity {u32} scope {u32} with it"),
-                                       index, a.token_index, a.entity.value, a.scope.value, b.token_index, b.entity.value, b.scope.value);
-        }
-    }
-    for (u32 index = 0; left->identifier_use_by_token_plus_one && index < left->identifier_use_by_token_capacity && !difference.length; index += 1)
-    {
-        if (left->identifier_use_by_token_plus_one[index] != right->identifier_use_by_token_plus_one[index])
-        {
-            difference = string_format(arena, S8("token {u32} maps to use {u32} without the tree, {u32} with it"), index,
-                                       left->identifier_use_by_token_plus_one[index], right->identifier_use_by_token_plus_one[index]);
-        }
-    }
-    for (u32 index = 0; index < left->scope_count && !difference.length; index += 1)
-    {
-        CScope a = left->scopes[index];
-        CScope b = right->scopes[index];
-        if (a.parent.value != b.parent.value || a.first_entity.value != b.first_entity.value || a.last_entity.value != b.last_entity.value ||
-            a.token_start != b.token_start || a.token_end != b.token_end || a.entity_count != b.entity_count)
-        {
-            difference = string_format(arena, S8("scope {u32} differs: [{u32}, {u32}) without the tree, [{u32}, {u32}) with it"), index, a.token_start,
-                                       a.token_end, b.token_start, b.token_end);
-        }
-    }
-    for (u32 index = 0; index < left->entity_count && !difference.length; index += 1)
-    {
-        CEntity const* a = left->entities + index;
-        CEntity const* b = right->entities + index;
-        if (!string_equal(a->name, b->name) || a->type.value != b->type.value || a->scope.value != b->scope.value || a->kind != b->kind ||
-            a->next_in_scope.value != b->next_in_scope.value || a->declaration_index != b->declaration_index ||
-            a->declaration_token_plus_one != b->declaration_token_plus_one || a->declaration_statement_start != b->declaration_statement_start ||
-            a->declaration_token_start != b->declaration_token_start || a->declaration_token_count != b->declaration_token_count ||
-            a->is_definition != b->is_definition || a->is_static_storage != b->is_static_storage || a->is_extern != b->is_extern)
-        {
-            difference = string_format(arena, S8("entity {u32} ('{S8}') differs"), index, a->name);
         }
     }
     return difference;
