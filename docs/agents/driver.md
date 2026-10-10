@@ -1367,16 +1367,25 @@ words come from `object_aarch64_elf_tls_ie_relax` and
 `object_aarch64_elf_tls_desc_relax`). The reader accepts RELA entries whose
 words are exactly those instructions (the immediates are canonicalized to
 zero, x0 where the ABI fixes it, a scratch `Xt` of x1..x30) and refuses any
-other word by relocation name. `link_aarch64_tls_relax` sorts the sites by
-section and offset and consumes one whole sequence at a time: each step must
-sit four bytes after the previous one, in order, with one symbol and addend,
-one register for an IE pair and one scratch for the descriptor's LDR and BLR,
-against a defined thread-local symbol with a 32-bit offset. A missing,
-repeated, overlapping, reordered or split step fails the link before the
-image is written, as `link.relocation` naming the symbol and the relocation
-that could not start or complete its sequence. Non-adjacent schedules are
-refused rather than relaxed; Clang 18 at `-O2` already separates an IE ADRP
-from its LDR, so such an initial-exec object fails to link today. The other descriptor forms (560/561 and the
+other word by relocation name. `link_aarch64_tls_relax` heap-sorts the sites
+by section and offset, then scans them once. A descriptor sequence is consumed
+whole: each step must sit four bytes after the previous one, in order, with one
+symbol and addend and one scratch register for its LDR and BLR. An initial-exec
+pair may be non-adjacent, since Clang 18 at `-O2` schedules loads between the
+halves: each section keeps a table of pending ADRPs keyed by destination
+register, and an LDR (base register equal to its destination, 64-bit) pairs
+with the nearest preceding ADRP of that register in the same section, which
+must name the same symbol and addend. Each ADRP is consumed by exactly one
+LDR; a second ADRP for a register that is still pending, an LDR without a
+partner, two LDRs sharing one ADRP, a register, symbol or addend mismatch, or
+an ADRP left unpaired at the end of its section refuses the link. The sort is
+O(n log n) and the pairing scan O(n). All of it runs against a defined
+thread-local symbol with a 32-bit offset and fails the link before the image
+is written, as `link.relocation` naming the symbol and the relocation that
+could not start or complete its sequence. The relaxation does not check that
+intervening instructions leave the register alone; compilers do not
+interleave a use of the page address. TLS descriptors stay strictly adjacent.
+The other descriptor forms (560/561 and the
 565-568 `OFF_G1`/`OFF_G0_NC`/`LDR`/`ADD` sequence), the dynamic
 `R_AARCH64_TLSDESC` 1031, and TLS owned by a loader or shared library are
 still refused by name. The tests (the "initial-exec TLS (#2582)" and "TLS

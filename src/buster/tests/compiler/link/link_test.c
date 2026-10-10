@@ -4067,6 +4067,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_tls_initial_exec_relaxation
         }
         scratch_end(temporary);
     }
+    {
+        // Clang 18 -O2 schedule: ADRP x11, an unrelated load, then LDR x11.
+        // The unrelated word is kept; the halves relax in place (tprel
+        // 0x11244). A second pair on x9 for tw (0x2018) interleaves with it,
+        // its sites listed out of order, and a pending x11 pair in another
+        // register is unaffected by the nearer x9 ADRP.
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 const load = UINT32_C(0xb9400140);
+        u32 text[] = {UINT32_C(0x9000000b), UINT32_C(0x90000009), load, UINT32_C(0xf9400129), load, UINT32_C(0xf940016b), UINT32_C(0xd65f03c0)};
+        LinkTestTlsIeSite sites[] = {{LINK_TEST_TLS_IE_LOW, 20, 1, 0}, {LINK_TEST_TLS_IE_HIGH, 4, 2, 0}, {LINK_TEST_TLS_IE_LOW, 12, 2, 0},
+                                     {LINK_TEST_TLS_IE_HIGH, 0, 1, 0}};
+        u64 text_offset = 0;
+        NativeExecutableLinkResult linked = link_test_aarch64_tls_ie_link(temporary.arena, text, 7, sites, 4, &text_offset);
+        if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE && text_offset && text_offset + 28 <= linked.executable.length))
+        {
+            u32 expected[] = {UINT32_C(0xd2a0002b), UINT32_C(0xd2a00009), load, UINT32_C(0xf2800000) | (0x2018u << 5) | 9, load,
+                              UINT32_C(0xf2800000) | (0x1244u << 5) | 11, UINT32_C(0xd65f03c0)};
+            for (u32 word = 0; word < BUSTER_ARRAY_LENGTH(expected); word += 1)
+            {
+                BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, text_offset + word * 4) == expected[word]);
+            }
+        }
+        scratch_end(temporary);
+    }
     // Everything that is not the exact pair is refused instead of leaving a
     // GOT load or a half-rewritten sequence behind.
     enum
@@ -4083,7 +4107,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_tls_initial_exec_relaxation
         // ADRP alone, LDR alone, not adjacent.
         {{0x90000008, 0xf9400108, 0xd65f03c0, 0, 0}, {{IE_H, 0, 1, 0}}, 1},
         {{0x90000008, 0xf9400108, 0xd65f03c0, 0, 0}, {{IE_L, 4, 1, 0}}, 1},
-        {{0x90000008, 0xd503201f, 0xf9400108, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        // A non-adjacent pair is relaxed, but only when the registers, symbol
+        // and addend agree and the ADRP is the nearest and only partner.
+        {{0x90000008, 0xd503201f, 0xf9400109, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x90000009, 0xd503201f, 0xf9400108, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}}, 2},
+        {{0x90000008, 0xd503201f, 0xf9400108, 0xf9400108, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 0}, {IE_L, 12, 1, 0}}, 3},
+        {{0x90000008, 0x90000009, 0xf9400129, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_H, 4, 1, 0}, {IE_L, 8, 1, 0}}, 3},
+        {{0x90000008, 0x90000008, 0xf9400108, 0xd65f03c0, 0}, {{IE_H, 0, 1, 0}, {IE_H, 4, 1, 0}, {IE_L, 8, 1, 0}}, 3},
+        {{0x90000008, 0xd503201f, 0xf9400108, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 2, 0}}, 2},
+        {{0x90000008, 0xd503201f, 0xf9400108, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 1, 4}}, 2},
+        {{0x90000008, 0xd503201f, 0xf9400108, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 8, 3, 0}}, 2},
         // Destination, base and offset mismatches inside the words.
         {{0x90000008, 0xf9400109, 0xd65f03c0, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 4, 1, 0}}, 2},
         {{0x90000008, 0xf9400128, 0xd65f03c0, 0, 0}, {{IE_H, 0, 1, 0}, {IE_L, 4, 1, 0}}, 2},
@@ -4208,11 +4241,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_tls_descriptor_relaxation(U
         {{0x90000000, 0x91000000, 0xf9400001, 0xd63f0020, 0xd65f03c0, 0}, {{DA, 0, 1, 0}, {DD, 4, 1, 0}, {DL, 8, 1, 0}, {DC, 12, 1, 0}}, 4, {0}},
         {{0x90000000, 0xf9400001, 0xd503201f, 0x91000000, 0xd63f0020, 0}, {{DA, 0, 1, 0}, {DL, 4, 1, 0}, {DD, 12, 1, 0}, {DC, 16, 1, 0}}, 4, {0}},
         // A duplicated first or last step, and an initial-exec ADRP heading
-        // the descriptor.
+        // the descriptor (it stays pending, so the orphaned LDR step is named).
         {{0x90000000, 0xf9400001, 0x91000000, 0xd63f0020, 0xd65f03c0, 0}, {{DA, 0, 1, 0}, {DA, 0, 1, 0}, {DL, 4, 1, 0}, {DD, 8, 1, 0}, {DC, 12, 1, 0}}, 5, {0}},
         {{0x90000000, 0xf9400001, 0x91000000, 0xd63f0020, 0xd65f03c0, 0}, {{DA, 0, 1, 0}, {DL, 4, 1, 0}, {DD, 8, 1, 0}, {DC, 12, 1, 0}, {DC, 12, 1, 0}}, 5, {0}},
         {{0x90000000, 0xf9400001, 0x91000000, 0xd63f0020, 0xd65f03c0, 0}, {{IH, 0, 1, 0}, {DL, 4, 1, 0}, {DD, 8, 1, 0}, {DC, 12, 1, 0}}, 4,
-         S8_INITIALIZER("R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21")},
+         S8_INITIALIZER("R_AARCH64_TLSDESC_LD64_LO12")},
         // Two complete descriptors overlapping by one word.
         {{0x90000000, 0xf9400001, 0x91000000, 0xd63f0020, 0xd65f03c0, 0},
          {{DA, 0, 1, 0}, {DL, 4, 1, 0}, {DD, 8, 1, 0}, {DC, 12, 1, 0}, {DA, 12, 1, 0}}, 5, {0}},

@@ -108,6 +108,12 @@
 // TLS exports reuse link_elf_thread_local_offset and packed loaded section indices;
 // their dynamic symbols carry STT_TLS offsets rather than image addresses.
 //
+// AArch64 fixed-address TLS relaxation (link_aarch64_tls_relax): sites are
+// heap-sorted by section and offset; an initial-exec ADRP/LDR pair may have
+// unrelated instructions between the halves and is matched by register
+// (link_aarch64_tls_pending_drain reports an unpaired ADRP), while a TLS
+// descriptor sequence must still be four adjacent words.
+//
 // Linux x86-64 fixed-address imported function pointers use loader-filled
 // GOT address slots and R_X86_64_64 literals. A direct PC32/PC64/ABS32 address
 // instead needs a canonical PLT value in its undefined STT_FUNC .dynsym;
@@ -8803,12 +8809,15 @@ enum
 {
     LINK_TLS_SITE_OFFSET_BITS = 48,
     LINK_AARCH64_TLS_SEQUENCE_MAX = 4,
+    LINK_AARCH64_TLS_REGISTER_COUNT = 32,
 };
 
 // The AArch64 sequences a fixed-address executable relaxes to local-exec,
-// each a run of relocations on consecutive words in this order: initial-exec
-// ADRP/LDR, and the general-dynamic descriptor ADRP/LDR/ADD/BLR. The names
-// are the AAELF64 spellings a refused link reports.
+// each a relocation run in this order: initial-exec ADRP/LDR, and the
+// general-dynamic descriptor ADRP/LDR/ADD/BLR. Only the descriptor run must
+// sit on consecutive words; the initial-exec pair is matched by register in
+// link_aarch64_tls_relax. The names are the AAELF64 spellings a refused link
+// reports.
 typedef struct LinkAarch64TlsSequence LinkAarch64TlsSequence;
 struct LinkAarch64TlsSequence
 {
@@ -8874,16 +8883,43 @@ BUSTER_GLOBAL_LOCAL void link_tls_site_sift(LinkTlsSite* sites, u32 count, u32 r
     }
 }
 
+// Fail if an initial-exec ADRP is still waiting for its LDR: *failed names
+// that ADRP. Empties the table either way, so the next section starts clean.
+BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_pending_drain(u32* pending, LinkTlsSite const* sites, u32* failed)
+{
+    bool clear = true;
+    for (u32 reg = 0; reg < LINK_AARCH64_TLS_REGISTER_COUNT; reg += 1)
+    {
+        if (pending[reg] != UINT32_MAX)
+        {
+            *failed = clear ? sites[pending[reg]].relocation : *failed;
+            clear = false;
+            pending[reg] = UINT32_MAX;
+        }
+    }
+    return clear;
+}
+
 // Rewrite every AArch64 initial-exec pair and descriptor sequence into
-// local-exec form. Sites are sorted by section and offset, then consumed one
-// whole sequence at a time: the site that starts it picks the sequence, and
-// each later step must sit exactly four bytes after the previous one in the
-// same section, have the next kind, and name the same symbol and addend.
-// Registers must agree (one register for an IE pair; the LDR and BLR of a
-// descriptor share the scratch register). Every site is consumed exactly
-// once, so a repeated, missing, misplaced, overlapping or out-of-order step
-// fails the whole link, before anything is written, and *failed names the
-// relocation that could not start or complete a sequence.
+// local-exec form. Sites are sorted by section and offset (an in-place heap
+// sort, so no recursion and O(n log n)), then scanned once in that order.
+// A descriptor sequence stays strictly adjacent: the site that starts it picks
+// the sequence, and each later step must sit exactly four bytes after the
+// previous one in the same section, have the next kind, and name the same
+// symbol and addend; the LDR and BLR share the scratch register.
+// An initial-exec pair may be scheduled apart (Clang 18 -O2 slides loads
+// between the halves). Each section keeps a table of 32 pending ADRPs keyed
+// by destination register. A GOTTPREL ADRP fills its register's slot (a slot
+// already full means the older ADRP can never be paired, so the link fails);
+// a GOTTPREL LDR takes the slot of its base register, which is also its
+// destination, and must find an ADRP there naming the same symbol and
+// addend. That ADRP is the nearest preceding one for the register, and each
+// is consumed once. An ADRP left over at the end of its section, or an LDR
+// with no partner, fails the whole link. The scan is O(n) for n sites.
+// Every site is consumed exactly once and all words are computed before any
+// is written, so a repeated, missing, misplaced or mismatched step fails the
+// whole link with the output untouched; *failed names the relocation that
+// could not start or complete a sequence.
 BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_relax(Arena* arena, ObjectFile* object, u8* bytes, u64 const* section_offsets, u32* failed)
 {
     u32 count = 0;
@@ -8929,45 +8965,101 @@ BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_relax(Arena* arena, ObjectFile* object
     }
     // Validate and compute every replacement word first; write only once the
     // whole object relaxes.
+    u32 pending[LINK_AARCH64_TLS_REGISTER_COUNT];
+    for (u32 reg = 0; reg < LINK_AARCH64_TLS_REGISTER_COUNT; reg += 1)
+    {
+        pending[reg] = UINT32_MAX;
+    }
+    u64 pending_section = UINT64_MAX;
     u32 cursor = 0;
     while (valid && cursor < site_count)
     {
         ObjectRelocation* first = &object->relocations[sites[cursor].relocation];
-        LinkAarch64TlsSequence const* sequence = 0;
-        for (u32 candidate = 0; candidate < BUSTER_ARRAY_LENGTH(link_aarch64_tls_sequences); candidate += 1)
+        u64 section = sites[cursor].key >> LINK_TLS_SITE_OFFSET_BITS;
+        if (section != pending_section)
         {
-            sequence = link_aarch64_tls_sequences[candidate].kinds[0] == first->kind ? &link_aarch64_tls_sequences[candidate] : sequence;
+            valid = link_aarch64_tls_pending_drain(pending, sites, failed);
+            pending_section = section;
         }
-        u32 length = sequence ? sequence->length : 0;
-        u64 tprel = 0;
-        valid = length && length <= site_count - cursor &&
-                link_aarch64_elf_tprel_offset(object, &object->symbols[first->symbol], first->addend, UINT32_MAX, &tprel);
-        u32 original[LINK_AARCH64_TLS_SEQUENCE_MAX] = {0};
-        for (u32 step = 0; valid && step < length; step += 1)
+        if (!valid)
         {
-            ObjectRelocation* relocation = &object->relocations[sites[cursor + step].relocation];
-            original[step] = link_read_u32(object->sections[relocation->section].data.pointer, relocation->offset);
-            valid = relocation->kind == sequence->kinds[step] && sites[cursor + step].key == sites[cursor].key + (u64)step * 4 &&
-                    relocation->symbol == first->symbol && relocation->addend == first->addend &&
-                    (object_aarch64_elf_tls_ie_relax(relocation->kind, original[step], tprel, &words[cursor + step]) ||
-                     object_aarch64_elf_tls_desc_relax(relocation->kind, original[step], tprel, &words[cursor + step]));
+            cursor = site_count;
         }
-        if (valid && object_relocation_kind_is_aarch64_elf_tls_ie(first->kind))
+        else if (first->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21)
         {
-            valid = (words[cursor] & 31) == (words[cursor + 1] & 31);
+            // Keep the original word until the LDR supplies the offset; a
+            // zero offset here only proves it is the ADRP the reader accepts.
+            u32 original = link_read_u32(object->sections[first->section].data.pointer, first->offset);
+            u32 checked = 0;
+            valid = object_aarch64_elf_tls_ie_relax(first->kind, original, 0, &checked) && pending[original & 31] == UINT32_MAX;
+            if (valid)
+            {
+                words[cursor] = original;
+                pending[original & 31] = cursor;
+                cursor += 1;
+            }
+            else
+            {
+                *failed = sites[cursor].relocation;
+            }
         }
-        else if (valid)
+        else if (first->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12)
         {
-            valid = (original[1] & 31) == ((original[3] >> 5) & 31);
-        }
-        if (valid)
-        {
-            cursor += length;
+            u32 original = link_read_u32(object->sections[first->section].data.pointer, first->offset);
+            u32 checked = 0;
+            u32 partner = UINT32_MAX;
+            u64 tprel = 0;
+            valid = object_aarch64_elf_tls_ie_relax(first->kind, original, 0, &checked);
+            partner = valid ? pending[(original >> 5) & 31] : UINT32_MAX;
+            valid = valid && partner != UINT32_MAX && object->relocations[sites[partner].relocation].symbol == first->symbol &&
+                    object->relocations[sites[partner].relocation].addend == first->addend &&
+                    link_aarch64_elf_tprel_offset(object, &object->symbols[first->symbol], first->addend, UINT32_MAX, &tprel) &&
+                    object_aarch64_elf_tls_ie_relax(OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21, words[partner], tprel, &words[partner]) &&
+                    object_aarch64_elf_tls_ie_relax(first->kind, original, tprel, &words[cursor]);
+            if (valid)
+            {
+                pending[(original >> 5) & 31] = UINT32_MAX;
+                cursor += 1;
+            }
+            else
+            {
+                *failed = sites[cursor].relocation;
+            }
         }
         else
         {
-            *failed = sites[cursor].relocation;
+            LinkAarch64TlsSequence const* sequence = 0;
+            for (u32 candidate = 1; candidate < BUSTER_ARRAY_LENGTH(link_aarch64_tls_sequences); candidate += 1)
+            {
+                sequence = link_aarch64_tls_sequences[candidate].kinds[0] == first->kind ? &link_aarch64_tls_sequences[candidate] : sequence;
+            }
+            u32 length = sequence ? sequence->length : 0;
+            u64 tprel = 0;
+            valid = length && length <= site_count - cursor &&
+                    link_aarch64_elf_tprel_offset(object, &object->symbols[first->symbol], first->addend, UINT32_MAX, &tprel);
+            u32 original[LINK_AARCH64_TLS_SEQUENCE_MAX] = {0};
+            for (u32 step = 0; valid && step < length; step += 1)
+            {
+                ObjectRelocation* relocation = &object->relocations[sites[cursor + step].relocation];
+                original[step] = link_read_u32(object->sections[relocation->section].data.pointer, relocation->offset);
+                valid = relocation->kind == sequence->kinds[step] && sites[cursor + step].key == sites[cursor].key + (u64)step * 4 &&
+                        relocation->symbol == first->symbol && relocation->addend == first->addend &&
+                        object_aarch64_elf_tls_desc_relax(relocation->kind, original[step], tprel, &words[cursor + step]);
+            }
+            valid = valid && (original[1] & 31) == ((original[3] >> 5) & 31);
+            if (valid)
+            {
+                cursor += length;
+            }
+            else
+            {
+                *failed = sites[cursor].relocation;
+            }
         }
+    }
+    if (valid)
+    {
+        valid = link_aarch64_tls_pending_drain(pending, sites, failed);
     }
     for (u32 index = 0; valid && index < site_count; index += 1)
     {
