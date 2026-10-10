@@ -412,13 +412,16 @@ which hands any unit that `c_parse_ast` would diagnose or read differently
 back to `c_parse_ast`. Semantic analysis answers function-body
 expression-type queries from the tree where it can (the
 [tree expression typer](frontend/ast.md#tree-expression-typer)); no other
-stage reads it. With the flag the object and every diagnostic are
-byte-identical, and a tree the builder rejects fails the unit with the parse
-error class and a located diagnostic published like `c_parse_ast`'s. It does
-nothing for `-E`, assembly inputs or the other languages. Any other layout
-value is an argument error (`unsupported -fc-ast-pilot layout: <value>`).
-Verbose compilation prints `C_AST`, `C_AST_WALK`, `C_AST_TYPES` and
-`C_AST_SPLIT` rows beside `C_TYPE_LAYOUT`.
+stage reads it. Only under the flag does analysis share the primitive and
+pointer type rows those queries mint
+([interned rows](frontend/ast.md#interned-rows)). With the flag the object
+and every diagnostic are byte-identical, and a tree the builder rejects fails
+the unit with the parse error class and a located diagnostic published like
+`c_parse_ast`'s. It does nothing for `-E`, assembly inputs or the other
+languages. Any other layout value is an argument error
+(`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints
+`C_AST`, `C_AST_WALK`, `C_AST_TYPES` and `C_AST_SPLIT` rows beside
+`C_TYPE_LAYOUT`.
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
 nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`
@@ -1552,8 +1555,27 @@ objects. Unwind information remains independent of source debug information.
 With `-g`, named scalar locals that need more than one defining instruction to
 describe stay in distinct frame slots, so their location lists follow stores
 through reassignment and control-flow joins. A frame location starts after its
-first entry-block store; a local whose first store is only on a later control
-flow path stays unavailable rather than exposing uninitialized frame bytes. A
+first entry-block store. A local first stored on a later control-flow path
+gets per-block ranges from a forward must-initialized pass over the published
+CFG (`machine_debug_initialized_build`): the whole of each reachable block
+that every incoming path has written, else the rest of a block after its own
+first write. A write on only some paths therefore never reaches the join, and
+uninitialized frame bytes are never exposed. Ranges are produced in machine
+layout order, and `codegen_canonical_location_append` merges a seed into the
+previous one when it continues the same local with the same whole location,
+so back-to-back blocks become one location-list entry or CodeView
+`S_DEFRANGE_*` record. Past `MACHINE_DEBUG_INITIALIZED_CELL_LIMIT` block-local
+cells, or once a function's deferred ranges would exceed
+`MACHINE_DEBUG_INITIALIZED_RANGE_LIMIT`, the remaining locals stay
+unavailable. The CodeView symbol reserve counts every location range
+(`CODEVIEW_DEFRANGE_RECORD_BYTES`), and a range longer than the 16-bit
+`S_DEFRANGE_*` length is emitted as consecutive records of at most
+`CODEVIEW_DEFRANGE_MAX_LENGTH` bytes rather than clamped. Regressions:
+`codegen_test_debug_local_seed_coverage`,
+`machine_test_debug_value_initialized_blocks`,
+`machine_test_debug_value_initialized_budget`,
+`codeview_test_many_location_ranges` and
+`codeview_test_long_location_range`. A
 local stays SSA only when its sole write is its entry initializer and that
 initializer is an instruction result no other local already names. This costs
 code in debug builds: the target keeps the remaining memory locals in frame

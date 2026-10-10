@@ -1740,6 +1740,49 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_block_local_storage(UnitTe
     return result;
 }
 
+// First code offset of a source line inside a function, or UINT32_MAX.
+BUSTER_GLOBAL_LOCAL u32 codegen_test_line_offset(CodegenModule const* generated, CodegenFunctionDescriptor const* descriptor, u32 line)
+{
+    u32 offset = UINT32_MAX;
+    for (u32 line_index = 0; descriptor && line_index < generated->line_entry_count; line_index += 1)
+    {
+        CodegenLineEntry entry = generated->line_entries[line_index];
+        if (entry.line == line && entry.code_offset >= descriptor->code_offset &&
+            entry.code_offset < descriptor->code_offset + descriptor->code_size)
+        {
+            offset = BUSTER_MIN(offset, entry.code_offset);
+        }
+    }
+    return offset;
+}
+
+// Whether an available seed of the named local covers `offset`; with
+// `before`, whether any available seed starts before `offset` instead.
+BUSTER_GLOBAL_LOCAL bool codegen_test_local_seed_at(CodegenModule const* generated, IrFunction const* function, String8 name, u32 offset,
+                                                    bool before)
+{
+    IrLocalId local = IR_LOCAL_ID_INVALID;
+    for (u32 local_index = 0; local_index < function->debug_local_count; local_index += 1)
+    {
+        if (string_equal(function->debug_locals[local_index].name, name))
+        {
+            local = function->debug_locals[local_index].id;
+        }
+    }
+    bool found = false;
+    for (u32 seed_index = 0; offset != UINT32_MAX && local.value != IR_ID_UNDERLYING_INVALID && seed_index < generated->debug_location_count;
+         seed_index += 1)
+    {
+        DebugLocationSeed const* seed = generated->debug_locations + seed_index;
+        if (seed->function_symbol.value == function->symbol.value && seed->local.value == local.value &&
+            seed->location.kind != DEBUG_LOCATION_UNAVAILABLE)
+        {
+            found |= before ? seed->start < offset : seed->start <= offset && offset < seed->end;
+        }
+    }
+    return found;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_local_seed_coverage(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1783,6 +1826,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_local_seed_coverage(UnitTe
                         "    if (take) later = 41;\n"
                         "    else later = 42;\n"
                         "    sink = later;\n"
+                        "    return sink;\n"
+                        "}\n"
+                        "int path_only(int take)\n"
+                        "{\n"
+                        "    int later;\n"
+                        "    int maybe;\n"
+                        "    sink = take;\n"
+                        "    if (take) later = 41;\n"
+                        "    else later = 42;\n"
+                        "    if (take) { maybe = 7; sink += maybe; }\n"
+                        "    sink = later;\n"
+                        "    for (int i = 0; i < take; i += 1)\n"
+                        "    {\n"
+                        "        int t;\n"
+                        "        t = i + later;\n"
+                        "        sink += t;\n"
+                        "    }\n"
                         "    return sink;\n"
                         "}\n");
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
@@ -1870,7 +1930,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_local_seed_coverage(UnitTe
                 BUSTER_TEST_RAW(arguments, !advertised_before_initialization && covered_after_initialization && covered_after_join &&
                                            covered_after_overwrite, label);
                 String8 const coverage_function_names[] = {
-                    S8("debug_values"), S8("copies"), S8("reassigned"), S8("branch_only"),
+                    S8("debug_values"), S8("copies"), S8("reassigned"), S8("branch_only"), S8("path_only"),
                 };
                 for (u32 coverage_index = 0; generated.error == CODEGEN_ERROR_NONE && coverage_index < BUSTER_ARRAY_LENGTH(coverage_function_names);
                      coverage_index += 1)
@@ -1886,22 +1946,45 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_local_seed_coverage(UnitTe
                             continue;
                         }
                         bool found_available = false;
-                        bool found_unavailable = false;
                         for (u32 seed_index = 0; seed_index < generated.debug_location_count; seed_index += 1)
                         {
                             DebugLocationSeed const* seed = generated.debug_locations + seed_index;
                             if (seed->function_symbol.value == coverage_function->symbol.value && seed->local.value == local->id.value)
                             {
                                 found_available |= seed->location.kind != DEBUG_LOCATION_UNAVAILABLE;
-                                found_unavailable |= seed->location.kind == DEBUG_LOCATION_UNAVAILABLE;
                             }
                         }
-                        bool path_only_local = string_equal(coverage_function_names[coverage_index], S8("branch_only")) &&
-                                               string_equal(local->name, S8("later"));
                         String8 local_label = string_format(temporary.arena, S8("frontend={u32} allocator={u32} {S8}.{S8}"), frontend,
                                                             allocator, coverage_function_names[coverage_index], local->name);
-                        BUSTER_TEST_RAW(arguments, path_only_local ? found_unavailable && !found_available : found_available, local_label);
+                        BUSTER_TEST_RAW(arguments, found_available, local_label);
                     }
+                }
+                // Locals first written after a branch (#2717): a location
+                // starts only past every path's write and follows the
+                // must-initialized blocks, so a one-sided write never
+                // reaches the join and the entry stack bytes are never shown.
+                IrFunction* path_function = codegen_test_c_function_find(module, S8("path_only"));
+                CodegenFunctionDescriptor* path_descriptor =
+                    path_function && generated.error == CODEGEN_ERROR_NONE ? codegen_test_c_descriptor_find(&generated, path_function->symbol) : 0;
+                u32 first_write_line = codegen_test_line_offset(&generated, path_descriptor, 48);
+                u32 join_line = codegen_test_line_offset(&generated, path_descriptor, 51);
+                u32 loop_use_line = codegen_test_line_offset(&generated, path_descriptor, 56);
+                String8 path_label = string_format(temporary.arena, S8("frontend={u32} allocator={u32} path_only"), frontend, allocator);
+                BUSTER_TEST_RAW(arguments, path_descriptor && first_write_line != UINT32_MAX &&
+                                           join_line != UINT32_MAX && loop_use_line != UINT32_MAX, path_label);
+                if (path_descriptor)
+                {
+                    BUSTER_TEST_RAW(arguments, codegen_test_local_seed_at(&generated, path_function, S8("later"), join_line, false) &&
+                                               codegen_test_local_seed_at(&generated, path_function, S8("later"), loop_use_line, false) &&
+                                               !codegen_test_local_seed_at(&generated, path_function, S8("later"), first_write_line, true),
+                                    path_label);
+                    BUSTER_TEST_RAW(arguments, !codegen_test_local_seed_at(&generated, path_function, S8("maybe"), join_line, false) &&
+                                               !codegen_test_local_seed_at(&generated, path_function, S8("maybe"), loop_use_line, false) &&
+                                               !codegen_test_local_seed_at(&generated, path_function, S8("maybe"), first_write_line, true),
+                                    path_label);
+                    BUSTER_TEST_RAW(arguments, codegen_test_local_seed_at(&generated, path_function, S8("t"), loop_use_line, false) &&
+                                               !codegen_test_local_seed_at(&generated, path_function, S8("t"), join_line, true),
+                                    path_label);
                 }
             }
         }
