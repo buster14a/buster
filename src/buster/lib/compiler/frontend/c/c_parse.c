@@ -23051,10 +23051,9 @@ BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machi
                                            });
 }
 
-typedef struct CParseStatementPlan CParseStatementPlan;
 BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
                                                        CPreprocessResult preprocess, u32 declaration_index, CScopeId scope, u32 body_start,
-                                                       u32 body_token_count, CParseStatementPlan* plan);
+                                                       u32 body_token_count);
 
 // The GNU statement expression `({ ... })` opening at `index`, if one does.
 // `body_start` and `body_end` bound the block's tokens -- the braces excluded
@@ -23102,7 +23101,7 @@ BUSTER_C_INTERNAL void c_parse_bind_statement_expression_body(CTypeParseMachine*
     };
     if (body_start < body_end)
     {
-        c_parse_bind_block_statements(machine, result_arena, result, preprocess, declaration_index, child, body_start, body_end - body_start, 0);
+        c_parse_bind_block_statements(machine, result_arena, result, preprocess, declaration_index, child, body_start, body_end - body_start);
     }
 }
 
@@ -25065,12 +25064,20 @@ struct CParseStatementPlanEntry
     CParseStatementPlanKind kind;
 };
 
+typedef struct CParseStatementPlan CParseStatementPlan;
 struct CParseStatementPlan
 {
     CParseStatementPlanEntry* entries;
     u32 count;
     u32 capacity;
     CAstStatementStatistics* statistics;
+    // The walk's place in the plan (c_parse_bind_block_statements): the next
+    // entry, its first token (UINT32_MAX past the last), and the declaration
+    // or loop entry of the token the walk is at. Kept here, not in the walk's
+    // locals, so the token loop carries only its next-event token.
+    CParseStatementPlanEntry const* hint;
+    u32 cursor;
+    u32 next;
 };
 
 // Node classes. PLAIN: expression syntax, or a type name without a member or
@@ -25560,8 +25567,9 @@ BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseM
                 {
                     // The jump keyword: before a goto's label, else the anchor.
                     u32 keyword = kind == C_AST_GOTO ? anchor - 1 : anchor;
-                    bool keyword_valid = kind != C_AST_GOTO ||
-                                         (anchor > body_start && c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[anchor - 1], C_SYMBOL_WELL_KNOWN_GOTO));
+                    bool keyword_valid =
+                        kind != C_AST_GOTO ||
+                        (anchor > body_start && c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[anchor - 1], C_SYMBOL_WELL_KNOWN_GOTO));
                     u32 end = extent == 1 ? (c_parse_plan_punctuator_at(&preprocess, anchor + 1, limit, C_PUNCTUATOR_SEMICOLON) ? anchor + 1 : UINT32_MAX)
                                           : c_parse_plan_expression_end(ast, &preprocess, node - 1, limit, C_PUNCTUATOR_SEMICOLON, &first);
                     if (!keyword_valid || (extent == 1 && end == UINT32_MAX))
@@ -25901,10 +25909,12 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 c_parse_block_walk_event(CParsePendingType
 // statement expression's body is a block too, and one written in a
 // declaration's initializer is reached from c_parse_local_declarations rather
 // than from the function-body walk -- which hands that whole declaration
-// statement over and resumes past its semicolon.
-BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
-                                                       CPreprocessResult preprocess, u32 declaration_index, CScopeId scope, u32 body_start,
-                                                       u32 body_token_count, CParseStatementPlan* plan)
+// statement over and resumes past its semicolon. `plan` is a function body's
+// statement plan, or null. The walk is inlined into its two callers below, so
+// the walk without a plan is compiled with every plan branch folded away.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_parse_bind_block_walk(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
+                                                               CPreprocessResult preprocess, u32 declaration_index, CScopeId scope, u32 body_start,
+                                                               u32 body_token_count, CParseStatementPlan* plan)
 {
     CTokenShape const* token_shapes = c_preprocess_token_shapes(&preprocess);
     Arena* conflicts[] = {
@@ -25940,14 +25950,16 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
     u32 asm_goto_label_end = UINT32_MAX;
     u32 asm_operand_range_start = UINT32_MAX;
     u32 asm_operand_range_end = UINT32_MAX;
-    // The statement plan of a function body under -fc-ast-pilot, else none:
-    // its next entry, and the walk's next event -- that entry's token or the
-    // innermost pending typeof declaration's resume point, whichever comes
-    // first. `hint` is the declaration or loop entry of the token at its start.
-    u32 plan_cursor = 0;
-    u32 plan_next = plan && plan->count ? plan->entries[0].start : UINT32_MAX;
-    u32 walk_event = plan_next;
-    CParseStatementPlanEntry const* hint = 0;
+    // The statement plan of a function body under -fc-ast-pilot, else none,
+    // and the walk's next event: the plan's next entry or the innermost
+    // pending typeof declaration's resume point, whichever comes first.
+    if (plan)
+    {
+        plan->hint = 0;
+        plan->cursor = 0;
+        plan->next = plan->count ? plan->entries[0].start : UINT32_MAX;
+    }
+    u32 walk_event = plan ? plan->next : UINT32_MAX;
     while (index < body_end)
     {
         while (scope_count > 1 && scope_end_stack[scope_count - 1] == index)
@@ -25956,7 +25968,9 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
             scope_count -= 1;
             result->binding_scope = scope_stack[scope_count - 1];
         }
-        if (index >= walk_event)
+        // Without a plan the next event is a pending typeof declaration's
+        // resume point alone, tested as the walk always has.
+        if (plan ? index >= walk_event : pending_typeof_count && index >= pending_typeof[pending_typeof_count - 1].resume_after)
         {
             if (pending_typeof_count && index >= pending_typeof[pending_typeof_count - 1].resume_after)
             {
@@ -25975,13 +25989,13 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                     asm_operand_range_end = pending->asm_operand_range_end;
                     pending->search_from = group_end + 1;
                     pending->resume_after = group_end + 1;
-                    walk_event = c_parse_block_walk_event(pending_typeof, pending_typeof_count, plan_next);
+                    walk_event = c_parse_block_walk_event(pending_typeof, pending_typeof_count, plan ? plan->next : UINT32_MAX);
                     index = scheduled_body_start - 1;
                     continue;
                 }
                 CParsePendingTypeofDeclaration resumed = *pending;
                 pending_typeof_count -= 1;
-                walk_event = c_parse_block_walk_event(pending_typeof, pending_typeof_count, plan_next);
+                walk_event = c_parse_block_walk_event(pending_typeof, pending_typeof_count, plan ? plan->next : UINT32_MAX);
                 bool parsed = c_parse_local_declarations(machine, result_arena, result, preprocess, resumed.scope, declaration_index,
                                                           resumed.start, resumed.end, resumed.is_for_initializer);
                 bool inferred_auto = false;
@@ -26004,14 +26018,16 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
             }
             else if (plan)
             {
-                while (plan_cursor < plan->count && plan->entries[plan_cursor].start < index)
+                while (plan->cursor < plan->count && plan->entries[plan->cursor].start < index)
                 {
-                    plan_cursor += 1;
+                    plan->cursor += 1;
                 }
-                hint = plan_cursor < plan->count && plan->entries[plan_cursor].start == index ? plan->entries + plan_cursor : 0;
-                plan_cursor += hint != 0;
-                plan_next = plan_cursor < plan->count ? plan->entries[plan_cursor].start : UINT32_MAX;
-                walk_event = c_parse_block_walk_event(pending_typeof, pending_typeof_count, plan_next);
+                CParseStatementPlanEntry const* hint =
+                    plan->cursor < plan->count && plan->entries[plan->cursor].start == index ? plan->entries + plan->cursor : 0;
+                plan->hint = hint;
+                plan->cursor += hint != 0;
+                plan->next = plan->cursor < plan->count ? plan->entries[plan->cursor].start : UINT32_MAX;
+                walk_event = c_parse_block_walk_event(pending_typeof, pending_typeof_count, plan->next);
                 // A segment is bound in one pass unless a state of this walk the
                 // plan cannot see reaches into it: a pending typeof declaration,
                 // a live asm range, an attribute resume point, or the end of a
@@ -26240,26 +26256,30 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
         {
             // The plan's loop entry states the header's `)` and first `;`
             // and the loop's end, which the scans below find otherwise.
-            bool planned_loop = hint && hint->start == index && hint->kind == C_PARSE_STATEMENT_PLAN_LOOP;
-            u32 header_close = planned_loop ? hint->end : UINT32_MAX;
+            CParseStatementPlanEntry const* loop_hint = plan ? plan->hint : 0;
+            bool planned_loop = loop_hint && loop_hint->start == index && loop_hint->kind == C_PARSE_STATEMENT_PLAN_LOOP;
+            u32 header_close = planned_loop ? loop_hint->end : UINT32_MAX;
             u32 depth = 0;
-            for (u32 scan = index + 1; !planned_loop && scan < body_end; scan += 1)
+            if (!planned_loop)
             {
-                if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                for (u32 scan = index + 1; scan < body_end; scan += 1)
                 {
-                    depth += 1;
-                }
-                else if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_RIGHT_PARENTHESIS))
-                {
-                    if (!depth)
+                    if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_LEFT_PARENTHESIS))
                     {
-                        break;
+                        depth += 1;
                     }
-                    depth -= 1;
-                    if (!depth)
+                    else if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_RIGHT_PARENTHESIS))
                     {
-                        header_close = scan;
-                        break;
+                        if (!depth)
+                        {
+                            break;
+                        }
+                        depth -= 1;
+                        if (!depth)
+                        {
+                            header_close = scan;
+                            break;
+                        }
                     }
                 }
             }
@@ -26268,8 +26288,8 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                 // The loop scope covers the whole controlled statement, compound or not, so the
                 // init declaration stays visible across every form of body.
                 c_parse_position_index_ensure(result, preprocess);
-                u32 loop_end = planned_loop ? hint->loop_end : UINT32_MAX;
-                u32 first_separator = planned_loop ? hint->separator : UINT32_MAX;
+                u32 loop_end = planned_loop ? loop_hint->loop_end : UINT32_MAX;
+                u32 first_separator = planned_loop ? loop_hint->separator : UINT32_MAX;
                 if (!planned_loop)
                 {
                     // Created on the first loop: a body without one never pays for the memo.
@@ -26354,7 +26374,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                             .is_for_initializer = true,
                         };
                         pending_typeof_count += 1;
-                        walk_event = c_parse_block_walk_event(pending_typeof, pending_typeof_count, plan_next);
+                        walk_event = c_parse_block_walk_event(pending_typeof, pending_typeof_count, plan ? plan->next : UINT32_MAX);
                         index = typeof_body_start - 1;
                         continue;
                     }
@@ -26391,30 +26411,35 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
             }
             // The plan's declaration entry states the `;` the scan below finds,
             // and that no statement expression precedes it.
-            bool planned_declaration = hint && hint->start == index && hint->kind == C_PARSE_STATEMENT_PLAN_DECLARATION;
-            u32 end = planned_declaration ? hint->end : index;
+            CParseStatementPlanEntry const* declaration_hint = plan ? plan->hint : 0;
+            bool planned_declaration =
+                declaration_hint && declaration_hint->start == index && declaration_hint->kind == C_PARSE_STATEMENT_PLAN_DECLARATION;
+            u32 end = planned_declaration ? declaration_hint->end : index;
             u32 delimiter_depth = 0;
-            while (!planned_declaration && end < body_end)
+            if (!planned_declaration)
             {
-                CToken end_token = preprocess.tokens[end];
-                if (c_token_is_punctuator(&end_token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&end_token, C_PUNCTUATOR_LEFT_BRACKET) ||
-                    c_token_is_punctuator(&end_token, C_PUNCTUATOR_LEFT_BRACE))
+                while (end < body_end)
                 {
-                    delimiter_depth += 1;
-                }
-                else if (c_token_is_punctuator(&end_token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&end_token, C_PUNCTUATOR_RIGHT_BRACKET) ||
-                         c_token_is_punctuator(&end_token, C_PUNCTUATOR_RIGHT_BRACE))
-                {
-                    if (delimiter_depth)
+                    CToken end_token = preprocess.tokens[end];
+                    if (c_token_is_punctuator(&end_token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                        c_token_is_punctuator(&end_token, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&end_token, C_PUNCTUATOR_LEFT_BRACE))
                     {
-                        delimiter_depth -= 1;
+                        delimiter_depth += 1;
                     }
+                    else if (c_token_is_punctuator(&end_token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                             c_token_is_punctuator(&end_token, C_PUNCTUATOR_RIGHT_BRACKET) || c_token_is_punctuator(&end_token, C_PUNCTUATOR_RIGHT_BRACE))
+                    {
+                        if (delimiter_depth)
+                        {
+                            delimiter_depth -= 1;
+                        }
+                    }
+                    else if (!delimiter_depth && c_token_is_punctuator(&end_token, C_PUNCTUATOR_SEMICOLON))
+                    {
+                        break;
+                    }
+                    end += 1;
                 }
-                else if (!delimiter_depth && c_token_is_punctuator(&end_token, C_PUNCTUATOR_SEMICOLON))
-                {
-                    break;
-                }
-                end += 1;
             }
             u32 typeof_body_start = 0;
             u32 typeof_body_end = 0;
@@ -26444,7 +26469,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                     .asm_operand_range_end = asm_operand_range_end,
                 };
                 pending_typeof_count += 1;
-                walk_event = c_parse_block_walk_event(pending_typeof, pending_typeof_count, plan_next);
+                walk_event = c_parse_block_walk_event(pending_typeof, pending_typeof_count, plan ? plan->next : UINT32_MAX);
                 index = typeof_body_start - 1;
                 continue;
             }
@@ -26508,6 +26533,21 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
     scratch_end(temporary);
 }
 
+BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
+                                                       CPreprocessResult preprocess, u32 declaration_index, CScopeId scope, u32 body_start,
+                                                       u32 body_token_count)
+{
+    c_parse_bind_block_walk(machine, result_arena, result, preprocess, declaration_index, scope, body_start, body_token_count, 0);
+}
+
+// The same walk over a function body, following its statement plan.
+BUSTER_GLOBAL_LOCAL void c_parse_bind_planned_block_statements(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
+                                                               CPreprocessResult preprocess, u32 declaration_index, CScopeId scope,
+                                                               u32 body_start, u32 body_token_count, CParseStatementPlan* plan)
+{
+    c_parse_bind_block_walk(machine, result_arena, result, preprocess, declaration_index, scope, body_start, body_token_count, plan);
+}
+
 BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
                                                     CPreprocessResult preprocess, u32 declaration_index)
 {
@@ -26519,18 +26559,19 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
         Arena* conflicts[] = {
             result_arena,
         };
-        TemporalArena plan_temporary = {0};
-        CParseStatementPlan plan = {0};
         if (machine->syntax_tree)
         {
-            plan_temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-            plan = c_parse_statement_plan_build(machine, plan_temporary.arena, preprocess, declaration->body_start, declaration->body_token_count);
-        }
-        c_parse_bind_block_statements(machine, result_arena, result, preprocess, declaration_index, declaration->scope, declaration->body_start,
-                                      declaration->body_token_count, machine->syntax_tree ? &plan : 0);
-        if (machine->syntax_tree)
-        {
+            TemporalArena plan_temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+            CParseStatementPlan plan =
+                c_parse_statement_plan_build(machine, plan_temporary.arena, preprocess, declaration->body_start, declaration->body_token_count);
+            c_parse_bind_planned_block_statements(machine, result_arena, result, preprocess, declaration_index, declaration->scope,
+                                                  declaration->body_start, declaration->body_token_count, &plan);
             scratch_end(plan_temporary);
+        }
+        else
+        {
+            c_parse_bind_block_statements(machine, result_arena, result, preprocess, declaration_index, declaration->scope, declaration->body_start,
+                                          declaration->body_token_count);
         }
         // The body's scopes are closed and their bindings unwound, but the
         // bucket chains keep every entity they ever held, so the two passes

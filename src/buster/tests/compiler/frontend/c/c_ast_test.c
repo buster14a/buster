@@ -2187,7 +2187,9 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_bindings_differ(Arena* arena, CAnalysis
         CIdentifierUse b = right->identifier_uses[index];
         if (a.token_index != b.token_index || a.entity.value != b.entity.value || a.scope.value != b.scope.value)
         {
-            difference = string_format(arena, S8("use {u32} differs: token {u32} entity {u32} scope {u32} without the tree, token {u32} entity {u32} scope {u32} with it"),
+            difference = string_format(arena,
+                                       S8("use {u32} differs: token {u32} entity {u32} scope {u32} without the tree, "
+                                          "token {u32} entity {u32} scope {u32} with it"),
                                        index, a.token_index, a.entity.value, a.scope.value, b.token_index, b.entity.value, b.scope.value);
         }
     }
@@ -4050,7 +4052,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statements(UnitTestArguments* argu
                                              statistics.segments == 0 && statistics.declaration_hints == 0 && statistics.loop_hints == 0),
                                 label);
                 BUSTER_TEST_RAW(arguments,
-                                !followed || (statistics.segments >= statement_case->segments && statistics.declaration_hints >= statement_case->declaration_hints &&
+                                !followed || (statistics.segments >= statement_case->segments &&
+                                              statistics.declaration_hints >= statement_case->declaration_hints &&
                                               statistics.loop_hints >= statement_case->loop_hints && statistics.declines >= statement_case->declines &&
                                               statistics.uses && statistics.bails == statement_case->bails),
                                 label);
