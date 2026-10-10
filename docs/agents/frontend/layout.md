@@ -614,9 +614,11 @@ when its `sizeof`/`_Alignof` terms (at most
 with only trailing `*` and qualifiers, and the terms are joined by `+`, `*`,
 parentheses and integer literals, it reads the terms from the solve's own
 layout columns, waits like a spelled type when one is still open, and uses the
-untyped evaluator's answer when it is below 2^31. Over non-negative operands
-every subexpression not multiplied by zero is at most the result, so that
-answer is the typed one whatever the operand types. A chain of
+untyped evaluator's answer only when the product of max(operand, 2) over every
+term and literal is below 2^31. That product bounds every subexpression, so no
+intermediate value overflows `int`, wraps an unsigned type, or wraps the
+evaluator's 64-bit arithmetic, and the answer is the typed one whatever the
+operand types (`c_test_alignas_fold_typed_width`). A chain of
 `_Alignas(sizeof(struct S{n-1}))` records therefore resolves one record per
 attempt with no typed query, at any depth, and a record that reaches itself
 waits on itself and ends in "invalid object alignment". Every other expression
