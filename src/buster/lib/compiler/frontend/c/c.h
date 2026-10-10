@@ -1999,6 +1999,59 @@ BUSTER_F_DECL CAggregateAttributes c_parse_aggregate_attributes(CParseResult con
 // translation unit, so the scan is a count test in the common case.
 BUSTER_F_DECL CTypeAlignment const* c_parse_type_alignment(CParseResult const* result, CTypeId type);
 BUSTER_F_DECL CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess);
+
+// Why c_parse_ast_from_tree handed a unit to the token walker (GitHub #3102).
+typedef enum CParserTreeFallback
+{
+    C_PARSER_TREE_FALLBACK_NONE,
+    // The walker's own preconditions fail, or the tree is not complete.
+    C_PARSER_TREE_FALLBACK_INPUT,
+    // One of the walker's token validators would report a diagnostic.
+    C_PARSER_TREE_FALLBACK_DIAGNOSTIC,
+    // A parenthesized specifier (typeof, _Atomic(T), _Alignas, _BitInt) or
+    // an enum's fixed underlying type.
+    C_PARSER_TREE_FALLBACK_SPECIFIERS,
+    // Redundant parentheses (#3215's family), attributes inside the
+    // declarator, a function derivation followed by a suffix, or no name.
+    C_PARSER_TREE_FALLBACK_DECLARATOR,
+    // An old-style definition with a declaration list.
+    C_PARSER_TREE_FALLBACK_OLD_STYLE,
+    // A token next to an anchor is not the one the shape requires, or a
+    // comma operator in an initializer.
+    C_PARSER_TREE_FALLBACK_TOKENS,
+    // A _Static_assert spelled otherwise, with a comma operator in its
+    // condition, or a body assertion behind an attribute list.
+    C_PARSER_TREE_FALLBACK_ASSERTION,
+    // A top-level node kind with no record rule (a pragma).
+    C_PARSER_TREE_FALLBACK_EXTERNAL,
+    C_PARSER_TREE_FALLBACK_COUNT,
+} CParserTreeFallback;
+
+typedef struct CParserTreeStatistics CParserTreeStatistics;
+struct CParserTreeStatistics
+{
+    // Units whose records the tree produced, and units handed to the walker.
+    u64 units;
+    u64 fallbacks;
+    // Records and body assertion ranges the tree produced.
+    u64 records;
+    u64 assertions;
+    u64 fallback_counts[C_PARSER_TREE_FALLBACK_COUNT];
+    // The last fallback: its reason and the first token of the external
+    // declaration that caused it (UINT32_MAX when no declaration did).
+    CParserTreeFallback reason;
+    u32 fallback_token;
+};
+
+// c_parse_ast for a unit whose complete syntax tree the caller holds (the
+// driver's -fc-ast-pilot): the same CParserResult, with the declaration
+// split, names, bodies and body assertions read from the tree's nodes. It
+// falls back to c_parse_ast's token walker for the whole unit when that
+// walker would report a diagnostic or read a shape differently from the
+// grammar, so its result is always the walker's. `statistics` may be null.
+BUSTER_F_DECL CParserResult c_parse_ast_from_tree(Arena* arena, CPreprocessResult preprocess, CAst const* ast, CParserTreeStatistics* statistics);
+// The CParserTreeFallback in lower case without its prefix ("none", "input", ...).
+BUSTER_F_DECL String8 c_parser_tree_fallback_name(CParserTreeFallback reason);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 // Complete syntax and semantic analysis without constructing canonical IR.
 BUSTER_F_DECL CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax);
