@@ -4459,6 +4459,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_relocation_properties(UnitTestArg
         {OBJECT_RELOCATION_AARCH64_ELF_ADR_PREL_LO21, 4, false},
         {OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21, 4, true},
         {OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12, 4, true},
+        {OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21, 4, true},
+        {OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12, 4, true},
+        {OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12, 4, true},
+        {OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL, 4, true},
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(expected) == OBJECT_RELOCATION_COUNT);
     bool seen[OBJECT_RELOCATION_COUNT] = {0};
@@ -6786,6 +6790,119 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                                    !object_aarch64_elf_tls_ie_relax(OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12, UINT32_C(0xf940011f), 0, &unchanged) &&
                                    !object_aarch64_elf_tls_ie_relax(OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12, UINT32_C(0xb9400108), 0, &unchanged) &&
                                    !object_aarch64_elf_tls_ie_relax(OBJECT_RELOCATION_AARCH64_ELF_PAGE21, UINT32_C(0x90000008), 0, &unchanged) &&
+                                   unchanged == UINT32_C(0xdeadbeef));
+    }
+    // AArch64 ELF TLS descriptors (#2582): 562/563/564/569 round-trip with
+    // canonical zero immediates, print with their psABI modifiers and the
+    // .tlsdesccall marker, refuse anything but the AAELF64 words by name, and
+    // relax byte-exactly to MOVZ/MOVK/NOP/NOP.
+    {
+        ObjectSection desc_sections[BUSTER_ARRAY_LENGTH(sections)];
+        memcpy(desc_sections, sections, sizeof(desc_sections));
+        u32 desc_words[] = {UINT32_C(0x90000000), UINT32_C(0xf9400001), UINT32_C(0x91000000), UINT32_C(0xd63f0020)};
+        u32 desc_text[] = {desc_words[0], desc_words[1], desc_words[2], desc_words[3], UINT32_C(0xd65f03c0), 0};
+        desc_sections[OBJECT_SECTION_TEXT].data = (ByteSlice){.pointer = (u8*)desc_text, .length = sizeof(desc_text)};
+        desc_sections[OBJECT_SECTION_TEXT].virtual_size = sizeof(desc_text);
+        ObjectRelocationKind desc_kinds[] = {OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21, OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12,
+                                             OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12, OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL};
+        u32 desc_types[] = {562, 563, 564, 569};
+        String8 desc_names[] = {S8("R_AARCH64_TLSDESC_ADR_PAGE21"), S8("R_AARCH64_TLSDESC_LD64_LO12"), S8("R_AARCH64_TLSDESC_ADD_LO12"),
+                                S8("R_AARCH64_TLSDESC_CALL")};
+        ObjectRelocation desc_relocations[BUSTER_ARRAY_LENGTH(desc_kinds)];
+        for (u32 step = 0; step < BUSTER_ARRAY_LENGTH(desc_kinds); step += 1)
+        {
+            desc_relocations[step] = (ObjectRelocation){.offset = step * 4, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = desc_kinds[step]};
+        }
+        ObjectFile desc_object = object;
+        desc_object.sections = desc_sections;
+        desc_object.relocations = desc_relocations;
+        desc_object.relocation_count = BUSTER_ARRAY_LENGTH(desc_relocations);
+        String8 desc_assembly = object_print_assembly(arguments->arena, &desc_object);
+        BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(desc_assembly), S8("adrp x0, :tlsdesc:object_callee")));
+        BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(desc_assembly), S8("ldr x1, [x0, :tlsdesc_lo12:object_callee]")) ||
+                                   object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(desc_assembly), S8("ldr x1, [x0, #:tlsdesc_lo12:object_callee]")));
+        BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(desc_assembly), S8("add x0, x0, :tlsdesc_lo12:object_callee")) ||
+                                   object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(desc_assembly), S8("add x0, x0, #:tlsdesc_lo12:object_callee")));
+        BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(desc_assembly), S8(".tlsdesccall object_callee\n\tblr x1\n")));
+        ObjectArtifact desc_artifact = object_write(arguments->arena, &desc_object, OBJECT_FORMAT_ELF64);
+        u64 desc_relocation_section = 0;
+        u64 desc_target_data = 0;
+        bool desc_offsets = object_test_elf_relocation_offsets(desc_artifact.bytes, &desc_relocation_section, &desc_target_data);
+        BUSTER_TEST(arguments, desc_artifact.error == OBJECT_ERROR_NONE && desc_offsets);
+        if (desc_offsets)
+        {
+            u64 relocation_data = 0;
+            memcpy(&relocation_data, desc_artifact.bytes.pointer + desc_relocation_section + 24, sizeof(relocation_data));
+            for (u32 step = 0; step < BUSTER_ARRAY_LENGTH(desc_types); step += 1)
+            {
+                u64 information = 0;
+                memcpy(&information, desc_artifact.bytes.pointer + relocation_data + step * 24 + 8, sizeof(information));
+                BUSTER_TEST(arguments, (u32)information == desc_types[step]);
+            }
+            ObjectFile desc_imported = object_read(arguments->arena, desc_artifact.bytes, desc_object.target);
+            bool desc_valid = desc_imported.error == OBJECT_ERROR_NONE && desc_imported.relocation_count == 4;
+            BUSTER_TEST(arguments, desc_valid);
+            for (u32 step = 0; desc_valid && step < BUSTER_ARRAY_LENGTH(desc_kinds); step += 1)
+            {
+                u32 word = 0;
+                memcpy(&word, desc_imported.sections[OBJECT_SECTION_TEXT].data.pointer + step * 4, sizeof(word));
+                BUSTER_TEST(arguments, desc_imported.relocations[step].kind == desc_kinds[step] && desc_imported.relocations[step].addend == 0 &&
+                                           desc_imported.relocations[step].offset == step * 4 && word == desc_words[step]);
+            }
+            // Noncanonical ADRP/LDR/ADD immediates canonicalize to zero.
+            u32 noncanonical[] = {UINT32_C(0xb0000000), UINT32_C(0xf9401001), UINT32_C(0x91010000), desc_words[3]};
+            for (u32 step = 0; step < BUSTER_ARRAY_LENGTH(noncanonical); step += 1)
+            {
+                object_test_write_u32(desc_artifact.bytes, desc_target_data + step * 4, noncanonical[step]);
+            }
+            ObjectFile desc_canonical = object_read(arguments->arena, desc_artifact.bytes, desc_object.target);
+            bool canonical_valid = desc_canonical.error == OBJECT_ERROR_NONE && desc_canonical.relocation_count == 4;
+            BUSTER_TEST(arguments, canonical_valid);
+            if (canonical_valid)
+            {
+                BUSTER_TEST(arguments, memcmp(desc_canonical.sections[OBJECT_SECTION_TEXT].data.pointer, desc_words, sizeof(desc_words)) == 0);
+            }
+            // Any other register, width, shift or instruction is refused by name.
+            u32 bad_words[4][4] = {
+                {UINT32_C(0x90000001), UINT32_C(0x10000000), UINT32_C(0xd503201f), UINT32_C(0x9000001f)},
+                {UINT32_C(0xf9400000), UINT32_C(0xf9400021), UINT32_C(0xb9400001), UINT32_C(0xf940001f)},
+                {UINT32_C(0x91000021), UINT32_C(0x91400000), UINT32_C(0x11000000), UINT32_C(0x91000001)},
+                {UINT32_C(0xd63f0000), UINT32_C(0xd61f0020), UINT32_C(0xd63f03e0), UINT32_C(0xd503201f)},
+            };
+            for (u32 step = 0; step < BUSTER_ARRAY_LENGTH(bad_words); step += 1)
+            {
+                for (u32 reset = 0; reset < BUSTER_ARRAY_LENGTH(desc_words); reset += 1)
+                {
+                    object_test_write_u32(desc_artifact.bytes, desc_target_data + reset * 4, desc_words[reset]);
+                }
+                for (u32 bad = 0; bad < BUSTER_ARRAY_LENGTH(bad_words[step]); bad += 1)
+                {
+                    object_test_write_u32(desc_artifact.bytes, desc_target_data + step * 4, bad_words[step][bad]);
+                    ObjectFile refused = object_read(arguments->arena, desc_artifact.bytes, desc_object.target);
+                    BUSTER_TEST(arguments, refused.error == OBJECT_ERROR_UNSUPPORTED_TARGET &&
+                                               object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(refused.diagnostic), desc_names[step]));
+                }
+            }
+        }
+        BUSTER_TEST(arguments, object_write(arguments->arena, &desc_object, OBJECT_FORMAT_MACH_O64).error != OBJECT_ERROR_NONE);
+        // Byte-exact relaxation; the LDR/BLR scratch may be any of x1..x30.
+        for (u32 reg = 1; reg < 31; reg += 1)
+        {
+            u64 tprel = UINT64_C(0x12345678) + reg;
+            u32 patched[4] = {0};
+            BUSTER_TEST(arguments, object_aarch64_elf_tls_desc_relax(desc_kinds[0], UINT32_C(0x90000000), tprel, &patched[0]) &&
+                                       object_aarch64_elf_tls_desc_relax(desc_kinds[1], UINT32_C(0xf9400000) | reg, tprel, &patched[1]) &&
+                                       object_aarch64_elf_tls_desc_relax(desc_kinds[2], UINT32_C(0x91000000), tprel, &patched[2]) &&
+                                       object_aarch64_elf_tls_desc_relax(desc_kinds[3], UINT32_C(0xd63f0000) | (reg << 5), tprel, &patched[3]));
+            BUSTER_TEST(arguments, patched[0] == (UINT32_C(0xd2a00000) | ((u32)(tprel >> 16) << 5)) &&
+                                       patched[1] == (UINT32_C(0xf2800000) | ((u32)(tprel & 0xffff) << 5)) &&
+                                       patched[2] == UINT32_C(0xd503201f) && patched[3] == UINT32_C(0xd503201f));
+        }
+        u32 unchanged = UINT32_C(0xdeadbeef);
+        BUSTER_TEST(arguments, !object_aarch64_elf_tls_desc_relax(desc_kinds[0], UINT32_C(0x90000000), UINT64_C(0x100000000), &unchanged) &&
+                                   !object_aarch64_elf_tls_desc_relax(desc_kinds[1], UINT32_C(0xf9400401), 0, &unchanged) &&
+                                   !object_aarch64_elf_tls_desc_relax(OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21, UINT32_C(0x90000000), 0, &unchanged) &&
+                                   !object_aarch64_elf_tls_ie_relax(desc_kinds[0], UINT32_C(0x90000000), 0, &unchanged) &&
                                    unchanged == UINT32_C(0xdeadbeef));
     }
     u32 page_patched = 0;

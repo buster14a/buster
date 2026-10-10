@@ -46,12 +46,19 @@ jobs:
       - name: Machine specifications
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
-          requested-runner: ubuntu-24.04
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the trusted lifecycle controller
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Compile the trusted native controller
         run: clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/lifecycle.c -lm -o "$RUNNER_TEMP/9700x-lifecycle"
       - name: Reconcile terminal checks and record separate Actions costs
@@ -63,11 +70,19 @@ jobs:
         run: |
           set -o pipefail
           "$RUNNER_TEMP/9700x-lifecycle" recover "$LC_RUN_ID" "$LC_ATTEMPT" | tee "$RUNNER_TEMP/9700x-lifecycle.jsonl"
+      - name: Retain safe machine records
+        if: ${{ always() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}
       - name: Retain bounded lifecycle observations
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: 9700x-lifecycle-${{ github.event.workflow_run.id || inputs.run_id }}-${{ github.event.workflow_run.run_attempt || inputs.run_attempt }}
-          path: ${{ runner.temp }}/9700x-lifecycle.jsonl
+          path: |
+            ${{ runner.temp }}/9700x-lifecycle.jsonl
+            ${{ runner.temp }}/machine-specifications/
           if-no-files-found: warn
           retention-days: 90

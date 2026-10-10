@@ -3,6 +3,7 @@
 import ast
 import contextlib
 import io
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -242,6 +243,10 @@ class JobEnvironmentWorkflowTests(unittest.TestCase):
                 self.assertEqual(body.count("        id: checkout\n"), 1)
                 self.assertRegex(body, r"      - uses: actions/checkout@[^\n]+\n        id: checkout\n"
                                       r"(?:        [^\n]*\n|          [^\n]*\n)*"
+                                      r"      - name: Record actual checkout identity\n"
+                                      r"        uses: buster14a/buster/\.github/actions/machine-specifications@[0-9a-f]{40}\n"
+                                      r"        with:\n          mode: source\n          source-directory: \.\n"
+                                      r"          source-repository: \$\{\{ github.repository \}\}\n"
                                       r"      - name: Retain actual job environment\n")
                 guard = re.search(r"^        if: (.+)$", step, re.M).group(1)
                 self.assertEqual(guard, "${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}")
@@ -289,6 +294,63 @@ class JobEnvironmentWorkflowTests(unittest.TestCase):
         self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse, no_code_plan]", complete)
         self.assertIn("${{ runner.temp }}/desktop-partitions.json", complete)
         self.assertIn("${{ runner.temp }}/main-ci-reuse-finish.json", complete)
+
+
+
+class MachineSpecificationsWorkflowTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        global PINS, PIN
+        spec = importlib.util.spec_from_file_location("machine_pins", ROOT / "tools/check_action_pins.py")
+        PINS = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(PINS)
+        PIN = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
+
+    def test_machine_reporting_contract(self):
+        startup = ("      - name: Machine specifications\n        uses: " + PINS.MACHINE_REPORTER_REFERENCE +
+                   "\n        with:\n          requested-runner: >-\n            ubuntu-latest\n")
+        good = "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n" + startup + "      - run: exit 1\n"
+        self.assertEqual(PINS.check_machine_reporting(good, "case.yml"), [])
+        for bad in (
+            good.replace(startup, ""),
+            good.replace("        uses: " + PINS.MACHINE_REPORTER_REFERENCE, "        run: echo Machine specifications"),
+            good.replace("        with:", "        if: success()\n        with:", 1),
+            good.replace("        with:", "        continue-on-error: true\n        with:", 1),
+            good.replace("        with:", "        env:\n          PATH: untrusted\n        with:", 1),
+            good.replace("    steps:\n", "    steps:\n      - run: expensive-build\n", 1),
+            good.replace(PINS.MACHINE_REPORTER_REFERENCE, PINS.MACHINE_REPORTER_REFERENCE[:-40] + "a" * 40),
+            good + "  future:\n    runs-on: windows-2025\n    steps:\n      - run: echo missing\n",
+            "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n" +
+            "          echo 'Machine specifications'\n          uses: " + PINS.MACHINE_REPORTER_REFERENCE + "\n",
+        ):
+            with self.subTest(bad=bad):
+                self.assertTrue(PINS.check_machine_reporting(bad, "case.yml"))
+        caller = "jobs:\n  caller:\n    uses: ./.github/workflows/throughput-real-source.yml\n"
+        self.assertEqual(PINS.check_machine_reporting(caller, "caller.yml"), [])
+        self.assertTrue(PINS.check_machine_reporting(caller + "    steps:\n", "caller.yml"))
+        self.assertEqual(PINS.check_machine_reporting(good.replace("    runs-on:", "    if: false\n    runs-on:"),
+                                                     "skipped.yml"), [])
+
+    def test_every_repository_job_and_reporter_implementation(self):
+        self.assertEqual(PINS.check_machine_reporter_implementation(ROOT), [])
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            with self.subTest(path=path):
+                self.assertEqual(PINS.check_machine_reporting(path.read_text(), path), [])
+
+    def test_checkout_reporting_cannot_guess_event_sha(self):
+        startup = ("      - name: Machine specifications\n        uses: " + PINS.MACHINE_REPORTER_REFERENCE +
+                   "\n        with:\n          requested-runner: >-\n            ubuntu-latest\n")
+        checkout = "      - uses: " + PIN + "\n        if: condition\n        with:\n          path: candidate\n"
+        source = ("      - name: Record actual checkout identity\n        if: condition\n        uses: " +
+                  PINS.MACHINE_REPORTER_REFERENCE + "\n        with:\n          mode: source\n" +
+                  "          source-directory: candidate\n")
+        good = "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n" + startup + checkout + source
+        self.assertEqual(PINS.check_machine_reporting(good, "case.yml"), [])
+        for bad in (good.replace(source, ""), good.replace("mode: source", "mode: startup"),
+                    good.replace("source-directory: candidate", "source-directory: trusted"),
+                    good.replace("        if: condition\n        uses: " + PINS.MACHINE_REPORTER_REFERENCE,
+                                 "        uses: " + PINS.MACHINE_REPORTER_REFERENCE)):
+            self.assertTrue(PINS.check_machine_reporting(bad, "case.yml"))
 
 
 if __name__ == "__main__":

@@ -1624,6 +1624,7 @@ typedef struct CStringLiteralMemo CStringLiteralMemo;
 // exists. Counts of actual operations, not timings; see
 // docs/agents/frontend/layout.md for each field's exact meaning.
 typedef struct CMemberLookup CMemberLookup;
+typedef struct CObjectSizeFacts CObjectSizeFacts;
 typedef struct CTypeLayoutStatistics CTypeLayoutStatistics;
 struct CTypeLayoutStatistics
 {
@@ -1711,6 +1712,9 @@ struct CParseResult
     // by-value operand copy keeps counting into the same record. Null for
     // hand-built results, which then count nothing.
     CTypeLayoutStatistics* type_layout_statistics;
+    // Outside the checkpointed body for the same reason (CObjectSizeFacts in
+    // c_internal.h). Null for hand-built results, which record nothing.
+    CObjectSizeFacts* object_size_facts;
     // Name index of wide aggregates for c_parse_member_type (CMemberLookup in
     // c_internal.h). Outside the checkpointed body too: entries are validated
     // against the live rows on every use, so a rollback or a by-value copy may

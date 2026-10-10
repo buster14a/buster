@@ -4288,6 +4288,20 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__sync_synchronize"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__sync_fetch_and_nand"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__sync_nand_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_add"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_sub"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_or"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_and"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_fetch_and_xor"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_add_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_sub_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_or_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_and_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_xor_and_fetch"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_bool_compare_and_swap"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_val_compare_and_swap"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_lock_test_and_set"), C_SYMBOL_BUILTIN_ATOMIC },
+    { S8_INITIALIZER("__sync_lock_release"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__atomic_load"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__atomic_store"), C_SYMBOL_BUILTIN_ATOMIC },
     { S8_INITIALIZER("__atomic_exchange"), C_SYMBOL_BUILTIN_ATOMIC },
@@ -4345,6 +4359,27 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_powil"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_roundf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_round"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_truncf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_trunc"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_truncl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_rintf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_rint"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_rintl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_nearbyintf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_nearbyint"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_nearbyintl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fmaf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fma"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_fmal"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_ldexpf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_ldexp"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_ldexpl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_lroundf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_lround"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_lroundl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_llroundf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_llround"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_llroundl"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_inf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_inff"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_nanf"), C_SYMBOL_BUILTIN_MATH },
@@ -4700,11 +4735,11 @@ bool c_semantic_integer_builtin_fold(CSymbolBuiltin builtin, u32 width, u64 bits
         case C_SYMBOL_BUILTIN_PARITY: answer = population & 1; break;
         case C_SYMBOL_BUILTIN_ABSOLUTE_VALUE:
         {
-            // The most negative value has no positive counterpart: leave it
-            // unfolded rather than claim a constant for undefined behavior.
+            // The most negative value has no positive counterpart and wraps
+            // to itself under -fwrapv, as the (x ^ s) - s lowering and GCC's
+            // static-initializer fold both do.
             u64 sign = UINT64_C(1) << (width - 1);
             answer = bits & sign ? (0 - bits) & mask : bits;
-            known = answer != sign;
             break;
         }
         case C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS:
@@ -4731,12 +4766,58 @@ bool c_semantic_integer_builtin_fold(CSymbolBuiltin builtin, u32 width, u64 bits
     return known;
 }
 
-// The math builtins whose result is long double, by link name. A bare `l`
-// suffix test is wrong: ceil and huge_val end in `l` but return double.
+// The libm-backed rounding, fused-multiply-add and scaling builtins, one row
+// per link name. `argument_kind` is the floating type of every floating
+// parameter, `result_kind` the call's type, and `integer_second` marks the
+// `int` second parameter of ldexp. The call lowers to a runtime libm import.
+BUSTER_GLOBAL_LOCAL CMathLibmShape const c_math_libm_shapes[] = {
+    {S8_INITIALIZER("truncf"), 1, C_TYPE_FLOAT, C_TYPE_FLOAT, false},
+    {S8_INITIALIZER("trunc"), 1, C_TYPE_DOUBLE, C_TYPE_DOUBLE, false},
+    {S8_INITIALIZER("truncl"), 1, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_DOUBLE, false},
+    {S8_INITIALIZER("rintf"), 1, C_TYPE_FLOAT, C_TYPE_FLOAT, false},
+    {S8_INITIALIZER("rint"), 1, C_TYPE_DOUBLE, C_TYPE_DOUBLE, false},
+    {S8_INITIALIZER("rintl"), 1, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_DOUBLE, false},
+    {S8_INITIALIZER("nearbyintf"), 1, C_TYPE_FLOAT, C_TYPE_FLOAT, false},
+    {S8_INITIALIZER("nearbyint"), 1, C_TYPE_DOUBLE, C_TYPE_DOUBLE, false},
+    {S8_INITIALIZER("nearbyintl"), 1, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_DOUBLE, false},
+    {S8_INITIALIZER("fmaf"), 3, C_TYPE_FLOAT, C_TYPE_FLOAT, false},
+    {S8_INITIALIZER("fma"), 3, C_TYPE_DOUBLE, C_TYPE_DOUBLE, false},
+    {S8_INITIALIZER("fmal"), 3, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_DOUBLE, false},
+    {S8_INITIALIZER("ldexpf"), 2, C_TYPE_FLOAT, C_TYPE_FLOAT, true},
+    {S8_INITIALIZER("ldexp"), 2, C_TYPE_DOUBLE, C_TYPE_DOUBLE, true},
+    {S8_INITIALIZER("ldexpl"), 2, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_DOUBLE, true},
+    {S8_INITIALIZER("lroundf"), 1, C_TYPE_FLOAT, C_TYPE_LONG, false},
+    {S8_INITIALIZER("lround"), 1, C_TYPE_DOUBLE, C_TYPE_LONG, false},
+    {S8_INITIALIZER("lroundl"), 1, C_TYPE_LONG_DOUBLE, C_TYPE_LONG, false},
+    {S8_INITIALIZER("llroundf"), 1, C_TYPE_FLOAT, C_TYPE_LONG_LONG, false},
+    {S8_INITIALIZER("llround"), 1, C_TYPE_DOUBLE, C_TYPE_LONG_LONG, false},
+    {S8_INITIALIZER("llroundl"), 1, C_TYPE_LONG_DOUBLE, C_TYPE_LONG_LONG, false},
+};
+
+// The libm shape of a math builtin named by its link name or its
+// `__builtin_` spelling; `arity` is zero when it is not one of those.
+CMathLibmShape c_semantic_math_libm_shape(String8 name)
+{
+    String8 link_name = string_starts_with_sequence(name, S8("__builtin_")) ? string_slice(name, 10, name.length) : name;
+    CMathLibmShape result = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_math_libm_shapes) && !result.arity; index += 1)
+    {
+        if (string_equal(link_name, c_math_libm_shapes[index].link_name))
+        {
+            result = c_math_libm_shapes[index];
+        }
+    }
+    return result;
+}
+
+// The math builtins whose floating operand is long double, by link name. A
+// bare `l` suffix test is wrong: ceil and huge_val end in `l` but return double.
 bool c_semantic_math_link_is_long_double(String8 link_name)
 {
+    CMathLibmShape libm = c_semantic_math_libm_shape(link_name);
     return string_equal(link_name, S8("fabsl")) || string_equal(link_name, S8("fmaxl")) || string_equal(link_name, S8("fminl")) ||
-           string_equal(link_name, S8("powil")) || string_equal(link_name, S8("copysignl")) || string_equal(link_name, S8("signbitl"));
+           string_equal(link_name, S8("powil")) || string_equal(link_name, S8("copysignl")) || string_equal(link_name, S8("signbitl")) ||
+           (libm.arity && libm.argument_kind == C_TYPE_LONG_DOUBLE);
 }
 
 // One probe entry of the intern table. The identity of a name is its first
@@ -8135,6 +8216,10 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
                  ((builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC) &&
                   c_semantic_vendor_builtin_supported((Target){.cpu_arch = cpu_arch}, name)) ||
                  (builtin == C_SYMBOL_BUILTIN_COMPLEX && (native || cpu_arch == CPU_ARCH_WASM64)) ||
+                 // The libm rounding/fma/ldexp calls are floating imports: eBPF has
+                 // no floating point, and Wasm64 lowers no long double (#1394).
+                 (builtin == C_SYMBOL_BUILTIN_MATH && c_semantic_math_libm_shape(name).arity &&
+                  (native || (cpu_arch == CPU_ARCH_WASM64 && c_semantic_math_libm_shape(name).argument_kind != C_TYPE_LONG_DOUBLE))) ||
                  (builtin == C_SYMBOL_BUILTIN_RETURN_ADDRESS && native && os != OPERATING_SYSTEM_WINDOWS);
     }
 
@@ -12810,7 +12895,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
             C_DEFINE_TYPE_MACRO("__pie__", level);
         }
     }
-    // __GCC_HAVE_SYNC_COMPARE_AND_SWAP_* has no matching __sync compare-and-swap builtins,
+    // __GCC_HAVE_SYNC_COMPARE_AND_SWAP_* is not defined: the generic __sync compare-and-swap
+    // builtins exist but their sized `_1`..`_16` forms do not (#1394),
     // __SIZEOF_FLOAT128__ is unmodeled, __SEG_FS/__SEG_GS have no keywords,
     // and __PRAGMA_REDEFINE_EXTNAME is an unimplemented pragma.
     C_DEFINE_TYPE_MACRO("__SIZE_TYPE__", unsigned_pointer_type);

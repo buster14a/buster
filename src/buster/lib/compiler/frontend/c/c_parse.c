@@ -2015,6 +2015,10 @@ BUSTER_C_SHARED CRecordLayoutRule c_record_layout_rule(Target target)
                                                             : C_RECORD_LAYOUT_ITANIUM;
 }
 
+// The object-size limit of a 32-bit target, the narrowest target_data_layout
+// gives; c_parse_type_layout_core compares against it before asking the target.
+#define C_PARSE_OBJECT_SIZE_LIMIT_FLOOR UINT32_MAX
+
 // Object byte sizes must fit the target size_t and the shared u64 bit-size
 // representation. The 61-bit cap also matches Clang's constant-array limit
 // (ConstantArrayType::getMaxSizeBits); it is not a PTRDIFF_MAX rule.
@@ -3418,8 +3422,10 @@ BUSTER_GLOBAL_LOCAL bool c_parse_layout_typed_array_bound(CParseLayoutContext* c
     {
         constant = c_parse_layout_typed_constant(context, bound.token_start, bound.token_start + bound.token_count);
     }
-    *count_out = constant.magnitude;
-    return constant.valid && !constant.is_negative && !constant.magnitude_high;
+    // A count past u64 saturates: its size is zero for a zero-size element
+    // and above every object-size limit otherwise.
+    *count_out = constant.magnitude_high ? UINT64_MAX : constant.magnitude;
+    return constant.valid && !constant.is_negative;
 }
 
 // The per-type attempts of one solve, in the order c_parse_layout_next hands
@@ -4508,7 +4514,17 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
 BUSTER_C_INTERNAL bool c_parse_type_layout_core(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                              CTypeId requested, u64* size_out, u32* alignment_out, u32 offset_member, u64* offset_out)
 {
-    return c_parse_type_layout_solve(machine, arena, preprocess, result, requested, size_out, alignment_out, offset_member, offset_out, 0, true);
+    bool answered = c_parse_type_layout_solve(machine, arena, preprocess, result, requested, size_out, alignment_out, offset_member, offset_out, 0, true);
+    // Count answers past the target object-size limit for the static-assertion
+    // check (CObjectSizeFacts). target_data_layout gives pointers of 32 or 64
+    // bits, so no limit is below C_PARSE_OBJECT_SIZE_LIMIT_FLOOR and an
+    // ordinary answer costs one comparison.
+    if (answered && *size_out > C_PARSE_OBJECT_SIZE_LIMIT_FLOOR && result->object_size_facts &&
+        *size_out > c_array_object_size_limit(target_data_layout(preprocess.target).pointer.bit_width))
+    {
+        result->object_size_facts->oversized_layouts += 1;
+    }
+    return answered;
 }
 
 BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
@@ -6396,7 +6412,8 @@ BUSTER_C_SHARED CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPrep
                 if (builtin == C_SYMBOL_BUILTIN_MATH || builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET ||
                     c_semantic_integer_count_parameter_kind(builtin, name) != C_TYPE_INVALID)
                 {
-                    CTypeKind kind = builtin != C_SYMBOL_BUILTIN_MATH || string_starts_with_sequence(name, S8("__builtin_signbit")) || string_starts_with_sequence(name, S8("__builtin_is")) || string_equal(name, S8("__builtin_fpclassify"))
+                    CMathLibmShape libm = builtin == C_SYMBOL_BUILTIN_MATH ? c_semantic_math_libm_shape(name) : (CMathLibmShape){0};
+                    CTypeKind kind = libm.arity ? libm.result_kind : builtin != C_SYMBOL_BUILTIN_MATH || string_starts_with_sequence(name, S8("__builtin_signbit")) || string_starts_with_sequence(name, S8("__builtin_is")) || string_equal(name, S8("__builtin_fpclassify"))
                                          ? C_TYPE_INT : name.length && name.pointer[name.length - 1] == 'f' && !string_equal(name, S8("__builtin_inf"))
                                          ? C_TYPE_FLOAT : name.length && c_semantic_math_link_is_long_double(string_starts_with_sequence(name, S8("__builtin_")) ? string_slice(name, 10, name.length) : name)
                                          ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
@@ -9317,6 +9334,12 @@ BUSTER_C_INTERNAL String8 c_parse_constant_expression_syntax_error(CTypeParseMac
     return message;
 }
 
+// Oversized layout answers so far; an assertion compares it around its fold.
+BUSTER_C_INTERNAL u64 c_parse_oversized_layout_count(CParseResult* result)
+{
+    return result->object_size_facts ? result->object_size_facts->oversized_layouts : 0;
+}
+
 BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                      CDeclaration declaration, CScopeId scope)
 {
@@ -9360,6 +9383,7 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
     if (!syntax_error.length && !deferred)
     {
         CToken first = preprocess.tokens[declaration.token_start];
+        u64 oversized_before = c_parse_oversized_layout_count(result);
         bool expression_is_integer = true;
         u32 expression_start = 0;
         u32 expression_end = 0;
@@ -9403,15 +9427,21 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
         {
             c_parse_defer_static_assert(preprocess, result, declaration, scope);
         }
-        else if (!evaluated)
+        else if (!evaluated || !value)
         {
-            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
-                               c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT));
-        }
-        else if (!value)
-        {
-            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
-                               c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_FAILED));
+            // An assertion that measured an oversized type folded a value from
+            // its saturated size; the size error stands for it. Any diagnostic
+            // gates the size validation that reports that error, so ask for it.
+            if (result->object_size_facts)
+            {
+                result->object_size_facts->validation_requested = true;
+            }
+            if (c_parse_oversized_layout_count(result) == oversized_before)
+            {
+                CDiagnosticKind kind = evaluated ? C_DIAGNOSTIC_STATIC_ASSERT_FAILED : C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT;
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, first), kind,
+                                   c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, kind));
+            }
         }
     }
     return;
@@ -21459,10 +21489,10 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
         // CPython's configure probes it for HAVE_BUILTIN_ATOMIC and most Linux
         // userland reaches for it in preference to the C11 one.
         predefined_function_name |= string_starts_with_sequence(spelling, S8("__atomic_"));
-        // Admit only the implemented legacy full barrier and NAND spellings.
-        predefined_function_name |= string_equal(spelling, S8("__sync_synchronize")) ||
-                                    string_equal(spelling, S8("__sync_fetch_and_nand")) ||
-                                    string_equal(spelling, S8("__sync_nand_and_fetch"));
+        // Admit only the implemented legacy `__sync_*` spellings: the full
+        // barrier, the read-modify-write pairs, compare-and-swap and the lock
+        // pair.  Sized `_1`..`_16` forms are not implemented.
+        predefined_function_name |= string_equal(spelling, S8("__sync_synchronize")) || c_ir_atomic_builtin_spelling(spelling).sequential;
         // GNU's complex part operators are spelled as identifiers but name no
         // entity; the expression walker consumes them as prefix operators.
         predefined_function_name |= string_equal(spelling, S8("__real__")) || string_equal(spelling, S8("__real")) ||
@@ -31786,18 +31816,22 @@ BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* m
         u32 start = 0;
         u32 end = 0;
         u64 mark = machine->scratch_arena->position;
+        u64 oversized_before = c_parse_oversized_layout_count(result);
         CParseConstant value = {.type = C_TYPE_ID_INVALID};
         if (c_parse_static_assert_expression_range(preprocess, declaration, &start, &end))
         {
             value = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, assertion.scope, start, end);
         }
         arena_set_position(machine->scratch_arena, mark);
-        if (!value.valid)
+        // This assertion measured an oversized type; the size validation
+        // around this pass reports it (see c_parse_static_assert_check).
+        bool size_reported = c_parse_oversized_layout_count(result) != oversized_before;
+        if (!size_reported && !value.valid)
         {
             c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, assertion.location), C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
                                c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT));
         }
-        else if (value.is_float || !c_parse_constant_truth(value))
+        else if (!size_reported && (value.is_float || !c_parse_constant_truth(value)))
         {
             c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, assertion.location), C_DIAGNOSTIC_STATIC_ASSERT_FAILED,
                                c_parse_static_assert_diagnostic_message(arena, preprocess, declaration, C_DIAGNOSTIC_STATIC_ASSERT_FAILED));
@@ -32729,9 +32763,19 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
                             (string_equal(name, S8("__builtin_fabs")) || string_equal(name, S8("__builtin_fabsf")));
         u32 minimum = 0;
         u32 maximum = UINT32_MAX;
+        u32 libm_arity = builtin == C_SYMBOL_BUILTIN_MATH ? c_semantic_math_libm_shape(name).arity : 0;
         switch (builtin)
         {
-        case C_SYMBOL_BUILTIN_ATOMIC: minimum = maximum = c_semantic_atomic_builtin_arity(c_ir_atomic_builtin_spelling(name)); break;
+        case C_SYMBOL_BUILTIN_ATOMIC:
+        {
+            // GNU documents trailing "protected variable" arguments for the
+            // legacy `__sync_*` family only: they are parsed and typed but
+            // never evaluated, as GCC does.
+            CIrAtomicBuiltinSpelling atomic_arity = c_ir_atomic_builtin_spelling(name);
+            minimum = c_semantic_atomic_builtin_arity(atomic_arity);
+            maximum = atomic_arity.sequential ? UINT32_MAX : minimum;
+        }
+        break;
         case C_SYMBOL_BUILTIN_EXPECT: minimum = 2; break;
         case C_SYMBOL_BUILTIN_MEMORY: minimum = maximum = c_semantic_memory_builtin_arity(name); break;
         case C_SYMBOL_BUILTIN_OVERFLOW: minimum = maximum = 3; break;
@@ -32751,8 +32795,8 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         case C_SYMBOL_BUILTIN_PARITY:
         case C_SYMBOL_BUILTIN_ABSOLUTE_VALUE:
         case C_SYMBOL_BUILTIN_BYTE_SWAP: minimum = maximum = 1; break;
-        case C_SYMBOL_BUILTIN_MATH: minimum = string_starts_with_sequence(name, S8("__builtin_copysign")) ? 2 : 0;
-                                    maximum = string_starts_with_sequence(name, S8("__builtin_copysign")) ? 2 : UINT32_MAX; break;
+        case C_SYMBOL_BUILTIN_MATH: minimum = libm_arity ? libm_arity : string_starts_with_sequence(name, S8("__builtin_copysign")) ? 2 : 0;
+                                    maximum = libm_arity ? libm_arity : string_starts_with_sequence(name, S8("__builtin_copysign")) ? 2 : UINT32_MAX; break;
         case C_SYMBOL_BUILTIN_DEBUGTRAP:
         case C_SYMBOL_BUILTIN_SPIN_PAUSE:
         case C_SYMBOL_BUILTIN_UNREACHABLE: maximum = 0; break;
@@ -34904,6 +34948,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     result.string_literals = c_string_literal_memo_create(arena, preprocess.tokens);
     result.type_layout_statistics = arena_allocate(arena, CTypeLayoutStatistics, 1);
     *result.type_layout_statistics = (CTypeLayoutStatistics){0};
+    result.object_size_facts = arena_allocate(arena, CObjectSizeFacts, 1);
+    *result.object_size_facts = (CObjectSizeFacts){0};
     result.member_lookup = arena_allocate(arena, CMemberLookup, 1);
     *result.member_lookup = (CMemberLookup){0};
 
@@ -35573,6 +35619,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     };
     c_parse_validate_unattached_cleanup_attributes(&result, preprocess);
     c_parse_validate_bfloat16_builtin_calls(&machine, arena, &result, preprocess);
+    bool object_sizes_validated = false;
     if (validate_lowering_constraints)
     {
         c_parse_index_scope_children(&result, arena);
@@ -35582,7 +35629,17 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         c_parse_validate_integer_transform_calls(&machine, &result, preprocess);
         c_parse_validate_vendor_builtin_calls(&machine, &result, preprocess);
         if (!result.diagnostic_count)
+        {
             c_parse_validate_lowering_constraints(&machine, arena, &result, preprocess);
+            object_sizes_validated = true;
+        }
+    }
+    // A failing static assertion gated the lowering constraints, which hold
+    // the size validation it asked for (CObjectSizeFacts): one pass here
+    // reports every oversized type, before or after it, once.
+    if (!object_sizes_validated && result.object_size_facts->validation_requested)
+    {
+        c_parse_validate_array_object_sizes(&machine, &result, preprocess, 0);
     }
     // Preserve declaration-point width reports when another early diagnostic
     // gates the ordinary member-constraint pass. This publishes only retained

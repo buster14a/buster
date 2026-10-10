@@ -1218,8 +1218,9 @@ reference model (see the position-independent code bullets in
 [machine.md](machine.md)). On AArch64 ELF the model makes `-fPIC` objects
 acceptable to `ld.lld -shared -z text`; Buster's own `-shared` and `-pie`
 writers still exist only for x86-64 Linux. Thread-local access under AArch64
-ELF PIC is refused by a named code-generation diagnostic (TLSDESC is not
-implemented) and publishes no output. Cancellation, preprocessing,
+ELF PIC is refused by a named code-generation diagnostic (emitting TLSDESC is
+not implemented; foreign TLSDESC objects are relaxed at link time, see the
+AArch64 TLS paragraph below) and publishes no output. Cancellation, preprocessing,
 syntax-only and assembly/prebuilt-only input routes retain their behavior.
 Mach-O and COFF keep their existing target models; Wasm/eBPF compatibility
 behavior is unchanged. LLVM-bitcode and direct backend model requests remain
@@ -1351,21 +1352,43 @@ the ELF planner identifies a refused fixed-address relocation; generic
 relocation failures, including malformed TLS sites, do not imply that cause.
 
 AArch64 Linux writes only fixed-address executables (`-shared` and `-pie` are
-refused), so its thread-local access is always resolved at link time. Foreign
-initial-exec objects (`R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21` 541 and
-`R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC` 542, issue 2582) are read and the
-adjacent `adrp xN` / `ldr xN, [xN]` pair against a defined thread-local symbol
-becomes `movz xN, #tprel[31:16], lsl #16` / `movk xN, #tprel[15:0]` with the
-same variant-I offset local-exec uses (`object_aarch64_elf_tls_ie_relax`,
-`link_aarch64_elf_tprel_offset`). The reader accepts RELA entries whose words
-are exactly those instructions (the immediates are canonicalized to zero); the
-linker additionally requires the LDR to follow its ADRP directly with one
-register throughout, a 32-bit offset, and no half left unpaired, and fails the
-link otherwise. TLS descriptors (`R_AARCH64_TLSDESC_*`) and TLS owned by a
-loader or shared library are still refused by name. The tests
-(the "initial-exec TLS (#2582)" block of `object_tests` and `link_test_aarch64_tls_initial_exec_relaxation`)
-check encodings only; executing a Clang-built IE object is left to the hosted
-AArch64 leg.
+refused), so its thread-local access is always resolved at link time, and
+foreign initial-exec and TLS descriptor objects are relaxed to local-exec as
+GNU ld and lld do for static executables (issue 2582). Initial-exec
+(`R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21` 541 and
+`R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC` 542) `adrp xN` / `ldr xN, [xN]`
+becomes `movz xN, #tprel[31:16], lsl #16` / `movk xN, #tprel[15:0]`. The
+general-dynamic descriptor sequence (`R_AARCH64_TLSDESC_ADR_PAGE21` 562,
+`_LD64_LO12` 563, `_ADD_LO12` 564 and `_CALL` 569) `adrp x0` / `ldr Xt, [x0]`
+/ `add x0, x0` / `blr Xt`, which Clang and GCC emit as one adjacent run,
+becomes `movz x0` / `movk x0` with the same halves, then two `nop`s. Both use
+the variant-I offset local-exec uses (`link_aarch64_elf_tprel_offset`; the
+words come from `object_aarch64_elf_tls_ie_relax` and
+`object_aarch64_elf_tls_desc_relax`). The reader accepts RELA entries whose
+words are exactly those instructions (the immediates are canonicalized to
+zero, x0 where the ABI fixes it, a scratch `Xt` of x1..x30) and refuses any
+other word by relocation name. `link_aarch64_tls_relax` sorts the sites by
+section and offset and consumes one whole sequence at a time: each step must
+sit four bytes after the previous one, in order, with one symbol and addend,
+one register for an IE pair and one scratch for the descriptor's LDR and BLR,
+against a defined thread-local symbol with a 32-bit offset. A missing,
+repeated, overlapping, reordered or split step fails the link before the
+image is written, as `link.relocation` naming the symbol and the relocation
+that could not start or complete its sequence. Non-adjacent schedules are
+refused rather than relaxed; Clang 18 at `-O2` already separates an IE ADRP
+from its LDR, so such an initial-exec object fails to link today. The other descriptor forms (560/561 and the
+565-568 `OFF_G1`/`OFF_G0_NC`/`LDR`/`ADD` sequence), the dynamic
+`R_AARCH64_TLSDESC` 1031, and TLS owned by a loader or shared library are
+still refused by name. The tests (the "initial-exec TLS (#2582)" and "TLS
+descriptors (#2582)" blocks of `object_tests`,
+`link_test_aarch64_tls_initial_exec_relaxation` and
+`link_test_aarch64_tls_descriptor_relaxation`) check encodings only.
+`compiler_driver_test_aarch64_elf_tlsdesc` runs on Linux AArch64 hosts: the
+configured host compiler builds `fixtures/aarch64_elf_tlsdesc.c` with `-fPIC
+-ftls-model=global-dynamic` at `-O0` and `-O2`, Buster links it with a
+Buster-compiled main defining the other thread-local, and the test checks
+every descriptor appears relaxed and the image prints the same values as a
+host-linked control.
 
 ## Pass-through options
 
