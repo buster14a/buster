@@ -22844,36 +22844,6 @@ BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range_core(CTypeParseMachin
                                                                    CScopeId scope, CTypeId type, u32 start, u32 count, u32* alignment_out,
                                                                    bool* request_out);
 
-// Whether [start, end) defines an enum anywhere, directly or inside a record
-// body, outside a statement expression (its block owns its enumerators). A
-// declaration whose initializer cannot publish such a definition at its own
-// source point -- a pre-C23 `for` declaration (C17 6.8.5p3), C23 `auto` and
-// `constexpr` -- must refuse it: its names would otherwise read an outer
-// enumerator of the same spelling (#3252). `token_out` is the enum keyword.
-BUSTER_GLOBAL_LOCAL bool c_parse_range_defines_enumerator(CPreprocessResult preprocess, u32 start, u32 end, u32* token_out)
-{
-    bool found = false;
-    for (u32 index = start; !found && index < end; index += 1)
-    {
-        u32 body_start = 0;
-        u32 body_end = 0;
-        u32 group_end = 0;
-        u32 open = 0;
-        u32 close = 0;
-        if (c_parse_statement_expression_at(preprocess, index, end, &body_start, &body_end, &group_end))
-        {
-            index = group_end;
-        }
-        else if (preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[index], C_SYMBOL_WELL_KNOWN_ENUM) &&
-                 c_parse_type_definition_at(preprocess, index, end, &open, &close))
-        {
-            *token_out = index;
-            found = true;
-        }
-    }
-    return found;
-}
-
 BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess,
                                                     CScopeId scope, u32 declaration_index, u32 start, u32 end, bool is_for_initializer)
 {
@@ -22972,20 +22942,10 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             return false;
         }
         u32 diagnostic_checkpoint = result->diagnostic_count;
-        // C23 auto does not define the types named in its initializer, so
-        // an enumerator defined there is refused (GCC rejects it)
-        // rather than bound to an outer name (#3252).
-        u32 auto_enum_token = 0;
-        if (auto_info.is_c23_auto &&
-            c_parse_range_defines_enumerator(preprocess, auto_info.initializer_start, auto_info.initializer_end, &auto_enum_token))
-        {
-            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_enum_token]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                               S8("a C23 auto initializer cannot define an enumerator"));
-        }
-        // C23 auto does not define the types named in its initializer
-        // (its constraint is a maintainer decision, #1615), so it passes no
-        // machine and its initializer binds as before.
-        c_parse_bind_auto_initializer_identifiers(auto_info.is_c23_auto ? 0 : machine, declaration_index, arena, result, preprocess, scope,
+        // A type its initializer defines is declared here, so an enumerator
+        // it names is in scope for the rest of the block, as Clang does for
+        // C23 auto and GNU __auto_type alike (#3252).
+        c_parse_bind_auto_initializer_identifiers(machine, declaration_index, arena, result, preprocess, scope,
                                                   auto_info.initializer_start, auto_info.initializer_end);
         CTypeId inferred = C_TYPE_ID_INVALID;
         if (!c_parse_auto_initializer_type(machine, arena, preprocess, result, scope, auto_info.initializer_start, auto_info.initializer_end, &inferred))
@@ -23172,20 +23132,6 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 suffix_end = suffix_index;
                 break;
             }
-        }
-        // A pre-C23 `for` declaration (C17 6.8.5p3, DR277) cannot declare an
-        // enumerator anywhere in its declarator (an array bound included),
-        // and a C23 `constexpr` initializer does not publish its
-        // definitions yet, so its name would read an outer enumerator of the
-        // same spelling. Refuse the definition instead (#3252).
-        u32 initializer_enum_token = 0;
-        u32 enum_range_start = restricted_for_declaration ? segment_start : suffix_end + 1;
-        if ((restricted_for_declaration || (is_constexpr && suffix_end < segment_end)) && enum_range_start < segment_end &&
-            c_parse_range_defines_enumerator(preprocess, enum_range_start, segment_end, &initializer_enum_token))
-        {
-            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[initializer_enum_token]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                               restricted_for_declaration ? S8("pre-C23 for declaration may only declare automatic or register objects")
-                                                          : S8("a constexpr initializer cannot define an enumerator"));
         }
         // A GNU `aligned` attribute may follow the declarator rather than the
         // specifiers (`char scratch[64] __attribute__((aligned(8)));`). The
@@ -23568,25 +23514,6 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         c_parse_scope_add_entity(result, scope, entity, declared_symbol);
         c_parse_bind_array_bound_identifiers(machine, arena, result, preprocess, scope, declaration_index, segment_start, suffix_end, false);
         u32 initializer_start = suffix_end < segment_end ? suffix_end + 1 : segment_end;
-        if (is_constexpr)
-        {
-            CDeclaration local_declaration = {
-                .name = c_token_spelling(preprocess.spelling_base, name),
-                .location = c_preprocess_token_site(&preprocess, name),
-                .token_start = segment_start,
-                .token_count = segment_end - segment_start,
-                .type = type,
-                .scope = scope,
-                .kind = C_DECLARATION_OBJECT,
-                .is_definition = initializer_start < segment_end,
-                .is_constexpr = true,
-            };
-            c_parse_validate_constexpr_declaration(machine, arena, result, preprocess, &local_declaration);
-            if (initializer_start < segment_end)
-            {
-                c_parse_validate_constexpr_initializer(machine, arena, result, preprocess, scope, entity, initializer_start, segment_end);
-            }
-        }
         if (initializer_start < segment_end && type.value < result->type_count && result->types[type.value].kind == C_TYPE_ARRAY)
         {
             CType array_type = result->types[type.value];
@@ -23607,10 +23534,13 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 }
             }
         }
-        // C17 6.8.5p3 limits what a pre-C23 for declaration may declare, so
-        // its initializer's definitions stay with that separate path (#2392).
-        // C23 auto and constexpr initializers wait on a maintainer decision.
-        bool defines_types = !restricted_for_declaration && !is_auto_type && !is_constexpr;
+        // A type defined in the initializer declares its tags and enumerators
+        // here, in a pre-C23 `for` declaration and a C23 `constexpr` one too,
+        // as Clang does (#3252). C17 6.8.5p3 is read, like Clang, as limiting
+        // the declarators, not the initializer's type names; the specifiers'
+        // own definitions stay refused (#2392). An auto initializer defines
+        // its types on its own path.
+        bool defines_types = !is_auto_type;
         u32 attribute_resume = UINT32_MAX;
         for (u32 use_index = initializer_start; use_index < segment_end; use_index += 1)
         {
@@ -23708,6 +23638,27 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 !c_parse_identifier_is_bound(result, use_index))
             {
                 c_parse_bind_identifier(arena, result, preprocess, scope, use_index);
+            }
+        }
+        // Validated once the initializer's own type definitions are
+        // published, so a constant it reads binds them, not an outer name.
+        if (is_constexpr)
+        {
+            CDeclaration local_declaration = {
+                .name = c_token_spelling(preprocess.spelling_base, name),
+                .location = c_preprocess_token_site(&preprocess, name),
+                .token_start = segment_start,
+                .token_count = segment_end - segment_start,
+                .type = type,
+                .scope = scope,
+                .kind = C_DECLARATION_OBJECT,
+                .is_definition = initializer_start < segment_end,
+                .is_constexpr = true,
+            };
+            c_parse_validate_constexpr_declaration(machine, arena, result, preprocess, &local_declaration);
+            if (initializer_start < segment_end)
+            {
+                c_parse_validate_constexpr_initializer(machine, arena, result, preprocess, scope, entity, initializer_start, segment_end);
             }
         }
         segment_start = segment_end + 1;

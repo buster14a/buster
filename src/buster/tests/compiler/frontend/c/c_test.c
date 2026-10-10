@@ -10005,8 +10005,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_scope(UnitTestArgumen
         for (u32 form = 0; form < 2; form += 1)
         {
             // GNU __auto_type defines the types of its initializer at its own
-            // point; the C23 for declaration may too. C23 auto and constexpr, and
-            // the pre-C23 for declaration (C17 6.8.5p3), keep their own rules.
+            // point, and so do C23 auto and constexpr and the for declaration
+            // in every dialect (#3252).
             String8 gnu_sources[] = {
                 S8("int main(void){__auto_type z=sizeof(enum{K=4});return K-4+(int)z-(int)sizeof(int);}"),
                 S8("enum{A=100};int main(void){__auto_type n=sizeof(struct{enum{A=3}e;char c[A];});return (int)n-8+A-3;}"),
@@ -10038,32 +10038,34 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_scope(UnitTestArgumen
             }
             c_test_enum_scope_case(arguments, &result, S8("int main(void){for(int i=(int)sizeof(enum{K=4});i<1;i++);return K;}"), C_PREPROCESS_DIALECT_C23,
                                    targets[target_index], form != 0, false, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER);
-            // A definition these paths cannot publish at its own point is
-            // refused, never bound to an outer enumerator of the same name
-            // (#3252): GCC and Clang reject the pre-C23 for case, GCC the C23
-            // auto and constexpr ones; they are refused until published.
-            String8 refused_sources[] = {
-                S8("enum{A=100};int main(void){for(int i=(int)sizeof(struct{enum{A=3}e;char c[A];});i<0;i++);return 0;}"),
-                S8("int main(void){for(int i=(int)sizeof(enum{K=4});i<0;i++);return 0;}"),
-                // An array bound is part of the declarator too.
-                S8("int main(void){for(int a[sizeof(enum{K=4})],i=0;i<0;i++);return 0;}"),
+            // A pre-C23 `for` initializer and a C23 `auto` or `constexpr`
+            // initializer publish their definitions at their own point, as
+            // Clang does (#3252): the names bind the inner enumerator in the
+            // loop or the rest of the block, never an outer one, and end with
+            // the loop.
+            String8 for_sources[] = {
+                S8("enum{A=100};int main(void){int s=0;for(int i=(int)sizeof(struct{enum{A=3}e;char c[A];});i<9;i++)s+=A;return s-3;}"),
+                S8("int main(void){int s=0;for(int i=(int)sizeof(enum{K=4});i<6;i++)s+=K;return s-8;}"),
+                S8("int main(void){int s=0;for(int a[sizeof(enum{K=4})],i=0;i<1;i++)s=(int)sizeof a+K;return s-20;}"),
             };
-            for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(refused_sources); fixture += 1)
+            for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(for_sources); fixture += 1)
             {
-                c_test_enum_scope_case(arguments, &result, refused_sources[fixture], C_PREPROCESS_DIALECT_GNU17, targets[target_index], form != 0, false,
-                                       C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
-                c_test_enum_scope_case(arguments, &result, refused_sources[fixture], C_PREPROCESS_DIALECT_C17, targets[target_index], form != 0, false,
-                                       C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                c_test_enum_scope_case(arguments, &result, for_sources[fixture], C_PREPROCESS_DIALECT_GNU17, targets[target_index], form != 0, true,
+                                       C_DIAGNOSTIC_REDEFINITION);
+                c_test_enum_scope_case(arguments, &result, for_sources[fixture], C_PREPROCESS_DIALECT_C17, targets[target_index], form != 0, true,
+                                       C_DIAGNOSTIC_REDEFINITION);
             }
-            String8 c23_refused[] = {
-                S8("enum{A=100};int main(void){auto n=sizeof(struct{enum{A=3}e;char c[A];});return (int)n;}"),
-                S8("enum{A=100};int main(void){constexpr int n=sizeof(struct{enum{A=3}e;char c[A];});return n;}"),
-                S8("int main(void){constexpr int n=sizeof(enum{K=4});return n;}"),
+            c_test_enum_scope_case(arguments, &result, S8("int main(void){for(int i=(int)sizeof(enum{K=4});i<1;i++);return K;}"), C_PREPROCESS_DIALECT_GNU17,
+                                   targets[target_index], form != 0, false, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER);
+            String8 c23_initializer_sources[] = {
+                S8("enum{A=100};int main(void){auto n=sizeof(struct{enum{A=3}e;char c[A];});return (int)n-8+A-3;}"),
+                S8("enum{A=100};int main(void){constexpr int n=sizeof(struct{enum{A=3}e;char c[A];});return n-8+A-3;}"),
+                S8("int main(void){constexpr int n=sizeof(enum{K=4});return n-4+K-4;}"),
             };
-            for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(c23_refused); fixture += 1)
+            for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(c23_initializer_sources); fixture += 1)
             {
-                c_test_enum_scope_case(arguments, &result, c23_refused[fixture], C_PREPROCESS_DIALECT_C23, targets[target_index], form != 0, false,
-                                       C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                c_test_enum_scope_case(arguments, &result, c23_initializer_sources[fixture], C_PREPROCESS_DIALECT_C23, targets[target_index], form != 0,
+                                       true, C_DIAGNOSTIC_REDEFINITION);
             }
         }
     }

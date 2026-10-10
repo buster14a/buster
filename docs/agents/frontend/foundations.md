@@ -1773,20 +1773,20 @@ the definition; a definition with attributes between its keyword and its body
 (`enum __attribute__((packed)) { ... }`) is refused with an unsupported
 diagnostic in a block initializer, because the expression parser sizes such a
 type name wrongly and an unrecognized body would bind to an outer name of the
-same spelling. A C23 `for` declaration publishes the
-same way. The pre-C23 `for` declaration (C17 6.8.5p3, DR277), C23 `auto` and
-C23 `constexpr` initializers do not publish a definition at its own point, and
-binding its names to an outer enumerator of the same spelling would miscompile
-(`for (int i = sizeof(struct { enum { A = 3 } e; char c[A]; }); ...)` under
-`-std=gnu17` would size `c` with the outer `A`). `c_parse_range_defines_enumerator`
-finds an enum definition in such an initializer, outside a statement expression,
-and `c_parse_local_declarations` refuses it with an unsupported-semantics
-diagnostic (the `for` case with the C17 6.8.5p3 wording, which GCC and Clang
-also reject; GCC 13 rejects the `auto` and `constexpr` cases as well, Clang 18
-accepts `auto`). Publishing them like other initializers, the alternative
-policy, is tracked by #3252: until then a C23 program that defines an enum in
-an `auto` or `constexpr` initializer is refused, even where it names no
-outer enumerator.
+same spelling. A `for` declaration in every dialect and a C23 `auto` or
+`constexpr` initializer publish the same way, at the definition's own point,
+as Clang does (#3252, maintainer decision 2026-10-09): `for (int i =
+sizeof(struct { enum { A = 3 } e; char c[A]; }); ...)` sizes `c` with the inner
+`A` and the loop's condition and body see it, and the name ends with the loop.
+Clang 18 accepts each of these, including the pre-C23 `for` form, and gives
+those values; GCC rejects the `auto` and `constexpr` forms and, under
+`-pedantic-errors`, the pre-C23 `for` one. C17 6.8.5p3 is read, as Clang
+reads it, as limiting the for declaration's declarators, not the type names in
+its initializer; a tag or enum defined in the declaration's own specifiers
+(`for (enum { Q = 3 } e = Q; ...)`) stays refused (#2392). A C23 `auto`
+initializer defines its types through `c_parse_bind_auto_initializer_identifiers`
+like GNU `__auto_type`, and a `constexpr` initializer is validated only after
+its definitions are published, so a constant it reads binds them.
 `c_test_initializer_enum_scope` checks acceptance/refusal, unique publication
 and both canonical frontend forms on the same three layouts, plus GNU17 and C23
 cases through `c_test_enum_scope_case`.
