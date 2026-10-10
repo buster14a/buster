@@ -58216,9 +58216,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_anonymous_aggregate_runtime(Uni
 // A later local's array bound that applies sizeof to an earlier local array of
 // aggregates is sized by the whole array, never by the pointer it decays to
 // (#2713). The array type of `n` maps after the bound's first attempt, so the
-// bound waits for it instead of folding sizeof(pointer).
+// bound waits for it instead of folding sizeof(pointer). `chained` goes two
+// levels deep (#3375): a bound whose sizeof reads an element of a local array
+// (`a[0]`, `*x`, BUSTER_ARRAY_LENGTH's `(x)[0]`) still gives that array a
+// constant size, so a braced initializer of an array sized by it is accepted.
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL String8 const c_test_local_array_sizeof_bound_source = S8_INITIALIZER(
+    "#define BUSTER_ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))\n"
     "typedef struct { int a[4]; } S;\n"
     "typedef struct { char c; short s; int i; double d; } R;\n"
     "static int nested(void)\n"
@@ -58228,6 +58232,26 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_local_array_sizeof_bound_source = S8_IN
     "        unsigned deep[sizeof(m) / sizeof(m[0])] = {1, 2, 3};\n"
     "        return (int)sizeof deep - 12 + (int)deep[2] - 3;\n"
     "    }\n"
+    "}\n"
+    "typedef struct { char const* pointer; unsigned long length; } Name;\n"
+    "static int chained(void)\n"
+    "{\n"
+    "    int a[3];\n"
+    "    int b[sizeof(a) / sizeof(a[0]) + 4];\n"
+    "    int c[sizeof(b) / sizeof(b[0])] = {0};\n"
+    "    unsigned long long const lengths[] = {63, 64, 65};\n"
+    "    Name names[BUSTER_ARRAY_LENGTH(lengths) + 4];\n"
+    "    unsigned found[BUSTER_ARRAY_LENGTH(names)] = {0};\n"
+    "    int x[3];\n"
+    "    char y[sizeof *x * 2];\n"
+    "    char z[sizeof y] = {7};\n"
+    "    _Static_assert(sizeof c == 7 * sizeof(int), \"c\");\n"
+    "    _Static_assert(sizeof found == 7 * sizeof(unsigned), \"found\");\n"
+    "    (void)a; (void)b; (void)names; (void)x; (void)y;\n"
+    "    if (BUSTER_ARRAY_LENGTH(c) != 7 || BUSTER_ARRAY_LENGTH(found) != 7) return 1;\n"
+    "    for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(found); i += 1) if (c[i] || found[i]) return 2;\n"
+    "    if (sizeof z != 8 || z[0] != 7 || z[7]) return 3;\n"
+    "    return 0;\n"
     "}\n"
     "int main(void)\n"
     "{\n"
@@ -58253,6 +58277,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_local_array_sizeof_bound_source = S8_IN
     "    if (sizeof decayed != sizeof(char *)) return 8;\n"
     "    if (sizeof element != 16 || sizeof deref != 16) return 9;\n"
     "    if (nested()) return 10;\n"
+    "    if (chained()) return 11 + chained();\n"
     "    return 0;\n"
     "}\n");
 #endif
