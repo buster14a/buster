@@ -57726,6 +57726,74 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_indices(UnitTestArgumen
     return result;
 }
 
+// A bit-field member gets one diagnostic, Clang's, in every offsetof
+// context (#1570): directly, through an anonymous member, behind a runtime or
+// constant index, and inside an offsetof nested in an index.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_bit_field_diagnostic(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 declaration = S8("struct B { int lead; int bits : 3; struct { int inner : 2; }; struct { int q; int r : 4; } rows[2]; int v[4]; };");
+    struct
+    {
+        String8 designator;
+        String8 expected;
+    } cases[] = {
+        {S8("bits"), S8("cannot compute offset of bit-field 'bits'")},
+        {S8("inner"), S8("cannot compute offset of bit-field 'inner'")},
+        {S8("rows[1].r"), S8("cannot compute offset of bit-field 'r'")},
+        {S8("v[__builtin_offsetof(struct B, bits)]"), S8("cannot compute offset of bit-field 'bits'")},
+    };
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+    {
+        for (u32 context = 0; context < 5; context += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 expression = string_format(temporary.arena, S8("__builtin_offsetof(struct B, {S8})"), cases[row].designator);
+            String8 contexts[] = {
+                string_format(temporary.arena, S8("enum {{ BIT_FIELD_OFFSET = {S8} }};"), expression),
+                string_format(temporary.arena, S8("_Static_assert({S8} == 4, \"offset\");"), expression),
+                string_format(temporary.arena, S8("static unsigned long long value = {S8};"), expression),
+                string_format(temporary.arena, S8("unsigned long long probe(void) {{ return {S8}; }}"), expression),
+                string_format(temporary.arena, S8("unsigned long long probe(int i) {{ return {S8} + __builtin_offsetof(struct B, rows[i].r); }}"),
+                              expression),
+            };
+            String8 source = string_format(temporary.arena, S8("{S8}\n{S8}\n"), declaration, contexts[context]);
+            String8 label = string_format(arguments->arena, S8("offsetof bit-field diagnostic case={u32} context={u32}: {S8}"), row, context, source);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0))
+            {
+                CParseResult parsed = c_parse(temporary.arena, tokens);
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                bool parsed_reports = false;
+                bool semantic_reports = false;
+                bool generic = false;
+                for (u32 diagnostic = 0; diagnostic < parsed.diagnostic_count; diagnostic += 1)
+                {
+                    parsed_reports |= string_ends_with_sequence(parsed.diagnostics[diagnostic].message, cases[row].expected);
+                    generic |= string_ends_with_sequence(parsed.diagnostics[diagnostic].message, S8("invalid __builtin_offsetof type or member designator"));
+                }
+                for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count; diagnostic += 1)
+                {
+                    semantic_reports |= semantic.diagnostics[diagnostic].severity == C_DIAGNOSTIC_ERROR &&
+                                        string_ends_with_sequence(semantic.diagnostics[diagnostic].message, cases[row].expected);
+                    generic |= string_ends_with_sequence(semantic.diagnostics[diagnostic].message, S8("invalid __builtin_offsetof type or member designator"));
+                }
+                BUSTER_TEST_RAW(arguments, semantic_reports && !generic, label);
+                if (context < 2)
+                {
+                    // Enumerators and assertions also report while the model is built.
+                    BUSTER_TEST_RAW(arguments, parsed_reports, label);
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // The shared COffsetofWalk refuses every row in all four contexts: index
 // admission, target-size_t arithmetic, designator grammar and bit-fields.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_refusals(UnitTestArguments* arguments)
@@ -61474,6 +61542,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_offsetof_typed_indices);
     C_TEST_FIXTURE(arguments, c_test_offsetof_typed_indices_runtime);
     C_TEST_FIXTURE(arguments, c_test_offsetof_typed_refusals);
+    C_TEST_FIXTURE(arguments, c_test_offsetof_bit_field_diagnostic);
     C_TEST_FIXTURE(arguments, c_test_oversized_token_spellings);
     C_TEST_FIXTURE(arguments, c_test_packed_and_aligned_layout);
     C_TEST_FIXTURE(arguments, c_test_parameter_local_alignment);

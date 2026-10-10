@@ -9770,6 +9770,73 @@ BUSTER_C_INTERNAL bool c_parse_type_name_trailer_invalid(CPreprocessResult prepr
 // at its `)`. Call arguments, compound-literal initializers and statement
 // expressions are skipped whole, and a shape the walk does not model ends it
 // without a diagnostic, so it rejects only what no expression can spell.
+BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                        CParseResult* result, CTypeId aggregate, u32 symbol, String8 name, CTypeId* member_out,
+                                                        u64* offset_out, bool* bit_field_out);
+
+// One diagnostic for an offsetof designator that names a bit-field, in every
+// context (#1570), worded and placed as Clang does: at the member. The
+// designator is stepped by the shared COffsetofWalk; indices are skipped, not
+// evaluated. A type operand that defines a tag body is left to evaluation, so
+// the type is never parsed twice.
+BUSTER_C_INTERNAL String8 c_parse_offsetof_bit_field(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                      u32 open, u32* error_token)
+{
+    String8 message = {0};
+    u64 mark = machine->scratch_arena->position;
+    u32 close = c_parse_matching_delimiter_indexed(result, preprocess, open);
+    bool valid = close < preprocess.token_count;
+    u32 comma = open + 1;
+    while (valid && comma < close && !c_token_is_punctuator(&preprocess.tokens[comma], C_PUNCTUATOR_COMMA))
+    {
+        CToken token = preprocess.tokens[comma];
+        valid = !c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE);
+        if (valid && (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET)))
+        {
+            u32 nested = c_parse_matching_delimiter_indexed(result, preprocess, comma);
+            valid = nested < close;
+            comma = valid ? nested : close;
+        }
+        comma += 1;
+    }
+    u32 cursor = open + 1;
+    CTypeId type = valid && comma > open + 1 && comma < close
+        ? c_parse_scalar_type_in_scope(machine, result, preprocess, scope, open + 1, comma, &cursor) : C_TYPE_ID_INVALID;
+    valid = valid && type.value < result->type_count && cursor == comma &&
+            (result->types[type.value].kind == C_TYPE_STRUCT || result->types[type.value].kind == C_TYPE_UNION);
+    CTypeParseMachine* layout_machine = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE ? 0 : machine;
+    COffsetofWalk walk = c_offsetof_walk_begin(preprocess.target, comma + 1, close, 0, true, valid);
+    COffsetofStep step = c_offsetof_walk_next(&walk, preprocess.tokens);
+    while (!message.length && (step == C_OFFSETOF_STEP_MEMBER || step == C_OFFSETOF_STEP_INDEX))
+    {
+        if (step == C_OFFSETOF_STEP_MEMBER)
+        {
+            CToken token = preprocess.tokens[walk.cursor];
+            String8 name = c_token_spelling(preprocess.spelling_base, token);
+            u64 offset = 0;
+            bool bit_field = false;
+            bool found = c_parse_constant_member_offset(layout_machine, machine->scratch_arena, preprocess, result, type, token.symbol, name, &type,
+                                                        &offset, &bit_field);
+            if (bit_field)
+            {
+                message = c_parse_message(result->arena, S8("cannot compute offset of bit-field '{S8}'"), name);
+                *error_token = walk.cursor;
+            }
+            c_offsetof_walk_member(&walk, found, 0);
+        }
+        else
+        {
+            u32 bracket = c_parse_matching_delimiter_indexed(result, preprocess, walk.cursor);
+            bool array = type.value < result->type_count && result->types[type.value].kind == C_TYPE_ARRAY;
+            type = array ? result->types[type.value].element_type : C_TYPE_ID_INVALID;
+            c_offsetof_walk_runtime_index(&walk, array, bracket);
+        }
+        step = c_offsetof_walk_next(&walk, preprocess.tokens);
+    }
+    arena_set_position(machine->scratch_arena, mark);
+    return message;
+}
+
 BUSTER_C_INTERNAL String8 c_parse_constant_expression_syntax_error(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                                    CScopeId scope, u32 start, u32 end, u32* error_token)
 {
@@ -9808,6 +9875,17 @@ BUSTER_C_INTERNAL String8 c_parse_constant_expression_syntax_error(CTypeParseMac
             {
                 u32 close = c_parse_matching_delimiter_indexed(result, preprocess, next);
                 stop = close >= end;
+                // An offsetof group, and any nested in its indices, is checked
+                // for a bit-field member before evaluation reports it generically.
+                for (u32 word = index; !stop && !message.length && word + 1 < close; word += 1)
+                {
+                    if (c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[word], C_SYMBOL_WELL_KNOWN_BUILTIN_OFFSETOF) &&
+                        c_token_is_punctuator(&preprocess.tokens[word + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        CScopeId word_scope = result->scope_children_offsets ? c_parse_scope_for_token(result, scope, word) : scope;
+                        message = c_parse_offsetof_bit_field(machine, result, preprocess, word_scope, word + 1, error_token);
+                    }
+                }
                 next = close + 1;
             }
             operand = prefix;
@@ -29376,11 +29454,15 @@ BUSTER_C_INTERNAL bool c_parse_member_offset_visit(Arena* arena, u32 type, u32**
     return fresh;
 }
 
+// A bit-field `name` stops the search with *bit_field_out set (when given):
+// offsetof and member addresses cannot name it, and the first match in
+// breadth-first order is the member C name lookup selects.
 BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                         CParseResult* result, CTypeId aggregate, u32 symbol, String8 name, CTypeId* member_out,
-                                                        u64* offset_out)
+                                                        u64* offset_out, bool* bit_field_out)
 {
     bool found = false;
+    bool bit_field = false;
     CParseMemberOffsetWork local_work[8];
     u32 local_slots[16] = {0};
     CParseMemberOffsetWork* work = local_work;
@@ -29391,7 +29473,7 @@ BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine
     u32 count = 1;
     work[0] = (CParseMemberOffsetWork){.type = aggregate};
     u64 maximum = ir_integer_mask((IrInteger){.low = UINT64_MAX}, target_data_layout(preprocess.target).pointer.bit_width).low;
-    for (u32 index = 0; !found && index < count; index += 1)
+    for (u32 index = 0; !found && !bit_field && index < count; index += 1)
     {
         CParseMemberOffsetWork item = work[index];
         if (item.type.value < result->type_count && c_parse_member_offset_visit(arena, item.type.value, &slots, &slot_capacity, &visited_count))
@@ -29402,7 +29484,7 @@ BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine
                 item.type = type.unqualified_type;
                 type = result->types[item.type.value];
             }
-            for (u32 member_index = 0; !found && member_index < type.member_count; member_index += 1)
+            for (u32 member_index = 0; !found && !bit_field && member_index < type.member_count; member_index += 1)
             {
                 CMember member = result->members[type.member_start + member_index];
 #if BUSTER_INCLUDE_TESTS
@@ -29410,6 +29492,7 @@ BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine
 #endif
                 bool matches = c_parse_member_named(&member, symbol, name);
                 bool promoted = !member.name.length && !member.is_bit_field;
+                bit_field = matches && member.is_bit_field;
                 if ((matches || promoted) && !member.is_bit_field)
                 {
                     u64 offset = 0;
@@ -29454,6 +29537,10 @@ BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine
             }
         }
     }
+    if (bit_field_out)
+    {
+        *bit_field_out = bit_field;
+    }
     return found;
 }
 
@@ -29461,7 +29548,7 @@ BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine
 bool c_test_member_offset(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CTypeId aggregate, String8 name, u64* offset)
 {
     CTypeId member = C_TYPE_ID_INVALID;
-    return c_parse_constant_member_offset(0, arena, preprocess, result, aggregate, 0, name, &member, offset);
+    return c_parse_constant_member_offset(0, arena, preprocess, result, aggregate, 0, name, &member, offset, 0);
 }
 #endif
 
@@ -29523,7 +29610,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_offsetof(CTypeParseMachine* ma
         CToken token = preprocess.tokens[walk.cursor];
         u64 offset = 0;
         bool found = c_parse_constant_member_offset(layout_machine, arena, preprocess, result, type, token.symbol,
-                                                    c_token_spelling(preprocess.spelling_base, token), &type, &offset);
+                                                    c_token_spelling(preprocess.spelling_base, token), &type, &offset, 0);
         c_offsetof_walk_member(&walk, found, offset);
         step = c_offsetof_walk_next(&walk, preprocess.tokens);
     }
@@ -29552,7 +29639,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_member_address(CTypeParseMachi
         {
             u64 offset = 0;
             value.valid = c_parse_constant_member_offset(machine, arena, preprocess, result, type, token.symbol,
-                                                         c_token_spelling(preprocess.spelling_base, token), &type, &offset);
+                                                         c_token_spelling(preprocess.spelling_base, token), &type, &offset, 0);
             value.integer += offset;
             cursor += 1;
         }
@@ -32823,7 +32910,10 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_offsetof_operands
         u64 mark = machine->scratch_arena->position;
         u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index + 1);
         CScopeId operand_scope = c_parse_scope_for_token(result, scope, index);
-        bool constant = close < end;
+        u32 bit_field_token = index;
+        diagnostic.message = c_parse_offsetof_bit_field(machine, result, preprocess, operand_scope, index + 1, &bit_field_token);
+        diagnostic.token = bit_field_token;
+        bool constant = !diagnostic.message.length && close < end;
         u32 comma = constant ? c_parse_constraint_expression_end(result, preprocess, index + 2, close) : end;
         for (u32 cursor = comma + 1; constant && cursor < close; cursor += 1)
         {
