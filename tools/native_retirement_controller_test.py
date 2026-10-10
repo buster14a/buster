@@ -388,6 +388,29 @@ class CatchUpDetectionTests(unittest.TestCase):
         refreshed = self.commit(later, header, b"/* newest */\n")
         self.assertFalse(c.catch_up_admissible(self.repo, refreshed, published))
 
+    def test_catch_up_published_after_main_moved_is_not_requested_again(self):
+        # The writer publishes a catch-up for its expected base when main moved
+        # on without generated state (#1893); the controller must then treat
+        # that head as current, not plan another writer run.
+        import native_retirement_merge_gate as gate
+        request = git(self.repo, "commit-tree", self.fresh + "^{tree}", "-p", self.fresh, "-m", "request")
+        expected = self.commit(self.fresh, "README.md", b"expected\n")
+        header = "tools/native_retirement_dependency_binding.generated.h"
+        published_tree = git(self.repo, "rev-parse",
+                             self.commit(expected, header, b"/* newer */\n") + "^{tree}")
+        published = git(self.repo, "commit-tree", published_tree, "-p", expected, "-p", request,
+                        "-m", f"catch-up\n\n{gate.TRAILER_BASE}: {expected}\n")
+        moved = self.commit(expected, "src/buster/lib/hash.h", b"changed\n")
+        self.assertTrue(i.catch_up_main_admissible(self.repo, expected, request, moved))
+        self.assertTrue(c.catch_up_admissible(self.repo, moved, published))
+        # Generated state on main still supersedes the run and the published head.
+        generated = self.commit(moved, header, b"/* newest */\n")
+        self.assertFalse(i.catch_up_main_admissible(self.repo, expected, request, generated))
+        self.assertFalse(c.catch_up_admissible(self.repo, generated, published))
+        # A non-catch-up candidate is never relaxed by the writer.
+        bound = self.commit(self.fresh, "src/buster/lib/hash.h", b"bound\n")
+        self.assertFalse(i.catch_up_main_admissible(self.repo, expected, bound, moved))
+
     def test_writer_is_requested_only_for_trust_transitions_and_needed_catch_ups(self):
         import native_retirement_merge_gate as gate
         human = {"number": 7, "state": "open", "draft": False, "user": {"login": "author", "id": 5, "type": "User"},
