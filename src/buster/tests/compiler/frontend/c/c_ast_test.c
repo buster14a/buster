@@ -2032,12 +2032,18 @@ enum
     C_AST_CORPUS_SPLIT_RECORD_FLOOR = 4800,
     C_AST_CORPUS_HOSTED_SPLIT_RECORD_FLOOR = 13000,
     // Tree expression-typer answers checked against the type machine
-    // (c_ast_corpus_types): about 56,000 from the fixtures on Linux x86-64
-    // (the fewest, about 49,900, on Windows AArch64, where fewer fixtures
-    // reach typed bodies), and about 302,600 in all with the frontend's own
-    // sources where the host headers exist.
-    C_AST_CORPUS_TYPE_ANSWER_FLOOR = 45000,
-    C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR = 270000,
+    // (c_ast_corpus_types): about 56,100 from the fixtures on Linux x86-64
+    // and about 50,800 with the fixtures preprocessed for aarch64-windows
+    // (Windows AArch64 itself, which reaches fewer typed bodies, counted about
+    // 49,900 before initializers were typed, which only adds answers), and
+    // about 320,300 in all with the frontend's own sources where the host
+    // headers exist.
+    C_AST_CORPUS_TYPE_ANSWER_FLOOR = 46000,
+    C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR = 290000,
+    // Designator probes the const-assignment walk skipped in the fixtures,
+    // each checked against the machine: about 1,400 (1,370 for
+    // aarch64-windows).
+    C_AST_CORPUS_TYPE_PROBE_FLOOR = 1200,
 };
 
 BUSTER_GLOBAL_LOCAL bool c_ast_corpus_in(String8 const* paths, u32 count, String8 path)
@@ -2073,6 +2079,9 @@ struct CAstCorpusTally
     // The tree expression typer over the same inputs (c_ast_corpus_types).
     u64 type_answers;
     u64 type_compared;
+    // Designator probes the const-assignment walk skipped and verify mode
+    // checked against the machine.
+    u64 type_probes;
     // The declaration split from the tree (c_parse_ast_from_tree) over the
     // same inputs: units it published, records and body assertion ranges it
     // published, units it handed to the token walker and why, and every
@@ -2191,8 +2200,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
             }
             BUSTER_TEST_RAW(arguments, verify.mismatches == verify.first_count,
                             string_format(arguments->arena, S8("{S8}: {u64} tree answers disagree with the machine"), label, verify.mismatches));
+            BUSTER_TEST_RAW(arguments, verify.probe_mismatches == 0,
+                            string_format(arguments->arena, S8("{S8}: the machine typed {u64} of {u64} skipped designator probes, or changed the model"),
+                                          label, verify.probe_mismatches, verify.probes));
             tally->type_answers += statistics.answers;
             tally->type_compared += verify.compared;
+            tally->type_probes += verify.probes;
             arena_destroy(arena, 1);
         }
     }
@@ -2579,6 +2592,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
     BUSTER_TEST(arguments, tally.records >= C_AST_CORPUS_RECORD_FLOOR);
     BUSTER_TEST(arguments, tally.pinned == BUSTER_ARRAY_LENGTH(c_ast_corpus_pins));
     BUSTER_TEST(arguments, tally.type_answers >= C_AST_CORPUS_TYPE_ANSWER_FLOOR && tally.type_compared == tally.type_answers);
+    BUSTER_TEST(arguments, tally.type_probes >= C_AST_CORPUS_TYPE_PROBE_FLOOR);
     BUSTER_TEST(arguments, tally.split_records >= C_AST_CORPUS_SPLIT_RECORD_FLOOR && tally.split_compared >= tally.split_records);
 #if BUSTER_LINUX && !BUSTER_ANDROID
     c_ast_test_merge(&result, c_ast_corpus_sources(arguments, &tally));
@@ -3639,6 +3653,24 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     {S8_INITIALIZER("struct S { int field; }; void f(void) { struct S s = {.field = 1}; }"), S8_INITIALIZER("."), 0, 2, C_TEST_AST_TYPE_PROBE_MISS,
      C_TYPE_INVALID},
     {S8_INITIALIZER("void f(void) { int local = 1; }"), S8_INITIALIZER("int"), 0, 2, C_TEST_AST_TYPE_PROBE_MISS, C_TYPE_INVALID},
+    // A file-scope object's initializer, typed for the static-initializer
+    // walk. Names the binder recorded no use for resolve by spelling in the
+    // file scope, as the machine resolves them.
+    {S8_INITIALIZER("enum E { A, B }; int f = B;"), S8_INITIALIZER("B"), 1, 1, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("enum E { A = 1 }; long f = A + 2L;"), S8_INITIALIZER("A"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    {S8_INITIALIZER("long f = (7L);"), S8_INITIALIZER("("), 0, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    {S8_INITIALIZER("unsigned long f = sizeof(\"ab\") / sizeof((\"ab\")[0]) - 1;"), S8_INITIALIZER("sizeof"), 0, 16, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_UNSIGNED_LONG, false, C_TYPE_UNSIGNED_LONG_LONG},
+    {S8_INITIALIZER("typedef unsigned short U16; enum E { A }; U16 f = (U16)A;"), S8_INITIALIZER("("), 0, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_UNSIGNED_SHORT},
+    {S8_INITIALIZER("typedef struct P { int x; } P; P f = (P){1};"), S8_INITIALIZER("("), 0, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_STRUCT},
+    {S8_INITIALIZER("struct S { int a; int b; } f = { .a = 1, .b = sizeof(int) };"), S8_INITIALIZER("sizeof"), 0, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_UNSIGNED_LONG, false, C_TYPE_UNSIGNED_LONG_LONG},
+    // Declined or missed there as in a body: `&` and a string literal append
+    // rows, and a designator is no expression.
+    {S8_INITIALIZER("int g; int* f = &g;"), S8_INITIALIZER("&"), 0, 2, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("char const* f = \"text\";"), S8_INITIALIZER("\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("struct S { int a; } f = { .a = 1 };"), S8_INITIALIZER("."), 0, 2, C_TEST_AST_TYPE_PROBE_MISS, C_TYPE_INVALID},
 };
 
 BUSTER_GLOBAL_LOCAL u32 c_ast_test_token_index(CPreprocessResult preprocess, String8 spelling, u32 occurrence)
@@ -3699,6 +3731,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
         BUSTER_TEST(arguments, probe.status == C_TEST_AST_TYPE_PROBE_ANSWER && probe.kind == C_TYPE_INT);
     }
     c_ast_release(&built.ast);
+    scratch_end(temporary);
+    // The const-assignment walk does not ask about the designator probes of
+    // `{ .f = 1, .g = 2 }`: the `{` and the `,` it would take for the bases of
+    // `.f` and `.g`, and the `.f` and `.g` places before each `=`. Verify mode
+    // has the machine answer all four, and each must fail without a
+    // diagnostic or a new table row.
+    temporary = scratch_begin(&arguments->arena, 1);
+    preprocess = c_ast_test_preprocess(temporary.arena, S8("struct S { int f; int g; }; void h(void) { struct S s = { .f = 1, .g = 2 }; }"),
+                                       C_PREPROCESS_DIALECT_GNU17);
+    c_test_ast_type_verify_take();
+    c_test_ast_type_verify_set(true);
+    analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+    c_test_ast_type_verify_set(false);
+    CTestAstTypeVerify verify = c_test_ast_type_verify_take();
+    BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count && verify.probes == 4 && verify.probe_mismatches == 0);
     scratch_end(temporary);
     return result;
 }

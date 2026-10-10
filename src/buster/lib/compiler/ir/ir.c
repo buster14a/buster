@@ -5210,7 +5210,7 @@ IrInstructionId ir_block_append_instruction(Arena* arena, IrFunction* function, 
     if (refusal == IR_COMMIT_ACCEPTED)
     {
         ir_function_invalidate_cfg(function);
-        result = ir_block_commit_accepted(arena, function, block, instruction, canonical_source);
+        result = ir_block_commit_accepted(arena, function, block, &instruction, canonical_source);
     }
     if (refusal_out)
     {
@@ -5779,22 +5779,28 @@ enum
 // `is_parameter` says whether a block parameter carries the value. These
 // faults name the instruction that defined the value rather than a block; a
 // parameter or an unreferenced value names IR_INSTRUCTION_ID_INVALID.
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_value(IrProgram* program, IrFunction* function, IrValueId value_id, bool is_parameter)
+//
+// Only the error kind comes back: every fault has the same location, which
+// ir_validate_value below rebuilds. Returning the 20-byte result by value
+// made the caller reload it with a 16-byte load across the callee's 16- and
+// 4-byte stores, which cannot be store-forwarded; on the stage-1 self-compile
+// that stall was most of the fused validator's own time (#2626).
+BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_value_error(IrProgram* program, IrFunction* function, IrValueId value_id, bool is_parameter)
 {
-    IrValidationResult result = ir_validation_ok();
+    IrValidationError error = IR_VALIDATION_NONE;
     IR_CONSTRUCTION_RECORD(VALIDATION_VALUES, 1);
     IrValue* value = function->values + value_id.value;
     IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
     if (!value_type || (value->definition.value >= function->instruction_count &&
                         !(value->definition.value == IR_ID_UNDERLYING_INVALID && is_parameter && value->category == IR_VALUE_VALUE)))
     {
-        result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, value->definition);
+        error = IR_VALIDATION_INVALID_ID;
     }
     else if (value->definition.value < function->instruction_count && is_parameter)
     {
         // A value has exactly one definition: the row it names cannot
         // also share it with a block parameter.
-        result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, IR_BLOCK_ID_INVALID, value->definition);
+        error = IR_VALIDATION_BLOCK_PARAMETER;
     }
     else if (!function->label_metadata_count)
     {
@@ -5810,7 +5816,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_value(IrProgram* program, IrF
         }
         if (!transfer_valid || !value_type->layout.resolved)
         {
-            result = ir_validation_error(IR_VALIDATION_OPERATION, function, IR_BLOCK_ID_INVALID, value->definition);
+            error = IR_VALIDATION_OPERATION;
         }
     }
     else
@@ -5826,24 +5832,38 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_value(IrProgram* program, IrF
         if ((metadata.is_label_value && !metadata.has_label_provenance && !metadata.has_non_label_provenance && !direct_valid) ||
             (metadata.has_label_provenance && !storage_valid) || !transfer_valid || !shape_valid)
         {
-            result = ir_validation_error(IR_VALIDATION_OPERATION, function, IR_BLOCK_ID_INVALID, value->definition);
+            error = IR_VALIDATION_OPERATION;
         }
         else if (direct_valid || storage_valid)
         {
-            for (u32 label_index = 0; label_index < metadata.label_block_count && result.error == IR_VALIDATION_NONE; label_index += 1)
+            for (u32 label_index = 0; label_index < metadata.label_block_count && error == IR_VALIDATION_NONE; label_index += 1)
             {
                 IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_PROVENANCE_BLOCKS, 1);
                 if (metadata.label_blocks[label_index].value >= function->block_count)
                 {
-                    result = ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, IR_BLOCK_ID_INVALID, value->definition);
+                    error = IR_VALIDATION_BRANCH_TARGET;
                 }
             }
         }
     }
-    if (result.error == IR_VALIDATION_NONE && value->alignment &&
+    if (error == IR_VALIDATION_NONE && value->alignment &&
         ((value->alignment & (value->alignment - 1)) || !value_type->layout.resolved || value->alignment < value_type->layout.alignment))
     {
-        result = ir_validation_error(IR_VALIDATION_ALIGNMENT, function, IR_BLOCK_ID_INVALID, value->definition);
+        error = IR_VALIDATION_ALIGNMENT;
+    }
+    return error;
+}
+
+// The full result of ir_validate_value_error, located where every value fault
+// is located: at the value's defining row, in no block. The location is built
+// only on failure, so the common path carries nothing wider than the kind.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_value(IrProgram* program, IrFunction* function, IrValueId value_id, bool is_parameter)
+{
+    IrValidationResult result = ir_validation_ok();
+    IrValidationError error = ir_validate_value_error(program, function, value_id, is_parameter);
+    if (error != IR_VALIDATION_NONE)
+    {
+        result = ir_validation_error(error, function, IR_BLOCK_ID_INVALID, function->values[value_id.value].definition);
     }
     return result;
 }
@@ -6870,12 +6890,19 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_rows(IrProgram* program
             *visited_count += 1;
             IrInstruction* instruction = function->instructions + instruction_id.value;
             u32 defined_value = instruction->result.value;
+            IrValidationError value_error = IR_VALIDATION_NONE;
             if (defined_value < function->value_count && function->values[defined_value].definition.value == instruction_id.value)
             {
-                result = ir_validate_value(program, function, instruction->result, defined[defined_value] == IR_VALIDATION_DEFINED_PARAMETER);
+                value_error = ir_validate_value_error(program, function, instruction->result, defined[defined_value] == IR_VALIDATION_DEFINED_PARAMETER);
                 defined[defined_value] = IR_VALIDATION_DEFINED_INSTRUCTION;
             }
-            if (result.error == IR_VALIDATION_NONE)
+            if (value_error != IR_VALIDATION_NONE)
+            {
+                // The value's definition is this row, which is where
+                // ir_validate_value locates every value fault.
+                result = ir_validation_error(value_error, function, IR_BLOCK_ID_INVALID, instruction_id);
+            }
+            else
             {
                 IrValidationError error = ir_validate_instruction_row(program, function, signature, instruction_id, instruction, terminated);
                 if (error != IR_VALIDATION_NONE)
