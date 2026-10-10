@@ -197,7 +197,12 @@ STT_FILE records are metadata and may use SHN_ABS. Other reserved section
 definitions (including absolute/common values and extended indexes) and
 unsupported runtime symbol types, including GNU IFUNC, are refused. Calling an
 IFUNC resolver as a normal function or dropping a weak absolute definition
-would produce a successful link with different behavior.
+would produce a successful link with different behavior. The Mach-O and COFF
+readers refuse the same definitions in their own forms: an external `N_ABS` or
+`N_INDR` symbol or a Mach-O common (`N_UNDF` with a size), and an external
+`IMAGE_SYM_ABSOLUTE` symbol or a COFF common (section 0 with a size). Local
+absolutes such as COFF `@comp.id`/`@feat.00` remain ignored producer metadata
+(`compiler_driver_archive_test_foreign_reserved_symbols`).
 
 These failures return `OBJECT_ERROR_UNSUPPORTED_TARGET` with a diagnostic naming
 the section or symbol and its numeric type/index. Reserved symbol section

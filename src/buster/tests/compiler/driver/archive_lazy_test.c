@@ -1660,6 +1660,138 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_stack_note(UnitT
     return result;
 }
 
+// One external or static symbol `target` in a minimal object: a COFF file
+// with one one-byte `.text` section, or a Mach-O file with only LC_SYMTAB.
+BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_archive_reserved_foreign(Arena* arena, bool mach, CpuArch arch, u32 form, u16 section, u64 value)
+{
+    ByteSlice result = {0};
+    if (mach)
+    {
+        // Header, LC_SEGMENT_64 with one one-byte __TEXT,__text section at
+        // 208, LC_SYMTAB, the nlist at 216 and its strings at 232.
+        String8 strings = S8("\0_target\0");
+        result = (ByteSlice){.pointer = arena_allocate_zeroed(arena, u8, 232 + strings.length), .length = 232 + strings.length};
+        compiler_driver_archive_test_integer(result.pointer, 0xfeedfacf, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 4, arch == CPU_ARCH_X86_64 ? 0x01000007 : 0x0100000c, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 8, arch == CPU_ARCH_X86_64 ? 3 : 0, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 12, 1, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 16, 2, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 20, 176, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 32, 0x19, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 36, 152, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 64, 1, 8, false);
+        compiler_driver_archive_test_integer(result.pointer + 72, 208, 8, false);
+        compiler_driver_archive_test_integer(result.pointer + 80, 1, 8, false);
+        compiler_driver_archive_test_integer(result.pointer + 88, 7, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 92, 7, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 96, 1, 4, false);
+        memcpy(result.pointer + 104, "__text", 6);
+        memcpy(result.pointer + 120, "__TEXT", 6);
+        compiler_driver_archive_test_integer(result.pointer + 144, 1, 8, false);
+        compiler_driver_archive_test_integer(result.pointer + 152, 208, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 168, 0x80000400, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 184, 2, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 188, 24, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 192, 216, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 196, 1, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 200, 232, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 204, strings.length, 4, false);
+        result.pointer[208] = 0xc3;
+        compiler_driver_archive_test_integer(result.pointer + 216, 1, 4, false);
+        result.pointer[220] = (u8)form;
+        result.pointer[221] = (u8)section;
+        compiler_driver_archive_test_integer(result.pointer + 224, value, 8, false);
+        memcpy(result.pointer + 232, strings.pointer, strings.length);
+    }
+    else
+    {
+        result = (ByteSlice){.pointer = arena_allocate_zeroed(arena, u8, 86), .length = 86};
+        compiler_driver_archive_test_integer(result.pointer, arch == CPU_ARCH_X86_64 ? 0x8664 : 0xaa64, 2, false);
+        compiler_driver_archive_test_integer(result.pointer + 2, 1, 2, false);
+        compiler_driver_archive_test_integer(result.pointer + 8, 64, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 12, 1, 4, false);
+        memcpy(result.pointer + 20, ".text", 5);
+        compiler_driver_archive_test_integer(result.pointer + 36, 1, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 40, 60, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 56, 0x60500020, 4, false);
+        result.pointer[60] = 0xc3;
+        memcpy(result.pointer + 64, "target", 6);
+        compiler_driver_archive_test_integer(result.pointer + 72, value, 4, false);
+        compiler_driver_archive_test_integer(result.pointer + 76, section, 2, false);
+        result.pointer[80] = (u8)form;
+        compiler_driver_archive_test_integer(result.pointer + 82, 4, 4, false);
+    }
+    return result;
+}
+
+// Issue 1243: the Mach-O and COFF forms of a definition the object model
+// cannot hold -- an external absolute (N_ABS, N_INDR, IMAGE_SYM_ABSOLUTE) or
+// common symbol -- were skipped or read as undefined, so a reference to one
+// linked unresolved or not at all. Each is refused by name, its static or
+// local twin stays ignored metadata, and an unindexed archive selects the
+// member that defines it, so the refusal names that member.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_foreign_reserved_symbols(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    struct
+    {
+        bool mach;
+        u32 form;
+        u16 section;
+        u64 value;
+        String8 message;
+    } rows[] = {
+        {false, 2, 0xffff, 0x1234, S8("unsupported COFF symbol target (index 0): IMAGE_SYM_ABSOLUTE")},
+        {false, 2, 0, 16, S8("unsupported COFF symbol target (index 0): common, size 16")},
+        {false, 3, 0xffff, 0x1234, S8("")},
+        {true, 0x03, 0, 0x1234, S8("unsupported Mach-O symbol target (index 0): N_ABS")},
+        {true, 0x0b, 0, 0, S8("unsupported Mach-O symbol target (index 0): N_INDR")},
+        {true, 0x01, 0, 16, S8("unsupported Mach-O symbol target (index 0): common")},
+        {true, 0x02, 0, 0x1234, S8("")},
+    };
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 arch = 0; arch < BUSTER_ARRAY_LENGTH(architectures); arch += 1)
+    {
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
+        {
+            Target target = {.cpu_arch = architectures[arch], .os = rows[row].mach ? OPERATING_SYSTEM_MACOS : OPERATING_SYSTEM_WINDOWS};
+            ByteSlice bytes = compiler_driver_archive_reserved_foreign(arena, rows[row].mach, architectures[arch], rows[row].form, rows[row].section,
+                                                                       rows[row].value);
+            ObjectFile object = object_read(arena, bytes, target);
+            bool refused = rows[row].message.length != 0;
+            BUSTER_TEST(arguments, object.error == (refused ? OBJECT_ERROR_UNSUPPORTED_TARGET : OBJECT_ERROR_NONE));
+            if (refused) BUSTER_STRING_TEST(arguments, object.diagnostic, rows[row].message);
+            else BUSTER_TEST(arguments, !object.diagnostic.length);
+            // An unindexed archive whose only member defines the request.
+            u64 padded = bytes.length + (bytes.length & 1);
+            ByteSlice archive_bytes = {.pointer = arena_allocate_zeroed(arena, u8, 8 + 60 + padded), .length = 8 + 60 + padded};
+            memcpy(archive_bytes.pointer, "!<arch>\n", 8);
+            compiler_driver_archive_test_header(archive_bytes.pointer + 8, S8("member0.o/"), bytes.length);
+            memcpy(archive_bytes.pointer + 68, bytes.pointer, bytes.length);
+            if (bytes.length & 1) archive_bytes.pointer[68 + bytes.length] = '\n';
+            ObjectArchive archive = object_archive_read_link(arena, archive_bytes, target);
+            if (BUSTER_REQUIRE(arguments, archive.error == OBJECT_ERROR_NONE && archive.object_count == 1))
+            {
+                ObjectSymbol request = {.name = S8("target"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true};
+                ObjectFile selected[2] = {compiler_driver_archive_test_object(arena, target, &request, 1, 0)};
+                u32 selected_count = 1;
+                CompilerDriverArchiveState state = {0};
+                compiler_driver_archive_extract(arena, &state, &archive, selected, &selected_count);
+                if (refused)
+                {
+                    BUSTER_TEST(arguments, archive.error == OBJECT_ERROR_UNSUPPORTED_TARGET && archive.failed_member == 0 && selected_count == 1 &&
+                        string_first_sequence(archive.diagnostic, rows[row].message) != BUSTER_STRING_NO_MATCH &&
+                        string_first_sequence(archive.diagnostic, S8("selected member member0.o")) != BUSTER_STRING_NO_MATCH);
+                }
+                else BUSTER_TEST(arguments, archive.error == OBJECT_ERROR_NONE && selected_count == 1 && !archive.diagnostic.length);
+                if (state.arena) arena_destroy(state.arena, 1);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_lazy(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_archive_test_default_roots(arguments);
@@ -1669,6 +1801,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_lazy(UnitTestArg
     result.succeeded_test_count += native.succeeded_test_count;
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_test_aarch64_refusal_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_test_reserved_symbol_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_test_foreign_reserved_symbols);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_library_order_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_library_order_execution);
     OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
