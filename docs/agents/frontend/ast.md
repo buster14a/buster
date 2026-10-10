@@ -505,22 +505,23 @@ A member's interned `char *` row moved ahead of its struct, the struct resolved
 a pass earlier, and the `-g` type entries of the unity self-host came out in a
 different order.
 
-The same holds for an aggregate a body query defines. The machine reads most
-aggregate definitions written in expressions back from rows the declaration
-pass made. One whose type name puts a qualifier before the tag
-(`(const struct { char *p; })`) it defines itself, inside the window, with its
-row ahead of its members'. CTypeInterning's `suspended` counts the member
-segments the machine is reading (`c_type_parse_aggregate_range_step`), and
-nothing is interned while any is in flight. The machine's failure path takes
-back the segments it discards. Without that, a source of this shape kept its
-`-g0` object but its `-g` object changed. The unity self-host defines no
-aggregate inside the window. The c_ast corpus and the frontend fixtures define
-a few, but in none of them did interning move a member's row ahead of its
-aggregate, which is why the self-host checks missed it.
-`c_test_type_interning_objects` compiles
-both shapes, and a third that does the same in file-scope initializers
-(`S8()`-style casts, `&` of objects, aggregates defined in initializer type
-names), with the window shut (`c_test_set_type_interning_off`) and open,
+The same holds for an aggregate a type name defines. The declaration pass
+registers every aggregate that a body or file-scope initializer type name
+defines, qualified ones such as `(const struct { char *p; })` included, before
+the window opens, and the machine reads its row back, so no member segment is
+read inside the window ([#3380](https://github.com/buster14a/buster/pull/3380)).
+A trap in `c_parse_type_interning_suspend` while the window is open never
+fires on `c_test_type_interning_objects`' sources or on the unity self-host at
+`-g0` and `-g`. CTypeInterning's `suspended` stays as a guard should a later
+change define an aggregate inside the window: it counts the member segments
+the machine is reading (`c_type_parse_aggregate_range_step`), nothing is
+interned while any is in flight, and the machine's failure path takes back the
+segments it discards. The history of this guard is in audit
+[`2026-10-10T014058Z`](../../performance-audits/2026-10-10T014058Z.md).
+`c_test_type_interning_objects` compiles three sources: body casts and `&`,
+aggregates defined in body type names, and the same in file-scope
+initializers (`S8()`-style casts, `&` of objects, aggregates defined in
+initializer type names). It compiles each with the window shut (`c_test_set_type_interning_off`) and open,
 at `-g0` and `-g`, with and without the tree, and requires identical objects
 and diagnostics.
 
