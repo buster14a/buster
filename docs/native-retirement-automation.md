@@ -113,7 +113,9 @@ The catch-up is fully automatic:
    - When `main` is current, it closes any open catch-up request.
 2. The controller treats that bot-owned PR as an ordinary request with an empty
    classification. It skips prerequisite CI, because nothing on a bot-created
-   empty head needs testing. It dispatches the existing writer through the
+   empty head needs testing. GitHub still records that head's `pull_request`
+   runs, but as `action_required` (seen on #3327): they await approval and
+   validate nothing. Nobody needs to approve them. It dispatches the existing writer through the
    standing grant. The writer regenerates the pair for current `main` and
    publishes the usual two-parent integration head; that push starts PR CI.
    The controller records its claim as a comment on the PR, so its job needs
@@ -148,7 +150,12 @@ number so duplicate events for the same candidate/base/policy cannot create a
 new request. Claims remain visible across controller restarts and missed events.
 
 The controller then uploads exactly one bounded `request.json` artifact and
-performs one `workflow_dispatch` POST with the full pinned inputs. The writer
+performs one `workflow_dispatch` POST with the full pinned inputs. The sealed
+artifact must hold that one file and nothing else; the job's machine records go
+in a separate `native-retirement-automation-machine-<run>` artifact. Adding them
+to the sealed artifact stopped every automatic dispatch (#3327). A sealed
+artifact that the dispatch step refuses is recorded as `blocked` with a
+`not dispatched:` detail, because the refusal happens before the POST. The writer
 independently verifies the controller's repository, main revision, workflow path,
 event, attempt and state; the artifact's unique name, size, digest and complete
 JSON; and equality with the request supplied in its dispatch. Publication also
@@ -183,7 +190,10 @@ the dispatch POST is recorded separately as known-not-dispatched supersession.
 An uncertain leased publication is never treated as successful or blindly retried.
 
 Failed, cancelled, timed-out or ambiguous requests remain blocked for that source
-and policy even if only main advances. A deliberate cancellation does not
+and policy even if only main advances. A catch-up request is the exception: its
+source is the bot-made empty commit, which stays the same while its PR is open,
+so a block bars only that main revision. The next main revision can request
+one new writer run, still serialized behind any active writer. A deliberate cancellation does not
 immediately resurrect itself. A real source change, an explicitly reviewed new
 policy epoch, or owner-directed manual integration/reconciliation is required
 for exceptional recovery; normal successful/stale operation needs no new approval.
