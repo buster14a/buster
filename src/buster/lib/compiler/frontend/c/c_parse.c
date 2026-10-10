@@ -564,7 +564,8 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit_identifier(CPa
         builtin = (CSymbolBuiltin)preprocess.symbols->builtin_kinds[token.symbol];
     else if (!token.symbol || !preprocess.symbols)
         builtin = c_symbol_builtin_from_spelling(c_token_spelling(preprocess.spelling_base, token));
-    if (builtin == C_SYMBOL_BUILTIN_GENERIC || builtin == C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P)
+    if (builtin == C_SYMBOL_BUILTIN_GENERIC || builtin == C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P ||
+        builtin == C_SYMBOL_BUILTIN_CLASSIFY_TYPE)
         c_parse_position_index_append(result->arena, &index->type_identity_positions, &index->type_identity_count,
             &index->type_identity_capacity, token_index);
     u8 token_class = c_parse_token_class(result, preprocess, token_index);
@@ -8314,7 +8315,9 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
 #else
     CAstTypePending* pending_out = 0;
 #endif
-    if (stored)
+    // A stored answer needs the query table, which a slot already implies;
+    // the explicit test lets the analyzer see that too.
+    if (stored && machine->expression_queries)
     {
         WORK_LEDGER_RECORD(REDERIVE_TYPE_QUERY_CACHE_HITS, 1);
         *type_out = machine->expression_queries[slot].type;
@@ -8795,6 +8798,92 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_builtin(CTypeParseMachine* machi
     return valid;
 }
 
+// Clang's __builtin_classify_type type classes.
+enum
+{
+    C_CLASSIFY_TYPE_VOID = 0,
+    C_CLASSIFY_TYPE_INTEGER = 1,
+    C_CLASSIFY_TYPE_BOOL = 4,
+    C_CLASSIFY_TYPE_POINTER = 5,
+    C_CLASSIFY_TYPE_REAL = 8,
+    C_CLASSIFY_TYPE_COMPLEX = 9,
+    C_CLASSIFY_TYPE_STRUCT = 12,
+    C_CLASSIFY_TYPE_UNION = 13,
+    C_CLASSIFY_TYPE_VECTOR = 19,
+};
+
+// Clang's __builtin_classify_type values for the types this frontend models.
+// The operand is unevaluated and undergoes lvalue conversion and decay, so the
+// caller passes the unqualified, decayed type. Returns false for a type with
+// no class here: _BitInt is not modeled, nullptr_t (Clang's -1) is refused,
+// and va_list's class depends on the target ABI.
+BUSTER_C_INTERNAL bool c_parse_classify_type_value(CParseResult* result, CTypeId type, u32* value_out)
+{
+    CTypeKind kind = type.value < result->type_count ? result->types[type.value].kind : C_TYPE_INVALID;
+    u32 value = 0;
+    bool valid = true;
+    switch (kind)
+    {
+    case C_TYPE_VOID: value = C_CLASSIFY_TYPE_VOID; break;
+    case C_TYPE_BOOL: value = C_CLASSIFY_TYPE_BOOL; break;
+    case C_TYPE_CHAR:
+    case C_TYPE_SIGNED_CHAR:
+    case C_TYPE_UNSIGNED_CHAR:
+    case C_TYPE_SHORT:
+    case C_TYPE_UNSIGNED_SHORT:
+    case C_TYPE_INT:
+    case C_TYPE_UNSIGNED_INT:
+    case C_TYPE_LONG:
+    case C_TYPE_UNSIGNED_LONG:
+    case C_TYPE_LONG_LONG:
+    case C_TYPE_UNSIGNED_LONG_LONG:
+    case C_TYPE_INT128:
+    case C_TYPE_UNSIGNED_INT128:
+    case C_TYPE_ENUM: value = C_CLASSIFY_TYPE_INTEGER; break;
+    case C_TYPE_FLOAT16:
+    case C_TYPE_BFLOAT16:
+    case C_TYPE_FLOAT:
+    case C_TYPE_DOUBLE:
+    case C_TYPE_LONG_DOUBLE: value = C_CLASSIFY_TYPE_REAL; break;
+    case C_TYPE_FLOAT16_COMPLEX:
+    case C_TYPE_FLOAT_COMPLEX:
+    case C_TYPE_DOUBLE_COMPLEX:
+    case C_TYPE_LONG_DOUBLE_COMPLEX: value = C_CLASSIFY_TYPE_COMPLEX; break;
+    case C_TYPE_POINTER: value = C_CLASSIFY_TYPE_POINTER; break;
+    case C_TYPE_STRUCT: value = C_CLASSIFY_TYPE_STRUCT; break;
+    case C_TYPE_UNION: value = C_CLASSIFY_TYPE_UNION; break;
+    case C_TYPE_VECTOR: value = C_CLASSIFY_TYPE_VECTOR; break;
+    default: valid = false; break;
+    }
+    *value_out = value;
+    return valid;
+}
+
+// __builtin_classify_type(expression): the answer is an int constant recorded
+// like a __builtin_types_compatible_p answer. The operand is only typed, never
+// evaluated. Wrong arity or an untypable operand records nothing.
+BUSTER_C_INTERNAL bool c_parse_classify_type_builtin(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                     CParseResult* result, CScopeId scope, u32 start, u32 end)
+{
+    u32 close = c_parse_matching_delimiter_indexed(result, preprocess, start + 1);
+    bool valid = close < end && close > start + 2 &&
+                 c_parse_identity_separator(result, preprocess, start + 2, close, C_PUNCTUATOR_COMMA) == close;
+    CTypeId type = C_TYPE_ID_INVALID;
+    u32 value = 0;
+    valid = valid && c_parse_expression_type_query(machine, arena, preprocess, result, scope, start + 2, close, &type);
+    if (valid)
+    {
+        type = c_parse_auto_decay_type(result, type);
+        valid = c_parse_classify_type_value(result, type, &value);
+    }
+    if (valid)
+    {
+        valid = c_parse_type_identity_record(result, (CTypeIdentityQuery){
+            .token_start = start, .token_end = close + 1, .result_start = UINT32_MAX, .result_end = value});
+    }
+    return valid;
+}
+
 // Children have later token starts than their parents. This reverse work walk
 // settles every nested identity before expression/type queries consume it;
 // the active guard prevents a query from recursively starting another walk.
@@ -8827,6 +8916,10 @@ BUSTER_C_INTERNAL void c_parse_type_identity_prepare(CTypeParseMachine* machine,
                 else if (string_equal(name, S8("__builtin_types_compatible_p")))
                 {
                     c_parse_types_compatible_builtin(machine, arena, preprocess, result, token_scope, index, end);
+                }
+                else if (string_equal(name, S8("__builtin_classify_type")))
+                {
+                    c_parse_classify_type_builtin(machine, arena, preprocess, result, token_scope, index, end);
                 }
             }
         }
@@ -9867,7 +9960,8 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
         if (token.kind == C_TOKEN_IDENTIFIER &&
             (enumerator || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_offsetof")) ||
              string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic")) ||
-             string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_types_compatible_p"))))
+             string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_types_compatible_p")) ||
+             string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_classify_type"))))
         {
             deferred = true;
             break;
@@ -33226,6 +33320,7 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         case C_SYMBOL_BUILTIN_VA_START:
         case C_SYMBOL_BUILTIN_VA_START_C23:
         case C_SYMBOL_BUILTIN_VA_COPY: minimum = maximum = 2; break;
+        case C_SYMBOL_BUILTIN_CLASSIFY_TYPE:
         case C_SYMBOL_BUILTIN_VA_END:
         case C_SYMBOL_BUILTIN_ALLOCA:
         case C_SYMBOL_BUILTIN_STRLEN:

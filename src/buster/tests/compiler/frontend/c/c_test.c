@@ -22070,6 +22070,163 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_infinity(UnitTestArguments* ar
     return result;
 }
 
+// __builtin_classify_type answers Clang's type class from the unevaluated,
+// decayed operand type as an int constant. _BitInt is not modeled by the
+// frontend type system; nullptr_t (C_TYPE_NULLPTR) is modeled but deliberately
+// refused, so neither has a row here.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_classify_type(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "#if !__has_builtin(__builtin_classify_type)\n#error classify type is implemented\n#endif\n"
+        "typedef int V4 __attribute__((vector_size(16)));\n"
+        "enum Color { Red };\nstruct Pair { int a; int b; };\nunion Word { int i; float f; };\n"
+        "extern void sink(void);\nextern int array[3];\nextern const volatile int qualified;\n"
+        "_Static_assert(__builtin_classify_type(sink()) == 0, \"void\");\n"
+        "_Static_assert(__builtin_classify_type(1) == 1, \"int\");\n"
+        "_Static_assert(__builtin_classify_type('a') == 1, \"char\");\n"
+        "_Static_assert(__builtin_classify_type(1ull) == 1, \"unsigned long long\");\n"
+        "_Static_assert(__builtin_classify_type((__int128)1) == 1, \"int128\");\n"
+        "_Static_assert(__builtin_classify_type(Red) == 1, \"enumerator\");\n"
+        "_Static_assert(__builtin_classify_type((enum Color)0) == 1, \"enum\");\n"
+        "_Static_assert(__builtin_classify_type(qualified) == 1, \"qualified int\");\n"
+        "_Static_assert(__builtin_classify_type((_Bool)1) == 4, \"bool\");\n"
+        "_Static_assert(__builtin_classify_type((void*)0) == 5, \"pointer\");\n"
+        "_Static_assert(__builtin_classify_type(array) == 5, \"array decay\");\n"
+        "_Static_assert(__builtin_classify_type(sink) == 5, \"function decay\");\n"
+        "_Static_assert(__builtin_classify_type(\"text\") == 5, \"string literal\");\n"
+        "_Static_assert(__builtin_classify_type(1.0f) == 8, \"float\");\n"
+        "_Static_assert(__builtin_classify_type(1.0) == 8, \"double\");\n"
+        "_Static_assert(__builtin_classify_type(1.0L) == 8, \"long double\");\n"
+        "_Static_assert(__builtin_classify_type(1.0if) == 9, \"complex\");\n"
+        "_Static_assert(__builtin_classify_type(*(struct Pair*)0) == 12, \"struct\");\n"
+        "_Static_assert(__builtin_classify_type(*(union Word*)0) == 13, \"union\");\n"
+        "_Static_assert(__builtin_classify_type(*(V4*)0) == 19, \"vector\");\n"
+        "static int static_class = __builtin_classify_type(1.0);\n"
+        "static int bounded[__builtin_classify_type((void*)0)];\n"
+        "int counter(void)\n{\n    int x = 3;\n    int class = __builtin_classify_type(x++) + __builtin_classify_type(sink());\n"
+        "    switch (class)\n    {\n    case __builtin_classify_type(1) + __builtin_classify_type(sink()): return x;\n"
+        "    default: return 100;\n    }\n}\n"
+        "static int bumps;\nstatic int bump(void)\n{\n    bumps += 1;\n    return 1;\n}\n"
+        "int main(void)\n{\n    int x = 7;\n    volatile int sequence = 0;\n    _Atomic int atomic = 0;\n    int error = 0;\n"
+        "    error |= __builtin_classify_type(x++) != 1;\n    error |= __builtin_classify_type(sequence++) != 1;\n"
+        "    error |= __builtin_classify_type(x ? bump() : bump()) != 1;\n    error |= __builtin_classify_type(x && bump()) != 1;\n"
+        "    error |= __builtin_classify_type((bump(), 1.0)) != 8;\n    error |= __builtin_classify_type(x ? (void)bump() : (void)bump()) != 0;\n"
+        "    error |= __builtin_classify_type(atomic) != 1;\n    error |= bumps != 0;\n"
+        "    error |= x != 7 || sequence != 0;\n    error |= static_class != 8 || sizeof(bounded) != 5 * sizeof(int);\n"
+        "    error |= counter() != 3;\n    return error;\n}\n");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("builtin-classify-type.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            bool accepted = preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0;
+            BUSTER_TEST_RAW(arguments, accepted, string_format(temporary.arena,
+                S8("classify type target={u32} form={u32}: first diagnostic {S8}"), target_index, form,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            if (accepted && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                IrGlobal* initialized = c_test_find_ir_global(module, lowered.program, S8("static_class"));
+                BUSTER_TEST(arguments, initialized && initialized->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER &&
+                    initialized->initializer_bits == 8);
+                IrFunction* function = c_test_find_ir_function(module, S8("counter"));
+                if (BUSTER_REQUIRE(arguments, function != 0))
+                {
+                    // The operands are unevaluated: no call and no increment.
+                    BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    String8 invalid[] = {
+        S8("int bad(void) { return __builtin_classify_type(); }"),
+        S8("int bad(void) { return __builtin_classify_type(1, 2); }"),
+        S8("static int bad = __builtin_classify_type();"),
+        S8("_Static_assert(__builtin_classify_type() == 1, \"arity\");"),
+        S8("_Static_assert(__builtin_classify_type(1, 2) == 1, \"arity\");"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = targets[0];
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[index],
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("builtin-classify-type-invalid.c"), preprocess, syntax, target,
+            (CIRLowerOptions){0});
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0, invalid[index]);
+        BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0, invalid[index]);
+        BUSTER_TEST(arguments, !lowered.canonical_ir_certified && lowered.program == 0);
+        scratch_end(temporary);
+    }
+    {
+        // va_list's class depends on the target ABI, so the function that
+        // asks for it fails to lower with a diagnostic naming the builtin.
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = targets[0];
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, S8("int bad(__builtin_va_list list) { return __builtin_classify_type(list); }"),
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("builtin-classify-type-va-list.c"), preprocess, syntax, target,
+            (CIRLowerOptions){0});
+        bool named = false;
+        for (u64 index = 0; index < lowered.diagnostic_count; index += 1)
+        {
+            named |= string_first_sequence(lowered.diagnostics[index].message, S8("__builtin_classify_type")) != BUSTER_STRING_NO_MATCH;
+        }
+        BUSTER_TEST(arguments, lowered.diagnostic_count != 0 && named && !lowered.canonical_ir_certified);
+        scratch_end(temporary);
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 path = buster_test_temporary_path(arguments->arena, S8("builtin-classify-type-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("builtin-classify-type-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fregister-allocator=fast"),
+#if BUSTER_CPU_ARCH_X86_64
+                S8("-mattr=+sse2,+cx16"),
+#endif
+                form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#endif
+    return result;
+}
+
 // GNU vector subscripts are scalar lanes even inside conditional expressions.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vector_subscript_conditional_type(UnitTestArguments* arguments)
 {
@@ -23078,6 +23235,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__atomic_test_and_set"), native_targets},
         {S8("__atomic_clear"), native_targets},
         {S8("__builtin_types_compatible_p"), all_targets},
+        {S8("__builtin_classify_type"), all_targets},
         {S8("__builtin_choose_expr"), all_targets},
         {S8("__builtin_expect"), all_targets},
         {S8("__builtin_memcpy"), all_targets},
@@ -60637,6 +60795,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_brace_designators);
     C_TEST_FIXTURE(arguments, c_test_braced_string_initializers);
     C_TEST_FIXTURE(arguments, c_test_braced_string_runtime);
+    C_TEST_FIXTURE(arguments, c_test_builtin_classify_type);
     C_TEST_FIXTURE(arguments, c_test_builtin_infinity);
     C_TEST_FIXTURE(arguments, c_test_c23_attribute_noreturn);
     C_TEST_FIXTURE(arguments, c_test_c23_attribute_positions);
