@@ -1465,7 +1465,11 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_size_query(CAstTypeBody* body, CPreprocessR
     }
 }
 
-BUSTER_GLOBAL_LOCAL void c_ast_types_type_node(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess, u32 node, u32 relative)
+// Inlined at both callers: the eager pass calls it once per node, and paid
+// about 40 M instructions on the unity self-host for an out-of-line call when
+// c_ast_types_retype became its second caller.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_ast_types_type_node(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess, u32 node,
+                                                             u32 relative)
 {
     u32 kind = body->ast->kinds[node];
     switch (kind)
