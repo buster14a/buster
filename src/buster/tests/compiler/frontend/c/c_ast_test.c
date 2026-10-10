@@ -3582,6 +3582,16 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
      C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
     {S8_INITIALIZER("struct S { struct { int inner; }; }; int f(struct S* pointer) { return pointer->inner; }"), S8_INITIALIZER("pointer"), 1, 3,
      C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    // A pass remembers a member found directly in its aggregate
+    // (c_ast_types_member_lookup): the second `p->bits` keeps the bit-field
+    // width that promotes it to int, and `b->x` is a different aggregate's
+    // member of the same name. A promoted member is looked up again each time.
+    {S8_INITIALIZER("struct S { unsigned bits : 3; }; int f(struct S* p) { return p->bits + p->bits; }"), S8_INITIALIZER("p"), 1, 7,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("struct A { char x; }; struct B { long x; }; long f(struct A* a, struct B* b) { return a->x + b->x; }"), S8_INITIALIZER("a"), 1,
+     7, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    {S8_INITIALIZER("struct S { struct { long inner; }; }; long f(struct S* p) { return p->inner + p->inner; }"), S8_INITIALIZER("p"), 1, 7,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
     {S8_INITIALIZER("int f(int* items) { return items[2]; }"), S8_INITIALIZER("items"), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("unsigned char table[4]; unsigned char f(int i) { return table[i]; }"), S8_INITIALIZER("table"), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
      C_TYPE_UNSIGNED_CHAR},

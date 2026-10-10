@@ -335,6 +335,18 @@ unchanged.
   only when every operand the machine types for it is accepted. Its arrays
   live in the machine's scratch arena above the body's validation mark and are
   released with the rest of the body's scratch.
+- **Why bodies are typed eagerly.** Initializers wait for their first query
+  (below), but bodies gain nothing from that. On the unity self-host, 6,531 of
+  6,612 bodies receive a query that the literal fast path does not answer, and
+  90% of the typed body expression nodes lie inside some queried node's
+  subtree. The pass is made cheaper per node instead (audit
+  `2026-10-10T…`, below):
+  - one table load classifies a node's kind;
+  - only the arrays that are read before they are written are cleared;
+  - `c_ast_types_member_lookup` remembers, for the length of one pass, a member
+    found directly in its aggregate's row. Nothing the lookup reads changes
+    during a pass. A promoted search into anonymous members is never
+    remembered, because it takes guarded body scratch (#1256).
 - **File-scope initializers.** `c_parse_validate_static_initializers` made
   nearly all of the queries outside a typed body: 77,545 of 79,035 on the unity
   self-host, at about 190 M machine Ir, against at most 3 M for any other
