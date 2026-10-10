@@ -2646,6 +2646,7 @@ struct CIrPreparedCall
     bool builtin_constant_p;
     bool builtin_choose_expr;
     bool builtin_types_compatible_p;
+    bool builtin_classify_type;
     bool builtin_object_size;
     bool builtin_assume_aligned;
     bool builtin_debugtrap;
@@ -23955,6 +23956,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         bool builtin_constant_p = builtin_kind == C_SYMBOL_BUILTIN_CONSTANT_P;
         bool builtin_choose_expr = builtin_kind == C_SYMBOL_BUILTIN_CHOOSE_EXPR;
         bool builtin_types_compatible_p = builtin_kind == C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P;
+        bool builtin_classify_type = builtin_kind == C_SYMBOL_BUILTIN_CLASSIFY_TYPE;
         bool builtin_object_size = builtin_kind == C_SYMBOL_BUILTIN_OBJECT_SIZE;
         bool builtin_assume_aligned = builtin_kind == C_SYMBOL_BUILTIN_ASSUME_ALIGNED;
         bool builtin_debugtrap = builtin_kind == C_SYMBOL_BUILTIN_DEBUGTRAP;
@@ -24192,7 +24194,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         }
         indirect |= callee_start != index || indexed_callee || parenthesized_callee;
         if ((!indexed_callee && !parenthesized_callee && token.kind != C_TOKEN_IDENTIFIER) ||
-            (!builtin_identity && !builtin_constant_p && !builtin_choose_expr && !builtin_types_compatible_p && !builtin_object_size &&
+            (!builtin_identity && !builtin_constant_p && !builtin_choose_expr && !builtin_types_compatible_p && !builtin_classify_type && !builtin_object_size &&
              !builtin_assume_aligned && !builtin_debugtrap && !builtin_spin_pause && !builtin_unreachable && !builtin_frame_address && !builtin_return_address && !builtin_alloca && !builtin_complex && !builtin_integer_transform && !builtin_vendor_target && !builtin_vendor_generic && !builtin_strlen && !builtin_clear_cache && !builtin_prefetch &&
              !builtin_va_start && !builtin_va_copy && !builtin_va_end && !builtin_va_arg && !builtin_generic && builtin_atomic == C_IR_ATOMIC_BUILTIN_COUNT &&
              !builtin_math_link_name.length && builtin_memory == C_IR_MEMORY_BUILTIN_COUNT && builtin_overflow == C_IR_OVERFLOW_BUILTIN_NONE &&
@@ -24247,6 +24249,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             .builtin_constant_p = builtin_constant_p,
             .builtin_choose_expr = builtin_choose_expr,
             .builtin_types_compatible_p = builtin_types_compatible_p,
+            .builtin_classify_type = builtin_classify_type,
             .builtin_object_size = builtin_object_size,
             .builtin_assume_aligned = builtin_assume_aligned,
             .builtin_debugtrap = builtin_debugtrap,
@@ -24312,12 +24315,13 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // duplicating a destination expression in fortified memory macros.
         // _Generic and __builtin_choose_expr own their selected expression.
         // Deferred preparation lets that expression prepare its own calls.
-        // __builtin_constant_p also discards side effects in its operand.
+        // __builtin_constant_p and __builtin_classify_type discard their operand.
         // A selection or choice can designate a function, so a `(` after
         // its close calls the result: stop on the close, its open folded
         // into the scan, so the `)(` chain call is discovered there exactly
         // as it is for `get()(3)`.
-        if (builtin_generic || builtin_choose_expr || builtin_object_size || builtin_constant_p || builtin_vendor_generic)
+        if (builtin_generic || builtin_choose_expr || builtin_object_size || builtin_constant_p || builtin_classify_type ||
+            builtin_vendor_generic)
         {
             if ((builtin_generic || builtin_choose_expr) && close + 1 < end &&
                 c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
@@ -24961,7 +24965,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
     {
         CIrPreparedCall* selected = builder->prepared_calls + call_index;
         CToken token = builder->preprocess.tokens[selected->token_index];
-        if (selected->builtin_constant_p || selected->builtin_choose_expr || selected->builtin_types_compatible_p || selected->builtin_object_size ||
+        if (selected->builtin_constant_p || selected->builtin_choose_expr || selected->builtin_types_compatible_p || selected->builtin_classify_type || selected->builtin_object_size ||
             selected->builtin_assume_aligned)
         {
             u32 starts[4] = {0};
@@ -25000,10 +25004,10 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_CHOOSE, starts[branch], ends[branch], false);
                 }
             }
-            else if (selected->builtin_types_compatible_p)
+            else if (selected->builtin_types_compatible_p || selected->builtin_classify_type)
             {
                 CTypeIdentityQuery answer;
-                if (argument_count != 2 || !c_ir_type_identity_query(builder, selected->token_index, selected->close_index + 1, &answer) ||
+                if (argument_count != (selected->builtin_classify_type ? 1u : 2u) || !c_ir_type_identity_query(builder, selected->token_index, selected->close_index + 1, &answer) ||
                     answer.result_start != UINT32_MAX)
                 {
                     return C_IR_PREPARED_CALL_STEP_FAILED;
@@ -39462,7 +39466,8 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
         }
         CTypeIdentityQuery identity;
         CSymbolBuiltin identity_kind = c_ir_token_builtin_kind(builder, token);
-        bool type_identity = (identity_kind == C_SYMBOL_BUILTIN_GENERIC || identity_kind == C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P) &&
+        bool type_identity = (identity_kind == C_SYMBOL_BUILTIN_GENERIC || identity_kind == C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P ||
+         identity_kind == C_SYMBOL_BUILTIN_CLASSIFY_TYPE) &&
             c_ir_type_identity_query(builder, index, end, &identity);
         if (type_identity)
         {
@@ -57935,7 +57940,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 continue;
             }
             if (token.kind == C_TOKEN_IDENTIFIER &&
-                string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__builtin_types_compatible_p")))
+                (string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__builtin_types_compatible_p")) ||
+                 string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__builtin_classify_type"))))
             {
                 CTypeIdentityQuery answer;
                 if (!c_ir_type_identity_query(builder, index, end, &answer) || answer.result_start != UINT32_MAX)
