@@ -1383,8 +1383,14 @@ O(n log n) and the pairing scan O(n). All of it runs against a defined
 thread-local symbol with a 32-bit offset and fails the link before the image
 is written, as `link.relocation` naming the symbol and the relocation that
 could not start or complete its sequence. The relaxation does not check that
-intervening instructions leave the register alone; compilers do not
-interleave a use of the page address. TLS descriptors stay strictly adjacent.
+intervening instructions leave the register alone, and it does not need to.
+Every ADRP for one symbol and addend becomes the same `movz Xn, #hi` and every
+matching LDR the same `movk Xn, #lo`. On any path where the original LDR read
+the page an ADRP for that symbol left in `Xn`, the relaxed `movk` therefore
+completes the offset that a `movz` put there. That holds even if the pairing
+does not match the control flow. The only extra assumption is that no
+other instruction reads that GOT page address, which no compiler emits. TLS
+descriptors stay strictly adjacent.
 The other descriptor forms (560/561 and the
 565-568 `OFF_G1`/`OFF_G0_NC`/`LDR`/`ADD` sequence), the dynamic
 `R_AARCH64_TLSDESC` 1031, and TLS owned by a loader or shared library are

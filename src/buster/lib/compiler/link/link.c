@@ -9028,8 +9028,10 @@ BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_relax(Arena* arena, ObjectFile* object
         }
         else
         {
+            // Both initial-exec kinds took the branches above, so only a
+            // descriptor sequence can start here.
             LinkAarch64TlsSequence const* sequence = 0;
-            for (u32 candidate = 1; candidate < BUSTER_ARRAY_LENGTH(link_aarch64_tls_sequences); candidate += 1)
+            for (u32 candidate = 0; candidate < BUSTER_ARRAY_LENGTH(link_aarch64_tls_sequences); candidate += 1)
             {
                 sequence = link_aarch64_tls_sequences[candidate].kinds[0] == first->kind ? &link_aarch64_tls_sequences[candidate] : sequence;
             }
