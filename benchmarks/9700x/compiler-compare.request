@@ -146,3 +146,4 @@ request: PR #3157 issue #2717 final default -g scalar location candidate after d
 # request: PR #3157 issue #2717 remove analyzer dead store; compare the final exact PR head
 request: PR #3157 issue #2717 guard optional published CFG; compare the final exact PR head
 request: PR #3157 issue #2717 ready-head Apple/macOS/iOS CI and fresh compiler-compare-v1 after marker-only push from ee52b190; source-identical code
+request: PR #3357 issue #132 owner-requested pre-merge compiler comparison; selector result-row projection replacing the classification full-row re-entry; exact head against merge base, compiler-compare-v1 and throughput-corpus-v2; acceptance cells: selection retired instructions, branch misses, L1D misses, bounded memory, identical output
