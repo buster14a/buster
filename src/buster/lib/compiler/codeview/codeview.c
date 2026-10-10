@@ -17,6 +17,9 @@ enum
     // Match the MSVC/LLVM maximum including the four-byte record prefix.
     CODEVIEW_MAX_RECORD_SIZE = 0xff00,
     CODEVIEW_CONTINUATION_SIZE = 8,
+    // Largest S_DEFRANGE_* record emitted (S_DEFRANGE_SUBFIELD_REGISTER: the
+    // four-byte prefix plus 16 payload bytes), rounded up to a padded bound.
+    CODEVIEW_DEFRANGE_RECORD_BYTES = 24,
 };
 
 enum
@@ -892,6 +895,19 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
         {
             symbol_capacity += (u64)input.model->variable_count * 192 + (u64)input.model->scope_count * 96 +
                                (u64)input.model->inline_site_count * 64 + 256;
+            // Every location range (each piece of a piecewise one) is its own
+            // S_DEFRANGE_* record, so a variable's bytes grow with its ranges
+            // and name rather than fitting one fixed per-variable reserve.
+            for (u32 variable_index = 0; variable_index < input.model->variable_count; variable_index += 1)
+            {
+                DebugVariable const* variable = input.model->variables + variable_index;
+                symbol_capacity += variable->name.length + variable->linkage_name.length;
+                for (u32 location_index = 0; variable->locations && location_index < variable->location_count; location_index += 1)
+                {
+                    u32 pieces = variable->locations[location_index].location.piece_count;
+                    symbol_capacity += (u64)CODEVIEW_DEFRANGE_RECORD_BYTES * (pieces ? pieces : 1u);
+                }
+            }
         }
         ByteWriter symbols = byte_writer_make(arena_allocate(arena, u8, symbol_capacity), symbol_capacity);
         // Count the same scope tree once per emitted function. Debug models may

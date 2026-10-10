@@ -2750,6 +2750,11 @@ struct MachineDebugFacts
 // for the whole of such a block, or from just after the block's own first
 // write, and never over bytes a path may leave unwritten.
 #define MACHINE_DEBUG_INITIALIZED_CELL_LIMIT (UINT32_C(1) << 20)
+// Output budget: every range becomes a DWARF location-list entry and a
+// CodeView S_DEFRANGE_* record with two relocations. Tracked locals keep
+// their ranges in tracking order until a function's total would pass this
+// many; the rest fall back to unavailable rather than inflating debug output.
+#define MACHINE_DEBUG_INITIALIZED_RANGE_LIMIT (UINT32_C(1) << 14)
 
 typedef struct MachineDebugInitialized MachineDebugInitialized;
 struct MachineDebugInitialized
@@ -2765,6 +2770,11 @@ struct MachineDebugInitialized
     u64* exit_sets;
     u64* entry_sets;
     u8* reachable;
+    // Per tracked local: its ranges did not fit the output budget.
+    u8* over_budget;
+    // Machine emission order of the blocks (null when it is block order), so
+    // each local's ranges come out in code order and contiguous ones merge.
+    u32 const* layout;
     u32 tracked_count;
     u32 word_count;
     u32 block_count;
@@ -3141,6 +3151,21 @@ BUSTER_GLOBAL_LOCAL u64 machine_debug_initialized_incoming(IrFunction* function,
     return incoming;
 }
 
+// First instruction of the block's range for a tracked local: the block start
+// when every path into it has written the local, else just past its first
+// write there; UINT32_MAX when the local holds no written value in the block.
+BUSTER_GLOBAL_LOCAL u32 machine_debug_initialized_block_first(IrFunction* function, MachineDebugInitialized const* initialized,
+                                                              u32 block_index, u32 tracked)
+{
+    IrCfgBlock const* block = function->published_cfg->blocks + block_index;
+    u64 end = (u64)block->first_instruction + block->instruction_count;
+    u64 entry_word = initialized->entry_sets[(u64)block_index * initialized->word_count + tracked / 64u];
+    bool entered = ((entry_word >> (tracked % 64u)) & 1u) != 0;
+    u32 after = initialized->store_after[(u64)block_index * initialized->tracked_count + tracked];
+    u32 first = entered ? block->first_instruction : after;
+    return first < end ? first : UINT32_MAX;
+}
+
 // Track the debug frame locals no entry-block write reaches, record each
 // block's first complete write to them, then solve the forward
 // must-initialized sets in reverse postorder. Functions whose named locals are
@@ -3276,33 +3301,52 @@ BUSTER_GLOBAL_LOCAL void machine_debug_initialized_build(Arena* arena, IrFunctio
                 }
             }
         }
+        u32* range_counts = arena_allocate(arena, u32, tracked_count);
+        initialized->over_budget = arena_allocate(arena, u8, tracked_count);
+        memset(range_counts, 0, sizeof(u32) * tracked_count);
+        for (u32 block_index = 0; valid && block_index < block_count; block_index += 1)
+        {
+            for (u32 tracked_index = 0; initialized->reachable[block_index] && tracked_index < tracked_count; tracked_index += 1)
+            {
+                range_counts[tracked_index] += machine_debug_initialized_block_first(function, initialized, block_index, tracked_index) !=
+                                               UINT32_MAX;
+            }
+        }
+        u32 range_total = 0;
+        for (u32 tracked_index = 0; tracked_index < tracked_count; tracked_index += 1)
+        {
+            bool fits = range_counts[tracked_index] <= MACHINE_DEBUG_INITIALIZED_RANGE_LIMIT - range_total;
+            initialized->over_budget[tracked_index] = !fits;
+            range_total += fits ? range_counts[tracked_index] : 0;
+        }
+        initialized->layout = valid ? machine_selection_canonical_layout(arena, function) : 0;
         initialized->valid = valid;
     }
 }
 
-// The block ranges where a tracked local holds a written value: a whole
-// reachable block it is initialized on entry to, else the rest of a block
-// after its first write there. Only counts when `rows` is null.
+// The block ranges where a tracked local holds a written value, in machine
+// layout order: a whole reachable block it is initialized on entry to, else
+// the rest of a block after its first write there. Only counts when `rows` is
+// null.
 BUSTER_GLOBAL_LOCAL u32 machine_debug_initialized_ranges(IrFunction* function, MachineDebugInitialized const* initialized, u32 local_id,
                                                           MachineDebugBlockValue* rows)
 {
     u32 count = 0;
     u32 tracked = initialized->valid && local_id < function->local_count ? initialized->tracked[local_id] : UINT32_MAX;
-    for (u32 block_index = 0; tracked != UINT32_MAX && block_index < initialized->block_count; block_index += 1)
+    tracked = tracked != UINT32_MAX && !initialized->over_budget[tracked] ? tracked : UINT32_MAX;
+    for (u32 order_index = 0; tracked != UINT32_MAX && order_index < initialized->block_count; order_index += 1)
     {
+        u32 block_index = initialized->layout ? initialized->layout[order_index] : order_index;
         IrCfgBlock const* block = function->published_cfg->blocks + block_index;
-        u64 end = (u64)block->first_instruction + block->instruction_count;
-        u64 entry_word = initialized->entry_sets[(u64)block_index * initialized->word_count + tracked / 64u];
-        bool entered = ((entry_word >> (tracked % 64u)) & 1u) != 0;
-        u32 after = initialized->store_after[(u64)block_index * initialized->tracked_count + tracked];
-        u32 first = entered ? block->first_instruction : after;
-        if (initialized->reachable[block_index] && first < end)
+        u32 first = initialized->reachable[block_index] ? machine_debug_initialized_block_first(function, initialized, block_index, tracked)
+                                                        : UINT32_MAX;
+        if (first != UINT32_MAX)
         {
             if (rows)
             {
                 rows[count] = (MachineDebugBlockValue){
                     .first_instruction = first,
-                    .instruction_count = (u32)(end - first),
+                    .instruction_count = block->first_instruction + block->instruction_count - first,
                 };
             }
             count += 1u;
@@ -3384,7 +3428,7 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
         MachineDebugInitialized initialized;
         machine_debug_initialized_build(scratch.arena, ir_function, local_places, facts.local_first_store_after, &initialized);
         MachineDebugBlockValue* initialized_ranges =
-            initialized.valid ? arena_allocate(scratch.arena, MachineDebugBlockValue, initialized.block_count) : 0;
+            arena_allocate(scratch.arena, MachineDebugBlockValue, initialized.block_count ? initialized.block_count : 1u);
 
         u32 local_slot_count = 8u;
         while (local_slot_count / 2u < unresolved_count && local_slot_count < (1u << 30))
@@ -3819,7 +3863,7 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build_dense(Arena* arena, IrProgra
         MachineDebugInitialized initialized;
         machine_debug_initialized_build(arena, ir_function, local_places, facts.local_first_store_after, &initialized);
         MachineDebugBlockValue* initialized_ranges =
-            initialized.valid ? arena_allocate(arena, MachineDebugBlockValue, initialized.block_count) : 0;
+            arena_allocate(arena, MachineDebugBlockValue, initialized.block_count ? initialized.block_count : 1u);
         u32 parameter_ordinal = 0;
         for (u32 debug_index = 0; result && debug_index < ir_function->debug_local_count; debug_index += 1)
         {
