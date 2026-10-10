@@ -561,6 +561,28 @@ class CombinedTreeTests(unittest.TestCase):
             with self.assertRaisesRegex(gate.AdmissionError, "changed admission policy"):
                 gate.verify_trusted_policy(report, repo)
 
+    def test_current_native_declaration_predecessor_requires_new_authority(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            gate.git(repo, "init", "-b", "main")
+            gate.git(repo, "config", "user.name", "Queue fixture")
+            gate.git(repo, "config", "user.email", "queue@example.invalid")
+            (repo / "README.md").write_text("base\n")
+            gate.git(repo, "add", ".")
+            gate.git(repo, "commit", "-m", "base")
+            main = gate.git(repo, "rev-parse", "HEAD")
+            (repo / "docs").mkdir()
+            (repo / "docs/current-native-object-census-v1.json").write_text("new rebinding policy\n")
+            gate.git(repo, "add", ".")
+            gate.git(repo, "commit", "-m", "predecessor changes policy")
+            predecessor = gate.git(repo, "rev-parse", "HEAD")
+            report = dict(candidate(), policy_sha=main, base=predecessor,
+                          base_first_parents=[predecessor, main])
+            self.assertFalse(gate.check_current(report, main, report["head"]))
+            self.assertTrue(gate.check_current(report, predecessor, report["head"]))
+            with self.assertRaisesRegex(gate.AdmissionError, "changed admission policy"):
+                gate.verify_trusted_policy(report, repo)
+
 
 class OrchestrationTests(unittest.TestCase):
     def test_speculative_group_does_not_run_retirement_gate_or_collect_ci_early(self):

@@ -8790,9 +8790,9 @@ BUSTER_GLOBAL_LOCAL bool link_aarch64_elf_tprel_offset(ObjectFile* object, Objec
     return valid;
 }
 
-// One initial-exec relocation site, keyed by section and byte offset.
-typedef struct LinkTlsIeSite LinkTlsIeSite;
-struct LinkTlsIeSite
+// One relaxable TLS relocation site, keyed by section and byte offset.
+typedef struct LinkTlsSite LinkTlsSite;
+struct LinkTlsSite
 {
     u64 key;
     u32 relocation;
@@ -8801,10 +8801,60 @@ struct LinkTlsIeSite
 
 enum
 {
-    LINK_TLS_IE_OFFSET_BITS = 48,
+    LINK_TLS_SITE_OFFSET_BITS = 48,
+    LINK_AARCH64_TLS_SEQUENCE_MAX = 4,
 };
 
-BUSTER_GLOBAL_LOCAL void link_tls_ie_site_sift(LinkTlsIeSite* sites, u32 count, u32 root)
+// The AArch64 sequences a fixed-address executable relaxes to local-exec,
+// each a run of relocations on consecutive words in this order: initial-exec
+// ADRP/LDR, and the general-dynamic descriptor ADRP/LDR/ADD/BLR. The names
+// are the AAELF64 spellings a refused link reports.
+typedef struct LinkAarch64TlsSequence LinkAarch64TlsSequence;
+struct LinkAarch64TlsSequence
+{
+    ObjectRelocationKind kinds[LINK_AARCH64_TLS_SEQUENCE_MAX];
+    String8 names[LINK_AARCH64_TLS_SEQUENCE_MAX];
+    u32 length;
+};
+
+static LinkAarch64TlsSequence const link_aarch64_tls_sequences[] = {
+    {
+        {OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21, OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12},
+        {S8_INITIALIZER("R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21"), S8_INITIALIZER("R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC")},
+        2,
+    },
+    {
+        {OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21, OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12,
+         OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12, OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL},
+        {S8_INITIALIZER("R_AARCH64_TLSDESC_ADR_PAGE21"), S8_INITIALIZER("R_AARCH64_TLSDESC_LD64_LO12"),
+         S8_INITIALIZER("R_AARCH64_TLSDESC_ADD_LO12"), S8_INITIALIZER("R_AARCH64_TLSDESC_CALL")},
+        4,
+    },
+};
+
+BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_relaxable(ObjectRelocationKind kind)
+{
+    return object_relocation_kind_is_aarch64_elf_tls_ie(kind) || object_relocation_kind_is_aarch64_elf_tls_desc(kind);
+}
+
+// The AAELF64 name of a relaxable kind, for the refused-link diagnostic.
+BUSTER_GLOBAL_LOCAL String8 link_aarch64_tls_relocation_name(ObjectRelocationKind kind)
+{
+    String8 name = S8("AArch64 TLS relocation");
+    for (u32 sequence = 0; sequence < BUSTER_ARRAY_LENGTH(link_aarch64_tls_sequences); sequence += 1)
+    {
+        for (u32 step = 0; step < link_aarch64_tls_sequences[sequence].length; step += 1)
+        {
+            if (link_aarch64_tls_sequences[sequence].kinds[step] == kind)
+            {
+                name = link_aarch64_tls_sequences[sequence].names[step];
+            }
+        }
+    }
+    return name;
+}
+
+BUSTER_GLOBAL_LOCAL void link_tls_site_sift(LinkTlsSite* sites, u32 count, u32 root)
 {
     while (root < count / 2)
     {
@@ -8817,75 +8867,112 @@ BUSTER_GLOBAL_LOCAL void link_tls_ie_site_sift(LinkTlsIeSite* sites, u32 count, 
         {
             break;
         }
-        LinkTlsIeSite swapped = sites[root];
+        LinkTlsSite swapped = sites[root];
         sites[root] = sites[child];
         sites[child] = swapped;
         root = child;
     }
 }
 
-// Rewrite every AArch64 initial-exec pair into MOVZ/MOVK of its thread-pointer
-// offset. Sites are paired by exact identity: the LDR relocation must sit in
-// the same section four bytes after its ADRP relocation, name the same symbol
-// and addend, and use the same register. Each ADRP is consumed by exactly one
-// LDR and the other way round, so a repeated, unmatched or overlapping half
-// fails instead of leaving a rewritten ADRP whose partner is something else.
-BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_ie_relax(Arena* arena, ObjectFile* object, u8* bytes, u64 const* section_offsets)
+// Rewrite every AArch64 initial-exec pair and descriptor sequence into
+// local-exec form. Sites are sorted by section and offset, then consumed one
+// whole sequence at a time: the site that starts it picks the sequence, and
+// each later step must sit exactly four bytes after the previous one in the
+// same section, have the next kind, and name the same symbol and addend.
+// Registers must agree (one register for an IE pair; the LDR and BLR of a
+// descriptor share the scratch register). Every site is consumed exactly
+// once, so a repeated, missing, misplaced, overlapping or out-of-order step
+// fails the whole link, before anything is written, and *failed names the
+// relocation that could not start or complete a sequence.
+BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_relax(Arena* arena, ObjectFile* object, u8* bytes, u64 const* section_offsets, u32* failed)
 {
     u32 count = 0;
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
-        count += object_relocation_kind_is_aarch64_elf_tls_ie(object->relocations[index].kind);
+        count += link_aarch64_tls_relaxable(object->relocations[index].kind);
     }
     bool valid = true;
-    LinkTlsIeSite* sites = count ? arena_allocate(arena, LinkTlsIeSite, count) : 0;
+    LinkTlsSite* sites = count ? arena_allocate(arena, LinkTlsSite, count) : 0;
+    u32* words = count ? arena_allocate(arena, u32, count) : 0;
     u32 site_count = 0;
+    *failed = UINT32_MAX;
     for (u32 index = 0; valid && index < object->relocation_count; index += 1)
     {
         ObjectRelocation* relocation = &object->relocations[index];
-        if (object_relocation_kind_is_aarch64_elf_tls_ie(relocation->kind))
+        if (link_aarch64_tls_relaxable(relocation->kind))
         {
             valid = sites && site_count < count && relocation->section < OBJECT_SECTION_COUNT && relocation->symbol < object->symbol_count &&
                     !(relocation->offset & 3) &&
-                    relocation->offset < ((u64)1 << LINK_TLS_IE_OFFSET_BITS) && relocation->offset <= object->sections[relocation->section].data.length &&
+                    relocation->offset < ((u64)1 << LINK_TLS_SITE_OFFSET_BITS) && relocation->offset <= object->sections[relocation->section].data.length &&
                     4 <= object->sections[relocation->section].data.length - relocation->offset &&
                     object->sections[relocation->section].alignment >= 4;
             if (valid)
             {
-                sites[site_count++] = (LinkTlsIeSite){.key = ((u64)relocation->section << LINK_TLS_IE_OFFSET_BITS) | relocation->offset, .relocation = index};
+                sites[site_count++] = (LinkTlsSite){.key = ((u64)relocation->section << LINK_TLS_SITE_OFFSET_BITS) | relocation->offset, .relocation = index};
+            }
+            else
+            {
+                *failed = index;
             }
         }
     }
     for (u32 root = site_count / 2; root > 0; root -= 1)
     {
-        link_tls_ie_site_sift(sites, site_count, root - 1);
+        link_tls_site_sift(sites, site_count, root - 1);
     }
     for (u32 remaining = site_count; remaining > 1; remaining -= 1)
     {
-        LinkTlsIeSite swapped = sites[0];
+        LinkTlsSite swapped = sites[0];
         sites[0] = sites[remaining - 1];
         sites[remaining - 1] = swapped;
-        link_tls_ie_site_sift(sites, remaining - 1, 0);
+        link_tls_site_sift(sites, remaining - 1, 0);
     }
-    for (u32 cursor = 0; valid && cursor < site_count; cursor += 2)
+    // Validate and compute every replacement word first; write only once the
+    // whole object relaxes.
+    u32 cursor = 0;
+    while (valid && cursor < site_count)
     {
-        ObjectRelocation* high = &object->relocations[sites[cursor].relocation];
-        ObjectRelocation* low = cursor + 1 < site_count ? &object->relocations[sites[cursor + 1].relocation] : 0;
+        ObjectRelocation* first = &object->relocations[sites[cursor].relocation];
+        LinkAarch64TlsSequence const* sequence = 0;
+        for (u32 candidate = 0; candidate < BUSTER_ARRAY_LENGTH(link_aarch64_tls_sequences); candidate += 1)
+        {
+            sequence = link_aarch64_tls_sequences[candidate].kinds[0] == first->kind ? &link_aarch64_tls_sequences[candidate] : sequence;
+        }
+        u32 length = sequence ? sequence->length : 0;
         u64 tprel = 0;
-        u32 high_word = 0;
-        u32 low_word = 0;
-        valid = low && high->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21 &&
-                low->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12 && sites[cursor + 1].key == sites[cursor].key + 4 &&
-                low->symbol == high->symbol && low->addend == high->addend &&
-                link_aarch64_elf_tprel_offset(object, &object->symbols[high->symbol], high->addend, UINT32_MAX, &tprel) &&
-                object_aarch64_elf_tls_ie_relax(high->kind, link_read_u32(object->sections[high->section].data.pointer, high->offset), tprel, &high_word) &&
-                object_aarch64_elf_tls_ie_relax(low->kind, link_read_u32(object->sections[low->section].data.pointer, low->offset), tprel, &low_word) &&
-                (high_word & 31) == (low_word & 31);
+        valid = length && length <= site_count - cursor &&
+                link_aarch64_elf_tprel_offset(object, &object->symbols[first->symbol], first->addend, UINT32_MAX, &tprel);
+        u32 original[LINK_AARCH64_TLS_SEQUENCE_MAX] = {0};
+        for (u32 step = 0; valid && step < length; step += 1)
+        {
+            ObjectRelocation* relocation = &object->relocations[sites[cursor + step].relocation];
+            original[step] = link_read_u32(object->sections[relocation->section].data.pointer, relocation->offset);
+            valid = relocation->kind == sequence->kinds[step] && sites[cursor + step].key == sites[cursor].key + (u64)step * 4 &&
+                    relocation->symbol == first->symbol && relocation->addend == first->addend &&
+                    (object_aarch64_elf_tls_ie_relax(relocation->kind, original[step], tprel, &words[cursor + step]) ||
+                     object_aarch64_elf_tls_desc_relax(relocation->kind, original[step], tprel, &words[cursor + step]));
+        }
+        if (valid && object_relocation_kind_is_aarch64_elf_tls_ie(first->kind))
+        {
+            valid = (words[cursor] & 31) == (words[cursor + 1] & 31);
+        }
+        else if (valid)
+        {
+            valid = (original[1] & 31) == ((original[3] >> 5) & 31);
+        }
         if (valid)
         {
-            link_write_u32(bytes, section_offsets[high->section] + high->offset, high_word);
-            link_write_u32(bytes, section_offsets[low->section] + low->offset, low_word);
+            cursor += length;
         }
+        else
+        {
+            *failed = sites[cursor].relocation;
+        }
+    }
+    for (u32 index = 0; valid && index < site_count; index += 1)
+    {
+        ObjectRelocation* relocation = &object->relocations[sites[index].relocation];
+        link_write_u32(bytes, section_offsets[relocation->section] + relocation->offset, words[index]);
     }
     return valid;
 }
@@ -8943,7 +9030,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation relocation = object->relocations[index];
-        if (object_relocation_kind_is_aarch64_elf_page(relocation.kind) || object_relocation_kind_is_aarch64_elf_tls_ie(relocation.kind))
+        if (object_relocation_kind_is_aarch64_elf_page(relocation.kind) || link_aarch64_tls_relaxable(relocation.kind))
         {
             // The layout staging writer cannot patch an A64 page field. Do
             // not impose an unrelated x86 rel32/absolute32 range on it; the
@@ -9276,9 +9363,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         }
         link_write_u32(bytes, output_offset, patched);
     }
-    if (!link_aarch64_tls_ie_relax(arena, object, bytes, section_offsets))
+    u32 tls_failed = UINT32_MAX;
+    if (!link_aarch64_tls_relax(arena, object, bytes, section_offsets, &tls_failed))
     {
         result.error = LINK_ERROR_RELOCATION;
+        if (tls_failed < object->relocation_count)
+        {
+            ObjectRelocation* relocation = &object->relocations[tls_failed];
+            String8 symbol = relocation->symbol < object->symbol_count ? object->symbols[relocation->symbol].name : S8("?");
+            result.symbol = string_format(arena, S8("{S8} ({S8} sequence cannot be relaxed to local-exec)"), symbol,
+                                          link_aarch64_tls_relocation_name(relocation->kind));
+        }
         return result;
     }
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))

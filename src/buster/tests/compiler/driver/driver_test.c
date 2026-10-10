@@ -11,6 +11,8 @@
 // driver_metrics_test.c holds the per-input metrics / -fkeep-going fixtures.
 // compiler_driver_test_aarch64_elf_ldst checks foreign non-PIC memory references
 // against native host-linked controls, including each scaled low12 form.
+// compiler_driver_test_aarch64_elf_tlsdesc runs foreign TLSDESC objects relaxed
+// to local-exec, against a host-linked control (#2582).
 // compiler_driver_test_cached_plan_lanes owns prepared-key reuse across gangs;
 // compiler_driver_test_unit_batches owns failed-cohort recovery and exact output.
 // compiler_driver_test_native_frame_vectors compiles its matrix on a lane gang
@@ -1003,6 +1005,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
         {{S8("-march=x86-64-v2"), S8("-mavx512f")}, {TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2}, {TARGET_CPU_FEATURE_X86_AVX512BW}},
         {{S8("-march=x86-64-v2"), S8("-mno-sse4.1")}, {TARGET_CPU_FEATURE_X86_SSSE3}, {TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSE4_2}},
         {{S8("-march=x86-64-v3"), S8("-mno-xsave")}, {TARGET_CPU_FEATURE_X86_SSE4_2}, {TARGET_CPU_FEATURE_X86_XSAVE, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2}},
+        {{S8("-mno-xsave")}, {TARGET_CPU_FEATURE_X86_SSE2}, {TARGET_CPU_FEATURE_X86_XSAVE, TARGET_CPU_FEATURE_X86_AMX_TILE}},
+        {{S8("-mamx-tile"), S8("-mno-xsave")}, {TARGET_CPU_FEATURE_X86_SSE2}, {TARGET_CPU_FEATURE_X86_XSAVE, TARGET_CPU_FEATURE_X86_AMX_TILE}},
         {{S8("-march=x86-64-v2"), S8("-mfma4")}, {TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_SSE4A}, {TARGET_CPU_FEATURE_X86_AVX2}},
         {{S8("-march=x86-64-v2"), S8("-mxop")}, {TARGET_CPU_FEATURE_X86_FMA4, TARGET_CPU_FEATURE_X86_SSE4A}, {TARGET_CPU_FEATURE_X86_AVX2}},
         {{S8("-march=x86-64-v2"), S8("-mavx512vp2intersect")}, {TARGET_CPU_FEATURE_X86_AVX512DQ, TARGET_CPU_FEATURE_X86_AVX512F}, {TARGET_CPU_FEATURE_X86_AVX512BW}},
@@ -5140,6 +5144,141 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_elf_ldst(UnitTes
     return result;
 }
 
+// A foreign compiler's general-dynamic TLS descriptors (#2582) must relax
+// and execute in a fixed-address Buster executable. The configured host
+// compiler builds aarch64_elf_tlsdesc.c with -fPIC at -O0 and -O2; Buster
+// compiles the main that defines the second thread-local and links both.
+// Every TLSDESC sequence in the object must appear relaxed in .text as
+// MOVZ x0 / MOVK x0 / NOP / NOP, a host-linked control must print the same
+// values, and the Buster image must print and return them.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_elf_tlsdesc(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && BUSTER_CPU_ARCH_AARCH64 && !BUSTER_ANDROID
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 const fixture = S8("src/buster/tests/compiler/driver/fixtures/aarch64_elf_tlsdesc.c");
+    String8 const main_fixture = S8("src/buster/tests/compiler/driver/fixtures/aarch64_elf_tlsdesc_main.c");
+    String8 const expected_output = S8("TLSDESC_RUNTIME foreign=42 buster=8 sum=55 after=47\n");
+    ProcessSpawnOptions spawn_options = {.use_process_environment = true, .search_path = true,
+        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 level = 0; level < BUSTER_ARRAY_LENGTH(optimizations); level += 1)
+    {
+        TemporalArena scope = arena_begin_temporal(arena);
+        String8 object_path = buster_test_temporary_path(arena, S8("buster-aarch64-elf-tlsdesc"), S8(".o"));
+        String8 control_path = buster_test_temporary_path(arena, S8("buster-aarch64-elf-tlsdesc-control"), S8(""));
+        String8 output_path = buster_test_temporary_path(arena, S8("buster-aarch64-elf-tlsdesc-native"), S8(""));
+        String8 command[12];
+        u32 count = 0;
+        command[count++] = S8(BUSTER_HOST_C_COMPILER);
+        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+        command[count++] = optimizations[level];
+        command[count++] = S8("-fPIC");
+        command[count++] = S8("-ftls-model=global-dynamic");
+        command[count++] = S8("-c");
+        command[count++] = fixture;
+        command[count++] = S8("-o");
+        command[count++] = object_path;
+        ProcessSpawnResult compiler = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0}, spawn_options);
+        ProcessWaitResult compiled = compiler.handle ? os_process_wait_deadline(arena, compiler, 30000000) : (ProcessWaitResult){0};
+        bool compile_ok = compiler.handle && !compiled.timed_out && compiled.result == PROCESS_RESULT_SUCCESS;
+        String8 compile_error = BYTE_SLICE_TO_STRING(8, compiled.streams[STANDARD_STREAM_ERROR]);
+        BUSTER_TEST_RAW(arguments, compile_ok, compile_error.length ? compile_error : S8("host compiler did not run"));
+        if (compile_ok)
+        {
+            // The host toolchain links and runs the same object first, so an
+            // import failure cannot hide a fixture or host problem.
+            count = 0;
+            command[count++] = S8(BUSTER_HOST_C_COMPILER);
+            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+            command[count++] = S8("-no-pie");
+            command[count++] = main_fixture;
+            command[count++] = object_path;
+            command[count++] = S8("-o");
+            command[count++] = control_path;
+            ProcessSpawnResult host_link = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0}, spawn_options);
+            ProcessWaitResult host_linked = host_link.handle ? os_process_wait_deadline(arena, host_link, 30000000) : (ProcessWaitResult){0};
+            bool control_ok = host_link.handle && !host_linked.timed_out && host_linked.result == PROCESS_RESULT_SUCCESS;
+            BUSTER_TEST(arguments, control_ok);
+            if (control_ok)
+            {
+                String8 run_control[] = {control_path};
+                ProcessSpawnResult control = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_control), (SliceString8){0}, (SliceString8){0}, spawn_options);
+                ProcessWaitResult control_ran = control.handle ? os_process_wait_deadline(arena, control, 30000000) : (ProcessWaitResult){0};
+                control_ok = control.handle && !control_ran.timed_out && control_ran.result == PROCESS_RESULT_SUCCESS &&
+                             string_equal(BYTE_SLICE_TO_STRING(8, control_ran.streams[STANDARD_STREAM_OUTPUT]), expected_output);
+                BUSTER_TEST(arguments, control_ok);
+                BUSTER_TEST(arguments, os_file_delete(control_path));
+            }
+            // Every access in the fixture is a TLSDESC sequence; count them.
+            ByteSlice bytes = file_read(arena, object_path, (FileReadOptions){0});
+            ObjectFile imported = object_read(arena, bytes, (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX});
+            u32 descriptor_sites = 0;
+            u32 descriptor_steps = 0;
+            if (BUSTER_REQUIRE(arguments, imported.error == OBJECT_ERROR_NONE))
+            {
+                for (u32 index = 0; index < imported.relocation_count; index += 1)
+                {
+                    ObjectRelocationKind kind = imported.relocations[index].kind;
+                    descriptor_sites += kind == OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21;
+                    descriptor_steps += object_relocation_kind_is_aarch64_elf_tls_desc(kind);
+                }
+            }
+            BUSTER_TEST(arguments, descriptor_sites >= 3 && descriptor_steps == descriptor_sites * 4);
+            String8 link_command[] = {main_fixture, object_path, S8("-o"), output_path};
+            CompilerDriverResult linked = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+            BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+            if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                // Variant I puts both thread-locals after the 16-byte TCB, so
+                // each relaxed offset is at least 16 and fits in MOVK's half.
+                ByteSlice image = file_read(arena, output_path, (FileReadOptions){0});
+                ByteSlice text = compiler_driver_test_elf_section(image, S8(".text"));
+                u32 relaxed = 0;
+                u32 offset_mask = 0;
+                u32 distinct_offsets = 0;
+                for (u64 offset = 0; offset + 16 <= text.length; offset += 4)
+                {
+                    u32 words[4];
+                    memcpy(words, text.pointer + offset, sizeof(words));
+                    if ((words[0] & UINT32_C(0xffe0001f)) == UINT32_C(0xd2a00000) && (words[1] & UINT32_C(0xffe0001f)) == UINT32_C(0xf2800000) &&
+                        words[2] == UINT32_C(0xd503201f) && words[3] == UINT32_C(0xd503201f))
+                    {
+                        u32 tprel = (((words[0] >> 5) & 0xffff) << 16) | ((words[1] >> 5) & 0xffff);
+                        relaxed += 1;
+                        u32 bit = tprel >= 16 && tprel < 16 + 31 * 4 && !(tprel & 3) ? UINT32_C(1) << ((tprel - 16) / 4) : UINT32_C(0x80000000);
+                        distinct_offsets += !(offset_mask & bit);
+                        offset_mask |= bit;
+                    }
+                }
+                BUSTER_TEST(arguments, relaxed == descriptor_sites && distinct_offsets == 2 && !(offset_mask & UINT32_C(0x80000000)));
+                String8 run_native[] = {output_path};
+                ProcessSpawnResult native = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_native), (SliceString8){0}, (SliceString8){0}, spawn_options);
+                ProcessWaitResult native_ran = native.handle ? os_process_wait_deadline(arena, native, 30000000) : (ProcessWaitResult){0};
+                String8 observed = BYTE_SLICE_TO_STRING(8, native_ran.streams[STANDARD_STREAM_OUTPUT]);
+                bool executed = native.handle && !native_ran.timed_out && native_ran.result == PROCESS_RESULT_SUCCESS;
+                BUSTER_TEST_RAW(arguments, executed && string_equal(observed, expected_output), observed);
+                if (executed && control_ok && relaxed == descriptor_sites)
+                {
+                    arguments->show(arguments, string_format(arena,
+                        S8("AARCH64_ELF_TLSDESC_NATIVE_V1 optimization={S8} compiler={S8} descriptors={u32} host_control=pass buster=pass\n"),
+                        optimizations[level], S8(BUSTER_HOST_C_COMPILER), descriptor_sites));
+                }
+                BUSTER_TEST(arguments, os_file_delete(output_path));
+            }
+            BUSTER_TEST(arguments, os_file_delete(object_path));
+        }
+        arena_set_position(arena, scope.position);
+    }
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // An aligned C global must survive the frontend/codegen/object boundary into
 // the COFF section flags. An unrepresentable request must fail before the
 // production driver publishes over an existing output file.
@@ -7791,11 +7930,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_scalar_local_locat
     return result;
 }
 
-// Each lexical block is its own DIE with its own exact code runs (#2241):
-// sibling blocks do not share a DIE or overlap even though the generated code
-// for a block is not one contiguous run, and a nested block lies inside its
-// parent. DIEs are emitted in tree order, which is the order the range lists
-// are appended in: the function, block A, A's nested block, then block B.
+// Lexical block nesting reaches the DWARF range lists (#2241). Blocks have no
+// code range of their own yet, so each model scope covers its whole function,
+// and blocks that share a parent are merged into one scope (siblings with equal
+// ranges would overlap). The two top-level blocks are therefore one DIE, the
+// block nested in the first is its child, and DIEs are emitted in tree order,
+// which is the order the range lists are appended in: the function, the merged
+// top-level scope, then the nested one.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_lexical_block_nesting(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9303,6 +9444,313 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_liveness_dead_stores(Uni
                 invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 String8 description = string_format(temporary.arena, S8("liveness dead stores native {S8} {S8}: {S8}"),
+                    allocators[allocator], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description);
+                }
+                scratch_end(temporary);
+            }
+        }
+#endif
+    }
+    return result;
+}
+
+// An edge conform defers the write-back of a value its destination does not
+// read (`machine_fast_dead_in`): another successor of the source stores it at
+// the same point or carries it dirty. `other_side` reads values only on the
+// branch contracted second; `published` and `nested` feed join parameters
+// whose sources die at the edge; `exit_value` keeps loop values for the code
+// after a bottom-tested loop; `dispatch` mixes a switch with a conditional
+// after it. The host runs the program under both allocators and frontend
+// forms (expected values cross-checked with host GCC and Clang), and each
+// target must select without fallback. On the 64-bit Linux targets FAST and
+// QUALITY stored 41 (x86-64) and 37 (AArch64) values at block boundaries
+// before the rule and 13 with it; the bound keeps the rule from silently
+// disappearing.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_deferred_edge_stores(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static volatile int opaque = 3;\n"
+        "static int sink;\n"
+        "static __attribute__((noinline)) int bump(int x) { sink += x; return x + 1; }\n"
+        "static __attribute__((noinline)) long long other_side(int n)\n"
+        "{\n"
+        "    long long total = 0;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long a = i * 5 + opaque, b = a * a % 97, c = bump(i) ^ a;\n"
+        "        if (c & 1) { total += c * 3; }\n"
+        "        else { total += b * 7 - a + bump((int)(b & 15)); }\n"
+        "        total %= 1000003;\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long published(int n)\n"
+        "{\n"
+        "    long long s = opaque, t = 1;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long a = bump(i) * 3 + s;\n"
+        "        s = (a & 4) ? a % 10007 : s * 5 % 10009 + t;\n"
+        "        t = (s & 1) ? t + a % 13 : t ^ (a & 255);\n"
+        "    }\n"
+        "    return s * 17 + t;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long exit_value(int n)\n"
+        "{\n"
+        "    long long k = opaque, r = 0, i = 0, last;\n"
+        "    do\n"
+        "    {\n"
+        "        long long a = bump((int)i) + k, b = a ^ (i * 11), c = a * b % 1009, d = c + b * 3;\n"
+        "        last = d * 7 + c - a;\n"
+        "        r = (r + a * c + b) % 1000033;\n"
+        "        k = (k + d) % 997;\n"
+        "        i += 1;\n"
+        "    } while (i < n && (r & 7) != 5);\n"
+        "    return last * 3 + r + k + i;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long nested(int n)\n"
+        "{\n"
+        "    long long u = opaque + n, v = u * 9 % 101, w = v ^ u, acc = 0;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long p = bump(i) + u, q = p * v % 1013, z = q ^ w;\n"
+        "        if (p & 1)\n"
+        "        {\n"
+        "            if (q & 2) { acc += z; } else { acc -= q * 3; }\n"
+        "        }\n"
+        "        else\n"
+        "        {\n"
+        "            acc += (z & 8) ? p + bump((int)(z & 7)) : q - p;\n"
+        "        }\n"
+        "        acc %= 999983;\n"
+        "    }\n"
+        "    return acc + (n > 3 ? u : w) + v;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long dispatch(int n)\n"
+        "{\n"
+        "    long long r = 0;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long x = bump(i) * 7 + opaque, y = x * x % 1031, z = x ^ y;\n"
+        "        switch ((x + y) % 4)\n"
+        "        {\n"
+        "        case 0: r += x; break;\n"
+        "        case 1: r += y * 3; break;\n"
+        "        case 2: r -= z; break;\n"
+        "        default: r ^= bump((int)(z & 7)); break;\n"
+        "        }\n"
+        "        if (r < 0) { r = -r + y; }\n"
+        "        r %= 1000037;\n"
+        "    }\n"
+        "    return r;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int bad = 0;\n"
+        "    bad |= other_side(57) != 13114ll;\n"
+        "    bad |= published(61) != 48855ll;\n"
+        "    bad |= exit_value(40) != 313990ll;\n"
+        "    bad |= nested(45) != 17271ll;\n"
+        "    bad |= dispatch(50) != 16243ll;\n"
+        "    return bad | (sink != 6145);\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-deferred-edge-stores"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
+        String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-deferred-edge-stores-object"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[target], frontends[frontend],
+                                         allocators[allocator], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), object, input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 description = string_format(temporary.arena, S8("deferred edge stores object {S8} {S8} {S8}: {S8} boundary spills {u64}"),
+                        targets[target], allocators[allocator], frontends[frontend], compiled.diagnostic,
+                        compiled.codegen_statistics.allocator_boundary_spill_count);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == 0, description);
+                    if (target == 0 || target == 2)
+                    {
+                        BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.allocator_boundary_spill_count <= 24, description);
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-deferred-edge-stores-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), allocators[allocator], frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), executable, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("deferred edge stores native {S8} {S8}: {S8}"),
+                    allocators[allocator], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description);
+                }
+                scratch_end(temporary);
+            }
+        }
+#endif
+    }
+    return result;
+}
+
+// A staged edge copy (an edge assigning two or more parameters) whose source
+// is a constant or a frame address is rematerialized into its destination
+// after the parallel copy instead of passing through the edge-copy tile
+// (`MACHINE_FAST_EDGE_SOURCE_RECREATED`). The program covers joins whose
+// edges mix constants and computed values, a loop that rotates parameters
+// with constants on one path, a switch whose cases assign constant pairs,
+// a pointer parameter that receives two frame addresses, and 64-bit
+// constants. Every target must select without fallback, and the host runs
+// the program under every allocator and both frontend forms; the expected
+// values were cross-checked with host GCC and Clang.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_recreated_edge_sources(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static volatile int opaque = 3;\n"
+        "static int sink;\n"
+        "static __attribute__((noinline)) int bump(int x) { sink += x; return x + 1; }\n"
+        "static __attribute__((noinline)) long long mixed(int n)\n"
+        "{\n"
+        "    long long total = 0;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long a, b, c;\n"
+        "        if (i % 3 == 0) { a = 7; b = i + opaque; c = -1; }\n"
+        "        else if (i % 3 == 1) { a = bump(i); b = 40; c = i * 5; }\n"
+        "        else { a = -9; b = 0; c = bump(i) ^ 6; }\n"
+        "        total = (total * 7 + a * 3 + b * 5 + c) % 1000003;\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long rotate(int n)\n"
+        "{\n"
+        "    long long x = 1, y = 2, z = 3;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long t = x;\n"
+        "        if (i & 1) { x = y; y = z; z = t + 11; }\n"
+        "        else { x = 5; y = t * 3 + bump(i); z = 0; }\n"
+        "    }\n"
+        "    return x * 10007 + y * 101 + z;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long cases(int n)\n"
+        "{\n"
+        "    long long r = 0;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long p, q;\n"
+        "        switch ((i + opaque) % 4)\n"
+        "        {\n"
+        "        case 0: p = 1; q = 2; break;\n"
+        "        case 1: p = bump(i); q = 3; break;\n"
+        "        case 2: p = -4; q = bump(i) * 2; break;\n"
+        "        default: p = i; q = i * i; break;\n"
+        "        }\n"
+        "        r = (r * 13 + p * 7 - q) % 999983;\n"
+        "    }\n"
+        "    return r;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long frames(int n)\n"
+        "{\n"
+        "    long long a = opaque, b = 17, acc = 0;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long* p;\n"
+        "        long long k;\n"
+        "        if (i & 2) { p = &a; k = 4; } else { p = &b; k = i; }\n"
+        "        *p += k + bump(i & 3);\n"
+        "        acc += *p ^ k;\n"
+        "    }\n"
+        "    return acc * 3 + a + b;\n"
+        "}\n"
+        "static __attribute__((noinline)) unsigned long long wide(int n)\n"
+        "{\n"
+        "    unsigned long long u = 0, v = 1, w = 0xffffffffffull;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        unsigned long long nu, nv, nw;\n"
+        "        if (bump(i) & 1) { nu = 0x123456789abcull; nv = v * 3; nw = 0; }\n"
+        "        else { nu = u ^ w; nv = 0x8000000000000001ull; nw = w + u; }\n"
+        "        u = nu; v = nv; w = nw;\n"
+        "    }\n"
+        "    return u ^ (v * 31) ^ (w << 1);\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int bad = 0;\n"
+        "    bad |= mixed(40) != 139839ll;\n"
+        "    bad |= rotate(23) != 107399804ll;\n"
+        "    bad |= cases(37) != 427040ll;\n"
+        "    bad |= frames(29) != 7376ll;\n"
+        "    bad |= wide(27) != 9223392052853119713ull;\n"
+        "    return bad | (sink != 1365);\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-recreated-edge-sources"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
+        String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-recreated-edge-sources-object"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[target], frontends[frontend],
+                                         allocators[allocator], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), object, input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 description = string_format(temporary.arena, S8("recreated edge sources object {S8} {S8} {S8}: {S8}"),
+                        targets[target], allocators[allocator], frontends[frontend], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == 0, description);
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-recreated-edge-sources-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), allocators[allocator], frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), executable, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("recreated edge sources native {S8} {S8}: {S8}"),
                     allocators[allocator], frontends[frontend], compiled.diagnostic);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -28790,6 +29238,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_scoped_constant_execution);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_coff_section_alignment);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_elf_ldst);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_elf_tlsdesc);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_write_limits);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
@@ -28873,6 +29322,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fixed_register_vacate);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_back_edge_dead_stores);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_liveness_dead_stores);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_deferred_edge_stores);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_recreated_edge_sources);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_return_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_field_assignment_results);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vector_casts);

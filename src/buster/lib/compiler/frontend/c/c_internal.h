@@ -767,6 +767,16 @@ BUSTER_C_EXTERN CTypeKind c_semantic_uint64_kind(Target target);
 BUSTER_C_EXTERN CTypeKind c_semantic_byte_swap_kind(Target target, CSymbolBuiltin builtin, String8 spelling);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_builtin_fold_kind(Target target, CSymbolBuiltin builtin, String8 spelling);
 BUSTER_C_EXTERN bool c_semantic_integer_builtin_fold(CSymbolBuiltin builtin, u32 width, u64 bits, u64* answer_out);
+typedef struct CMathLibmShape
+{
+    String8 link_name;
+    u32 arity;
+    CTypeKind argument_kind;
+    CTypeKind result_kind;
+    bool integer_second;
+} CMathLibmShape;
+
+BUSTER_C_EXTERN CMathLibmShape c_semantic_math_libm_shape(String8 name);
 BUSTER_C_EXTERN bool c_semantic_math_link_is_long_double(String8 link_name);
 
 struct CSymbolTable
@@ -1360,6 +1370,23 @@ struct CMemberIndexEntry
     CMemberIndexState state;
 };
 
+// What a static assertion needs to know about oversized types (#1479). An
+// oversized size saturates or exceeds the limit, so an assertion that measured
+// one folds a meaningless value: its own diagnostic would only restate the
+// size error. c_parse_static_assert_check and
+// c_parse_validate_deferred_assertions compare oversized_layouts around their
+// own fold, so an unrelated assertion is always reported.
+struct CObjectSizeFacts
+{
+    // Layout answers past the target object-size limit, counted by
+    // c_parse_type_layout_core.
+    u64 oversized_layouts;
+    // An immediate assertion failed or was suppressed. Its diagnostic, or the
+    // size error it relies on, needs the size validation that an earlier
+    // diagnostic gates, so c_analyze_semantics_core runs it once at the end.
+    bool validation_requested;
+};
+
 struct CMemberLookup
 {
     // Indexed by type id; grown on demand, zero-filled.
@@ -1523,6 +1550,19 @@ BUSTER_C_EXTERN bool c_parse_expression_integer_kind(CTypeKind kind);
 // The immutable scalar row for `kind` once analysis has published them, a new
 // row before that; the tests-build probe publishes them as analysis does.
 BUSTER_C_EXTERN CTypeId c_parse_expression_scalar_type(CParseResult* result, CTypeKind kind);
+// The machine's operator rules the typer applies to operand types it already
+// holds: the operand kind (an enum's compatible type), the integer promotion
+// with a bit-field width, the usual arithmetic conversions, the real-kind
+// predicate and a cast's scalar conversion constraint.
+BUSTER_C_EXTERN CTypeKind c_parse_expression_value_kind(CParseResult* result, CTypeId id);
+BUSTER_C_EXTERN CTypeKind c_parse_expression_promoted_kind_with_width(Target target, CTypeKind kind, u32 bit_field_width);
+BUSTER_C_EXTERN CTypeId c_parse_expression_arithmetic_type(CParseResult* result, Target target, CTypeId left_id, CTypeId right_id,
+                                                           u32 left_bit_field_width, u32 right_bit_field_width);
+BUSTER_C_EXTERN bool c_parse_expression_real_kind(CTypeKind kind);
+BUSTER_C_EXTERN String8 c_parse_scalar_conversion_message(Target target, CTypeKind to, CTypeKind from, bool runtime);
+// The binding strength the machine's operator scan gives a token: 1 for the
+// comma, 2 for the assignment family, then 4 (`||`) to 13 (`*`); 0 for none.
+BUSTER_C_EXTERN u32 c_parse_expression_operator_precedence(CToken token);
 // Whether no type-identity site (_Generic, __builtin_types_compatible_p) lies
 // in [start, end); false when the position index is not built, which proves
 // nothing.
@@ -1638,6 +1678,11 @@ typedef enum CIrAtomicBuiltin
     // boolean, and the store of zero that releases it again.
     C_IR_ATOMIC_BUILTIN_TEST_AND_SET,
     C_IR_ATOMIC_BUILTIN_CLEAR,
+    // GCC's legacy compare-and-swap pair.  Both take the expected value by
+    // value, not through a pointer: `val` answers the previous contents and
+    // `bool` answers whether they matched.
+    C_IR_ATOMIC_BUILTIN_SYNC_BOOL_COMPARE_AND_SWAP,
+    C_IR_ATOMIC_BUILTIN_SYNC_VAL_COMPARE_AND_SWAP,
     C_IR_ATOMIC_BUILTIN_COUNT,
 } CIrAtomicBuiltin;
 
@@ -1650,6 +1695,9 @@ struct CIrAtomicBuiltinSpelling
     bool new_value;
     bool generic;
     bool sequential;
+    // `__sync_lock_test_and_set` is an acquire barrier and `__sync_lock_release`
+    // a release one; every other `__sync_*` spelling is a full barrier.
+    bool lock;
 };
 
 BUSTER_C_EXTERN CIrAtomicBuiltinSpelling c_ir_atomic_builtin_spelling(String8 name);
@@ -1675,6 +1723,7 @@ BUSTER_C_EXTERN String8 c_semantic_asm_x87_operands_message(u64 const* constrain
 
 BUSTER_C_EXTERN String8 c_ir_math_builtin_link_name(String8 name);
 BUSTER_C_EXTERN u32 c_semantic_memory_builtin_arity(String8 name);
+BUSTER_C_EXTERN bool c_semantic_overflow_builtin_generic(String8 name);
 
 typedef enum CIrSimdArgument
 {
