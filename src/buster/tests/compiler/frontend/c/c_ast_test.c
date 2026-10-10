@@ -9,9 +9,12 @@
 // diagnostic and no partial tree. c_ast_test_corpus (see "corpus
 // differential" below) builds every tests/**/*.c file and the compiler's own
 // frontend sources and holds the tree to c_parse_ast's top-level declaration
-// split, and the tree expression typer (c_ast_types.c) to the type machine
-// (c_ast_corpus_types). c_ast_test_types probes the typer's accepted kinds,
-// declines and misses one range at a time.
+// split, the declaration split read from the tree (c_parse_ast_from_tree) to
+// c_parse_ast's records field by field (c_ast_corpus_split), and the tree
+// expression typer (c_ast_types.c) to the type machine (c_ast_corpus_types).
+// c_ast_test_types probes the typer's accepted kinds, declines and misses one
+// range at a time; c_ast_test_split runs the tree split on one shape per
+// fallback reason in every layout.
 //
 // Case helpers (macros: they add into the caller's `result`):
 //   c_ast_test_expect(arguments, source, expected_dump)
@@ -1146,6 +1149,86 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_uninterned(UnitTestArguments* argu
     return result;
 }
 
+// ---- the declaration split from the tree ----------------------------------
+
+// The first difference between c_parse_ast's result and the tree split's, or
+// an empty string: the declaration and diagnostic counts and capacities,
+// every field of every record, each record's body assertion ranges, and the
+// diagnostics.
+BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_split_differ(Arena* arena, CParserResult const* walker, CParserResult const* tree)
+{
+    String8 difference = {0};
+    if (walker->declaration_count != tree->declaration_count || walker->diagnostic_count != tree->diagnostic_count ||
+        walker->declaration_capacity != tree->declaration_capacity || walker->diagnostic_capacity != tree->diagnostic_capacity ||
+        (walker->number_facts == 0) != (tree->number_facts == 0))
+    {
+        difference = string_format(arena, S8("{u32} records, {u32} diagnostics from c_parse_ast; {u32}, {u32} from the tree split"), walker->declaration_count,
+                                   walker->diagnostic_count, tree->declaration_count, tree->diagnostic_count);
+    }
+    u32 index = 0;
+    CParserDeclaration const* right = tree->first_declaration;
+    for (CParserDeclaration const* left = walker->first_declaration; left && right && !difference.length; left = left->next, right = right->next)
+    {
+#define C_AST_CORPUS_SPLIT_FIELD(field)                                                                                                         \
+        if (!difference.length && (u64)left->field != (u64)right->field)                                                                        \
+        {                                                                                                                                       \
+            difference = string_format(arena, S8("record {u32} (token {u32}): " #field ": c_parse_ast {u64}, tree split {u64}"), index,          \
+                                       left->token_start, (u64)left->field, (u64)right->field);                                                \
+        }
+        C_AST_CORPUS_SPLIT_FIELD(token_start)
+        C_AST_CORPUS_SPLIT_FIELD(token_count)
+        C_AST_CORPUS_SPLIT_FIELD(kind)
+        C_AST_CORPUS_SPLIT_FIELD(declarator_start)
+        C_AST_CORPUS_SPLIT_FIELD(declarator_count)
+        C_AST_CORPUS_SPLIT_FIELD(body_start)
+        C_AST_CORPUS_SPLIT_FIELD(body_token_count)
+        C_AST_CORPUS_SPLIT_FIELD(identifier_list_start)
+        C_AST_CORPUS_SPLIT_FIELD(identifier_list_token_count)
+        C_AST_CORPUS_SPLIT_FIELD(parameter_declaration_start)
+        C_AST_CORPUS_SPLIT_FIELD(parameter_declaration_token_count)
+        C_AST_CORPUS_SPLIT_FIELD(name_token)
+        C_AST_CORPUS_SPLIT_FIELD(function_name_token)
+        C_AST_CORPUS_SPLIT_FIELD(expression.token_start)
+        C_AST_CORPUS_SPLIT_FIELD(expression.token_count)
+        C_AST_CORPUS_SPLIT_FIELD(is_definition)
+        C_AST_CORPUS_SPLIT_FIELD(is_typedef)
+        C_AST_CORPUS_SPLIT_FIELD(is_constexpr)
+        C_AST_CORPUS_SPLIT_FIELD(is_variadic)
+        C_AST_CORPUS_SPLIT_FIELD(seen_equal)
+        C_AST_CORPUS_SPLIT_FIELD(is_declarator_continuation)
+        C_AST_CORPUS_SPLIT_FIELD(is_identifier_list_definition)
+#undef C_AST_CORPUS_SPLIT_FIELD
+        u32 assertion = 0;
+        CParserStaticAssert const* tree_assertion = right->first_static_assert;
+        for (CParserStaticAssert const* walker_assertion = left->first_static_assert; !difference.length && (walker_assertion || tree_assertion);
+             walker_assertion = walker_assertion ? walker_assertion->next : 0, tree_assertion = tree_assertion ? tree_assertion->next : 0)
+        {
+            if (!walker_assertion || !tree_assertion || walker_assertion->token_start != tree_assertion->token_start ||
+                walker_assertion->token_count != tree_assertion->token_count)
+            {
+                difference = string_format(arena, S8("record {u32} (token {u32}): body assertion {u32}: c_parse_ast [{u32}, +{u32}], tree split [{u32}, +{u32}]"),
+                                           index, left->token_start, assertion, walker_assertion ? walker_assertion->token_start : UINT32_MAX,
+                                           walker_assertion ? walker_assertion->token_count : 0, tree_assertion ? tree_assertion->token_start : UINT32_MAX,
+                                           tree_assertion ? tree_assertion->token_count : 0);
+            }
+            assertion += 1;
+        }
+        index += 1;
+    }
+    for (u32 diagnostic = 0; diagnostic < walker->diagnostic_count && !difference.length; diagnostic += 1)
+    {
+        CDiagnostic const* a = walker->diagnostics + diagnostic;
+        CDiagnostic const* b = tree->diagnostics + diagnostic;
+        if (!string_equal(a->message, b->message) || a->kind != b->kind || a->severity != b->severity || a->location.offset != b->location.offset ||
+            a->location.line != b->location.line || a->location.column != b->location.column || a->location.file != b->location.file)
+        {
+            difference = string_format(arena, S8("diagnostic {u32} differs: '{S8}' from c_parse_ast, '{S8}' from the tree split"), diagnostic, a->message,
+                                       b->message);
+        }
+    }
+    return difference;
+}
+
 #if !BUSTER_ANDROID && !BUSTER_IOS
 // Mobile test runs carry no repository tree, so the fixture-reading suites
 // below run only where the tests/ directory exists, as c_test.c's do.
@@ -1227,7 +1310,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_fixture_sweep(UnitTestArguments* a
 // c_ast_test_corpus holds the tree to real inputs: every tests/**/*.c file the
 // preprocessor accepts, tests/basic_c_dialect.c in each dialect, a table of
 // declaration shapes the corpus holds few of, and (on Linux) the compiler's
-// own C frontend sources. Two claims are checked on each.
+// own C frontend sources. Three claims are checked on each.
 //
 // 1. The tree never rejects what the earlier syntax pass accepts. A file whose
 //    preprocessing reports errors is skipped (it has no token stream: system
@@ -1281,6 +1364,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_fixture_sweep(UnitTestArguments* a
 //    Where the two passes legitimately differ, the input lives in
 //    c_ast_corpus_known with the reason, and both sides are pinned. The table
 //    is empty today.
+// 3. The records c_parse_ast_from_tree publishes are c_parse_ast's: the same
+//    count, every CParserDeclaration field of every record, each record's body
+//    _Static_assert ranges, and the diagnostics (c_ast_corpus_split_differ).
+//    A unit the split hands to the walker compares too. Floors on the records
+//    it published itself keep a split that always falls back from passing,
+//    and the frontend's own sources must take the split whole.
 
 enum
 {
@@ -1773,6 +1862,12 @@ enum
     // Records compared against c_parse_ast, so a comparison that silently
     // sees nothing cannot pass.
     C_AST_CORPUS_RECORD_FLOOR = 6000,
+    // Records the tree split (c_parse_ast_from_tree) published itself rather
+    // than by falling back: about 6,100 from the fixtures and constructs on
+    // Linux x86-64 (fewer fixtures preprocess on other hosts), and about
+    // 15,900 in all with the frontend's own sources.
+    C_AST_CORPUS_SPLIT_RECORD_FLOOR = 4800,
+    C_AST_CORPUS_HOSTED_SPLIT_RECORD_FLOOR = 13000,
     // Tree expression-typer answers checked against the type machine
     // (c_ast_corpus_types): about 56,100 from the fixtures on Linux x86-64
     // and about 50,800 with the fixtures preprocessed for aarch64-windows
@@ -1824,7 +1919,39 @@ struct CAstCorpusTally
     // Designator probes the const-assignment walk skipped and verify mode
     // checked against the machine.
     u64 type_probes;
+    // The declaration split from the tree (c_parse_ast_from_tree) over the
+    // same inputs: units it published, records and body assertion ranges it
+    // published, units it handed to the token walker and why, and every
+    // record compared field by field with c_parse_ast's.
+    u64 split_units;
+    u64 split_records;
+    u64 split_assertions;
+    u64 split_fallbacks;
+    u64 split_fallback_counts[C_PARSER_TREE_FALLBACK_COUNT];
+    u64 split_compared;
 };
+
+// c_parse_ast_from_tree on one input whose tree is complete, held to
+// c_parse_ast's result, with the outcome added to the tally.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_split(UnitTestArguments* arguments, Arena* arena, String8 label, CPreprocessResult preprocess,
+                                                      CAst const* ast, CParserResult const* syntax, CAstCorpusTally* tally)
+{
+    UnitTestResult result = {0};
+    CParserTreeStatistics statistics = {0};
+    CParserResult derived = c_parse_ast_from_tree(arena, preprocess, ast, &statistics);
+    String8 difference = c_ast_corpus_split_differ(arena, syntax, &derived);
+    BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(arena, S8("{S8}: tree split: {S8}"), label, difference));
+    tally->split_units += statistics.units;
+    tally->split_records += statistics.records;
+    tally->split_assertions += statistics.assertions;
+    tally->split_fallbacks += statistics.fallbacks;
+    for (u32 reason = 0; reason < C_PARSER_TREE_FALLBACK_COUNT; reason += 1)
+    {
+        tally->split_fallback_counts[reason] += statistics.fallback_counts[reason];
+    }
+    tally->split_compared += derived.declaration_count;
+    return result;
+}
 
 // The first difference between two analyses: the sizes of the type tables,
 // then the diagnostics (count, then each message, kind, severity and
@@ -1955,6 +2082,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_unit(UnitTestArguments* argument
         if (built.complete)
         {
             BUSTER_TEST_RAW(arguments, c_ast_validate(&built.ast) == C_AST_NODE_INVALID, label);
+            c_ast_test_merge(&result, c_ast_corpus_split(arguments, temporary.arena, label, preprocess, &built.ast, &syntax, tally));
             if (!syntax.diagnostic_count)
             {
                 u32 record_count = c_ast_corpus_records(temporary.arena, &built.ast, 0);
@@ -2065,6 +2193,39 @@ BUSTER_GLOBAL_LOCAL CAstCorpusConstruct const c_ast_corpus_constructs[] = {
     {S8_INITIALIZER("int (__attribute__((x)) fd)(void) { return 0; } int pt, (__attribute__((y)) pu) = 1;"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("typedef int (__attribute__((x)) TF)(int); TF tf; typedef int (__attribute__((x)) TA)[2]; TA ta; void (*(__attribute__((x)) hf))(void);"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("struct S5 { int a, __attribute__((x)) b __attribute__((y)); int c : 2, __attribute__((x)) d : 3 __attribute__((y)); int (__attribute__((x)) m)[2]; };"), C_PREPROCESS_DIALECT_GNU17},
+    // Body _Static_assert notes (c_parse_ast_from_tree): noted when the
+    // walker's brace frames reach the assertion as a block or member item,
+    // not behind a label, `case`, statement expression, type name or a
+    // `for` header.
+    {S8_INITIALIZER("void sa(int x) { _Static_assert(1, \"a\"); { _Static_assert(2, \"b\"); } struct S { _Static_assert(3, \"c\"); int a; union { _Static_assert(4, \"d\"); int b; } u; } s; (void)s; "
+                    "int y = ({ _Static_assert(5, \"e\"); 0; }); (void)y; (void)sizeof(struct { _Static_assert(6, \"f\"); int a; }); "
+                    "if (x) { _Static_assert(7, \"g\"); } else { _Static_assert(8, \"h\"); } for (;;) { _Static_assert(9, \"i\"); break; } "
+                    "do { _Static_assert(10, \"j\"); } while (0); switch (x) { case 0: { _Static_assert(11, \"k\"); } default: break; } }"),
+     C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("void sb(int x) { L: _Static_assert(1, \"a\"); switch (x) { case 1: _Static_assert(2, \"b\"); break; } "
+                    "for (struct { _Static_assert(3, \"c\"); int a; } t = {0}; t.a;) { } int g(void) { _Static_assert(4, \"d\"); return 0; } (void)g; goto L; }"),
+     C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("void sc(void) { _Static_assert(1, \"a\" \"b\"); typedef struct { _Static_assert(2, \"c\"); int a; } T; T t = {0}; (void)t; } "
+                    "void sd(void) { } _Static_assert(sizeof(int) == 4, \"e\"); _Static_assert(-1 < 0, \"f\"); _Static_assert((1), \"g\");"),
+     C_PREPROCESS_DIALECT_GNU17},
+    // Declarator shapes the split reads from the chain of derivations: groups
+    // two deep, qualified pointers, variadic lists in and out of groups, the
+    // old-style identifier-list ambiguity, and initializers whose first token
+    // is a parenthesis.
+    {S8_INITIALIZER("int *(*(*p3)[2])(void); extern int (*const tbl3[3])(void); int * const * volatile pp3; int (*fpv)(int, ...), xv; "
+                    "int fv(int, ...), gv(void); int fw(int a, ...) { return a; } int (*fx(int, ...))(char, ...);"),
+     C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("typedef int T; int ft(T) { return 0; } int fu(T, T); int fk(a, b) { return 0; } int fe(); int fd(void) { return 0; } int fz(T, int);"),
+     C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("bool fb(bool) { return 0; } int fc(bool, int); bool;"), C_PREPROCESS_DIALECT_C23},
+    {S8_INITIALIZER("struct S6; union { int a; }; enum { A6, B6 = A6 + 1 }; const struct S7 { int a; }; __extension__ struct S8 { int a; }; "
+                    "static struct S9 { int a; }; struct { struct S6 *p; int (*f)(void); }; enum __attribute__((packed)) { C6 };"),
+     C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int a7 = (1), b7 = ((2)) + 3, *c7 = (int *)0, d7[] = {1, 2}; char *p7 = \"abc\", q7[] = \"de\"; int x7 __asm__(\"y7\") = 1, z7; "
+                    "int e7 = -(1), f7 = sizeof (int), g7 = (int){4};"),
+     C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int __attribute__((unused)) a8, b8; int f8(void) __attribute__((noreturn)); [[nodiscard]] int g8(void); int h8(void) [[deprecated]];"),
+     C_PREPROCESS_DIALECT_C23},
 };
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_constructs_run(UnitTestArguments* arguments, CAstCorpusTally* tally)
@@ -2207,6 +2368,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_sources(UnitTestArguments* argum
         string_print_error(S8("c_ast_test_corpus: /usr/include/stdint.h is absent; the compiler-source half is skipped\n"));
     }
     u64 built_before = tally->built;
+    u64 split_units_before = tally->split_units;
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(paths) && hosted; index += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -2228,6 +2390,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_sources(UnitTestArguments* argum
         scratch_end(temporary);
     }
     BUSTER_TEST(arguments, !hosted || tally->built == built_before + BUSTER_ARRAY_LENGTH(paths));
+    // Real-world input with glibc's headers: every source takes the tree split.
+    BUSTER_TEST(arguments, !hosted || tally->split_units == split_units_before + BUSTER_ARRAY_LENGTH(paths));
+    BUSTER_TEST(arguments, !hosted || tally->split_records >= C_AST_CORPUS_HOSTED_SPLIT_RECORD_FLOOR);
     BUSTER_TEST(arguments, !hosted || tally->type_answers >= C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR);
     return result;
 }
@@ -2263,6 +2428,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
     BUSTER_TEST(arguments, tally.pinned == BUSTER_ARRAY_LENGTH(c_ast_corpus_pins));
     BUSTER_TEST(arguments, tally.type_answers >= C_AST_CORPUS_TYPE_ANSWER_FLOOR && tally.type_compared == tally.type_answers);
     BUSTER_TEST(arguments, tally.type_probes >= C_AST_CORPUS_TYPE_PROBE_FLOOR);
+    BUSTER_TEST(arguments, tally.split_records >= C_AST_CORPUS_SPLIT_RECORD_FLOOR && tally.split_compared >= tally.split_records);
 #if BUSTER_LINUX && !BUSTER_ANDROID
     c_ast_test_merge(&result, c_ast_corpus_sources(arguments, &tally));
 #endif
@@ -3417,6 +3583,98 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
     return result;
 }
 
+// c_parse_ast_from_tree on one shape per fallback reason, and on shapes it
+// publishes itself, in every layout: the result is always c_parse_ast's, and
+// the statistics name the reason. Both #3215 shapes are among them: the
+// walker misreads their redundant parentheses, so the split leaves them to it
+// rather than publishing the grammar's reading.
+typedef struct CAstSplitCase CAstSplitCase;
+struct CAstSplitCase
+{
+    String8 source;
+    CPreprocessDialect dialect;
+    CParserTreeFallback reason;
+    // Body _Static_assert ranges the split publishes, when it publishes.
+    u32 assertions;
+};
+
+BUSTER_GLOBAL_LOCAL CAstSplitCase const c_ast_split_cases[] = {
+    {S8_INITIALIZER("int a, *b, f(int), (*g)(int, ...); struct S { int x; }; enum { A, B }; _Static_assert(1, \"m\"); asm(\"nop\"); ; "
+                    "int h(int x) { _Static_assert(1, \"n\"); struct T { _Static_assert(2, \"o\"); int a; } t = {x}; return t.a; }"),
+     C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 2},
+    // `typedef` and `constexpr` words the walker reads outside the top-level
+    // specifiers make it record the whole declaration as a typedef or as
+    // constexpr (#3310). The split matches it by scanning such a declaration
+    // whole.
+    {S8_INITIALIZER("int sx = ({ typedef int T9; T9 t = 1; t; }), sy; struct Q9 { int a; } typedef q9;"), C_PREPROCESS_DIALECT_GNU17,
+     C_PARSER_TREE_FALLBACK_NONE, 0},
+    {S8_INITIALIZER("int cy = (constexpr int){3}, cz; constexpr int cw = 2;"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_NONE, 0},
+    {S8_INITIALIZER("int x = 0x;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DIAGNOSTIC},
+    {S8_INITIALIZER("long long long y;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DIAGNOSTIC},
+    {S8_INITIALIZER("_Alignas(8) int a;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_SPECIFIERS},
+    {S8_INITIALIZER("__typeof__(1) t;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_SPECIFIERS},
+    {S8_INITIALIZER("enum E : int { A };"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_SPECIFIERS},
+    // #3215: c_parse_ast reads the first as a function declaration and the
+    // second as one object declaration over both lines.
+    {S8_INITIALIZER("int f(int x) { return x + 1; } int ((*pq))(int) = f;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DECLARATOR},
+    {S8_INITIALIZER("int (gd(int a)) { return a; } int zz;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DECLARATOR},
+    {S8_INITIALIZER("int (x);"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DECLARATOR},
+    {S8_INITIALIZER("int * __attribute__((x)) p;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DECLARATOR},
+    {S8_INITIALIZER("int k(a) int a; { return a; }"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_OLD_STYLE},
+    {S8_INITIALIZER("int e = (1, 2);"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_TOKENS},
+    {S8_INITIALIZER("int h8(void) [[deprecated]];"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_TOKENS},
+    {S8_INITIALIZER("struct P { int a, b; }; _Static_assert(sizeof (struct P){1, 2} == 8, \"m\");"), C_PREPROCESS_DIALECT_GNU17,
+     C_PARSER_TREE_FALLBACK_ASSERTION},
+    {S8_INITIALIZER("void f(void) { _Static_assert(1); }"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_ASSERTION},
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_split(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ast_split_cases); index += 1)
+    {
+        CAstSplitCase const* split_case = &c_ast_split_cases[index];
+        for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 label = string_format(temporary.arena, S8("split case {u32}, layout {u32}"), index, layout);
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, split_case->source, split_case->dialect);
+            CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
+            if (BUSTER_REQUIRE(arguments, preprocess.error_count == 0 && built.complete))
+            {
+                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                CParserTreeStatistics statistics = {0};
+                CParserResult derived = c_parse_ast_from_tree(temporary.arena, preprocess, &built.ast, &statistics);
+                String8 difference = c_ast_corpus_split_differ(temporary.arena, &syntax, &derived);
+                BUSTER_TEST_RAW(arguments, difference.length == 0, label);
+                bool published = split_case->reason == C_PARSER_TREE_FALLBACK_NONE;
+                BUSTER_TEST_RAW(arguments, statistics.units == (u64)published && statistics.fallbacks == (u64)!published, label);
+                BUSTER_TEST_RAW(arguments, published || (statistics.reason == split_case->reason && statistics.fallback_counts[split_case->reason] == 1),
+                                label);
+                BUSTER_TEST_RAW(arguments, !published || (statistics.records == syntax.declaration_count && statistics.assertions == split_case->assertions),
+                                label);
+            }
+            scratch_end(temporary);
+        }
+    }
+    // Without a tree, and with an incomplete one, the walker answers.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, S8("int a;"), C_PREPROCESS_DIALECT_GNU17);
+        CParserTreeStatistics statistics = {0};
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CParserResult derived = c_parse_ast_from_tree(temporary.arena, preprocess, 0, &statistics);
+        BUSTER_TEST(arguments, c_ast_corpus_split_differ(temporary.arena, &syntax, &derived).length == 0);
+        CAst empty = {0};
+        derived = c_parse_ast_from_tree(temporary.arena, preprocess, &empty, &statistics);
+        BUSTER_TEST(arguments, c_ast_corpus_split_differ(temporary.arena, &syntax, &derived).length == 0);
+        BUSTER_TEST(arguments, statistics.fallbacks == 2 && statistics.fallback_counts[C_PARSER_TREE_FALLBACK_INPUT] == 2 && statistics.units == 0);
+        BUSTER_TEST(arguments, string_equal(c_parser_tree_fallback_name(C_PARSER_TREE_FALLBACK_DECLARATOR), S8("declarator")));
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult c_ast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3432,6 +3690,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_oracle);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_uninterned);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_types);
+    BUSTER_TEST_FIXTURE(arguments, c_ast_test_split);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_fixture_sweep);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_corpus);
