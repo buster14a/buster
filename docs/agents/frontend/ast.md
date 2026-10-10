@@ -879,4 +879,15 @@ The base is main `f86d65f9`, which the candidate branches from. The budgets:
 - adoption of the hook as the default: unchanged from stage 1, with
   acceptance on the Zen 5 route (#2761).
 
+The probe's hosted census is
+[`2026-10-10T175428Z`](../../performance-audits/2026-10-10T175428Z.md), taken
+the same way and diagnostic only:
+- Every budget passes except adoption. Objects are byte-identical across the
+  four arms, and the self-host unit takes the split whole.
+- The probe falls from 125.5 M to 81.6 M Ir (−35.0%), and the whole compile by
+  44.1 M (−0.46%, C against B). The id classification alone gives −14.0%; the
+  memo cuts the validated specifier runs from 29,649 to 3,299.
+- The default path is −0.0037%.
+- Acceptance stays with Zen 5 (#2761), so the default stays off.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
