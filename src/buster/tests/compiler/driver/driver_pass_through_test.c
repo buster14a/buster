@@ -338,11 +338,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_version_script_images(Un
             BUSTER_TEST(arguments, host.handle && os_process_wait_sync(arena, host).result == PROCESS_RESULT_SUCCESS);
         }
     }
-    os_delete_file(source);
-    os_delete_file(client);
-    os_delete_file(script);
-    os_delete_file(library);
-    os_delete_file(executable);
+    os_file_delete(source);
+    os_file_delete(client);
+    os_file_delete(script);
+    os_file_delete(library);
+    os_file_delete(executable);
     scratch_end(temporary);
 #else
     BUSTER_UNUSED(arguments);
