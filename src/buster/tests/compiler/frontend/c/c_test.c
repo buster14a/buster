@@ -40020,7 +40020,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_literal_expression_queries(UnitTestArg
 // order, which CTypeInterning.suspended guards against (#3102). The third
 // source does the same in file-scope initializers, whose queries the window
 // spans too: `S8()`'s `(char8*)("text")` casts, `&` of objects, and aggregates
-// defined inside initializer type names.
+// defined inside initializer type names. The fourth reads members through
+// pointers to const and volatile structs and through const objects, in bodies
+// and file-scope initializers, nested and of array and aligned typedef type,
+// whose qualified copies the pilot shares (c_parse_intern_qualified_type).
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -40056,6 +40059,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArgumen
            "const void *cp = (const struct { char *p; long *l; } *)0;\n"
            "void use(const void *p);\n"
            "void f(char *q) { use((char *)q); use((char **)&q); use(&gp); use(names[1]); use(&harr[1]); }\n"),
+        S8("typedef int A16 __attribute__((aligned(16)));\n"
+           "struct In { int x; char *s; };\n"
+           "struct Out { struct In in; int v[3]; A16 al; long n; } o[2];\n"
+           "const struct Out co = { { 1, 0 }, { 1, 2, 3 }, 4, 5 };\n"
+           "const long *cn = &co.n;\n"
+           "long cv = sizeof(co.in.x) + sizeof(co.v);\n"
+           "void use(const void *p);\n"
+           "long f(const struct Out *p, volatile struct Out *q, const struct Out *r)\n"
+           "{\n"
+           "    long n = p->n + p->in.x + q->n + r->n + p->v[1] + (long)p->al + (long)q->al;\n"
+           "    use(p->in.s); use(r->in.s); use(&p->in); use(p->v); use((const void *)q->v);\n"
+           "    const struct Out c = o[0];\n"
+           "    return n + c.n + c.in.x + (long)c.al + (long)co.in.x;\n"
+           "}\n"
+           "long g(const struct Out *p, volatile struct In *i) { return p->n + p->in.x + (long)p->in.s[0] + i->x + (long)i->s; }\n"),
     };
     String8 debug[] = {S8("-g0"), S8("-g")};
     for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
@@ -40099,6 +40117,42 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArgumen
         }
         c_test_scratch_end(temporary);
     }
+    return result;
+}
+
+// A shared qualified member copy (CTypeInterning) must be the row
+// c_parse_add_qualified_type would append, so a copy that would inherit an
+// alignment record is never shared: two copies of an aligned typedef's row
+// are two rows with two records, and the lookup finds none, while two copies
+// of a plain row are one row that the lookup finds.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_qualified_member_sharing(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena, S8("typedef int A16 __attribute__((aligned(16))); typedef long plain;"),
+                                            (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU17});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CTypeId aligned = C_TYPE_ID_INVALID;
+    CTypeId plain = C_TYPE_ID_INVALID;
+    for (u32 index = 0; index < parse.entity_count; index += 1)
+    {
+        CEntity const* entity = parse.entities + index;
+        aligned = string_equal(entity->name, S8("A16")) ? entity->type : aligned;
+        plain = string_equal(entity->name, S8("plain")) ? entity->type : plain;
+    }
+    if (BUSTER_REQUIRE(arguments, !parse.diagnostic_count && aligned.value < parse.type_count && plain.value < parse.type_count &&
+                                      c_parse_type_alignment(&parse, aligned) && !c_parse_type_alignment(&parse, plain)))
+    {
+        CTestQualifiedShare shared = c_test_qualified_share(&parse, plain);
+        BUSTER_TEST(arguments, shared.first.value < parse.type_count && shared.second.value == shared.first.value &&
+                                   shared.found.value == shared.first.value && shared.types_added == 1 && shared.alignments_added == 0);
+        BUSTER_TEST(arguments, parse.types[shared.first.value].is_const && parse.types[shared.first.value].unqualified_type.value == plain.value);
+        CTestQualifiedShare kept = c_test_qualified_share(&parse, aligned);
+        BUSTER_TEST(arguments, kept.first.value < parse.type_count && kept.second.value < parse.type_count && kept.second.value != kept.first.value &&
+                                   kept.found.value == C_ID_UNDERLYING_INVALID && kept.types_added == 2 && kept.alignments_added == 2);
+        BUSTER_TEST(arguments, c_parse_type_alignment(&parse, kept.first) && c_parse_type_alignment(&parse, kept.second));
+    }
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -62047,6 +62101,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_line_filename_escapes);
     C_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
     C_TEST_FIXTURE(arguments, c_test_type_interning_objects);
+    C_TEST_FIXTURE(arguments, c_test_qualified_member_sharing);
     C_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
     C_TEST_FIXTURE(arguments, c_test_local_label_declarations);
     C_TEST_FIXTURE(arguments, c_test_local_labels);

@@ -117,6 +117,9 @@ struct CTestAstTypeVerify
     // answered too, and those it did not fail cleanly.
     u64 probes;
     u64 probe_mismatches;
+    // Answers to a member query whose row is a shared qualified copy
+    // (c_parse_intern_qualified_type).
+    u64 shared_members;
     u64 reason_counts[C_TEST_AST_TYPE_MISMATCH_REASONS];
     CTestAstTypeMismatch first[C_TEST_AST_TYPE_MISMATCH_KEPT];
     u32 first_count;
@@ -162,6 +165,20 @@ BUSTER_F_DECL void c_test_set_literal_query_machine_only(bool machine_only);
 // Keeps the interning window shut (CTypeInterning), so one source can be
 // compiled with and without interned rows and the objects compared.
 BUSTER_F_DECL void c_test_set_type_interning_off(bool off);
+// Two const copies of `base` through c_parse_intern_qualified_type with the
+// window open, and the lookup after them: the same row and one append when
+// the copy may be shared, two rows (and two alignment records for an aligned
+// base) when it may not.
+typedef struct CTestQualifiedShare CTestQualifiedShare;
+struct CTestQualifiedShare
+{
+    CTypeId first;
+    CTypeId second;
+    CTypeId found;
+    u32 types_added;
+    u32 alignments_added;
+};
+BUSTER_F_DECL CTestQualifiedShare c_test_qualified_share(CParseResult* result, CTypeId base);
 
 // Direct member alignment queries must leave the published model, including
 // spare rows and the type-map input counts/pointers, byte-for-byte unchanged.

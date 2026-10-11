@@ -100,6 +100,8 @@
 //   c_parse_primitive_type                        construction, attributes
 //   c_parse_intern_type, c_parse_interned_type    shared primitive and pointer
 //                                                 rows (CTypeInterning)
+//   c_parse_intern_qualified_type,                shared qualified member
+//   c_parse_interned_qualified_type               copies (CTypeInterning)
 //   c_parse_primitive_type_read                   a specifier run's row,
 //                                                 appending nothing
 //   c_parse_definition_scan_start                 definition-token index
@@ -6067,7 +6069,8 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_postfix(Arena* arena, CPre
                                c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 1]), 0, 0, 0);
     if (type.value < result->type_count && (qualifiers.is_const || qualifiers.is_volatile))
     {
-        type = c_parse_add_qualified_type(result, type, qualifiers);
+        // Shared under the pilot's interning window (CTypeInterning).
+        type = c_parse_intern_qualified_type(result, type, qualifiers);
     }
     index += 2;
     }
@@ -12604,6 +12607,225 @@ BUSTER_C_SHARED CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId
 
     return qualified_id;
 }
+
+// ---- shared qualified member copies (CTypeInterning's `qualified_*`) ----
+
+// Whether two rows are equal in every field, which a shared qualified copy
+// must be to stand in for the copy c_parse_add_qualified_type would append.
+BUSTER_C_INTERNAL bool c_parse_type_rows_equal(CType const* x, CType const* y)
+{
+    return string_equal(x->tag, y->tag) && x->tag_scope.value == y->tag_scope.value && x->element_type.value == y->element_type.value &&
+           x->return_type.value == y->return_type.value && x->unqualified_type.value == y->unqualified_type.value && x->array_bound == y->array_bound &&
+           x->parameter_start == y->parameter_start && x->parameter_count == y->parameter_count && x->member_start == y->member_start &&
+           x->member_count == y->member_count && x->enum_member_start == y->enum_member_start && x->enum_member_count == y->enum_member_count &&
+           x->definition_start == y->definition_start && x->definition_token_count == y->definition_token_count &&
+           x->vector_byte_size == y->vector_byte_size && x->kind == y->kind && x->is_const == y->is_const && x->is_volatile == y->is_volatile &&
+           x->is_restrict == y->is_restrict && x->is_atomic == y->is_atomic && x->is_variadic == y->is_variadic && x->is_complete == y->is_complete &&
+           x->is_transparent_union == y->is_transparent_union && x->has_unqualified_type == y->has_unqualified_type &&
+           x->is_unprototyped == y->is_unprototyped && x->has_fixed_underlying_type == y->has_fixed_underlying_type;
+}
+
+// The copy c_parse_add_qualified_type would append for `base` and
+// `qualifiers` (const and volatile, as the member step passes them), and
+// whether it may be shared: not when it would inherit an alignment record,
+// and never a restrict or atomic row (CTypeInterning).
+BUSTER_C_INTERNAL bool c_parse_qualified_copy(CParseResult const* result, CTypeId base, CType qualifiers, CType* copy_out)
+{
+    bool shareable = base.value < result->type_count;
+    if (shareable)
+    {
+        CType copy = result->types[base.value];
+        copy.is_const |= qualifiers.is_const;
+        copy.is_volatile |= qualifiers.is_volatile;
+        copy.is_restrict |= qualifiers.is_restrict;
+        copy.is_atomic |= qualifiers.is_atomic;
+        copy.unqualified_type = copy.has_unqualified_type ? copy.unqualified_type : base;
+        copy.has_unqualified_type = true;
+        *copy_out = copy;
+        shareable = !copy.is_restrict && !copy.is_atomic && !(result->type_alignment_count && c_parse_type_alignment(result, base));
+    }
+    return shareable;
+}
+
+BUSTER_C_INTERNAL u32 c_parse_qualified_slot_home(CTypeInterning const* interning, CType const* key)
+{
+    u64 word = ((u64)key->unqualified_type.value << 24) ^ ((u64)key->element_type.value << 3) ^ ((u64)key->kind << 56) ^ ((u64)key->is_const << 1) ^
+               (u64)key->is_volatile;
+    return (u32)((word * UINT64_C(0x9E3779B97F4A7C15)) >> 32) & (interning->qualified_slot_count - 1);
+}
+
+// The live shared copy equal to `key`, or C_ID_UNDERLYING_INVALID. With
+// `free_out`, also the first slot of the probe that an insertion may take, as
+// c_parse_interned_find reports it.
+BUSTER_C_INTERNAL u32 c_parse_qualified_find(CParseResult const* result, CType const* key, u32* free_out)
+{
+    CTypeInterning const* interning = c_parse_type_interning(result);
+    u32 found = C_ID_UNDERLYING_INVALID;
+    u32 free_slot = UINT32_MAX;
+    if (interning && interning->qualified_slot_count)
+    {
+        u32 mask = interning->qualified_slot_count - 1;
+        u32 slot = c_parse_qualified_slot_home(interning, key);
+        bool probing = true;
+        while (probing)
+        {
+            u32 entry = interning->qualified_slots[slot];
+            bool live = entry && entry - 1 < result->interned_qualified_count;
+            u32 row = live ? interning->qualified_rows[entry - 1] : C_ID_UNDERLYING_INVALID;
+            if (live && row < result->type_count && c_parse_type_rows_equal(result->types + row, key))
+            {
+                found = row;
+                probing = false;
+            }
+            else
+            {
+                free_slot = !live && free_slot == UINT32_MAX ? slot : free_slot;
+                probing = entry != 0;
+                slot = (slot + 1) & mask;
+            }
+        }
+    }
+    if (free_out)
+    {
+        *free_out = free_slot;
+    }
+    return found;
+}
+
+// Rebuilds the qualified slot table at four times the live entries' need,
+// from the live log, as c_parse_interned_slots_rebuild does for its own.
+BUSTER_C_INTERNAL bool c_parse_qualified_slots_rebuild(CParseResult* result)
+{
+    CTypeInterning* interning = c_parse_type_interning(result);
+    u32 live = result->interned_qualified_count;
+    u32 slot_count = 256;
+    while (slot_count < UINT32_MAX / 4 && slot_count < (live + 1) * 4)
+    {
+        slot_count *= 2;
+    }
+    bool built = c_parse_arena_can_allocate(result->arena, (u64)slot_count * sizeof(u32), BUSTER_ALIGN_OF(u32));
+    if (built)
+    {
+        interning->qualified_slots = arena_allocate_zeroed(result->arena, u32, slot_count);
+        interning->qualified_slot_count = slot_count;
+        interning->qualified_slot_used = live;
+        for (u32 entry = 0; entry < live; entry += 1)
+        {
+            u32 slot = c_parse_qualified_slot_home(interning, result->types + interning->qualified_rows[entry]);
+            while (interning->qualified_slots[slot])
+            {
+                slot = (slot + 1) & (slot_count - 1);
+            }
+            interning->qualified_slots[slot] = entry + 1;
+        }
+    }
+    return built;
+}
+
+// The qualified copy of `base` the member step reads: the live shared copy
+// equal to it while the interning window is open, else an appended copy
+// (c_parse_add_qualified_type), which is logged for sharing when it may be.
+BUSTER_C_SHARED CTypeId c_parse_intern_qualified_type(CParseResult* result, CTypeId base, CType qualifiers)
+{
+    CTypeInterning* interning = c_parse_type_interning(result);
+    CType key = {0};
+    bool shared = interning && interning->enabled && !interning->suspended && c_parse_qualified_copy(result, base, qualifiers, &key);
+    u32 free_slot = UINT32_MAX;
+    u32 found = shared ? c_parse_qualified_find(result, &key, &free_slot) : C_ID_UNDERLYING_INVALID;
+    CTypeId id = (CTypeId){.value = found};
+    if (found == C_ID_UNDERLYING_INVALID)
+    {
+        id = c_parse_add_qualified_type(result, base, qualifiers);
+        u32 entry = result->interned_qualified_count;
+        bool room = shared && id.value != C_ID_UNDERLYING_INVALID && entry < UINT32_MAX - 1;
+        if (room && entry >= interning->qualified_row_capacity)
+        {
+            u32 capacity = interning->qualified_row_capacity ? interning->qualified_row_capacity * 2 : 256;
+            room = capacity > entry && c_parse_arena_can_allocate(result->arena, (u64)capacity * sizeof(u32), BUSTER_ALIGN_OF(u32));
+            if (room)
+            {
+                u32* rows = arena_allocate(result->arena, u32, capacity);
+                if (entry)
+                {
+                    memcpy(rows, interning->qualified_rows, sizeof(*rows) * entry);
+                }
+                interning->qualified_rows = rows;
+                interning->qualified_row_capacity = capacity;
+            }
+        }
+        if (room)
+        {
+            interning->qualified_rows[entry] = id.value;
+            result->interned_qualified_count = entry + 1;
+            if (free_slot != UINT32_MAX && (interning->qualified_slot_used + 1) * 2 <= interning->qualified_slot_count)
+            {
+                interning->qualified_slot_used += interning->qualified_slots[free_slot] == 0;
+                interning->qualified_slots[free_slot] = entry + 1;
+            }
+            else if (!c_parse_qualified_slots_rebuild(result))
+            {
+                // Without a table the entry cannot be found; it stays an
+                // ordinary row.
+                result->interned_qualified_count = entry;
+            }
+        }
+    }
+    return id;
+}
+
+// The live shared copy c_parse_intern_qualified_type would return for `base`
+// and `qualifiers`, C_TYPE_ID_INVALID when there is none or the copy may not
+// be shared. Appends nothing: the tree expression typer asks it whether a
+// member step over a qualified aggregate would read an existing row.
+BUSTER_C_SHARED CTypeId c_parse_interned_qualified_type(CParseResult const* result, CTypeId base, CType qualifiers)
+{
+    CType key = {0};
+    CTypeId id = C_TYPE_ID_INVALID;
+    if (c_parse_qualified_copy(result, base, qualifiers, &key))
+    {
+        id.value = c_parse_qualified_find(result, &key, 0);
+    }
+    return id;
+}
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_C_SHARED bool c_parse_qualified_copy_shared(CParseResult const* result, u32 row)
+{
+    return row < result->type_count && c_parse_qualified_find(result, result->types + row, 0) == row;
+}
+
+// Shares `base`'s const copy twice with the interning window open, on a
+// header lent for the call when the parse has none, and reports what was
+// appended. The lent header is taken back afterwards; the appended rows stay.
+CTestQualifiedShare c_test_qualified_share(CParseResult* result, CTypeId base)
+{
+    CTestQualifiedShare report = {0};
+    CTypeInterning lent = {0};
+    CTypeInterning* owned = c_parse_type_interning(result);
+    if (result->aggregate_lookup)
+    {
+        CTypeInterning* interning = owned ? owned : &lent;
+        bool enabled = interning->enabled;
+        u32 suspended = interning->suspended;
+        result->aggregate_lookup->type_interning = interning;
+        interning->enabled = true;
+        interning->suspended = 0;
+        u32 types = result->type_count;
+        u32 alignments = result->type_alignment_count;
+        CType qualifiers = {.is_const = true};
+        report.first = c_parse_intern_qualified_type(result, base, qualifiers);
+        report.second = c_parse_intern_qualified_type(result, base, qualifiers);
+        report.found = c_parse_interned_qualified_type(result, base, qualifiers);
+        report.types_added = result->type_count - types;
+        report.alignments_added = result->type_alignment_count - alignments;
+        interning->enabled = enabled;
+        interning->suspended = suspended;
+        result->aggregate_lookup->type_interning = owned;
+        result->interned_qualified_count = owned ? result->interned_qualified_count : 0;
+    }
+    return report;
+}
+#endif
 
 BUSTER_C_INTERNAL CTypeId c_parse_unqualified_type(CParseResult* result, CTypeId type_id)
 {
@@ -32853,6 +33075,10 @@ BUSTER_C_INTERNAL CTestTypeConstantQuery c_test_protected_expression_query(Arena
             c_parse_type_interning(result) ? (u64)c_parse_type_interning(result)->row_capacity * sizeof(u32) : 0},
         {c_parse_type_interning(result) ? c_parse_type_interning(result)->slots : 0, 0,
             c_parse_type_interning(result) ? (u64)c_parse_type_interning(result)->slot_count * sizeof(u32) : 0},
+        {c_parse_type_interning(result) ? c_parse_type_interning(result)->qualified_rows : 0, 0,
+            c_parse_type_interning(result) ? (u64)c_parse_type_interning(result)->qualified_row_capacity * sizeof(u32) : 0},
+        {c_parse_type_interning(result) ? c_parse_type_interning(result)->qualified_slots : 0, 0,
+            c_parse_type_interning(result) ? (u64)c_parse_type_interning(result)->qualified_slot_count * sizeof(u32) : 0},
         {result->binding_by_symbol, 0, (u64)result->binding_capacity * sizeof(CEntityId)},
         {result->binding_undo, 0, (u64)result->binding_undo_capacity * sizeof(CParseBindingUndo)},
     };
