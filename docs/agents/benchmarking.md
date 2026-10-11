@@ -473,6 +473,9 @@ captures (#2741).
   perf record -F 999 -g --call-graph fp -o "$session_root/release.data" -- ./build/Release/ide bench
   ```
 
+  For test-generated image lifetime during captures, see
+  [profiling image retention](testing.md#profiling-image-retention).
+
   The ordinary local default includes tests, which enables
   `BUSTER_IR_TRANSFORM_CHECKS` in Release. Keep tests-on, sanitized,
   instrumented and explicit transform-verification builds identified as

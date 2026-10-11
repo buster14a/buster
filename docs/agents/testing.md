@@ -631,6 +631,48 @@ child. `WASM_NODE_PROCESS` retains separate startup and wait timings. Delayed
 startup and missing-readiness controls cover the handshake. Actual Node-backed
 Wasm oracle deadlines and success requirements are unchanged.
 
+## Profiling image retention
+
+For Linux Superluminal captures, the profiler can abort when a test executable
+is deleted before image metadata is read. Run tests with opt-in retention:
+
+```sh
+BUSTER_TEST_RETAIN_IMAGES=1 build/Release/ide test
+```
+
+Any `--module=...` or `--ci=1` options can be added. This mode addresses the
+capture lifetime described in [issue #3674](https://github.com/buster14a/buster/issues/3674).
+It keeps paths registered by spawned executables and recognized shared-library
+images (ELF `ET_DYN`, Mach-O `MH_DYLIB`/`MH_BUNDLE`, and PE DLL images). If the
+bounded registration table overflows, it also keeps any recognized loadable
+image. When a temporary directory contains a kept image, the entire directory
+tree is retained; ordinary text, object files and archives are not retained by
+the image classifier itself.
+
+The test temporary root remains until you remove it. The final
+`TEST_IMAGE_RETENTION_V1` line reports counter deltas:
+
+```text
+TEST_IMAGE_RETENTION_V1 status=retained root=<root-or-none> registered=<n> retained_files=<n> retained_directories=<n> overflowed=<n>
+```
+
+After the capture and symbol processing finish, remove the reported root:
+
+```sh
+rm -rf '<root>'
+```
+
+Do not run that cleanup until both operations are complete. Images outside the
+temporary root that are registered or recognized are left in place as well;
+the root cleanup does not remove them. Retaining full-run artifacts can consume
+substantial disk space, and whole-tree directory retention can preserve
+unrelated files beside an image. A crash or timeout can leave a temporary root
+even without this mode. Windows behavior has not been verified locally.
+In one measured full local run, the retained root occupied 110 MiB across 5,598
+files, and the suite passed without mode-induced assertion failures. Usage
+varies by run; record and investigate any later failures rather than skipping
+or weakening assertions.
+
 The bit-field aggregate Node oracle (#2194) logs `WASM_NODE_MODULE` with the
 exact module size and SHA-256 before each run, and the module bytes as hex
 (`WASM_NODE_MODULE_BYTES`, at most 64 KiB) when the oracle fails. After

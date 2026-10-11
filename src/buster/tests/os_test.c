@@ -1,3 +1,6 @@
+// OS tests cover process, filesystem, and synchronization contracts. os_tests
+// registers their focused fixtures; os_test_image_retention exercises the
+// test-only generated-image seam and its deletion/whole-tree behavior.
 #include <buster/tests/os_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/file.h>
@@ -1862,6 +1865,147 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_group_churn(UnitTestArguments
 }
 #endif
 
+BUSTER_GLOBAL_LOCAL bool os_test_image_retention_write_elf(String8 path, u16 image_type)
+{
+    u8 header[64] = {0};
+    header[0] = 0x7f;
+    header[1] = 'E';
+    header[2] = 'L';
+    header[3] = 'F';
+    header[4] = 2;
+    header[5] = 1;
+    header[6] = 1;
+    header[16] = (u8)image_type;
+    header[17] = (u8)(image_type >> 8);
+    return file_write(path, (ByteSlice){.pointer = header, .length = sizeof(header)});
+}
+
+BUSTER_GLOBAL_LOCAL bool os_test_image_retention_write_macho(String8 path, u32 file_type)
+{
+    u8 header[64] = {0};
+    header[0] = 0xcf;
+    header[1] = 0xfa;
+    header[2] = 0xed;
+    header[3] = 0xfe;
+    header[12] = (u8)file_type;
+    header[13] = (u8)(file_type >> 8);
+    header[14] = (u8)(file_type >> 16);
+    header[15] = (u8)(file_type >> 24);
+    return file_write(path, (ByteSlice){.pointer = header, .length = sizeof(header)});
+}
+
+BUSTER_GLOBAL_LOCAL bool os_test_image_retention_write_pe(String8 path, u16 characteristics)
+{
+    u8 image[88] = {0};
+    image[0] = 'M';
+    image[1] = 'Z';
+    image[0x3c] = 64;
+    image[64] = 'P';
+    image[65] = 'E';
+    image[86] = (u8)characteristics;
+    image[87] = (u8)(characteristics >> 8);
+    return file_write(path, (ByteSlice){.pointer = image, .length = sizeof(image)});
+}
+
+BUSTER_GLOBAL_LOCAL bool os_test_image_retention_exists(String8 path)
+{
+    FileStats stats = os_path_followed_stats(path);
+    return stats.valid && stats.kind != OS_FILE_KIND_MISSING;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_image_retention(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    bool previous_active = os_image_retention_set_active(false);
+    String8 inactive_text = buster_test_temporary_path(arguments->arena, S8("image-retention-inactive-text"), S8(".txt"));
+    String8 inactive_shared = buster_test_temporary_path(arguments->arena, S8("image-retention-inactive-elf"), S8(".bin"));
+    String8 inactive_registered = buster_test_temporary_path(arguments->arena, S8("image-retention-inactive-registered"), S8(".txt"));
+    String8 active_registered = buster_test_temporary_path(arguments->arena, S8("image-retention-registered"), S8(".txt"));
+    String8 active_relative = string_format(arguments->arena, S8("build/cache/image-retention-relative-{u64}.bin"), os_now_microseconds());
+    String8 active_relative_absolute = os_path_absolute_lexical(arguments->arena, active_relative, false);
+    String8 active_elf = buster_test_temporary_path(arguments->arena, S8("image-retention-elf-dyn"), S8(".bin"));
+    String8 active_macho = buster_test_temporary_path(arguments->arena, S8("image-retention-macho-dylib"), S8(".bin"));
+    String8 active_pe = buster_test_temporary_path(arguments->arena, S8("image-retention-pe-dll"), S8(".bin"));
+    String8 active_rel = buster_test_temporary_path(arguments->arena, S8("image-retention-elf-rel"), S8(".bin"));
+    String8 active_exec = buster_test_temporary_path(arguments->arena, S8("image-retention-elf-exec"), S8(".bin"));
+    String8 active_text = buster_test_temporary_path(arguments->arena, S8("image-retention-active-text"), S8(".txt"));
+    String8 injected = buster_test_temporary_path(arguments->arena, S8("image-retention-injected-delete"), S8(".txt"));
+    String8 retained_directory = buster_test_temporary_path(arguments->arena, S8("image-retention-directory"), S8(""));
+    String8 directory_image = string_format(arguments->arena, S8("{S8}/image.bin"), retained_directory);
+    String8 directory_text = string_format(arguments->arena, S8("{S8}/text.txt"), retained_directory);
+    String8 empty_directory = buster_test_temporary_path(arguments->arena, S8("image-retention-empty-directory"), S8(""));
+    String8 empty_directory_text = string_format(arguments->arena, S8("{S8}/text.txt"), empty_directory);
+    String8 text = S8("ordinary text");
+    OsImageRetentionCounters before = os_image_retention_counters();
+
+    BUSTER_TEST(arguments, file_write(inactive_text, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    BUSTER_TEST(arguments, os_test_image_retention_write_elf(inactive_shared, 3));
+    BUSTER_TEST(arguments, file_write(inactive_registered, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    os_image_retention_register(inactive_registered);
+    BUSTER_TEST(arguments, os_file_delete(inactive_text) && !os_test_image_retention_exists(inactive_text));
+    BUSTER_TEST(arguments, os_file_delete(inactive_shared) && !os_test_image_retention_exists(inactive_shared));
+    BUSTER_TEST(arguments, os_file_delete(inactive_registered) && !os_test_image_retention_exists(inactive_registered));
+
+    BUSTER_TEST(arguments, os_make_directory_attempt(S8("build/cache")));
+    os_image_retention_set_active(true);
+    BUSTER_TEST(arguments, file_write(active_registered, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    os_image_retention_register(active_registered);
+    BUSTER_TEST(arguments, os_file_delete(active_registered) && os_test_image_retention_exists(active_registered));
+    BUSTER_TEST(arguments, file_write(active_relative, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    os_image_retention_register(active_relative);
+    BUSTER_TEST(arguments, active_relative_absolute.length &&
+                           os_file_delete(active_relative_absolute) && os_test_image_retention_exists(active_relative_absolute));
+    BUSTER_TEST(arguments, os_test_image_retention_write_elf(active_elf, 3));
+    BUSTER_TEST(arguments, os_file_delete(active_elf) && os_test_image_retention_exists(active_elf));
+    BUSTER_TEST(arguments, os_test_image_retention_write_macho(active_macho, 6));
+    BUSTER_TEST(arguments, os_file_delete(active_macho) && os_test_image_retention_exists(active_macho));
+    BUSTER_TEST(arguments, os_test_image_retention_write_pe(active_pe, 0x2000));
+    BUSTER_TEST(arguments, os_file_delete(active_pe) && os_test_image_retention_exists(active_pe));
+    BUSTER_TEST(arguments, os_test_image_retention_write_elf(active_rel, 1));
+    BUSTER_TEST(arguments, os_file_delete(active_rel) && !os_test_image_retention_exists(active_rel));
+    BUSTER_TEST(arguments, os_test_image_retention_write_elf(active_exec, 2));
+    BUSTER_TEST(arguments, os_file_delete(active_exec) && !os_test_image_retention_exists(active_exec));
+    BUSTER_TEST(arguments, file_write(active_text, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    BUSTER_TEST(arguments, os_file_delete(active_text) && !os_test_image_retention_exists(active_text));
+
+    BUSTER_TEST(arguments, file_write(injected, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    os_image_retention_register(injected);
+    OsFileTestStep injected_delete[] = {{OS_FILE_TEST_DELETE, OS_FILE_TEST_ERROR, 12345}};
+    os_file_test_begin(injected, injected_delete, BUSTER_ARRAY_LENGTH(injected_delete));
+    OsError injected_result = os_file_delete_checked(injected);
+    u32 consumed = os_file_test_end();
+    BUSTER_TEST(arguments, injected_result.v == 12345 && consumed == 1 && os_test_image_retention_exists(injected));
+
+    BUSTER_TEST(arguments, os_make_directory_attempt(retained_directory));
+    BUSTER_TEST(arguments, os_test_image_retention_write_elf(directory_image, 3));
+    BUSTER_TEST(arguments, file_write(directory_text, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    OsImageRetentionCounters before_directory_delete = os_image_retention_counters();
+    BUSTER_TEST(arguments, os_directory_delete(retained_directory));
+    OsImageRetentionCounters after_directory_delete = os_image_retention_counters();
+    BUSTER_TEST(arguments, os_test_image_retention_exists(retained_directory) &&
+                           os_test_image_retention_exists(directory_image) && os_test_image_retention_exists(directory_text));
+    BUSTER_TEST(arguments, after_directory_delete.retained_directories - before_directory_delete.retained_directories == 1);
+    BUSTER_TEST(arguments, os_make_directory_attempt(empty_directory));
+    BUSTER_TEST(arguments, file_write(empty_directory_text, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    BUSTER_TEST(arguments, os_directory_delete(empty_directory) && !os_test_image_retention_exists(empty_directory));
+
+    OsImageRetentionCounters after_retained_files = os_image_retention_counters();
+    BUSTER_TEST(arguments, after_retained_files.registered - before.registered >= 3);
+    BUSTER_TEST(arguments, after_retained_files.retained_files - before.retained_files >= 5);
+    os_image_retention_set_active(false);
+    BUSTER_TEST(arguments, os_file_delete(active_registered) && !os_test_image_retention_exists(active_registered));
+    BUSTER_TEST(arguments, os_file_delete(active_relative_absolute) && !os_test_image_retention_exists(active_relative_absolute));
+    BUSTER_TEST(arguments, os_file_delete(active_elf) && !os_test_image_retention_exists(active_elf));
+    BUSTER_TEST(arguments, os_file_delete(active_macho) && !os_test_image_retention_exists(active_macho));
+    BUSTER_TEST(arguments, os_file_delete(active_pe) && !os_test_image_retention_exists(active_pe));
+    BUSTER_TEST(arguments, os_file_delete(injected) && !os_test_image_retention_exists(injected));
+    BUSTER_TEST(arguments, os_directory_delete(retained_directory) && !os_test_image_retention_exists(retained_directory));
+    BUSTER_TEST(arguments, os_file_delete(active_text) && !os_test_image_retention_exists(active_text));
+    BUSTER_TEST(arguments, os_file_delete(active_rel) && os_file_delete(active_exec));
+    os_image_retention_set_active(previous_active);
+    return result;
+}
+
 UnitTestResult os_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -1900,6 +2044,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_replay);
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_storage);
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_limits);
+    BUSTER_TEST_FIXTURE(arguments, os_test_image_retention);
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_overflow);
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_sink_admission);
