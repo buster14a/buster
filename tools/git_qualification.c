@@ -48,10 +48,15 @@ static char* format(const char* pattern, ...)
     return result;
 }
 
+static int quote_fits(size_t length, size_t available)
+{
+    return available >= 3 && length <= (available - 3) / 4;
+}
+
 static char* quote(const char* text)
 {
     size_t n = strlen(text);
-    if (n > (sizeof(arena) - used - 3) / 4) fail("quote bound");
+    if (!quote_fits(n, sizeof(arena) - used)) fail("quote bound");
     char* result = arena + used;
     char* out = result;
     *out++ = '\'';
@@ -472,7 +477,8 @@ int main(int argc, char** argv)
         char* mixed[] = {"cc", "a.c", "a.o"};
         char* pre[] = {"cc", "-E", "-x", "c", "-"};
         if (host_link(5, compile) || !host_link(6, link) || host_link(3, mixed) || host_link(5, pre) ||
-            strcmp(quote("a'b"), "'a'\\''b'")) fail("routing or quoting control");
+            strcmp(quote("a'b"), "'a'\\''b'") || quote_fits(0, 2) || !quote_fits(0, 3) ||
+            quote_fits(SIZE_MAX, 16) || !quote_fits(3, 15)) fail("routing or quoting control");
         puts("GIT_QUALIFICATION_SELF_TEST_PASS");
         result = 0;
     }

@@ -40,6 +40,8 @@ The inspected primary sources below are all at the selected Git commit.
 | Git | GPL-2.0-only, with file-specific exceptions; [COPYING](https://github.com/git/git/blob/c44beea485f0f2feaf460e2ac87fdd5608d63cf0/COPYING) |
 | SHA-1 collision detection | MIT; [sha1dc/LICENSE.txt](https://github.com/git/git/blob/c44beea485f0f2feaf460e2ac87fdd5608d63cf0/sha1dc/LICENSE.txt) |
 | Reftable | BSD-3-Clause; [reftable/LICENSE](https://github.com/git/git/blob/c44beea485f0f2feaf460e2ac87fdd5608d63cf0/reftable/LICENSE) |
+| Obstack compatibility code | LGPL-2.1-or-later; [compat/obstack.c](https://github.com/git/git/blob/c44beea485f0f2feaf460e2ac87fdd5608d63cf0/compat/obstack.c) |
+| EWAH bitmap code | GPL-2.0-or-later; [ewah/ewah_bitmap.c](https://github.com/git/git/blob/c44beea485f0f2feaf460e2ac87fdd5608d63cf0/ewah/ewah_bitmap.c) |
 | LibXDiff | LGPL-2.1-or-later; [xdiff/xdiff.h](https://github.com/git/git/blob/c44beea485f0f2feaf460e2ac87fdd5608d63cf0/xdiff/xdiff.h) |
 | Clar unit-test framework | ISC; [t/unit-tests/clar/COPYING](https://github.com/git/git/blob/c44beea485f0f2feaf460e2ac87fdd5608d63cf0/t/unit-tests/clar/COPYING) |
 | Bundled regex, if selected by upstream platform policy | LGPL-2.1-or-later; [compat/regex/regex.c](https://github.com/git/git/blob/c44beea485f0f2feaf460e2ac87fdd5608d63cf0/compat/regex/regex.c) |
@@ -74,7 +76,9 @@ mkdir /absolute/path/fresh-git-evidence
 The input checkout must be at the exact pin, with no tracked modifications,
 untracked/ignored inputs or index skip/assume-unchanged flags. The harness
 checks it before and after execution and builds independent disposable
-clones. The CC wrapper receives the normal Makefile arguments unchanged.
+clones. Its input controls require tracked-dirty, untracked, ignored, wrong-pin,
+assume-unchanged and skip-worktree cases to fail, then verify restoration.
+Separate process controls require exit 7 and timeout 124 to retain those outcomes. The CC wrapper receives the normal Makefile arguments unchanged.
 Buster C/query actions use `ide cc -target x86_64-linux -march=baseline`;
 object/archive-only links explicitly use host Clang. The Clang cell compiles
 and links independently. No failed Buster C action falls back to Clang.
@@ -137,6 +141,10 @@ Build-census success alone does not satisfy #3180. Qualification still needs:
   through the approved existing comparison route. Hosted timings cannot satisfy
   performance acceptance.
 - The useful developer workflow, affected checks and self-host preservation.
+
+The normal dependency-enabled build needs the driver contract tracked in
+[#2302](https://github.com/buster14a/buster/issues/2302). Retain `-MF/-MQ/-MMD/-MP`
+when retesting; removing them cannot qualify this incremental-build configuration.
 
 Report reduced compiler failures to existing driver/frontend/ABI/backend
 owners; do not expand this harness branch into a competing #3102/#56

@@ -13,7 +13,26 @@ concurrency:
   group: git-qualification-${{ github.run_id }}
   cancel-in-progress: false
 jobs:
+  native-controls:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: ubuntu-26.04
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Clang and GCC native controls
+        run: |
+          clang -std=c11 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/git_qualification.c -o "$RUNNER_TEMP/git-controls-clang"
+          "$RUNNER_TEMP/git-controls-clang" --self-test
+          gcc -std=c11 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/git_qualification.c -o "$RUNNER_TEMP/git-controls-gcc"
+          "$RUNNER_TEMP/git-controls-gcc" --self-test
   local-operations:
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[git-census]') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 40
     env:
@@ -81,6 +100,7 @@ jobs:
             ${{ runner.temp }}/git-qualification/*.log
             ${{ runner.temp }}/git-qualification/*.tsv
             ${{ runner.temp }}/git-qualification/licenses
+            ${{ runner.temp }}/git-qualification/machine-specifications
             ${{ runner.temp }}/git-qualification/*-actions
             ${{ runner.temp }}/git-qualification/*/.depend
             ${{ runner.temp }}/git-qualification/*/GIT-BUILD-OPTIONS
