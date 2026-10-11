@@ -7340,6 +7340,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         result.c_ast.lower.bodies += unit.c_ast.lower.bodies;
         result.c_ast.lower.conditionals += unit.c_ast.lower.conditionals;
+        result.c_ast.lower.steps += unit.c_ast.lower.steps;
         result.c_ast.lower.answers += unit.c_ast.lower.answers;
         result.c_ast.lower.negatives += unit.c_ast.lower.negatives;
         result.c_ast.lower.fallbacks += unit.c_ast.lower.fallbacks;

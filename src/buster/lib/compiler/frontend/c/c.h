@@ -1488,12 +1488,14 @@ struct CAstStatementStatistics
 // top-level function bodies whose conditional nodes it indexed, the nodes, and
 // how each root-conditional query inside an indexed body ended. An answer is
 // a root `?:` the tree reported; a negative is a range holding no `?`; a
-// fallback went to the token scan.
+// fallback went to the token scan. Steps are the nodes and parentheses the
+// index build visited, a work count that must stay linear in the input.
 typedef struct CAstLowerStatistics CAstLowerStatistics;
 struct CAstLowerStatistics
 {
     u64 bodies;
     u64 conditionals;
+    u64 steps;
     u64 answers;
     u64 negatives;
     u64 fallbacks;

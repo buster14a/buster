@@ -40031,6 +40031,88 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArgumen
     return result;
 }
 
+// The root-conditional index's build work stays linear in the input
+// (CAstLowerStatistics.steps; GitHub #3102). Each chain shape is compiled at
+// depth n and 2n, with and without -fc-ast-pilot. The objects must match, and
+// doubling the depth may at most double the steps, plus a constant for the
+// function around the chain. Without the memo, a left-nested chain walked its
+// shared leftmost paths and parentheses again for every level, and its steps
+// quadrupled.
+//   left:   ((a ? b : c) ? b : c) ...    every condition holds the previous one
+//   prefix: (-(-a ? b : c) ? b : c) ...  the same under a prefix operator
+//   right:  a ? b : a ? b : ... c        every else operand holds the next one
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditional_chains(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Per level the head, then the leaf, then per level the close.
+    String8 heads[] = {S8("("), S8("(-"), S8("a ? b : ")};
+    String8 leaves[] = {S8("a"), S8("a"), S8("c")};
+    String8 closes[] = {S8(" ? b : c)"), S8(" ? b : c)"), S8("")};
+    String8 shape_names[] = {S8("left"), S8("prefix"), S8("right")};
+    u32 depths[] = {128, 256};
+    String8 prefix = S8("int f(int a, int b, int c) { return ");
+    String8 suffix = S8("; }\n");
+    TemporalArena temporary = scratch_begin(0, 0);
+    Arena* arena = temporary.arena;
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(shape_names); shape += 1)
+    {
+        u64 steps[BUSTER_ARRAY_LENGTH(depths)] = {0};
+        for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+        {
+            u32 depth = depths[depth_index];
+            u64 length = prefix.length + leaves[shape].length + suffix.length + (u64)depth * (heads[shape].length + closes[shape].length);
+            char8* bytes = arena_allocate(arena, char8, length);
+            u64 cursor = 0;
+            memcpy(bytes + cursor, prefix.pointer, prefix.length);
+            cursor += prefix.length;
+            for (u32 level = 0; level < depth; level += 1)
+            {
+                memcpy(bytes + cursor, heads[shape].pointer, heads[shape].length);
+                cursor += heads[shape].length;
+            }
+            memcpy(bytes + cursor, leaves[shape].pointer, leaves[shape].length);
+            cursor += leaves[shape].length;
+            for (u32 level = 0; level < depth; level += 1)
+            {
+                memcpy(bytes + cursor, closes[shape].pointer, closes[shape].length);
+                cursor += closes[shape].length;
+            }
+            memcpy(bytes + cursor, suffix.pointer, suffix.length);
+            String8 source = {.pointer = bytes, .length = length};
+            String8 input = buster_test_temporary_path(arena, string_format(arena, S8("buster-tree-chain-{S8}-{u32}"), shape_names[shape], depth),
+                                                       S8(".c"));
+            BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+            ByteSlice objects[2] = {0};
+            for (u32 pilot = 0; pilot < 2; pilot += 1)
+            {
+                String8 output = buster_test_temporary_path(
+                    arena, string_format(arena, S8("buster-tree-chain-{S8}-{u32}-{u32}"), shape_names[shape], depth, pilot), S8(".o"));
+                String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), S8("-g0"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"),
+                                     output, input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8){command + !pilot, BUSTER_ARRAY_LENGTH(command) - !pilot}));
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                objects[pilot] = compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
+                if (pilot)
+                {
+                    steps[depth_index] = compiled.c_ast.lower.steps;
+                    BUSTER_TEST(arguments, compiled.c_ast.lower.conditionals == depth);
+                    BUSTER_TEST(arguments, compiled.c_ast.lower.answers > 0);
+                }
+            }
+            BUSTER_TEST_RAW(arguments,
+                            objects[0].length && objects[0].length == objects[1].length &&
+                                memcmp(objects[0].pointer, objects[1].pointer, objects[0].length) == 0,
+                            string_format(arena, S8("{S8} chain of {u32}: the pilot's object differs from the default's"), shape_names[shape], depth));
+        }
+        BUSTER_TEST_RAW(arguments, steps[0] > 0 && steps[1] <= 2 * steps[0] + 64,
+                        string_format(arena, S8("{S8} chain: {u64} index steps at depth {u32}, {u64} at depth {u32}"), shape_names[shape], steps[0],
+                                      depths[0], steps[1], depths[1]));
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_expression_frames(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -61975,6 +62057,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
     C_TEST_FIXTURE(arguments, c_test_type_interning_objects);
     C_TEST_FIXTURE(arguments, c_test_tree_root_conditionals);
+    C_TEST_FIXTURE(arguments, c_test_tree_root_conditional_chains);
     C_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
     C_TEST_FIXTURE(arguments, c_test_local_label_declarations);
     C_TEST_FIXTURE(arguments, c_test_local_labels);

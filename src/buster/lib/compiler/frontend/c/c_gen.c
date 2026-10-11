@@ -39383,51 +39383,96 @@ BUSTER_C_INTERNAL void c_ir_tree_sort_keys(u64* keys, u64* scratch, u32 count)
     }
 }
 
+// The conditional nodes of one body already indexed, ascending by node: each
+// one's first token (its condition's) and its start widened over parentheses.
+// Postorder indexes every conditional on another's leftmost path before that
+// one, so c_ir_tree_first_token can stop at it.
+typedef struct CIrTreeFirstMemo CIrTreeFirstMemo;
+struct CIrTreeFirstMemo
+{
+    u32* nodes;
+    u32* firsts;
+    u32* starts;
+    u32 count;
+};
+
 // The first token of the subtree at `node`. Each node's first token is either
 // its anchor or its first child's first token, and the anchor of a node whose
 // first token lies in its first child comes after that token, so the first
 // token is the smallest anchor on the leftmost path. A label address `&&l` is
-// anchored at its label. Parentheses have no node; the caller widens over them.
-BUSTER_C_INTERNAL u32 c_ir_tree_first_token(CAst const* ast, u32 node)
+// anchored at its label. The walk ends at an indexed conditional, which brings
+// its own first token, so a chain of conditionals on each other's leftmost
+// paths is walked once in all. Parentheses have no node: `*widen_from` gets
+// the token the caller's widening resumes at, the conditional's widened start
+// when its first token was taken, else the first token. `*steps` counts the
+// nodes the walk visits, siblings included.
+BUSTER_C_INTERNAL u32 c_ir_tree_first_token(CAst const* ast, u32 node, CIrTreeFirstMemo const* memo, u32* widen_from, u64* steps)
 {
     u32 first = ast->tokens[node];
     CAstKind first_kind = (CAstKind)ast->kinds[node];
+    u32 resume = UINT32_MAX;
     u32 cursor = node;
-    while (ast->extents[cursor] > 1)
+    bool descending = ast->extents[cursor] > 1;
+    while (descending)
     {
         u32 begin = c_ast_subtree_begin(ast, cursor);
         u32 child = cursor - 1;
+        *steps += 1;
         while (child + 1 - ast->extents[child] > begin)
         {
             child -= ast->extents[child];
+            *steps += 1;
         }
         cursor = child;
-        if (ast->tokens[cursor] < first)
+        u32 slot = UINT32_MAX;
+        if ((u8)(ast->kinds[cursor] - C_AST_CONDITIONAL) < 2)
         {
-            first = ast->tokens[cursor];
-            first_kind = (CAstKind)ast->kinds[cursor];
+            u32 low = 0;
+            u32 high = memo->count;
+            while (low < high)
+            {
+                u32 middle = low + (high - low) / 2;
+                low = memo->nodes[middle] < cursor ? middle + 1 : low;
+                high = memo->nodes[middle] < cursor ? high : middle;
+            }
+            slot = low < memo->count && memo->nodes[low] == cursor ? low : UINT32_MAX;
+        }
+        if (slot != UINT32_MAX)
+        {
+            if (memo->firsts[slot] < first)
+            {
+                first = memo->firsts[slot];
+                first_kind = C_AST_CONDITIONAL;
+                resume = memo->starts[slot];
+            }
+            descending = false;
+        }
+        else
+        {
+            if (ast->tokens[cursor] < first)
+            {
+                first = ast->tokens[cursor];
+                first_kind = (CAstKind)ast->kinds[cursor];
+            }
+            descending = ast->extents[cursor] > 1;
         }
     }
-    return first_kind == C_AST_LABEL_ADDRESS && first ? first - 1 : first;
-}
-
-// One past the `)` matching the `(` at `open` when it closes before `bound`,
-// else 0: the stream's delimiter array when the parse built one, else a scan
-// that stops at `bound`.
-BUSTER_C_INTERNAL u32 c_ir_tree_parenthesis_close(CPreprocessResult const* preprocess, u32 const* stream_matching_delimiters_plus_one, u32 open,
-                                                    u32 bound)
-{
-    u32 close = stream_matching_delimiters_plus_one ? stream_matching_delimiters_plus_one[open] - 1
-                                                    : c_ir_matching_delimiter(*preprocess, open, bound, C_PUNCTUATOR_LEFT_PARENTHESIS,
-                                                                              C_PUNCTUATOR_RIGHT_PARENTHESIS);
-    bool closes = close < bound && c_token_is_punctuator(&preprocess->tokens[close], C_PUNCTUATOR_RIGHT_PARENTHESIS);
-    return closes ? close + 1 : 0;
+    first = first_kind == C_AST_LABEL_ADDRESS && first ? first - 1 : first;
+    *widen_from = resume != UINT32_MAX ? resume : first;
+    return first;
 }
 
 // The record of the conditional node `node` (CONDITIONAL or
-// CONDITIONAL_OMITTED), or false when one of its tokens cannot be found.
+// CONDITIONAL_OMITTED), or false when one of its tokens cannot be found. It
+// also fills `node`'s memo entry, the next slot of `memo`. The start widens
+// over each `(` whose `)` closes before the `?`, read from the stream's
+// delimiter array, which the index requires. A memo entry's widened start
+// counts for any later conditional whose condition holds it on its leftmost
+// path: those parentheses close before the earlier `?`, so before the later
+// one too.
 BUSTER_C_INTERNAL bool c_ir_tree_conditional_record(CAst const* ast, CPreprocessResult const* preprocess, u32 const* stream_matching_delimiters_plus_one,
-                                                     u32 body_start, u32 node, CIrTreeConditional* record_out)
+                                                     u32 body_start, u32 node, CIrTreeFirstMemo* memo, CIrTreeConditional* record_out,
+                                                     u64* steps)
 {
     CToken const* tokens = preprocess->tokens;
     u32 question = ast->tokens[node];
@@ -39438,22 +39483,31 @@ BUSTER_C_INTERNAL bool c_ir_tree_conditional_record(CAst const* ast, CPreprocess
     {
         u32 then = condition;
         condition = then - ast->extents[then];
-        u32 else_first = c_ir_tree_first_token(ast, otherwise);
+        u32 else_first = 0;
+        c_ir_tree_first_token(ast, otherwise, memo, &else_first, steps);
         while (else_first > question + 1 && c_token_is_punctuator(&tokens[else_first - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             else_first -= 1;
+            *steps += 1;
         }
         colon = else_first - 1;
     }
     bool valid = colon > question && colon < preprocess->token_count && c_token_is_punctuator(&tokens[colon], C_PUNCTUATOR_COLON);
-    u32 start = c_ir_tree_first_token(ast, condition);
-    bool widening = valid;
+    u32 start = 0;
+    u32 first = c_ir_tree_first_token(ast, condition, memo, &start, steps);
+    bool widening = true;
     while (widening)
     {
-        widening = start > body_start && c_token_is_punctuator(&tokens[start - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-                   c_ir_tree_parenthesis_close(preprocess, stream_matching_delimiters_plus_one, start - 1, question) != 0;
+        u32 close = start > body_start ? stream_matching_delimiters_plus_one[start - 1] - 1 : UINT32_MAX;
+        widening = start > body_start && c_token_is_punctuator(&tokens[start - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) && close < question &&
+                   c_token_is_punctuator(&tokens[close], C_PUNCTUATOR_RIGHT_PARENTHESIS);
         start -= widening;
+        *steps += widening;
     }
+    memo->nodes[memo->count] = node;
+    memo->firsts[memo->count] = first;
+    memo->starts[memo->count] = start;
+    memo->count += 1;
     valid = valid && start < question;
     *record_out = (CIrTreeConditional){
         .start = start,
@@ -39500,15 +39554,18 @@ BUSTER_C_INTERNAL u64 c_ir_tree_conditionals_size(CAst const* ast, u32* body_cou
     *body_count_out = body_count;
     *conditional_count_out = conditional_count;
     // Braces and bodies per body; per conditional, its question, its kept and
-    // found records and three sort keys; one spare element and alignment slack
-    // for each of the eight arrays.
+    // found records, three sort keys and three memo words; one spare element
+    // and alignment slack for each of the eleven arrays.
     return (u64)(body_count + 1) * (sizeof(u32) + sizeof(CIrTreeConditionals)) +
-           (u64)(conditional_count + 1) * (sizeof(u32) + 2 * sizeof(CIrTreeConditional) + 3 * sizeof(u64)) + 8 * 16;
+           (u64)(conditional_count + 1) * (4 * sizeof(u32) + 2 * sizeof(CIrTreeConditional) + 3 * sizeof(u64)) + 11 * 16;
 }
 
 // Indexes the conditional nodes of every top-level function body of `ast`
 // (see above) in `arena`, sized by c_ir_tree_conditionals_size. A body nested
 // in another (a GNU nested function) is not indexed: its queries run the scan.
+// The work is linear in the bodies' nodes: each one's leftmost-path walks stop
+// at the conditionals already indexed (CIrTreeFirstMemo), and each `(` is
+// widened over once. CAstLowerStatistics.steps counts it.
 BUSTER_C_INTERNAL CIrTreeConditionalIndex c_ir_tree_conditionals_build(Arena* arena, CAst const* ast, CPreprocessResult const* preprocess,
                                                                         u32 const* stream_matching_delimiters_plus_one, u32 body_count,
                                                                         u32 conditional_count, CAstLowerStatistics* statistics)
@@ -39521,6 +39578,12 @@ BUSTER_C_INTERNAL CIrTreeConditionalIndex c_ir_tree_conditionals_build(Arena* ar
     u64* question_keys = arena_allocate(arena, u64, conditional_count + 1);
     u64* scratch = arena_allocate(arena, u64, conditional_count + 1);
     CIrTreeConditional* found = arena_allocate(arena, CIrTreeConditional, conditional_count + 1);
+    CIrTreeFirstMemo memo = {
+        .nodes = arena_allocate(arena, u32, conditional_count + 1),
+        .firsts = arena_allocate(arena, u32, conditional_count + 1),
+        .starts = arena_allocate(arena, u32, conditional_count + 1),
+    };
+    u64 steps = 0;
     u32 slot = body_count;
     u32 question_end = conditional_count;
     u32 record_end = conditional_count;
@@ -39546,6 +39609,7 @@ BUSTER_C_INTERNAL CIrTreeConditionalIndex c_ir_tree_conditionals_build(Arena* ar
         // found, its record keyed by (start, position found).
         u32 question_count = 0;
         u32 found_count = 0;
+        memo.count = 0;
         for (u32 node = node_begin; node < body && question_count < body_question_count; node += 1)
         {
             if ((u8)(ast->kinds[node] - C_AST_CONDITIONAL) < 2)
@@ -39553,7 +39617,7 @@ BUSTER_C_INTERNAL CIrTreeConditionalIndex c_ir_tree_conditionals_build(Arena* ar
                 question_keys[question_count] = (u64)ast->tokens[node] << 32;
                 question_count += 1;
                 CIrTreeConditional record;
-                if (c_ir_tree_conditional_record(ast, preprocess, stream_matching_delimiters_plus_one, body_start, node, &record))
+                if (c_ir_tree_conditional_record(ast, preprocess, stream_matching_delimiters_plus_one, body_start, node, &memo, &record, &steps))
                 {
                     found[found_count] = record;
                     keys[found_count] = ((u64)record.start << 32) | found_count;
@@ -39601,6 +39665,10 @@ BUSTER_C_INTERNAL CIrTreeConditionalIndex c_ir_tree_conditionals_build(Arena* ar
         }
     }
     BUSTER_CHECK(!slot);
+    if (statistics)
+    {
+        statistics->steps += steps;
+    }
     CIrTreeConditionalIndex index = {
         .braces = braces,
         .bodies = bodies,
@@ -61141,7 +61209,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     u32 const* stream_matching_delimiters_plus_one =
         label_candidates_valid && parse.position_index->delimiter_mismatch_count == 0 ? parse.position_index->matching_delimiters_plus_one : 0;
     CIrTreeConditionalIndex tree_conditionals = {0};
-    if (tree_arena)
+    // The index reads parenthesis matches from the stream's delimiter array,
+    // so a stream with mismatched delimiters, which has none, lowers by the
+    // scans alone.
+    if (tree_arena && stream_matching_delimiters_plus_one)
     {
         tree_conditionals = c_ir_tree_conditionals_build(tree_arena, options.syntax_tree, &preprocess, stream_matching_delimiters_plus_one,
                                                          tree_body_count, tree_conditional_count, options.ast_lower_statistics);

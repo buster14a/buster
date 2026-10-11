@@ -319,7 +319,8 @@ Under `-v` the driver prints six rows with the other verbose counters:
   fallback> fallback_token=<that body's `{`>`
 
 - `C_AST_LOWER bodies=<top-level function bodies lowering indexed>
-  conditionals=<conditional nodes in them> answers=<root-conditional queries
+  conditionals=<conditional nodes in them> steps=<nodes and parentheses the
+  index build visited> answers=<root-conditional queries
   answered true from the tree> negatives=<queries answered false because the
   range holds no `?`> fallbacks=<queries inside an indexed body handed to the
   token scan>`
@@ -906,6 +907,18 @@ and `CONDITIONAL_OMITTED` nodes, and for each one it records three tokens:
 
 A record whose `:` cannot be found this way is left out, but its `?` is still
 indexed. Each body keeps its `?` tokens and its records in ascending order.
+
+The build's work is linear in the bodies' nodes. Postorder indexes every
+conditional on another's leftmost path before that one, so the walk for a
+first token stops at an indexed conditional and takes its first token and
+widened start. Those parentheses close before the earlier `?`, so they
+widen the later one too, and each `(` is widened over once. Without the
+memo, a left-nested chain `((a ? b : c) ? b : c) ...` walked its shared
+paths and parentheses again for every level, which was quadratic.
+`CAstLowerStatistics.steps` counts the work, and
+`c_test_tree_root_conditional_chains` requires it to stay linear as chains
+double. Parenthesis matches come from the stream's delimiter array, so a
+stream with mismatched delimiters gets no index.
 
 A query inside a body is answered in one of three ways:
 - **False**, when no `?` lies in the range. Every `?` in a body is the anchor
