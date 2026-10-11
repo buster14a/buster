@@ -1491,7 +1491,8 @@ typedef enum CAstExtentFallback
 {
     C_AST_EXTENT_FALLBACK_NONE,
     // The body has no table: no tree, no function definition whose body is
-    // this one, or a body whose delimiters do not nest.
+    // this one, a body whose delimiters do not nest, or a table that does
+    // not fit its arena.
     C_AST_EXTENT_FALLBACK_INPUT,
     // A token the grammar puts next to a statement's anchor (the `(` after a
     // header keyword, the `else` before an else-branch, the `goto` before a

@@ -43104,24 +43104,33 @@ String8 c_ast_extent_fallback_name(CAstExtentFallback reason)
     return name;
 }
 
-// The unit's body index, in a private arena: null when there is no tree or
-// the arena cannot be reserved, and lowering then walks every body.
+// The unit's body index, in a private arena: null when there is no tree, or
+// the arena cannot be reserved or cannot hold the index, and lowering then
+// walks every body.
 BUSTER_C_INTERNAL CIrStatementExtents* c_ir_statement_extents_create(CAst const* ast)
 {
     CIrStatementExtents* extents = 0;
     Arena* arena = ast && ast->node_count && ast->root < ast->node_count && ast->kinds[ast->root] == C_AST_TRANSLATION_UNIT
                        ? c_frontend_arena_create((ArenaCreation){0}, C_FRONTEND_RESERVATION_LOWERING)
                        : 0;
-    if (arena)
+    u32 floor = arena ? c_ast_subtree_begin(ast, ast->root) : 0;
+    u32 count = 0;
+    for (u32 cursor = arena ? ast->root : 0; cursor > floor; cursor = c_ast_subtree_begin(ast, cursor - 1))
+    {
+        count += ast->kinds[cursor - 1] == C_AST_FUNCTION_DEFINITION && cursor >= 2 && ast->kinds[cursor - 2] == C_AST_COMPOUND_STATEMENT;
+    }
+    u64 position = arena ? arena->position : 0;
+    bool fits = arena &&
+                c_ir_arena_reservation_advance(arena->reserved_size, &position, sizeof(CIrStatementExtents), 1, BUSTER_ALIGN_OF(CIrStatementExtents)) &&
+                c_ir_arena_reservation_advance(arena->reserved_size, &position, sizeof(u32), 2 * (u64)count + 2, BUSTER_ALIGN_OF(u32));
+    if (arena && !fits)
+    {
+        arena_destroy(arena, 1);
+    }
+    if (fits)
     {
         extents = arena_allocate(arena, CIrStatementExtents, 1);
         *extents = (CIrStatementExtents){.ast = ast, .arena = arena};
-        u32 floor = c_ast_subtree_begin(ast, ast->root);
-        u32 count = 0;
-        for (u32 cursor = ast->root; cursor > floor; cursor = c_ast_subtree_begin(ast, cursor - 1))
-        {
-            count += ast->kinds[cursor - 1] == C_AST_FUNCTION_DEFINITION && cursor >= 2 && ast->kinds[cursor - 2] == C_AST_COMPOUND_STATEMENT;
-        }
         u32* bodies = arena_allocate(arena, u32, 2 * (u64)count + 2);
         u32 slot = count;
         for (u32 cursor = ast->root; cursor > floor && slot; cursor = c_ast_subtree_begin(ast, cursor - 1))
@@ -43391,13 +43400,19 @@ BUSTER_C_INTERNAL void c_ir_statement_extents_build(CIrStatementExtents* extents
     extents->entry_count = 0;
     u32 limit = extents->token_start + extents->token_count;
     u32 body = extents->token_start ? c_ir_statement_extents_body_node(extents, extents->token_start - 1) : C_AST_NODE_INVALID;
-    CAstExtentFallback refusal = !extents->delimiters_valid || body == C_AST_NODE_INVALID || limit >= preprocess->token_count ||
+    u32 nodes = body != C_AST_NODE_INVALID ? ast->extents[body] : 0;
+    // The table's arrays must fit the private arena; a body whose table does
+    // not is walked, like a body without a tree.
+    u64 position = extents->body_mark;
+    bool fits = c_ir_arena_reservation_advance(extents->arena->reserved_size, &position, sizeof(u32), nodes, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(extents->arena->reserved_size, &position, sizeof(CIrExtentVisit), nodes, BUSTER_ALIGN_OF(CIrExtentVisit)) &&
+                c_ir_arena_reservation_advance(extents->arena->reserved_size, &position, sizeof(CIrExtentEntry), nodes, BUSTER_ALIGN_OF(CIrExtentEntry));
+    CAstExtentFallback refusal = !extents->delimiters_valid || body == C_AST_NODE_INVALID || !fits || limit >= preprocess->token_count ||
                                          !c_token_is_punctuator(&preprocess->tokens[limit], C_PUNCTUATOR_RIGHT_BRACE)
                                      ? C_AST_EXTENT_FALLBACK_INPUT
                                      : C_AST_EXTENT_FALLBACK_NONE;
     if (!refusal)
     {
-        u32 nodes = ast->extents[body];
         u32 begin = c_ast_subtree_begin(ast, body);
         u32* lasts = arena_allocate(extents->arena, u32, nodes);
         CIrExtentVisit* stack = arena_allocate(extents->arena, CIrExtentVisit, nodes);

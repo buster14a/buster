@@ -846,8 +846,11 @@ The table holds token indices only, in a private arena reset for each body.
 No node id or `CAst` pointer reaches anything lowering publishes. The token
 walkers stay the default path, and they also answer as the fallback.
 `CAstExtentFallback` names why the walker answered:
-- **`input`:** the body has no tree, no function definition owns it, or its
-  delimiters do not nest.
+- **`input`:** the body has no tree, no function definition owns it, its
+  delimiters do not nest, or its table does not fit the table's arena. The
+  arrays are preflighted against the reservation before any is carved, as is
+  the unit's body index; an index that does not fit leaves every body to the
+  walker.
 - **`anchor`:** an anchor check failed, and the whole body is refused.
 - **`shape`:** the query does not start at an entry. That covers statement-expression
   interiors, which the walk does not enter, a label shape the walker reads

@@ -4469,6 +4469,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_extents(UnitTestArguments* argumen
             scratch_end(temporary);
         }
     }
+    // A table that does not fit its arena refuses the body (`input`), and the
+    // walker lowers it alike: the reservation is checked before any carve.
+    for (u32 reserved = 0; reserved < 2; reserved += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, S8(C_AST_EXTENT_CASE_EVERY), C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+        if (BUSTER_REQUIRE(arguments, built.complete && analysis.analysis_complete && analysis.diagnostic_count == 0))
+        {
+            CIRLowerResult walked = c_lower_to_ir_with_options(temporary.arena, S8("extent, walked"), preprocess, analysis, target_native, (CIRLowerOptions){0});
+            CAstExtentStatistics statistics = {0};
+            c_test_lowering_initial_reservation(reserved ? 4096 : 0);
+            CIRLowerResult tabled = c_lower_to_ir_with_options(temporary.arena, S8("extent, small arena"), preprocess, analysis, target_native,
+                                                               (CIRLowerOptions){.syntax_tree = &built.ast, .syntax_tree_extent_statistics = &statistics});
+            c_test_lowering_initial_reservation(0);
+            BUSTER_TEST(arguments, tabled.program && tabled.diagnostic_count == 0);
+            BUSTER_TEST(arguments, c_ast_test_instruction_total(&tabled) == c_ast_test_instruction_total(&walked));
+            BUSTER_TEST(arguments, reserved ? statistics.answers == 0 && (statistics.bodies == 0 || statistics.body_fallbacks[C_AST_EXTENT_FALLBACK_INPUT] == 1)
+                                            : statistics.answers >= C_AST_EXTENT_CASE_ANSWER_FLOOR);
+        }
+        c_ast_release(&built.ast);
+        scratch_end(temporary);
+    }
     // Without a tree lowering keeps no table and counts nothing.
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
