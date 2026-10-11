@@ -134,10 +134,22 @@
   }
  ],
  "requirements": {
-  "node": "Node.js with WebAssembly support; skipped when absent",
-  "clang": "Clang LLVM consumer; skipped when absent",
-  "gpu-toolchains": "GPU toolchain profile in .github/workflows/gpu-toolchains.yml",
-  "gcc-and-clang": "Both GCC and Clang on PATH (Linux scalar ABI oracle); skipped when absent"
+  "node": {
+   "text": "Node.js with WebAssembly support on PATH",
+   "missing": "skip"
+  },
+  "clang": {
+   "text": "Clang on PATH as the independent LLVM bitcode consumer",
+   "missing": "skip"
+  },
+  "gcc-and-clang": {
+   "text": "Both GCC and Clang on PATH for the Linux scalar ABI oracle (mandatory on supported Linux)",
+   "missing": "fail"
+  },
+  "gpu-toolchains": {
+   "text": "Pinned toolchains for the selected profile in .github/workflows/gpu-toolchains.yml; an omitted profile reports SKIP_NOT_CONFIGURED and provides no evidence",
+   "missing": "fail"
+  }
  },
  "cells": [
   {

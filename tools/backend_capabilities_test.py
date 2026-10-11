@@ -35,7 +35,9 @@ class BackendCapabilityTests(unittest.TestCase):
                 "doc": "docs/backend.md",
             }],
             "features": [{"id": "calls", "name": "Calls"}],
-            "requirements": {"node": "Node.js is required; skipped when absent"},
+            "requirements": {
+                "node": {"text": "Node.js is required; skipped when absent", "missing": "skip"},
+            },
             "cells": [{
                 "backend": "fixture",
                 "feature": "calls",
@@ -92,6 +94,19 @@ class BackendCapabilityTests(unittest.TestCase):
         for mutate in mutations:
             with self.subTest(mutate=mutate):
                 self.assert_error(self.errors(mutate), "unknown key 'extra'")
+
+    def test_requirement_schema_accepts_disposition_and_rejects_invalid_values(self):
+        self.assertEqual([], self.errors())
+        for mutate, expected in (
+            (lambda data: data["requirements"].update(node="Node.js is required"),
+             "requirements.node: expected an object"),
+            (lambda data: data["requirements"]["node"].update(missing="ignore"),
+             "requirements.node.missing: must be 'skip' or 'fail'"),
+            (lambda data: data["requirements"]["node"].update(extra=True),
+             "requirements.node: unknown key 'extra'"),
+        ):
+            with self.subTest(expected=expected):
+                self.assert_error(self.errors(mutate), expected)
 
     def test_ids_statuses_backend_kind_and_doc(self):
         self.assertEqual([], self.errors())
@@ -224,10 +239,13 @@ class BackendCapabilityTests(unittest.TestCase):
         self.assertFalse(rendered.endswith("\n\n"))
         self.assertFalse(any(line.endswith((" ", "\t")) for line in rendered.splitlines()))
         self.assertIn("[Fixture backend](backend.md)", rendered)
+        self.assertIn("Evidence marked **requires X** depends on tool X.", rendered)
+        self.assertIn("requires `node`; missing: skip", rendered)
         self.assertIn("diagnostic `backend diagnostic` (tested)", rendered)
         report = capabilities.derived_report(self.data, self.root)
         self.assertEqual(["encode"], report["cells"][0]["levels"])
         self.assertEqual(1, report["summary"]["fixture"]["supported"])
+        self.assertEqual(self.data["requirements"], report["requirements"])
 
 
 if __name__ == "__main__":

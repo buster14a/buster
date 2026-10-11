@@ -8,7 +8,7 @@ Reviewed revision `2b90c52fcd8aa9d9dc59b23e7c02fdbc852e1aef`.
 
 `supported` has positive evidence, `partial` has bounded evidence and a note, `unsupported-diagnostic` records an explicit rejection, and `not-applicable` marks a separate boundary. `unknown` is not a pass. Evidence levels: `validate` → Parse/validate; `encode` → Exact encode; `object-link` → Object/link; `oracle` → Independent oracle; `execute` → Executed semantics; `integration` → Self-host/real project.
 
-Evidence marked **requires X** is skipped (not passed) when X is absent. Requirements: `node`: Node.js with WebAssembly support; skipped when absent; `clang`: Clang LLVM consumer; skipped when absent; `gpu-toolchains`: GPU toolchain profile in .github/workflows/gpu-toolchains.yml; `gcc-and-clang`: Both GCC and Clang on PATH (Linux scalar ABI oracle); skipped when absent.
+Evidence marked **requires X** depends on tool X. If X is missing, a `skip` requirement means the evidence is skipped, not passed. A `fail` requirement records a test failure. Requirements: `node` (missing: skip): Node.js with WebAssembly support on PATH; `clang` (missing: skip): Clang on PATH as the independent LLVM bitcode consumer; `gcc-and-clang` (missing: fail): Both GCC and Clang on PATH for the Linux scalar ABI oracle (mandatory on supported Linux); `gpu-toolchains` (missing: fail): Pinned toolchains for the selected profile in .github/workflows/gpu-toolchains.yml; an omitted profile reports SKIP_NOT_CONFIGURED and provides no evidence.
 
 A registered target or emitted bytes are not a support claim. Direct code generation and external GPU orchestration are separate rows.
 
@@ -78,19 +78,19 @@ A registered target or emitted bytes are not a support claim. Direct code genera
 | Scalar calls | supported | encode | `compiler_driver_test_wasm_integers` in `src/buster/tests/compiler/driver/driver_test.c` | — |
 | Aggregate call ABI | unsupported-diagnostic | — | diagnostic `aggregate or unsupported parameter ABI in WebAssembly function` (source only) | Local aggregate copies are supported; aggregate parameter ABI is not. |
 | Variadic calls | unknown | — | — | Not yet audited for this backend. |
-| Indirect calls | supported | encode, oracle, execute | `compiler_driver_test_wasm64_function_tables` in `src/buster/tests/compiler/driver/driver_test.c` (requires `node`) | Scalar function-pointer table ABI with typed indirect calls. |
+| Indirect calls | supported | encode, oracle, execute | `compiler_driver_test_wasm64_function_tables` in `src/buster/tests/compiler/driver/driver_test.c` (requires `node`; missing: skip) | Scalar function-pointer table ABI with typed indirect calls. |
 | Atomics | unsupported-diagnostic | — | diagnostic `atomic operations are unsupported by WebAssembly` (source only) | — |
 | SIMD/vectors | unsupported-diagnostic | — | diagnostic `exact SIMD intrinsics are unsupported by Wasm64; select an explicit source fallback` (source only) | — |
 | TLS | unknown | — | — | Not yet audited for this backend. |
 | Debug info | unknown | — | — | Not yet audited for this backend. |
 | Object/link | unknown | — | — | Emits a core module directly; no relocatable object/link contract is claimed. |
-| Execution/independent oracle | supported | oracle, execute | `compiler_driver_test_wasm64_function_tables` in `src/buster/tests/compiler/driver/driver_test.c` (requires `node`) | Node validates and executes the emitted table/typed-call module. compiler_driver_test_wasm_node_policy covers Node process-lifecycle policy only, not engine execution. |
+| Execution/independent oracle | supported | oracle, execute | `compiler_driver_test_wasm64_function_tables` in `src/buster/tests/compiler/driver/driver_test.c` (requires `node`; missing: skip) | Node validates and executes the emitted table/typed-call module. compiler_driver_test_wasm_node_policy covers Node process-lifecycle policy only, not engine execution. |
 
 ## Wasm32 WASI Preview 1 (wasm32-wasip1)
 
 | Feature | Status | Levels | Evidence | Note |
 |---|---|---|---|---|
-| Scalar calls | supported | execute | anchor `3/3 wasm32 WASI Preview 1 command executions passed` in `src/buster/tests/compiler/driver/driver_test.c` (requires `node`) | — |
+| Scalar calls | supported | execute | anchor `3/3 wasm32 WASI Preview 1 command executions passed` in `src/buster/tests/compiler/driver/driver_test.c` (requires `node`; missing: skip) | — |
 | Aggregate call ABI | unsupported-diagnostic | — | diagnostic `aggregate or unsupported parameter ABI in WebAssembly function` (source only) | — |
 | Variadic calls | unknown | — | — | Not yet audited for this backend. |
 | Indirect calls | unsupported-diagnostic | — | diagnostic `indirect calls are unsupported by Wasm32` (source only)<br>diagnostic `runtime function addresses are unsupported by Wasm32` (tested) | — |
@@ -99,7 +99,7 @@ A registered target or emitted bytes are not a support claim. Direct code genera
 | TLS | unknown | — | — | Not yet audited for this backend. |
 | Debug info | unknown | — | — | Not yet audited for this backend. |
 | Object/link | unknown | — | — | Emits a WASI command module directly; no relocatable object/link contract is claimed. |
-| Execution/independent oracle | supported | execute | anchor `3/3 wasm32 WASI Preview 1 command executions passed` in `src/buster/tests/compiler/driver/driver_test.c` (requires `node`) | — |
+| Execution/independent oracle | supported | execute | anchor `3/3 wasm32 WASI Preview 1 command executions passed` in `src/buster/tests/compiler/driver/driver_test.c` (requires `node`; missing: skip) | — |
 
 ## eBPF (bpfel-unknown-linux)
 
@@ -120,8 +120,8 @@ A registered target or emitted bytes are not a support claim. Direct code genera
 
 | Feature | Status | Levels | Evidence | Note |
 |---|---|---|---|---|
-| Scalar calls | supported | encode, oracle, execute | `llvm_bitcode_test_scalar_abi_wire` in `src/buster/tests/compiler/llvm/bitcode_test.c`<br>`llvm_bitcode_test_scalar_abi_runtime` in `src/buster/tests/compiler/llvm/bitcode_test.c` (requires `gcc-and-clang`) | — |
-| Aggregate call ABI | partial | oracle | `llvm_bitcode_test_aggregate_va_arg` in `src/buster/tests/compiler/llvm/bitcode_test.c` (requires `clang`)<br>diagnostic `unsupported LLVM aggregate ABI part` (source only) | Only the documented aggregate ABI parts are lowered. |
+| Scalar calls | supported | encode, oracle, execute | `llvm_bitcode_test_scalar_abi_wire` in `src/buster/tests/compiler/llvm/bitcode_test.c`<br>`llvm_bitcode_test_scalar_abi_runtime` in `src/buster/tests/compiler/llvm/bitcode_test.c` (requires `gcc-and-clang`; missing: fail) | — |
+| Aggregate call ABI | partial | oracle | `llvm_bitcode_test_aggregate_va_arg` in `src/buster/tests/compiler/llvm/bitcode_test.c` (requires `clang`; missing: skip)<br>diagnostic `unsupported LLVM aggregate ABI part` (source only) | Only the documented aggregate ABI parts are lowered. |
 | Variadic calls | supported | encode | `llvm_bitcode_test_canonical_variadics` in `src/buster/tests/compiler/llvm/bitcode_test.c` | Canonical va_list operations are built directly in IR and encoded; no independent consumer is mapped for this row. |
 | Indirect calls | unknown | — | — | Not yet audited for this backend. |
 | Atomics | unknown | — | — | Not yet audited for this backend. |
@@ -129,7 +129,7 @@ A registered target or emitted bytes are not a support claim. Direct code genera
 | TLS | unknown | — | — | Not yet audited for this backend. |
 | Debug info | unknown | — | — | Not yet audited for this backend. |
 | Object/link | not-applicable | — | — | Bitcode is consumed by external LLVM tools; Buster does not link it. |
-| Execution/independent oracle | supported | oracle | `llvm_bitcode_test_consumers` in `src/buster/tests/compiler/llvm/bitcode_test.c` (requires `clang`) | — |
+| Execution/independent oracle | supported | oracle | `llvm_bitcode_test_consumers` in `src/buster/tests/compiler/llvm/bitcode_test.c` (requires `clang`; missing: skip) | — |
 
 ## Direct Vulkan 1.2 SPIR-V compute
 
@@ -158,7 +158,7 @@ A registered target or emitted bytes are not a support claim. Direct code genera
 | SIMD/vectors | not-applicable | — | — | Source lowering belongs to the external GPU toolchain; Buster orchestrates it. |
 | TLS | not-applicable | — | — | Source lowering belongs to the external GPU toolchain; Buster orchestrates it. |
 | Debug info | not-applicable | — | — | Source lowering belongs to the external GPU toolchain; Buster orchestrates it. |
-| Object/link | partial | oracle | anchor `spirv-dxc-2025.07` in `tools/gpu_toolchains.c` (requires `gpu-toolchains`) | Single-module SPIR-V passthrough is byte-identical and revalidated; no multi-module linking. |
+| Object/link | partial | oracle | anchor `spirv-dxc-2025.07` in `tools/gpu_toolchains.c` (requires `gpu-toolchains`; missing: fail) | Single-module SPIR-V passthrough is byte-identical and revalidated; no multi-module linking. |
 | Execution/independent oracle | not-applicable | — | — | Toolchain acceptance profiles are smoke tests, not shader execution. |
 
 ## Updating this catalogue

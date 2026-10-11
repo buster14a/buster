@@ -42,6 +42,7 @@ OBJECT_KEYS = {
         {"file", "symbol", "anchor", "provides", "requires"},
     ),
     "diagnostic": ({"file", "text"}, {"file", "text"}),
+    "requirement": ({"text", "missing"}, {"text", "missing"}),
 }
 
 
@@ -116,11 +117,15 @@ def validate_catalogue(data, root, label=CATALOGUE):
         errors.append(catalogue_error(label, "requirements", "expected an object"))
         requirements = {}
     else:
-        for key, text in requirements.items():
+        for key, value in requirements.items():
             if not nonempty_string(key):
                 errors.append(catalogue_error(label, "requirements", "keys must be non-empty strings"))
-            if not nonempty_string(text):
-                errors.append(catalogue_error(label, f"requirements.{key}", "must be a non-empty string"))
+            location = f"requirements.{key}"
+            if check_object(value, "requirement", location, errors, label):
+                if not nonempty_string(value.get("text")):
+                    errors.append(catalogue_error(label, f"{location}.text", "must be a non-empty string"))
+                if value.get("missing") not in ("skip", "fail"):
+                    errors.append(catalogue_error(label, f"{location}.missing", "must be 'skip' or 'fail'"))
 
     named_values = {}
     for collection, object_type in (
@@ -375,7 +380,7 @@ def derived_report(data, root):
         }
         cells.append(report_cell)
         summary[cell["backend"]][cell["status"]] += 1
-    return {"cells": cells, "summary": summary}
+    return {"cells": cells, "summary": summary, "requirements": data["requirements"]}
 
 
 def code_span(text):
@@ -415,12 +420,17 @@ def render_catalogue(data, root):
     ]
     if requirements:
         lines.append(
-            "Evidence marked **requires X** is skipped (not passed) when X is absent. Requirements: "
-            + "; ".join(f"{code_span(key)}: {value}" for key, value in requirements.items())
+            "Evidence marked **requires X** depends on tool X. If X is missing, a `skip` "
+            "requirement means the evidence is skipped, not passed. A `fail` requirement "
+            "records a test failure. Requirements: "
+            + "; ".join(
+                f"{code_span(key)} (missing: {value['missing']}): {value['text']}"
+                for key, value in requirements.items()
+            )
             + "."
         )
     else:
-        lines.append("Evidence has no optional external requirements.")
+        lines.append("No evidence requirements are declared.")
     lines.extend([
         "",
         "A registered target or emitted bytes are not a support claim. Direct code generation "
@@ -466,7 +476,11 @@ def render_catalogue(data, root):
                 else:
                     item = f"anchor {code_span(evidence['anchor'])} in {code_span(evidence['file'])}"
                 if "requires" in evidence:
-                    item += f" (requires {code_span(evidence['requires'])})"
+                    requirement = requirements[evidence["requires"]]
+                    item += (
+                        f" (requires {code_span(evidence['requires'])}; "
+                        f"missing: {requirement['missing']})"
+                    )
                 evidence_text.append(item)
             for diagnostic in cell.get("diagnostics", []):
                 tested = ("tested" if diagnostic_is_tested(root, diagnostic["text"], test_texts)
