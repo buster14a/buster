@@ -328,8 +328,10 @@ unchanged.
   tree's top-level function definitions and declarations once
   (`c_ast_types_bodies_prepare`). Before each body's validator families run,
   `c_ast_types_body_begin` makes one forward pass over the body's node
-  interval. Children come before parents, so each expression node's operands
-  are already typed when the node is reached. The pass records each node's
+  interval, in two loops: one types the single-token leaves and lists the other
+  expression nodes, and the other runs the operator rules over that list in
+  index order. Children come before parents, so each expression node's
+  operands are already typed when the node is reached. The pass records each node's
   token span and, for the accepted kinds, its type, whether it is safe under
   constraint checks, and the bit-field width of a member. A node is accepted
   only when every operand the machine types for it is accepted. Its arrays
@@ -347,6 +349,16 @@ unchanged.
     found directly in its aggregate's row. Nothing the lookup reads changes
     during a pass. A promoted search into anonymous members is never
     remembered, because it takes guarded body scratch (#1256).
+
+  A second cut keeps every rule:
+  - the leaves and the operators are typed in separate loops, which keeps
+    each loop's working values in registers;
+  - an integer literal whose kind the syntax pass cached is typed from that
+    fact without calling the machine's leaf;
+  - `c_ast_types_arithmetic` remembers the usual arithmetic conversions for
+    one pass;
+  - two integer operands pass the checked-mode operator rule without its
+    other tests.
 - **File-scope initializers.** `c_parse_validate_static_initializers` made
   nearly all of the queries outside a typed body: 77,545 of 79,035 on the unity
   self-host, at about 190 M machine Ir, against at most 3 M for any other
