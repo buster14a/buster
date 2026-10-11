@@ -36,30 +36,23 @@ jobs:
   experiment:
     if: >-
       ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' &&
-          (github.event_name == 'workflow_dispatch' || github.head_ref == 'codex/1826-isolated-test-partitions') }}
+          (github.event_name == 'workflow_dispatch' || github.head_ref == 'codex/1826-isolated-test-partitions' || github.head_ref == 'codex/3620-schedule-unit-modules') }}
     name: Unit partition experiment (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: windows
-            runner: windows-2025
-            python: python
-            driver: build/build.exe
-            binary: build/ci-unit-tree/Debug/ide.exe
-          - platform: linux
-            runner: ubuntu-26.04
-            python: python3
-            driver: build/build
-            binary: build/ci-unit-tree/Debug/ide
+        include: ${{ fromJSON(github.head_ref == 'codex/3620-schedule-unit-modules' && '[{"platform":"windows","runner":"windows-2025","python":"python","driver":"build/build.exe","binary":"build/ci-unit-tree/Release/ide.exe","llvm_target":"x86_64-windows"},{"platform":"linux","runner":"ubuntu-26.04","python":"python3","driver":"build/build","binary":"build/ci-unit-tree/Release/ide","llvm_target":"x86_64-linux"},{"platform":"linux-aarch64","runner":"ubuntu-26.04-arm","python":"python3","driver":"build/build","binary":"build/ci-unit-tree/Release/ide","llvm_target":"aarch64-linux"},{"platform":"macos-aarch64","runner":"macos-26","python":"python3","driver":"build/build","binary":"build/ci-unit-tree/Release/ide","llvm_target":""}]' || '[{"platform":"windows","runner":"windows-2025","python":"python","driver":"build/build.exe","binary":"build/ci-unit-tree/Debug/ide.exe","llvm_target":"x86_64-windows"},{"platform":"linux","runner":"ubuntu-26.04","python":"python3","driver":"build/build","binary":"build/ci-unit-tree/Debug/ide","llvm_target":"x86_64-linux"}]') }}
     env:
       BUSTER_TEST_JOBS: '2'
       BUSTER_TEST_UNIT_SCHEDULE: 'pair'
       BUSTER_TEST_TABLE_AUDITS: '0'
-      BUSTER_UNIT_PAIRS: ${{ github.event_name == 'workflow_dispatch' && inputs.pairs || '1' }}
-      BUSTER_UNIT_BASELINE_JOBS: ${{ github.event_name == 'workflow_dispatch' && inputs.baseline_jobs || '2' }}
+      BUSTER_UNIT_PAIRS: ${{ github.head_ref == 'codex/3620-schedule-unit-modules' && '3' || github.event_name == 'workflow_dispatch' && inputs.pairs || '1' }}
+      BUSTER_UNIT_BASELINE_JOBS: ${{ github.head_ref == 'codex/3620-schedule-unit-modules' && '4' || github.event_name == 'workflow_dispatch' && inputs.baseline_jobs || '2' }}
+      BUSTER_UNIT_CONFIG: ${{ github.head_ref == 'codex/3620-schedule-unit-modules' && 'Release' || 'Debug' }}
+      BUSTER_UNIT_BASELINE_TARGET: ${{ github.head_ref == 'codex/3620-schedule-unit-modules' && 'test_units_partitioned' || 'test_units' }}
+      BUSTER_UNIT_CANDIDATE_SCHEDULE: ${{ github.head_ref == 'codex/3620-schedule-unit-modules' && 'modules' || 'pair' }}
       BUSTER_CI_PYTHON: ${{ matrix.python }}
       BUSTER_UNIT_DRIVER: ${{ matrix.driver }}
       BUSTER_UNIT_BINARY: ${{ matrix.binary }}
@@ -82,7 +75,7 @@ jobs:
           source-directory: .
           source-repository: ${{ github.repository }}
       - name: Install Linux linker
-        if: ${{ matrix.platform == 'linux' }}
+        if: ${{ startsWith(matrix.platform, 'linux') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -90,17 +83,18 @@ jobs:
           sudo apt-get install --no-install-recommends --yes mold
 
       - name: Install latest stable LLVM
+        if: ${{ matrix.platform != 'macos-aarch64' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          LLVM_TARGET: x86_64-${{ matrix.platform }}
+          LLVM_TARGET: ${{ matrix.llvm_target }}
         run: |
           set -euo pipefail
           "$BUSTER_CI_PYTHON" tools/ci_llvm.py --target "$LLVM_TARGET" --work-directory "$RUNNER_TEMP/llvm" \
             --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV"
 
       - name: Bootstrap Linux driver
-        if: ${{ matrix.platform == 'linux' }}
+        if: ${{ matrix.platform != 'windows' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -166,7 +160,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Validate Linux controls and build one shared binary
-        if: ${{ matrix.platform == 'linux' }}
+        if: ${{ matrix.platform != 'windows' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -180,9 +174,9 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/ci_unit_tests_measure_test.py -v
           "$BUSTER_CI_PYTHON" tools/ci_unit_tests_campaign_test.py -v
           "$BUSTER_UNIT_DRIVER" test_units_partitioned --self-test
-          "$BUSTER_UNIT_DRIVER" generate --build-directory build/ci-unit-tree --cc clang --ci --sanitize --fuzz --config Debug
-          "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config Debug -t ide
-          "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config Debug -t test_unit_inventory > "$RUNNER_TEMP/unit-partitions/inventory.log" 2>&1
+          "$BUSTER_UNIT_DRIVER" generate --build-directory build/ci-unit-tree --cc clang --ci --sanitize --fuzz --config $BUSTER_UNIT_CONFIG
+          "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config $BUSTER_UNIT_CONFIG -t ide
+          "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config $BUSTER_UNIT_CONFIG -t test_unit_inventory > "$RUNNER_TEMP/unit-partitions/inventory.log" 2>&1
 
       - name: Validate Windows controls and build one shared binary
         if: ${{ matrix.platform == 'windows' }}
@@ -203,55 +197,56 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $env:BUSTER_UNIT_DRIVER test_units_partitioned --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" generate --build-directory build/ci-unit-tree --cc clang --ci --sanitize --fuzz --config Debug 2>&1"
+          cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" generate --build-directory build/ci-unit-tree --cc clang --ci --sanitize --fuzz --config $env:BUSTER_UNIT_CONFIG 2>&1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config Debug -t ide 2>&1"
+          cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config $env:BUSTER_UNIT_CONFIG -t ide 2>&1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config Debug -t test_unit_inventory > `"$Root\inventory.log`" 2>&1"
+          cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config $env:BUSTER_UNIT_CONFIG -t test_unit_inventory > `"$Root\inventory.log`" 2>&1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # Leave ten minutes beyond the native child deadline for startup,
       # cleanup, replay and failure proof before the observer terminates it.
       - name: Serial baseline 1
-        if: ${{ matrix.platform == 'linux' }}
+        if: ${{ matrix.platform != 'windows' }}
         shell: bash
         env:
           BUSTER_TEST_JOBS: ${{ env.BUSTER_UNIT_BASELINE_JOBS }}
         run: |
           set -euo pipefail
           "$BUSTER_UNIT_DRIVER" matrix_phase_run "$RUNNER_TEMP/unit-partitions/phases" sample-1-baseline 1 6000 -- \
-            "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config Debug -t test_units \
+            "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config $BUSTER_UNIT_CONFIG -t "$BUSTER_UNIT_BASELINE_TARGET" \
             2>&1 | tee "$RUNNER_TEMP/unit-partitions/sample-1-baseline.log"
 
       - name: Partitioned candidate 1
-        if: ${{ matrix.platform == 'linux' }}
+        if: ${{ matrix.platform != 'windows' }}
         shell: bash
         env:
           BUSTER_TEST_JOBS: '4'
+          BUSTER_TEST_UNIT_SCHEDULE: ${{ env.BUSTER_UNIT_CANDIDATE_SCHEDULE }}
         run: |
           set -euo pipefail
           "$BUSTER_UNIT_DRIVER" matrix_phase_run "$RUNNER_TEMP/unit-partitions/phases" sample-2-candidate 1 6000 -- \
-            "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config Debug -t test_units_partitioned \
+            "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config $BUSTER_UNIT_CONFIG -t test_units_partitioned \
             2>&1 | tee "$RUNNER_TEMP/unit-partitions/sample-2-candidate.log"
 
       - name: Additional alternating pairs
-        if: ${{ matrix.platform == 'linux' && env.BUSTER_UNIT_PAIRS == '3' }}
+        if: ${{ matrix.platform != 'windows' && env.BUSTER_UNIT_PAIRS == '3' }}
         shell: bash
         run: |
           set -euo pipefail
           # Identical native invocations on the same binary; no reconfiguration
           # or cross-runner artifact transfer between measurements.
           BUSTER_TEST_JOBS="$BUSTER_UNIT_BASELINE_JOBS" "$BUSTER_UNIT_DRIVER" matrix_phase_run "$RUNNER_TEMP/unit-partitions/phases" sample-3-baseline 1 6000 -- \
-            "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config Debug -t test_units \
+            "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config $BUSTER_UNIT_CONFIG -t "$BUSTER_UNIT_BASELINE_TARGET" \
             2>&1 | tee "$RUNNER_TEMP/unit-partitions/sample-3-baseline.log"
-          BUSTER_TEST_JOBS=4 "$BUSTER_UNIT_DRIVER" matrix_phase_run "$RUNNER_TEMP/unit-partitions/phases" sample-4-candidate 1 6000 -- \
-            "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config Debug -t test_units_partitioned \
+          BUSTER_TEST_UNIT_SCHEDULE="$BUSTER_UNIT_CANDIDATE_SCHEDULE" BUSTER_TEST_JOBS=4 "$BUSTER_UNIT_DRIVER" matrix_phase_run "$RUNNER_TEMP/unit-partitions/phases" sample-4-candidate 1 6000 -- \
+            "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config $BUSTER_UNIT_CONFIG -t test_units_partitioned \
             2>&1 | tee "$RUNNER_TEMP/unit-partitions/sample-4-candidate.log"
           BUSTER_TEST_JOBS="$BUSTER_UNIT_BASELINE_JOBS" "$BUSTER_UNIT_DRIVER" matrix_phase_run "$RUNNER_TEMP/unit-partitions/phases" sample-5-baseline 1 6000 -- \
-            "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config Debug -t test_units \
+            "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config $BUSTER_UNIT_CONFIG -t "$BUSTER_UNIT_BASELINE_TARGET" \
             2>&1 | tee "$RUNNER_TEMP/unit-partitions/sample-5-baseline.log"
-          BUSTER_TEST_JOBS=4 "$BUSTER_UNIT_DRIVER" matrix_phase_run "$RUNNER_TEMP/unit-partitions/phases" sample-6-candidate 1 6000 -- \
-            "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config Debug -t test_units_partitioned \
+          BUSTER_TEST_UNIT_SCHEDULE="$BUSTER_UNIT_CANDIDATE_SCHEDULE" BUSTER_TEST_JOBS=4 "$BUSTER_UNIT_DRIVER" matrix_phase_run "$RUNNER_TEMP/unit-partitions/phases" sample-6-candidate 1 6000 -- \
+            "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config $BUSTER_UNIT_CONFIG -t test_units_partitioned \
             2>&1 | tee "$RUNNER_TEMP/unit-partitions/sample-6-candidate.log"
 
       - name: Windows paired measurements
@@ -262,29 +257,35 @@ jobs:
           $Root = Join-Path $env:RUNNER_TEMP 'unit-partitions'
           # Keep native Windows environment names and paths out of MSYS
           # translation, just like the ordinary Windows combination step.
+          $env:BUSTER_TEST_UNIT_SCHEDULE = 'pair'
           $env:BUSTER_TEST_JOBS = $env:BUSTER_UNIT_BASELINE_JOBS
-          cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" matrix_phase_run `"$Root\phases`" sample-1-baseline 1 6000 -- `"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config Debug -t test_units 2>&1" | Tee-Object -FilePath (Join-Path $Root 'sample-1-baseline.log')
+          cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" matrix_phase_run `"$Root\phases`" sample-1-baseline 1 6000 -- `"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config $env:BUSTER_UNIT_CONFIG -t $env:BUSTER_UNIT_BASELINE_TARGET 2>&1" | Tee-Object -FilePath (Join-Path $Root 'sample-1-baseline.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:BUSTER_TEST_UNIT_SCHEDULE = $env:BUSTER_UNIT_CANDIDATE_SCHEDULE
           $env:BUSTER_TEST_JOBS = '4'
-          cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" matrix_phase_run `"$Root\phases`" sample-2-candidate 1 6000 -- `"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config Debug -t test_units_partitioned 2>&1" | Tee-Object -FilePath (Join-Path $Root 'sample-2-candidate.log')
+          cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" matrix_phase_run `"$Root\phases`" sample-2-candidate 1 6000 -- `"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config $env:BUSTER_UNIT_CONFIG -t test_units_partitioned 2>&1" | Tee-Object -FilePath (Join-Path $Root 'sample-2-candidate.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ($env:BUSTER_UNIT_PAIRS -eq '3') {
+            $env:BUSTER_TEST_UNIT_SCHEDULE = 'pair'
             $env:BUSTER_TEST_JOBS = $env:BUSTER_UNIT_BASELINE_JOBS
-            cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" matrix_phase_run `"$Root\phases`" sample-3-baseline 1 6000 -- `"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config Debug -t test_units 2>&1" | Tee-Object -FilePath (Join-Path $Root 'sample-3-baseline.log')
+            cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" matrix_phase_run `"$Root\phases`" sample-3-baseline 1 6000 -- `"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config $env:BUSTER_UNIT_CONFIG -t $env:BUSTER_UNIT_BASELINE_TARGET 2>&1" | Tee-Object -FilePath (Join-Path $Root 'sample-3-baseline.log')
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $env:BUSTER_TEST_UNIT_SCHEDULE = $env:BUSTER_UNIT_CANDIDATE_SCHEDULE
             $env:BUSTER_TEST_JOBS = '4'
-            cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" matrix_phase_run `"$Root\phases`" sample-4-candidate 1 6000 -- `"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config Debug -t test_units_partitioned 2>&1" | Tee-Object -FilePath (Join-Path $Root 'sample-4-candidate.log')
+            cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" matrix_phase_run `"$Root\phases`" sample-4-candidate 1 6000 -- `"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config $env:BUSTER_UNIT_CONFIG -t test_units_partitioned 2>&1" | Tee-Object -FilePath (Join-Path $Root 'sample-4-candidate.log')
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $env:BUSTER_TEST_UNIT_SCHEDULE = 'pair'
             $env:BUSTER_TEST_JOBS = $env:BUSTER_UNIT_BASELINE_JOBS
-            cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" matrix_phase_run `"$Root\phases`" sample-5-baseline 1 6000 -- `"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config Debug -t test_units 2>&1" | Tee-Object -FilePath (Join-Path $Root 'sample-5-baseline.log')
+            cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" matrix_phase_run `"$Root\phases`" sample-5-baseline 1 6000 -- `"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config $env:BUSTER_UNIT_CONFIG -t $env:BUSTER_UNIT_BASELINE_TARGET 2>&1" | Tee-Object -FilePath (Join-Path $Root 'sample-5-baseline.log')
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $env:BUSTER_TEST_UNIT_SCHEDULE = $env:BUSTER_UNIT_CANDIDATE_SCHEDULE
             $env:BUSTER_TEST_JOBS = '4'
-            cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" matrix_phase_run `"$Root\phases`" sample-6-candidate 1 6000 -- `"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config Debug -t test_units_partitioned 2>&1" | Tee-Object -FilePath (Join-Path $Root 'sample-6-candidate.log')
+            cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" matrix_phase_run `"$Root\phases`" sample-6-candidate 1 6000 -- `"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config $env:BUSTER_UNIT_CONFIG -t test_units_partitioned 2>&1" | Tee-Object -FilePath (Join-Path $Root 'sample-6-candidate.log')
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
       - name: Review exact evidence
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && github.head_ref != 'codex/3620-schedule-unit-modules' }}
         shell: bash
         env:
           BUSTER_UNIT_PLATFORM: ${{ matrix.platform }}
@@ -292,6 +293,15 @@ jobs:
           set -euo pipefail
           "$BUSTER_CI_PYTHON" tools/ci_unit_tests_campaign.py --directory "$RUNNER_TEMP/unit-partitions" \
             --binary "$BUSTER_UNIT_BINARY" --platform "$BUSTER_UNIT_PLATFORM" --pairs "$BUSTER_UNIT_PAIRS"
+
+      - name: Compare matched module schedules
+        if: ${{ !cancelled() && github.head_ref == 'codex/3620-schedule-unit-modules' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BUSTER_UNIT_DRIVER" test_units_partitioned --compare "$RUNNER_TEMP/unit-partitions/sample-1-baseline.log" "$RUNNER_TEMP/unit-partitions/sample-2-candidate.log" | tee "$RUNNER_TEMP/unit-partitions/compare-1.log"
+          "$BUSTER_UNIT_DRIVER" test_units_partitioned --compare "$RUNNER_TEMP/unit-partitions/sample-3-baseline.log" "$RUNNER_TEMP/unit-partitions/sample-4-candidate.log" | tee "$RUNNER_TEMP/unit-partitions/compare-2.log"
+          "$BUSTER_UNIT_DRIVER" test_units_partitioned --compare "$RUNNER_TEMP/unit-partitions/sample-5-baseline.log" "$RUNNER_TEMP/unit-partitions/sample-6-candidate.log" | tee "$RUNNER_TEMP/unit-partitions/compare-3.log"
 
       - name: Retain machine records in existing evidence
         if: ${{ always() }}

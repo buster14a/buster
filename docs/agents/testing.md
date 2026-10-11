@@ -1289,3 +1289,14 @@ the existing unit-partition experiment explicitly selects it. Empty or
 synthetic module processes; the selector's harness controls add no registered
 modules, fixtures or assertions. Hosted wall-time improvements still require
 same-binary, same-runner comparisons and complete lane evidence.
+
+The `codex/3620-schedule-unit-modules` qualification branch runs three paired
+sanitized Release invocations per Linux x86-64, Linux AArch64, Windows x64 and
+macOS AArch64 hosted runner, using one immutable binary and four test workers
+in both arms. The `pair` control runs before each `modules` candidate. Raw
+logs and machine records remain in the unit-partition artifact, including failed
+attempts. `test_units_partitioned --compare <pair-log> <module-log>` requires
+identical source and binary identities, per-module indices/names/assertion
+counts, external totals and exact fixture-start records, plus successful parent
+terminals. It reports both native wall intervals without claiming acceptance.
+Historical Debug/serial-versus-pair dispatches retain their original protocol.

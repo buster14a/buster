@@ -374,9 +374,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_serial_run(Arena* arena, SliceString8 
     return result;
 }
 
-// Two persistent parent lanes own independent module processes. The atomic
-// index assigns one stable result slot per module; completion order never owns
-// an output row. Retained captures share the old pair's 128 MiB budget.
+// Two parent lanes claim stable module slots; replay preserves table order.
+// Retained captures share the pair's 128 MiB budget.
 typedef struct CiUnitSchedule CiUnitSchedule;
 struct CiUnitSchedule
 {
@@ -687,8 +686,211 @@ BUSTER_GLOBAL_LOCAL bool ci_unit_review_self_test(Arena* arena, String8 executab
     return result;
 }
 
-// Synthetic scheduled children exercise actual spawn, capture, quota and
-// independent-inventory validation without changing registered test counts.
+typedef struct CiUnitObservation CiUnitObservation;
+struct CiUnitObservation
+{
+    CiUnitProof proof;
+    String8 revision, digest;
+    u64 elapsed, workers, external;
+    bool valid;
+};
+
+// Compare matched module work after the native parent's coverage gate.
+BUSTER_GLOBAL_LOCAL CiUnitObservation ci_unit_observe(String8 output, bool scheduled)
+{
+    CiUnitObservation observation = {.valid = true};
+    bool plan_seen = false, terminal_seen = false;
+    u64 cursor = 0, terminal_modules = 0, terminal_assertions = 0;
+    while (observation.valid && cursor < output.length)
+    {
+        u64 begin = cursor;
+        while (cursor < output.length && output.pointer[cursor] != '\n') { cursor += 1; }
+        String8 line = {output.pointer + begin, cursor - begin};
+        cursor += cursor < output.length;
+        if (line.length && line.pointer[line.length - 1] == '\r') { line.length -= 1; }
+        String8 text = line;
+        if (string_starts_with_sequence(line, S8("TEST_MODULE_TIMING ")))
+        {
+            u64 index = 0, duration = 0, passed = 0, failed = 0, assertions = 0;
+            String8 name = {0}, status = {0};
+            observation.valid = !terminal_seen && ci_unit_number(&text, S8("TEST_MODULE_TIMING index="), &index) &&
+                ci_unit_word(&text, S8(" module="), &name) && ci_unit_number(&text, S8(" duration_ns="), &duration) &&
+                ci_unit_number(&text, S8(" passed="), &passed) && ci_unit_number(&text, S8(" failed="), &failed) &&
+                ci_unit_number(&text, S8(" assertions="), &assertions) && ci_unit_word(&text, S8(" status="), &status) &&
+                !text.length && index < CI_UNIT_MAX_MODULES && ci_unit_token(name) && !failed && passed == assertions &&
+                string_equal(status, S8("pass")) && !observation.proof.modules[index].timed &&
+                UINT64_MAX - observation.proof.assertions >= assertions;
+            if (observation.valid)
+            {
+                for (u64 previous = 0; observation.valid && previous < CI_UNIT_MAX_MODULES; previous += 1)
+                {
+                    observation.valid = !observation.proof.modules[previous].timed || !string_equal(observation.proof.modules[previous].name, name);
+                }
+                observation.proof.modules[index] = (CiUnitModule){.name = name, .timed = true, .assertions = assertions};
+                observation.proof.count += 1;
+                observation.proof.assertions += assertions;
+            }
+        }
+        else if (string_starts_with_sequence(line, S8("CI_UNIT_BATCH_V1 ")))
+        {
+            u64 modules = 0, modules_passed = 0, assertions = 0, passed = 0, failed = 0, external = 0, external_passed = 0;
+            String8 group = {0}, status = {0};
+            observation.valid = !terminal_seen && ci_unit_word(&text, S8("CI_UNIT_BATCH_V1 group="), &group) &&
+                ci_unit_number(&text, S8(" modules="), &modules) && ci_unit_number(&text, S8(" modules_passed="), &modules_passed) &&
+                ci_unit_number(&text, S8(" assertions="), &assertions) && ci_unit_number(&text, S8(" passed="), &passed) &&
+                ci_unit_number(&text, S8(" failed="), &failed) && ci_unit_number(&text, S8(" external="), &external) &&
+                ci_unit_number(&text, S8(" external_passed="), &external_passed) && ci_unit_word(&text, S8(" status="), &status) &&
+                !text.length && modules == modules_passed && assertions == passed && !failed && external == external_passed &&
+                string_equal(status, S8("pass")) && UINT64_MAX - observation.external >= external;
+            observation.external += external;
+        }
+        else if (string_starts_with_sequence(line, scheduled ? S8("CI_UNIT_SCHEDULE_PLAN_V1 ") : S8("CI_UNIT_PLAN_V1 ")))
+        {
+            u64 slots = 0, slot_workers = 0, modules = 0;
+            String8 primary = {0};
+            observation.valid = !plan_seen && !terminal_seen &&
+                ci_unit_word(&text, scheduled ? S8("CI_UNIT_SCHEDULE_PLAN_V1 source_revision=") : S8("CI_UNIT_PLAN_V1 source_revision="), &observation.revision) &&
+                ci_unit_word(&text, S8(" binary_sha256="), &observation.digest) && ci_unit_number(&text, S8(" workers="), &observation.workers) &&
+                ci_unit_number(&text, scheduled ? S8(" slots=") : S8(" groups="), &slots) &&
+                ci_unit_number(&text, scheduled ? S8(" slot_workers=") : S8(" group_workers="), &slot_workers);
+            if (scheduled) { observation.valid = observation.valid && ci_unit_number(&text, S8(" modules="), &modules); }
+            else { observation.valid = observation.valid && ci_unit_word(&text, S8(" primary_module="), &primary); }
+            observation.valid = observation.valid && !text.length && slots == 2 && slot_workers >= 2 &&
+                slot_workers == observation.workers / 2 && ci_unit_hex(observation.revision, 40) && ci_unit_hex(observation.digest, 64);
+            plan_seen = true;
+        }
+        else if (string_starts_with_sequence(line, scheduled ? S8("CI_UNIT_SCHEDULE_V1 ") : S8("CI_UNIT_PARTITION_V1 ")))
+        {
+            u64 slots = 0, workers = 0, passed = 0, failed = 0, external = 0, captured = 0;
+            String8 status = {0};
+            observation.valid = plan_seen && !terminal_seen &&
+                ci_unit_number(&text, scheduled ? S8("CI_UNIT_SCHEDULE_V1 slots=") : S8("CI_UNIT_PARTITION_V1 groups="), &slots) &&
+                ci_unit_number(&text, S8(" workers="), &workers) && ci_unit_number(&text, S8(" elapsed_us="), &observation.elapsed) &&
+                ci_unit_number(&text, S8(" modules="), &terminal_modules) && ci_unit_number(&text, S8(" assertions="), &terminal_assertions) &&
+                ci_unit_number(&text, S8(" passed="), &passed) && ci_unit_number(&text, S8(" failed="), &failed);
+            if (scheduled)
+            {
+                observation.valid = observation.valid && ci_unit_number(&text, S8(" external="), &external) &&
+                    ci_unit_number(&text, S8(" captured_bytes="), &captured) && captured <= 2 * CI_UNIT_CAPTURE_LIMIT;
+            }
+            observation.valid = observation.valid && ci_unit_word(&text, S8(" status="), &status) && !text.length &&
+                slots == 2 && workers == observation.workers && observation.elapsed && !failed &&
+                passed == terminal_assertions && string_equal(status, S8("pass"));
+            terminal_seen = true;
+        }
+    }
+    observation.valid = observation.valid && plan_seen && terminal_seen && observation.proof.count &&
+        terminal_modules == observation.proof.count && terminal_assertions == observation.proof.assertions;
+    return observation;
+}
+
+BUSTER_GLOBAL_LOCAL bool ci_unit_observations_equal(CiUnitObservation* pair, CiUnitObservation* scheduled)
+{
+    bool result = pair->valid && scheduled->valid && string_equal(pair->revision, scheduled->revision) &&
+        string_equal(pair->digest, scheduled->digest) && pair->workers == scheduled->workers &&
+        pair->proof.count == scheduled->proof.count && pair->proof.assertions == scheduled->proof.assertions && pair->external == scheduled->external;
+    for (u64 index = 0; result && index < CI_UNIT_MAX_MODULES; index += 1)
+    {
+        CiUnitModule* left = pair->proof.modules + index;
+        CiUnitModule* right = scheduled->proof.modules + index;
+        result = left->timed == right->timed && (!left->timed ||
+            (string_equal(left->name, right->name) && left->assertions == right->assertions));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 ci_unit_fixture_next(String8 output, u64* cursor, String8 module_name)
+{
+    String8 result = {0};
+    while (!result.length && *cursor < output.length)
+    {
+        u64 begin = *cursor;
+        while (*cursor < output.length && output.pointer[*cursor] != '\n') { *cursor += 1; }
+        String8 line = {output.pointer + begin, *cursor - begin};
+        *cursor += *cursor < output.length;
+        if (line.length && line.pointer[line.length - 1] == '\r') { line.length -= 1; }
+        String8 text = line, kind = {0}, module = {0};
+        if (ci_unit_word(&text, S8("TEST_FIXTURE_START_V1 kind="), &kind) &&
+            ci_unit_word(&text, S8(" module="), &module) && string_equal(module, module_name))
+        {
+            result = line;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ci_unit_fixtures_equal(String8 pair, String8 scheduled, CiUnitProof* proof)
+{
+    bool result = true;
+    for (u64 index = 0; result && index < CI_UNIT_MAX_MODULES; index += 1)
+    {
+        if (proof->modules[index].timed)
+        {
+            u64 pair_cursor = 0, scheduled_cursor = 0;
+            bool running = true;
+            while (result && running)
+            {
+                String8 left = ci_unit_fixture_next(pair, &pair_cursor, proof->modules[index].name);
+                String8 right = ci_unit_fixture_next(scheduled, &scheduled_cursor, proof->modules[index].name);
+                result = string_equal(left, right);
+                running = left.length || right.length;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 ci_unit_log_text(Arena* arena, ByteSlice bytes)
+{
+    String8 result = BYTE_SLICE_TO_STRING(8, bytes);
+    if (bytes.length >= 2 && ((bytes.pointer[0] == 0xff && bytes.pointer[1] == 0xfe) ||
+                             (bytes.pointer[0] == 0xfe && bytes.pointer[1] == 0xff)))
+    {
+        result = (String8){0};
+        if (!(bytes.length & 1))
+        {
+            bool little_endian = bytes.pointer[0] == 0xff;
+            String16 text = {.pointer = arena_allocate(arena, char16, bytes.length / 2 - 1), .length = bytes.length / 2 - 1};
+            for (u64 index = 0; index < text.length; index += 1)
+            {
+                u8* source = bytes.pointer + 2 + 2 * index;
+                text.pointer[index] = (char16)(little_endian ? source[0] | ((u16)source[1] << 8) : source[1] | ((u16)source[0] << 8));
+            }
+            result = string8_from_string16(arena, text, false);
+        }
+    }
+    else if (bytes.length >= 3 && bytes.pointer[0] == 0xef && bytes.pointer[1] == 0xbb && bytes.pointer[2] == 0xbf)
+    {
+        result = (String8){(char8*)bytes.pointer + 3, bytes.length - 3};
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_compare(Arena* arena, String8 pair_path, String8 schedule_path)
+{
+    FileMapRead pair_file = file_map_read(arena, pair_path, (FileReadOptions){0});
+    FileMapRead schedule_file = file_map_read(arena, schedule_path, (FileReadOptions){0});
+    bool valid = pair_file.bytes.pointer && schedule_file.bytes.pointer &&
+        pair_file.bytes.length <= 4 * CI_UNIT_CAPTURE_LIMIT && schedule_file.bytes.length <= 4 * CI_UNIT_CAPTURE_LIMIT;
+    CiUnitObservation pair = {0}, scheduled = {0};
+    if (valid)
+    {
+        String8 pair_text = ci_unit_log_text(arena, pair_file.bytes);
+        String8 schedule_text = ci_unit_log_text(arena, schedule_file.bytes);
+        pair = ci_unit_observe(pair_text, false);
+        scheduled = ci_unit_observe(schedule_text, true);
+        valid = ci_unit_observations_equal(&pair, &scheduled) && ci_unit_fixtures_equal(pair_text, schedule_text, &pair.proof);
+    }
+    string_print(S8("CI_UNIT_COMPARE_V1 source_revision={S8} binary_sha256={S8} workers={u64} modules={u64} assertions={u64} pair_elapsed_us={u64} schedule_elapsed_us={u64} status={S8}\n"),
+        pair.revision, pair.digest, pair.workers, pair.proof.count, pair.proof.assertions, pair.elapsed, scheduled.elapsed,
+        valid ? S8("pass") : S8("fail"));
+    file_map_unmap(pair_file);
+    file_map_unmap(schedule_file);
+    ProcessResult result = valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    return result;
+}
+
+// Private children exercise the native schedule without registered assertions.
 BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_schedule_test_child(void)
 {
     String8 group = os_get_environment_variable(S8("BUSTER_TEST_MODULE_GROUP"));
@@ -704,7 +906,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_schedule_test_child(void)
         selected += runs;
         string_print(S8("CI_UNIT_MODULE_V1 index={u64} module={S8} table_audit={u32} enabled={u32} selected={u32} group={S8}\n"),
             index, names[index], (u32)(index == 2), (u32)enabled, (u32)runs, index ? S8("rest") : S8("primary"));
-        // Inventory rows must all precede timing rows.
     }
     if (selected == 1)
     {
@@ -749,6 +950,28 @@ BUSTER_GLOBAL_LOCAL bool ci_unit_schedule_self_test(Arena* arena, String8 execut
     proof.modules[1].name = S8("other_tests");
     proof.modules[1].enabled = false;
     result = result && !ci_unit_inventory_equal(&queried, &proof);
+    String8 source = S8("0123456789abcdef0123456789abcdef01234567");
+    String8 digest = S8("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    String8 timing = S8("TEST_MODULE_TIMING index=1 module=other_tests duration_ns=1 passed=2 failed=0 assertions=2 status=pass\n");
+    String8 pair_log = string_format(arena, S8("CI_UNIT_PLAN_V1 source_revision={S8} binary_sha256={S8} workers=4 groups=2 group_workers=2 primary_module={S8}\n{S8}"
+        "CI_UNIT_PARTITION_V1 groups=2 workers=4 elapsed_us=100 modules=1 assertions=2 passed=2 failed=0 status=pass\n"), source, digest, ci_unit_primary_module(), timing);
+    String8 scheduled_log = string_format(arena, S8("CI_UNIT_SCHEDULE_PLAN_V1 source_revision={S8} binary_sha256={S8} workers=4 slots=2 slot_workers=2 modules=1\n{S8}"
+        "CI_UNIT_SCHEDULE_V1 slots=2 workers=4 elapsed_us=90 modules=1 assertions=2 passed=2 failed=0 external=0 captured_bytes=0 status=pass\n"), source, digest, timing);
+    CiUnitObservation pair_observed = ci_unit_observe(pair_log, false);
+    CiUnitObservation scheduled_observed = ci_unit_observe(scheduled_log, true);
+    result = result && ci_unit_observations_equal(&pair_observed, &scheduled_observed);
+    scheduled_observed.proof.modules[1].assertions += 1;
+    result = result && !ci_unit_observations_equal(&pair_observed, &scheduled_observed);
+    scheduled_observed.proof.modules[1].assertions -= 1;
+    scheduled_observed.digest = S8("wrong-binary");
+    result = result && !ci_unit_observations_equal(&pair_observed, &scheduled_observed) &&
+        !ci_unit_observe(string_format(arena, S8("{S8}{S8}"), pair_log, timing), false).valid;
+    String8 fixture = S8("TEST_FIXTURE_START_V1 kind=fixture module=other_tests fixture=example index=0\n");
+    result = result && ci_unit_fixtures_equal(fixture, fixture, &pair_observed.proof) &&
+        !ci_unit_fixtures_equal(fixture, (String8){0}, &pair_observed.proof);
+    u8 utf16[] = {0xff, 0xfe, 'a', 0, 'b', 0};
+    result = result && string_equal(ci_unit_log_text(arena, (ByteSlice){utf16, sizeof(utf16)}), S8("ab")) &&
+        !ci_unit_log_text(arena, (ByteSlice){utf16, sizeof(utf16) - 1}).length;
     result = ci_unit_schedule_run(arena, executable, 4, S8("self-test"), S8("self-test"), true) == PROCESS_RESULT_SUCCESS && result;
     return result;
 }
@@ -812,6 +1035,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_tests_main(Arena* arena, SliceString8 
     if (arguments.length == 1 && string_equal(arguments.pointer[0], S8("--self-test-module-child")))
     {
         result = ci_unit_schedule_test_child();
+    }
+    else if (arguments.length == 3 && string_equal(arguments.pointer[0], S8("--compare")))
+    {
+        result = ci_unit_compare(arena, arguments.pointer[1], arguments.pointer[2]);
     }
     else if (arguments.length == 2 && string_equal(arguments.pointer[0], S8("--self-test-child")))
     {
