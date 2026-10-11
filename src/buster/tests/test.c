@@ -1173,11 +1173,11 @@ bool buster_test_module_selection_check(String8 selection)
     return result;
 }
 
-// Match the native parent independently. Windows x64's checked frontend
-// dominates the old rest group; ARM retains the better-balanced driver split.
+// Match the native parent independently. The frontend dominates the rest
+// group on sanitized lanes; Windows ARM keeps the driver split.
 BUSTER_GLOBAL_LOCAL String8 test_module_group_primary_name(void)
 {
-    String8 result = BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64 ? S8("c_frontend_tests") : S8("compiler_driver_tests");
+    String8 result = BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 ? S8("compiler_driver_tests") : S8("c_frontend_tests");
     return result;
 }
 
@@ -3442,7 +3442,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
         // The metadata and machine suites exercise x86 emission on every host,
         // including AArch64 CI. Prepare the exact-plan tables, with every shape
         // resolved, before their lanes.
-        machine_x86_64_exact_prewarm_all_shapes();
+        machine_x86_64_exact_prewarm_all();
         x86_64_metadata_test_prewarm_symbolic_immediate_plans();
         // Every lane in the gang below is an aarch64 suite, and each one queries
         // canonical form validity per encode and per decode.

@@ -435,6 +435,9 @@ BUSTER_F_DECL OsError os_file_delete_checked(String8 path);
 // rather than followed, so the walk cannot escape the tree it was given.
 // Returns whether the tree is gone; a missing `path` counts as success.
 BUSTER_F_DECL bool os_directory_delete(String8 path);
+// Lists the entry names directly inside `path`, unordered, without "." and
+// "..". A missing or unreadable directory yields no names.
+BUSTER_F_DECL String8* os_directory_entry_names(Arena* arena, String8 path, u32* count);
 
 // Replacement publication: inspect the destination, stage beside it, rename
 // the staging file over it.

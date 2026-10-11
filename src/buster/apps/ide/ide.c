@@ -2122,9 +2122,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          tree.split.fallbacks ? tree.split.fallback_token : UINT32_MAX);
             // Counts: the statement plans the body binder followed, and the bodies left to its token walk.
             string_print(S8("C_AST_STATEMENTS bodies={u64} segments={u64} segment_tokens={u64} uses={u64} bails={u64} declaration_hints={u64} "
-                            "loop_hints={u64} declines={u64} fallbacks={u64} reason={S8} fallback_token={u32}\n"),
+                            "loop_hints={u64} declines={u64} declarator_hints={u64} initializer_hints={u64} auto_skips={u64} "
+                            "declarator_declines={u64} fallbacks={u64} reason={S8} fallback_token={u32}\n"),
                          tree.statements.bodies, tree.statements.segments, tree.statements.segment_tokens, tree.statements.uses, tree.statements.bails,
-                         tree.statements.declaration_hints, tree.statements.loop_hints, tree.statements.declines, tree.statements.fallbacks,
+                         tree.statements.declaration_hints, tree.statements.loop_hints, tree.statements.declines, tree.statements.declarator_hints,
+                         tree.statements.initializer_hints, tree.statements.auto_skips, tree.statements.declarator_declines, tree.statements.fallbacks,
                          c_ast_statement_fallback_name(tree.statements.fallbacks ? tree.statements.reason : C_AST_STATEMENT_FALLBACK_NONE),
                          tree.statements.fallbacks ? tree.statements.fallback_token : UINT32_MAX);
         }

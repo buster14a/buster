@@ -109,6 +109,18 @@ fixture as well as compiling both architectures.
   symbol rows own TLS/GOT/relocations, and offset folding never modifies them.
   These facts authorize no memory reordering or dereference. No `MachineAddress`
   MIR side table is produced; keep `MACHINE_REF_ADDRESS` stable.
+- A symbol row's `MachineSymbolReference` is chosen per symbol by
+  `machine_x64_symbol_reference` / `machine_a64_symbol_reference`, and the
+  object layer spells it per format. Mach-O relocation types name the
+  instruction, and ld64/lld resolve them with that meaning (#1454). An x86-64
+  direct call takes the PLT form, which the writer emits as
+  `X86_64_RELOC_BRANCH`. The address of a symbol the module does not define
+  takes the GOT form on both architectures: `GOT_LOAD`, or `GOT_LOAD_PAGE21`
+  and `GOT_LOAD_PAGEOFF12` on `adrp`+`ldr`. Every other rip-relative field is
+  `SIGNED`, or `SIGNED_1/2/4` when immediate bytes follow the field.
+  Inline/global assembly keeps a direct branch's identity through
+  `assembly_x86_relocation_is_branch`. `tools/test_mach_o_dylib_data_lld.sh`
+  is the independent-linker oracle for this contract.
 - `MachineFunction` owns CFG edges, block parameters, and incoming edge
   parallel-copy sources. Edge source `i` maps to destination block parameter
   `i`; keep these copies parallel through allocation so cycles are resolved as
@@ -357,6 +369,15 @@ fixture as well as compiling both architectures.
   the defining row's slot address (`machine_x64_emit_exact_frame_address`,
   `machine_a64_emit_frame_address`). This is sound because a slot whose address
   a row takes keeps its own storage for the whole function.
+- x86-64 selection gives a register-copy cast of an integer constant a constant
+  definition, so the recipe above covers it. A C null pointer is
+  `CAST(INTEGER_TO_POINTER)` of zero. `machine_x64_cast_copies_constant` follows
+  up to four integer-to-pointer, pointer-reinterpret or integer-reinterpret
+  casts between general-register scalars back to a `CONSTANT_INTEGER`, and such
+  a cast is selected as `MOV_RI` of that immediate instead of `MOV_RR`. A
+  constant or cast whose every use is such a cast is marked `fused_dead` and
+  selects into nothing. Edge arguments count as uses, so a value reaching a
+  block parameter keeps its row. AArch64 selection does not do this yet.
 - FAST/QUALITY start a join's or loop header's general block parameters in
   registers. `machine_fast_parameter_contract` gives each non-pinned,
   non-mutable general parameter a caller-saved (or already-saved) register
@@ -374,9 +395,18 @@ fixture as well as compiling both architectures.
   register (`machine_fast_free_edge_register`: not a source, target, carried
   value, pinned register or unsaved callee-saved register; the first slot
   scratch is preferred) stages memory sources bound for homes and saves one
-  value to break each copy cycle. An edge with a vector or mask assignment,
-  or with no free register, still stages its resident sources through the
-  tile. Either way a source with a rematerialization recipe (constant or
+  value to break each copy cycle. A parameter home can also be another
+  copy's memory source (a loop back edge rotating homed parameters), so an
+  edge that writes any home, including a pinned non-contract target's, reads
+  every memory source before its first home store: straight into its
+  register target when no resident source occupies that register, otherwise
+  through the free register into its tile cell. On unity `ide.c` (x86-64
+  `-march=native -g0`) this kept 45 FAST edges off the staged form and
+  removed about 680 stack-referencing instructions per mode. An edge with a
+  vector or mask assignment, or with no free register, still stages its
+  resident sources through the tile; the same input has no vector or mask
+  edge, and its no-free-register edges stage about 600 (FAST) and 2.4k
+  (QUALITY scan) sources. Either way a source with a rematerialization recipe (constant or
   frame address) reads no register and rematerializes straight into its
   destination (`MACHINE_FAST_EDGE_SOURCE_RECREATED`). On unity `ide.c` the
   parallel move removed about 46 k stack-referencing instructions and 2% of
@@ -785,12 +815,21 @@ fixture as well as compiling both architectures.
   Smaller vectors and model-dependent register splitting retain their MIR
   representation and admission rules;
   unsupported shapes are refused without a direct fallback.
+- MIR prologue unwind actions are frame events the target encoder appends
+  right after emitting each frame instruction, at its real cursor
+  (`MachineEncodeResult.frame_events`, `prologue_size`). The shared Windows
+  probes publish their own event span through the same descriptor append.
+  Module codegen copies the finished stream into the function descriptor and
+  never re-derives instruction lengths, save masks or frame chunks; DWARF CFI
+  and PE serializers keep their format checks. A new prologue instruction
+  that changes SP, saves a register or establishes the frame pointer must
+  publish its event where it is emitted. The Windows AArch64 unwind format
+  needs an event for every prologue word, including no-effect ones (#1918).
 - Windows/UEFI x86-64 MIR frames larger than one page reuse
   `codegen_x64_emit_windows_stack_allocate`, the retained shared bounded
   R10/R11 probe loop. RSP stays unchanged until the final allocation, so a
-  large frame requires one allocation unwind action and a bounded prologue.
-  `MachineEncodeResult.frame_allocation_offset` supplies its actual byte offset
-  to unwind construction without widening the result on 64-bit hosts.
+  large frame requires one allocation unwind action and a bounded prologue;
+  the probe publishes that action at its actual end offset.
   Keep object creation and native Windows execution of
   `tests/basic_c_win64_large_frame.c` covered in every allocator mode; page
   probing must preserve all incoming argument registers and private copies.
@@ -888,8 +927,7 @@ fixture as well as compiling both architectures.
 - ELF/Mach-O AArch64 fixed frames are not limited by the scaled callee-save offset.
   Above that offset's reach, the prologue and each epilogue derive the compact
   save-area base from X29 in reserved X16, then use small unsigned offsets.
-  Module unwind construction counts both setup words and retains the actual
-  SP-relative save locations. Capacity planning includes large-offset body
+  Each save's frame event still names its SP-relative location. Capacity planning includes large-offset body
   transfers and aggregate-copy pieces; frame-size sums are checked before
   narrowing. Keep strict large-frame and packed-layout tests in all MIR modes.
 - AArch64 calls in functions containing dynamic stack allocations reserve

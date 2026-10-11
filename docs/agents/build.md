@@ -414,8 +414,9 @@ serialization remains only for multi-test-tree local selections. Sanitized
 Clang CI trees and Windows AArch64 Release run `test_all` through the existing
 isolated-process runner (`BUSTER_TEST_PROCESS_PARTITIONS`), which splits a
 four-worker quota into two two-worker processes and runs the ordinary invocation
-below four. The `primary` group owns `c_frontend_tests` on Windows x86-64 and
-`compiler_driver_tests` elsewhere; `rest` owns every other enabled module.
+below four. The `primary` group owns `c_frontend_tests` on every partitioned
+tree except Windows AArch64, where it owns `compiler_driver_tests`; `rest`
+owns every other enabled module.
 The parent independently checks both complete inventories and their exact
 disjoint union. Windows AArch64 has no artifact-fanout consumer; supported
 canonical producers retain their standard configure arguments.
