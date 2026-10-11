@@ -283,6 +283,11 @@ publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
 the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
 not predefined at any level. `-mattr` overrides still refine the level.
 The psABI's LAHF-SAHF has no target feature and is implied by long mode.
+`-m64` is accepted only for the resolved x86-64 target, in either option order
+and when repeated. It confirms the existing 64-bit x86 ABI and preserves the
+target OS's data model and CPU features. It is refused for other architectures
+and GPU targets; `-m32` and `-mx32` remain unsupported rather than producing
+objects with the wrong ABI (#3458).
 `-mtune=<model>` is accepted with any nonempty value, `native` included, and
 ignored: it selects only a scheduling model, and instruction selection here has
 no per-CPU tuning, so it never changes the emitted code (GitHub #2851).

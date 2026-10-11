@@ -1765,6 +1765,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     String8 position_independent_image_option = {0};
     bool common_storage_requested = false;
     bool static_link_requested = false;
+    bool x86_64_abi_requested = false;
     String8 runtime_omission_option = {0};
     for (u64 argument_index = 0; argument_index < arguments.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; argument_index += 1)
     {
@@ -2505,6 +2506,13 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             continue;
         }
+        if (string_equal(argument, S8("-m64")))
+        {
+            // The represented x86 ABI is already 64-bit. Validate against the
+            // final target so option order cannot hide a foreign/GPU target.
+            x86_64_abi_requested = true;
+            continue;
+        }
         // -m<feature> and -mno-<feature> are -mattr=+feature and -mattr=-feature
         // in command-line order with the -mattr items, plus GCC's implied
         // features on x86-64 (applied where the overrides resolve).
@@ -2767,6 +2775,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         {
             compiler_driver_resolve_native_target(arena, &invocation, architecture_option, feature_overrides, feature_override_count);
         }
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && x86_64_abi_requested &&
+        (invocation.has_gpu_target || invocation.target.cpu_arch != CPU_ARCH_X86_64))
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: -m64 for this target"));
     }
     // No canonical object field carries common-storage intent. Reject only an
     // effective request when this invocation will emit a code-generation artifact;
