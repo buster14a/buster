@@ -23410,6 +23410,8 @@ u64 c_test_logical_call_reference_rows(void)
 // running the scan there would put back exactly the cost the chain removes.
 BUSTER_C_INTERNAL void c_ir_prepared_call_chained_check(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 end, u32 answer)
 {
+    BUSTER_CHECK(call->open_index < builder->preprocess.token_count &&
+                 c_token_is_punctuator(&builder->preprocess.tokens[call->open_index], C_PUNCTUATOR_LEFT_PARENTHESIS));
     u32 reference = UINT32_MAX;
 #if BUSTER_INCLUDE_TESTS
     c_logical_call_reference_work += 1;

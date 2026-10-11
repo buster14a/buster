@@ -1,6 +1,5 @@
 #include <buster/tests/compiler/frontend/c/c_test.h>
 #include <buster/lib/time.h>
-#include <stdio.h>
 #include <buster/lib/compiler/frontend/c/c_gen_internal.h>
 #include <buster/lib/compiler/frontend/c/c_parse_internal.h>
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
@@ -2376,7 +2375,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_parenthesized_logical_chains(
     UnitTestResult result = {0};
     // 1,700 is just past the depth at which the pre-fix scratch growth aborted
     // (1,670); 4,096 matches the nested-call fixture.
-    u32 depths[] = {1024, 2048, 4096, 8192};
+    u32 depths[] = {1700, 4096};
     String8 prefix = S8("int f0(void);\nint f1(void);\nint tall(int i)\n{\n    int x = ");
     String8 middle = S8(";\n    if (");
     String8 last = S8(") x += i;\n    return !");
@@ -2400,15 +2399,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_parenthesized_logical_chains(
             c_test_append_source(source_bytes, source_capacity, &source_length, suffix);
             CPreprocessResult preprocess = {0};
             CParseResult parse = {0};
-            u64 label_start = c_test_logical_label_type_work();
-            u64 call_start = c_test_logical_call_reference_work();
-            TimeDataType clock_start = timestamp_take();
             CIRLowerResult lowered = c_test_lower_source(temporary.arena, (String8){.pointer = source_bytes, .length = source_length},
                                                          S8("parenthesized-logical-chain.c"), target_native, &preprocess, &parse);
-            u64 ns = timestamp_ns_between(clock_start, timestamp_take());
-            printf("LOGICAL_WORK depth=%u shape=%u ns=%llu label=%llu call_reference=%llu\n", depth, shape,
-                   (unsigned long long)ns, (unsigned long long)(c_test_logical_label_type_work() - label_start),
-                   (unsigned long long)(c_test_logical_call_reference_work() - call_start));
             BUSTER_TEST_RAW(arguments, lowered.canonical_ir_certified,
                             string_format(temporary.arena, S8("shape {u32} depth {u32} not certified"), shape, depth));
             BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0,
@@ -62308,9 +62300,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_omitted_conditional(UnitTestArgume
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    C_TEST_FIXTURE(arguments, c_test_logical_chain_work_growth);
-    C_TEST_FIXTURE(arguments, c_test_lowering_parenthesized_logical_chains);
-    return result;
     BUSTER_TEST_FIXTURE(arguments, c_test_generic_work_and_scratch);
     BUSTER_TEST_FIXTURE(arguments, c_test_generic_large_function);
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
