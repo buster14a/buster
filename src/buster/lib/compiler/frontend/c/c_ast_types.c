@@ -1939,7 +1939,7 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_agree(CAstTypeBody const* body, CPr
 // rule does. The answer is C_AST_TYPE_STRING's replay with this node's kind.
 // Called only from c_ast_types_answer's decline branch, off the path that
 // ordinary answers take.
-BUSTER_GLOBAL_LOCAL bool c_ast_types_qualified_member(CAstTypeBody const* body, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
+BUSTER_GLOBAL_LOCAL C_AST_TYPES_NOINLINE bool c_ast_types_qualified_member(CAstTypeBody const* body, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                       u32 node, bool checked, CAstTypeAnswer* answer)
 {
     CAst const* ast = body->ast;

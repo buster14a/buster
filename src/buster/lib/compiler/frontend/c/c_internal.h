@@ -1594,6 +1594,15 @@ struct CParsePromotedMemberWork
 };
 
 // ---- tree expression typer (c_ast_types.c) ----------------------------------
+
+// The typer's rarely taken answers stay out of line: inlined into
+// c_parse_expression_type_query, which every query runs, they change that
+// function's code on the default path too.
+#if BUSTER_COMPILER_MSVC
+#define C_AST_TYPES_NOINLINE __declspec(noinline)
+#else
+#define C_AST_TYPES_NOINLINE __attribute__((noinline))
+#endif
 //
 // What the typer made of one type query. ANSWER carries the type and the
 // nonplace-projection fact exactly as a valid, constraint-free machine answer

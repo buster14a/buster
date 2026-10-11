@@ -8340,6 +8340,32 @@ BUSTER_C_INTERNAL void c_parse_expression_tree_replay(CTypeParseMachine* machine
     }
 }
 
+// The machine's two calls for a member access over a const or volatile
+// aggregate (c_parse_direct_expression_postfix): c_parse_member_type on the
+// aggregate's row, `tree.type`, then c_parse_add_qualified_type, which
+// appends the member's qualified copy. That row is the answer. The member's
+// name ends the access. A member that is not found appends nothing, and the
+// query goes to the machine. Its scratch is the machine's, rewound as the
+// string replay rewinds it. Kept out of line: inlined into
+// c_parse_expression_type_query, it changed that function's code on every
+// query, the default path's included.
+BUSTER_GLOBAL_LOCAL C_AST_TYPES_NOINLINE CTypeId c_parse_expression_tree_member(CTypeParseMachine* machine, CPreprocessResult const* preprocess,
+                                                                                CParseResult* result, CAstTypeAnswer tree)
+{
+    CToken name = preprocess->tokens[tree.replay_end - 1];
+    CType const* aggregate = result->types + tree.type.value;
+    CType qualifiers = {.is_const = aggregate->is_const, .is_volatile = aggregate->is_volatile};
+    Arena* scratch = machine->scratch_arena;
+    u64 scratch_mark = scratch->position;
+    CTypeId member = c_parse_member_type(scratch, result, tree.type, name.symbol, c_token_spelling(preprocess->spelling_base, name), 0, 0, 0);
+    CTypeId type = member.value < result->type_count ? c_parse_add_qualified_type(result, member, qualifiers) : C_TYPE_ID_INVALID;
+    if (scratch->position != scratch_mark)
+    {
+        arena_set_position(scratch, scratch_mark);
+    }
+    return type;
+}
+
 // The answer to a query of one string-literal token alone, perhaps
 // parenthesized (C_AST_TYPE_STRING from c_ast_types_answer): the machine's
 // root SIZEOF task strips the parentheses, consults the per-body memo for the
@@ -8368,19 +8394,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_tree_string(CTypeParseMachine* mach
     }
     else if (tree.node_kind == C_AST_MEMBER || tree.node_kind == C_AST_MEMBER_ARROW)
     {
-        // The member's name ends the access. A member that is not found
-        // appends nothing, and the query goes to the machine.
-        CToken name = preprocess->tokens[tree.replay_end - 1];
-        CType const* aggregate = result->types + tree.type.value;
-        CType qualifiers = {.is_const = aggregate->is_const, .is_volatile = aggregate->is_volatile};
-        Arena* scratch = machine->scratch_arena;
-        u64 scratch_mark = scratch->position;
-        CTypeId member = c_parse_member_type(scratch, result, tree.type, name.symbol, c_token_spelling(preprocess->spelling_base, name), 0, 0, 0);
-        type = member.value < result->type_count ? c_parse_add_qualified_type(result, member, qualifiers) : C_TYPE_ID_INVALID;
-        if (scratch->position != scratch_mark)
-        {
-            arena_set_position(scratch, scratch_mark);
-        }
+        type = c_parse_expression_tree_member(machine, preprocess, result, tree);
     }
     else
     {
