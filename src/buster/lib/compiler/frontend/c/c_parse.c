@@ -41,7 +41,11 @@
 //   statement plan (c_parse_statement_plan_build): statement boundaries,
 //   block declaration ends and `for` header boundaries read from the tree's
 //   COMPOUND_STATEMENT items, and plain expression segments bound in one
-//   pass (c_parse_bind_plan_segment) instead of by its token loop.
+//   pass (c_parse_bind_plan_segment) instead of by its token loop. A block
+//   declaration's entry carries declarator hints (c_parse_plan_declarators):
+//   the split (c_parse_planned_local_declarations) takes each declarator's
+//   `,` and `=` from them, and binds a plain initializer with the use filter
+//   alone.
 //
 // Types and declarators are parsed by CTypeParseMachine (types in
 // c_internal.h), an explicit frame stack in place of recursion: each
@@ -120,14 +124,16 @@
 //                                                 entity lookup
 //   c_parse_scope_cursor_lookup                   post-binding lookups of the
 //                                                 lowering-constraint passes
-//   c_parse_local_declarations                    block-scope declarations,
-//                                                 auto inference, local
+//   c_parse_local_declarations_split,             block-scope declarations,
+//   c_parse_local_declarations                    auto inference, local
 //                                                 linkage redeclarations
 //   c_parse_label_address_prefix_proven,          statement boundaries, asm
 //   c_parse_statement_end                         goto, label addresses
 //   c_parse_statement_plan_build,                 the statement plan read from
-//   c_parse_bind_plan_segment                     the syntax tree, and its
-//                                                 one-pass segment binding
+//   c_parse_bind_plan_segment,                    the syntax tree, its
+//   c_parse_plan_declarators,                     one-pass segment binding,
+//   c_parse_planned_local_declarations            and the declarator hints of
+//                                                 its block declarations
 //   c_parse_bind_function_body                    binds body identifiers to
 //                                                 entities, indexes scopes
 //   c_parse_token_census_reference,               the token-shape census that

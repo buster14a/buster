@@ -2112,6 +2112,14 @@ enum
     C_AST_CORPUS_STATEMENT_USE_FLOOR = 20000,
     C_AST_CORPUS_HOSTED_STATEMENT_SEGMENT_FLOOR = 27000,
     C_AST_CORPUS_HOSTED_STATEMENT_USE_FLOOR = 100000,
+    // Block declarators the split took from their plan hints, and the plain
+    // initializers among them: about 3,550 and 2,960 from the fixtures on
+    // Linux x86-64, and about 19,000 and 18,100 in all with the frontend's
+    // own sources. No hint may be refused.
+    C_AST_CORPUS_STATEMENT_DECLARATOR_FLOOR = 2800,
+    C_AST_CORPUS_STATEMENT_INITIALIZER_FLOOR = 2300,
+    C_AST_CORPUS_HOSTED_STATEMENT_DECLARATOR_FLOOR = 15000,
+    C_AST_CORPUS_HOSTED_STATEMENT_INITIALIZER_FLOOR = 14000,
 };
 
 BUSTER_GLOBAL_LOCAL bool c_ast_corpus_in(String8 const* paths, u32 count, String8 path)
@@ -2162,13 +2170,17 @@ struct CAstCorpusTally
     u64 split_compared;
     // The body binder's statement plans over the same inputs (the analysis
     // with the tree in c_ast_corpus_types): bodies planned, segments and the
-    // tokens and uses they bound, hints taken, bodies left to the token walk,
+    // tokens and uses they bound, hints taken, declarator hints taken (with
+    // their plain initializers and refusals), bodies left to the token walk,
     // and identifier uses compared field by field with the walk's own.
     u64 statement_bodies;
     u64 statement_segments;
     u64 statement_segment_tokens;
     u64 statement_uses;
     u64 statement_hints;
+    u64 statement_declarators;
+    u64 statement_initializers;
+    u64 statement_declarator_declines;
     u64 statement_fallbacks;
     u64 statement_compared;
 };
@@ -2267,6 +2279,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
         tally->statement_segment_tokens += statements.segment_tokens;
         tally->statement_uses += statements.uses;
         tally->statement_hints += statements.declaration_hints + statements.loop_hints;
+        tally->statement_declarators += statements.declarator_hints;
+        tally->statement_initializers += statements.initializer_hints;
+        tally->statement_declarator_declines += statements.declarator_declines;
         tally->statement_fallbacks += statements.fallbacks;
         tally->statement_compared += typed.identifier_use_count;
         arena_destroy(arena, 1);
@@ -2670,6 +2685,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_sources(UnitTestArguments* argum
     BUSTER_TEST(arguments, !hosted || tally->type_answers >= C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR);
     BUSTER_TEST(arguments, !hosted || (tally->statement_segments >= C_AST_CORPUS_HOSTED_STATEMENT_SEGMENT_FLOOR &&
                                        tally->statement_uses >= C_AST_CORPUS_HOSTED_STATEMENT_USE_FLOOR));
+    BUSTER_TEST(arguments, !hosted || (tally->statement_declarators >= C_AST_CORPUS_HOSTED_STATEMENT_DECLARATOR_FLOOR &&
+                                       tally->statement_initializers >= C_AST_CORPUS_HOSTED_STATEMENT_INITIALIZER_FLOOR &&
+                                       tally->statement_declarator_declines == 0));
     return result;
 }
 #endif
@@ -2707,6 +2725,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
     BUSTER_TEST(arguments, tally.split_records >= C_AST_CORPUS_SPLIT_RECORD_FLOOR && tally.split_compared >= tally.split_records);
     BUSTER_TEST(arguments, tally.statement_segments >= C_AST_CORPUS_STATEMENT_SEGMENT_FLOOR && tally.statement_uses >= C_AST_CORPUS_STATEMENT_USE_FLOOR &&
                                tally.statement_compared >= tally.statement_uses && tally.statement_hints);
+    BUSTER_TEST(arguments, tally.statement_declarators >= C_AST_CORPUS_STATEMENT_DECLARATOR_FLOOR &&
+                               tally.statement_initializers >= C_AST_CORPUS_STATEMENT_INITIALIZER_FLOOR && tally.statement_declarator_declines == 0);
 #if BUSTER_LINUX && !BUSTER_ANDROID
     c_ast_test_merge(&result, c_ast_corpus_sources(arguments, &tally));
 #endif

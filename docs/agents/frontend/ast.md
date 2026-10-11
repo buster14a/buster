@@ -311,9 +311,13 @@ Under `-v` the driver prints five rows with the other verbose counters:
   uses=<identifier uses they bound> bails=<segments it handed back to the
   token loop partway> declaration_hints=<block declarations whose end the plan
   gave> loop_hints=<for statements whose boundaries the plan gave>
-  declines=<statements the plan left to the token loop> fallbacks=<bodies left
-  wholly to the token loop> reason=<CAstStatementFallback of the last
-  fallback> fallback_token=<that body's `{`>`
+  declines=<statements the plan left to the token loop>
+  declarator_hints=<block declarators the split took from their hints>
+  initializer_hints=<plain initializers among them> auto_skips=<declarations
+  whose auto-inference scans were skipped> declarator_declines=<declarator
+  hints the split refused> fallbacks=<bodies left wholly to the token loop>
+  reason=<CAstStatementFallback of the last fallback> fallback_token=<that
+  body's `{`>`
 
 The second row's passes run only under `-v`; they are diagnostic. The third,
 fourth and fifth rows count what the typer, the split and the statement plan
@@ -730,8 +734,22 @@ given tokens the plan tells it what it would otherwise scan for:
   end of a statement scope.
 - **Declaration hints.** A block `DECLARATION` gives its `;`, so the loop's
   scan for it and its search for a GNU typeof statement expression are
-  skipped. `c_parse_local_declarations` still reads the declaration from its
-  tokens; that is the next row's declarator machine.
+  skipped. It also carries a **declarator hint** per `INIT_DECLARATOR`
+  (`c_parse_plan_declarators`): the `,` or `;` past the declarator's greatest
+  anchor and closers, the `=` past the closers of the child before its
+  initializer, and whether that initializer is plain (expressions, type names
+  as above, initializer lists, designators and compound literals). It also
+  says whether `DECL_SPECIFIERS` holds an `auto` or `__auto_type` word. The
+  split (`c_parse_planned_local_declarations`, the hinted caller of the
+  always-inline `c_parse_local_declarations_split`) then skips the two
+  auto-inference scans of a declaration that cannot infer, the `,` and `=`
+  scans of each declarator whose hinted tokens it confirms, and, in a plain
+  initializer, the statement-expression, type-definition, attributed
+  definition and attribute tests; `__builtin_offsetof` is a call in the tree,
+  so its test stays, as does the use filter. A hint the tokens refuse
+  (`declarator_declines`) returns that declarator and the rest of the
+  declaration to the scans. The specifiers and declarators themselves are
+  still read by the type machine from tokens; that is the next row's.
 - **Loop hints.** A `FOR` gives its header's first `;` and `)` and one past
   its body, in place of the loop's scans and `c_parse_statement_end`.
 
@@ -769,8 +787,10 @@ the per-token use map, every scope and every entity of the analysis with the
 plan against the analysis without the tree. `c_ast_test_statements` runs one
 body that takes every kind of entry, one whose statements the plan leaves to
 the loop (with an `__builtin_offsetof` bail), and one tampered tree per
-fallback reason, in every layout. On the self-host unity input every body
-follows its plan, with no fallback and no bail.
+fallback reason, in every layout, and a body of block declarations whose
+declarators take every hint, with a tampered declarator whose `=` hint the
+split refuses. On the self-host unity input every body follows its plan, with
+no fallback, no bail and no refused declarator hint.
 
 ## Corpus differential
 
@@ -853,7 +873,7 @@ differential tests pass.
 | Current owner | Rediscovers | Tree replacement | Status |
 |---|---|---|---|
 | `c_parse_ast_run`, `c_parser_parse_function_body`, `c_parser_parse_declaration_expression` | declaration split, declarator name, body range, static-assert ranges | `DECLARATION`, `FUNCTION_DEFINITION`, `INIT_DECLARATOR`, `STATIC_ASSERT` | Retired under `-fc-ast-pilot` by the [declaration split](#declaration-split-from-the-tree). The walker stays the default path and the per-unit fallback. |
-| `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, and plain segments bound in one pass. The token loop stays the engine, the default path and the per-body fallback; `c_parse_local_declarations` still reads each declaration's declarators from tokens (next row), and the switch and control-statement validators still call `c_parse_statement_end`. |
+| `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, plain segments bound in one pass, and each block declarator's `,`, `=` and plain initializer. The token loop stays the engine, the default path and the per-body fallback; the type machine still reads specifiers and declarators from tokens (next row), and the switch and control-statement validators keep `c_parse_statement_end`, whose calls cost about 1 M instructions on the self-host. |
 | `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Not migrated. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Not migrated. |
@@ -871,14 +891,18 @@ Deleting it waits on the hook becoming the default.
 
 Under `-fc-ast-pilot`, the second row's boundary scans no longer run for a
 planned statement: the body binder takes block declaration ends, `for` header
-boundaries and loop ends from the tree, and binds plain segments without its
-per-token loop. Its consumer is the binder itself, and the field-by-field
-binding differential passes. The row is not retired: the loop still runs
-without the flag, for every statement the plan declines and for every body
-that falls back; `c_parse_local_declarations` still splits declarators and
-initializers by tokens; and `c_parse_validate_one_switch` and
-`c_parse_validate_control_statements` still find statement ends with
-`c_parse_statement_end`.
+boundaries and loop ends from the tree, binds plain segments without its
+per-token loop, and `c_parse_local_declarations` splits a planned block
+declaration at the declarators' hinted `,` and `=` and binds a plain
+initializer with the use filter alone. Its consumer is the binder itself, and
+the field-by-field binding differential passes. The row is not retired: the
+loop and the token split still run without the flag, for every statement the
+plan declines and for every body that falls back; the declaration's
+specifiers and declarators are still read by the type machine (the next row);
+and `c_parse_validate_one_switch` and `c_parse_validate_control_statements`
+still find statement ends with `c_parse_statement_end`, deliberately: those
+calls cost 1.05 M instructions on the self-host unity input, less than a tree
+lookup would.
 
 The [tree expression typer](#tree-expression-typer) is the first consumer of
 the fourth row's replacement. Under `-fc-ast-pilot` it answers most of semantic
