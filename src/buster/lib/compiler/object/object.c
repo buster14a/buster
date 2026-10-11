@@ -15679,7 +15679,14 @@ ObjectExecutable object_link_executable(ObjectFile* object)
             u8* target = (u8*)address + section_offsets[symbol->section] + symbol->value;
             // Every symbol here is defined in this image, so a Mach-O GOT load
             // is relaxed to the address of its target instead of a slot.
-            if (relocation->kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX &&
+            bool mach_got_load = relocation->kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX &&
+                                 object_format_for_target(object->target) == OBJECT_FORMAT_MACH_O64;
+            if (relocation->kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX && !mach_got_load)
+            {
+                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                break;
+            }
+            if (mach_got_load &&
                 buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX, (u8*)address + section_offsets[relocation->section],
                                                         relocation->offset, source_section->data.length,
                                                         relocation->addend) != BUSTER_X86_METADATA_GOT_PATCH_PC32)
@@ -15687,8 +15694,7 @@ ObjectExecutable object_link_executable(ObjectFile* object)
                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                 break;
             }
-            if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 ||
-                relocation->kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX)
+            if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 || mach_got_load)
             {
                 s64 displacement = 0;
                 if (!object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
