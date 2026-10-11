@@ -221,7 +221,8 @@ if cleanup later succeeds.
 attempt for an unrelated error; Windows additionally exercises two injected
 transient errors, a real handle opened without delete sharing, and a real
 read-only file. A two-lane Windows control releases a real held handle while
-cleanup runs and requires eventual deletion; serial builds retain the persistent
+cleanup runs and requires eventual deletion when the test quota permits two
+lanes; serial builds and one-lane quotas retain the persistent
 lock controls. Both persistent native errors remain failures until the
 fixture releases its lock or restores the attribute. Missing paths are
 idempotent success, matching `os_file_delete_checked`.

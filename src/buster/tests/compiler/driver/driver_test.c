@@ -97,7 +97,7 @@ struct CompilerDriverExecutableCleanupLanes
     bool closed;
 };
 
-BUSTER_GLOBAL_LOCAL void compiler_driver_test_executable_cleanup_lane(void* pointer)
+BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_driver_test_executable_cleanup_lane(void* pointer)
 {
     CompilerDriverExecutableCleanupLanes* state = pointer;
     if (!lane_index()) { state->blocked = os_file_delete_checked(state->path); }
@@ -170,7 +170,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_executable_cleanup(UnitT
         }
 
 #if !BUSTER_SINGLE_THREADED
-        if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
+        if (buster_test_worker_count(2) > 1 && BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
         {
             OsFileDescriptor* holder = os_file_open(path, (OpenFlags){0}, (OsFileAccess){.read = 1},
                                                    (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
