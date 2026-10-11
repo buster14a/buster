@@ -145,7 +145,9 @@ the same section, with zero addends and valid call encodings. Missing or undefin
 targets, malformed ELF ranges, unrelocated calls and every other code relocation
 fail the runner. Globals and maps remain unsupported by this test-only loader.
 `METAMORPHIC_EBPF_KERNEL available=0|1` records actual kernel availability; VM
-execution alone does not certify kernel acceptance. All previously supported
+execution alone does not certify kernel acceptance. The Linux x86-64 native CI
+lane requires `available=1` through the
+[eBPF kernel oracle gate](ci-suite-partition.md#ebpf-kernel-oracle-1625). All previously supported
 relations and aggregate materialization still run. An unavailable kernel is a
 coverage exclusion, never an execution pass for the call relation. An interpreter
 refusal is reported as a runner failure,
