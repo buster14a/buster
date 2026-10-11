@@ -11579,6 +11579,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                     }
                 }
                 else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L ||
                          relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12)
                 {
                     if (symbol->section != OBJECT_SECTION_THREAD_LOCAL_DATA && symbol->section != OBJECT_SECTION_THREAD_LOCAL_ZERO)
@@ -15030,8 +15031,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             link_write_u32(bytes, command, 0xc);
             link_write_u32(bytes, command + 4, dylib_command_size);
             link_write_u32(bytes, command + 8, 24);
-            link_write_u32(bytes, command + 16, 0x10000);
-            link_write_u32(bytes, command + 20, 0x10000);
+            link_write_u32(bytes, command + 16, options.dynamic_libraries[library_index].mach_versions_present
+                                                    ? options.dynamic_libraries[library_index].mach_current_version
+                                                    : 0x10000);
+            link_write_u32(bytes, command + 20, options.dynamic_libraries[library_index].mach_versions_present
+                                                    ? options.dynamic_libraries[library_index].mach_compatibility_version
+                                                    : 0x10000);
             memcpy(bytes + command + 24, library.pointer, library.length);
             bytes[command + 24 + library.length] = 0;
             command += dylib_command_size;

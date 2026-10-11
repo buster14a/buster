@@ -51,6 +51,10 @@ function(buster_add_ios_test_assets target)
         LIST_DIRECTORIES FALSE CONFIGURE_DEPENDS
         "${CMAKE_SOURCE_DIR}/src/buster/tests/compiler/codegen/fixtures/*")
     list(APPEND ios_test_fixtures ${ios_codegen_fixtures})
+    file(GLOB_RECURSE ios_driver_fixtures
+        LIST_DIRECTORIES FALSE CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/src/buster/tests/compiler/driver/fixtures/*")
+    list(APPEND ios_test_fixtures ${ios_driver_fixtures})
 
     set(ios_test_inventory
         "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${target}-ios-test-fixtures.txt")
@@ -107,18 +111,28 @@ function(buster_add_ios_test_assets target)
                     "${ios_bundle_content_dir}/src/buster/tests/compiler/codegen/fixtures")
         endif()
 
+        set(ios_driver_commands)
+        if (ios_driver_fixtures)
+            list(APPEND ios_driver_commands
+                COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                    "${CMAKE_SOURCE_DIR}/src/buster/tests/compiler/driver/fixtures"
+                    "${ios_bundle_content_dir}/src/buster/tests/compiler/driver/fixtures")
+        endif()
+
         add_custom_command(
             OUTPUT "${ios_test_stamp}"
             COMMAND "${CMAKE_COMMAND}" -E rm -rf
                 "${ios_bundle_content_dir}/tests"
                 "${ios_bundle_content_dir}/src/buster/tests/compiler/spirv/fixtures"
                 "${ios_bundle_content_dir}/src/buster/tests/compiler/codegen/fixtures"
+                "${ios_bundle_content_dir}/src/buster/tests/compiler/driver/fixtures"
             COMMAND "${CMAKE_COMMAND}" -E copy_directory
                 "${IOS_ASSETS_SOURCE_DIR}"
                 "${ios_bundle_content_dir}/tests"
             ${ios_filter_commands}
             ${ios_spirv_commands}
             ${ios_codegen_commands}
+            ${ios_driver_commands}
             COMMAND "${CMAKE_COMMAND}" -E touch "${ios_test_stamp}"
             DEPENDS "${ios_test_inventory}" ${ios_test_fixtures}
             COMMENT "Staging active test fixtures into ${target}.app (${config})"

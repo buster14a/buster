@@ -127,11 +127,11 @@ Both make the mode fail.
 | Test | RUNs | Buster | Owner |
 | --- | ---: | --- | --- |
 | `preprocess-multiple.c` | 1 | pass | — |
-| `std-trigraph-override.c` | 2 | refuses `-trigraphs`, `-ftrigraphs` | [#3420](https://github.com/buster14a/buster/issues/3420) |
-| `nostdlibinc.c` | 1 | refuses target `x86_64-unknown-unknown` | [#3421](https://github.com/buster14a/buster/issues/3421), then `-nostdlibinc` in #3420 |
+| `std-trigraph-override.c` | 2 | pass | — |
+| `nostdlibinc.c` | 1 | refuses target `x86_64-unknown-unknown` | [#3421](https://github.com/buster14a/buster/issues/3421) |
 | `redundant-args.c` | 1 | refuses target `x86_64-apple-darwin11` | [#3421](https://github.com/buster14a/buster/issues/3421) |
-| `working-directory-and-abs.c` | 1 | refuses `-working-directory=` | [#3420](https://github.com/buster14a/buster/issues/3420) |
-| `print-target-triple.c` | 1 | refuses `-print-target-triple` | [#3420](https://github.com/buster14a/buster/issues/3420) |
+| `working-directory-and-abs.c` | 1 | pass | — |
+| `print-target-triple.c` | 1 | pass | — |
 | `dumpmachine.c` | 3 | prints `x86_64-linux-gnu`, refuses `-m32`, refuses `xxx-pc-freebsd` | [#3421](https://github.com/buster14a/buster/issues/3421), [#1418](https://github.com/buster14a/buster/issues/1418) |
 | `mg.c` | 1 | refuses `-M` | [#2293](https://github.com/buster14a/buster/issues/2293) |
 

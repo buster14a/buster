@@ -2529,6 +2529,12 @@ BUSTER_GLOBAL_LOCAL CAstCorpusConstruct const c_ast_corpus_constructs[] = {
      C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("int __attribute__((unused)) a8, b8; int f8(void) __attribute__((noreturn)); [[nodiscard]] int g8(void); int h8(void) [[deprecated]];"),
      C_PREPROCESS_DIALECT_C23},
+    // A redundant group after a decorated typedef name (#3368).
+    {S8_INITIALIZER("typedef int T; __attribute__((unused)) T (x); static __attribute__((unused)) const T (y), (z)[2]; "
+                    "__attribute__((unused)) T (tg(int a)) { return a; } __extension__ T (w); int __attribute__((unused)) T2(int);"),
+     C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("typedef int T; [[maybe_unused]] T (x); [[maybe_unused]] static T (y); [[maybe_unused]] T (tc(int a)) { return a; }"),
+     C_PREPROCESS_DIALECT_C23},
 };
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_constructs_run(UnitTestArguments* arguments, CAstCorpusTally* tally)
@@ -4022,9 +4028,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
 
 // c_parse_ast_from_tree on one shape per fallback reason, and on shapes it
 // publishes itself, in every layout: the result is always c_parse_ast's, and
-// the statistics name the reason. The #3215 and #3368 shapes are among the
-// published ones; a redundant group after a decorated typedef name is not,
-// because the walker still reads it as that name's parameter list.
+// the statistics name the reason. The #3215 and #3368 shapes, including a
+// redundant group after a decorated typedef name, are among the published ones.
 typedef struct CAstSplitCase CAstSplitCase;
 struct CAstSplitCase
 {
@@ -4073,9 +4078,12 @@ BUSTER_GLOBAL_LOCAL CAstSplitCase const c_ast_split_cases[] = {
      C_PARSER_TREE_FALLBACK_NONE, 0},
     {S8_INITIALIZER("typedef int T; T (x); static const T (y), (z)[2]; T (tg(int a)) { return a; } struct S { int a; } (s); struct S (s2);"),
      C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 0, 1},
-    // After a decoration the walker still reads the group as the typedef
-    // name's parameter list, so the split refuses it.
-    {S8_INITIALIZER("typedef int T; __attribute__((unused)) T (x);"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DECLARATOR, 0, 1},
+    // Decorations among the words before the typedef name leave it in the
+    // type's position, so the group is still a declarator group.
+    {S8_INITIALIZER("typedef int T; __attribute__((unused)) T (x); static __attribute__((unused)) const T (y), (z)[2]; "
+                    "__attribute__((unused)) T (tg(int a)) { return a; } __extension__ T (w);"),
+     C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 0, 1},
+    {S8_INITIALIZER("typedef int T; [[maybe_unused]] T (x); [[maybe_unused]] static T (y);"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_NONE, 0, 1},
     {S8_INITIALIZER("int * __attribute__((x)) p;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DECLARATOR},
     // The walker reads `...` only before the declarator's last `)`.
     {S8_INITIALIZER("int (gv(int a, ...)) { return a; }"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_TOKENS},
