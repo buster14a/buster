@@ -1193,16 +1193,13 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append(ObjectAssemblyBuffer* buffer, co
 {
     if (!buffer->error)
     {
-        if (count > buffer->capacity - buffer->count)
-        {
-            buffer->error = true;
-            return;
-        }
-        if (count)
+        // `count` is the logical output length even past capacity: an overrun
+        // is not an error, it only measures the exact size a retry reserves.
+        if (buffer->count <= buffer->capacity && count <= buffer->capacity - buffer->count && count)
         {
             memcpy(buffer->bytes + buffer->count, bytes, count);
-            buffer->count += count;
         }
+        buffer->count = count > UINT64_MAX - buffer->count ? UINT64_MAX : buffer->count + count;
     }
 }
 
@@ -1357,6 +1354,25 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_internal_label(ObjectAssemblyBuffe
     {
         object_assembly_append_internal_label(buffer, section, offset);
         object_assembly_append_string(buffer, S8(":\n"));
+    }
+}
+
+// A marked offset strictly inside an emitted unit never gets its `label:`
+// form because the unit is printed whole; the label is instead defined
+// relative to the location just after that unit (#3517).
+BUSTER_GLOBAL_LOCAL void object_assembly_emit_interior_internal_labels(ObjectAssemblyBuffer* buffer, u32 section, u64 unit_start,
+                                                                       u64 unit_end)
+{
+    for (u64 offset = unit_start + 1; offset < unit_end; offset += 1)
+    {
+        if (object_assembly_has_internal_label(buffer, section, offset))
+        {
+            object_assembly_append_string(buffer, S8("\t.set "));
+            object_assembly_append_internal_label(buffer, section, offset);
+            object_assembly_append_string(buffer, S8(", . - "));
+            object_assembly_append_u64_decimal(buffer, unit_end - offset);
+            object_assembly_append_string(buffer, S8("\n"));
+        }
     }
 }
 
@@ -4545,8 +4561,11 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
         object_assembly_prepare_internal_labels(buffer, object, section_index);
     }
     u64 cursor = 0;
+    u64 unit_start = 0;
     while (cursor < data.length && !buffer->error)
     {
+        object_assembly_emit_interior_internal_labels(buffer, section_index, unit_start, cursor);
+        unit_start = cursor;
         object_assembly_advance_index(buffer, object, section_index, cursor);
         ObjectRelocation* next_relocation = object_assembly_first_relocation(buffer, object, section_index, cursor, data.length);
         u64 apple_x86_start = object_assembly_apple_x86_relocation_start(next_relocation, data, cursor);
@@ -4623,6 +4642,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
         object_assembly_append_byte_range(buffer, data, cursor, boundary);
         cursor = boundary;
     }
+    object_assembly_emit_interior_internal_labels(buffer, section_index, unit_start, cursor);
     object_assembly_advance_index(buffer, object, section_index, data.length);
     object_assembly_emit_labels(buffer, object, target, section_index, data.length);
     object_assembly_emit_internal_label(buffer, section_index, data.length);
@@ -4663,14 +4683,18 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
             valid = object_aarch64_elf_got_addend_valid(relocation->kind, relocation->addend);
         }
     }
-    if (valid)
+    for (u32 attempt = 0; attempt < 2 && valid; attempt += 1)
     {
+        u64 attempt_position = arena->position;
         ObjectAssemblyBuffer buffer = {.bytes = arena_allocate(arena, char8, capacity), .capacity = capacity, .arena = arena};
         if (buffer.bytes)
         {
-            // Reserve output first, then discard every index/label allocation
-            // on either success or failure without disturbing the returned bytes.
+            // The capacity estimate is a first guess; when emission overruns
+            // it, the logical count it still produced is the exact size the
+            // one retry reserves. Discard every index/label allocation on
+            // either success or failure without disturbing the returned bytes.
             u64 output_position = arena->position;
+            valid = false;
             buffer.index = object_assembly_build_index(arena, object);
             if (object->target.cpu_arch == CPU_ARCH_X86_64)
             {
@@ -4705,8 +4729,20 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
                 object_assembly_append_string(&buffer, object->requires_executable_stack ? S8("\t.section .note.GNU-stack,\"x\",@progbits\n")
                                                                                        : S8("\t.section .note.GNU-stack,\"\",@progbits\n"));
             }
-            if (!buffer.error) result = (String8){.pointer = buffer.bytes, .length = buffer.count};
-            arena_set_position(arena, output_position);
+            if (!buffer.error && buffer.count <= buffer.capacity)
+            {
+                result = (String8){.pointer = buffer.bytes, .length = buffer.count};
+            }
+            else if (!buffer.error && !attempt && buffer.count != UINT64_MAX)
+            {
+                capacity = buffer.count;
+                valid = true;
+            }
+            arena_set_position(arena, valid ? attempt_position : output_position);
+        }
+        else
+        {
+            valid = false;
         }
     }
     return result;
@@ -10498,10 +10534,26 @@ BUSTER_GLOBAL_LOCAL ObjectArchive object_archive_read_core(Arena* arena, ByteSli
                             // Without a ranlib index, read only symbol/name
                             // metadata from each descriptor. Payload and
                             // invocation-target checks still wait for selection.
+                            // Unreadable metadata rejects the archive, naming the
+                            // member: skipping it could let a later member satisfy
+                            // a symbol the skipped one defines first (#1319).
                             for (u32 member = 0; member < result.object_count && result.error == OBJECT_ERROR_NONE; member += 1)
                             {
                                 result.objects[member] = object_archive_member_symbols(arena, result.member_bytes[member], result.objects[member].target);
                                 result.error = result.objects[member].error;
+                                String8 member_name = result.member_names[member];
+                                if (result.error != OBJECT_ERROR_NONE)
+                                {
+                                    result.failed_member = member;
+                                    if (member_name.length <= UINT64_MAX - 128 &&
+                                        object_reader_arena_can_allocate_bytes(arena, member_name.length + 128, BUSTER_ALIGN_OF(char8)))
+                                    {
+                                        String8 reason = result.error == OBJECT_ERROR_CAPACITY ? S8("symbol table exceeds reader capacity")
+                                                                                               : S8("unreadable symbol table");
+                                        result.diagnostic = string_format(arena, S8("member {S8}: {S8} in an archive without a symbol index"),
+                                                                          member_name, reason);
+                                    }
+                                }
                             }
                         }
                     }
@@ -13592,12 +13644,11 @@ BUSTER_GLOBAL_LOCAL void* object_writer_table_allocate_bytes(Arena* arena, u64 c
 
 #define object_writer_table_allocate(arena, T, count) ((T*)object_writer_table_allocate_bytes((arena), (count), sizeof(T), BUSTER_ALIGN_OF(T)))
 
-// Regular COFF reserves section numbers 0xff00 and above. Its long-name
-// references are slash plus decimal in an eight-byte field (PE/COFF section
-// table Name), so seven decimal digits is the largest reference we emit.
+// COFF long-name references are slash plus decimal in an eight-byte field
+// (PE/COFF section table Name), so seven decimal digits is the largest
+// reference we emit. OBJECT_COFF_MAX_SECTIONS is in object.h.
 enum
 {
-    OBJECT_COFF_MAX_SECTIONS = 65279,
     OBJECT_COFF_MAX_SECTION_NAME_OFFSET = 9999999,
 };
 
@@ -13617,7 +13668,7 @@ BUSTER_GLOBAL_LOCAL bool object_writer_32_capacity(ObjectFile* object, ObjectFor
         u64 relocation_reservation = coff ? OBJECT_WRITER_COFF_RELOCATION_RESERVATION : OBJECT_WRITER_MACH_RELOCATION_RESERVATION;
         u64 fixed = OBJECT_WRITER_RESERVATION_BASE + (u64)object->section_count * OBJECT_WRITER_SECTION_RESERVATION +
                     (u64)object->symbol_count * OBJECT_WRITER_SYMBOL_RESERVATION + (u64)object->relocation_count * relocation_reservation;
-        result = object->section_count <= (u32)(coff ? OBJECT_COFF_MAX_SECTIONS : UINT8_MAX) && fixed <= UINT32_MAX &&
+        result = object->section_count <= (u32)(coff ? OBJECT_COFF_MAX_SECTIONS : OBJECT_MACH_O_MAX_SECTIONS) && fixed <= UINT32_MAX &&
                  (!object->section_count || object->sections) && (!object->symbol_count || object->symbols);
     }
     u64 virtual_size = 0;
@@ -13757,11 +13808,17 @@ BUSTER_GLOBAL_LOCAL bool object_split_initializer_priorities(Arena* arena, Objec
     *split = *object;
     *moves = (ObjectInitializerSplit){0};
     u32 initializer_entries[2] = {0};
+    bool initializer_present[2] = {0};
     u32 group_count = 0;
     for (u32 slot = 0; slot < 2; slot += 1)
     {
+        // An assembled object's sections sit in declaration order, so the
+        // slot an array's kind names may hold any other section; only one of
+        // that kind is the array this renames and splits.
+        ObjectSectionKind kind = object_initializer_kinds[slot];
+        initializer_present[slot] = (u32)kind < object->section_count && object->sections[kind].kind == kind;
         u32* priorities = object->initializer_priorities[slot];
-        if (priorities && (u32)object_initializer_kinds[slot] < object->section_count)
+        if (priorities && initializer_present[slot])
         {
             initializer_entries[slot] = (u32)(object->sections[object_initializer_kinds[slot]].data.length / OBJECT_INITIALIZER_ENTRY_SIZE);
         }
@@ -13799,7 +13856,7 @@ BUSTER_GLOBAL_LOCAL bool object_split_initializer_priorities(Arena* arena, Objec
         for (u32 slot = 0; slot < 2; slot += 1)
         {
             ObjectSectionKind kind = object_initializer_kinds[slot];
-            if (rename_unprioritized && (u32)kind < object->section_count)
+            if (rename_unprioritized && initializer_present[slot])
             {
                 sections[kind].name = object_initializer_section_name(arena, format, kind, IR_INITIALIZER_PRIORITY_NONE);
             }
@@ -15616,7 +15673,7 @@ BUSTER_GLOBAL_LOCAL ObjectError object_mach_o_place_thread_variables(Arena* aren
     u32 added_symbols = variable_count + (bootstrap == UINT32_MAX);
     bool valid = !variable_count || ((u64)object->symbol_count + added_symbols <= 0x00ffffff &&
                                      (u64)object->relocation_count + 2 * (u64)variable_count <= UINT32_MAX &&
-                                     object->section_count < 255 && (u64)variable_count * OBJECT_MACH_THREAD_VARIABLE_SIZE <= UINT32_MAX);
+                                     object->section_count < OBJECT_MACH_O_MAX_SECTIONS && (u64)variable_count * OBJECT_MACH_THREAD_VARIABLE_SIZE <= UINT32_MAX);
     // Plan every allocation below, in order, before making any.
     u64 planned = arena->position;
     bool fits = !variable_count || !valid ||
@@ -15767,11 +15824,13 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
     {
         return result;
     }
-    // A section of its own name (issue 1276) is an ELF writer's alone; the
-    // COFF and Mach-O writers lay out one section per kind. A GNU IFUNC
-    // (ObjectSymbol.indirect, issue 1243) has no COFF or Mach-O form either.
-    if (format != OBJECT_FORMAT_ELF64 &&
-        (object->section_count > OBJECT_SECTION_COUNT || object->requires_executable_stack || object_symbols_have_indirect(object)))
+    // The COFF and Mach-O writers emit each section as it stands, whatever
+    // its index, so an assembled object's own sections reach them in any
+    // number; object_writer_32_capacity holds each format to its section
+    // limit. Codegen never hands them a section past OBJECT_SECTION_COUNT
+    // (object_named_section_plan refuses first). A GNU IFUNC
+    // (ObjectSymbol.indirect, issue 1243) has no COFF or Mach-O form.
+    if (format != OBJECT_FORMAT_ELF64 && (object->requires_executable_stack || object_symbols_have_indirect(object)))
     {
         result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
         return result;

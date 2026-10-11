@@ -741,3 +741,27 @@ released after validation; completed definitions reuse their source identity.
 The multidimensional constant/runtime pair pins a later array derivation that
 first materializes a member during retry, including its exact source diagnostic.
 A GNU17-only empty-record dimension pins completion without member-row growth.
+
+### Promoted-member workspace
+
+Initializer member paths keep the existing breadth-first search and generation-stamped
+visited table. The semantic machine starts with token-derived workspace capacity,
+but expression queries can append type rows beyond that estimate. A search grows
+its checked private workspace to cover the live type table before indexing it;
+scratch and phase rewinds cannot release those buffers. The next growth releases
+the previous private reservation, and semantic teardown releases the last one.
+Reservation failure produces a structured diagnostic rather than treating an intact
+record as if it lacked the requested member. The depth-16/32 later-assertion regression
+in `c_test_nested_designator_static_assert` covers this interaction in syntax-only
+validation, both frontend forms and the AST pilot; runtime controls check inferred
+array length and member values.
+
+If an omitted outer array bound remains uninferred after a failed initializer
+walk, shape validation still traverses the list through the existing unbounded-root
+mode. It publishes no synthetic bound and diagnoses unknown outer/inner member
+names instead of silently skipping the list (#3672). The same registered fixture
+checks unsized/sized invalid neighbors through direct semantics and the driver,
+with independent Linux GCC/Clang rejection controls. Workspace ownership has its
+own registered fault/recovery control: a failed replacement preserves the old
+reservation and generation, a later search recovers, and production teardown
+returns the private reservation count to its starting value.
