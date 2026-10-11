@@ -4690,51 +4690,55 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
             // one retry reserves. Discard every index/label allocation on
             // either success or failure without disturbing the returned bytes.
             u64 output_position = arena->position;
-                valid = false;
-                buffer.index = object_assembly_build_index(arena, object);
-                if (object->target.cpu_arch == CPU_ARCH_X86_64)
+            valid = false;
+            buffer.index = object_assembly_build_index(arena, object);
+            if (object->target.cpu_arch == CPU_ARCH_X86_64)
+            {
+                object_assembly_append_string(&buffer, S8("\t.intel_syntax noprefix\n"));
+            }
+            for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
+            {
+                ObjectSymbol* symbol = object->symbols + symbol_index;
+                if (symbol->section == OBJECT_SECTION_UNDEFINED)
                 {
-                    object_assembly_append_string(&buffer, S8("\t.intel_syntax noprefix\n"));
-                }
-                for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
-                {
-                    ObjectSymbol* symbol = object->symbols + symbol_index;
-                    if (symbol->section == OBJECT_SECTION_UNDEFINED)
+                    object_assembly_append_string(&buffer, symbol->weak && object_assembly_is_x86_64_elf(object->target) ? S8("\t.weak ") : S8("\t.extern "));
+                    object_assembly_append_assembly_symbol(&buffer, object->target, symbol->name);
+                    object_assembly_append_string(&buffer, S8("\n"));
+                    if (symbol->hidden && object_assembly_is_x86_64_elf(object->target))
                     {
-                        object_assembly_append_string(&buffer, symbol->weak && object_assembly_is_x86_64_elf(object->target) ? S8("\t.weak ") : S8("\t.extern "));
+                        object_assembly_append_string(&buffer, S8("\t.hidden "));
                         object_assembly_append_assembly_symbol(&buffer, object->target, symbol->name);
                         object_assembly_append_string(&buffer, S8("\n"));
-                        if (symbol->hidden && object_assembly_is_x86_64_elf(object->target))
-                        {
-                            object_assembly_append_string(&buffer, S8("\t.hidden "));
-                            object_assembly_append_assembly_symbol(&buffer, object->target, symbol->name);
-                            object_assembly_append_string(&buffer, S8("\n"));
-                        }
                     }
                 }
-                for (u32 section_index = 0; section_index < object->section_count && !buffer.error; section_index += 1)
-                {
-                    u64 section_position = arena->position;
-                    object_assembly_emit_section(&buffer, object, object->target, section_index);
-                    buffer.internal_labels = 0;
-                    buffer.internal_label_count = 0;
-                    arena_set_position(arena, section_position);
-                }
-                if (object->target.os == OPERATING_SYSTEM_LINUX || object->target.os == OPERATING_SYSTEM_ANDROID)
-                {
-                    object_assembly_append_string(&buffer, object->requires_executable_stack ? S8("\t.section .note.GNU-stack,\"x\",@progbits\n")
-                                                                                           : S8("\t.section .note.GNU-stack,\"\",@progbits\n"));
-                }
-                if (!buffer.error && buffer.count <= buffer.capacity)
-                {
-                    result = (String8){.pointer = buffer.bytes, .length = buffer.count};
-                }
-                else if (!buffer.error && !attempt && buffer.count != UINT64_MAX)
-                {
-                    capacity = buffer.count;
-                    valid = true;
-                }
-                arena_set_position(arena, valid ? attempt_position : output_position);
+            }
+            for (u32 section_index = 0; section_index < object->section_count && !buffer.error; section_index += 1)
+            {
+                u64 section_position = arena->position;
+                object_assembly_emit_section(&buffer, object, object->target, section_index);
+                buffer.internal_labels = 0;
+                buffer.internal_label_count = 0;
+                arena_set_position(arena, section_position);
+            }
+            if (object->target.os == OPERATING_SYSTEM_LINUX || object->target.os == OPERATING_SYSTEM_ANDROID)
+            {
+                object_assembly_append_string(&buffer, object->requires_executable_stack ? S8("\t.section .note.GNU-stack,\"x\",@progbits\n")
+                                                                                       : S8("\t.section .note.GNU-stack,\"\",@progbits\n"));
+            }
+            if (!buffer.error && buffer.count <= buffer.capacity)
+            {
+                result = (String8){.pointer = buffer.bytes, .length = buffer.count};
+            }
+            else if (!buffer.error && !attempt && buffer.count != UINT64_MAX)
+            {
+                capacity = buffer.count;
+                valid = true;
+            }
+            arena_set_position(arena, valid ? attempt_position : output_position);
+        }
+        else
+        {
+            valid = false;
         }
     }
     return result;
