@@ -26181,8 +26181,8 @@ BUSTER_GLOBAL_LOCAL u32 c_parse_plan_expression_end(CAst const* ast, CPreprocess
 // declarators those tokens do not confirm gets none, and is split from
 // tokens. Returns whether its specifiers hold no `auto` or `__auto_type`
 // word.
-BUSTER_GLOBAL_LOCAL bool c_parse_plan_declarators(CAst const* ast, CPreprocessResult const* preprocess, CParseStatementPlan* plan, u32 node,
-                                                  u32 terminator, u32 limit)
+BUSTER_GLOBAL_LOCAL bool c_parse_plan_declarators(CAst const* ast, CPreprocessResult const* preprocess, CParseDeclaratorHint* declarators,
+                                                  u32* declarator_count, u32 declarator_capacity, u32 node, u32 terminator, u32 limit)
 {
     u32 floor = c_ast_subtree_begin(ast, node);
     u32 count = 0;
@@ -26198,7 +26198,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_plan_declarators(CAst const* ast, CPreprocessRe
         no_auto = !(ast->kinds[cursor - 1] == C_AST_SPECIFIER_WORD &&
                     (ast->data[cursor - 1] == C_AST_WORD_AUTO || ast->data[cursor - 1] == C_AST_WORD_AUTO_TYPE));
     }
-    bool confirmed = ast->kinds[specifiers] == C_AST_DECL_SPECIFIERS && plan->declarator_count + count <= plan->declarator_capacity;
+    bool confirmed = ast->kinds[specifiers] == C_AST_DECL_SPECIFIERS && *declarator_count + count <= declarator_capacity;
     u32 declarator = node - 1;
     for (u32 slot = count; slot && confirmed; slot -= 1)
     {
@@ -26218,14 +26218,14 @@ BUSTER_GLOBAL_LOCAL bool c_parse_plan_declarators(CAst const* ast, CPreprocessRe
                 plain = (c_parse_plan_kind_class[ast->kinds[cursor]] & (C_PARSE_PLAN_PLAIN | C_PARSE_PLAN_INITIALIZER)) != 0;
             }
         }
-        plan->declarators[plan->declarator_count + slot - 1] = (CParseDeclaratorHint){
+        declarators[*declarator_count + slot - 1] = (CParseDeclaratorHint){
             .end = end,
             .assign = assign,
             .plain = plain,
         };
         declarator = c_ast_subtree_begin(ast, declarator) - 1;
     }
-    plan->declarator_count += confirmed ? count : 0;
+    *declarator_count += confirmed ? count : 0;
     return no_auto;
 }
 
@@ -26559,7 +26559,10 @@ BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseM
                     if (terminator != UINT32_MAX)
                     {
                         u32 first_declarator = plan.declarator_count;
-                        bool no_auto = c_parse_plan_declarators(ast, &preprocess, &plan, node, terminator, limit);
+                        u32 declarator_count = first_declarator;
+                        bool no_auto = c_parse_plan_declarators(ast, &preprocess, plan.declarators, &declarator_count, plan.declarator_capacity, node,
+                                                                terminator, limit);
+                        plan.declarator_count = declarator_count;
                         ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_DECLARATION, anchor, terminator, first_declarator,
                                                       plan.declarator_count - first_declarator);
                         if (ordered)

@@ -1316,6 +1316,22 @@ the two auto-inference scans per declaration 36.4 M. The budgets:
 - **Adoption of the hook as the default.** Unchanged, with acceptance on the
   Zen 5 route (#2761).
 
+The declarator hints' hosted census is
+[`2026-10-11T104257Z`](../../performance-audits/2026-10-11T104257Z.md), taken
+the same way and diagnostic only:
+- Correctness, object identity and coverage pass: 0 binding differences on
+  the corpus, the frontend sources and the self-host unity input; identical
+  `-c` objects in the four arms; 36,366 hinted declarators on the self-host,
+  none refused, and every planned declaration skips the inference scans.
+- The block-declaration split falls by 84.2 M (25%), and the whole compile by
+  63.9 M (0.69%, C against B).
+- **The default-path budget fails by 0.006 points:** D against A is +0.056%.
+  The hintless split is 2.6 M cheaper than the base's; the body walk's own
+  code is 7.9 M dearer, with identical callees and call counts. The band was
+  not widened. The walk's default-path criterion is the owner decision above
+  (work equivalence), which this change meets.
+- Acceptance stays with Zen 5 (#2761), so the default stays off.
+
 The census also found that the switch and control-statement validators'
 `c_parse_statement_end` calls cost 1.05 M in total (7,586 calls) on that input.
 Reading their ends from the tree cannot repay its own lookup, so they stay
