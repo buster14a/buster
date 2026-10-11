@@ -483,6 +483,17 @@ fixture as well as compiling both architectures.
   row has read yet (`physical_live_mask`: staged call arguments). A value
   crossing the next call moves only into a paid callee-saved register. Dead,
   rematerializable, or unplaceable occupants keep the eviction.
+- FAST/QUALITY remember the register each value was first bound to
+  (`MachineFastState.preferred_registers`). A free pick for a reload
+  (`machine_fast_ensure` with no fixed target) takes that register while it is
+  free, through the same advisory path as consumer hints: it never evicts and
+  never overrides fixed, tied, pinned, forbidden or callee-saved preferences.
+  A value reloaded on two paths then usually meets the join in one register,
+  so fewer copies repair the disagreement. On unity `ide.c` (x86-64
+  `-march=native -g0`) this removed about 4.3k FAST and 2.8k QUALITY copies
+  and 0.08% / 0.06% of `.text`. Boundary spills and reloads barely move,
+  because they come from a value missing on some path, not from disagreement
+  ([#56 census](https://github.com/buster14a/buster/issues/56#issuecomment-6108071761)).
 - A FAST/QUALITY fixed physical destination evicts its current owner without a
   store when that owner's last use is the same row and it does not escape its
   block (or that use lies below the loop floor): a dying value staged into an argument or return register is consumed
@@ -993,7 +1004,9 @@ fixture as well as compiling both architectures.
   natural alignment, and places anonymous arguments in aligned stack slots.
   Both platforms use public eight-byte pointer lists. `va_copy` copies eight
   bytes; `va_arg` selects ordinary MIR loads, alignment, cursor stores and
-  exact aggregate copies for the supported values through sixteen bytes.
+  exact aggregate copies. Values through sixteen bytes are read inline. Larger
+  indirect aggregates consume one pointer and copy the pointee; Darwin also
+  reads larger by-value HFAs/HVAs from aligned inline stack slots.
   `compiler_driver_test_aarch64_platform_variadic` requires zero fallback
   for every MIR allocator and frontend form, then executes native standalone
   and mixed-compiler callers, callees and public-list consumers on matching
