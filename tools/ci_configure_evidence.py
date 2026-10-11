@@ -80,8 +80,32 @@ def summarize_ninja_log(data: bytes) -> dict:
             "start_ms": start_ms,
             "end_ms": end_ms,
             "duration_ms": end_ms - start_ms,
+            "hash": fields[4] if len(fields) > 4 else None,
         }
-    edges = list(entries.values())
+    edges = []
+    grouped_edges = {}
+    for entry in entries.values():
+        if entry["hash"] is None:
+            edges.append({
+                "output": entry["output"],
+                "outputs": [entry["output"]],
+                "start_ms": entry["start_ms"],
+                "end_ms": entry["end_ms"],
+                "duration_ms": entry["duration_ms"],
+            })
+            continue
+        key = (entry["start_ms"], entry["end_ms"], entry["hash"])
+        grouped_edges.setdefault(key, []).append(entry["output"])
+    for (start_ms, end_ms, _), outputs in grouped_edges.items():
+        outputs.sort()
+        output = min(outputs, key=lambda value: (len(value), value))
+        edges.append({
+            "output": output,
+            "outputs": outputs,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "duration_ms": end_ms - start_ms,
+        })
     all_edges = sorted(edges, key=lambda edge: (-edge["duration_ms"], edge["output"]))
     return {
         "version": version,
@@ -227,8 +251,9 @@ def main():
                   f"edge_duration_sum_seconds={summary['edge_duration_sum_ms'] / 1000:.3f} "
                   f"malformed={summary['malformed_lines']}")
             for rank, edge in enumerate(summary["top"], 1):
+                outputs = f" outputs={len(edge['outputs'])}" if len(edge["outputs"]) > 1 else ""
                 print(f"NINJA_LOG_EDGE tree={tree} rank={rank} seconds={edge['duration_ms'] / 1000:.3f} "
-                      f"output={edge['output']}")
+                      f"output={edge['output']}{outputs}")
         result = 1 if report["errors"] else 0
     except (OSError, ValueError) as error:
         print(f"CMake evidence collection failed: {error}", file=sys.stderr)

@@ -38,9 +38,11 @@ in `combinations.log`. The manifest is diagnostic-only: it neither certifies
 successful compiler probes nor replaces the coverage/result consumers.
 Each tree's raw `.ninja_log` is retained as `<tree>/ninja_log.txt` (a nonhidden
 name kept by artifact upload), alongside `ninja-log-summary.json`. Manifest
-`retained_path` identifies each file's location in the artifact. Per-output
+`retained_path` identifies each file's location in the artifact. Per-edge
 summaries are printed as `NINJA_LOG_*` lines; this remains diagnostic-only (#2816).
-The summary reports per-output durations only: `.ninja_log` may append build,
+The summary reports per-edge durations only. Multi-output edges with the same
+start, end, and command hash are reported once, with all output paths listed.
+`.ninja_log` may append build,
 `test_all`, and analyzer invocations with independently zeroed clocks, so it
 provides no elapsed or phase timing; use [matrix phase records](ci-matrix-phases.md)
 for build-phase wall time.

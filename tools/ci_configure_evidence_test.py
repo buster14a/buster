@@ -67,8 +67,10 @@ class ConfigureEvidenceTests(unittest.TestCase):
         self.assertFalse((self.output / self.tree / ".ninja_log").exists())
         summary = {"tree": self.tree, "version": 5, "edges": 1, "malformed_lines": 0,
                    "edge_duration_sum_ms": 10,
-                   "top": [{"output": "obj.o", "start_ms": 0, "end_ms": 10, "duration_ms": 10}],
-                   "all_edges": [{"output": "obj.o", "start_ms": 0, "end_ms": 10, "duration_ms": 10}]}
+                   "top": [{"output": "obj.o", "outputs": ["obj.o"], "start_ms": 0, "end_ms": 10,
+                            "duration_ms": 10}],
+                   "all_edges": [{"output": "obj.o", "outputs": ["obj.o"], "start_ms": 0, "end_ms": 10,
+                                  "duration_ms": 10}]}
         self.assertEqual(result["ninja_logs_captured"], 1)
         self.assertEqual(result["ninja_log_summaries"], [summary])
         self.assertEqual(json.loads((self.output / self.tree / "ninja-log-summary.json").read_text()),
@@ -114,6 +116,44 @@ class ConfigureEvidenceTests(unittest.TestCase):
         link = next(edge for edge in result["all_edges"] if edge["output"] == "ide.exe")
         self.assertEqual(link["duration_ms"], 15)
 
+    def test_multi_output_ninja_edges_are_counted_once(self):
+        data = (
+            b"# ninja log v7\n"
+            b"2\t9\t8134371059249091\tc.txt\t74a94d333aafb5ff\n"
+            b"1\t1023\t8134371059249091\ta.txt\t35ac50d1984a72a1\n"
+            b"1\t1023\t8134371059249091\tC:/Users/Administrator/work/ninja-multi/b.txt\t35ac50d1984a72a1\n"
+            b"1\t1023\t8134371059249091\tother.txt\tother-hash\n"
+        )
+        result = evidence.summarize_ninja_log(data)
+        self.assertEqual(result["edges"], 3)
+        self.assertEqual(result["edge_duration_sum_ms"], 7 + 1022 + 1022)
+        self.assertEqual([edge["output"] for edge in result["all_edges"]],
+                         ["a.txt", "other.txt", "c.txt"])
+        grouped = next(edge for edge in result["all_edges"] if edge["output"] == "a.txt")
+        self.assertEqual(grouped, {
+            "output": "a.txt",
+            "outputs": ["C:/Users/Administrator/work/ninja-multi/b.txt", "a.txt"],
+            "start_ms": 1,
+            "end_ms": 1023,
+            "duration_ms": 1022,
+        })
+        unrelated = next(edge for edge in result["all_edges"] if edge["output"] == "other.txt")
+        self.assertEqual(unrelated["outputs"], ["other.txt"])
+
+    def test_hashless_ninja_lines_remain_per_output(self):
+        data = (
+            b"# ninja log v7\n"
+            b"0\t10\t8134371059249091\ta.txt\n"
+            b"0\t10\t8134371059249091\tb.txt\n"
+        )
+        result = evidence.summarize_ninja_log(data)
+        self.assertEqual(result["edges"], 2)
+        self.assertEqual(result["edge_duration_sum_ms"], 20)
+        self.assertEqual(result["all_edges"], [
+            {"output": "a.txt", "outputs": ["a.txt"], "start_ms": 0, "end_ms": 10, "duration_ms": 10},
+            {"output": "b.txt", "outputs": ["b.txt"], "start_ms": 0, "end_ms": 10, "duration_ms": 10},
+        ])
+
     def test_duplicate_outputs_keep_last_invocation_edge(self):
         data = (
             b"# ninja log v7\n"
@@ -126,7 +166,8 @@ class ConfigureEvidenceTests(unittest.TestCase):
         self.assertEqual(result["malformed_lines"], 1)
         self.assertEqual(result["edge_duration_sum_ms"], 7)
         self.assertEqual(result["all_edges"],
-                         [{"output": "a.c.obj", "start_ms": 0, "end_ms": 7, "duration_ms": 7}])
+                         [{"output": "a.c.obj", "outputs": ["a.c.obj"],
+                           "start_ms": 0, "end_ms": 7, "duration_ms": 7}])
 
     def test_summarize_empty_and_headers_only_ninja_logs(self):
         for data in (b"", b"# ninja log v6\n\n"):
@@ -152,16 +193,23 @@ class ConfigureEvidenceTests(unittest.TestCase):
         self.assertEqual(result["ninja_log_summaries"], [])
 
     def test_cli_prints_ninja_log_breakdown(self):
-        self.write(f"{self.tree}/.ninja_log", b"# ninja log v5\n0\t1500\t0\tcompile.obj\thash\n")
+        self.write(f"{self.tree}/.ninja_log",
+                   b"# ninja log v5\n"
+                   b"0\t1500\t0\tcompile.obj\thash\n"
+                   b"0\t1500\t0\tC:/build/compile.obj\thash\n"
+                   b"0\t500\t0\tlink.exe\tlink-hash\n")
         run = subprocess.run([sys.executable, evidence.__file__, "--build-root", str(self.build),
                               "--output", str(self.output)],
                              capture_output=True, text=True, check=False)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertTrue(run.stdout.startswith("CMake evidence: 1 trees, 0 configure logs, "))
-        self.assertIn(f"NINJA_LOG_SUMMARY tree={self.tree} edges=1 "
-                      "edge_duration_sum_seconds=1.500 malformed=0", run.stdout)
+        self.assertIn(f"NINJA_LOG_SUMMARY tree={self.tree} edges=2 "
+                      "edge_duration_sum_seconds=2.000 malformed=0", run.stdout)
         self.assertIn(f"NINJA_LOG_EDGE tree={self.tree} rank=1 "
-                      "seconds=1.500 output=compile.obj", run.stdout)
+                      "seconds=1.500 output=compile.obj outputs=2", run.stdout)
+        self.assertIn(f"NINJA_LOG_EDGE tree={self.tree} rank=2 "
+                      "seconds=0.500 output=link.exe", run.stdout)
+        self.assertNotIn("outputs=1", run.stdout)
         self.assertNotIn("NINJA_LOG_TAIL", run.stdout)
         self.assertNotIn("wall_seconds=", run.stdout)
         self.assertNotIn("start_seconds=", run.stdout)
