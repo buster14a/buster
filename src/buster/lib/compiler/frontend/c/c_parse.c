@@ -19913,6 +19913,23 @@ BUSTER_C_INTERNAL bool c_parse_pointer_declarator_group(CPreprocessResult prepro
                               c_token_is_punctuator(&preprocess.tokens[open + 1], C_PUNCTUATOR_LEFT_PARENTHESIS));
 }
 
+// The type words whose `(` opens their own operand: `_Atomic(int)`,
+// `_Alignas(8)` and `typeof(f(1))`. That `(` is never a declarator group or
+// parameter list, so the declaration scans skip it; otherwise
+// `_Atomic(int) (av)` reads as the redundant `(f)(...)` function shape with
+// the keyword `int` as its name (GitHub #3368).
+BUSTER_C_INTERNAL bool c_parse_parenthesized_operand_word(CPreprocessResult preprocess, CToken word)
+{
+    bool operand = false;
+    if (c_parse_type_word_for_dialect_token(preprocess, word))
+    {
+        String8 spelling = c_token_spelling(preprocess.spelling_base, word);
+        operand = string_equal(spelling, S8("_Atomic")) || string_equal(spelling, S8("_Alignas")) || string_equal(spelling, S8("typeof")) ||
+                  string_equal(spelling, S8("__typeof")) || string_equal(spelling, S8("__typeof__")) || string_equal(spelling, S8("typeof_unqual"));
+    }
+    return operand;
+}
+
 // Whether the declaration scans read the top-level `(` at `open` as a
 // declarator group, so that the name inside it is the declarator's and a
 // parameter list right after that name, `int (gd(int a))`, makes a function
@@ -19924,7 +19941,8 @@ BUSTER_C_INTERNAL bool c_parse_pointer_declarator_group(CPreprocessResult prepro
 // no parameter list does (c_parse_pointer_declarator_group); `T (x)` is read
 // as a function `T`. After any other keyword -- `_Static_assert((f(1)))` --
 // it is none, and after a `)` or `]` it is the suffix of what precedes it:
-// `(void)` in `int (*fp)(void)` is a parameter list.
+// `(void)` in `int (*fp)(void)` is a parameter list, unless that `)` closes
+// one of those words' operands.
 BUSTER_C_INTERNAL bool c_parse_declarator_group_may_open(CPreprocessResult preprocess, u32 start, u32 open, u32 end)
 {
     bool after_suffix = open > start && (c_token_is_punctuator(&preprocess.tokens[open - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
@@ -19937,13 +19955,25 @@ BUSTER_C_INTERNAL bool c_parse_declarator_group_may_open(CPreprocessResult prepr
         {
             may_open = c_parse_pointer_declarator_group(preprocess, open, end);
         }
-        else if (c_parse_type_word_for_dialect_token(preprocess, word))
+        else
         {
-            String8 spelling = c_token_spelling(preprocess.spelling_base, word);
-            may_open = !string_equal(spelling, S8("_Atomic")) && !string_equal(spelling, S8("_Alignas")) && !string_equal(spelling, S8("typeof")) &&
-                       !string_equal(spelling, S8("__typeof")) && !string_equal(spelling, S8("__typeof__")) &&
-                       !string_equal(spelling, S8("typeof_unqual"));
+            may_open = c_parse_type_word_for_dialect_token(preprocess, word) && !c_parse_parenthesized_operand_word(preprocess, word);
         }
+    }
+    // The `)` that closes such a word's operand ends a specifier, not a
+    // declarator: `_Atomic(int) (fd(int a))` opens a group (GitHub #3368).
+    if (!may_open && open > start + 1 && c_token_is_punctuator(&preprocess.tokens[open - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        u32 operand_open = open - 1;
+        u32 depth = 1;
+        while (operand_open > start && depth)
+        {
+            operand_open -= 1;
+            depth += c_token_is_punctuator(&preprocess.tokens[operand_open], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            depth -= c_token_is_punctuator(&preprocess.tokens[operand_open], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        }
+        may_open = !depth && operand_open > start && preprocess.tokens[operand_open - 1].kind == C_TOKEN_IDENTIFIER &&
+                   c_parse_parenthesized_operand_word(preprocess, preprocess.tokens[operand_open - 1]);
     }
     return may_open;
 }
@@ -29210,7 +29240,9 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
             c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
         {
             if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && !declarator.seen_equal &&
-                declarator.function_name_token == C_ID_UNDERLYING_INVALID)
+                declarator.function_name_token == C_ID_UNDERLYING_INVALID &&
+                !(index > start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
+                  c_parse_parenthesized_operand_word(preprocess, preprocess.tokens[index - 1])))
             {
                 u32 parenthesized_name_token = C_ID_UNDERLYING_INVALID;
                 bool parenthesized_function = c_parse_parenthesized_function_name(preprocess, index, end, &parenthesized_name_token);
@@ -29478,7 +29510,9 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                 if (c_punctuator_in_set((u8)punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
                 {
                     if (!delimiter_count && punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS && !seen_equal &&
-                        function_name_token == C_ID_UNDERLYING_INVALID)
+                        function_name_token == C_ID_UNDERLYING_INVALID &&
+                        !(index > start && c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
+                          c_parse_parenthesized_operand_word(preprocess, preprocess.tokens[index - 1])))
                     {
                         u32 parenthesized_name_token = C_ID_UNDERLYING_INVALID;
                         bool parenthesized_function = c_parse_parenthesized_function_name(preprocess, index, token_count, &parenthesized_name_token);
