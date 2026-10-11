@@ -786,6 +786,7 @@ BUSTER_C_EXTERN CIntegerTransformBuiltin c_semantic_integer_transform_builtin(Ta
 BUSTER_C_EXTERN u64 c_integer_transform_bits(CIntegerTransformBuiltin builtin, u64 value, u64 count);
 BUSTER_C_EXTERN u32 c_parse_constraint_expression_end(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_semantic_bfloat16_builtin_spelling(String8 name);
+BUSTER_C_EXTERN bool c_semantic_vendor_storage_half_argument(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_semantic_vendor_builtin_signature(Target target, String8 name, CVendorBuiltin* signature);
 BUSTER_C_EXTERN CTypeId c_semantic_vendor_builtin_type(CParseResult* result, Target target, CVendorBuiltinType descriptor);
 BUSTER_C_EXTERN bool c_semantic_vendor_builtin_supported(Target target, String8 name);
@@ -1364,32 +1365,36 @@ typedef enum CConstantEvaluationMode
 
 // Interned primitive and pointer rows (GitHub #3102). c_parse_primitive_type,
 // c_parse_pointer_chain and the type machine's `&` each build a fresh row for
-// every type name or address they read, and an expression's type name is
-// read once per operator-scan level and again by its leaf, so nearly all the
-// rows the per-body validation queries mint are copies. While `enabled` --
-// only inside c_parse_validate_lowering_constraints' loop over function
-// bodies -- c_parse_intern_type returns the earlier row instead. The header
-// exists only when the caller asked for it (CParserResult.type_interning,
-// which the driver sets with the tree under -fc-ast-pilot), so the default
-// path appends every row as before.
+// every type name or address they read, and an expression's type name is read
+// once per operator-scan level and again by its leaf, so nearly all the rows
+// the static-initializer and per-body validation queries mint are copies. While
+// `enabled` -- only in c_parse_validate_lowering_constraints, from the
+// static-initializer walk through the loop over function bodies --
+// c_parse_intern_type returns the earlier row instead. The header exists only
+// when the caller asked for it (CParserResult.type_interning, which the driver
+// sets with the tree under -fc-ast-pilot), so the default path appends every
+// row as before.
 //
 // The window is what keeps the copies unobservable but for the table's size.
-// Such a row is immutable, carries no tag, link, bound or alignment record,
-// and lowers to a scalar or pointer IR type that lowering interns itself; and
-// the loop runs after every declaration has its rows, so a row it interns
-// follows every row that can refer to it. Lowering maps rows in passes, in
-// table order, and a struct resolves only once the rows of its members are
-// mapped: interning a member's row would move it ahead of its struct and
-// resolve the struct a pass earlier, which reorders the IR types and so the
-// `-g` type entries. Within the window an interned row only ever replaces a
-// later copy of itself, which resolves in the same pass. The one exception
-// is a member's row: a type name inside the window may still define an
-// aggregate (`(const struct { char *p; })`, whose row the machine does not
-// find already defined), and that row precedes its members', so `suspended`
-// counts the member segments the machine is reading and nothing is interned
-// while any is. Restrict-qualified rows are never interned, because
-// c_type_parse_root_finish diagnoses an invalid `restrict` only on rows a
-// query appends.
+// Such a row is immutable, carries no tag, link, bound or alignment record, and
+// lowers to a scalar or pointer IR type that lowering interns itself; and the
+// window opens after every declaration has its rows, and nothing in it rewrites
+// a declaration's, so a row it interns follows every row that can refer to it.
+// Lowering maps rows in passes, in table order, and a struct resolves only once
+// the rows of its members are mapped: interning a member's row would move it
+// ahead of its struct and resolve the struct a pass earlier, which reorders the
+// IR types and so the `-g` type entries. Within the window an interned row only
+// ever replaces a later copy of itself, which resolves in the same pass. Every
+// aggregate a body or file-scope initializer type name defines, qualified ones
+// such as `(const struct { char *p; })` included, gets its row and its members'
+// rows from the declaration pass before the window opens;
+// c_type_parse_core_step steps over the leading qualifiers and reads that row
+// back, so no member segment is read while the window is open. `suspended` is a
+// defensive guard for the member-row order should a later change define an
+// aggregate inside the window: it counts the member segments the machine is
+// reading, and nothing is interned while any is. Restrict-qualified rows are
+// never interned, because c_type_parse_root_finish diagnoses an invalid
+// `restrict` only on rows a query appends.
 //
 // The header hangs off CAggregateLookup.type_interning, outside the
 // checkpointed CParseResult that every query copies. `rows` is an append-only
@@ -1610,6 +1615,9 @@ typedef enum CAstTypeStatus
     C_AST_TYPE_MISS,
     C_AST_TYPE_DECLINE,
     C_AST_TYPE_ANSWER,
+    // An answer that is the row a replay of the queried string literal
+    // appends; `type` is invalid until c_parse_expression_tree_query replays it.
+    C_AST_TYPE_STRING,
 } CAstTypeStatus;
 
 typedef struct CAstTypeAnswer CAstTypeAnswer;
@@ -1619,9 +1627,10 @@ struct CAstTypeAnswer
     CAstTypeStatus status;
     // The CAstKind of the node the range mapped to (answer or decline).
     u32 node_kind;
-    // [replay_start, replay_end), when not empty, is a checked cast's
-    // string-literal operand, whose typing the answer must replay exactly as
-    // the machine's operand task would (c_parse_expression_tree_query).
+    // [replay_start, replay_end), when not empty, is a string-literal token
+    // whose typing the answer must replay exactly as the machine's task would
+    // (c_parse_expression_tree_query): a checked cast's operand, or under
+    // C_AST_TYPE_STRING the queried literal itself.
     u32 replay_start;
     u32 replay_end;
     bool nonplace_projection;

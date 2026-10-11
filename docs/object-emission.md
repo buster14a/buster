@@ -195,9 +195,34 @@ skip policy. Supported DWARF payloads still pass through without DIE decoding.
 Ordinary NOTYPE/OBJECT/FUNC/SECTION/TLS symbols keep their existing mapping.
 STT_FILE records are metadata and may use SHN_ABS. Other reserved section
 definitions (including absolute/common values and extended indexes) and
-unsupported runtime symbol types, including GNU IFUNC, are refused. Calling an
-IFUNC resolver as a normal function or dropping a weak absolute definition
-would produce a successful link with different behavior. The Mach-O and COFF
+unsupported runtime symbol types are refused. Dropping a weak absolute
+definition would produce a successful link with different behavior.
+
+A GNU IFUNC (`STT_GNU_IFUNC`) defined in code is represented: the reader marks
+the symbol `indirect`, and `link_elf_indirect_functions_rebind` rewrites it
+before any writer runs, the way `ld` and `lld` give it a PLT entry and an
+`IRELATIVE` slot. The name defines a thunk that jumps through a writable slot,
+so calls, address-taken references and GOT loads all reach one canonical
+address and never the resolver. A runner calls each resolver once and fills the
+slots. In an executable it is the first `.preinit_array` entry, which a dynamic
+image publishes as `DT_PREINIT_ARRAY`, so the loader runs it after relocation
+and before every constructor; a static image's stub calls it first. A
+`-shared` object has no runner: each slot carries an `R_X86_64_IRELATIVE`, the
+last of its dynamic relocations, so ld.so fills it while relocating the library,
+before any initializer runs, including an executable's `DT_PREINIT_ARRAY`
+callbacks that call into the library. On AArch64 the runner
+passes hwcap 0, so a resolver that dispatches on hwcap selects its baseline
+implementation. An undefined IFUNC, or one outside code, stays refused, and
+the C frontend's own `ifunc` attribute is still refused by name.
+`compiler_driver_elf_ifunc_tests` checks single resolution and address identity
+against the host linker for static, dynamic, `-pie` and `-shared` images, and a
+host-linked executable whose preinit callback calls a `-shared` library's IFUNC.
+`.ctors`/`.dtors` and `.init`/`.fini` inputs stay refused: GNU ld 2.42 folds
+`.ctors` into `.init_array` in reverse but emits a null `.fini_array` slot for
+`.dtors`, and lld 18 runs neither, so no consistent oracle exists, and the
+fragments need the crti/crtn prologue Buster's entry stub does not link.
+
+The Mach-O and COFF
 readers refuse the same definitions in their own forms: an external `N_ABS` or
 `N_INDR` symbol or a Mach-O common (`N_UNDF` with a size), and an external
 `IMAGE_SYM_ABSOLUTE` symbol or a COFF common (section 0 with a size). Local

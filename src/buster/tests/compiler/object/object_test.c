@@ -1899,6 +1899,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_semantic_refusals(UnitTestArg
                 }
             }
         }
+        // GNU IFUNC (type 10) is represented only when defined in code: the
+        // reader marks it indirect and the linker rebinds it (issue 1243).
+        // Undefined or in the data section above, it stays refused.
+        ByteSlice indirect_bytes = object_test_elf_semantic_input(temporary.arena, S8(".text"), 1, 6, 10, 1, false, target.cpu_arch);
+        ObjectFile indirect = object_read(temporary.arena, indirect_bytes, target);
+        BUSTER_TEST(arguments, indirect.error == OBJECT_ERROR_NONE && indirect.symbol_count == 1 && indirect.symbols[0].indirect &&
+                                   indirect.symbols[0].kind == OBJECT_SYMBOL_FUNCTION && indirect.symbols[0].section == OBJECT_SECTION_TEXT);
+        // It round-trips through the ELF writer as type 10 and has no COFF or Mach-O form.
+        if (indirect.error == OBJECT_ERROR_NONE)
+        {
+            ObjectArtifact elf = object_write(temporary.arena, &indirect, OBJECT_FORMAT_ELF64);
+            ObjectFile again = elf.error == OBJECT_ERROR_NONE ? object_read(temporary.arena, elf.bytes, target) : (ObjectFile){.error = elf.error};
+            BUSTER_TEST(arguments, again.error == OBJECT_ERROR_NONE && again.symbol_count >= 1);
+            bool round_trip = false;
+            for (u32 index = 0; index < again.symbol_count; index += 1)
+            {
+                round_trip = round_trip || (string_equal(again.symbols[index].name, indirect.symbols[0].name) && again.symbols[index].indirect);
+            }
+            BUSTER_TEST(arguments, round_trip);
+            BUSTER_TEST(arguments, object_write(temporary.arena, &indirect, OBJECT_FORMAT_COFF).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+            BUSTER_TEST(arguments, object_write(temporary.arena, &indirect, OBJECT_FORMAT_MACH_O64).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+        }
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(reserved_indexes); index += 1)
         {
             for (u32 weak = 0; weak < 2; weak += 1)

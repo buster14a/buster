@@ -1745,15 +1745,14 @@ BUSTER_GLOBAL_LOCAL u32* machine_fast_loop_floors(Arena* arena, MachineFunction 
 
 // Whether a parameter contract may carry `value`, which the designated
 // predecessor holds dirty, into `block` alongside its parameters: a live,
-// escaping, general, immutable, unpinned value that is not itself one of the
-// block's parameters.
+// escaping, general, unpinned value that is not itself one of the block's
+// parameters.
 BUSTER_GLOBAL_LOCAL bool machine_fast_carriable(MachineFastState* state, MachineBlock const* block, u32 value)
 {
     MachineFunction* function = state->function;
     MachineVirtualRegister const* carried = function->virtual_registers + value;
     bool keep = state->escapes[value] && state->rematerialize_immediates[value] == UINT32_MAX && state->last_use[value] >= block->first_instruction &&
-                carried->register_class == MACHINE_REGISTER_CLASS_GENERAL && !(carried->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) &&
-                !(state->pinned_registers && state->pinned_registers[value] != UINT32_MAX);
+                carried->register_class == MACHINE_REGISTER_CLASS_GENERAL && !(state->pinned_registers && state->pinned_registers[value] != UINT32_MAX);
     for (u32 parameter_index = 0; keep && parameter_index < block->parameter_count; parameter_index += 1)
     {
         keep = function->block_parameters[block->parameter_offset + parameter_index].virtual_register != value;

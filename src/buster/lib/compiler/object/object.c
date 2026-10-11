@@ -6080,9 +6080,14 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 {
                     continue;
                 }
-                // NOTYPE, OBJECT, FUNC, SECTION and TLS are represented. IFUNC
-                // resolves through a resolver, never a direct call to its value.
-                if (read_ok && symbol_type != 0 && symbol_type != 1 && symbol_type != 2 && symbol_type != 3 && symbol_type != 6)
+                // NOTYPE, OBJECT, FUNC, SECTION and TLS are represented. GNU
+                // IFUNC is represented as an indirect function when it is
+                // defined in code: the linker calls its resolver and binds every
+                // reference to the result (link_elf_indirect_functions_rebind).
+                bool indirect_code = symbol_type == 10 && section_index != 0 && section_index < section_count &&
+                                     section_kinds[section_index] != UINT32_MAX &&
+                                     result.sections[section_kinds[section_index]].kind == OBJECT_SECTION_TEXT;
+                if (read_ok && symbol_type != 0 && symbol_type != 1 && symbol_type != 2 && symbol_type != 3 && symbol_type != 6 && !indirect_code)
                 {
                     result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                     if (object_reader_arena_can_allocate_bytes(arena, name.length + 128, BUSTER_ALIGN_OF(char8)))
@@ -6175,7 +6180,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     .value = symbol_value,
                     .size = size,
                     .section = section_index ? section_kinds[section_index] : OBJECT_SECTION_UNDEFINED,
-                    .kind = symbol_type == 2 || untyped_code ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
+                    .kind = symbol_type == 2 || symbol_type == 10 || untyped_code ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
                     .global = binding != 0,
                     .weak = binding == 2,
                     .thread_local_state = symbol_type == 6 || section_thread_local ? OBJECT_SYMBOL_THREAD_LOCAL_YES
@@ -6187,6 +6192,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     // but not preemptible; ObjectSymbol cannot record that, so
                     // it imports as default visibility (#1291).
                     .hidden = (other & 3) == 1 || (other & 3) == 2,
+                    .indirect = symbol_type == 10,
                 };
                 symbol_map[source_index] = result.symbol_count++;
             }
@@ -13719,7 +13725,7 @@ BUSTER_GLOBAL_LOCAL u8 object_elf64_symbol_type(ObjectSymbol const* source, bool
 {
     bool untyped = !is_defined && source->kind == OBJECT_SYMBOL_DATA && source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN;
     bool labeled = is_defined && source->untyped;
-    return is_thread_local ? 6 : labeled ? 0 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : untyped ? 0 : 1;
+    return is_thread_local ? 6 : labeled ? 0 : source->indirect ? 10 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : untyped ? 0 : 1;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_elf64_section_is_thread_local(ObjectSection const* section)
@@ -15072,6 +15078,17 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
 // Validates the object for `format` and dispatches to its writer.
 // `borrow_payloads` lets the planned ELF64 writer name large payloads in
 // place (object_write_borrowing).
+BUSTER_GLOBAL_LOCAL bool object_symbols_have_indirect(ObjectFile* object)
+{
+    u32 index = 0;
+    while (index < object->symbol_count && !object->symbols[index].indirect)
+    {
+        index += 1;
+    }
+
+    return index < object->symbol_count;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* object, ObjectFormat format, bool borrow_payloads)
 {
     ObjectArtifact result = {
@@ -15088,8 +15105,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
         return result;
     }
     // A section of its own name (issue 1276) is an ELF writer's alone; the
-    // COFF and Mach-O writers lay out one section per kind.
-    if (format != OBJECT_FORMAT_ELF64 && (object->section_count > OBJECT_SECTION_COUNT || object->requires_executable_stack))
+    // COFF and Mach-O writers lay out one section per kind. A GNU IFUNC
+    // (ObjectSymbol.indirect, issue 1243) has no COFF or Mach-O form either.
+    if (format != OBJECT_FORMAT_ELF64 &&
+        (object->section_count > OBJECT_SECTION_COUNT || object->requires_executable_stack || object_symbols_have_indirect(object)))
     {
         result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
         return result;

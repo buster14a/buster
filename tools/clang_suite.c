@@ -2,6 +2,7 @@
 // clang_suite_inventory parses the complete immutable Git source ledger;
 // clang_suite_main verifies source identity and owns fresh evidence publication.
 // clang_suite_smoke.c owns the deliberately narrow preprocessing assertions.
+// clang_suite_intrinsics.c owns the scoped stock-header intrinsic assertions.
 // Source rows are not lit/GoogleTest case discovery or execution coverage.
 
 #define BUSTER_CLANG_SUITE_COMMIT "85ac560262434c9ccfc0c183ec22d4138ed647fb"
@@ -237,6 +238,8 @@ BUSTER_GLOBAL_LOCAL String8 clang_suite_directory(Arena* arena, String8 path)
 
 #include "clang_suite_smoke.c"
 
+#include "clang_suite_intrinsics.c"
+
 #include "clang_suite_test.c"
 
 BUSTER_GLOBAL_LOCAL ProcessResult clang_suite_main(Arena* arena, SliceString8 arguments)
@@ -244,7 +247,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult clang_suite_main(Arena* arena, SliceString8 ar
     bool self_test = arguments.length == 1 && string_equal(arguments.pointer[0], S8("--self-test"));
     bool smoke = arguments.length == 5 && string_equal(arguments.pointer[0], S8("--smoke"));
     bool inventory_only = arguments.length == 3 && string_equal(arguments.pointer[0], S8("--inventory"));
-    bool valid = self_test || smoke || inventory_only;
+    bool intrinsics = arguments.length == 5 && string_equal(arguments.pointer[0], S8("--intrinsics"));
+    bool valid = self_test || smoke || inventory_only || intrinsics;
     if (self_test)
     {
         valid = clang_suite_self_test(arena);
@@ -301,11 +305,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult clang_suite_main(Arena* arena, SliceString8 ar
                 string_print(S8("error: Clang suite source ledger is malformed or differs from its complete pinned census\n"));
             }
         }
-        if (valid && smoke)
+        if (valid && (smoke || intrinsics))
         {
             String8 ide = os_path_absolute_lexical(arena, arguments.pointer[3], true);
             String8 clang = os_path_absolute_lexical(arena, arguments.pointer[4], true);
-            valid = ide.length && clang.length && clang_suite_smoke(arena, checkout, results, ide, clang);
+            valid = ide.length && clang.length;
+            if (valid)
+            {
+                valid = intrinsics ? clang_suite_intrinsics(arena, checkout, results, ide, clang)
+                                   : clang_suite_smoke(arena, checkout, results, ide, clang);
+            }
         }
         if (claimed)
         {
@@ -313,16 +322,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult clang_suite_main(Arena* arena, SliceString8 ar
             valid = unchanged && valid;
             String8 receipt = string_format(arena, S8("BUSTER_CLANG_SUITE_RECEIPT_V1\nversion={S8}\ncommit={S8}\n"
                                                      "source_files={u64}\nsource_manifest_sha256={S8}\nraw_git_inventory_sha256={S8}\n"
-                                                     "source_ledger_executed=0\nsmoke_requested={u32}\ncheckout_status_clean={u32}\nstatus={S8}\n"),
+                                                     "source_ledger_executed=0\nsmoke_requested={u32}\nintrinsics_requested={u32}\ncheckout_status_clean={u32}\nstatus={S8}\n"),
                                             S8(BUSTER_CLANG_SUITE_VERSION), S8(BUSTER_CLANG_SUITE_COMMIT), inventory.files,
                                             stage_object_sha256_bytes(arena, (u8*)inventory.manifest.pointer, inventory.manifest.length), raw_digest,
-                                            (u32)smoke, (u32)unchanged, valid ? S8("pass") : S8("fail"));
+                                            (u32)smoke, (u32)intrinsics, (u32)unchanged, valid ? S8("pass") : S8("fail"));
             valid = clang_suite_write(arena, path_join(arena, results, S8("receipt.txt")), receipt) && valid;
         }
     }
     else
     {
-        string_print(S8("usage: test_clang_suite --self-test | --inventory CHECKOUT FRESH_RESULTS | --smoke CHECKOUT FRESH_RESULTS ABSOLUTE_IDE ABSOLUTE_CLANG\n"));
+        string_print(S8("usage: test_clang_suite --self-test | --inventory CHECKOUT FRESH_RESULTS | --smoke CHECKOUT FRESH_RESULTS ABSOLUTE_IDE ABSOLUTE_CLANG | --intrinsics CHECKOUT FRESH_RESULTS ABSOLUTE_IDE ABSOLUTE_CLANG\n"));
     }
     ProcessResult result = valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
     return result;
