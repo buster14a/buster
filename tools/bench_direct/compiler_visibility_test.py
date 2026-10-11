@@ -27,7 +27,7 @@ import compiler_comment  # noqa: E402
 import compiler_github  # noqa: E402
 import compiler_publish  # noqa: E402
 import compiler_receipt  # noqa: E402
-from compiler_test import BINARIES, EXPECTED, archive, corpus, receipt, summary  # noqa: E402
+from compiler_test import BINARIES, EXPECTED, archive, corpus, machine_bytes, receipt, summary  # noqa: E402
 
 REPO = "buster14a/buster"
 HEAD, TRUSTED, PARENT, OLDER = "a" * 40, "9" * 40, "b" * 40, "c" * 40
@@ -650,11 +650,14 @@ class RecoveryTest(unittest.TestCase):
 
 
 class PublishTest(unittest.TestCase):
-    def test_publisher_completes_the_started_check_and_emits_the_entry(self) -> None:
+    def publish(self, record: bytes | None) -> tuple[RecoveryApi, dict, dict]:
+        """(api, started check, job outputs) after one main-mode publication of a valid receipt."""
         api = RecoveryApi()
         api.checks = []
         started = api.add_check(HEAD, marker(request="91", attempt="1"), status="in_progress")
-        api.payload = archive({"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary()), **corpus_members()})
+        machine = {} if record is None else {compiler_publish.MACHINE_RECORD: record}
+        api.payload = archive({"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary()),
+                               **corpus_members(), **machine})
         listing = {"artifacts": [{"id": 8, "name": f"buster-9700x-compiler-{HEAD}-1", "expired": False,
                                   "size_in_bytes": 100, "archive_download_url": "https://api.invalid/zip",
                                   "expires_at": "2027-01-04T00:00:00Z"}]}
@@ -686,6 +689,10 @@ class PublishTest(unittest.TestCase):
                     mock.patch("sys.stdout", new_callable=io.StringIO):
                 self.assertEqual(compiler_publish.main(), 0)
             written = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        return api, started, written
+
+    def test_publisher_completes_the_started_check_and_emits_the_entry(self) -> None:
+        api, started, written = self.publish(machine_bytes())
         self.assertEqual(len(api.checks), 1)
         self.assertEqual((started["status"], started["conclusion"]), ("completed", "success"))
         self.assertIn("[Evidence artifact]", started["output"]["summary"])
@@ -694,6 +701,15 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(published["check_url"], started["html_url"])
         self.assertEqual(compiler_comment.validate_entry(published, REPO), [])
         self.assertIn(f"`{'b' * 40}` (first parent)", published["markdown"])
+        self.assertIn('"cpu_vendor": "unknown (not exposed', started["output"]["text"])
+
+    def test_publisher_refuses_a_missing_or_stale_machine_record(self) -> None:
+        stale = machine_bytes(run_id={"value": "90", "status": "available", "reason": ""})
+        for record, reason in ((None, "is missing from the evidence artifact"), (stale, "run_id '90' is not")):
+            with self.subTest(reason=reason):
+                started = self.publish(record)[1]
+                self.assertEqual((started["status"], started["conclusion"]), ("completed", "failure"))
+                self.assertIn(reason, started["output"]["summary"])
 
 
 if __name__ == "__main__":

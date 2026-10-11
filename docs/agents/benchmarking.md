@@ -535,7 +535,20 @@ captures (#2741).
   `build.c`, `uarch_lab.py`, `ide`, `tools/` and the workflows, and fails on an
   unregistered or stale one. Each published 9700X compiler receipt must name
   the observed CPU, the Ryzen 7 9700X; a runner label, target flag or other
-  host is refused. The direct workload harness reads the same observed CPU
+  host is refused. The `compare` and `compare-pull` jobs also keep their #2758
+  startup record (`machine-specifications/report.json`, through the pinned
+  action's `mode: retain`) in the evidence artifact they already upload, and
+  `compiler_publish.machine_record` fails publication when that record is
+  missing or malformed, when a required fact (schema, run, attempt, job, CPU
+  model, architecture) is not `available`, when it names another CPU or
+  architecture than the 9700X's x86-64, when its model differs from the
+  receipt's observed CPU, or when its run, attempt or job is not the attempt
+  being published. Optional facts keep the collector's own `unknown` or
+  `unavailable` status in the published check and are never filled in. Only
+  publication-only recovery of an attempt from before the record was retained
+  may lack it. The record is collected by the same job, so it corroborates the
+  receipt rather than proving the host independently. The direct workload
+  harness, which uploads no artifact, reads the same observed CPU
   model, prints it in its report, and on any other host compiles and runs
   nothing and fails. The inventory test also refuses a `covered` row whose
   evidence consumer never checks the observed host against `APPROVED_HOST`.
