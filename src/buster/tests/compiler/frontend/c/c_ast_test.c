@@ -2466,6 +2466,14 @@ BUSTER_GLOBAL_LOCAL CAstCorpusConstruct const c_ast_corpus_constructs[] = {
      C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("typedef int (__attribute__((x)) TF)(int); TF tf; typedef int (__attribute__((x)) TA)[2]; TA ta; void (*(__attribute__((x)) hf))(void);"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("struct S5 { int a, __attribute__((x)) b __attribute__((y)); int c : 2, __attribute__((x)) d : 3 __attribute__((y)); int (__attribute__((x)) m)[2]; };"), C_PREPROCESS_DIALECT_GNU17},
+    // #3368: a single redundant group after a typedef or tag name, in the
+    // type's position after storage and qualifier words, in a list, around
+    // a function whose list sits inside it, and in a typedef.
+    {S8_INITIALIZER("typedef int T; T (x); static const T (y) = 2, (z)[2]; T (tg(int a)) { return a; } typedef T (U); U (u), (uf(U a)); extern T (tf(void));"),
+     C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("struct S { int a; }; struct S (s2), (*s3); struct P { int a; }; struct P (pg(void)) { struct P r = {0}; return r; } union W { int a; }; "
+                    "union W (w); enum E { E0 }; enum E (e); const struct S (cs);"),
+     C_PREPROCESS_DIALECT_GNU17},
     // Body _Static_assert notes (c_parse_ast_from_tree): noted when the
     // walker's brace frames reach the assertion as a block or member item,
     // not behind a label, `case`, statement expression, type name or a
@@ -3987,9 +3995,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
 
 // c_parse_ast_from_tree on one shape per fallback reason, and on shapes it
 // publishes itself, in every layout: the result is always c_parse_ast's, and
-// the statistics name the reason. The #3215 shapes are among the published
-// ones; a redundant group after a tag or typedef name is not, because the
-// walker still reads it as that name's parameter list.
+// the statistics name the reason. The #3215 and #3368 shapes are among the
+// published ones; a redundant group after a decorated typedef name is not,
+// because the walker still reads it as that name's parameter list.
 typedef struct CAstSplitCase CAstSplitCase;
 struct CAstSplitCase
 {
@@ -4032,10 +4040,15 @@ BUSTER_GLOBAL_LOCAL CAstSplitCase const c_ast_split_cases[] = {
     {S8_INITIALIZER("int f(int x) { return x + 1; } int ((*pq))(int) = f;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 0},
     {S8_INITIALIZER("int (gd(int a)) { return a; } int zz;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 0},
     {S8_INITIALIZER("int (x); int ((y))[3]; void ((h))(void) {}"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 0},
-    // After a tag or typedef name the walker reads a redundant group that
-    // does not open on `*` or `(` as that name's parameter list (#3368).
+    // #3368: a single redundant group after a tag or typedef name, published
+    // since the walker reads it as a declarator group.
     {S8_INITIALIZER("struct P { int a; }; struct P (pg(void)) { struct P r = {0}; return r; }"), C_PREPROCESS_DIALECT_GNU17,
-     C_PARSER_TREE_FALLBACK_DECLARATOR},
+     C_PARSER_TREE_FALLBACK_NONE, 0},
+    {S8_INITIALIZER("typedef int T; T (x); static const T (y), (z)[2]; T (tg(int a)) { return a; } struct S { int a; } (s); struct S (s2);"),
+     C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 0, 1},
+    // After a decoration the walker still reads the group as the typedef
+    // name's parameter list, so the split refuses it.
+    {S8_INITIALIZER("typedef int T; __attribute__((unused)) T (x);"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DECLARATOR, 0, 1},
     {S8_INITIALIZER("int * __attribute__((x)) p;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DECLARATOR},
     // The walker reads `...` only before the declarator's last `)`.
     {S8_INITIALIZER("int (gv(int a, ...)) { return a; }"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_TOKENS},

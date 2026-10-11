@@ -19878,6 +19878,44 @@ BUSTER_C_INTERNAL bool c_parse_declarator_group_may_open(CPreprocessResult prepr
     return may_open;
 }
 
+// The two places where the non-keyword identifier before the `(` at `open`
+// names a type, so the `(` opens a declarator group rather than that word's
+// parameter list (GitHub #3368). c_parse_declarator_group_may_open cannot see
+// either one, because it has no binding state.
+// A tag is lexical: `struct S (s)` writes `struct`, `union` or `enum` right
+// before the name.
+BUSTER_C_INTERNAL bool c_parse_tag_name_before_group(CPreprocessResult preprocess, u32 start, u32 open)
+{
+    bool tag = open >= start + 2 && preprocess.tokens[open - 1].kind == C_TOKEN_IDENTIFIER &&
+               !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[open - 1]);
+    if (tag)
+    {
+        CToken word = preprocess.tokens[open - 2];
+        tag = c_token_is_well_known(preprocess.spelling_base, word, C_SYMBOL_WELL_KNOWN_STRUCT) ||
+              c_token_is_well_known(preprocess.spelling_base, word, C_SYMBOL_WELL_KNOWN_UNION) ||
+              c_token_is_well_known(preprocess.spelling_base, word, C_SYMBOL_WELL_KNOWN_ENUM);
+    }
+    return tag;
+}
+
+// A typedef name needs binding state, which the caller supplies; this is the
+// position where one can stand as the type: the first word of [start, open),
+// or after storage-class, function-specifier and qualifier words only. After
+// a type word, `int T(x)`, the identifier is the declarator's name. A
+// decoration before it (`__attribute__((x)) T (y)`) ends the walk, and the
+// group stays that word's parameter list as before.
+BUSTER_C_INTERNAL bool c_parse_typedef_name_position(CPreprocessResult preprocess, u32 start, u32 open)
+{
+    u32 index = open > start ? open - 1 : start;
+    CType ignored = {0};
+    while (index > start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
+           c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[index - 1], &ignored))
+    {
+        index -= 1;
+    }
+    return open > start && index == start;
+}
+
 BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end)
 {
     u32 first_bound = result->array_bound_count;
@@ -28692,6 +28730,74 @@ BUSTER_C_INTERNAL bool c_parser_parameter_list_is_variadic(CPreprocessResult pre
     return delimiter_count == 1 && top_level_parenthesis && c_token_is_punctuator(&preprocess.tokens[close_index - 1], C_PUNCTUATOR_ELLIPSIS);
 }
 
+// The file-scope typedef names c_parse_ast_run has recorded so far, as an
+// open-addressed set of name token indices plus one. At file scope a typedef
+// name cannot be redeclared as anything else, so a name in the set is a type
+// for the rest of the unit; block-scope typedefs never reach these scans.
+// The scans ask it only in c_parse_typedef_name_position's position, so most
+// declarations pay one insert per typedef and no lookup (GitHub #3368).
+typedef struct CParserTypedefNames CParserTypedefNames;
+struct CParserTypedefNames
+{
+    u32* slots;
+    u32 capacity;
+    u32 count;
+};
+
+#define C_PARSER_TYPEDEF_NAMES_MINIMUM_CAPACITY 64u
+
+BUSTER_C_INTERNAL bool c_parser_same_name(CPreprocessResult preprocess, CToken left, CToken right)
+{
+    return left.symbol && right.symbol ? left.symbol == right.symbol
+                                       : string_equal(c_token_spelling(preprocess.spelling_base, left), c_token_spelling(preprocess.spelling_base, right));
+}
+
+BUSTER_C_INTERNAL u32 c_parser_typedef_name_slot(CPreprocessResult preprocess, u32 const* slots, u32 capacity, u32 token)
+{
+    CToken name = preprocess.tokens[token];
+    u32 slot = (u32)c_parse_name_hash(name.symbol, c_token_spelling(preprocess.spelling_base, name)) & (capacity - 1);
+    while (slots[slot] && !c_parser_same_name(preprocess, preprocess.tokens[slots[slot] - 1], name))
+    {
+        slot = (slot + 1) & (capacity - 1);
+    }
+    return slot;
+}
+
+BUSTER_C_INTERNAL bool c_parser_typedef_names_contains(CPreprocessResult preprocess, CParserTypedefNames const* names, u32 token)
+{
+    return names && names->count && names->slots[c_parser_typedef_name_slot(preprocess, names->slots, names->capacity, token)] != 0;
+}
+
+BUSTER_C_INTERNAL void c_parser_typedef_names_add(Arena* arena, CPreprocessResult preprocess, CParserTypedefNames* names, u32 token)
+{
+    if ((names->count + 1) * 2 > names->capacity)
+    {
+        u32 capacity = names->capacity ? names->capacity * 2 : C_PARSER_TYPEDEF_NAMES_MINIMUM_CAPACITY;
+        u32* slots = arena_allocate_zeroed(arena, u32, capacity);
+        for (u32 index = 0; index < names->capacity; index += 1)
+        {
+            if (names->slots[index])
+            {
+                slots[c_parser_typedef_name_slot(preprocess, slots, capacity, names->slots[index] - 1)] = names->slots[index];
+            }
+        }
+        names->slots = slots;
+        names->capacity = capacity;
+    }
+    u32 slot = c_parser_typedef_name_slot(preprocess, names->slots, names->capacity, token);
+    names->count += names->slots[slot] == 0;
+    names->slots[slot] = names->slots[slot] ? names->slots[slot] : token + 1;
+}
+
+// Whether the non-keyword identifier before the `(` at `open` names a type:
+// a tag, or a recorded typedef name standing where the type may.
+BUSTER_C_INTERNAL bool c_parser_type_name_before_group(CPreprocessResult preprocess, CParserTypedefNames const* typedef_names, u32 start, u32 open)
+{
+    return c_parse_tag_name_before_group(preprocess, start, open) ||
+           (typedef_names && typedef_names->count && c_parse_typedef_name_position(preprocess, start, open) &&
+            c_parser_typedef_names_contains(preprocess, typedef_names, open - 1));
+}
+
 // One declarator of a file-scope comma-separated list. `start`/`count` cover
 // the segment between two top-level separators; for the first declarator that
 // range still carries the declaration specifiers, which is why the name scan
@@ -28705,7 +28811,7 @@ struct CParserDeclarator
     bool is_variadic;
 };
 
-BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult preprocess, u32 start, u32 end)
+BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult preprocess, CParserTypedefNames const* typedef_names, u32 start, u32 end)
 {
     CParserDeclarator declarator = {
         .name_token = C_ID_UNDERLYING_INVALID,
@@ -28749,10 +28855,14 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
                 bool pointer_group = c_parse_pointer_declarator_group(preprocess, index, end);
                 bool ordinary_function = !pointer_group && index > start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
                                          !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[index - 1]);
+                // After a typedef or tag name the group is a declarator
+                // group, `T (x)` and `struct S (s)` (GitHub #3368).
+                bool type_name = ordinary_function && c_parser_type_name_before_group(preprocess, typedef_names, start, index);
+                ordinary_function &= !type_name;
                 // `int (gd(int a))` holds the name's own list inside the
                 // group; after a name candidate, `f(T (a))` is f's list.
                 parenthesized_function = parenthesized_function ||
-                                         (!ordinary_function && c_parse_declarator_group_may_open(preprocess, start, index, end) &&
+                                         (!ordinary_function && (type_name || c_parse_declarator_group_may_open(preprocess, start, index, end)) &&
                                           c_parse_parenthesized_declarator_is_function(preprocess, index, end, &parenthesized_name_token));
                 if (parenthesized_function)
                 {
@@ -28773,7 +28883,7 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
                     declarator.function_name_token = index - 1;
                     declarator.name_token = declarator.function_name_token;
                 }
-                else if ((declarator.name_token == C_ID_UNDERLYING_INVALID || pointer_group ||
+                else if ((declarator.name_token == C_ID_UNDERLYING_INVALID || pointer_group || type_name ||
                           c_parse_declarator_group_may_open(preprocess, start, index, end)) &&
                          c_parse_parenthesized_declarator_name(preprocess, index, end, &parenthesized_name_token))
                 {
@@ -28877,8 +28987,8 @@ BUSTER_C_INTERNAL bool c_parser_identifier_list_contains(CPreprocessResult prepr
 // One semicolon-terminated declaration-list row, with the semicolon excluded.
 // It is only a syntax disambiguator; the semantic pass uses the ordinary
 // block-declaration parser for the actual types and constraints.
-BUSTER_C_INTERNAL bool c_parser_old_style_parameter_declaration(CPreprocessResult preprocess, u32 identifier_start,
-                                                                  u32 identifier_end, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_parser_old_style_parameter_declaration(CPreprocessResult preprocess, CParserTypedefNames const* typedef_names,
+                                                                  u32 identifier_start, u32 identifier_end, u32 start, u32 end)
 {
     if (start >= end)
     {
@@ -28888,7 +28998,7 @@ BUSTER_C_INTERNAL bool c_parser_old_style_parameter_declaration(CPreprocessResul
     while (segment_start < end)
     {
         u32 segment_end = c_parser_declarator_list_segment_end(preprocess, segment_start, end);
-        CParserDeclarator declarator = c_parser_scan_declarator(preprocess, segment_start, segment_end);
+        CParserDeclarator declarator = c_parser_scan_declarator(preprocess, typedef_names, segment_start, segment_end);
         if (declarator.seen_equal || declarator.name_token == C_ID_UNDERLYING_INVALID ||
             !c_parser_identifier_list_contains(preprocess, identifier_start, identifier_end, declarator.name_token))
         {
@@ -28920,6 +29030,7 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
         result.number_facts = c_number_facts_build(arena, &preprocess);
         u32* delimiter_stack = arena_allocate(arena, u32, token_count + 1);
         CParserBodyFrames body_frames = {0};
+        CParserTypedefNames typedef_names = {0};
         u32 index = 0;
         u32 validated_specifier_end = 0;
         while (index < token_count && c_preprocess_token_shape_at(token_shapes, &preprocess, index) != C_TOKEN_END_OF_FILE)
@@ -29016,12 +29127,17 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                         bool ordinary_function = !pointer_group && index > start &&
                                                   c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
                                                   !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[index - 1]);
+                        // After a typedef or tag name the group is a
+                        // declarator group, `T (x)` and `struct S (s)`
+                        // (GitHub #3368).
+                        bool type_name = ordinary_function && c_parser_type_name_before_group(preprocess, &typedef_names, start, index);
+                        ordinary_function &= !type_name;
                         // `int (gd(int a))` holds the name's own list inside
                         // the group; after a name candidate, `f(T (a))` is
                         // f's list (GitHub #3215).
                         parenthesized_function =
                             parenthesized_function ||
-                            (!ordinary_function && c_parse_declarator_group_may_open(preprocess, start, index, token_count) &&
+                            (!ordinary_function && (type_name || c_parse_declarator_group_may_open(preprocess, start, index, token_count)) &&
                              c_parse_parenthesized_declarator_is_function(preprocess, index, token_count, &parenthesized_name_token));
                         if (parenthesized_function)
                         {
@@ -29038,7 +29154,7 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                             name_token = function_name_token;
                             parameter_list_open = index;
                         }
-                        else if ((name_token == C_ID_UNDERLYING_INVALID || pointer_group ||
+                        else if ((name_token == C_ID_UNDERLYING_INVALID || pointer_group || type_name ||
                                   (!seen_declarator_comma && c_parse_declarator_group_may_open(preprocess, start, index, token_count))) &&
                                  c_parse_parenthesized_declarator_name(preprocess, index, token_count, &parenthesized_name_token))
                         {
@@ -29143,7 +29259,7 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                 {
                     if (identifier_list_candidate && parameter_list_close != C_ID_UNDERLYING_INVALID &&
                         old_style_declaration_cursor < index &&
-                        c_parser_old_style_parameter_declaration(preprocess, identifier_list_start,
+                        c_parser_old_style_parameter_declaration(preprocess, &typedef_names, identifier_list_start,
                                                                  identifier_list_start + identifier_list_token_count,
                                                                  old_style_declaration_cursor, index))
                     {
@@ -29227,7 +29343,7 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                 };
                 if (split_declarators)
                 {
-                    CParserDeclarator declarator = c_parser_scan_declarator(preprocess, segment_start, segment_end);
+                    CParserDeclarator declarator = c_parser_scan_declarator(preprocess, &typedef_names, segment_start, segment_end);
                     declaration->name_token = declarator.name_token;
                     declaration->function_name_token = declarator.function_name_token;
                     declaration->seen_equal = declarator.seen_equal;
@@ -29239,6 +29355,10 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                     declaration->is_definition = declaration->kind == C_PARSER_DECLARATION_OBJECT && declarator.seen_equal;
                 }
                 c_parser_parse_declaration_expression(preprocess, declaration);
+                if (declaration->kind == C_PARSER_DECLARATION_TYPEDEF && declaration->name_token != C_ID_UNDERLYING_INVALID)
+                {
+                    c_parser_typedef_names_add(arena, preprocess, &typedef_names, declaration->name_token);
+                }
                 if (declaration->kind == C_PARSER_DECLARATION_FUNCTION && body_token_count)
                 {
                     c_parser_parse_function_body(arena, preprocess, declaration, &body_frames);
@@ -29314,7 +29434,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
 //   over a superset of the tokens it validates;
 // - its heuristics would read a shape differently from the grammar, or the
 //   rules here do not state what they read (CParserTreeFallback): redundant
-//   parentheses after a typedef or tag name, attributes inside a declarator, a parenthesized
+//   parentheses after a decorated typedef name, attributes inside a declarator, a parenthesized
 //   specifier, an old-style declaration list, a comma operator where the
 //   walker splits on commas, or a token next to an anchor that is not the
 //   one the shape requires.
@@ -29445,12 +29565,13 @@ struct CParserTreeDeclarator
 // the token run before the name counts the `(` and `*` actually written.
 // More `(` than boundaries is a redundant group, which the walker reads the
 // same way (c_parse_parenthesized_declarator_is_function walks out through
-// it, GitHub #3215), except after a typedef or tag name, where the walker
-// reads the group as that name's parameter list; that shape is refused.
+// it, GitHub #3215). After a typedef or tag name the walker reads a group
+// only where c_parser_type_name_before_group does (GitHub #3368); a group
+// it reads as that name's parameter list instead is refused.
 // Fewer `*` than pointers (an attribute list in the run)
 // refuses the shape, as do attributes on a pointer or opening a group, and a
 // function returning an array or a function.
-BUSTER_C_INTERNAL bool c_parser_tree_declarator(CParserTreeSplit* split, u32 root, u32 lower, CParserTreeDeclarator* declarator)
+BUSTER_C_INTERNAL bool c_parser_tree_declarator(CParserTreeSplit* split, u32 root, u32 lower, u32 typedef_name, CParserTreeDeclarator* declarator)
 {
     CAst const* ast = split->ast;
     CPreprocessResult const* preprocess = &split->preprocess;
@@ -29533,11 +29654,15 @@ BUSTER_C_INTERNAL bool c_parser_tree_declarator(CParserTreeSplit* split, u32 roo
             }
         }
         // A redundant group the walker does not read as a group is refused
-        // (c_parse_declarator_group_may_open): after a typedef or tag name,
-        // `T (x)` and `T (gd(int a))` name a function `T` there.
+        // (c_parse_declarator_group_may_open). After a tag or typedef name
+        // the walker reads one where c_parser_type_name_before_group does:
+        // after `struct S`, or after a typedef name in the type's position.
+        // Elsewhere, `__attribute__((a)) T (x)`, it names a function `T`.
         bool redundant = opens > boundaries;
         bool misread = redundant && c_parser_tree_punctuator_at(preprocess, index, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-                       !c_parse_declarator_group_may_open(*preprocess, lower, index, (u32)preprocess->token_count);
+                       !c_parse_declarator_group_may_open(*preprocess, lower, index, (u32)preprocess->token_count) &&
+                       !c_parse_tag_name_before_group(*preprocess, lower, index) &&
+                       !(index > lower && index - 1 == typedef_name && c_parse_typedef_name_position(*preprocess, lower, index));
         shaped = opens >= boundaries && stars == pointers && !misread && (!function || redundant || ast->tokens[first_derivation] == name + 1);
         *declarator = (CParserTreeDeclarator){
             .name = name,
@@ -29725,6 +29850,11 @@ struct CParserTreeSpecifiers
     // The last name the walker reads outside every delimiter: a typedef
     // name, a tag, or a word the dialect does not reserve.
     u32 last_name;
+    // The TYPEDEF_NAME the grammar reads as the type, else
+    // C_ID_UNDERLYING_INVALID. The walker binds the same file-scope name, so
+    // a redundant group after it is a declarator group on both sides
+    // (c_parser_type_name_before_group, GitHub #3368).
+    u32 typedef_name;
     // c_parse_type_only_declaration's shape, before the `;`: decorations and
     // the prefix words it skips, one struct, union or enum specifier, then
     // decorations.
@@ -29748,7 +29878,7 @@ BUSTER_C_INTERNAL bool c_parser_tree_specifiers(CParserTreeSplit* split, u32 spe
     bool shaped = true;
     bool after_aggregate = true;
     bool type_only = true;
-    *out = (CParserTreeSpecifiers){.last_name = C_ID_UNDERLYING_INVALID};
+    *out = (CParserTreeSpecifiers){.last_name = C_ID_UNDERLYING_INVALID, .typedef_name = C_ID_UNDERLYING_INVALID};
     while (shaped && item > begin)
     {
         item -= 1;
@@ -29779,6 +29909,7 @@ BUSTER_C_INTERNAL bool c_parser_tree_specifiers(CParserTreeSplit* split, u32 spe
             }
         }
         out->last_name = out->last_name == C_ID_UNDERLYING_INVALID ? name : out->last_name;
+        out->typedef_name = kind == C_AST_TYPEDEF_NAME ? token : out->typedef_name;
         out->typedef_word |= kind == C_AST_SPECIFIER_WORD && ast->data[item] == C_AST_WORD_TYPEDEF;
         out->constexpr_word |= kind == C_AST_SPECIFIER_WORD && ast->data[item] == C_AST_WORD_CONSTEXPR &&
                                c_preprocess_dialect_is_c23(preprocess->dialect);
@@ -29885,7 +30016,7 @@ BUSTER_C_INTERNAL bool c_parser_tree_declaration(CParserTreeSplit* split, u32 no
         for (u32 index = 0; shaped && index < count; index += 1)
         {
             parts[index] = c_parser_tree_init_declarator(ast, children[index + 1]);
-            shaped = c_parser_tree_declarator(split, parts[index].declarator, start, &declarators[index]);
+            shaped = c_parser_tree_declarator(split, parts[index].declarator, start, specifiers.typedef_name, &declarators[index]);
             segment_starts[index] = index == 0                                          ? start
                                     : parts[index].leading != C_ID_UNDERLYING_INVALID ? parts[index].leading
                                                                                        : declarators[index].first;
@@ -29980,7 +30111,7 @@ BUSTER_C_INTERNAL bool c_parser_tree_definition(CParserTreeSplit* split, u32 nod
     CParserTreeSpecifiers specifiers = {0};
     CParserTreeDeclarator declarator = {0};
     bool shaped = (c_ast_list_count(ast, node) == 0 || c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_OLD_STYLE, start)) &&
-                  c_parser_tree_specifiers(split, specifiers_root, &specifiers) && c_parser_tree_declarator(split, declarator_root, start, &declarator) &&
+                  c_parser_tree_specifiers(split, specifiers_root, &specifiers) && c_parser_tree_declarator(split, declarator_root, start, specifiers.typedef_name, &declarator) &&
                   ((declarator.function && c_parser_tree_punctuator_at(preprocess, end - 1, C_PUNCTUATOR_RIGHT_BRACE)) ||
                    c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_TOKENS, brace)) &&
                   c_parser_tree_declarator_end(split, &declarator, brace);
