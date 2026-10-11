@@ -147,7 +147,10 @@ in both frontend forms.
   builtin calls and separately declared vector aliases can produce distinct
   semantic rows with the same byte width and lane type. The conditional retains
   their vector type; different widths or lane types and vector/scalar
-  pairs remain incompatible. `c_test_simd_conditional_types` checks semantic-only
+  pairs remain incompatible. The strict IR operand query resolves builtin SIMD
+  result shapes before conditional prediction, so a load call contributes its
+  vector result rather than the pointer argument found by the identifier fallback.
+  `c_test_simd_conditional_types` checks semantic-only
   acceptance and canonical lowering for load/load, load/masked-load and alias
   operands, with rejection controls. `c_test_simd_conditional_header` compiles the
   production header for Zen 5 in syntax-only and object modes, then runs native

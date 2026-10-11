@@ -23642,8 +23642,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_simd_conditional_types(UnitTestArgumen
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                 CPreprocessResult tokens = c_preprocess(temporary.arena, sources[source_index],
                     (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
-                CParseResult parsed = c_parse(temporary.arena, tokens);
-                BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult parsed = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0);
                 if (source_index == 0)
                 {
                     BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
@@ -23683,8 +23684,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_simd_conditional_header(UnitTestArgume
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             String8 output = buster_test_temporary_unique_path(temporary.arena, S8("simd-conditional-header"), S8(".o"));
             String8 command[] = {S8("-Isrc"), S8("-std=gnu17"), S8("-target"), S8("x86_64-unknown-linux"),
-                S8("-march=znver5"), frontends[form], actions[action], S8("-fverify-codegen"), S8("-o"), output, path};
-            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                S8("-march=znver5"), frontends[form], actions[action], S8("-o"), output, path, S8("-fverify-codegen")};
+            SliceString8 command_line = (SliceString8)BUSTER_ARRAY_TO_SLICE(command);
+            if (action == 0)
+            {
+                command_line.length -= 1;
+            }
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, command_line);
             invocation.reject_machine_fallback = true;
             CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
             BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
