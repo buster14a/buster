@@ -663,8 +663,13 @@ shifted ADD, writeback or post-index addressing, `@PAGE` off
 Mach-O, or an instruction the relocation cannot patch (LDUR, LDP) is a structured
 diagnostic naming the combination. Out-of-range pages and misaligned scaled offsets
 are link-time checks (`object_aarch64_elf_page_relocate` and the PE/Mach-O
-equivalents), as with any assembler. GOT, TLS and codegen-PIC expansion stay with
-their own owners and remain refused here. Numeric `:lo12:` expressions on ELF and COFF
+equivalents), as with any assembler. On ELF, `adrp Xd, :got:sym` and
+`ldr Xt, [Xn, :got_lo12:sym]` are also accepted (#3192), spelling
+`R_AARCH64_ADR_GOT_PAGE` and `R_AARCH64_LD64_GOT_LO12_NC` with an exactly zero
+addend; `:got:` on any other instruction, `:got_lo12:` on anything but a plain
+64-bit `ldr [base, offset]`, and either modifier on Mach-O or COFF are
+diagnosed. TLS and codegen-PIC expansion stay with their own owners and
+remain refused here. Numeric `:lo12:` expressions on ELF and COFF
 are absolute nonnegative immediates without a symbol or relocation. ADD accepts
 0 through 4095; load/store offsets must be aligned and fit the encoded 12-bit
 scaled field, so their byte offset may exceed 4095. Negative, misaligned and
@@ -891,8 +896,8 @@ destinations are the same register, are operand diagnostics, as in llvm-mc.
 Not in this vocabulary, and still refused unless another owner accepts them:
 
 - relocated operands other than the page-address forms documented with the unit
-  vocabulary (GOT, TLS and `:got_lo12:`-style modifiers; the control owner
-  handles label LDR);
+  vocabulary (TLS and further GOT-style modifiers; the control owner handles
+  label LDR, and ELF `:got:`/`:got_lo12:` are documented above);
 - CASP, LDAPR (RCPC), LDTR/STTR, CRC32 and pointer authentication;
 - AdvSIMD forms beyond the list above that the direct SIMD owner does not
   cover, such as by-element arithmetic (`fmla v0.4s, v1.4s, v2.s[0]`) and
@@ -1243,9 +1248,35 @@ define those names are selected; libgcc.a is not otherwise added to the link,
 so the libgcc_s helper policy above is unchanged. Links without such a
 reference, including weak ones, do not read or name libgcc.a. A missing
 archive, or one that does not define the name, fails the link with the archive
-and symbol named, before replacing the output. AArch64 (`__aarch64_cpu_features`,
-`__init_cpu_features_resolver`, outline atomics) and non-Linux targets remain
-out of scope.
+and symbol named, before replacing the output.
+
+The same policy covers AArch64 Linux (GitHub #3508), with a target-keyed name
+set and GCC triple list (`aarch64-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`aarch64-redhat-linux`, `aarch64-suse-linux`); the x86-64 names and triples
+are unchanged. Every AArch64 name below is a hidden definition that only the
+static `libgcc.a` provides; `libgcc_s.so.1` exports none of them, so they
+belong here rather than in the libgcc_s helper policy:
+
+- GCC 10+ and Clang default to `-moutline-atomics`, so `__atomic_*` builtins
+  call `__aarch64_<op><bytes>_<order>` helpers: `cas` (1, 2, 4, 8 and 16
+  bytes) and `swp`, `ldadd`, `ldclr`, `ldeor`, `ldset` (1, 2, 4 and 8 bytes),
+  each with `relax`, `acq`, `rel`, `acq_rel` or `sync`
+  (`compiler_driver_elf_outline_atomic_symbol`). Each helper member references
+  `__aarch64_have_lse_atomics`, so `lse-init.o` and its `.init_array` LSE
+  probe are selected with it.
+- GCC 14+ and compiler-rt FMV resolvers use `__aarch64_cpu_features`,
+  `__init_cpu_features_resolver` and `__init_cpu_features` (`cpuinfo.o`, with
+  its own constructor). GCC 13 and older `libgcc.a` has no `cpuinfo.o`, so such
+  a link fails with the archive and symbol named, as the host link does.
+- `__builtin___clear_cache` calls `__aarch64_sync_cache_range`
+  (`sync-cache.o`).
+
+The selected members reference `getauxval` or `__getauxval`, which bind to
+glibc like any other import. `compiler_driver_elf_aarch64_cpu_runtime_tests`
+checks these links against the host link on AArch64 Linux hosts.
+`compiler_driver_elf_aarch64_cpu_runtime_selection_tests` covers selection,
+refusal, and per-target keying from any Linux host. SME runtime entry points,
+Android, and non-Linux targets remain out of scope.
 
 `compiler_driver_elf_dynamic_symbols` walks that table once and produces two
 things.

@@ -6774,6 +6774,53 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_symbolic_pages(U
     return result;
 }
 
+// The issue #3192 repro: a standalone ELF unit's `adrp Xd, :got:sym` and
+// `ldr Xt, [Xn, :got_lo12:sym]` reach the object as R_AARCH64_ADR_GOT_PAGE
+// and R_AARCH64_LD64_GOT_LO12_NC with a zero addend, and read back the same.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_got_operands(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("got-operands"), S8(".s"));
+    String8 output = buster_test_temporary_path(arena, S8("got-operands"), S8(".o"));
+    String8 source = S8(".text\n.globl f\nf:\nadrp x0, :got:ext_data\nldr x0, [x0, :got_lo12:ext_data]\nret\n");
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 command[] = {S8("-target"), S8("aarch64-unknown-linux"), S8("-c"), input, S8("-o"), output};
+        CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        ObjectRelocationKind const kinds[] = {OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21, OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12};
+        BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object &&
+            assembled.object.relocation_count == BUSTER_ARRAY_LENGTH(kinds), assembled.diagnostic);
+        if (assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object &&
+            assembled.object.relocation_count == BUSTER_ARRAY_LENGTH(kinds))
+        {
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(kinds); index += 1)
+            {
+                ObjectRelocation relocation = assembled.object.relocations[index];
+                BUSTER_TEST_RAW(arguments, relocation.kind == kinds[index] && relocation.offset == 4 * index && relocation.addend == 0 &&
+                    relocation.symbol < assembled.object.symbol_count &&
+                    string_equal(assembled.object.symbols[relocation.symbol].name, S8("ext_data")), source);
+            }
+            ObjectFile reread = object_read(arena, file_read(arena, output, (FileReadOptions){0}), assembled.object.target);
+            BUSTER_TEST(arguments, reread.error == OBJECT_ERROR_NONE && reread.relocation_count == BUSTER_ARRAY_LENGTH(kinds));
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(kinds) && reread.relocation_count == BUSTER_ARRAY_LENGTH(kinds); index += 1)
+            {
+                BUSTER_TEST(arguments, reread.relocations[index].kind == kinds[index] && reread.relocations[index].offset == 4 * index);
+            }
+        }
+        os_file_delete(input);
+        os_file_delete(output);
+    }
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // Exercise the complete native-language boundary, then drive a nonstandard-
 // suffix assembly unit through parsing, assembly, object serialization and
 // object reading. This reaches the native target resolver, unlike an
@@ -24389,6 +24436,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_pic_outputs(Unit
                 BUSTER_TEST(arguments, text.pointer && string_first_sequence(printed, S8("adrp x0, :got:pic_ext_value")) != BUSTER_STRING_NO_MATCH);
                 BUSTER_TEST(arguments, string_first_sequence(printed, S8(":got_lo12:pic_ext_value")) != BUSTER_STRING_NO_MATCH);
                 BUSTER_TEST(arguments, string_first_sequence(printed, S8("add x0, x0, :lo12:pic_static_value")) != BUSTER_STRING_NO_MATCH);
+                // The printed unit is itself accepted (#3192): its GOT lines
+                // assemble back to the same relocation pair.
+                String8 printed_input = buster_test_temporary_path(arena, S8("buster-aarch64-pic-printed"), S8(".s"));
+                String8 printed_output = buster_test_temporary_path(arena, S8("buster-aarch64-pic-reassembled"), S8(".o"));
+                if (text.pointer && file_write(printed_input, text))
+                {
+                    String8 reassemble[] = {S8("-target"), S8("aarch64-linux"), S8("-c"), printed_input, S8("-o"), printed_output};
+                    CompilerDriverResult reassembled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(reassemble)));
+                    BUSTER_TEST_RAW(arguments, reassembled.error == COMPILER_DRIVER_ERROR_NONE && reassembled.has_object,
+                                    reassembled.diagnostic);
+                    u32 pages = compiler_driver_test_symbol_relocations(&reassembled.object, S8("pic_ext_value"),
+                                                                        OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21);
+                    u32 loads = compiler_driver_test_symbol_relocations(&reassembled.object, S8("pic_ext_value"),
+                                                                        OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12);
+                    BUSTER_TEST_RAW(arguments, pages != 0 && pages == loads, printed);
+                }
+                (void)os_file_delete(printed_input);
+                (void)os_file_delete(printed_output);
             }
             (void)os_file_delete(output);
             scratch_end(scope);
@@ -30807,6 +30873,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_constant_short_circuit_verification);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembler_language);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_symbolic_pages);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_got_operands);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bare_dwarf_sections);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_statements);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_quoted_assembly_round_trip);
