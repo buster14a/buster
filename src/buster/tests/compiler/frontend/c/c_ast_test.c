@@ -2434,6 +2434,9 @@ BUSTER_GLOBAL_LOCAL CAstCorpusConstruct const c_ast_corpus_constructs[] = {
     {S8_INITIALIZER("int g3(void) { struct L { int a; } l; { int x = ({ 1; }); (void)x; } switch (0) { case 1: break; } return l.a; } int after3;"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("[[maybe_unused]] int attr1; int attr2 [[maybe_unused]]; [[nodiscard]] int attr3(void); [[maybe_unused]]; [[deprecated]] struct SA { int a; };"), C_PREPROCESS_DIALECT_C23},
     {S8_INITIALIZER("typeof(int) tx; __typeof__(tx) ty, *tz; typeof_unqual(tx) tu; __auto_type au = 1;"), C_PREPROCESS_DIALECT_GNU23},
+    // #3493: typeof's comma operand at file scope and in a body.
+    {S8_INITIALIZER("int *p; __typeof__(0, p) q; int f(int a, int b, int c) { __typeof__(a ? b : c, p) r = p; return *r + *q; }"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int *p; typeof_unqual(1, p) u; int g(void) { typeof(0, p) v = u; return *v; }"), C_PREPROCESS_DIALECT_C23},
     {S8_INITIALIZER("constexpr int ce = 1; constexpr int cf = 2, cg = 3; static constexpr double cd = 1.5; auto ai = 1; bool bb = true;"), C_PREPROCESS_DIALECT_C23},
     {S8_INITIALIZER("__extension__ int ex; __extension__ struct SX { int a; }; __extension__ typedef int ET; __extension__ int exf(void) { return 0; }"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("int f(int a, int b) { return a ? b : -b; } int (*pf)(int, int) = f, (*pg)(int, int) = f; int af[] = {1, 2, 3}, ag = 4;"), C_PREPROCESS_DIALECT_GNU17},
