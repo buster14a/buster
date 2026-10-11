@@ -210,6 +210,10 @@ struct CompilerDriverInvocation
     String8* linker_arguments;
     String8* gpu_arguments;
     String8 output_path;
+    // -MF writes the depfile here; otherwise it is derived from the object path.
+    String8 dependency_path;
+    // Ordered, space-joined -MT/-MQ targets; empty uses an -MQ-quoted object path.
+    String8 dependency_targets;
     String8 entry_symbol;
     String8 sysroot;
     // Source text of the `-` input. A parsed command line names it with the
@@ -285,6 +289,11 @@ struct CompilerDriverInvocation
     CompilerDriverError error;
     AssemblySyntax assembly_syntax;
     bool emit_llvm_bitcode;
+    // -MD/-MMD enable depfile emission; the last one selects system filtering.
+    bool dependency_file;
+    bool dependency_exclude_system;
+    // -MP emits phony rules for header prerequisites.
+    bool dependency_phony_targets;
     bool verbose;
     // -w: the driver publishes no warning text or warning records.
     bool suppress_warnings;

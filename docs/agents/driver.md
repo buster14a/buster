@@ -1275,6 +1275,16 @@ syntax-only and assembly/prebuilt-only input routes retain their behavior.
 Mach-O and COFF keep their existing target models; Wasm/eBPF compatibility
 behavior is unchanged. LLVM-bitcode and direct backend model requests remain
 an audit residual of issue #1289.
+On x86-64 Android every executable link is a PIE, with or without `-pie`
+(`-no-pie` cannot select another image there): the kernel places bionic's
+executable at a load bias, so a fixed-address image marked `ET_DYN` would run
+its preinit entries, IFUNC runner and every data pointer unrelocated. The same
+writer names `/system/bin/linker64` and `libc.so`, and its entry stub does not
+register RDX as a loader finalizer, because bionic's `linker64` leaves RDX
+unspecified at the entry point. `-shared` stays refused for Android, and
+Android AArch64 still stages a fixed-address image. `android/runtime_order.sh`
+executes an x86-64 image on the CI emulator (see the Android CI notes in
+[testing.md](testing.md)).
 On any other target a link that asks for either image is refused as an
 unsupported option, while a compile-only invocation ignores the link option,
 as GCC does.
@@ -1287,8 +1297,8 @@ value are argument errors, and a GPU target ignores the option. The bit
 reaches `st_other` on ELF only; Mach-O and COFF objects do not record it.
 
 The default fixed-address dynamic executable
-(`link_native_executable_elf64_x86_64_dynamic`, which the AArch64 and Android
-dynamic writers also build on) is hardened the way GNU ld's default is
+(`link_native_executable_elf64_x86_64_dynamic`, which the AArch64 Linux and
+Android dynamic writers also build on) is hardened the way GNU ld's default is
 (#2720). It has three loads: R (headers, `.interp`, `.dynstr`/`.dynsym`/
 `.hash`/version tables, `.rela.plt`/`.rela.dyn`, `.rodata`, `.eh_frame_hdr`,
 `.eh_frame`), R+X (the entry stub, `.text`, `.plt`) and RW. The RW load starts
@@ -1521,9 +1531,31 @@ switches, runtime paths, version scripts, and other `-z` modes are refused.
 
 `-Wp,` and `-Wa,` are unsupported and are never warning options. This includes
 preprocessor macro/include operations and dependency requests. Direct `-D`,
-`-U`, and `-I` remain available; dependency generation (`-M`, `-MM`, `-MD`,
-`-MMD`, `-MF`, `-MT`, `-MP`) is refused in every spelling. A failed request
-preserves any existing artifact instead of reporting a successful stale build.
+`-U`, and `-I` remain available; `-Wp,-M*` stays refused. The driver supports
+the bounded `-MD`/`-MMD` dependency-file contract described below; standalone
+`-M`, `-MM`, and `-MG` remain unsupported.
+
+## Dependency files
+
+`-MD` and `-MMD` write a Make-compatible depfile for C `-c` output. The default
+depfile path comes from the object path by removing only the basename's last
+extension and appending `.d`; `-MF` overrides it. `-MT` adds a raw target,
+`-MQ` adds an escaped target, and the default target is the escaped object path.
+Multiple target options retain command-line order. `-MP` adds phony rules for
+header prerequisites. `-MF`, `-MT`, `-MQ`, and `-MP` require `-MD` or `-MMD`;
+explicit `-MF`/target options cannot be used with multiple inputs.
+
+Prerequisites come from resolved preprocessor include identities, in
+first-inclusion order; the main source comes first unless compiling stdin.
+Repeated identities appear once, builtin headers and `<command-line>` do not
+appear, and forced includes follow the main source. `-MMD` excludes headers
+found in system include paths and all headers included from a system header.
+Makefile-special spaces, tabs, dollar signs, and `#` characters are escaped.
+Paths containing a newline or carriage return cannot be represented and fail
+with a file-write diagnostic.
+The depfile is atomically published only after successful compilation and
+object publication, so a failed compile preserves existing object and depfile
+contents.
 
 ## Warning options
 
@@ -1592,6 +1624,12 @@ ordinary compilation focused on time to an artifact: it avoids constructing
 source debug models and their larger object payloads unless requested.
 `-g` selects DWARF 4 for native ELF/Mach-O targets and CodeView for Windows
 objects. Unwind information remains independent of source debug information.
+
+A linked Windows image's PDB (`pdb_build`) gives its TPI stream a hash stream:
+one `hashTypeRecord` bucket per record modulo `0x3ffff` (`pdb_type_record_hash`)
+and a sparse type-index offset entry per 8 KiB of records. DbgHelp (cdb,
+WinDbg, `symchk`, `dbh`) faults with `0xc0000005` loading a PDB whose TPI
+stream names no hash stream (#3411). The regression is `pdb_test_tpi_hashes`.
 
 With `-g`, named scalar locals that need more than one defining instruction to
 describe stay in distinct frame slots, so their location lists follow stores
@@ -1674,6 +1712,18 @@ aborts with an arena validation failure from 230,000 (#3254). The mobile
 builds of the driver fixture use smaller counts to keep their deadlines. A reservation that cannot be carved
 is a positioned `initializer working storage exceeds the scratch reservation`
 or `initializer nesting exceeds its capacity` diagnostic and a failed result.
+
+Automatic aggregate initializers lower through the nested compound-literal
+machine, which zero-fills each brace-enclosed element before storing its
+members. Its scratch is per element and released with it: the zero-value task
+stack grows with the widest path through the type (`c_ir_emit_zero_value`),
+the cursor stack follows the type's nesting depth, and the unit-lifetime query
+stack gets its own mapping when it would leave lowering less than half of the
+thread scratch. `c_test_ir_local_table_zero_scratch` lowers a 20,000-entry
+local table that previously exhausted the scratch (#2527); generating machine
+code for a function that large still aborts in the fast register allocator
+(#3413). A task stack that cannot grow is the diagnostic
+`aggregate zero-initializer exceeds the lowering scratch reservation`.
 
 ## ELF TLS companion lookup
 
