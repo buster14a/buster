@@ -111,7 +111,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_packet_fixture_expected(Arena* arena,
            "\"identity\":{S8},\"binaries\":{{"
            "\"baseline\":{{\"sha256\":\"{S8}\",\"revision\":\"{S8}\",\"size_bytes\":{S8}}},"
            "\"candidate\":{{\"sha256\":\"{S8}\",\"revision\":\"{S8}\",\"size_bytes\":{S8}}}}},"
-           "\"workload_config\":{{\"command\":\"IDE cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o OUT\","
+           "\"workload_config\":{{\"command\":\"IDE cc -march=native -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o OUT\","
            "\"repo_root\":{S8},\"perf\":\"perf\",\"extra\":[],\"extra_by_variant\":{{\"a\":[],\"b\":[]}}}},"
            "\"attempts\":[{{\"phase\":\"acquire\",\"packet\":0,\"run_id\":\"999\",\"run_attempt\":\"1\",\"state\":\"complete\","
            "\"reservation_seconds\":1800,\"actions_job_occupancy_us\":3000000,\"campaign\":\"{S8}\",\"freeze_revision\":\"{S8}\"}},"
