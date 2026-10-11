@@ -147,8 +147,14 @@ BUSTER_GLOBAL_LOCAL bool userspace_workload(Arena* arena, String8 program_path, 
             os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(device.error));
         }
     }
+    String8 chroot = executable_resolve_in_path(arena, S8("chroot"));
+    valid = chroot.length && valid;
+    if (!chroot.length)
+    {
+        string_print(S8("error: userspace requires the external chroot executable in PATH\n"));
+    }
     String8 run_args[] = {S8("env"), S8("-i"), S8("PATH=/bin"), S8("LC_ALL=C"), S8("TZ=UTC"),
-                          S8("/usr/sbin/chroot"), root, S8("/bin/busybox"), S8("ash"), S8("/workload.sh")};
+                          chroot, root, S8("/bin/busybox"), S8("ash"), S8("/workload.sh")};
     ClangSuiteCommand ran = {.result = PROCESS_RESULT_FAILED};
     if (valid)
     {
