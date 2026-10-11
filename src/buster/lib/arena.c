@@ -9,6 +9,10 @@
 BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 
 BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(256);
+// Huge-page advice covers a reservation only above this prefix. Every arena's
+// header already dirties its first extent, so a huge page there is pure RSS
+// overhead; the measured win is in the sparse touches beyond it (#1585).
+BUSTER_GLOBAL_LOCAL u64 arena_huge_page_exempt_size = BUSTER_MB(2);
 BUSTER_GLOBAL_LOCAL u64 initial_size_granularity_factor = 4;
 BUSTER_GLOBAL_LOCAL void arena_set_position_unchecked(Arena* arena, u64 position);
 
@@ -581,6 +585,18 @@ Arena* arena_create(ArenaCreation original_creation)
 
         if (result)
         {
+            // Give `madvise`-policy hosts the huge pages an `always` host
+            // already supplies; the advice is advisory everywhere (#1585).
+            // Arenas reused from the pool carry their original advice.
+            if (individual_reserved_size > arena_huge_page_exempt_size)
+            {
+                for (u64 i = 0; i < count; i += 1)
+                {
+                    u8* arena_base = result + individual_reserved_size * i;
+                    os_advise_huge_pages(arena_base + arena_huge_page_exempt_size,
+                                         individual_reserved_size - arena_huge_page_exempt_size);
+                }
+            }
             for (u64 i = 0; i < count; i += 1)
             {
                 Arena* arena = (Arena*)(result + (individual_reserved_size * i));

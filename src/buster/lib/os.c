@@ -756,6 +756,22 @@ bool os_decommit(void* address, u64 size)
     return result;
 }
 
+// Best-effort transparent-huge-page advice on a reserved range. On Linux,
+// madvise(MADV_HUGEPAGE) asks khugepaged and fault-time allocation to back
+// the range with 2 MiB pages under the `madvise` host policy, and is already
+// satisfied under `always`; a kernel that rejects the advice leaves a plain
+// base-page mapping, which is a refusal and never a reservation failure.
+// Other targets expose no equivalent request, so the call is a no-op there.
+void os_advise_huge_pages(void* address, u64 size)
+{
+#if defined(__linux__)
+    (void)madvise(address, size, MADV_HUGEPAGE);
+#else
+    BUSTER_UNUSED(address);
+    BUSTER_UNUSED(size);
+#endif
+}
+
 void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map)
 {
     void* address = 0;
