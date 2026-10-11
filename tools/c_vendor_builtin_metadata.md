@@ -28,6 +28,11 @@ python3 tools/generate_c_vendor_builtins.py --check
 python3 tools/generate_c_vendor_builtins.py --describe __builtin_ia32_sha256rnds2
 ```
 
+The required `Workflow lint` job in `.github/workflows/ci.yml` runs both
+commands on every pull request and merge group that changes code, so hand
+edits to the generated files fail CI (#3392). Change the `.in` templates and
+regenerate instead.
+
 Omit `--check` to regenerate both source files. `--output-dir` can direct
 regeneration to a review directory. The generator uses the Python standard
 library only.
