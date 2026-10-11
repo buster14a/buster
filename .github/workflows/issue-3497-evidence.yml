@@ -1,26 +1,61 @@
-name: Issue 3497 profile extraction
+name: Issue 3497 exact witness proof
 on:
   push:
     branches:
       - codex/3497-nested-tag-evidence
 permissions:
-  actions: read
   contents: read
 jobs:
-  profile:
+  proof:
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
-      - name: Download exact failed-proof profiles
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - name: Checkout evidence orchestration
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          name: issue-3497-proof
-          run-id: 38179844969
-          github-token: ${{ github.token }}
-          path: profiles
-      - name: Install diagnostic reader
+          path: evidence
+          persist-credentials: false
+      - name: Checkout unchanged baseline
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 674bc77660c8c588c815c21fcc9e148f83094de1
+          path: baseline
+          persist-credentials: false
+      - name: Checkout exact repair source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 868ae5e708eeb7eee277f9dc17fe59f71aabed51
+          path: candidate
+          persist-credentials: false
+      - name: Install diagnostic counter
         run: sudo apt-get install -y valgrind
-      - name: Print candidate self costs
-        run: callgrind_annotate --auto=no --threshold=95 --inclusive=no profiles/callgrind-c1-p0-d2000.out
-      - name: Print candidate inclusive costs
-        run: callgrind_annotate --auto=no --threshold=90 --inclusive=yes --tree=both profiles/callgrind-c1-p0-d2000.out
+      - name: Build matching tests-off diagnostic baseline
+        working-directory: baseline
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/driver-baseline"
+          "$RUNNER_TEMP/driver-baseline" generate --cc clang --config Release --no-include-tests --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF -DBUSTER_NATIVE_TARGET=x86-64-v3
+          "$RUNNER_TEMP/driver-baseline" build --config Release -t ide
+      - name: Build matching tests-off diagnostic candidate
+        working-directory: candidate
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/driver-candidate"
+          "$RUNNER_TEMP/driver-candidate" generate --cc clang --config Release --no-include-tests --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF -DBUSTER_NATIVE_TARGET=x86-64-v3
+          "$RUNNER_TEMP/driver-candidate" build --config Release -t ide
+      - name: Exact issue declaration witness and separate layout/object control
+        run: |
+          sha256sum baseline/build/Release/ide candidate/build/Release/ide
+          clang -std=c11 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char evidence/tools/issue3497_evidence.c -o "$RUNNER_TEMP/issue3497-proof"
+          "$RUNNER_TEMP/issue3497-proof" "$GITHUB_WORKSPACE/baseline/build/Release/ide" "$GITHUB_WORKSPACE/candidate/build/Release/ide"
+      - name: Print actual candidate witness self costs
+        if: always()
+        run: callgrind_annotate --auto=no --threshold=95 --inclusive=no proof-3497/callgrind-c1-p0-d2000.out
+      - name: Retain proof and diagnostic binaries
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-3497-exact-witness-proof
+          path: |
+            proof-3497
+            baseline/build/Release/ide
+            candidate/build/Release/ide
+          if-no-files-found: warn

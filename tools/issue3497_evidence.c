@@ -69,15 +69,23 @@ int main(int argc, char** argv)
     uint64_t counts[2][2][2] = {{{0}}};
     for (unsigned sample = 0; !result && sample < 2; sample += 1)
     {
-        char source[256];
+        char source[256], query_source[256];
         snprintf(source, sizeof(source), "proof-3497/tag-%u.c", depths[sample]);
-        FILE* input = fopen(source, "wb");
-        if (!input) { result = 1; break; }
-        for (unsigned level = 0; level < depths[sample]; level += 1) { fprintf(input, "struct Tag%u {\n", level); }
-        fputs("int value;\n", input);
-        for (unsigned level = depths[sample]; level > 1; level -= 1) { fprintf(input, "} member%u;\n", level - 1); }
-        fputs("};\n_Static_assert(sizeof(struct Tag0)==sizeof(int), \"layout\");\nint nested_tag_value(void){return sizeof(struct Tag0);}\n", input);
-        result |= fclose(input) != 0;
+        snprintf(query_source, sizeof(query_source), "proof-3497/tag-query-%u.c", depths[sample]);
+        for (unsigned output = 0; output < 2; output += 1)
+        {
+            FILE* input = fopen(output ? query_source : source, "wb");
+            if (!input) { result = 1; break; }
+            for (unsigned level = 0; level < depths[sample]; level += 1) { fprintf(input, "struct S%u {\n", level); }
+            fputs("int x;\n", input);
+            for (unsigned level = depths[sample]; level > 1; level -= 1) { fprintf(input, "} m%u;\n", level - 1); }
+            fputs("} m0;\n", input);
+            if (output)
+            {
+                fputs("_Static_assert(sizeof(struct S0)==sizeof(int), \"layout\");\nint nested_tag_value(void){return sizeof(struct S0);}\n", input);
+            }
+            result |= fclose(input) != 0;
+        }
         for (unsigned compiler = 0; compiler < 2; compiler += 1)
         {
             for (unsigned pilot = 0; pilot < 2; pilot += 1)
@@ -102,7 +110,7 @@ int main(int argc, char** argv)
                     snprintf(output, sizeof(output), "proof-3497/c%u-p%u-g%u-d%u.o", compiler, pilot, debug, depths[sample]);
                     snprintf(object_log, sizeof(object_log), "proof-3497/object-c%u-p%u-g%u-d%u.log", compiler, pilot, debug, depths[sample]);
                     char* emit[18] = {argv[1 + compiler], "cc", "-nostdinc", "-target", "x86_64-unknown-linux",
-                                      "-march=znver5", "-c", debug ? "-g" : "-g0", "-o", output, source, 0};
+                                      "-march=znver5", "-c", debug ? "-g" : "-g0", "-o", output, query_source, 0};
                     if (pilot) { emit[11] = "-fc-ast-pilot"; emit[12] = 0; }
                     result |= run(emit, object_log) != 0;
                 }
