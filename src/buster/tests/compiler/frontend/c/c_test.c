@@ -38748,13 +38748,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_type_prediction(UnitTestAr
     return result;
 }
 
-// A `typeof` operand that opens with a cast to a `typeof` type and goes on
-// with an operator that may also be binary: `(typeof (object)) + 1` is a cast
-// of `+1`, not a sum whose left operand is a type name.  The operator scan
-// recognized a cast prefix only through the machineless base-type reader,
-// which has no `typeof`, so it split at the `+` and the declaration it typed
-// declared nothing.  The neighbours at the end resolved before and must keep
-// resolving.
 // First-party GNU17/GNU23 witnesses: typeof's operand is not the outer
 // cast's type-word grammar. Conjunction and sizeof/alignof neighbors still
 // resolve the next name as an ordinary identifier, even when it is a label.
@@ -38906,6 +38899,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_label_address(UnitTestArguments
     return result;
 }
 
+// A `typeof` operand that opens with a cast to a `typeof` type and goes on
+// with an operator that may also be binary: `(typeof (object)) + 1` is a cast
+// of `+1`, not a sum whose left operand is a type name.  The operator scan
+// recognized a cast prefix only through the machineless base-type reader,
+// which has no `typeof`, so it split at the `+` and the declaration it typed
+// declared nothing.  The neighbours at the end resolved before and must keep
+// resolving.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_cast_prefix_operator(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
