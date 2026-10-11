@@ -1284,7 +1284,9 @@ they must not be fed to the historical two-group observer as accepted evidence.
 
 `BUSTER_TEST_UNIT_SCHEDULE=pair` retains the earlier primary/rest runner;
 the existing unit-partition experiment explicitly selects it. Empty or
-`modules` selects the new scheduler, and unknown values fail. The native
+`modules` selects the new scheduler, and unknown values fail. An unset schedule
+under `BUSTER_CI_CHECKS_EVIDENCE` retains `pair` for the existing qualification
+receipt schema; an explicit schedule still takes precedence. The native
 `test_units_partitioned --self-test` covers both paths, including actual
 synthetic module processes; the selector's harness controls add no registered
 modules, fixtures or assertions. Hosted wall-time improvements still require

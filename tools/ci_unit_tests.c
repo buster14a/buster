@@ -6,10 +6,8 @@
 // BUSTER_TEST_UNIT_SCHEDULE=pair retains the old controlled experiment; its
 // ci_unit_pair merges stable primary/rest results. A
 // serial bootstrap or a quota below four retains the ordinary full invocation.
-// Each group needs at least two workers to retain OS multi-lane assertions.
-// ci_unit_source_revision uses a bounded Git HEAD query when the caller omits
-// provenance. Archives run with unknown identity; measurement rejects them.
-// ci_unit_serial_run preserves ordinary streaming and unlimited parent wait.
+// Two workers per child retain OS multi-lane assertions.
+// ci_unit_source_revision resolves provenance; serial_run retains streaming.
 #define CI_UNIT_MAX_MODULES 512
 #define CI_UNIT_CAPTURE_LIMIT BUSTER_MB(64)
 #define CI_UNIT_TIMEOUT_US (5400ull * 1000000ull)
@@ -48,8 +46,7 @@ struct CiUnitWork
     bool audits;
 };
 
-// The frontend dominates the rest group on sanitized lanes; Windows ARM keeps
-// the driver split.
+// Legacy pair ownership, independently matched by the test selector.
 BUSTER_GLOBAL_LOCAL String8 ci_unit_primary_module(void)
 {
     String8 result = BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 ? S8("compiler_driver_tests") : S8("c_frontend_tests");
@@ -1066,6 +1063,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_tests_main(Arena* arena, SliceString8 
         IntegerParsingU64 jobs = string8_parse_u64_decimal(jobs_text);
         bool valid_jobs = !jobs_text.length || (jobs.status == INTEGER_PARSING_SUCCESS && jobs.length == jobs_text.length && jobs.value > 0);
         String8 schedule = os_get_environment_variable(S8("BUSTER_TEST_UNIT_SCHEDULE"));
+        // Preserve the existing qualification receipt protocol.
+        if (!schedule.length && environment_variable_is_nonzero(S8("BUSTER_CI_CHECKS_EVIDENCE"))) { schedule = S8("pair"); }
         bool valid_schedule = !schedule.length || string_equal(schedule, S8("modules")) || string_equal(schedule, S8("pair"));
         valid_jobs = valid_jobs && valid_schedule;
         bool grouped = valid_jobs && jobs_text.length && jobs.value >= 4 && !BUSTER_SINGLE_THREADED;

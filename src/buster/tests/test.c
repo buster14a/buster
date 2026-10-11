@@ -1178,8 +1178,7 @@ bool buster_test_module_selection_check(String8 selection)
     return result;
 }
 
-// Match the native parent independently. The frontend dominates the rest
-// group on sanitized lanes; Windows ARM keeps the driver split.
+// Match the native parent's legacy pair ownership independently.
 BUSTER_GLOBAL_LOCAL String8 test_module_group_primary_name(void)
 {
     String8 result = BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 ? S8("compiler_driver_tests") : S8("c_frontend_tests");
