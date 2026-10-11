@@ -758,17 +758,10 @@
           ],
           "requires": "host-c-compiler",
           "symbol": "compiler_driver_test_aarch64_dynamic_calls"
-        },
-        {
-          "anchor": "supported only on Linux and Windows x86-64, and macOS",
-          "file": "build.c",
-          "provides": [
-            "integration"
-          ]
         }
       ],
       "feature": "execution",
-      "note": "Generated programs execute on native AArch64 Linux/macOS/Windows hosts (not Android/iOS/UEFI). Self-hosting is admitted on macOS, which routine Apple CI validates as AArch64 only. On Linux and Windows AArch64, self_host_add refuses to run.",
+      "note": "Generated programs execute on native AArch64 Linux/macOS/Windows hosts (not Android/iOS/UEFI). No integration level is claimed: self_host_add refuses Linux and Windows AArch64 (build.c), and an observed macOS AArch64 self-host run has not been mapped yet.",
       "status": "supported"
     },
     {
