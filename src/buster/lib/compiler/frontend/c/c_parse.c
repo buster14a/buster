@@ -36075,24 +36075,59 @@ BUSTER_C_INTERNAL String8 c_parse_unknown_member_designator_message(CParseResult
     return message;
 }
 
-// The `(` of the first GNU statement expression `({` in a file-scope
-// initializer [start, end), or end. GCC and Clang allow a statement expression
-// only inside a function body (#3364); left to the static-initializer folder it
-// passed -fsyntax-only and failed only when -c lowered it.
-BUSTER_C_INTERNAL u32 c_parse_file_scope_statement_expression(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
+// Reports the `(` of every GNU statement expression `({` outside a function
+// body. GCC and Clang allow one only inside a function, so each of these is
+// at file scope: in an initializer (#3364), a declaration's specifiers, a
+// typeof operand, an array bound or an attribute argument (#3437). Left to the
+// later passes, a typeof operand was accepted silently and an array bound was
+// reported as a variably modified type. The function bodies are marked in a
+// token bitmap, so no declaration order is assumed, and a translation unit
+// without a statement expression allocates nothing.
+BUSTER_C_INTERNAL void c_parse_validate_file_scope_statement_expressions(CParseResult* result, CPreprocessResult preprocess)
 {
-    u32 found = end;
-    CParseCandidates groups = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_STATEMENT_EXPRESSIONS, C_PARSE_POPULATION_NONE, start + 1);
-    for (u32 index = c_parse_candidates_next(&groups, start + 1, end); found == end && index < end;
-         index = c_parse_candidates_next(&groups, index + 1, end))
+    u32 token_count = (u32)preprocess.token_count;
+    CParseCandidates groups = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_STATEMENT_EXPRESSIONS, C_PARSE_POPULATION_NONE, 1);
+    u32 first = token_count > 1 ? c_parse_candidates_next(&groups, 1, token_count) : token_count;
+    if (first < token_count)
     {
-        if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE) &&
-            c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        TemporalArena temporary = scratch_begin(&result->arena, 1);
+        u64 word_count = ((u64)token_count + 63) >> 6;
+        u64* bodies = arena_allocate(temporary.arena, u64, word_count);
+        memset(bodies, 0, sizeof(*bodies) * word_count);
+        for (u32 declaration_index = 0; declaration_index < result->declaration_count; declaration_index += 1)
         {
-            found = index - 1;
+            CDeclaration const* declaration = &result->declarations[declaration_index];
+            if (declaration->kind == C_DECLARATION_FUNCTION && declaration->is_definition && declaration->body_token_count)
+            {
+                u32 start = BUSTER_MIN(declaration->body_start, token_count);
+                u32 end = (u32)BUSTER_MIN((u64)declaration->body_start + declaration->body_token_count, (u64)token_count);
+                u32 index = start;
+                while (index < end)
+                {
+                    if (!(index & 63) && end - index >= 64)
+                    {
+                        bodies[index >> 6] = UINT64_MAX;
+                        index += 64;
+                    }
+                    else
+                    {
+                        bodies[index >> 6] |= (u64)1 << (index & 63);
+                        index += 1;
+                    }
+                }
+            }
         }
+        for (u32 index = first; index < token_count; index = c_parse_candidates_next(&groups, index + 1, token_count))
+        {
+            if (!((bodies[index >> 6] >> (index & 63)) & 1) && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE) &&
+                c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[index - 1]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                   S8("statement expression not allowed at file scope"));
+            }
+        }
+        scratch_end(temporary);
     }
-    return found;
 }
 
 BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
@@ -36116,15 +36151,9 @@ BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* m
             u64 region_end = machine->scratch_arena->position;
             String8 conversion_message = {0};
             bool braced = start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE);
-            u32 statement_expression = c_parse_file_scope_statement_expression(result, preprocess, start, end);
-            bool incompatible = statement_expression == end && !braced &&
+            bool incompatible = !braced &&
                 c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, declaration.type, start, end, true, &conversion_message);
-            if (statement_expression < end)
-            {
-                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[statement_expression]),
-                                   C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("statement expression not allowed at file scope"));
-            }
-            else if (incompatible)
+            if (incompatible)
             {
                 c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
                                    conversion_message.length ? conversion_message : S8("initializer has an incompatible type"));
@@ -40786,7 +40815,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     }
     result.position_index = arena_allocate(arena, CTokenPositionIndex, 1);
     *result.position_index = (CTokenPositionIndex){0};
-    result.string_literals = c_string_literal_memo_create(arena, preprocess.tokens);
+    result.string_literals = c_string_literal_memo_create(arena, preprocess.tokens, syntax.string_literal_lengths_only);
     result.type_layout_statistics = arena_allocate(arena, CTypeLayoutStatistics, 1);
     *result.type_layout_statistics = (CTypeLayoutStatistics){0};
     result.object_size_facts = arena_allocate(arena, CObjectSizeFacts, 1);
@@ -41479,6 +41508,9 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         // as a nonconstant enumerator, has already produced a diagnostic.
         c_parse_validate_integer_transform_calls(&machine, &result, preprocess);
         c_parse_validate_vendor_builtin_calls(&machine, &result, preprocess);
+        // Ahead of the gate, so neither the static-initializer folder nor the
+        // variably-modified and alignment checks see a file-scope `({`.
+        c_parse_validate_file_scope_statement_expressions(&result, preprocess);
         if (!result.diagnostic_count)
         {
             c_parse_validate_lowering_constraints(&machine, arena, &result, preprocess);

@@ -2735,6 +2735,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_bare_sections(UnitTestArgu
         {S8_INITIALIZER(".fini_array"), ASSEMBLY_UNIT_SECTION_FINI_ARRAY},
         {S8_INITIALIZER(".tdata"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA},
         {S8_INITIALIZER(".tbss"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO},
+        {S8_INITIALIZER(".tls$"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA},
         {S8_INITIALIZER(".debug_info"), ASSEMBLY_UNIT_SECTION_DEBUG_INFO},
         {S8_INITIALIZER(".debug_abbrev"), ASSEMBLY_UNIT_SECTION_DEBUG_ABBREV},
         {S8_INITIALIZER(".debug_line"), ASSEMBLY_UNIT_SECTION_DEBUG_LINE},
@@ -2766,7 +2767,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_bare_sections(UnitTestArgu
         String8 rejected[] = {
             S8(".section .textual_rodata\n"), S8(".section .initdata\n"), S8(".section .datafile\n"),
             S8(".section .rodatafile\n"), S8(".section .bssfile\n"), S8(".section .init_arrayx\n"),
-            S8(".section .fini_arrays\n"), S8(".section .debug_info_extra\n"), S8(".section .tdatax\n"), S8(".section .mysec\n"),
+            S8(".section .fini_arrays\n"), S8(".section .debug_info_extra\n"), S8(".section .tdatax\n"), S8(".section .tls$x\n"), S8(".section .mysec\n"),
         };
         for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rejected); row += 1)
         {
