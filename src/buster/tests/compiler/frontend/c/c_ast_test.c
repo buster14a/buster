@@ -2274,6 +2274,12 @@ enum
     // about 60,000 in all with the frontend's own sources.
     C_AST_CORPUS_SPECIFIER_ANSWER_FLOOR = 15000,
     C_AST_CORPUS_HOSTED_SPECIFIER_ANSWER_FLOOR = 50000,
+    // Statements planned around their initializer lists' braces (compound
+    // literals in an expression, a header, a return or a do-while tail): about
+    // 460 from the fixtures on Linux x86-64, and about 4,230 in all with the
+    // frontend's own sources.
+    C_AST_CORPUS_STATEMENT_BRACED_FLOOR = 380,
+    C_AST_CORPUS_HOSTED_STATEMENT_BRACED_FLOOR = 3500,
     // Type-name runs skipped as no type name, each checked against the
     // machine in verify mode, and type-name runs read from the tree, in the
     // same analyses: about 1,250 skipped and 2,270 read from the fixtures on
@@ -2344,6 +2350,7 @@ struct CAstCorpusTally
     u64 statement_declarators;
     u64 statement_initializers;
     u64 statement_declarator_declines;
+    u64 statement_braced;
     u64 statement_fallbacks;
     u64 statement_compared;
     // The declaration specifier read over the same inputs (the analysis with
@@ -2438,6 +2445,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
         tally->statement_declarators += statements.declarator_hints;
         tally->statement_initializers += statements.initializer_hints;
         tally->statement_declarator_declines += statements.declarator_declines;
+        tally->statement_braced += statements.braced;
         tally->statement_fallbacks += statements.fallbacks;
         tally->statement_compared += typed.identifier_use_count;
         arena_destroy(arena, 1);
@@ -2649,6 +2657,11 @@ BUSTER_GLOBAL_LOCAL CAstCorpusConstruct const c_ast_corpus_constructs[] = {
      C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("typedef int T; T ((t))[2]; T ((*tp))(T); T (*(tq))(int); void pf(int ((a))[3], int ((*cb))(int)) { } void pg(T (a)) { }"),
      C_PREPROCESS_DIALECT_GNU17},
+    // #3368: old-style definitions whose name sits in a redundant group, with
+    // and without a declaration list, and lists in groups in a declaration.
+    {S8_INITIALIZER("int (k(a)) int a; { return a; } int (*(m(b)))(void) int b; { return 0; } int ((k4)(c, d)) int c; char *d; { return c; }"),
+     C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("typedef int T; int (k3(T)) { return 0; } int (k5)(T) { return 0; } int x, (kd(int c)), (k2)(T);"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("typedef int (__attribute__((x)) TF)(int); TF tf; typedef int (__attribute__((x)) TA)[2]; TA ta; void (*(__attribute__((x)) hf))(void);"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("struct S5 { int a, __attribute__((x)) b __attribute__((y)); int c : 2, __attribute__((x)) d : 3 __attribute__((y)); int (__attribute__((x)) m)[2]; };"), C_PREPROCESS_DIALECT_GNU17},
     // #3368: a single redundant group after a typedef or tag name, in the
@@ -2867,6 +2880,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_sources(UnitTestArguments* argum
                                        tally->statement_initializers >= C_AST_CORPUS_HOSTED_STATEMENT_INITIALIZER_FLOOR &&
                                        tally->statement_declarator_declines == 0));
     BUSTER_TEST(arguments, !hosted || tally->specifier_answers >= C_AST_CORPUS_HOSTED_SPECIFIER_ANSWER_FLOOR);
+    BUSTER_TEST(arguments, !hosted || tally->statement_braced >= C_AST_CORPUS_HOSTED_STATEMENT_BRACED_FLOOR);
     BUSTER_TEST(arguments, !hosted || (tally->type_name_skips >= C_AST_CORPUS_HOSTED_TYPE_NAME_SKIP_FLOOR &&
                                        tally->type_name_checked == tally->type_name_skips &&
                                        tally->type_name_answers >= C_AST_CORPUS_HOSTED_TYPE_NAME_ANSWER_FLOOR));
@@ -2910,6 +2924,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
     BUSTER_TEST(arguments, tally.statement_declarators >= C_AST_CORPUS_STATEMENT_DECLARATOR_FLOOR &&
                                tally.statement_initializers >= C_AST_CORPUS_STATEMENT_INITIALIZER_FLOOR && tally.statement_declarator_declines == 0);
     BUSTER_TEST(arguments, tally.specifier_answers >= C_AST_CORPUS_SPECIFIER_ANSWER_FLOOR && tally.specifier_compared);
+    BUSTER_TEST(arguments, tally.statement_braced >= C_AST_CORPUS_STATEMENT_BRACED_FLOOR);
     BUSTER_TEST(arguments, tally.type_name_skips >= C_AST_CORPUS_TYPE_NAME_SKIP_FLOOR && tally.type_name_checked == tally.type_name_skips &&
                                tally.type_name_answers >= C_AST_CORPUS_TYPE_NAME_ANSWER_FLOOR);
 #if BUSTER_LINUX && !BUSTER_ANDROID
@@ -4296,6 +4311,12 @@ BUSTER_GLOBAL_LOCAL CAstSplitCase const c_ast_split_cases[] = {
     // The walker reads `...` only before the declarator's last `)`.
     {S8_INITIALIZER("int (gv(int a, ...)) { return a; }"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_TOKENS},
     {S8_INITIALIZER("int k(a) int a; { return a; }"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_OLD_STYLE},
+    // #3368: a list inside or after a redundant group is the name's list
+    // too, so an old-style declaration list after it is refused, and the
+    // identifier list of a definition without one is published.
+    {S8_INITIALIZER("int (k(a)) int a; { return a; }"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_OLD_STYLE},
+    {S8_INITIALIZER("typedef int T; int (k(T)) { return 0; } int (*(m(T)))(void) { return 0; } int x, (kd(int c)), (k2)(T);"),
+     C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 0, 1, 0},
     {S8_INITIALIZER("int e = (1, 2);"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_TOKENS},
     {S8_INITIALIZER("int h8(void) [[deprecated]];"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_TOKENS},
     {S8_INITIALIZER("struct P { int a, b; }; _Static_assert(sizeof (struct P){1, 2} == 8, \"m\");"), C_PREPROCESS_DIALECT_GNU17,
@@ -4373,6 +4394,9 @@ typedef enum CAstStatementTamper
     // The second declarator's name moved onto the first's, so its `=` hint
     // lands before its own tokens and the split refuses it.
     C_AST_STATEMENT_TAMPER_DECLARATOR,
+    // The first initializer list's anchor moved off its `{`, so the plan
+    // leaves that statement to the loop.
+    C_AST_STATEMENT_TAMPER_LIST,
 } CAstStatementTamper;
 
 typedef struct CAstStatementCase CAstStatementCase;
@@ -4394,6 +4418,8 @@ struct CAstStatementCase
     u32 declarator_hints;
     u32 initializer_hints;
     u32 declarator_declines;
+    // The exact count of statements planned around initializer braces.
+    u32 braced;
 };
 
 #define C_AST_STATEMENT_CASE_EVERY                                                                                                             \
@@ -4428,6 +4454,32 @@ struct CAstStatementCase
     "    return a + *c + q.y + (int)o + u + t + s;\n"                                                                                         \
     "}\n"
 
+// Compound literals in every statement position the plan splits at their
+// braces: expression statements (with designators of each kind, a trailing
+// comma, nested and empty lists, a postfix after a `}` and a string run), an
+// if, while and switch header, a do-while tail and a return. One holds
+// __builtin_offsetof, which the loop reads, as its list's first token; one
+// holds more lists than the plan takes and is left to the loop.
+#define C_AST_STATEMENT_CASE_BRACED                                                                                                            \
+    "struct P { int x, y; };\n"                                                                                                               \
+    "struct Q { struct P p[2]; int n; };\n"                                                                                                   \
+    "int use(struct P);\n"                                                                                                                    \
+    "int m(int v, int w)\n"                                                                                                                   \
+    "{\n"                                                                                                                                     \
+    "    struct P p;\n"                                                                                                                       \
+    "    p = (struct P){.x = v, .y = w};\n"                                                                                                   \
+    "    use((struct P){v, });\n"                                                                                                             \
+    "    p.y = (struct Q){{[1] = {.y = v}}, .n = w,}.n;\n"                                                                                    \
+    "    p.x = ((int[]){1, 2, [3 ... 4] = v})[w & 1] + (struct P){}.y;\n"                                                                     \
+    "    p.x = (int){__builtin_offsetof(struct P, y)};\n"                                                                                     \
+    "    p.y = (int[][1]){{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}, {9}, {10}, {11}, {12}, {13}, {14}, {15}, {16}}[w][0];\n"                    \
+    "    if ((struct P){v, w}.x) p.x = 1;\n"                                                                                                  \
+    "    while ((int){v} > w) w++;\n"                                                                                                         \
+    "    switch ((int){w}) { default: break; }\n"                                                                                             \
+    "    do { v--; } while ((struct P){v}.x > 0);\n"                                                                                          \
+    "    return use((struct P){.x = p.x, .y = (int)sizeof(\"a\" \"b\")});\n"                                                                \
+    "}\n"
+
 BUSTER_GLOBAL_LOCAL CAstStatementCase const c_ast_statement_cases[] = {
     {S8_INITIALIZER(C_AST_STATEMENT_CASE_EVERY), C_AST_STATEMENT_TAMPER_NONE, C_AST_STATEMENT_FALLBACK_NONE, 10, 2, 3, 1, 0, 3, 3, 0},
     {S8_INITIALIZER(C_AST_STATEMENT_CASE_DECLARATORS), C_AST_STATEMENT_TAMPER_NONE, C_AST_STATEMENT_FALLBACK_NONE, 1, 5, 0, 1, 0, 8, 8, 0},
@@ -4447,6 +4499,8 @@ BUSTER_GLOBAL_LOCAL CAstStatementCase const c_ast_statement_cases[] = {
                     "    return p.x + local.q;\n"
                     "}\n"),
      C_AST_STATEMENT_TAMPER_NONE, C_AST_STATEMENT_FALLBACK_NONE, 1, 1, 0, 4, 1, 2, 1, 0},
+    {S8_INITIALIZER(C_AST_STATEMENT_CASE_BRACED), C_AST_STATEMENT_TAMPER_NONE, C_AST_STATEMENT_FALLBACK_NONE, 10, 1, 0, 1, 1, 0, 0, 0, 10},
+    {S8_INITIALIZER(C_AST_STATEMENT_CASE_BRACED), C_AST_STATEMENT_TAMPER_LIST, C_AST_STATEMENT_FALLBACK_NONE, 10, 1, 0, 2, 1, 0, 0, 0, 9},
     {S8_INITIALIZER(C_AST_STATEMENT_CASE_EVERY), C_AST_STATEMENT_TAMPER_BRACE, C_AST_STATEMENT_FALLBACK_INPUT},
     {S8_INITIALIZER(C_AST_STATEMENT_CASE_EVERY), C_AST_STATEMENT_TAMPER_SEMICOLON, C_AST_STATEMENT_FALLBACK_TOKENS},
 };
@@ -4475,6 +4529,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statements(UnitTestArguments* argu
                 if (statement_case->tamper == C_AST_STATEMENT_TAMPER_SEMICOLON && BUSTER_REQUIRE(arguments, statement != C_AST_NODE_INVALID))
                 {
                     tree.tokens[statement] -= 1;
+                }
+                u32 list = c_ast_test_find_kind(&tree, C_AST_INITIALIZER_LIST);
+                if (statement_case->tamper == C_AST_STATEMENT_TAMPER_LIST && BUSTER_REQUIRE(arguments, list != C_AST_NODE_INVALID))
+                {
+                    tree.tokens[list] += 1;
                 }
                 if (statement_case->tamper == C_AST_STATEMENT_TAMPER_DECLARATOR)
                 {
@@ -4515,7 +4574,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statements(UnitTestArguments* argu
                 BUSTER_TEST_RAW(arguments,
                                 !followed || (statistics.declarator_hints >= statement_case->declarator_hints &&
                                               statistics.initializer_hints >= statement_case->initializer_hints &&
-                                              statistics.declarator_declines == statement_case->declarator_declines),
+                                              statistics.declarator_declines == statement_case->declarator_declines &&
+                                              statistics.braced == statement_case->braced),
                                 label);
             }
             c_ast_release(&built.ast);
