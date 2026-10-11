@@ -1,5 +1,6 @@
 #include <buster/tests/compiler/object/object_test.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
+#include <buster/lib/compiler/assembly/assembly_unit.h>
 #include <buster/lib/compiler/object/object_internal.h>
 #include <buster/lib/compiler/pdb/pdb.h>
 #include <buster/lib/time.h>
@@ -5622,10 +5623,39 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_mach_relocation_identity(UnitTest
     return result;
 }
 
+// In-process object -> -S -> assembly_unit_encode byte identity for short
+// JMP and every Jcc condition, including forward and backward labels (#3602).
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_x86_short_branch_roundtrip(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 condition = 0; condition < 17; condition += 1)
+    {
+        TemporalArena scope = arena_begin_temporal(arguments->arena);
+        u8 opcode = condition == 16 ? 0xeb : (u8)(0x70 | condition);
+        u8 data[] = {opcode, 1, 0xc3, 0xc3, opcode, 0xfb};
+        ObjectSection section = {.kind = OBJECT_SECTION_TEXT, .data = BUSTER_ARRAY_TO_SLICE(data)};
+        ObjectFile object = {.target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX}, .sections = &section, .section_count = 1};
+        String8 assembly = object_print_assembly(arguments->arena, &object);
+        if (BUSTER_REQUIRE(arguments, assembly.length != 0))
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, assembly, (AssemblyEncodeOptions){.target = object.target});
+            if (BUSTER_REQUIRE(arguments, !unit.diagnostic_count && unit.section_count != 0))
+            {
+                BUSTER_TEST(arguments, unit.relocation_count == 0);
+                BUSTER_TEST(arguments, unit.sections[0].data.length == sizeof(data) &&
+                                           memcmp(unit.sections[0].data.pointer, data, sizeof(data)) == 0);
+            }
+        }
+        scratch_end(scope);
+    }
+    return result;
+}
+
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = object_test_assembly_index_order(arguments);
     BUSTER_TEST_FIXTURE(arguments, object_test_mach_relocation_identity);
+    BUSTER_TEST_FIXTURE(arguments, object_test_x86_short_branch_roundtrip);
     BUSTER_TEST_FIXTURE(arguments, object_test_elf_semantic_refusals);
     BUSTER_TEST_FIXTURE(arguments, object_test_x86_64_elf_listing_metadata);
     BUSTER_TEST_FIXTURE(arguments, object_test_elf_property_note_walk);

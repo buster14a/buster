@@ -684,6 +684,18 @@ the object reader, in-memory/ELF linkers and `object_aarch64_elf_page_relocate`
 resolve as S + A - P; Mach-O and COFF have no such relocation, so there a
 target the unit cannot fold is refused.
 
+X86-64 unit assembly relaxes unprefixed symbolic `jmp` and `jcc` to rel8
+when the target is binding-invariant and defined in the same section. Layout
+starts with eligible branches short and grows out-of-range forms to rel32;
+instruction encodings are cached while labels, numeric labels, `.` expressions,
+`.set` aliases, data expressions, symbol sizes and alignment are recomputed.
+Calls, explicit `@PLT`, external/cross-section targets, weak definitions and
+default-visible ELF globals retain rel32. The single-instruction
+`assembly_encode` API keeps its existing encoding policy. Short branches in
+object `-S` listings therefore reassemble with their original bytes when
+labels identify the same targets; this does not preserve an intentionally
+nonminimal near encoding or an instruction prefix that the printer omits.
+
 Symbolic page addressing takes the same relocation path (#2933). `adrp Xd, sym[+off]`
 names its symbol directly; the low 12 bits are `add Xd, Xn, :lo12:sym[+off]` and an
 unsigned-offset `[Xn, :lo12:sym[+off]]` on any LDR/STR/LDRB/LDRH/LDRSB/LDRSH/LDRSW,
