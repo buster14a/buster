@@ -1356,6 +1356,25 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_internal_label(ObjectAssemblyBuffe
     }
 }
 
+// A marked offset strictly inside an emitted unit never gets its `label:`
+// form because the unit is printed whole; the label is instead defined
+// relative to the location just after that unit (#3517).
+BUSTER_GLOBAL_LOCAL void object_assembly_emit_interior_internal_labels(ObjectAssemblyBuffer* buffer, u32 section, u64 unit_start,
+                                                                       u64 unit_end)
+{
+    for (u64 offset = unit_start + 1; offset < unit_end; offset += 1)
+    {
+        if (object_assembly_has_internal_label(buffer, section, offset))
+        {
+            object_assembly_append_string(buffer, S8("\t.set "));
+            object_assembly_append_internal_label(buffer, section, offset);
+            object_assembly_append_string(buffer, S8(", . - "));
+            object_assembly_append_u64_decimal(buffer, unit_end - offset);
+            object_assembly_append_string(buffer, S8("\n"));
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void object_assembly_append_s64_addend(ObjectAssemblyBuffer* buffer, s64 value)
 {
     if (!value)
@@ -4541,8 +4560,11 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
         object_assembly_prepare_internal_labels(buffer, object, section_index);
     }
     u64 cursor = 0;
+    u64 unit_start = 0;
     while (cursor < data.length && !buffer->error)
     {
+        object_assembly_emit_interior_internal_labels(buffer, section_index, unit_start, cursor);
+        unit_start = cursor;
         object_assembly_advance_index(buffer, object, section_index, cursor);
         ObjectRelocation* next_relocation = object_assembly_first_relocation(buffer, object, section_index, cursor, data.length);
         u64 apple_x86_start = object_assembly_apple_x86_relocation_start(next_relocation, data, cursor);
@@ -4619,6 +4641,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
         object_assembly_append_byte_range(buffer, data, cursor, boundary);
         cursor = boundary;
     }
+    object_assembly_emit_interior_internal_labels(buffer, section_index, unit_start, cursor);
     object_assembly_advance_index(buffer, object, section_index, data.length);
     object_assembly_emit_labels(buffer, object, target, section_index, data.length);
     object_assembly_emit_internal_label(buffer, section_index, data.length);
