@@ -134,10 +134,10 @@ extern int host_large_va_call(int (*check)(int, ...));
 
 int main(void)
 {
-    int bad = NAME(call)(NAME(check));
+    int bad = NAME(call)(NAME(check)) != 0;
 #if LARGE_VA_MIXED
-    bad |= NAME(call)(host_large_va_check) << 1;
-    bad |= host_large_va_call(NAME(check)) << 2;
+    bad |= (NAME(call)(host_large_va_check) != 0) << 1;
+    bad |= (host_large_va_call(NAME(check)) != 0) << 2;
 #endif
     return bad;
 }
