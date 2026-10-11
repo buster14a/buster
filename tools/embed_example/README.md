@@ -37,25 +37,32 @@ entitlement/policy requirements; its existing one-region contract does not
 support repeated direct JIT use in one process. Sanitizer builds are not a
 supported execution configuration.
 
-External data imports are limited by the relocation kinds accepted by
-`jit_external_data_relocation_is_supported` in
-`src/buster/lib/compiler/jit/jit.c`. The measured C forms for the requested
-Linux ELF and Apple Mach-O targets are:
+Explicit data imports support both ordinary C access and initialized pointers
+on the native Linux ELF and Apple Mach-O targets:
 
-| Target triple | Direct `host_scale` read | Initialized pointer to `host_scale` |
+| Target triple | Direct `host_scale` read/write | Initialized pointer to `host_scale` |
 | --- | --- | --- |
-| `x86_64-unknown-linux-gnu` | `OBJECT_RELOCATION_X86_64_PC32` in text; refused | `OBJECT_RELOCATION_ABSOLUTE64` in data; admitted |
-| `aarch64-unknown-linux-gnu` | `OBJECT_RELOCATION_ABSOLUTE64` in text; refused | `OBJECT_RELOCATION_ABSOLUTE64` in data; refused |
-| `aarch64-apple-darwin` | `OBJECT_RELOCATION_AARCH64_MACH_PAGE21` and `OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12` in text; admitted | `OBJECT_RELOCATION_ABSOLUTE64` in data; refused |
+| `x86_64-unknown-linux-gnu` | `OBJECT_RELOCATION_X86_64_PC32` in text | `OBJECT_RELOCATION_ABSOLUTE64` in data |
+| `aarch64-unknown-linux-gnu` | `OBJECT_RELOCATION_ABSOLUTE64` in text | `OBJECT_RELOCATION_ABSOLUTE64` in data |
+| `aarch64-apple-darwin` | `OBJECT_RELOCATION_AARCH64_MACH_PAGE21` and `OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12` in text | `OBJECT_RELOCATION_ABSOLUTE64` in data |
 
-Accordingly, on x86-64 Linux ELF use an initialized pointer to access imported
-data; ordinary direct access is refused. On AArch64 Mach-O, direct access is
-admitted; the pointer form is not. On AArch64 Linux ELF neither measured form
-is admitted, so loading code that imports data returns `JIT_FAILED` with the
-symbol named in the module message. AArch64 ELF currently admits only
-`OBJECT_RELOCATION_AARCH64_PREL32` and the Mach-O page relocation forms, not
-`OBJECT_RELOCATION_ABSOLUTE64`. This reports existing JIT behavior; the SDK
-does not add relocation support.
+The loader patches absolute references with the supplied address. Relative
+references constrain the JIT image placement: PC32 and PREL32 need a signed
+32-bit displacement, and AArch64 PAGE21 needs a signed 21-bit page distance.
+The loader uses non-fixed allocation hints and checks the returned mapping;
+it never replaces host mappings or copies imported data. Host mutations and
+generated writes therefore reach the same object, and `&host_scale` retains
+the supplied pointer identity. Imports whose relative ranges have no common
+available image placement return `JIT_FAILED` with the JIT capacity diagnostic.
+Absolute pointer forms have no relative-distance requirement. Other
+unsupported external-data relocation kinds remain refused.
+
+A missing explicit binding for an admitted function or data import returns
+`BUSTER_EMBED_STATUS_UNRESOLVED_IMPORT`; the message names that symbol even
+when the import list is empty. The module remains compiled and unloaded, so
+callers can retry `buster_embed_module_load` with the binding. A successful
+retry clears the failure message. Unsupported data forms, TLS, kind mismatches
+and address-range failures retain their own JIT diagnostics.
 
 Included headers are read from the filesystem using the compiler's normal
 include search. Virtual header overlays are outside this bounded facade and

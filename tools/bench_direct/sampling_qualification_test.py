@@ -77,7 +77,7 @@ def fixture(phase: str = "confirm", packet: int = 0) -> tuple:
                 "fresh_copy": "true", "routine_enabled": "false", "evidence_class": receipt.EVIDENCE_CLASS}
     binaries = {role: {"sha256": identity[role + "_sha256"], "revision": identity[role + "_revision"],
                         "size_bytes": 10000} for role in ("baseline", "candidate")}
-    workload = {"command": "IDE cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o OUT",
+    workload = {"command": "IDE cc -march=native -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o OUT",
                 "repo_root": "/trusted/frozen-source", "perf": "perf", "extra": [], "extra_by_variant": {"a": [], "b": []}}
     rows, series = [], {}
     for index, slot in enumerate(plan["slots"]):

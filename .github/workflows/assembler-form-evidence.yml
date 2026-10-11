@@ -196,12 +196,20 @@ jobs:
             extra=()
             if test "$features" = sme; then extra=(-mattr=+sme); fi
             output="$evidence/optional-addha-$features.o"
-            if build/Release/ide cc -target aarch64-linux "${extra[@]}" -c "$fixture" -o "$output" > "$evidence/optional-addha-$features.log" 2>&1; then
+            status=0
+            build/Release/ide cc -target aarch64-linux "${extra[@]}" -c "$fixture" -o "$output" > "$evidence/optional-addha-$features.log" 2>&1 || status=$?
+            if test "$features" = sme; then
+              if test "$status" -ne 0; then
+                cat "$evidence/optional-addha-$features.log"
+                echo "unexpected source refusal: addha $features"
+                exit 1
+              fi
+              llvm-objcopy-21 -O binary --only-section=.text "$output" "$output.text"
+              printf '\000\000\220\300' | cmp - "$output.text"
+            elif test "$status" -eq 0; then
               echo "unexpected source acceptance: addha $features"
               exit 1
             else
-              status=$?
-              test "$status" -ne 0
               test ! -s "$output"
               test -s "$evidence/optional-addha-$features.log"
               cat "$evidence/optional-addha-$features.log"
