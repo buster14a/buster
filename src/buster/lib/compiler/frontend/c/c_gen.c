@@ -138,6 +138,7 @@
 //   c_ir_lower_compound_literal_step              ordered evaluation and final
 //                                                 per-subobject initializer values
 //   c_ir_lower_expression_core_step               the expression evaluator
+//   c_ir_lower_condition_step                     depth-zero logical splits
 //   c_ir_lower_dispatch                           lowering-machine dispatch
 //   c_ir_tree_conditionals_build,                 root `?:` splits from the
 //   c_ir_tree_root_conditional                    tree's CONDITIONAL nodes
@@ -37938,65 +37939,134 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
         }
         u32 logical_or = UINT32_MAX;
         u32 logical_and = UINT32_MAX;
-        u32 parentheses = 0;
-        u32 brackets = 0;
-        u32 braces = 0;
-        for (u32 index = task.start; index < task.end; index += 1)
+        if (builder->group_facts_exact)
         {
-            CToken token = builder->preprocess.tokens[index];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            for (u32 index = task.start; index < task.end; index += 1)
             {
-                parentheses += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-            {
-                if (!parentheses)
+                CToken token = builder->preprocess.tokens[index];
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    u32 close = c_ir_matching_delimiter_cached(builder, index, task.end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                               C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                    if (close == UINT32_MAX)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    index = close;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                parentheses -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                brackets += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
-            {
-                if (!brackets)
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+                {
+                    u32 close = c_ir_matching_delimiter_cached(builder, index, task.end, C_PUNCTUATOR_LEFT_BRACKET,
+                                                               C_PUNCTUATOR_RIGHT_BRACKET);
+                    if (close == UINT32_MAX)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    index = close;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                brackets -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-            {
-                braces += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-            {
-                if (!braces)
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+                {
+                    u32 close = c_ir_matching_delimiter_cached(builder, index, task.end, C_PUNCTUATOR_LEFT_BRACE,
+                                                               C_PUNCTUATOR_RIGHT_BRACE);
+                    if (close == UINT32_MAX)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    index = close;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                braces -= 1;
-            }
-            else if (!parentheses && !brackets && !braces && logical_or == UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE))
-            {
-                logical_or = index;
-            }
-            else if (!parentheses && !brackets && !braces && logical_and == UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
-                     !c_ir_label_address_prefix(builder, task.start, index))
-            {
-                logical_and = index;
+                else if (logical_or == UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE))
+                {
+                    logical_or = index;
+                }
+                else if (logical_and == UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+                         !c_ir_label_address_prefix(builder, task.start, index))
+                {
+                    logical_and = index;
+                }
             }
         }
-        if (parentheses || brackets || braces)
+        else
         {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            u32 parentheses = 0;
+            u32 brackets = 0;
+            u32 braces = 0;
+            for (u32 index = task.start; index < task.end; index += 1)
+            {
+                CToken token = builder->preprocess.tokens[index];
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    parentheses += 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                {
+                    if (!parentheses)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    parentheses -= 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+                {
+                    brackets += 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+                {
+                    if (!brackets)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    brackets -= 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+                {
+                    braces += 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+                {
+                    if (!braces)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    braces -= 1;
+                }
+                else if (!parentheses && !brackets && !braces && logical_or == UINT32_MAX &&
+                         c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE))
+                {
+                    logical_or = index;
+                }
+                else if (!parentheses && !brackets && !braces && logical_and == UINT32_MAX &&
+                         c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+                         !c_ir_label_address_prefix(builder, task.start, index))
+                {
+                    logical_and = index;
+                }
+            }
+            if (parentheses || brackets || braces)
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
         }
         u32 operation = logical_or != UINT32_MAX ? logical_or : logical_and;
         if (operation != UINT32_MAX)
