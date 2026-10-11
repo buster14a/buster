@@ -420,8 +420,8 @@ the unit with the parse error class and a located diagnostic published like
 `c_parse_ast`'s. It does nothing for `-E`, assembly inputs or the other
 languages. Any other layout value is an argument error
 (`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints
-`C_AST`, `C_AST_WALK`, `C_AST_TYPES` and `C_AST_SPLIT` rows beside
-`C_TYPE_LAYOUT`.
+`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT` and `C_AST_LOCALS` rows
+beside `C_TYPE_LAYOUT`.
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
 nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`

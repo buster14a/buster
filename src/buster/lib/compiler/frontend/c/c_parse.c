@@ -37,6 +37,9 @@
 //   file-scope initializer, to the tree expression typer (c_ast_types.c)
 //   before running the machine. c_parse_validate_const_assignments does not
 //   ask about designators it meets as operands (c_parse_designator_probe).
+//   With the tree, c_parse_local_declarations reads a block declaration's
+//   storage classes and declarator boundaries from its DECLARATION node
+//   (c_parser_local_split); every type it builds is still parsed from tokens.
 //
 // Types and declarators are parsed by CTypeParseMachine (types in
 // c_internal.h), an explicit frame stack in place of recursion: each
@@ -115,6 +118,9 @@
 //                                                 entity lookup
 //   c_parse_scope_cursor_lookup                   post-binding lookups of the
 //                                                 lowering-constraint passes
+//   c_parser_local_index_build,                   the block-declaration split
+//   c_parser_local_split                          read from the syntax tree
+//                                                 under -fc-ast-pilot (#3102)
 //   c_parse_local_declarations                    block-scope declarations,
 //                                                 auto inference, local
 //                                                 linkage redeclarations

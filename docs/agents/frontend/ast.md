@@ -8,11 +8,14 @@ appends a complete syntax tree as it goes. The tree covers declarations and
 declarators, statements, expressions, initializers and designators,
 attributes, assembly and the supported GNU/C23 forms, function bodies
 included. **Status: pilot.** The default pipeline does not build it. The
-opt-in [driver hook](#driver-pilot-hook) builds it, and two consumers read it:
+opt-in [driver hook](#driver-pilot-hook) builds it, and three consumers read it:
 - the [declaration split](#declaration-split-from-the-tree) publishes
   `c_parse_ast`'s top-level records from its declaration nodes;
 - the [tree expression typer](#tree-expression-typer) answers function-body
-  and file-scope initializer expression-type queries during semantic analysis.
+  and file-scope initializer expression-type queries during semantic analysis;
+- the [block-declaration split](#block-declaration-split-from-the-tree) reads
+  a block declaration's storage classes and declarator boundaries from its
+  `DECLARATION` node.
 
 Otherwise `c_analyze_semantics_only` and `c_lower_to_ir_with_options` still
 rediscover syntax from token ranges, as described in the
@@ -303,9 +306,14 @@ Under `-v` the driver prints four rows with the other verbose counters:
   published> fallbacks=<units it handed to c_parse_ast's walker>
   reason=<CParserTreeFallback of the last fallback> fallback_token=<the first
   token of the declaration that caused it>`
+- `C_AST_LOCALS declarations=<block declarations whose declarator boundaries
+  the tree supplied> fallbacks=<block declarations split from tokens>
+  auto_scans=<tree-split declarations whose auto precheck still ran>
+  node=<> list=<> tokens=<> comma=<fallbacks by CParserLocalFallback>`
 
-The second row's passes run only under `-v`; they are diagnostic. The third
-and fourth rows count what the typer and the split did; they time nothing. Each feeds a
+The second row's passes run only under `-v`; they are diagnostic. The third,
+fourth and fifth rows count what the typer and the two splits did; they time
+nothing. Each feeds a
 counter that is printed (`walk_steps`, `scan_calls`, `child_entries`), so the
 compiler cannot drop the measured loop. Both rows use the driver's own clock
 and are summed over the inputs of one invocation; the layout is the
@@ -688,6 +696,56 @@ and 33 body assertions, with no fallback. The fixtures that fall back are the
 parenthesized specifiers, the fixed-type enums and a few attributed
 declarators.
 
+## Block-declaration split from the tree
+
+Under `-fc-ast-pilot`, `c_parse_local_declarations` (`c_parse.c`) reads three
+facts of a block declaration from its `DECLARATION` node
+(`c_parser_local_split`) instead of scanning the declaration's tokens:
+- **Storage classes.** The walker folds every identifier outside the
+  delimiters into the storage-class set. In a declaration the tree accepts, a
+  storage-class word stands only as a `DECL_SPECIFIERS` item, so the split
+  folds those items' tokens by the same test.
+- **The auto precheck.** `c_parse_auto_declaration_info` reads the specifiers
+  and the first declarator. It answers no unless an `auto` or `__auto_type`
+  word stands there, so it runs only when those nodes' subtrees hold a
+  `SPECIFIER_WORD` of either kind.
+- **Declarator boundaries.** The walker cuts the list at every comma outside
+  delimiters. A declarator holds no such comma. An initializer holds one only
+  as a conditional's middle operand, and that shape is refused. So the cuts
+  are the `,` before each later `INIT_DECLARATOR`'s first token, plus the
+  declaration's end. The first token is the least anchor before the
+  initializer, less the `(` written before it. The `,` has no node, and
+  reading it back is the check that it is the one the shape requires.
+
+Everything else stays token work, so the type rows keep the walker's order and
+contents (see [interned rows](#interned-rows)):
+- the specifier parse and the alignment run;
+- each declarator's `=` scan, pointer chain, suffixes and attributes;
+- entity creation;
+- initializer binding.
+
+The tree's cuts are used only when the specifier parse ends at or before the
+first of them.
+
+`c_parser_local_index_build` hashes the unit's `DECLARATION` nodes by first
+token once, before the body binding loop. It finds them with a `simd.h` pass
+over the `kinds` column. The index lives in the machine's scratch arena and is
+cleared after the loop. The walker stays the default path and the
+per-declaration fallback. `CParserLocalFallback` names each case:
+- `node`: no `DECLARATION` is anchored at the declaration's first token, or
+  the range does not end at a `;`. A declaration behind a C23 standard
+  attribute is this case, because the binder starts it past the attribute.
+- `list`: more than `C_PARSER_LOCAL_SEGMENT_LIMIT` (32) declarators.
+- `tokens`: the token before a later declarator is not a `,`, or the
+  specifier parse ended past the first cut.
+- `comma`: a conditional whose middle operand is a comma expression,
+  parenthesized or not.
+
+`c_ast_test_locals` runs one shape per reason in every layout. `tokens` has no
+valid source, so its shape is a copied tree with one declarator's anchor
+moved. The unity self-host input takes the split for all 41,586 of its block
+declarations.
+
 ## Corpus differential
 
 `c_ast_test_corpus` (`c_ast_tests`; like `c_test.c`'s fixture suites it does not run on Android or iOS, whose test runs carry no repository tree) builds every `tests/**/*.c` file the
@@ -730,7 +788,8 @@ Each of the four frontend sources must take the split whole. Today the
 comparison covers about 16,400 records with 0 differences.
 
 Every input whose tree builds and whose declarations `c_parse_ast` accepts
-also checks the [tree expression typer](#tree-expression-typer)
+also checks the [tree expression typer](#tree-expression-typer) and the
+[block-declaration split](#block-declaration-split-from-the-tree)
 (`c_ast_corpus_types`). Semantic analysis runs three times on it: without the
 tree, with it, and with it in verify mode (`c_test_ast_type_verify_set`), where
 the type machine also answers every query the tree answered. The first two
@@ -745,6 +804,15 @@ the fixtures reach fewer typed bodies: each stage-3 change alone gave about
 designator probe the const-assignment walk skips (about 1,400 in the
 fixtures, 27,600 in all), and each must fail without a diagnostic or a new
 table row.
+
+The runs without and with the tree must also end with the same analysis
+model, field by field (`c_ast_corpus_models_differ`). That covers every row of
+the type, entity, scope, array-bound, alignment, declaration, identifier-use,
+member, enum-member and parameter tables, with names compared by content:
+about 125,700 rows from the fixtures and 497,400 with the frontend sources.
+There are floors on the block declarations the tree splits, about 4,000 from
+the fixtures and 20,900 in all. The fixtures send six to the walker, and the
+frontend sources send none.
 
 The compiler sources are preprocessed against the host's C library, so the
 differential also covers glibc's headers. It caught `__float128`, which glibc
@@ -763,7 +831,7 @@ differential tests pass.
 |---|---|---|---|
 | `c_parse_ast_run`, `c_parser_parse_function_body`, `c_parser_parse_declaration_expression` | declaration split, declarator name, body range, static-assert ranges | `DECLARATION`, `FUNCTION_DEFINITION`, `INIT_DECLARATOR`, `STATIC_ASSERT` | Retired under `-fc-ast-pilot` by the [declaration split](#declaration-split-from-the-tree). The walker stays the default path and the per-unit fallback. |
 | `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Not migrated. |
-| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Not migrated. |
+| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | First slice read under `-fc-ast-pilot`: the [block-declaration split](#block-declaration-split-from-the-tree) takes block declarations' storage classes, auto precheck and declarator boundaries from `DECLARATION` nodes. The specifier and derivation parse is not migrated. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Not migrated. |
 | `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | Not migrated. |
@@ -785,6 +853,15 @@ expression nodes, operators, `&` and casts included. The machine still
 answers the rest: shapes whose answer appends a row that is not interned,
 and every query outside a typed body or initializer. So that row is not
 retired.
+
+The [block-declaration split](#block-declaration-split-from-the-tree) is the
+third row's first consumer, and it covers part of
+`c_parse_local_declarations`' declarator split. It reads no specifier and no
+derivation: the type machine still parses every declaration's types from
+tokens, in the walker's row order. Moving the specifier and derivation parse
+onto nodes must produce the same rows in the same order. That is the row's
+remaining work, together with file-scope declarations and parameters. So the
+row is not retired.
 
 ## Measurement plan
 
