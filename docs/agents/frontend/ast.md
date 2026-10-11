@@ -1611,11 +1611,11 @@ the same way and diagnostic only:
   the frontend sources and the self-host unity input. The objects of all four
   arms are identical.
 - On the self-host the read answers 79,095 runs: 13,470 primitive and 65,625
-  typedef. It hands 2,113 back, 2,045 of them `specifiers` and 68 `input`. The
+  typedef. It hands 2,113 back, 2,091 of them `input` and 22 `specifiers`. The
   machine's root runs fall by exactly 79,095.
-- The pilot's compile falls by 147.3 M Ir (−1.59%), with the 11.8 M index
-  charged.
-- The default path is +0.029%.
+- The pilot's compile falls by 141.8 M Ir (−1.53%), with the 17.7 M index
+  charged. The index holds the 144,693 word-only lists, built in one pass.
+- The default path is +0.026%.
 - Zen 5 validation stays incomplete (#2761), so the hook stays opt-in.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
