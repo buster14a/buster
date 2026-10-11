@@ -101,4 +101,4 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | Linux x86-64 portability /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3293-0d05ee208c8c9d28feb5f822a996f48a6db3bc9e | 0 | 1 | [series](series-5318b2756ec3749a.md) |
 | Windows x86-64 release /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3293-0d05ee208c8c9d28feb5f822a996f48a6db3bc9e | 0 | 1 | [series](series-5e1912c568c0cc94.md) |
 | CI complete /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3293-0d05ee208c8c9d28feb5f822a996f48a6db3bc9e | 0 | 1 | [series](series-2cc00985c079cd55.md) |
-| watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 10 | 10 | [series](series-a5c935d7b52c9992.md) |
+| watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 14 | 14 | [series](series-a5c935d7b52c9992.md) |
