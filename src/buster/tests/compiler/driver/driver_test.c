@@ -767,10 +767,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
 }
 
 // A fresh `cc` process registers the closed x86-64 shape set and resolves
-// each shape on its first serial lookup; this process resolves every shape
-// before compiling.  The two must write the same object bytes for code whose
+// each shape on its first serial lookup, and encodes each variable-memory
+// cell on its first read; this process prepares every shape and cell before
+// compiling.  The two must write the same object bytes for code whose
 // expansions reach the shape bridge (x87, division, atomics, conversions and
-// flag materialization), under every machine allocator.  -fno-machine-fallback turns
+// flag materialization) and for pointer loads and stores at zero, disp8 and
+// disp32 offsets, under every machine allocator.  -fno-machine-fallback turns
 // an unresolved shape into a failed compile instead of a silent canonical
 // fallback.  A child running the opt-in unit gang must resolve every shape
 // before its workers start, or its first worker lookup aborts; its linked
@@ -781,7 +783,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lazy_x86_shapes(UnitTest
 #if !BUSTER_ANDROID && !BUSTER_IOS
     Arena* arena = arguments->arena;
     u64 position = arena->position;
-    machine_x86_64_exact_prewarm_all_shapes();
+    machine_x86_64_exact_prewarm_all();
     String8 input = buster_test_temporary_path(arena, S8("lazy-x86-shapes"), S8(".c"));
     String8 local_output = buster_test_temporary_path(arena, S8("lazy-x86-shapes-local"), S8(".o"));
     String8 child_output = buster_test_temporary_path(arena, S8("lazy-x86-shapes-child"), S8(".o"));
@@ -798,7 +800,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lazy_x86_shapes(UnitTest
                         "{ __atomic_compare_exchange_n(p, &e, d, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return e; }\n"
                         "float integer_to_float(int x) { return (float)x; }\n"
                         "int double_less(double a, double b) { return a < b; }\n"
-                        "unsigned char nonzero(unsigned x) { return (unsigned char)(x != 0); }\n");
+                        "unsigned char nonzero(unsigned x) { return (unsigned char)(x != 0); }\n"
+                        "struct fields { char c; short s; int i; i64 l; char pad[300]; i64 far; };\n"
+                        "i64 copy_fields(struct fields* from, struct fields* to)\n"
+                        "{ to->c = from->c; to->s = from->s; to->i = from->i; to->far = from->l + from->far; return to->l + from->c; }\n");
     ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
                                    .use_process_environment = 1, .search_path = 1};
     // Only the machine allocators reach the shape bridge; the canonical
@@ -34181,6 +34186,61 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, os_file_delete(literal_source));
         }
         scratch_end(literal_temporary);
+    }
+    // A GNU statement expression in a file-scope initializer (#3364) is
+    // rejected by the frontend at its `(`, as GCC and Clang do, so
+    // -fsyntax-only and -c report the same located diagnostic instead of -c
+    // failing first in the static-initializer folder. Statement expressions
+    // in function bodies still compile. The sources are temporary files, so
+    // the native-retirement inventory stays unchanged.
+    {
+        TemporalArena statement_temporary = arena_begin_temporal(arguments->arena);
+        Arena* statement_arena = statement_temporary.arena;
+        String8 statement_source = buster_test_temporary_path(statement_arena, S8("buster-c-file-scope-statement-expression"), S8(".c"));
+        String8 statement_object = buster_test_temporary_path(statement_arena, S8("buster-c-file-scope-statement-expression"), S8(".o"));
+        String8 statement_texts[] = {
+            S8("static int sx = ({ 1; });\n"
+               "int main(void) { return sx - 1; }\n"),
+            S8("static int sx = ({ typedef int T; T v = 1; v; });\n"
+               "int main(void) { return sx - 1; }\n"),
+            S8("static int sx = sizeof(({ 1; }));\n"
+               "int main(void) { return sx - 4; }\n"),
+            S8("int f(void) { return ({ int a = 2; a; }); }\n"
+               "int main(void) { int v = ({ typedef int T; T t = 1; t; }); return v - 1 + f() - 2; }\n"),
+        };
+        String8 statement_locations[] = {S8(":1:17: "), S8(":1:17: "), S8(":1:24: "), S8("")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(statement_texts); index += 1)
+        {
+            if (BUSTER_REQUIRE(arguments, file_write(statement_source, BUSTER_SLICE_TO_BYTE_SLICE(statement_texts[index]))))
+            {
+                bool rejected = statement_locations[index].length != 0;
+                String8 syntax_command[] = {S8("-std=gnu17"), S8("-fsyntax-only"), statement_source};
+                CompilerDriverResult checked = compiler_driver_execute_invocation(
+                    statement_arena, compiler_driver_parse_arguments(statement_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+                String8 object_command[] = {S8("-std=gnu17"), S8("-g0"), S8("-c"), S8("-o"), statement_object, statement_source};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    statement_arena, compiler_driver_parse_arguments(statement_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+                if (rejected)
+                {
+                    String8 expected = string_format(statement_arena, S8("{S8}statement expression not allowed at file scope"), statement_locations[index]);
+                    BUSTER_TEST_RAW(arguments, checked.error != COMPILER_DRIVER_ERROR_NONE, checked.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, string_first_sequence(checked.diagnostic, expected) != BUSTER_STRING_NO_MATCH, checked.diagnostic);
+                    BUSTER_TEST_RAW(arguments, string_equal(checked.diagnostic, compiled.diagnostic), compiled.diagnostic);
+                }
+                else
+                {
+                    BUSTER_TEST_RAW(arguments, checked.error == COMPILER_DRIVER_ERROR_NONE, checked.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, os_file_delete(statement_object));
+                    }
+                }
+            }
+        }
+        BUSTER_TEST(arguments, os_file_delete(statement_source));
+        scratch_end(statement_temporary);
     }
 #if BUSTER_LINUX
     buster_test_arena_end(arguments, driver_fixture, true);

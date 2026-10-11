@@ -59,9 +59,10 @@
   `buster_x86_metadata_prewarm_all_forms()` first, which fills every one of
   them. The machine encoder's closed expansion-shape set follows the same
   rule: `machine_x86_64_exact_prewarm` registers its queries and resolves
-  each shape on its first serial lookup, and
-  `machine_x86_64_exact_prewarm_all_shapes()` resolves all of them before a
-  gang may emit x86-64 code. A new lazily built global adds both the check
+  each shape on its first serial lookup, and registers each variable-memory
+  encoding table but encodes each of its cells on its first serial read;
+  `machine_x86_64_exact_prewarm_all()` resolves every shape and encodes every
+  cell before a gang may emit x86-64 code. A new lazily built global adds both the check
   and a line in its module's prewarm.
   Publish the flag *after* the state, never before: the x86 metadata decode
   needs two flags for this, one guarding re-entry from the reads its own
