@@ -45,11 +45,11 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V74 80-Core Processor | workflow&#95;run / main | 4 | 4 | [series](series-0571bc9f9540bac0.md) |
 | watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | workflow&#95;run / main | 3 | 3 | [series](series-846967fae60c89e0.md) |
 | recover /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 12 | [series](series-e37dd0b70ac27893.md) |
-| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 4 | 4 | [series](series-057da0f926e66c95.md) |
+| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 4 | 5 | [series](series-057da0f926e66c95.md) |
 | recover / non-matrix | Ubuntu 26.04.1 LTS / Intel&#40;R&#41; Xeon&#40;R&#41; 6973P-C | workflow&#95;run / main | 1 | 1 | [series](series-adb0ba29963bbb6d.md) |
 | Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | workflow&#95;run / main | 2 | 2 | [series](series-ab426dcbacdd44b3.md) |
 | watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 26 | 26 | [series](series-a5c935d7b52c9992.md) |
-| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 11 | 11 | [series](series-20369cc20c6b6e85.md) |
+| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 14 | 14 | [series](series-20369cc20c6b6e85.md) |
 | watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | workflow&#95;run / main | 4 | 4 | [series](series-a5c500ec04fb6ce0.md) |
 | Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | schedule / main | 1 | 1 | [series](series-b3a133ad9ee03f39.md) |
 | watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | workflow&#95;run / main | 5 | 5 | [series](series-2920b31d99ae0d1d.md) |
