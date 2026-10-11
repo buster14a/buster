@@ -41,7 +41,9 @@
 //   statement plan (c_parse_statement_plan_build): statement boundaries,
 //   block declaration ends and `for` header boundaries read from the tree's
 //   COMPOUND_STATEMENT items, and plain expression segments bound in one
-//   pass (c_parse_bind_plan_segment) instead of by its token loop. A block
+//   pass (c_parse_bind_plan_segment) instead of by its token loop; an
+//   expression holding compound literals is split into segments at its
+//   initializer lists' braces (c_parse_plan_braced), which the loop reads. A block
 //   declaration's entry carries declarator hints (c_parse_plan_declarators):
 //   the split (c_parse_planned_local_declarations) takes each declarator's
 //   `,` and `=` from them, and binds a plain initializer with the use filter
@@ -19943,6 +19945,23 @@ BUSTER_C_INTERNAL bool c_parse_pointer_declarator_group(CPreprocessResult prepro
                               c_token_is_punctuator(&preprocess.tokens[open + 1], C_PUNCTUATOR_LEFT_PARENTHESIS));
 }
 
+// The type words whose `(` opens their own operand: `_Atomic(int)`,
+// `_Alignas(8)` and `typeof(f(1))`. That `(` is never a declarator group or
+// parameter list, so the declaration scans skip it; otherwise
+// `_Atomic(int) (av)` reads as the redundant `(f)(...)` function shape with
+// the keyword `int` as its name (GitHub #3368).
+BUSTER_C_INTERNAL bool c_parse_parenthesized_operand_word(CPreprocessResult preprocess, CToken word)
+{
+    bool operand = false;
+    if (c_parse_type_word_for_dialect_token(preprocess, word))
+    {
+        String8 spelling = c_token_spelling(preprocess.spelling_base, word);
+        operand = string_equal(spelling, S8("_Atomic")) || string_equal(spelling, S8("_Alignas")) || string_equal(spelling, S8("typeof")) ||
+                  string_equal(spelling, S8("__typeof")) || string_equal(spelling, S8("__typeof__")) || string_equal(spelling, S8("typeof_unqual"));
+    }
+    return operand;
+}
+
 // Whether the declaration scans read the top-level `(` at `open` as a
 // declarator group, so that the name inside it is the declarator's and a
 // parameter list right after that name, `int (gd(int a))`, makes a function
@@ -19954,7 +19973,8 @@ BUSTER_C_INTERNAL bool c_parse_pointer_declarator_group(CPreprocessResult prepro
 // no parameter list does (c_parse_pointer_declarator_group); `T (x)` is read
 // as a function `T`. After any other keyword -- `_Static_assert((f(1)))` --
 // it is none, and after a `)` or `]` it is the suffix of what precedes it:
-// `(void)` in `int (*fp)(void)` is a parameter list.
+// `(void)` in `int (*fp)(void)` is a parameter list, unless that `)` closes
+// one of those words' operands.
 BUSTER_C_INTERNAL bool c_parse_declarator_group_may_open(CPreprocessResult preprocess, u32 start, u32 open, u32 end)
 {
     bool after_suffix = open > start && (c_token_is_punctuator(&preprocess.tokens[open - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
@@ -19967,13 +19987,25 @@ BUSTER_C_INTERNAL bool c_parse_declarator_group_may_open(CPreprocessResult prepr
         {
             may_open = c_parse_pointer_declarator_group(preprocess, open, end);
         }
-        else if (c_parse_type_word_for_dialect_token(preprocess, word))
+        else
         {
-            String8 spelling = c_token_spelling(preprocess.spelling_base, word);
-            may_open = !string_equal(spelling, S8("_Atomic")) && !string_equal(spelling, S8("_Alignas")) && !string_equal(spelling, S8("typeof")) &&
-                       !string_equal(spelling, S8("__typeof")) && !string_equal(spelling, S8("__typeof__")) &&
-                       !string_equal(spelling, S8("typeof_unqual"));
+            may_open = c_parse_type_word_for_dialect_token(preprocess, word) && !c_parse_parenthesized_operand_word(preprocess, word);
         }
+    }
+    // The `)` that closes such a word's operand ends a specifier, not a
+    // declarator: `_Atomic(int) (fd(int a))` opens a group (GitHub #3368).
+    if (!may_open && open > start + 1 && c_token_is_punctuator(&preprocess.tokens[open - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        u32 operand_open = open - 1;
+        u32 depth = 1;
+        while (operand_open > start && depth)
+        {
+            operand_open -= 1;
+            depth += c_token_is_punctuator(&preprocess.tokens[operand_open], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            depth -= c_token_is_punctuator(&preprocess.tokens[operand_open], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        }
+        may_open = !depth && operand_open > start && preprocess.tokens[operand_open - 1].kind == C_TOKEN_IDENTIFIER &&
+                   c_parse_parenthesized_operand_word(preprocess, preprocess.tokens[operand_open - 1]);
     }
     return may_open;
 }
@@ -20001,17 +20033,45 @@ BUSTER_C_INTERNAL bool c_parse_tag_name_before_group(CPreprocessResult preproces
 // A typedef name needs binding state, which the caller supplies; this is the
 // position where one can stand as the type: the first word of [start, open),
 // or after storage-class, function-specifier and qualifier words only. After
-// a type word, `int T(x)`, the identifier is the declarator's name. A
-// decoration before it (`__attribute__((x)) T (y)`) ends the walk, and the
-// group stays that word's parameter list as before.
+// a type word, `int T(x)`, the identifier is the declarator's name.
+// Declaration decorations may sit among those words, `static
+// __attribute__((x)) T (y)` or `[[maybe_unused]] T (z)`. A decoration can only
+// be recognized from its head, so a backward walk that stops at the `)` or `]`
+// closing one walks the prefix again forwards from `start`, stepping over
+// each decoration. `int f(void)` stops at `int` and never walks forwards.
 BUSTER_C_INTERNAL bool c_parse_typedef_name_position(CPreprocessResult preprocess, u32 start, u32 open)
 {
-    u32 index = open > start ? open - 1 : start;
+    u32 name = open > start ? open - 1 : start;
+    u32 index = name;
     CType ignored = {0};
     while (index > start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
            c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[index - 1], &ignored))
     {
         index -= 1;
+    }
+    if (index > start && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                          c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_BRACKET)))
+    {
+        u32 forward = start;
+        bool walking = true;
+        while (walking && forward < name)
+        {
+            u32 after = c_parse_skip_declaration_decoration(preprocess, forward, name);
+            if (after != forward)
+            {
+                forward = after;
+            }
+            else if (preprocess.tokens[forward].kind == C_TOKEN_IDENTIFIER &&
+                     c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[forward], &ignored))
+            {
+                forward += 1;
+            }
+            else
+            {
+                walking = false;
+            }
+        }
+        index = forward == name ? start : index;
     }
     return open > start && index == start;
 }
@@ -25924,7 +25984,12 @@ BUSTER_C_INTERNAL bool c_parse_controlling_expression_defines_tag(CTokenShape co
 //                `do` keyword. Adjacent segments merge. The loop binds their
 //                identifiers in one pass (c_parse_bind_plan_segment) with its
 //                own predicates and steps past them; nothing in them can open a
-//                scope, declare, or reach any other path of the loop.
+//                scope, declare, or reach any other path of the loop. Such an
+//                expression may also hold compound literals, initializer
+//                lists and designators: it is then split at each list's `{`
+//                and `}` (c_parse_plan_braced), which the loop reads itself,
+//                opening and closing the scope it gives a `{` and starting a
+//                statement after each brace, as it always has.
 //   DECLARATION  a block declaration from its first token to its `;`, holding
 //                no statement expression: the loop's `;` scan and its GNU
 //                typeof statement-expression search are skipped. It carries
@@ -26306,17 +26371,164 @@ BUSTER_GLOBAL_LOCAL bool c_parse_plan_punctuator_at(CPreprocessResult const* pre
     return token < limit && c_token_is_punctuator(&preprocess->tokens[token], punctuator);
 }
 
-// The plain expression at `node` as a segment ending at the `terminator`
-// punctuator after its last anchor's closers: from `start` (or, with
-// UINT32_MAX, from the expression's own first token) to that punctuator.
-// UINT32_MAX when the expression is not plain or no such punctuator follows.
-BUSTER_GLOBAL_LOCAL u32 c_parse_plan_expression_end(CAst const* ast, CPreprocessResult const* preprocess, u32 node, u32 limit, CPunctuator terminator,
-                                                    u32* first)
+// The initializer lists of a braced expression (c_parse_plan_braced): its
+// lists' nodes and `}`, in node order, and their `{` and `}` in token order.
+// An expression with more lists is left to the token loop.
+enum
 {
-    u32 end = UINT32_MAX;
+    C_PARSE_PLAN_BRACED_LISTS = 16,
+};
+
+typedef struct CParsePlanBraces CParsePlanBraces;
+struct CParsePlanBraces
+{
+    u32 lists[C_PARSE_PLAN_BRACED_LISTS];
+    u32 closes[C_PARSE_PLAN_BRACED_LISTS];
+    u32 tokens[2 * C_PARSE_PLAN_BRACED_LISTS];
+    u32 list_count;
+    u32 count;
+};
+
+// The last token of n's subtree before its closers: the greatest anchor on
+// its rightmost chain, as c_parse_plan_last_anchor, except that the chain
+// stops at an initializer list, whose `}` (already in `braces`) is past every
+// token inside it.
+BUSTER_GLOBAL_LOCAL u32 c_parse_plan_braced_last(CAst const* ast, CParsePlanBraces const* braces, u32 node)
+{
+    u32 last = 0;
+    u32 cursor = node;
+    bool descending = true;
+    while (descending)
+    {
+        u32 token = ast->tokens[cursor] + (ast->kinds[cursor] == C_AST_STRING ? ast->data[cursor] - 1 : 0);
+        last = token > last ? token : last;
+        if (ast->kinds[cursor] == C_AST_INITIALIZER_LIST)
+        {
+            u32 slot = braces->list_count;
+            while (slot && braces->lists[slot - 1] != cursor)
+            {
+                slot -= 1;
+            }
+            u32 close = slot ? braces->closes[slot - 1] : 0;
+            last = close > last ? close : last;
+            descending = false;
+        }
+        else
+        {
+            descending = ast->extents[cursor] > 1;
+            cursor -= descending;
+        }
+    }
+    return last;
+}
+
+// Whether every node of n's subtree is plain or initializer syntax (compound
+// literals, initializer lists and designators), with at most
+// C_PARSE_PLAN_BRACED_LISTS lists whose `{` and `}` the tokens confirm. A
+// list's `}` follows its last item's last token, that token's closers and an
+// optional `,`; an empty list's follows its `{`. Lists come in node order, so
+// a list's inner lists are known before it. `*first` receives the subtree's
+// least anchor.
+BUSTER_GLOBAL_LOCAL bool c_parse_plan_braced(CAst const* ast, CPreprocessResult const* preprocess, u32 node, u32 limit, u32* first,
+                                             CParsePlanBraces* braces)
+{
+    bool braced = true;
+    u32 least = UINT32_MAX;
+    braces->list_count = 0;
+    braces->count = 0;
+    for (u32 cursor = c_ast_subtree_begin(ast, node); cursor <= node && braced; cursor += 1)
+    {
+        braced = (c_parse_plan_kind_class[ast->kinds[cursor]] & (C_PARSE_PLAN_PLAIN | C_PARSE_PLAN_INITIALIZER)) != 0;
+        least = ast->tokens[cursor] < least ? ast->tokens[cursor] : least;
+        if (braced && ast->kinds[cursor] == C_AST_INITIALIZER_LIST)
+        {
+            u32 open = ast->tokens[cursor];
+            u32 close = open + 1;
+            if (ast->extents[cursor] > 1)
+            {
+                close = c_parse_plan_after_closers(preprocess, c_parse_plan_braced_last(ast, braces, cursor - 1), limit, false);
+                close += c_parse_plan_punctuator_at(preprocess, close, limit, C_PUNCTUATOR_COMMA);
+            }
+            braced = braces->list_count < C_PARSE_PLAN_BRACED_LISTS && c_parse_plan_punctuator_at(preprocess, open, limit, C_PUNCTUATOR_LEFT_BRACE) &&
+                     c_parse_plan_punctuator_at(preprocess, close, limit, C_PUNCTUATOR_RIGHT_BRACE);
+            if (braced)
+            {
+                braces->lists[braces->list_count] = cursor;
+                braces->closes[braces->list_count++] = close;
+                // Insertion in token order; there are few lists.
+                for (u32 brace = 0; brace < 2; brace += 1)
+                {
+                    u32 token = brace ? close : open;
+                    u32 slot = braces->count++;
+                    while (slot && braces->tokens[slot - 1] > token)
+                    {
+                        braces->tokens[slot] = braces->tokens[slot - 1];
+                        slot -= 1;
+                    }
+                    braces->tokens[slot] = token;
+                }
+            }
+        }
+    }
+    *first = least;
+    return braced;
+}
+
+// Appends the segment [start, end] split at each brace of `braces`, which lie
+// inside it: the token loop reads every brace itself, opening and closing the
+// scope it gives a `{`, and starts a statement after each, as it would. With
+// no braces this is one segment.
+BUSTER_GLOBAL_LOCAL bool c_parse_plan_append_braced(CParseStatementPlan* plan, u32 start, u32 end, CParsePlanBraces const* braces)
+{
+    bool ordered = true;
+    u32 from = start;
+    for (u32 slot = 0; slot < braces->count && ordered; slot += 1)
+    {
+        u32 brace = braces->tokens[slot];
+        ordered = brace >= from && brace <= end;
+        if (ordered && brace > from)
+        {
+            ordered = c_parse_plan_append(plan, C_PARSE_STATEMENT_PLAN_SEGMENT, from, brace - 1, 0, 0);
+        }
+        from = brace + 1;
+    }
+    if (ordered && from <= end)
+    {
+        ordered = c_parse_plan_append(plan, C_PARSE_STATEMENT_PLAN_SEGMENT, from, end, 0, 0);
+    }
+    return ordered;
+}
+
+// The last token before the closers of the expression at `node` when it is
+// plain or braced, else UINT32_MAX. `*first` receives the expression's first
+// token apart from wrapping parentheses, and `braces` its initializer lists'
+// braces (none for a plain one).
+BUSTER_GLOBAL_LOCAL u32 c_parse_plan_expression_last(CAst const* ast, CPreprocessResult const* preprocess, u32 node, u32 limit, u32* first,
+                                                     CParsePlanBraces* braces)
+{
+    u32 last = UINT32_MAX;
+    braces->count = 0;
     if (c_parse_plan_plain(ast, node, first))
     {
-        u32 after = c_parse_plan_after_closers(preprocess, c_parse_plan_last_anchor(ast, node), limit, false);
+        last = c_parse_plan_last_anchor(ast, node);
+    }
+    else if (c_parse_plan_braced(ast, preprocess, node, limit, first, braces))
+    {
+        last = c_parse_plan_braced_last(ast, braces, node);
+    }
+    return last;
+}
+
+// The `terminator` punctuator after the closers of the expression at `node`
+// (c_parse_plan_expression_last), else UINT32_MAX.
+BUSTER_GLOBAL_LOCAL u32 c_parse_plan_expression_end(CAst const* ast, CPreprocessResult const* preprocess, u32 node, u32 limit, CPunctuator terminator,
+                                                    u32* first, CParsePlanBraces* braces)
+{
+    u32 end = UINT32_MAX;
+    u32 last = c_parse_plan_expression_last(ast, preprocess, node, limit, first, braces);
+    if (last != UINT32_MAX)
+    {
+        u32 after = c_parse_plan_after_closers(preprocess, last, limit, false);
         end = c_parse_plan_punctuator_at(preprocess, after, limit, terminator) ? after : UINT32_MAX;
     }
     return end;
@@ -26447,6 +26659,7 @@ BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseM
         fallback = C_AST_STATEMENT_FALLBACK_TOKENS;
     }
     u64 declines = 0;
+    u64 braced = 0;
     if (!fallback)
     {
         u32 begin = c_ast_subtree_begin(ast, compound);
@@ -26470,6 +26683,8 @@ BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseM
             u32 anchor = ast->tokens[node];
             u32 extent = ast->extents[node];
             u32 first = 0;
+            CParsePlanBraces braces;
+            braces.count = 0;
             bool ordered = true;
             bool declined = false;
             // Statements to plan after this one, in source order.
@@ -26491,7 +26706,7 @@ BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseM
             }
             else if (tag == C_PARSE_PLAN_VISIT_TAIL)
             {
-                u32 end = c_parse_plan_expression_end(ast, &preprocess, node - 1, limit, C_PUNCTUATOR_SEMICOLON, &first);
+                u32 end = c_parse_plan_expression_end(ast, &preprocess, node - 1, limit, C_PUNCTUATOR_SEMICOLON, &first, &braces);
                 u32 open = first;
                 while (end != UINT32_MAX && open > body_start && c_token_is_punctuator(&preprocess.tokens[open - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
                 {
@@ -26500,7 +26715,7 @@ BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseM
                 if (end != UINT32_MAX && open > body_start + 1 && open < first &&
                     c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[open - 1], C_SYMBOL_WELL_KNOWN_WHILE))
                 {
-                    ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_SEGMENT, open - 1, end, 0, 0);
+                    ordered = c_parse_plan_append_braced(&plan, open - 1, end, &braces);
                 }
                 else
                 {
@@ -26529,7 +26744,7 @@ BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseM
                     {
                         fallback = C_AST_STATEMENT_FALLBACK_TOKENS;
                     }
-                    else if (c_parse_plan_plain(ast, node - 1, &first))
+                    else if (c_parse_plan_plain(ast, node - 1, &first) || c_parse_plan_braced(ast, &preprocess, node - 1, limit, &first, &braces))
                     {
                         // Wrapping parentheses have no node; the token before
                         // a statement ends the previous one and is never `(`.
@@ -26537,7 +26752,7 @@ BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseM
                         {
                             first -= 1;
                         }
-                        ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_SEGMENT, first, anchor, 0, 0);
+                        ordered = c_parse_plan_append_braced(&plan, first, anchor, &braces);
                     }
                     else
                     {
@@ -26569,14 +26784,14 @@ BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseM
                         kind != C_AST_GOTO ||
                         (anchor > body_start && c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[anchor - 1], C_SYMBOL_WELL_KNOWN_GOTO));
                     u32 end = extent == 1 ? (c_parse_plan_punctuator_at(&preprocess, anchor + 1, limit, C_PUNCTUATOR_SEMICOLON) ? anchor + 1 : UINT32_MAX)
-                                          : c_parse_plan_expression_end(ast, &preprocess, node - 1, limit, C_PUNCTUATOR_SEMICOLON, &first);
+                                          : c_parse_plan_expression_end(ast, &preprocess, node - 1, limit, C_PUNCTUATOR_SEMICOLON, &first, &braces);
                     if (!keyword_valid || (extent == 1 && end == UINT32_MAX))
                     {
                         fallback = C_AST_STATEMENT_FALLBACK_TOKENS;
                     }
                     else if (end != UINT32_MAX)
                     {
-                        ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_SEGMENT, keyword, end, 0, 0);
+                        ordered = c_parse_plan_append_braced(&plan, keyword, end, &braces);
                     }
                     else
                     {
@@ -26592,19 +26807,20 @@ BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseM
                     u32 last_child = node - 1;
                     u32 body = kind == C_AST_IF_ELSE ? c_ast_subtree_begin(ast, last_child) - 1 : last_child;
                     u32 condition = c_ast_subtree_begin(ast, body) - 1;
+                    u32 last = c_parse_plan_expression_last(ast, &preprocess, condition, limit, &first, &braces);
                     if (!c_parse_plan_punctuator_at(&preprocess, anchor + 1, limit, C_PUNCTUATOR_LEFT_PARENTHESIS))
                     {
                         fallback = C_AST_STATEMENT_FALLBACK_TOKENS;
                     }
-                    else if (c_parse_plan_plain(ast, condition, &first))
+                    else if (last != UINT32_MAX)
                     {
                         // Past the condition's closers is the body's first
                         // token, which is never a closer; the header's `)` is
                         // just before it.
-                        u32 after = c_parse_plan_after_closers(&preprocess, c_parse_plan_last_anchor(ast, condition), limit, false);
+                        u32 after = c_parse_plan_after_closers(&preprocess, last, limit, false);
                         if (after < limit && after - 1 > anchor + 1 && c_token_is_punctuator(&preprocess.tokens[after - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
                         {
-                            ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_SEGMENT, anchor, after - 1, 0, 0);
+                            ordered = c_parse_plan_append_braced(&plan, anchor, after - 1, &braces);
                         }
                         else
                         {
@@ -26728,10 +26944,10 @@ BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseM
                 {
                     bool has_statement = extent > 1 && c_ast_subtree_begin(ast, node - 1) != c_ast_subtree_begin(ast, node);
                     u32 value = has_statement ? c_ast_subtree_begin(ast, node - 1) - 1 : node - 1;
-                    u32 colon = c_parse_plan_expression_end(ast, &preprocess, value, limit, C_PUNCTUATOR_COLON, &first);
+                    u32 colon = c_parse_plan_expression_end(ast, &preprocess, value, limit, C_PUNCTUATOR_COLON, &first, &braces);
                     if (colon != UINT32_MAX)
                     {
-                        ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_SEGMENT, anchor, colon, 0, 0);
+                        ordered = c_parse_plan_append_braced(&plan, anchor, colon, &braces);
                     }
                     else
                     {
@@ -26776,6 +26992,7 @@ BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseM
             }
             fallback = !ordered && !fallback ? C_AST_STATEMENT_FALLBACK_TOKENS : fallback;
             declines += declined;
+            braced += !declined && braces.count;
             // Pushed last first, so they come off in source order.
             for (u32 slot = 3; slot && !fallback; slot -= 1)
             {
@@ -26804,6 +27021,7 @@ BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseM
         plan.statistics->fallbacks += fallback != C_AST_STATEMENT_FALLBACK_NONE;
         plan.statistics->fallback_counts[fallback] += 1;
         plan.statistics->declines += fallback ? 0 : declines;
+        plan.statistics->braced += fallback ? 0 : braced;
         if (fallback)
         {
             plan.statistics->reason = fallback;
@@ -29150,7 +29368,9 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
             c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
         {
             if (!delimiter_count && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && !declarator.seen_equal &&
-                declarator.function_name_token == C_ID_UNDERLYING_INVALID)
+                declarator.function_name_token == C_ID_UNDERLYING_INVALID &&
+                !(index > start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
+                  c_parse_parenthesized_operand_word(preprocess, preprocess.tokens[index - 1])))
             {
                 u32 parenthesized_name_token = C_ID_UNDERLYING_INVALID;
                 bool parenthesized_function = c_parse_parenthesized_function_name(preprocess, index, end, &parenthesized_name_token);
@@ -29418,7 +29638,9 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                 if (c_punctuator_in_set((u8)punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
                 {
                     if (!delimiter_count && punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS && !seen_equal &&
-                        function_name_token == C_ID_UNDERLYING_INVALID)
+                        function_name_token == C_ID_UNDERLYING_INVALID &&
+                        !(index > start && c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
+                          c_parse_parenthesized_operand_word(preprocess, preprocess.tokens[index - 1])))
                     {
                         u32 parenthesized_name_token = C_ID_UNDERLYING_INVALID;
                         bool parenthesized_function = c_parse_parenthesized_function_name(preprocess, index, token_count, &parenthesized_name_token);
@@ -29965,8 +30187,9 @@ BUSTER_C_INTERNAL bool c_parser_tree_declarator(CParserTreeSplit* split, u32 roo
         // A redundant group the walker does not read as a group is refused
         // (c_parse_declarator_group_may_open). After a tag or typedef name
         // the walker reads one where c_parser_type_name_before_group does:
-        // after `struct S`, or after a typedef name in the type's position.
-        // Elsewhere, `__attribute__((a)) T (x)`, it names a function `T`.
+        // after `struct S`, or after a typedef name in the type's position,
+        // which decorations such as `__attribute__((a)) T (x)` keep.
+        // Elsewhere, `int T (x)`, it names a function `T`.
         bool redundant = opens > boundaries;
         bool misread = redundant && c_parser_tree_punctuator_at(preprocess, index, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                        !c_parse_declarator_group_may_open(*preprocess, lower, index, (u32)preprocess->token_count) &&

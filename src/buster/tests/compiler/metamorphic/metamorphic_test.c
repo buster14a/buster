@@ -453,6 +453,13 @@ BUSTER_GLOBAL_LOCAL MetaOutcome meta_execute(MetaContext* context, String8 direc
         if (!reference)
         {
             argv[count++] = S8("cc");
+            // Subprocesses do not see compiler_driver_host_cpu_default; -march
+            // applies after argument parsing, so only pin when no -target
+            // follows (#1557).
+            if (!target.triple.length)
+            {
+                argv[count++] = S8("-march=native");
+            }
         }
         argv[count++] = S8("-std=c11");
         argv[count++] = reference && context->reference_optimized ? S8("-O2") : S8("-O0");
