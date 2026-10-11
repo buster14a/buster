@@ -20231,12 +20231,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_function_address_ou
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_rejection_diagnostics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    struct
+    typedef struct CompilerDriverWasmRejectionCase CompilerDriverWasmRejectionCase;
+    struct CompilerDriverWasmRejectionCase
     {
         String8 target;
         String8 source;
         String8 message;
-    } cases[] = {
+    };
+    CompilerDriverWasmRejectionCase cases[] = {
         {S8("wasm32-wasip1"), S8("struct S { int a; int b; }; int probe(struct S s) { return s.a + s.b; } void _start(void) {}"),
          S8("aggregate or unsupported parameter ABI in WebAssembly function")},
         {S8("wasm64-unknown-freestanding"), S8("struct S { int a; int b; }; int probe(struct S s) { return s.a + s.b; } void _start(void) {}"),
