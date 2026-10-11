@@ -2179,6 +2179,17 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
         {
             initializer_counts[module->initializers[initializer_index].is_destructor ? 1 : 0] += 1;
         }
+        // An __attribute__((ifunc)) symbol has no bitcode form here, and
+        // dropping it would leave every call to it unresolved.
+        for (u32 alias_index = 0; alias_index < module->alias_count; alias_index += 1)
+        {
+            if (module->aliases[alias_index].is_indirect)
+            {
+                llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNRESOLVED_SYMBOL, llvm_bc_s8("LLVM bitcode does not represent ifunc symbols"), 0, 0, 0,
+                             module->aliases[alias_index].symbol);
+                return false;
+            }
+        }
         for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
         {
             IrGlobal* global = module->globals + global_index;

@@ -382,7 +382,11 @@ unchanged.
 - **File-scope initializers.** `c_parse_validate_static_initializers` made
   nearly all of the queries outside a typed body: 77,545 of 79,035 on the unity
   self-host, at about 190 M machine Ir, against at most 3 M for any other
-  validator (audit `2026-10-09T213311Z`). Before it validates a file-scope
+  validator (audit `2026-10-09T213311Z`). The other phases are left to the
+  machine: together they run about 3 M machine Ir, and almost none of it
+  could be answered (audit
+  [`2026-10-11T093053Z`](../../performance-audits/2026-10-11T093053Z.md)).
+  Before it validates a file-scope
   object's initializer, `c_ast_types_initializer_begin` reserves the arrays
   for that initializer's subtree, over the initializer's tokens, and they are
   released afterwards. The subtree is typed the same way, but only when the
@@ -468,6 +472,25 @@ unchanged.
   constraint checks, a `sizeof` expression) must therefore hold no type name
   the tree did not accept. The typer also declines a `?:` whose range holds a
   top-level comma or assignment, which the machine splits at instead.
+
+  It also declines shapes whose machine answers append few or no rows, but
+  for which it has no rule:
+  - `++` and `--`, prefix and postfix;
+  - an arithmetic, shift or `?:` operand that ends in `. name` or `-> name`
+    without being a member node, such as `a + s.f`. The machine reads the
+    bit-field width from those tokens, so `c_ast_types_operand_width` leaves
+    them to it.
+  - a member access over any other base kind, such as a cast or a compound
+    literal;
+  - a call whose callee is not a plain identifier, and a call of an unbound
+    builtin other than a void one with no arguments;
+  - an identifier with no binding in a body;
+  - `_Generic`, a statement expression, a braced initializer list,
+    `__real__` and `__imag__`, `true`, `false` and `nullptr`, and `&&label`.
+
+  The census in audit
+  [`2026-10-11T093336Z`](../../performance-audits/2026-10-11T093336Z.md)
+  charges each declined shape its machine Ir on the unity self-host.
 - **The replay.** With constraint checks the machine types a cast's operand.
   When that operand is one string-literal token, alone or in parentheses
   (`(char8*)("text")`, as `S8()` spells it), its typing appends the literal's
@@ -1482,6 +1505,70 @@ the same way and diagnostic only:
 - The memo answers 58% of the pass's member lookups.
 - The default path is within +0.006%.
 - Zen 5 validation stays incomplete (#2761).
+
+The stage-1 adoption budget is **not yet measured** on the Ryzen 7 9700X. As
+of main `a6705764` no approved route can time one compiler binary with and
+without `-fc-ast-pilot`:
+- the pull-request comparison (`compiler-compare-v1`) times two binaries with
+  default flags, and only for `-c`;
+- the one same-binary flag pair, the issue #48 inline profile, accepts
+  `-fcanonical-inline` only;
+- a direct workload cannot build or run the compiler.
+
+[#3397](https://github.com/buster14a/buster/issues/3397) proposes a fixed
+`compare-pull` profile for this measurement. Until it merges and one owner
+request runs it, the budget is neither passed nor failed. The hosted counts
+above are not acceptance, and the default stays off.
+
+For the typer's remaining out-of-body phases, these budgets were declared
+before any measured run. These are the queries outside a typed body or
+file-scope initializer that still run the machine under `-fc-ast-pilot`: file
+`_Static_assert`, deferred assertions, type alignments, variably modified
+checks, signatures, the binder and the like. The input and flags are stage
+2's. Four Callgrind arms (`--cache-sim=no --branch-sim=no`) are counted on
+tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `a6705764`, which the candidate branches from. The budgets:
+- **Census first.** A throwaway build of the base, not committed, routes each
+  machine run from a query through one noinline wrapper per analysis phase,
+  and Callgrind charges each phase's inclusive machine Ir under the pilot. A
+  phase is a candidate only if its machine Ir is at least 1 M and the typer can
+  answer its queries: it must run in the normal constant-evaluation mode, on
+  an idle machine. If the candidates total less than 1 M, no candidate is
+  built, and the audit records the negative result.
+- **Correctness.** No verify mismatch over the corpus, or in a one-off verify
+  run over the self-host input. Identical diagnostics and type-table sizes
+  with and without the tree. Byte-identical `-c` objects (`-g0` and `-g`)
+  across the four arms.
+- **Default path (D against A).** The new scopes exist only with the tree, so
+  the difference stays within ±0.05% Ir on `-fsyntax-only` and on `-c`
+  (`-g0`).
+- **The gain that ships it (C against B).** At least 1 M fewer instructions in
+  the whole compile, with the new scopes' passes and lookups charged, and
+  fewer machine runs from queries outside a typed region. A smaller gain, or
+  a loss, is recorded as a negative result, and the code does not ship.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761), and the hook stays
+  opt-in.
+
+The out-of-body census is
+[`2026-10-11T093053Z`](../../performance-audits/2026-10-11T093053Z.md),
+diagnostic only, and its result is negative. No candidate was built:
+- The phases outside a constant-evaluation mode run 3.00 M machine Ir in
+  all, not the 7 M listed earlier. File `_Static_assert` runs 0.90 M, and
+  deferred assertions, the validators after the body loop and variably
+  modified checks run 0.33 M or less each.
+- Only the binder reaches 1 M, at 1.41 M. 1.17 M of that is `S8()` compound
+  literals initializing locals. They are queried before the scalar rows are
+  published and while the interning window is shut, so the tree declines
+  them. The rest is 0.24 M.
+- The 17 constant-evaluation runs (3.22 M) are never the typer's.
+- 92% of the machine Ir still left under the pilot is declines and misses
+  inside typed bodies.
 
 For map row 7 in lowering (`c_ir_group_type_name`, `c_ir_query_type_name` and
 the query machine's `TYPE_NAME` frames), a census came first:

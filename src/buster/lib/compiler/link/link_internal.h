@@ -73,5 +73,11 @@ BUSTER_F_DECL NativeExecutableLinkResult link_elf_test_executable(Arena* arena, 
 // tests can choose its growth path and the arena's dirty high-water mark. The
 // image must be at least an ELF header long; the loaded sections sit at offset
 // zero and the layout is static.
+// The production ELF unwind-header sort over synthetic keys: entry i keys on
+// addresses[round * count + i] in each of round_count rounds, so later rounds
+// reuse the buffers an odd or even pass count left. order receives the final
+// original indices, pass_counts one radix pass count per round. Returns false
+// if the result and scratch buffers ever alias.
+BUSTER_F_DECL bool link_elf_eh_frame_sort_test(Arena* arena, u64 const* addresses, u32 count, u32 round_count, u32* order, u32* pass_counts);
 BUSTER_F_DECL NativeExecutableLinkResult link_elf_test_section_table_append(Arena* arena, ByteSlice image, ObjectFile* object);
 #endif
