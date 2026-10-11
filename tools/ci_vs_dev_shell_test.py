@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Regressions for the Windows CI Visual Studio shell helper and its wiring."""
+import json
 import os
 from pathlib import Path
 import re
@@ -83,14 +84,22 @@ class Probe:
     def __init__(self, shell, directory, vswhere, arguments, environment):
         directory.mkdir(parents=True)
         self.launch_log = directory / "launch.log"
+        self.stage_path = directory / "stages.log"
         self.github_env = directory / "github-env"
         self.stdout_path = directory / "stdout.txt"
         self.stderr_path = directory / "stderr.txt"
         script = directory / "step.ps1"
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
+            "function Write-FixtureStage([string]$Stage) {\n"
+            "    [System.IO.File]::AppendAllText($env:FAKE_STAGE_LOG, "
+            "\"stage=$Stage utc_ms=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())`n\")\n"
+            "}\n"
+            "Write-FixtureStage script-entry\n"
+            "Write-FixtureStage helper-entry\n"
             f"& '{HELPER}' -VsWhere '{vswhere}' -Arch amd64 -Component fixture.component "
             + arguments.replace("<github_env>", str(self.github_env)) + "\n"
+            "Write-FixtureStage helper-exit\n"
             "Write-Output \"AFTER_PATH=$env:PATH\"\n"
             "Write-Output \"AFTER_TARGET=$env:VSCMD_ARG_TGT_ARCH\"\n",
             encoding="utf-8")
@@ -98,13 +107,16 @@ class Probe:
         self.returncode = None
         self.timed_out = False
         self.stdout = self.stderr = ""
+        self.stages = ""
+        self.launch_utc_ms = time.time_ns() // 1000000
         self.started = time.monotonic()
         # File-backed capture: collecting one child can never block on another
         # child's pipe capacity or on a pipe handle inherited by a grandchild.
         self.outputs = (self.stdout_path.open("wb"), self.stderr_path.open("wb"))
         try:
             self.process = subprocess.Popen(
-                self.command, env=dict(environment, FAKE_LAUNCH_LOG=str(self.launch_log)),
+                self.command, env=dict(environment, FAKE_LAUNCH_LOG=str(self.launch_log),
+                                       FAKE_STAGE_LOG=str(self.stage_path)),
                 stdin=subprocess.DEVNULL, stdout=self.outputs[0], stderr=self.outputs[1])
         except BaseException:
             for output in self.outputs:
@@ -123,6 +135,10 @@ class Probe:
             output.close()
         self.stdout = self.stdout_path.read_text(errors="replace")
         self.stderr = self.stderr_path.read_text(errors="replace")
+        self.stages = self.stage_path.read_text(errors="replace") if self.stage_path.exists() else ""
+        print("VS_PROBE_TRACE " + json.dumps({"launch_utc_ms": self.launch_utc_ms,
+              "stage_log": str(self.stage_path), "stages": self.stages,
+              "timed_out": self.timed_out}), flush=True)
 
     def stop(self):
         if self.process.poll() is None:
@@ -188,19 +204,23 @@ class HelperBehaviorTests(unittest.TestCase):
         cls.vs_bin.mkdir()
         (tools / "Launch-VsDevShell.ps1").write_text(
             "param([string]$Arch, [string]$HostArch, [switch]$SkipAutomaticLocation)\n"
+            "Write-FixtureStage vsdev-entry\n"
             "Add-Content -LiteralPath $env:FAKE_LAUNCH_LOG -Value \"arch=$Arch host=$HostArch skip=$SkipAutomaticLocation\"\n"
             "$env:VSCMD_ARG_TGT_ARCH = $Arch\n"
-            f"$env:PATH = '{cls.vs_bin};' + $env:PATH\n",
+            f"$env:PATH = '{cls.vs_bin};' + $env:PATH\n"
+            "Write-FixtureStage vsdev-exit\n",
             encoding="utf-8")
         for compiler in ("cl", "gcc", "zig"):
             (cls.vs_bin / f"{compiler}.cmd").write_text("@echo off\r\n")
         cls.llvm_bin = cls.root / "llvm/bin"
         cls.llvm_bin.mkdir(parents=True)
         (cls.llvm_bin / "clang.cmd").write_text(
-            "@echo off\r\necho clang version fixture\r\necho Target: %FAKE_CLANG_TARGET%\r\n")
+            '@echo off\r\necho stage=clang-entry time=%TIME% >> "%FAKE_STAGE_LOG%"\r\n'
+            "echo clang version fixture\r\necho Target: %FAKE_CLANG_TARGET%\r\n")
         vswhere = cls.root / "vswhere.cmd"
         vswhere.write_text(
-            "@echo off\r\nif defined FAKE_VS_PATH echo %FAKE_VS_PATH%\r\nexit /b %FAKE_VSWHERE_STATUS%\r\n")
+            '@echo off\r\necho stage=vswhere-entry time=%TIME% >> "%FAKE_STAGE_LOG%"\r\n'
+            "if defined FAKE_VS_PATH echo %FAKE_VS_PATH%\r\nexit /b %FAKE_VSWHERE_STATUS%\r\n")
         environment = dict(
             os.environ,
             FAKE_VS_PATH=str(cls.root / "vs"),
@@ -238,12 +258,16 @@ class HelperBehaviorTests(unittest.TestCase):
     def probe(self, name):
         probe = self.probes[name]
         self.assertFalse(probe.timed_out, f"{probe.command} exceeded {PROBE_TIMEOUT_SECONDS}s: "
-                                          + probe.stdout + probe.stderr)
+                                          + probe.stdout + probe.stderr + "\nstages:\n" + probe.stages)
         return probe
 
     def test_combination_shell_exports_path_and_probes_every_compiler(self):
         result = self.probe("combination")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        stages = [line.split()[0] for line in result.stages.splitlines()]
+        self.assertEqual(stages, ["stage=script-entry", "stage=helper-entry", "stage=vswhere-entry",
+                                 "stage=vsdev-entry", "stage=vsdev-exit", "stage=clang-entry",
+                                 "stage=helper-exit"])
         self.assertEqual(result.launch_log.read_text().split(), ["arch=amd64", "host=amd64", "skip=True"])
         after = re.search(r"AFTER_PATH=(.*)", result.stdout).group(1)
         self.assertTrue(after.startswith(f"{self.llvm_bin};{self.vs_bin};"), after)
@@ -345,6 +369,9 @@ class ProbeSchedulingTests(unittest.TestCase):
         probe.outputs = (mock.Mock(), mock.Mock())
         probe.stdout_path = mock.Mock()
         probe.stderr_path = mock.Mock()
+        probe.stage_path = mock.Mock()
+        probe.stage_path.exists.return_value = False
+        probe.launch_utc_ms = 0
         with mock.patch("time.monotonic", return_value=190):
             probe.finish()
         probe.process.wait.assert_called_once_with(timeout=30)
@@ -361,6 +388,9 @@ class ProbeSchedulingTests(unittest.TestCase):
         probe.outputs = (mock.Mock(), mock.Mock())
         probe.stdout_path = mock.Mock()
         probe.stderr_path = mock.Mock()
+        probe.stage_path = mock.Mock()
+        probe.stage_path.exists.return_value = False
+        probe.launch_utc_ms = 0
         with mock.patch("time.monotonic", return_value=221):
             probe.finish()
         probe.process.wait.assert_called_once_with(timeout=0)
