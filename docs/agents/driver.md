@@ -1636,6 +1636,29 @@ Buster-compiled main defining the other thread-local, and the test checks
 every descriptor appears relaxed and the image prints the same values as a
 host-linked control.
 
+## Native linker identity
+
+`ide cc -Wl,--version` and `ide cc -Xlinker --version` print
+`Buster native linker` followed by the effective target triple and exit
+successfully without reading source or standard input, compiling, spawning an
+external tool, or writing an artifact. `-march=x86-64 -O0 -g` may accompany the query. The independent
+`-m64` driver capability is tracked by
+[#3458](https://github.com/buster14a/buster/issues/3458). The typed invocation API exposes
+`COMPILER_DRIVER_QUERY_LINKER_VERSION`; execution returns the identity in
+`CompilerDriverResult.output`.
+
+The query requires a native x86-64/AArch64 link action and a supported native
+OS. The raw linker request must contain exactly `--version`; other linker
+arguments, compiler queries, compile-only actions, bitcode and GPU pipelines
+are refused. A SONAME operand named `--version` retains its ordinary meaning.
+The identity makes no GNU ld/LLD compatibility or invented version claim.
+Buster currently links in process and has no external-linker selector.
+
+Meson versions without a Buster linker detection/class implementation still
+reject this truthful identity. Native query support alone does not qualify
+Meson/QEMU configuration: upstream recognition and tests against unmodified
+Meson are required under [#3475](https://github.com/buster14a/buster/issues/3475).
+
 ## Pass-through options
 
 `-Wl,a,b,c` produces three individual linker arguments, in order. Each

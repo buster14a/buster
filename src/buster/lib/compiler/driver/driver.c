@@ -9,7 +9,8 @@
 // exactly as its argv spelling would be. The parser first replaces `@path` arguments through
 // compiler_driver_expand_response_files (bounded, one level, no nesting).
 // Comma-separated -Wl payloads become individual linker arguments;
-// link_validate_linker_arguments owns their supported semantic subset.
+// compiler_driver_validate_linker_query handles the native identity query;
+// link_validate_linker_arguments owns the image-producing semantic subset.
 // compiler_driver_execute_invocation then runs the
 // selected pipeline: compiler_driver_execute_c_single carries a C input
 // through preprocess, parse (the opt-in -fc-ast-pilot syntax-tree build,
@@ -1002,6 +1003,34 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_codegen_request(CompilerDriver
 // -fmetrics-out path exist only as argv state and stay parser-only;
 // zero-valued API fields mean "not requested", never a CLI default.
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_request(Arena* arena, CompilerDriverInvocation* invocation);
+// --version is a driver query only when it is the entire raw-linker request.
+// In particular, a SONAME operand spelling --version stays an operand, and a
+// query cannot hide another linker option or select a non-native pipeline.
+BUSTER_GLOBAL_LOCAL void compiler_driver_validate_linker_query(CompilerDriverInvocation* invocation)
+{
+    bool raw_query = invocation->linker_argument_count == 1 && invocation->linker_arguments &&
+                     string_equal(invocation->linker_arguments[0], S8("--version"));
+    bool requested = raw_query || invocation->query == COMPILER_DRIVER_QUERY_LINKER_VERSION;
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE && requested)
+    {
+        bool native = invocation->target.cpu_arch == CPU_ARCH_X86_64 || invocation->target.cpu_arch == CPU_ARCH_AARCH64;
+        bool native_os = invocation->target.os == OPERATING_SYSTEM_LINUX || invocation->target.os == OPERATING_SYSTEM_WINDOWS ||
+                         invocation->target.os == OPERATING_SYSTEM_MACOS || invocation->target.os == OPERATING_SYSTEM_IOS ||
+                         invocation->target.os == OPERATING_SYSTEM_ANDROID || invocation->target.os == OPERATING_SYSTEM_UEFI;
+        bool conflicting_query = invocation->query != COMPILER_DRIVER_QUERY_NONE && invocation->query != COMPILER_DRIVER_QUERY_LINKER_VERSION;
+        if (invocation->action != COMPILER_DRIVER_ACTION_LINK || invocation->has_gpu_target || invocation->emit_llvm_bitcode ||
+            !native || !native_os || conflicting_query || (invocation->linker_argument_count && !raw_query))
+        {
+            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation->diagnostic = S8("native linker --version requires a native link action and no other linker arguments or query");
+        }
+        else
+        {
+            invocation->query = COMPILER_DRIVER_QUERY_LINKER_VERSION;
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_request(Arena* arena, CompilerDriverInvocation* invocation)
 {
     if (invocation->error == COMPILER_DRIVER_ERROR_NONE && invocation->has_gpu_target)
@@ -1010,6 +1039,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_request(Arena* arena, Compiler
     }
     compiler_driver_validate_codegen_request(invocation, false);
     compiler_driver_validate_dependency_request(arena, invocation);
+    compiler_driver_validate_linker_query(invocation);
 }
 
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_request(Arena* arena, CompilerDriverInvocation* invocation)
@@ -1833,6 +1863,10 @@ String8 compiler_driver_query_text(Arena* arena, CompilerDriverInvocation const*
     {
         result = string_format(arena, S8("Buster clang version " COMPILER_DRIVER_VERSION_STRING " (buster)\nTarget: {S8}\nThread model: posix\n"),
                                compiler_driver_query_machine(arena, invocation));
+    }
+    else if (invocation->query == COMPILER_DRIVER_QUERY_LINKER_VERSION)
+    {
+        result = string_format(arena, S8("Buster native linker\nTarget: {S8}\n"), compiler_driver_query_target_triple(arena, invocation));
     }
     else if (invocation->query == COMPILER_DRIVER_QUERY_DUMP_VERSION)
     {
@@ -3136,6 +3170,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
         }
     }
+    compiler_driver_validate_linker_query(&invocation);
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && !invocation.no_standard_includes && !invocation.has_gpu_target &&
         invocation.target.os != OPERATING_SYSTEM_UEFI && invocation.target.cpu_arch != CPU_ARCH_SPIRV_COMPUTE)
     {
@@ -3166,7 +3201,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.diagnostic = S8("no input files");
         }
     }
-    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.linker_argument_count)
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.linker_argument_count &&
+        invocation.query != COMPILER_DRIVER_QUERY_LINKER_VERSION)
     {
         String8 unsupported = invocation.linker_arguments[0];
         NativeExecutableLinkOptions options = {
@@ -8322,6 +8358,11 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     {
         result.error = invocation.error;
         result.diagnostic = invocation.diagnostic;
+        goto finish;
+    }
+    if (invocation.query == COMPILER_DRIVER_QUERY_LINKER_VERSION)
+    {
+        result.output = compiler_driver_query_text(arena, &invocation);
         goto finish;
     }
     // Count both explicit entries and the target's defaults before any source
