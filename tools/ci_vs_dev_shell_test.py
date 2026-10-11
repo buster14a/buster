@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Regressions for the Windows CI Visual Studio shell helper and its wiring.
 
-VS_PROBE_TRACE retains PowerShell UTC-millisecond stages and CMD local %TIME%
-stages separately. Launch-to-script-entry attributes interpreter startup;
+VS_PROBE_TRACE retains PowerShell and native-fixture UTC-millisecond stages. Launch-to-script-entry attributes interpreter startup;
 helper and fixture stage order attributes work after that startup. Stage clocks
 are diagnostic only and never replace the monotonic launch-relative deadline.
 """
@@ -27,6 +26,56 @@ PROBE_TIMEOUT_SECONDS = 120
 # on hosted ARM64 even while the complete workflow-tools step fit its budget.
 PROBE_CONCURRENT_LIMIT = 2
 PROBE_CLEANUP_SECONDS = 10
+
+
+
+NATIVE_PROBE_FIXTURE = r'''
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0602
+#endif
+#include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(int argc, char** argv)
+{
+    (void)argc;
+    const char* leaf = argv[0];
+    const char* slash = strrchr(leaf, '\\');
+    if (slash) { leaf = slash + 1; }
+    int clang = strcmp(leaf, "clang.exe") == 0;
+    FILETIME stamp;
+    ULARGE_INTEGER ticks;
+    GetSystemTimePreciseAsFileTime(&stamp);
+    ticks.LowPart = stamp.dwLowDateTime;
+    ticks.HighPart = stamp.dwHighDateTime;
+    const char* stage_path = getenv("FAKE_STAGE_LOG");
+    FILE* stage = stage_path ? fopen(stage_path, "ab") : NULL;
+    int result = 0;
+    if (!stage) { result = 98; }
+    else
+    {
+        fprintf(stage, "stage=%s utc_ms=%llu\n", clang ? "clang-entry" : "vswhere-entry",
+                (unsigned long long)((ticks.QuadPart - 116444736000000000ull) / 10000ull));
+        if (fclose(stage)) { result = 99; }
+        if (!result && clang)
+        {
+            const char* target = getenv("FAKE_CLANG_TARGET");
+            puts("clang version fixture");
+            printf("Target: %s\n", target ? target : "");
+        }
+        else if (!result)
+        {
+            const char* path = getenv("FAKE_VS_PATH");
+            const char* status = getenv("FAKE_VSWHERE_STATUS");
+            if (path && *path) { puts(path); }
+            result = status ? atoi(status) : 97;
+        }
+    }
+    return result;
+}
+'''
 
 
 def workflow_step(text, name):
@@ -220,13 +269,22 @@ class HelperBehaviorTests(unittest.TestCase):
             (cls.vs_bin / f"{compiler}.cmd").write_text("@echo off\r\n")
         cls.llvm_bin = cls.root / "llvm/bin"
         cls.llvm_bin.mkdir(parents=True)
-        (cls.llvm_bin / "clang.cmd").write_text(
-            '@echo off\r\necho stage=clang-entry local_time=%TIME% >> "%FAKE_STAGE_LOG%"\r\n'
-            "echo clang version fixture\r\necho Target: %FAKE_CLANG_TARGET%\r\n")
-        vswhere = cls.root / "vswhere.cmd"
-        vswhere.write_text(
-            '@echo off\r\necho stage=vswhere-entry local_time=%TIME% >> "%FAKE_STAGE_LOG%"\r\n'
-            "if defined FAKE_VS_PATH echo %FAKE_VS_PATH%\r\nexit /b %FAKE_VSWHERE_STATUS%\r\n")
+        # Both production probes are executables. CMD stand-ins paid about
+        # 22 seconds per invocation on hosted ARM64 even after PowerShell was
+        # warm (#2021 stage receipts). One small native fixture preserves the
+        # same environment/status protocol without seven extra CMD launches.
+        compiler = shutil.which("clang") or shutil.which("gcc")
+        if compiler is None:
+            raise AssertionError("the native VS probe fixture requires a C compiler")
+        source = cls.root / "probe-fixture.c"
+        source.write_text(NATIVE_PROBE_FIXTURE, encoding="utf-8")
+        executable = cls.root / "probe-fixture.exe"
+        subprocess.run([compiler, "-std=c11", "-Wall", "-Wextra", "-Werror",
+                        str(source), "-o", str(executable)],
+                       check=True, timeout=PROBE_TIMEOUT_SECONDS)
+        vswhere = cls.root / "vswhere.exe"
+        shutil.copyfile(executable, vswhere)
+        shutil.copyfile(executable, cls.llvm_bin / "clang.exe")
         environment = dict(
             os.environ,
             FAKE_VS_PATH=str(cls.root / "vs"),
@@ -238,7 +296,7 @@ class HelperBehaviorTests(unittest.TestCase):
                 "-LlvmBin '<llvm_bin>' -GithubEnv '<github_env>' "
                 "-Require cl, clang, gcc, zig -ClangArch x86_64")),
             "msvc": (vswhere, {"FAKE_CLANG_TARGET": "wrong-target"}, ""),
-            "missing vswhere": (cls.root / "missing-vswhere.cmd", {}, ""),
+            "missing vswhere": (cls.root / "missing-vswhere.exe", {}, ""),
         }
         for name, (overrides, arguments) in cls.FAILURES.items():
             plan[name] = (vswhere, overrides, arguments)
