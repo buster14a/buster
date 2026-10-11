@@ -31304,8 +31304,9 @@ BUSTER_C_INTERNAL bool c_ir_initializer_nesting_depth(CIntegerIrBuilder* builder
 // Depth-first expansion of an aggregate's zero value. The task stack holds,
 // for each level of the current path, the siblings still to visit plus one
 // completion row, so it grows with the widest path through the type and not
-// with its byte size: a 330-element table of 40-byte records needs about 350
-// rows, where sizing it from `layout.size * 8` asked for 105,000. It grows
+// with its byte size: zeroing one 40-byte record of four members, as every
+// element of a local table does, needs about 20 rows, where sizing it from
+// `layout.size * 8 + 64` asked for 384 per element and kept them. It grows
 // by doubling on demand, checked against the scratch reservation first, and
 // the whole stack is released on return: nothing it holds outlives the call
 // (outputs and operand arrays live in builder->arena, and the emitters it
