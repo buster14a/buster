@@ -137,7 +137,9 @@ BUSTER_GLOBAL_LOCAL bool userspace_workload(Arena* arena, String8 program_path, 
         String8 device_args[] = {S8("sudo"), S8("-n"), S8("mknod"), S8("-m"), S8("666"),
                                  path_join(arena, root, S8("dev/null")), S8("c"), S8("1"), S8("3")};
         ClangSuiteCommand device = userspace_command(arena, S8("."), (SliceString8)BUSTER_ARRAY_TO_SLICE(device_args), 60);
-        valid = device.result == PROCESS_RESULT_SUCCESS;
+        String8 device_evidence = path_join(arena, root, S8("device-node"));
+        make_directory_recursive(arena, device_evidence);
+        valid = userspace_save_command(arena, device_evidence, device) && device.result == PROCESS_RESULT_SUCCESS;
     }
     String8 run_args[] = {S8("sudo"), S8("-n"), S8("env"), S8("-i"), S8("PATH=/bin"), S8("LC_ALL=C"), S8("TZ=UTC"),
                           S8("/usr/sbin/chroot"), root, S8("/bin/busybox"), S8("ash"), S8("/workload.sh")};
@@ -149,6 +151,11 @@ BUSTER_GLOBAL_LOCAL bool userspace_workload(Arena* arena, String8 program_path, 
     String8 expected = clang_suite_read(arena, S8("tools/userspace/fixtures/expected.txt"));
     valid = userspace_save_command(arena, root, ran) && valid;
     valid = ran.result == PROCESS_RESULT_SUCCESS && expected.length && string_equal(ran.output, expected) && !ran.error.length && valid;
+    if (!valid)
+    {
+        os_file_write(os_get_standard_stream(STANDARD_STREAM_OUTPUT), BUSTER_SLICE_TO_BYTE_SLICE(ran.output));
+        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(ran.error));
+    }
     return valid;
 }
 

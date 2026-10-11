@@ -21,7 +21,7 @@ tar -xf ../bundle.tar
 cmp input ../input
 cmp sub/moved ../sub/moved
 cd ..
-if false; then exit 20; else printf 'false-status=1\n'; fi
+if false; then exit 20; else status=$?; test "$status" -eq 1; printf 'false-status=%s\n' "$status"; fi
 /bin/busybox ash -c 'exit 7' && exit 21 || test "$?" -eq 7
 printf 'child-status=7\n'
 printf 'abc\n' | sha256sum
