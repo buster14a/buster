@@ -29,7 +29,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: unit-partitions-${{ github.event.pull_request.number || github.run_id }}
+  group: unit-partitions-${{ github.head_ref == 'codex/3620-schedule-unit-modules' && github.sha || github.event.pull_request.number || github.run_id }}
   cancel-in-progress: false
 
 jobs:
