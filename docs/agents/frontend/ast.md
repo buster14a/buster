@@ -500,7 +500,9 @@ the query instead:
 - **The mark.** A node declined only because an interned row it reads did not
   exist is marked `C_AST_TYPE_FLAG_LATE`: an `&` over an accepted operand, and
   a cast or compound literal whose primitive row or a `*` level's row was
-  missing. Initializers read no interned row, so they are never marked.
+  missing. Initializers read no interned row, so they are never marked. The
+  mark is bit 8, beside `C_AST_TYPE_FLAG_FAILS` (bit 6) and
+  `C_AST_TYPE_FLAG_STRING` (bit 7), so the per-node flags are `u16`.
 - **The re-check.** When a query maps to a node that the decision declines
   and that carries the mark, `c_ast_types_retype` runs that kind's own rule
   again, and the decision is repeated. A row that exists now is the one the
