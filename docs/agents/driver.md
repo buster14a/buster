@@ -309,7 +309,8 @@ no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
 `-mpclmul`) are `-mattr=+feature` and `-mattr=-feature` in the same ordered
 override list, so the last option naming a feature wins and they refine a
 `-march` level wherever they sit. The feature names are the ones `-mattr`
-takes, dotted spellings included. On x86-64 they also follow GCC's implied
+takes, dotted spellings included. On AArch64, `sve` is a feature name and is
+not included in CPU-model defaults. On x86-64 they also follow GCC's implied
 features: `-mavx2` adds AVX, and `-mno-avx2` / `-mno-avx` also drop every
 enabled feature that requires it (AVX-512, FMA, VNNI, ...). The dependency pairs
 are `target_x86_feature_requirements` in `target.c`: the rules

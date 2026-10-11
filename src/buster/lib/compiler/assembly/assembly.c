@@ -8984,6 +8984,7 @@ BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, Strin
         TARGET_CPU_FEATURE_AARCH64_SSBS,
         TARGET_CPU_FEATURE_AARCH64_TRACEV8_4,
         TARGET_CPU_FEATURE_AARCH64_SME,
+        TARGET_CPU_FEATURE_AARCH64_SVE,
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(x86_feature_bits) + BUSTER_ARRAY_LENGTH(aarch64_feature_bits) ==
                     (u32)TARGET_CPU_FEATURE_COUNT - 2);
@@ -12760,6 +12761,8 @@ BUSTER_GLOBAL_LOCAL void assembly_aarch64_base_instruction_parse(AssemblyBuilder
                             : status == A64_BASE_ASSEMBLY_REQUIRES_FULLFP16 ? S8("instruction requires the fullfp16 target feature")
                             : status == A64_BASE_ASSEMBLY_REQUIRES_NEON ? S8("instruction requires the neon target feature")
                             : status == A64_BASE_ASSEMBLY_REQUIRES_LSE ? S8("instruction requires the lse target feature")
+                            : status == A64_BASE_ASSEMBLY_REQUIRES_SVE_OR_SME
+                                  ? S8("instruction requires the sve or sme target feature")
                             : lane_result == ASSEMBLY_AARCH64_COMPLEX_SIMD_LANE_FEATURE_TARGET_UNSUPPORTED
                                   ? S8("instruction is unsupported by the selected target features")
                                                                        : (String8){0};
