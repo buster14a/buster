@@ -97,6 +97,11 @@ jobs:
           set -euo pipefail
           python3 tools/check_action_pins.py
           python3 -B tools/ci_workflow_policy_test.py
+          clang -std=c11 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char tools/external_project_policy.c -o "$RUNNER_TEMP/external-project-policy"
+          "$RUNNER_TEMP/external-project-policy"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/external-project-driver"
+          "$RUNNER_TEMP/external-project-driver" external_projects --self-test
+          python3 -B tools/ci_apt_retry_test.py -v
           python3 -B tools/native_retirement_performance_declaration_test.py -v
           python3 -B tools/ci_unit_tests_measure_test.py -v
           python3 -B tools/ci_unit_tests_campaign_test.py -v
@@ -251,6 +256,11 @@ jobs:
           set -euo pipefail
           python3 tools/check_action_pins.py
           python3 -B tools/ci_workflow_policy_test.py
+          clang -std=c11 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char tools/external_project_policy.c -o "$RUNNER_TEMP/external-project-policy"
+          "$RUNNER_TEMP/external-project-policy"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/external-project-driver"
+          "$RUNNER_TEMP/external-project-driver" external_projects --self-test
+          python3 -B tools/ci_apt_retry_test.py -v
           python3 -B tools/native_retirement_performance_declaration_test.py -v
           python3 -B tools/ci_unit_tests_measure_test.py -v
           python3 -B tools/ci_unit_tests_campaign_test.py -v
@@ -865,6 +875,44 @@ jobs:
         run: |
           set -euo pipefail
           "${BUSTER_CI_RESOURCES_PYTHON:-$BUSTER_CI_PYTHON}" tools/ci_checks_resources.py stop --session "$RUNNER_TEMP/buster-ci/runner-resources"
+
+      - name: Report backend capability evidence (Linux, macOS)
+        id: backend_capability_report_unix
+        if: ${{ always() && steps.combinations_unix.outcome != 'skipped' && steps.checkout.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/buster-ci/backend-capabilities-report.md"
+          GITHUB_STEP_SUMMARY="$report" "$BUSTER_CI_PYTHON" tools/backend_capabilities.py --ci-report "$RUNNER_TEMP/buster-ci/combinations.log"
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload backend capability evidence report (Linux, macOS)
+        if: ${{ always() && steps.backend_capability_report_unix.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-capability-evidence-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/buster-ci/backend-capabilities-report.md
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Report backend capability evidence (Windows)
+        id: backend_capability_report_windows
+        if: ${{ always() && steps.combinations_windows.outcome != 'skipped' && steps.checkout.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/buster-ci/backend-capabilities-report.md"
+          GITHUB_STEP_SUMMARY="$report" "$BUSTER_CI_PYTHON" tools/backend_capabilities.py --ci-report "$RUNNER_TEMP/buster-ci/combinations.log"
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload backend capability evidence report (Windows)
+        if: ${{ always() && steps.backend_capability_report_windows.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-capability-evidence-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/buster-ci/backend-capabilities-report.md
+          if-no-files-found: error
+          retention-days: 7
 
       # Postprocess only: build.c still owns every configure, probe and build.
       # Keep raw diagnostics outside build/ so failed attempts survive cleanup.

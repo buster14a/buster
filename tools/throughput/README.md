@@ -165,9 +165,11 @@ particular, the Lua descriptor preserves run 34727853592's missing-readline
 failure. A new qualification must run the existing build.c oracle after
 installing the declared native dependencies before Lua can be admitted.
 
-The branch-only `throughput-real-source.yml` workflow stages these exact roots,
-runs the existing cJSON/Lua/SQLite oracles, and always writes the preflight and
-outcome evidence. For each freshly passing oracle, `admit-workload` then verifies
+The [main-push external-project owner](../../.github/workflows/external-projects.yml)
+stages these exact roots, runs the existing cJSON/Lua/SQLite oracles and retains
+preflight and outcome evidence. Full external execution is bound to the event
+SHA after each automatic push to `main`; PR, manual and reusable routes were
+retired by #3501. See [the migration map](../../docs/external-project-ci.md). For each freshly passing oracle, `admit-workload` then verifies
 parsed dependency, compiler-resource, system-header, SDK, sanitized-environment
 and runtime-library manifests; compiles every declared source/generated file to
 an object; independently compile-links the declared source list; executes that

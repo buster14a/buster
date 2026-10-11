@@ -89,6 +89,8 @@
 //   object_split_initializer_priorities            one section per priority
 //                                                  group, for the ELF and
 //                                                  COFF writers
+//   object_initializer_split_grouped               whether any relocation
+//                                                  needs placing at all
 //   object_image_range .. object_image_range_complete
 //                                                  bounded, counted cursors
 //                                                  over a planned image
@@ -13726,8 +13728,11 @@ BUSTER_GLOBAL_LOCAL u32 object_buffer_u32(ObjectBuffer* buffer, u64 value)
 //
 // The split does not copy the relocations: `moves` records where each
 // grouped entry went, and object_initializer_relocation_place gives a
-// relocation's new section and offset from it. The ELF writer places each
-// relocation as it reaches it; the COFF writer takes one placed copy. Every
+// relocation's new section and offset from it. Both writers ask
+// object_initializer_split_grouped once and place nothing when no group
+// moved an entry, so a split without groups costs no relocation work; with
+// groups the ELF writer places each relocation as it reaches it and the
+// COFF writer takes one placed copy. Every
 // table here is sized by sections or entries, never by relocations, and each
 // is checked before it is taken. A split past `section_limit` sections, or
 // one the arena cannot hold, answers false; the limit also bounds the one
@@ -13848,6 +13853,13 @@ BUSTER_GLOBAL_LOCAL bool object_split_initializer_priorities(Arena* arena, Objec
     return result;
 }
 
+// Whether any entry moved into a group: without one, every relocation's
+// placement is the relocation itself.
+BUSTER_GLOBAL_LOCAL bool object_initializer_split_grouped(ObjectInitializerSplit const* moves)
+{
+    return moves->grouped_entries[0] || moves->grouped_entries[1];
+}
+
 // A relocation inside a group moves to that group at its offset from the
 // group's start; one past the groups stays with the unprioritized run, which
 // now starts `grouped_entries` entries earlier. Every other relocation is
@@ -13882,7 +13894,7 @@ BUSTER_GLOBAL_LOCAL bool object_initializer_relocations_place(Arena* arena, Obje
                                                               ObjectWriteStatistics* statistics)
 {
     bool result = true;
-    if (moves->grouped_entries[0] || moves->grouped_entries[1])
+    if (object_initializer_split_grouped(moves))
     {
         ObjectRelocation* relocations = object_writer_table_allocate(arena, ObjectRelocation, split->relocation_count);
         result = relocations != 0;
@@ -14108,6 +14120,29 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_section_can_omit(u32 index, ObjectSection 
     return result;
 }
 
+// One relocation's share of the plan: its section's count, and with the
+// section's first relocation one more RELA table.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE ObjectError object_elf64_plan_relocation(ObjectElfPlan* plan, u32 input_count, ObjectRelocation relocation,
+                                                                           ObjectWriteStatistics* statistics)
+{
+    ObjectError result = OBJECT_ERROR_NONE;
+    statistics->relocation_visits += 1;
+    if ((u32)relocation.kind >= OBJECT_RELOCATION_COUNT || relocation.section >= input_count)
+    {
+        result = OBJECT_ERROR_INVALID_INPUT;
+    }
+    else if (!plan->relocation_types[relocation.kind])
+    {
+        result = OBJECT_ERROR_UNSUPPORTED_TARGET;
+    }
+    else
+    {
+        plan->relocation_section_count += plan->relocation_counts[relocation.section] ? 0 : 1;
+        plan->relocation_counts[relocation.section] += 1;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectError object_elf64_plan(Arena* scratch, ObjectFile* object, ObjectInitializerSplit const* moves, ObjectElfPlan* plan,
                                                   ObjectWriteStatistics* statistics)
 {
@@ -14136,24 +14171,16 @@ BUSTER_GLOBAL_LOCAL ObjectError object_elf64_plan(Arena* scratch, ObjectFile* ob
         memset(plan->section_indices, 0, (u64)input_count * sizeof(u32));
     }
     // Relocations: each section's count, and with it how many sections need
-    // a RELA table -- a section's first relocation opens one.
-    for (u32 index = 0; result == OBJECT_ERROR_NONE && index < object->relocation_count; index += 1)
+    // a RELA table -- a section's first relocation opens one. Only a split
+    // that grouped something places a relocation; one loop or the other runs.
+    bool grouped = object_initializer_split_grouped(moves);
+    for (u32 index = 0; result == OBJECT_ERROR_NONE && grouped && index < object->relocation_count; index += 1)
     {
-        ObjectRelocation relocation = object_initializer_relocation_place(moves, object->relocations + index);
-        statistics->relocation_visits += 1;
-        if ((u32)relocation.kind >= OBJECT_RELOCATION_COUNT || relocation.section >= input_count)
-        {
-            result = OBJECT_ERROR_INVALID_INPUT;
-        }
-        else if (!plan->relocation_types[relocation.kind])
-        {
-            result = OBJECT_ERROR_UNSUPPORTED_TARGET;
-        }
-        else
-        {
-            plan->relocation_section_count += plan->relocation_counts[relocation.section] ? 0 : 1;
-            plan->relocation_counts[relocation.section] += 1;
-        }
+        result = object_elf64_plan_relocation(plan, input_count, object_initializer_relocation_place(moves, object->relocations + index), statistics);
+    }
+    for (u32 index = 0; result == OBJECT_ERROR_NONE && !grouped && index < object->relocation_count; index += 1)
+    {
+        result = object_elf64_plan_relocation(plan, input_count, object->relocations[index], statistics);
     }
     u64 header_count = (u64)input_count + plan->relocation_section_count + OBJECT_ELF_FIXED_SECTION_COUNT;
     if (result == OBJECT_ERROR_NONE && header_count >= OBJECT_ELF_SECTION_INDEX_LIMIT)
@@ -14313,6 +14340,17 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_payload_borrowable(ObjectSection const* se
     return !object_section_kind_is_zero_fill(section->kind) && section->data.length >= OBJECT_BORROWED_PAYLOAD_MINIMUM;
 }
 
+// One relocation's RELA row, in the table of the section it now names.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE void object_elf64_emit_relocation(ObjectImageRange* relocation_ranges, u32 const* symbol_indices, ObjectElfPlan const* plan,
+                                                                    ObjectRelocation relocation, ObjectWriteStatistics* statistics)
+{
+    ObjectImageRange* table = relocation_ranges + relocation.section;
+    statistics->relocation_visits += 1;
+    object_image_u64(table, relocation.offset);
+    object_image_u64(table, ((u64)symbol_indices[relocation.symbol] << 32) | plan->relocation_types[relocation.kind]);
+    object_image_u64(table, (u64)relocation.addend);
+}
+
 // `borrowed` is null unless the caller borrows payloads; it then has room for
 // every borrowable payload, which the emitter records in file order.
 BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializerSplit const* moves, ObjectElfPlan const* plan, u8* image,
@@ -14425,14 +14463,15 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
         u32 section = plan->relocation_section + table;
         relocation_ranges[plan->relocation_targets[table]] = object_image_range(image, plan->offsets[section], plan->sizes[section], statistics);
     }
-    for (u32 index = 0; index < object->relocation_count; index += 1)
+    bool grouped = object_initializer_split_grouped(moves);
+    for (u32 index = 0; grouped && index < object->relocation_count; index += 1)
     {
-        ObjectRelocation relocation = object_initializer_relocation_place(moves, object->relocations + index);
-        ObjectImageRange* table = relocation_ranges + relocation.section;
-        statistics->relocation_visits += 1;
-        object_image_u64(table, relocation.offset);
-        object_image_u64(table, ((u64)symbol_indices[relocation.symbol] << 32) | plan->relocation_types[relocation.kind]);
-        object_image_u64(table, (u64)relocation.addend);
+        object_elf64_emit_relocation(relocation_ranges, symbol_indices, plan, object_initializer_relocation_place(moves, object->relocations + index),
+                                     statistics);
+    }
+    for (u32 index = 0; !grouped && index < object->relocation_count; index += 1)
+    {
+        object_elf64_emit_relocation(relocation_ranges, symbol_indices, plan, object->relocations[index], statistics);
     }
 
     ObjectImageRange tail =
