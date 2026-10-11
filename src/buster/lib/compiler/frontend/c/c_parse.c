@@ -25579,7 +25579,10 @@ BUSTER_C_INTERNAL bool c_parse_label_address_prefix_with_typedef_at(CParseResult
                 if (typeof_specifier && scan + 1 < index - 1 &&
                     c_token_is_punctuator(&preprocess->tokens[scan + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
                 {
-                    u32 close = c_parse_matching_delimiter_indexed(result, *preprocess, scan + 1);
+                    u32 close = result->position_index ? c_parse_matching_delimiter_indexed(result, *preprocess, scan + 1)
+                                                       : c_parse_matching_delimiter(*preprocess, scan + 1, index - 1,
+                                                                                     C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                                                     C_PUNCTUATOR_RIGHT_PARENTHESIS);
                     if (close < index - 1 && scan + 2 < close)
                     {
                         scan = close;
