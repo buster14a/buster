@@ -86,7 +86,8 @@ on startup latency; the scheduler alone is not a measured speedup.
 The helper's filesystem operations use the already loaded .NET file APIs,
 resolving literal paths through PowerShell's session provider paths so relative
 inputs follow the caller's PowerShell location even when the process cwd differs.
-Directories and non-FileSystem providers fail before execution. GITHUB_ENV
+VsWhere directories and non-FileSystem providers fail before the vendor shell
+runs. GITHUB_ENV paths are resolved at the existing post-vendor append point;
 appends use explicit UTF8 without a BOM and platform newlines. The fake dev-shell
 launch log uses the same direct file append instead of loading a cmdlet module.
 The vendor's real developer-shell script, host/target arguments, compiler probes,
