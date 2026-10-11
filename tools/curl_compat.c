@@ -12,8 +12,20 @@ BUSTER_GLOBAL_LOCAL bool curl_compat_write(Arena* arena, String8 directory, Stri
 
 BUSTER_GLOBAL_LOCAL bool curl_compat_step(Arena* arena, String8 directory, String8 evidence, String8 name, SliceString8 arguments, bool* stopped)
 {
-    bool result = raddebugger_command_ok(raddebugger_command(arena, arguments, directory, path_join(arena, evidence, name),
-                                                           RADDEBUGGER_ENVIRONMENT_INHERIT, stopped));
+    RaddebuggerCommandResult run = raddebugger_command(arena, arguments, directory, path_join(arena, evidence, name),
+                                                      RADDEBUGGER_ENVIRONMENT_INHERIT, stopped);
+    bool result = raddebugger_command_ok(run);
+    if (!result)
+    {
+        // Keep full streams in evidence; show bounded tails for cloud triage.
+        string_print(S8("CURL_STAGE_FAILED stage={S8} directory={S8}\n"), name, directory);
+        for (u32 stream = 0; stream < 2; stream += 1)
+        {
+            String8 text = BYTE_SLICE_TO_STRING(8, run.wait.streams[stream]);
+            u64 start = text.length > 65536 ? text.length - 65536 : 0;
+            string_print(S8("{S8}\n"), string_slice(text, start, text.length));
+        }
+    }
     return result;
 }
 
@@ -106,6 +118,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult curl_compat_census(Arena* arena, SliceString8 
     bool stopped = false;
     bool admitted = source.length && parent.length && ide.length && driver.length && git.length && clang.length &&
                     cmake.length && ninja.length && sha256sum.length && clang_suite_safe_path(name) &&
+                    string_first_sequence(driver, S8(";")) == BUSTER_STRING_NO_MATCH &&
+                    string_first_sequence(output, S8(";")) == BUSTER_STRING_NO_MATCH &&
                     !string_equal(parent, source) && !string_starts_with_sequence(parent, string_format(arena, S8("{S8}/"), source)) &&
                     raddebugger_git_verify(arena, git, source, S8(BUSTER_CURL_COMPAT_COMMIT), &stopped);
     if (admitted)

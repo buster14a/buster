@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-          fetch-depth: 1
+          fetch-depth: 8
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: curl/curl
@@ -35,6 +35,8 @@ jobs:
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o .ci-tools/build
           .ci-tools/build generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT
           .ci-tools/build build --config Release -t ide
+          .ci-tools/build source_size --base abb1c5afbcf55e120d83283ffbad402fc75bd80a
+          python3 tools/check_markdown_links.py
       - name: Provenance negative controls
         run: .ci-tools/build test_curl --self-test
       - name: Run pristine configure and build census
