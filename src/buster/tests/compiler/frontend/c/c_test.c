@@ -21130,6 +21130,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_fact_census(UnitTestArguments* 
         BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_LOWER, C_CENSUS_PHASE_STRING_MEMO_HITS) == 1);
         BUSTER_TEST(arguments, lower_decodes == 0);
     }
+    c_test_release_preprocess_arenas();
     return result;
 }
 #endif
