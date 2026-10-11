@@ -292,6 +292,59 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_files(UnitTes
     BUSTER_TEST(arguments, api_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT);
     BUSTER_TEST(arguments, compiler_driver_test_string_contains(api_refused.diagnostic, S8("-MD/-MMD")));
 
+
+    String8 pass_modes[] = {S8("-Wp,-MD,out.d"), S8("-Wp,-MMD,out.d")};
+    String8 pass_actions[] = {S8("-c"), S8("-S")};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(pass_modes); mode += 1)
+    {
+        for (u32 action = 0; action < BUSTER_ARRAY_LENGTH(pass_actions); action += 1)
+        {
+            String8 command[] = {pass_actions[action], pass_modes[mode], S8("-o"), S8("out"), input};
+            CompilerDriverInvocation parsed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            BUSTER_TEST(arguments, parsed.error == COMPILER_DRIVER_ERROR_NONE && parsed.dependency_passthrough);
+            BUSTER_TEST(arguments, parsed.dependency_exclude_system == (mode == 1));
+            BUSTER_STRING_TEST(arguments, parsed.dependency_path, S8("out.d"));
+        }
+    }
+    String8 malformed_pass[] = {
+        S8("-Wp,-MD"), S8("-Wp,-MMD"), S8("-Wp,-MD,"), S8("-Wp,-MMD,"),
+        S8("-Wp,-MD,out.d,-MP"), S8("-Wp,-MMD,out.d,"), S8("-Wp,-MMD,out.d,-DFOO"),
+        S8("-Wp,-MD,-"), S8("-Wp,-MMD,line\nbreak.d"), S8("-Wp,-MMD,line\rbreak.d")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(malformed_pass); index += 1)
+    {
+        String8 command[] = {S8("-c"), malformed_pass[index], input};
+        CompilerDriverInvocation parsed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, parsed.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        BUSTER_TEST(arguments, compiler_driver_test_string_contains(parsed.diagnostic, malformed_pass[index]));
+    }
+    String8 direct_options[] = {S8("-MD"), S8("-MMD"), S8("-MFother.d"), S8("-MTtarget"), S8("-MQtarget"), S8("-MP")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(direct_options); index += 1)
+    {
+        for (u32 order = 0; order < 2; order += 1)
+        {
+            String8 command[] = {S8("-c"), order ? direct_options[index] : pass_modes[0],
+                                 order ? pass_modes[0] : direct_options[index], input};
+            BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        }
+    }
+    String8 invalid_pass[][6] = {
+        {S8("-E"), pass_modes[0], input},
+        {S8("-fsyntax-only"), pass_modes[0], input},
+        {pass_modes[0], input},
+        {S8("-S"), pass_modes[0], input},
+        {S8("-S"), pass_modes[0], S8("-o"), S8("-"), input},
+        {S8("-c"), pass_modes[0], pass_modes[1], input},
+        {S8("-c"), pass_modes[0], input, input},
+        {S8("-c"), pass_modes[0], S8("tests/basic_asm_unit.s")},
+        {S8("-c"), pass_modes[0], S8("-emit-llvm"), input},
+        {S8("-c"), pass_modes[0], S8("--target=wasm32-unknown-unknown"), input}};
+    u32 invalid_pass_lengths[] = {3, 3, 2, 3, 5, 4, 4, 3, 4, 4};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_pass); index += 1)
+    {
+        BUSTER_TEST(arguments, compiler_driver_parse_arguments(
+                                  arena, (SliceString8){.pointer = invalid_pass[index], .length = invalid_pass_lengths[index]}).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    }
+
     String8 quote_inputs[] = {S8("a b"), S8("a$b"), S8("a#b"), S8("a\\ b"), S8("w\\x"), S8("line\nbreak")};
     String8 quote_expected[] = {S8("a\\ b"), S8("a$$b"), S8("a\\#b"), S8("a\\\\\\ b"), S8("w\\x"), {0}};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(quote_inputs); index += 1)
@@ -446,6 +499,64 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_files(UnitTes
         BUSTER_TEST(arguments, compiler_driver_dependency_test_change_directory(original_directory));
     }
 #endif
+
+    // The -Wp spellings share the resolved include identities, with named
+    // native assembly published before its depfile just like an object.
+    String8 pass_depfile = string_format_z(arena, S8("{S8}/pass through$#.d"), directory);
+    String8 pass_output = string_format_z(arena, S8("{S8}/pass through$#.s"), directory);
+    for (u32 mode = 0; mode < 2; mode += 1)
+    {
+        for (u32 action = 0; action < 2; action += 1)
+        {
+            String8 option = string_format_z(arena, mode ? S8("-Wp,-MMD,{S8}") : S8("-Wp,-MD,{S8}"), pass_depfile);
+            String8 command[] = {action ? S8("-S") : S8("-c"), option, S8("-nostdinc"),
+                                 S8("-I"), user_directory, S8("-isystem"), system_directory,
+                                 S8("-include"), forced, S8("-o"), pass_output, source};
+            CompilerDriverResult pass_compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, pass_compiled.error == COMPILER_DRIVER_ERROR_NONE, pass_compiled.diagnostic);
+            ByteSlice output_bytes = file_read(arena, pass_output, (FileReadOptions){0});
+            BUSTER_TEST(arguments, output_bytes.pointer && output_bytes.length);
+            if (action)
+            {
+                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, output_bytes), pass_compiled.output);
+            }
+            CompilerDriverDependencyTestRule pass_rule = {0};
+            bool pass_parsed = compiler_driver_dependency_test_parse_rule(arena, pass_depfile, &pass_rule);
+            u32 expected_count = mode ? BUSTER_ARRAY_LENGTH(expected_user) : BUSTER_ARRAY_LENGTH(expected_all);
+            String8* expected_paths = mode ? expected_user : expected_all;
+            BUSTER_TEST(arguments, pass_parsed && pass_rule.prerequisite_count == expected_count);
+            BUSTER_TEST(arguments, compiler_driver_dependency_test_path_equal(pass_rule.target, pass_output));
+            for (u32 index = 0; index < expected_count && index < pass_rule.prerequisite_count; index += 1)
+            {
+                BUSTER_TEST(arguments, compiler_driver_dependency_test_path_equal(pass_rule.prerequisites[index], expected_paths[index]));
+            }
+            String8 sentinel = S8("depfile must survive failed artifact publication");
+            BUSTER_TEST(arguments, file_write(pass_depfile, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+            command[10] = directory;
+            CompilerDriverResult failed_output = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST(arguments, failed_output.error == COMPILER_DRIVER_ERROR_FILE_WRITE);
+            ByteSlice preserved = file_read(arena, pass_depfile, (FileReadOptions){0});
+            BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, preserved), sentinel);
+            command[10] = pass_output;
+            command[1] = string_format_z(arena, mode ? S8("-Wp,-MMD,{S8}") : S8("-Wp,-MD,{S8}"), directory);
+            CompilerDriverResult failed_depfile = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST(arguments, failed_depfile.error == COMPILER_DRIVER_ERROR_FILE_WRITE);
+            BUSTER_TEST(arguments, compiler_driver_test_string_contains(failed_depfile.diagnostic, directory));
+            // API-created requests use the same refusal authority.
+            CompilerDriverInvocation api_pass = compiler_driver_parse_arguments(
+                arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            api_pass.dependency_path = (String8){0};
+            BUSTER_TEST(arguments, compiler_driver_execute_invocation(arena, api_pass).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+            api_pass.dependency_path = pass_output;
+            BUSTER_TEST(arguments, compiler_driver_execute_invocation(arena, api_pass).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+            api_pass.dependency_path = source;
+            BUSTER_TEST(arguments, compiler_driver_execute_invocation(arena, api_pass).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        }
+    }
+
     compiled = compiler_driver_dependency_test_compile(arena, source, object, user_directory, system_directory, forced,
                                                         S8("-MD"), true, 0, 0);
     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
@@ -489,6 +600,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_files(UnitTes
     CompilerDriverResult failed = compiler_driver_execute_invocation(
         arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(failure_command)));
     BUSTER_TEST(arguments, failed.error != COMPILER_DRIVER_ERROR_NONE && failed.diagnostic.length);
+
+    for (u32 action = 0; action < 2; action += 1)
+    {
+        String8 pass_failure[] = {action ? S8("-S") : S8("-c"),
+                                  string_format_z(arena, S8("-Wp,-MMD,{S8}"), failure_depfile),
+                                  S8("-o"), failure_object, invalid_source};
+        CompilerDriverResult pass_failed = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pass_failure)));
+        BUSTER_TEST(arguments, pass_failed.error != COMPILER_DRIVER_ERROR_NONE);
+        ByteSlice preserved_artifact = file_read(arena, failure_object, (FileReadOptions){0});
+        ByteSlice preserved_dependency = file_read(arena, failure_depfile, (FileReadOptions){0});
+        BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, preserved_artifact), sentinel_object);
+        BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, preserved_dependency), sentinel_depfile);
+    }
+
     FileMapRead preserved_object = file_map_read(arena, failure_object, (FileReadOptions){0});
     FileMapRead preserved_depfile = file_map_read(arena, failure_depfile, (FileReadOptions){0});
     BUSTER_TEST(arguments, preserved_object.bytes.pointer &&

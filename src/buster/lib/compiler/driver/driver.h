@@ -308,6 +308,8 @@ struct CompilerDriverInvocation
     // -MD/-MMD enable depfile emission; the last one selects system filtering.
     bool dependency_file;
     bool dependency_exclude_system;
+    // Exact -Wp,-MD,PATH / -Wp,-MMD,PATH: one C input, also named native -S.
+    bool dependency_passthrough;
     // -MP emits phony rules for header prerequisites.
     bool dependency_phony_targets;
     bool verbose;

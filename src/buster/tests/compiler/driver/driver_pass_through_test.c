@@ -116,7 +116,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_depfiles(Un
     {
         String8 contents = revision ? S8("#define VALUE 2\n") : S8("#define VALUE 1\n");
         BUSTER_TEST(arguments, file_write(header, BUSTER_SLICE_TO_BYTE_SLICE(contents)));
-        String8 flags[] = {string_format_z(arena, S8("-Wp,-MD,{S8}"), depfile), string_format_z(arena, S8("-Wp,-MMD,{S8}"), depfile),
+        String8 flags[] = {string_format_z(arena, S8("-Wp,-MD,{S8},-MP"), depfile), string_format_z(arena, S8("-Wp,-MMD,{S8},-DFROM_WP"), depfile),
                            S8("-Wp,-DFROM_WP")};
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(flags); index += 1)
         {

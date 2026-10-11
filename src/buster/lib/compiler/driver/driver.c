@@ -45,9 +45,9 @@
 // resource failure with its required size. Opt-in native C link batches publish
 // in input order only after the gang returns; assembly and archive selection
 // remain serial boundaries.
-// Dependency output follows successful C object publication: the preprocessor
-// contributes identity-deduplicated prerequisites and this driver renders and
-// atomically publishes their Makefile after the object writer succeeds.
+// Dependency output follows successful C object or bounded -Wp assembly
+// publication: the preprocessor contributes identity-deduplicated prerequisites
+// and this driver renders their Makefile after the artifact writer succeeds.
 // Every unit enters through compiler_driver_execute_unit. With
 // collect_input_metrics, compiler_driver_prime_arenas and the prewarm run
 // first, CompilerDriverUnitMetrics (compiler_driver_phase_begin marks the
@@ -1014,6 +1014,26 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_request(Arena* arena, Compiler
 
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_request(Arena* arena, CompilerDriverInvocation* invocation)
 {
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE && invocation->dependency_passthrough)
+    {
+        bool valid_path = invocation->dependency_path.pointer && invocation->dependency_path.length &&
+                          !string_equal(invocation->dependency_path, S8("-"));
+        for (u64 index = 0; valid_path && index < invocation->dependency_path.length; index += 1)
+        {
+            char8 byte = invocation->dependency_path.pointer[index];
+            valid_path = byte != ',' && byte != '\n' && byte != '\r' && byte != 0;
+        }
+        bool native_target = invocation->target.cpu_arch == CPU_ARCH_X86_64 || invocation->target.cpu_arch == CPU_ARCH_AARCH64;
+        bool named_assembly = invocation->action != COMPILER_DRIVER_ACTION_ASSEMBLY ||
+                              (invocation->output_path.length && !string_equal(invocation->output_path, S8("-")) && native_target);
+        if (!invocation->dependency_file || !valid_path || !native_target || invocation->input_count != 1 || !named_assembly ||
+            invocation->dependency_targets.pointer || invocation->dependency_targets.length || invocation->dependency_phony_targets ||
+            invocation->library_count || invocation->framework_count || invocation->retain_object)
+        {
+            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation->diagnostic = S8("-Wp dependency files require one C input, one depfile path, no direct dependency modifiers, and named native -S output");
+        }
+    }
     bool details_set = invocation->dependency_path.pointer || invocation->dependency_path.length ||
                        invocation->dependency_targets.pointer || invocation->dependency_targets.length ||
                        invocation->dependency_phony_targets;
@@ -1026,8 +1046,9 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_request(Arena* aren
     }
     if (invocation->error == COMPILER_DRIVER_ERROR_NONE && invocation->dependency_file)
     {
-        bool valid_request = invocation->action == COMPILER_DRIVER_ACTION_OBJECT && !invocation->has_gpu_target &&
-                             !invocation->emit_llvm_bitcode;
+        bool valid_action = invocation->action == COMPILER_DRIVER_ACTION_OBJECT ||
+                            (invocation->dependency_passthrough && invocation->action == COMPILER_DRIVER_ACTION_ASSEMBLY);
+        bool valid_request = valid_action && !invocation->has_gpu_target && !invocation->emit_llvm_bitcode;
         for (u32 index = 0; valid_request && index < invocation->input_count; index += 1)
         {
             CompilerDriverLanguage language = compiler_driver_input_language(*invocation, index);
@@ -1037,7 +1058,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_request(Arena* aren
         if (!valid_request)
         {
             invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
-            invocation->diagnostic = S8("dependency files (-MD/-MMD) require -c with C source inputs");
+            invocation->diagnostic = S8("dependency files (-MD/-MMD) require C -c or bounded -Wp native -S output");
         }
         else if (invocation->input_count > 1 &&
                  (invocation->dependency_path.pointer || invocation->dependency_path.length ||
@@ -1937,6 +1958,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     bool static_link_requested = false;
     String8 runtime_omission_option = {0};
     String8 dependency_option_without_mode = {0};
+    bool direct_dependency_options = false;
     u32 dependency_target_count = 0;
     for (u64 argument_index = 0; argument_index < arguments.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; argument_index += 1)
     {
@@ -1960,12 +1982,14 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         if (string_equal(argument, S8("-MD")) || string_equal(argument, S8("-MMD")))
         {
+            direct_dependency_options = true;
             invocation.dependency_file = true;
             invocation.dependency_exclude_system = string_equal(argument, S8("-MMD"));
             continue;
         }
         if (string_equal(argument, S8("-MP")))
         {
+            direct_dependency_options = true;
             invocation.dependency_phony_targets = true;
             if (!dependency_option_without_mode.length)
             {
@@ -1992,6 +2016,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         if (dependency_option.length)
         {
+            direct_dependency_options = true;
             if (!dependency_option_without_mode.length)
             {
                 dependency_option_without_mode = dependency_option;
@@ -2830,7 +2855,28 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         if (string_starts_with_sequence(argument, S8("-Wp,")) || string_starts_with_sequence(argument, S8("-Wa,")))
         {
-            compiler_driver_argument_error(arena, &invocation, S8("unsupported pass-through option: {S8}"), argument);
+            String8 passthrough_prefix = string_starts_with_sequence(argument, S8("-Wp,-MMD,")) ? S8("-Wp,-MMD,")
+                                        : string_starts_with_sequence(argument, S8("-Wp,-MD,")) ? S8("-Wp,-MD,")
+                                                                                             : (String8){0};
+            String8 path = string_slice(argument, passthrough_prefix.length, argument.length);
+            bool supported = passthrough_prefix.length && path.length && !invocation.dependency_passthrough &&
+                             !string_equal(path, S8("-"));
+            for (u64 index = 0; supported && index < path.length; index += 1)
+            {
+                char8 byte = path.pointer[index];
+                supported = byte != ',' && byte != '\n' && byte != '\r' && byte != 0;
+            }
+            if (supported)
+            {
+                invocation.dependency_passthrough = true;
+                invocation.dependency_file = true;
+                invocation.dependency_exclude_system = string_equal(passthrough_prefix, S8("-Wp,-MMD,"));
+                invocation.dependency_path = path;
+            }
+            else
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("unsupported pass-through option: {S8}"), argument);
+            }
             continue;
         }
         String8 prefix = {
@@ -3027,6 +3073,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     {
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} (dependency options require -MD or -MMD)"),
                                        dependency_option_without_mode);
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.dependency_passthrough && direct_dependency_options)
+    {
+        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation.diagnostic = S8("-Wp dependency requests cannot be mixed with direct -MD/-MMD/-MF/-MT/-MQ/-MP options");
     }
     compiler_driver_validate_dependency_request(arena, &invocation);
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE)
@@ -7328,7 +7379,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         compiler_driver_finish_investigation(arena, invocation, investigation, &object, &result);
     }
 end:
-    if (invocation.dependency_file && invocation.action == COMPILER_DRIVER_ACTION_OBJECT && !suppress_object_write &&
+    bool dependency_output = invocation.action == COMPILER_DRIVER_ACTION_OBJECT ||
+                             (invocation.dependency_passthrough && invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY &&
+                              invocation.output_path.length);
+    if (invocation.dependency_file && dependency_output && !suppress_object_write &&
         result.error == COMPILER_DRIVER_ERROR_NONE && result.has_object)
     {
         String8 object_path = invocation.output_path.length
@@ -8323,6 +8377,24 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.error = invocation.error;
         result.diagnostic = invocation.diagnostic;
         goto finish;
+    }
+    if (invocation.dependency_passthrough)
+    {
+        String8 output = invocation.output_path.length ? invocation.output_path
+                                                       : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
+        String8 dependency_absolute = os_path_absolute(arena, invocation.dependency_path, false);
+        String8 output_absolute = os_path_absolute(arena, output, false);
+        String8 input_absolute = os_path_absolute(arena, invocation.input_paths[0], false);
+        bool aliases = string_equal(invocation.dependency_path, output) ||
+                       string_equal(invocation.dependency_path, invocation.input_paths[0]) ||
+                       (dependency_absolute.length &&
+                        (string_equal(dependency_absolute, output_absolute) || string_equal(dependency_absolute, input_absolute)));
+        if (aliases)
+        {
+            result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            result.diagnostic = S8("-Wp dependency path aliases its source or output");
+            goto finish;
+        }
     }
     // Count both explicit entries and the target's defaults before any source
     // read, fast-path allocation or lookup; export maps also reserve libc.
