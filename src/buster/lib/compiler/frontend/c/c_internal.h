@@ -376,6 +376,9 @@ BUSTER_C_EXTERN CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, 
                                               CAnalysisResult parse, Target target);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_token(CParseResult* result, char8 const* spelling_base,
                                                        CScopeId scope, CToken const* token);
+// A stamp that changes whenever c_parse_lookup_entity_token's answer could;
+// false outside the validation families, where no stamp is kept.
+BUSTER_C_EXTERN bool c_parse_lookup_generation(CParseResult const* result, u64* generation_out);
 BUSTER_C_EXTERN CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId root, u32 token_index);
 // The same answer from a nearby earlier answer under `root` (or `root` itself): O(tree distance), not O(depth).
 BUSTER_C_EXTERN CScopeId c_parse_scope_for_token_near(CParseResult* result, CScopeId root, CScopeId hint, u32 token_index);
@@ -1599,6 +1602,8 @@ struct CTypeParseMachine
     // inside one is reported there, because neither path has a later fallback
     // that names it.
     u32 member_declarator_depth;
+    // Active aggregate-member frames; replaces per-core ancestor rescans.
+    u32 aggregate_segment_depth;
     // The `(` and `)` of the identifier list of the old-style definition
     // whose parenthesized declarator is being parsed, `(a)` in
     // `int (k(a)) int a; {...}`, else both zero: its names are parameters,

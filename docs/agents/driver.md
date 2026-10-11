@@ -415,7 +415,8 @@ vendor meaning. An excess component retains precedence over that refusal.
 Native x86-64 and AArch64 compilation uses the FAST register allocator at
 every optimization level, including the default and `-O0`. Callers may select
 `fast` or `quality`; both run canonical IR -> MIR -> placement ->
-metadata-backed native emission, and the last allocator-affecting option wins.
+metadata-backed native emission. Explicit allocator selection is independent
+of `-O`; the last allocator option wins.
 The stack-only mode is removed: `-fregister-allocator=none`,
 `-fregister-allocator=mir-stack` and `-fno-register-allocator` are argument errors.
 The allocators run on x86-64 under both System V and Win64, and on AArch64
@@ -477,10 +478,14 @@ width, as AT&T's unsuffixed spelling already does.
 spellings, including immediate boundaries, word prefixes and invalid register,
 memory, suffix-width and 64-bit neighbours. It never executes port I/O.
 
-The default `-fcanonical-fast` shared pipeline and independent
-`-fcanonical-fast-{fold,address,dce,parameters}` controls are described in
-[the FAST pipeline contract](../canonical-fast-pipeline.md). Timing is separate
-(`-ftime-canonical-fast -v`); register allocation selection is unchanged.
+Explicit `-O`/`-O0` skips optional canonical FAST cleanup; positive levels
+select the existing bounded `fold,address,dce,parameters` pipeline. Omission
+retains the adopted throughput recipe. Explicit whole-pipeline and per-pass
+controls override level defaults independently of option order; the last
+explicit control of each bit wins. Level/alias policy, fixed pass order and
+budgets are in [the FAST pipeline contract](../canonical-fast-pipeline.md#native-optimization-level-policy).
+Verbose output reports disabled as well as enabled passes. Timing is separate
+(`-ftime-canonical-fast -v`); register allocation selection is independent.
 
 Canonical inlining is separate from register allocation. Tiny direct-call
 inlining is opt-in at every optimization level: `-fcanonical-inline` enables
@@ -1822,6 +1827,38 @@ supported; other pass-through requests, including macro/include operations,
 are refused. Direct `-D`, `-U`, and `-I` remain available.
 Standalone `-M`, `-MM`, and `-MG` remain unsupported.
 
+## Macro filename prefix maps
+
+`-fmacro-prefix-map=OLD=NEW` records literal, case-sensitive prefix
+substitutions for C and preprocessed assembly. Empty OLD or NEW is allowed;
+the last `=` separates them, and the last matching option wins once, following
+GCC. Matching is a byte prefix, without a directory-boundary requirement,
+canonicalization or repeated application to the replacement.
+
+The preprocessor applies the mapping when expanding `__FILE__` and
+`__BASE_FILE__`; `__FILE_NAME__` takes its basename first. Logical `#line`
+names can match too. GCC-style directive operands retain their original
+filenames, so mapping cannot redirect `#include __FILE__` or mutate a
+`#line __FILE__` operand. Diagnostics, source maps, include identity/lookup,
+dependency prerequisites, output paths and debug information retain their
+original names. GPU forwarding is explicitly refused. The independent
+`-ffile-prefix-map`, `-fdebug-prefix-map` and `-fcanon-prefix-map` options
+remain unsupported.
+
+GCC 15.2 [prefix-map implementation](https://github.com/gcc-mirror/gcc/blob/releases/gcc-15.2.0/gcc/file-prefix-map.cc)
+and [file builtins](https://github.com/gcc-mirror/gcc/blob/releases/gcc-15.2.0/libcpp/macro.cc)
+define the ordering, separator and directive policy.
+Clang 21.1 [language option parsing](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.0/clang/lib/Frontend/CompilerInvocation.cpp)
+and [mapping](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.0/clang/lib/Basic/LangOptions.cpp)
+agree for the single directory-to-empty Kbuild mapping, but select overlapping
+prefixes in reverse lexical order, retain the first duplicate prefix and split
+the first `=`. These differences
+are explicit oracle cases, not an assertion of universal GCC/Clang equivalence.
+The registered `compiler_driver_test_macro_prefix_map` and
+`compiler_driver_test_macro_prefix_map_files` cover the contract.
+Set `BUSTER_PREFIX_MAP_ORACLES=1` on hosted Linux to additionally require
+independent installed GCC and Clang preprocessing of the matrix and includes.
+
 ## Dependency files
 
 `-MD` and `-MMD` write a Make-compatible depfile for C `-c` output. The default
@@ -1946,6 +1983,12 @@ one `hashTypeRecord` bucket per record modulo `0x3ffff` (`pdb_type_record_hash`)
 and a sparse type-index offset entry per 8 KiB of records. DbgHelp (cdb,
 WinDbg, `symchk`, `dbh`) faults with `0xc0000005` loading a PDB whose TPI
 stream names no hash stream (#3411). The regression is `pdb_test_tpi_hashes`.
+The globals and publics streams index each module's top-level procedures
+(`S_PROCREF`/`S_LPROCREF` naming the module-stream record) and data (copies of
+`S_GDATA32`/`S_LDATA32`); global ones also get an `S_PUB32` and an entry in the
+publics address map, sorted by section and offset (`pdb_gsi_emit`). With these
+empty, DbgHelp loads the PDB only as "public symbols & lines". The regression is
+`pdb_test_global_indexes`.
 
 CodeView names a frame-resident location with `S_DEFRANGE_REGISTER_REL`
 against RBP (x86-64) or X29 (AArch64), the base codegen normalizes FRAME offsets
