@@ -3,7 +3,16 @@
 #include <buster/lib/compiler/driver/driver.h>
 
 BUSTER_F_DECL bool compiler_driver_language_is_native(CompilerDriverLanguage language);
+typedef struct CompilerDriverDependencyQuoteResult CompilerDriverDependencyQuoteResult;
+struct CompilerDriverDependencyQuoteResult
+{
+    String8 text;
+    bool representable;
+};
 #if BUSTER_INCLUDE_TESTS
+// GCC Makefile escaping and object-derived depfile path helpers.
+BUSTER_F_DECL CompilerDriverDependencyQuoteResult compiler_driver_dependency_quote(Arena* arena, String8 value);
+BUSTER_F_DECL String8 compiler_driver_dependency_path(Arena* arena, String8 object_path);
 // Lowers the per-input function-record cap so a test can reach it; zero
 // restores COMPILER_DRIVER_INPUT_FUNCTION_LIMIT. Set only between invocations.
 BUSTER_F_DECL void compiler_driver_test_set_function_limit(u32 limit);

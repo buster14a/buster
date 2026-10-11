@@ -5401,6 +5401,24 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 eh_frame_header_offset = align_forward(section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length, 4);
     section_offsets[OBJECT_SECTION_UNWIND] = align_forward(eh_frame_header_offset + eh_frame_header_size, object->sections[OBJECT_SECTION_UNWIND].alignment);
     u64 read_only_end = section_offsets[OBJECT_SECTION_UNWIND] + object->sections[OBJECT_SECTION_UNWIND].data.length;
+    // An absent weak name read through the GOT (the default PIE code shape,
+    // e.g. `cmpq $0, hook@GOTPCREL(%rip)`) needs memory holding its address,
+    // and not every such site can be rewritten into a direct form. Every such
+    // name is worth zero, so they all share one slot after .eh_frame, left
+    // as the image's zero background.
+    bool zero_got_needed = false;
+    for (u32 index = 0; index < object->relocation_count; index += 1)
+    {
+        ObjectRelocation* relocation = &object->relocations[index];
+        zero_got_needed |= relocation->section < OBJECT_SECTION_COUNT && !object_section_kind_is_debug((ObjectSectionKind)relocation->section) &&
+                           relocation->symbol < object->symbol_count && object_relocation_kind_is_x86_got(relocation->kind) &&
+                           link_elf_symbol_resolves_to_zero(0, &object->symbols[relocation->symbol], false);
+    }
+    u64 zero_got_offset = align_forward(read_only_end, sizeof(u64));
+    if (zero_got_needed)
+    {
+        read_only_end = zero_got_offset + sizeof(u64);
+    }
     if (!link_elf_virtual_align(read_only_end, BUSTER_MAX((u32)ELF_PAGE_SIZE, object->sections[OBJECT_SECTION_DATA].alignment),
                                 &section_offsets[OBJECT_SECTION_DATA]))
     {
@@ -5499,7 +5517,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         u64 place_address = image_base + section_offsets[relocation->section] + relocation->offset;
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
         BusterX86MetadataGotPatch got_patch = BUSTER_X86_METADATA_GOT_PATCH_NONE;
-        if (object_relocation_kind_is_x86_got(relocation->kind))
+        bool zero_got = absent_weak && object_relocation_kind_is_x86_got(relocation->kind);
+        if (object_relocation_kind_is_x86_got(relocation->kind) && !zero_got)
         {
             got_patch = link_x86_relax_got_reference(relocation->kind, relocation->addend, bytes, output_offset, section_offsets[relocation->section],
                                                      section_offsets[relocation->section] + section->data.length);
@@ -5515,7 +5534,19 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         // definition of every name in it. A conversion that answers with the
         // address as an immediate patches the same field with the address
         // itself, and the GOT load's -4 has no part in that value.
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC64)
+        if (zero_got)
+        {
+            s64 value = 0;
+            if (!link_address_difference(image_base + zero_got_offset, place_address, relocation->addend, &value) || value < INT32_MIN ||
+                value > INT32_MAX)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            link_write_u32(bytes, output_offset, (u32)(s32)value);
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_X86_64_PC64)
         {
             s64 value = 0;
             if (!link_address_difference(symbol_address, place_address, relocation->addend, &value))
@@ -6362,6 +6393,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                 }
             }
         }
+        else if (symbol->section == OBJECT_SECTION_UNDEFINED && import_index == UINT32_MAX && object_relocation_kind_is_x86_got(relocation->kind) &&
+                 function_got_indices[relocation->symbol] == UINT32_MAX)
+        {
+            // An absent weak name read through the GOT (the default PIE code
+            // shape, e.g. `cmpq $0, hook@GOTPCREL(%rip)`) takes a slot that no
+            // loader relocation fills, so it reads as zero like ld's. Not
+            // every such site can be rewritten into a direct form.
+            function_got_indices[relocation->symbol] = function_got_count++;
+        }
         // Asked of the numbering above rather than of the symbol again: an
         // undefined symbol that was not numbered is one that resolves to
         // zero, and re-deriving that per relocation would rescan every
@@ -6969,19 +7009,21 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                                            ELF_RELOCATION_TYPE_X86_64_64, (u64)relocation->addend);
                 continue;
             }
-            if (object_relocation_kind_is_x86_got(relocation->kind))
+        }
+        // Function address identity and absent weak names both own a slot
+        // numbered by the planning loop above.
+        if (object_relocation_kind_is_x86_got(relocation->kind) && function_got_indices[relocation->symbol] != UINT32_MAX)
+        {
+            u64 slot_address = image_base + function_got_offset + (u64)function_got_indices[relocation->symbol] * sizeof(u64);
+            s64 value = 0;
+            if (!link_address_difference(slot_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
             {
-                u64 slot_address = image_base + function_got_offset + (u64)function_got_indices[relocation->symbol] * sizeof(u64);
-                s64 value = 0;
-                if (!link_address_difference(slot_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
-                {
-                    result.error = LINK_ERROR_RELOCATION;
-                    result.symbol = symbol->name;
-                    return result;
-                }
-                link_write_u32(bytes, output_offset, (u32)(s32)value);
-                continue;
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
             }
+            link_write_u32(bytes, output_offset, (u32)(s32)value);
+            continue;
         }
         BusterX86MetadataGotPatch got_patch = BUSTER_X86_METADATA_GOT_PATCH_NONE;
         if (object_relocation_kind_is_x86_got(relocation->kind))
@@ -13938,7 +13980,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 }
                 continue;
             }
-            if (!symbol->global || symbol->kind != OBJECT_SYMBOL_FUNCTION || !symbol->name.length)
+            // Functions and data alike: each import has a bound GOT slot, which
+            // GOT loads read, and a stub beside it, which calls reach.
+            if (!symbol->global || !symbol->name.length)
             {
                 result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
                 result.symbol = symbol->name;
@@ -14821,6 +14865,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             {
                 symbol_address = 0;
             }
+            // A GOT load names the slot holding the symbol's address: an
+            // import's bound slot, or, for a definition in this image, the
+            // symbol itself once the load is relaxed to an address below.
+            bool got_load = object_relocation_kind_is_x86_got(relocation->kind) ||
+                            relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 ||
+                            relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12;
             bool thread_local_pointer = false;
             if (result.error == LINK_ERROR_NONE)
             {
@@ -14849,8 +14899,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 }
                 else if (symbol->section == OBJECT_SECTION_UNDEFINED)
                 {
-                    if ((relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12) &&
-                        symbol->kind == OBJECT_SYMBOL_DATA)
+                    // Only a call may reach an import through its stub; any
+                    // other direct reference to imported data would read the
+                    // stub's code.
+                    if (!got_load && symbol->kind == OBJECT_SYMBOL_DATA &&
+                        (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 ||
+                         relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_ABSOLUTE64))
                     {
                         result.error = LINK_ERROR_RELOCATION;
                         result.symbol = symbol->name;
@@ -14865,7 +14919,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                             result.symbol = symbol->name;
                         }
                     }
-                    if (result.error == LINK_ERROR_NONE)
+                    if (result.error == LINK_ERROR_NONE && got_load)
+                    {
+                        if (!link_u64_add(image_base, got_offset, &symbol_address) ||
+                            !link_u64_add(symbol_address, (u64)import_index * sizeof(u64), &symbol_address))
+                        {
+                            result.error = LINK_ERROR_RELOCATION;
+                            result.symbol = symbol->name;
+                        }
+                    }
+                    else if (result.error == LINK_ERROR_NONE)
                     {
                         if (!link_u64_add(text_vm_address, stub_offset, &symbol_address) || import_index > UINT64_MAX / stub_size ||
                             !link_u64_add(symbol_address, (u64)import_index * stub_size, &symbol_address))
@@ -14896,10 +14959,35 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 output_offset = section_offsets[relocation->section] + relocation->offset;
             }
             u64 place_address = 0;
+            if (result.error == LINK_ERROR_NONE && got_load && symbol->section != OBJECT_SECTION_UNDEFINED)
+            {
+                // This image defines the symbol, so no slot is needed: the
+                // x86 load becomes the rip-relative LEA of the symbol and the
+                // AArch64 slot load the ADD of its page offset.
+                if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12)
+                {
+                    u32 instruction = 0;
+                    memcpy(&instruction, bytes + output_offset, sizeof(instruction));
+                    if ((instruction & UINT32_C(0xffc00000)) != UINT32_C(0xf9400000) || (instruction & 31) == 31)
+                    {
+                        result.error = LINK_ERROR_RELOCATION;
+                        result.symbol = symbol->name;
+                    }
+                    link_write_u32(bytes, output_offset, UINT32_C(0x91000000) | (instruction & 0x3ff));
+                }
+                else if (relocation->kind != OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 &&
+                         link_x86_relax_got_reference(relocation->kind, relocation->addend, bytes, output_offset, section_offsets[relocation->section],
+                                                      section_offsets[relocation->section] + section->data.length) != BUSTER_X86_METADATA_GOT_PATCH_PC32)
+                {
+                    result.error = LINK_ERROR_RELOCATION;
+                    result.symbol = symbol->name;
+                }
+            }
             if (result.error == LINK_ERROR_NONE)
             {
                 place_address = image_base + output_offset;
                 if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32 ||
+                    relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 || object_relocation_kind_is_x86_got(relocation->kind) ||
                     relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
                 {
                     s64 value = 0;
@@ -14935,7 +15023,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                         link_write_u32(bytes, output_offset, patched);
                     }
                 }
-                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
+                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ||
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21)
                 {
                     u32 instruction = 0;
                     memcpy(&instruction, bytes + output_offset, sizeof(instruction));
@@ -14949,7 +15038,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                     if (result.error == LINK_ERROR_NONE)
                     {
                         target_address = symbol_address;
-                        if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && !link_address_addend(symbol_address, relocation->addend, &target_address))
+                        if ((relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21) &&
+                            !link_address_addend(symbol_address, relocation->addend, &target_address))
                         {
                             result.error = LINK_ERROR_RELOCATION;
                             result.symbol = symbol->name;
@@ -15011,7 +15101,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                         link_write_u32(bytes, output_offset, instruction);
                     }
                 }
-                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
+                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12)
                 {
                     if (place_address & 3)
                     {

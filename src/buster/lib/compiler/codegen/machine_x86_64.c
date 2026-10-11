@@ -21,6 +21,9 @@
 // condition identity; serial prewarm refuses mismatched condition bindings.
 // machine_x64_plan_call reuses selector-owned variadic shape/placement rows;
 // machine_x64_select_call consumes their active prefix before the next call.
+// machine_x64_cast_copies_constant lets a register-copy cast of an integer
+// constant (a C null pointer) define itself with MOV_RI, which the allocators
+// rematerialize; constants only such casts read are marked fused_dead.
 
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_internal.h>
@@ -320,15 +323,22 @@ struct MachineX64Selector
 // An undefined weak symbol keeps that indirection under -fPIC even when it is
 // hidden, function or data: a PC-relative reference to the absent symbol is a
 // relocation a shared object cannot carry, while a GOT slot is simply zero.
+// Mach-O names the instruction in the relocation type itself: every direct
+// call takes the PLT form, which the Mach-O writer spells X86_64_RELOC_BRANCH,
+// and the address of a symbol this module does not define is loaded from its
+// GOT slot (X86_64_RELOC_GOT_LOAD), because a linker may bind it to a dylib.
+// Everything else stays the direct rip-relative X86_64_RELOC_SIGNED.
 BUSTER_GLOBAL_LOCAL u8 machine_x64_symbol_reference(MachineX64Selector* selector, IrSymbolId symbol, bool call_site)
 {
     IrSymbol* record = ir_symbol_from_id(&selector->program->symbols, symbol);
-    bool elf_external_call = call_site && record && !record->is_definition &&
-                             object_format_for_target(selector->target) == OBJECT_FORMAT_ELF64;
+    ObjectFormat format = object_format_for_target(selector->target);
+    bool elf_external_call = call_site && record && !record->is_definition && format == OBJECT_FORMAT_ELF64;
+    bool mach = format == OBJECT_FORMAT_MACH_O64;
+    bool mach_external_address = mach && !call_site && record && !record->is_definition && record->linkage != IR_LINKAGE_INTERNAL;
     bool weak_function_address = !call_site && selector->target.os == OPERATING_SYSTEM_LINUX && record &&
                                  record->kind == IR_SYMBOL_FUNCTION && !record->is_definition && record->is_weak;
     bool weak_undefined = record && !record->is_definition && record->is_weak && record->linkage != IR_LINKAGE_INTERNAL;
-    bool indirect = elf_external_call || weak_function_address ||
+    bool indirect = elf_external_call || weak_function_address || (mach && call_site) || mach_external_address ||
                     (selector->position_independent && (ir_symbol_is_interposable(record) || weak_undefined));
     return (u8)(!indirect ? MACHINE_SYMBOL_REFERENCE_DIRECT : call_site ? MACHINE_SYMBOL_REFERENCE_PLT : MACHINE_SYMBOL_REFERENCE_GOT);
 }
@@ -2877,13 +2887,64 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_float_to_integer(MachineX64Sele
     return selected;
 }
 
+// A register-copy cast changes no bits, so a chain of them over an integer
+// constant still holds that constant. Such a cast defines its own register
+// with MOV_RI, which the allocator rematerializes instead of spilling: a C
+// null pointer is CAST(INTEGER_TO_POINTER) of zero. Both ends must be
+// general-register scalars, which keeps floats and 128-bit integers out.
+#define MACHINE_X64_COPY_CAST_CHAIN_LIMIT 4u
+BUSTER_GLOBAL_LOCAL bool machine_x64_cast_copies_constant(MachineX64Selector* selector, IrInstruction const* cast, u64* immediate)
+{
+    IrFunction* function = selector->function;
+    bool found = false;
+    bool searching = cast->result.value < function->value_count &&
+                     (machine_x64_type_class(selector, function->values[cast->result.value].canonical_type).flags & MACHINE_TYPE_CLASS_SCALAR_REGISTER);
+    IrInstruction const* row = cast;
+    for (u32 step = 0; searching && step < MACHINE_X64_COPY_CAST_CHAIN_LIMIT; step += 1)
+    {
+        searching = false;
+        if (row->opcode == IR_OPCODE_CAST && row->operand_count == 1 && row->operands[0].value < function->value_count &&
+            (row->conversion_operation == IR_CONVERSION_INTEGER_TO_POINTER || row->conversion_operation == IR_CONVERSION_POINTER_REINTERPRET ||
+             row->conversion_operation == IR_CONVERSION_INTEGER_REINTERPRET) &&
+            (machine_x64_type_class(selector, function->values[row->operands[0].value].canonical_type).flags & MACHINE_TYPE_CLASS_SCALAR_REGISTER))
+        {
+            IrInstructionId definition = function->values[row->operands[0].value].definition;
+            if (definition.value < function->instruction_count)
+            {
+                row = function->instructions + definition.value;
+                if (row->opcode == IR_OPCODE_CONSTANT_INTEGER && row->immediate_count == 1 && row->immediates)
+                {
+                    *immediate = row->immediate_is_negative ? 0 - row->immediates[0] : row->immediates[0];
+                    found = true;
+                }
+                else
+                {
+                    searching = true;
+                }
+            }
+        }
+    }
+    return found;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
     IrFunction* function = selector->function;
 
     bool selected = false;
-    if (instruction->operands[0].value < function->value_count)
+    u64 constant = 0;
+    if (result_register != UINT32_MAX && machine_x64_cast_copies_constant(selector, instruction, &constant))
+    {
+        u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                    machine_ref_make(MACHINE_REF_IMMEDIATE, machine_x64_append_immediate(selector, constant))},
+                                                       .opcode = MACHINE_X64_MOV_RI,
+                                                   });
+        machine_x64_define(selector, result_register, row);
+        selected = true;
+    }
+    else if (instruction->operands[0].value < function->value_count)
     {
         IrTypeId source_type_id = function->values[instruction->operands[0].value].canonical_type;
         MachineTypeClass source_class = machine_x64_type_class(selector, source_type_id);
@@ -5634,7 +5695,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
             *row = (MachineInlineAssemblyRelocation){.symbol = name, .addend = addend, .offset = (u32)relocation.offset,
                                                      .block = target_block, .continuation_block = continuation_block,
                                                      .target_index = block ? label_target : UINT32_MAX,
-                                                     .kind = (u8)relocation.kind, .is_block = block, .is_control = control};
+                                                     .kind = (u8)relocation.kind, .is_block = block, .is_control = control,
+                                                     .is_branch = assembly_x86_relocation_is_branch(encoded.bytes, relocation)};
             if (control)
             {
                 control_targets[control_count++] = label_target;
@@ -8941,6 +9003,39 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             }
         }
         fusion_candidate_base += block_candidate_count;
+    }
+    // A cast that copies a constant materializes it itself, so a value every
+    // use of which is such a cast selects into nothing. The reads are
+    // counted over the same rows as use_count; edge arguments are uses no
+    // cast accounts for, so a value reaching a block parameter stays live.
+    u32* copy_cast_reads = arena_allocate(arena, u32, value_capacity);
+    memset(copy_cast_reads, 0, sizeof(u32) * value_capacity);
+    u64 copied_constant = 0;
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        IrBlock* block = function->blocks + block_index;
+        for (IrInstructionId id = block->first_instruction; id.value <= block->last_instruction.value; id.value += 1)
+        {
+            IrInstruction* instruction = function->instructions + id.value;
+            if (instruction->opcode == IR_OPCODE_CAST && instruction->result.value < function->value_count &&
+                selector.value_virtual_registers[instruction->result.value] != UINT32_MAX &&
+                machine_x64_cast_copies_constant(&selector, instruction, &copied_constant))
+            {
+                copy_cast_reads[instruction->operands[0].value] += 1;
+            }
+        }
+    }
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        IrBlock* block = function->blocks + block_index;
+        for (IrInstructionId id = block->first_instruction; id.value <= block->last_instruction.value; id.value += 1)
+        {
+            u32 value = function->instructions[id.value].result.value;
+            if (value < function->value_count && copy_cast_reads[value] && copy_cast_reads[value] == value_uses[value].use_count)
+            {
+                selector.fused_dead[value] = 1;
+            }
+        }
     }
     selector.virtual_register_count = selector.builder.virtual_registers.total_count;
     selector.classification_registers =
