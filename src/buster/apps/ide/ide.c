@@ -264,6 +264,10 @@ ProcessResult process_arguments(void)
     if (string_equal(command, S8("test")) || string_equal(command, S8("metamorphic")))
     {
         compiler_state.command = string_equal(command, S8("metamorphic")) ? COMPILER_COMMAND_METAMORPHIC : COMPILER_COMMAND_TEST;
+#if BUSTER_INCLUDE_TESTS
+        // Tests exercise native code unless they select a target (#1557).
+        compiler_driver_host_cpu_default = true;
+#endif
         ProcessResult result = PROCESS_RESULT_SUCCESS;
         for (u64 index = 2; result == PROCESS_RESULT_SUCCESS && index < arguments.length; index += 1)
         {
@@ -2158,10 +2162,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             // Counts: the statement plans the body binder followed, and the bodies left to its token walk.
             string_print(S8("C_AST_STATEMENTS bodies={u64} segments={u64} segment_tokens={u64} uses={u64} bails={u64} declaration_hints={u64} "
                             "loop_hints={u64} declines={u64} declarator_hints={u64} initializer_hints={u64} auto_skips={u64} "
-                            "declarator_declines={u64} fallbacks={u64} reason={S8} fallback_token={u32}\n"),
+                            "declarator_declines={u64} braced={u64} fallbacks={u64} reason={S8} fallback_token={u32}\n"),
                          tree.statements.bodies, tree.statements.segments, tree.statements.segment_tokens, tree.statements.uses, tree.statements.bails,
                          tree.statements.declaration_hints, tree.statements.loop_hints, tree.statements.declines, tree.statements.declarator_hints,
-                         tree.statements.initializer_hints, tree.statements.auto_skips, tree.statements.declarator_declines, tree.statements.fallbacks,
+                         tree.statements.initializer_hints, tree.statements.auto_skips, tree.statements.declarator_declines, tree.statements.braced,
+                         tree.statements.fallbacks,
                          c_ast_statement_fallback_name(tree.statements.fallbacks ? tree.statements.reason : C_AST_STATEMENT_FALLBACK_NONE),
                          tree.statements.fallbacks ? tree.statements.fallback_token : UINT32_MAX);
             // Counts: lowering's root-conditional queries inside indexed bodies, by how each ended.

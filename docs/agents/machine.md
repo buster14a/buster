@@ -377,7 +377,10 @@ fixture as well as compiling both architectures.
   a cast is selected as `MOV_RI` of that immediate instead of `MOV_RR`. A
   constant or cast whose every use is such a cast is marked `fused_dead` and
   selects into nothing. Edge arguments count as uses, so a value reaching a
-  block parameter keeps its row. AArch64 selection does not do this yet.
+  block parameter keeps its row. AArch64 selection applies the same rule
+  through `machine_a64_cast_copies_constant` and `MACHINE_A64_MOV_RI`; its
+  classification pass counts the copy-cast reads and the marking runs after
+  branch fusion against the same use counts, edge arguments included.
 - FAST/QUALITY start a join's or loop header's general block parameters in
   registers. `machine_fast_parameter_contract` gives each non-pinned,
   non-mutable general parameter a caller-saved (or already-saved) register
@@ -402,11 +405,20 @@ fixture as well as compiling both architectures.
   register target when no resident source occupies that register, otherwise
   through the free register into its tile cell. On unity `ide.c` (x86-64
   `-march=native -g0`) this kept 45 FAST edges off the staged form and
-  removed about 680 stack-referencing instructions per mode. An edge with a
-  vector or mask assignment, or with no free register, still stages its
-  resident sources through the tile; the same input has no vector or mask
-  edge, and its no-free-register edges stage about 600 (FAST) and 2.4k
-  (QUALITY scan) sources. Either way a source with a rematerialization recipe (constant or
+  removed about 680 stack-referencing instructions per mode. When no
+  register is free across the whole edge, which happens on wide edges when
+  the targets, sources and unsaved callee-saved registers cover the register
+  file, a target that no copy reads and that is not loaded early stages
+  instead (`machine_fast_edge_staging_register`): its value is dead until
+  its own copy. That register is overwritten by the copies, so a copy cycle
+  instead saves one value in its first copy's tile cell and reloads it at
+  the end of the cycle. On unity `ide.c` every no-free-register edge had
+  such a target and cycles were rare (none in FAST, two in the QUALITY
+  scan); 52 of 53 FAST edges left the staged form, removing 5.1 KB of
+  `.text` and about 780 stack-referencing instructions per mode. An edge
+  with a vector or mask assignment, or with neither register, still stages
+  its resident sources through the tile; the same input has no vector or
+  mask edge. Either way a source with a rematerialization recipe (constant or
   frame address) reads no register and rematerializes straight into its
   destination (`MACHINE_FAST_EDGE_SOURCE_RECREATED`). On unity `ide.c` the
   parallel move removed about 46 k stack-referencing instructions and 2% of
@@ -1186,8 +1198,9 @@ fixture as well as compiling both architectures.
   position-independent planner uses `LINK_ELF_PIC_GOT_ADDRESS_ZERO`. AArch64
   `ADR_GOT_PAGE`/`LD64_GOT_LO12_NC` already become `MOVZ #0`/`ADD #0` in
   `object_aarch64_elf_page_relocate`. `compiler_driver_elf_weak_got_tests`
-  links host PIE objects as PIE and `-no-pie` against a host-linker oracle
-  (#3414).
+  links host `-fPIE` objects against a host-linker oracle (#3414): as PIE and
+  `-no-pie` on x86-64, and `-no-pie` only on AArch64 Linux, which writes only
+  fixed-address executables.
   It relaxes the two indirect
   thread-local models back to local-exec for the same reason
   (`link_elf_relax_thread_local`), and a foreign object's local-dynamic
