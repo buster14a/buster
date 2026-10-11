@@ -1585,7 +1585,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission(UnitTestArgume
                         name = (OsTestHandleTypeName*)storage;
                         if (name->length <= sizeof(storage) && name->pointer)
                         {
-                            type = string8_from_string16(arena, (String16){name->pointer, name->length / 2});
+                            type = string8_from_string16(arena, (String16){name->pointer, name->length / 2}, false);
                         }
                     }
                     arguments->show(arguments, S8("CAPTURE_SINK_HANDLE_V1 value={u32} type={S8}\n"), index * 4, type);
