@@ -127,6 +127,7 @@
 //   c_parse_local_declarations_split,             block-scope declarations,
 //   c_parse_local_declarations                    auto inference, local
 //                                                 linkage redeclarations
+//   c_parse_label_address_opener                   indexed label opener lookup
 //   c_parse_label_address_prefix_proven, _at       opener-based label proof
 //   c_parse_label_address_prefix_proven_indexed    indexed label proof
 //   c_parse_label_address_prefix_with_typedef, _at typedef-aware label proof
@@ -25232,7 +25233,7 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix_proven(CPreprocessResult const
     return c_parse_label_address_prefix_proven_at(preprocess, body_start, index, UINT32_MAX);
 }
 
-BUSTER_C_INTERNAL bool c_parse_label_address_prefix_proven_indexed(CParseResult* result, CPreprocessResult const* preprocess, u32 body_start, u32 index)
+BUSTER_C_INTERNAL u32 c_parse_label_address_opener(CParseResult* result, CPreprocessResult const* preprocess, u32 body_start, u32 index)
 {
     u32 open = UINT32_MAX;
     if (result && result->position_index && index > body_start && index < preprocess->token_count &&
@@ -25241,6 +25242,12 @@ BUSTER_C_INTERNAL bool c_parse_label_address_prefix_proven_indexed(CParseResult*
     {
         open = c_parse_matching_opener_indexed(result, *preprocess, index - 1, body_start);
     }
+    return open;
+}
+
+BUSTER_C_INTERNAL bool c_parse_label_address_prefix_proven_indexed(CParseResult* result, CPreprocessResult const* preprocess, u32 body_start, u32 index)
+{
+    u32 open = c_parse_label_address_opener(result, preprocess, body_start, index);
     return c_parse_label_address_prefix_proven_at(preprocess, body_start, index, open);
 }
 
@@ -25334,13 +25341,7 @@ BUSTER_C_INTERNAL bool c_parse_label_address_prefix_with_typedef_at(CParseResult
 BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult const* preprocess, CScopeId scope,
                                                                     u32 body_start, u32 index)
 {
-    u32 open = UINT32_MAX;
-    if (result && result->position_index && index > body_start && index < preprocess->token_count &&
-        c_token_is_punctuator(&preprocess->tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
-        c_token_is_punctuator(&preprocess->tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
-    {
-        open = c_parse_matching_opener_indexed(result, *preprocess, index - 1, body_start);
-    }
+    u32 open = c_parse_label_address_opener(result, preprocess, body_start, index);
     return c_parse_label_address_prefix_with_typedef_at(result, preprocess, scope, body_start, index, open);
 }
 
@@ -25348,13 +25349,7 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* res
 BUSTER_C_SHARED bool c_test_parse_label_address_prefix_paths_agree(CParseResult* result, CPreprocessResult const* preprocess,
                                                                     CScopeId scope, u32 body_start, u32 index)
 {
-    u32 open = UINT32_MAX;
-    if (result && result->position_index && index > body_start && index < preprocess->token_count &&
-        c_token_is_punctuator(&preprocess->tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
-        c_token_is_punctuator(&preprocess->tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
-    {
-        open = c_parse_matching_opener_indexed(result, *preprocess, index - 1, body_start);
-    }
+    u32 open = c_parse_label_address_opener(result, preprocess, body_start, index);
     bool proven_agrees = c_parse_label_address_prefix_proven_at(preprocess, body_start, index, UINT32_MAX) ==
                          c_parse_label_address_prefix_proven_at(preprocess, body_start, index, open);
     bool typedef_agrees = c_parse_label_address_prefix_with_typedef_at(result, preprocess, scope, body_start, index, UINT32_MAX) ==
