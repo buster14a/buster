@@ -410,7 +410,8 @@ not additional authoritative IRs.
 | `reserved_selection_layout` | Explicit cold padding | The 2026-08-17e experiment rejected removal; no dormant matcher or telemetry is retained |
 | `MachineScheduleResult.function`, `moved` | Scheduler; QUALITY candidate evaluation | Shares unchanged source arrays and borrows input arena; new rows/points/line marks have the candidate's arena lifetime |
 | `MachineEncodeResult.bytes`, `byte_count`, `block_offsets`, `row_offsets`, `valid` | Target encoder; module emission and debug mapping | Exact placement and row stream; false valid is not usable partial code |
-| `frame_allocation_offset`, `epilog_offsets`, `epilog_count` | Native encoder; Windows unwind construction | Exact emitted prologue/epilogue instruction boundaries |
+| `frame_events`, `frame_event_count`, `prologue_size`, `frame_pointer_after_allocation` | Native encoder, appended after each emitted frame instruction (shared probes publish their own span); module descriptor copies them for DWARF CFI and PE unwind | Exact emitted prologue instruction ends from the encoder cursor; only a valid result publishes them |
+| `epilog_offsets`, `epilog_count` | Native encoder; Windows unwind construction | Exact emitted epilogue instruction boundaries |
 | `call_sites`, `call_site_count` | Encoder; module relocation creation | Function-relative emitted offsets and selected call-target pool |
 | `exact_attempts`, `exact_successes`, `exact_failures` | x86 exact emission; codegen diagnostics including rejected attempts | Attempt-local, not a capability certificate |
 | `MachineCallSite.code_offset`, `target`, `absolute`, `page_relative`, `page_low`, `is_thread_local`, `thread_local_low`, `thread_local_site` | Encoder marks exact fixup sites; module codegen selects format relocations | Encoded bytes and symbol-reference pool. TLS/page variants have distinct addend/width rules; never derive IDs from similarly named recipe values |

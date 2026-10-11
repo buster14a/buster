@@ -5083,32 +5083,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
     return result;
 }
 
-// Declarators wrapped in redundant parentheses (GitHub #3215). The split read
-// `int ((*pq))(int) = f;` as a function and `int (gd(int a)) { ... }` with
-// the declaration after it as one object, so both programs failed with an
-// undeclared name. Each compiles to the same object with and without
-// -fc-ast-pilot, which publishes the split from the tree for all but the
-// shapes it still refuses (an attribute list opening a group, a variadic list
-// inside one), and each program's main returns 0.
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_groups(UnitTestArguments* arguments)
+// One program per case, each with a main that returns 0: it compiles to the
+// same object with and without -fc-ast-pilot, the pilot publishes the split
+// from the tree exactly when `published` says so, and the linked program
+// exits with status 0.
+typedef struct CompilerDriverDeclaratorGroupCase CompilerDriverDeclaratorGroupCase;
+struct CompilerDriverDeclaratorGroupCase
+{
+    String8 source;
+    bool published;
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_declarator_group_cases(UnitTestArguments* arguments, CompilerDriverDeclaratorGroupCase const* cases,
+                                                                          u32 case_count)
 {
     UnitTestResult result = {0};
-    struct
-    {
-        String8 source;
-        bool published;
-    } const cases[] = {
-        {S8("int f(int x) { return x + 1; }\nint ((*pq))(int) = f;\nint main(void) { return pq(1) - 2; }\n"), true},
-        {S8("int (__attribute__((unused)) (*pq))(int) = 0;\nint main(void) { return pq != 0; }\n"), false},
-        {S8("int (gd(int a)) { return a; }\nint zz;\nint main(void) { return gd(0) + zz; }\n"), true},
-        {S8("int (x);\nint ((y))[3];\nvoid ((h))(void) {}\nint main(void) { h(); return x + y[2] + (int)sizeof(y) - 12; }\n"), true},
-        {S8("typedef int T;\nT ((t))[2];\nT ((*tp))(T);\nstatic T id(T v) { return v; }\n"
-            "int a, ((b)), (c)[2], ((*d))(void), (e(void)), (((*g)));\nint e(void) { return 0; }\n"
-            "int main(void) { tp = id; return a + b + c[1] + (d != 0) + e() + (g != 0) + t[1] + tp(0) + (int)sizeof(t) - 8; }\n"),
-         true},
-        {S8("int (gv(int a, ...)) { return a; }\nint main(void) { return gv(0, 1, 2); }\n"), false},
-    };
-    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    for (u32 case_index = 0; case_index < case_count; case_index += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         Arena* arena = temporary.arena;
@@ -5172,6 +5162,47 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_gro
         scratch_end(temporary);
     }
     return result;
+}
+
+// Declarators wrapped in redundant parentheses (GitHub #3215). The split read
+// `int ((*pq))(int) = f;` as a function and `int (gd(int a)) { ... }` with
+// the declaration after it as one object, so both programs failed with an
+// undeclared name. The pilot publishes the split from the tree for all but
+// the shapes it still refuses (an attribute list opening a group, a variadic
+// list inside one).
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_groups(UnitTestArguments* arguments)
+{
+    CompilerDriverDeclaratorGroupCase const cases[] = {
+        {S8("int f(int x) { return x + 1; }\nint ((*pq))(int) = f;\nint main(void) { return pq(1) - 2; }\n"), true},
+        {S8("int (__attribute__((unused)) (*pq))(int) = 0;\nint main(void) { return pq != 0; }\n"), false},
+        {S8("int (gd(int a)) { return a; }\nint zz;\nint main(void) { return gd(0) + zz; }\n"), true},
+        {S8("int (x);\nint ((y))[3];\nvoid ((h))(void) {}\nint main(void) { h(); return x + y[2] + (int)sizeof(y) - 12; }\n"), true},
+        {S8("typedef int T;\nT ((t))[2];\nT ((*tp))(T);\nstatic T id(T v) { return v; }\n"
+            "int a, ((b)), (c)[2], ((*d))(void), (e(void)), (((*g)));\nint e(void) { return 0; }\n"
+            "int main(void) { tp = id; return a + b + c[1] + (d != 0) + e() + (g != 0) + t[1] + tp(0) + (int)sizeof(t) - 8; }\n"),
+         true},
+        {S8("int (gv(int a, ...)) { return a; }\nint main(void) { return gv(0, 1, 2); }\n"), false},
+    };
+    return compiler_driver_declarator_group_cases(arguments, cases, BUSTER_ARRAY_LENGTH(cases));
+}
+
+// A single redundant group after a typedef or tag name (GitHub #3368). The
+// declaration scans read it as that name's parameter list, so `T (x);` and
+// `struct S (s2);` declared nothing and `T (tg(int a)) { ... }` declared a
+// function `T`: each program failed with an undeclared name. The pilot
+// publishes them all.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_name_declarator_groups(UnitTestArguments* arguments)
+{
+    CompilerDriverDeclaratorGroupCase const cases[] = {
+        {S8("typedef int T;\nT (x);\nint main(void) { return x; }\n"), true},
+        {S8("struct S { int a; };\nstruct S (s2);\nint main(void) { return s2.a; }\n"), true},
+        {S8("typedef int T;\nT (tg(int a)) { return a; }\nint main(void) { return tg(0); }\n"), true},
+        {S8("struct P { int a; };\nstruct P (pg(void)) { struct P r = {0}; return r; }\nint main(void) { return pg().a; }\n"), true},
+        {S8("typedef int T;\nstatic const T (y) = 2, (z)[2];\ntypedef T (U);\nU (u), (uf(U a));\nU uf(U a) { return a - y; }\n"
+            "union W { int a; } (w);\nenum E { E0 } (e);\nint main(void) { return uf(2) + z[1] + u + w.a + (int)e + (int)sizeof(z) - 8; }\n"),
+         true},
+    };
+    return compiler_driver_declarator_group_cases(arguments, cases, BUSTER_ARRAY_LENGTH(cases));
 }
 
 // Rejected wide escapes must leave both absent and existing output paths
@@ -30486,6 +30517,65 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_ide_run(UnitTestArgument
                                   (u32)stdin_run.spawned, (u32)stdin_run.input_written, (u32)stdin_run.status, stdin_run.output,
                                   stdin_run.error));
 
+    String8 host_compiler_id = S8(BUSTER_HOST_C_COMPILER_ID);
+    if (string_equal(host_compiler_id, S8("GNU")) || string_equal(host_compiler_id, S8("Clang")))
+    {
+        String8 cpu_runtime_source_path = buster_test_temporary_path(arena, S8("buster-ide-run-cpu-runtime"), S8(".c"));
+        String8 cpu_runtime_object_path = buster_test_temporary_path(arena, S8("buster-ide-run-cpu-runtime"), S8(".o"));
+        String8 cpu_runtime_source = S8("int puts(const char *);\n"
+                                        "int main(void) { puts(__builtin_cpu_supports(\"sse2\") ? \"cpu ran\" : \"cpu ran wrong\"); return 0; }\n");
+        bool cpu_runtime_source_written = file_write(cpu_runtime_source_path, BUSTER_SLICE_TO_BYTE_SLICE(cpu_runtime_source));
+        BUSTER_TEST(arguments, cpu_runtime_source_written);
+        bool cpu_runtime_object_compiled = false;
+        if (cpu_runtime_source_written)
+        {
+            String8 compiler_command[8] = {S8(BUSTER_HOST_C_COMPILER)};
+            u32 compiler_command_count = 1;
+            String8 compiler_argument = S8(BUSTER_HOST_C_COMPILER_ARG1);
+            if (compiler_argument.length) compiler_command[compiler_command_count++] = compiler_argument;
+            compiler_command[compiler_command_count++] = S8("-w");
+            compiler_command[compiler_command_count++] = S8("-O2");
+            compiler_command[compiler_command_count++] = S8("-c");
+            compiler_command[compiler_command_count++] = cpu_runtime_source_path;
+            compiler_command[compiler_command_count++] = S8("-o");
+            compiler_command[compiler_command_count++] = cpu_runtime_object_path;
+            ProcessSpawnResult compiler_spawn = os_process_spawn(
+                (SliceString8){.pointer = compiler_command, .length = compiler_command_count}, (SliceString8){0}, (SliceString8){0},
+                (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true, .search_path = true,
+                                      .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+            if (compiler_spawn.handle)
+            {
+                ProcessWaitResult compiler_wait = os_process_wait_deadline(arena, compiler_spawn, 30000000);
+                cpu_runtime_object_compiled = !compiler_wait.timed_out && compiler_wait.result == PROCESS_RESULT_SUCCESS;
+                if (!cpu_runtime_object_compiled)
+                {
+                    arguments->show(arguments, S8("CPU-runtime host compiler failed: {S8}\n"),
+                                    BYTE_SLICE_TO_STRING(8, compiler_wait.streams[STANDARD_STREAM_ERROR]));
+                }
+            }
+        }
+        BUSTER_TEST(arguments, cpu_runtime_object_compiled);
+        CompilerDriverIdeRunResult cpu_runtime_run = {.status = -1};
+        if (cpu_runtime_object_compiled)
+        {
+            String8 cpu_runtime_arguments[] = {S8("run"), cpu_runtime_object_path};
+            cpu_runtime_run = compiler_driver_test_spawn(arena, ide, (SliceString8)BUSTER_ARRAY_TO_SLICE(cpu_runtime_arguments),
+                                                         (String8){0});
+        }
+        bool cpu_runtime_diagnostic =
+            compiler_driver_test_contains(cpu_runtime_run.error, S8("in-memory execution cannot run")) ||
+            compiler_driver_test_contains(cpu_runtime_run.error, S8("libgcc.a"));
+        BUSTER_TEST_RAW(arguments,
+                        cpu_runtime_object_compiled && cpu_runtime_run.spawned && cpu_runtime_run.status == 1 &&
+                            !compiler_driver_test_contains(cpu_runtime_run.output, S8("cpu ran")) &&
+                            compiler_driver_test_contains(cpu_runtime_run.error, S8("run: error")) && cpu_runtime_diagnostic,
+                        string_format(arena, S8("spawned={u32} status={u32} stdout={S8} stderr={S8}"),
+                                      (u32)cpu_runtime_run.spawned, (u32)cpu_runtime_run.status, cpu_runtime_run.output,
+                                      cpu_runtime_run.error));
+        os_file_delete(cpu_runtime_source_path);
+        os_file_delete(cpu_runtime_object_path);
+    }
+
     os_file_delete(source_path);
     os_file_delete(executable_path);
     os_file_delete(argv0_path);
@@ -30734,6 +30824,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_ifunc_attribute);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_c_ast_pilot);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_redundant_declarator_groups);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_name_declarator_groups);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_void_function_pointer_roundtrip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_shared_ifunc_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_function_alignment_and_weakref);
