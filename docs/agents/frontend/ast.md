@@ -1581,4 +1581,20 @@ not on an instruction gain. The budgets:
 - **Acceptance.** Hosted counts are diagnostic. Zen 5 validation (#2761)
   stays incomplete, no benchmark request is made, and the hook stays opt-in.
 
+The extent table's hosted census is
+[`2026-10-11T115005Z`](../../performance-audits/2026-10-11T115005Z.md), taken
+the same way and diagnostic only:
+- Correctness, object identity and coverage pass. The corpus, the hosted
+  sources and the self-host show 0 differences, and both mutations are seen.
+  The four arms' objects are identical, and no self-host body is refused.
+  12 queries are walked for `shape`.
+- The default path passes by work equivalence: the same callees and call
+  counts. It is +0.0025% Ir.
+- **The table costs more than the walkers it replaces.** C against B is
+  +13.8 M (+0.060%). `c_ir_builder_controlled_body_range` rises from
+  15.7 M to 29.3 M inclusive, with the table's construction charged. A
+  first candidate cost +19.2 M. The slice ships on exactness, as declared,
+  and is not a speedup.
+- Acceptance stays with Zen 5 (#2761), so the default stays off.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
