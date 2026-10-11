@@ -2018,13 +2018,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         return PROCESS_RESULT_FAILED;
     }
     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, compiler_state.cc_arguments);
-    // --version, -dumpversion and -dumpmachine answer without compiling.
+    // Compiler and native-linker identity queries answer without reading inputs.
     bool query = invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.query != COMPILER_DRIVER_QUERY_NONE;
     if (query)
     {
         string_print(S8("{S8}"), compiler_driver_query_text(arena, &invocation));
     }
-    for (u32 input_index = 0; invocation.error == COMPILER_DRIVER_ERROR_NONE && input_index < invocation.input_count; input_index += 1)
+    for (u32 input_index = 0; !query && invocation.error == COMPILER_DRIVER_ERROR_NONE && input_index < invocation.input_count; input_index += 1)
     {
         if (string_equal(invocation.input_paths[input_index], S8("-")))
         {
