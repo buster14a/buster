@@ -1,8 +1,11 @@
 name: 9700X direct workload request
 
-# A pull request that changes a workload under benchmarks/9700x/ completes
-# this run, and only that completion starts 9700x-direct-bench.yml from main
-# (#2704). This job is a marker: it runs on a hosted runner, checks out
+# A pull request that changes a workload or its data under benchmarks/9700x/
+# (#2704), or the compiler comparison or scaling request file there (#2769,
+# #424), completes
+# this run. The trusted gate also proves a fresh request change at the exact
+# head against every parent (#3087); an unrelated synchronize is not a request.
+# Only that verified completion starts 9700x-direct-bench.yml from main. This job is a marker: it runs on a hosted runner, checks out
 # nothing, executes no repository content and holds no capability. The bench
 # workflow reads who started this run from GitHub's record, not from here, so
 # an edited copy of this file in a pull request gains nothing. Nothing is
@@ -13,6 +16,9 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - 'benchmarks/9700x/*.c'
+      - 'benchmarks/9700x/*.data'
+      - 'benchmarks/9700x/compiler-compare.request'
+      - 'benchmarks/9700x/scaling.request'
 
 # Zero token capabilities are stricter than the repository-wide static
 # read-only policy marker retained for common workflow tooling: contents: read
@@ -28,6 +34,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Record the request
         shell: bash
         run: echo 'A 9700X workload run was requested; see the 9700X direct workload benchmark workflow.'

@@ -1,0 +1,8 @@
+# Owner request in issue #2621: launch approved Ryzen 7 9700X validation.
+# Measurement-only historical comparison; this draft PR must not merge to main.
+# Baseline: 3bf9d004f2d1f6b4312e02825f17c56d7f3da14c
+# Production candidate: 96754770072f66a078775826e8fb485d401d8f56
+# Profiles: compiler-compare-v1 plus throughput-corpus-v2, including tiny_startup
+# and five other per-file object workloads, FAST and QUALITY, two rounds.
+# Local Lua/btrfs observations are separate; this is not a Lua workload replay.
+request: issue #2621 owner-authorized historical no-flush publication comparison against pre-fix 3bf9d004; production 967547700; fresh compiler-compare-v1 and throughput-corpus-v2 validation
