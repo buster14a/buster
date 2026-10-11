@@ -5,6 +5,7 @@
 #include <buster/lib/compiler/jit/jit.h>
 #include <buster/tests/compiler/codegen/ebpf_test_internal.h>
 #include <buster/tests/compiler/codegen/ebpf_call_test_internal.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 enum
 {
@@ -1485,7 +1486,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_differential(UnitT
         }
         recorded_cases[corpus] += indexed_ok;
         recorded_seeds[corpus] += indexed.debug_location_count;
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // Agreement is only evidence when the fixtures record. A generator that
     // drifted into rejecting every function would otherwise pass silently.
@@ -1586,7 +1587,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_seed_sizing(UnitTe
                                                                      (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX}) <= 4u);
     BUSTER_TEST(arguments, capacity < 4u * VALUE_COUNT);
     BUSTER_TEST(arguments, retained < (u64)8u * VALUE_COUNT * sizeof(DebugLocationSeed));
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -1735,7 +1736,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_block_local_storage(UnitTe
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -2003,7 +2004,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_local_seed_coverage(UnitTe
                                 reassigned_label);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -2073,7 +2074,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_first_scratch_storage(Unit
                     }
                     BUSTER_TEST(arguments, !memcmp(saved, generated.debug_locations, seed_bytes));
                 }
-                scratch_end(generation);
+                c_test_scratch_end(generation);
             }
         }
         BUSTER_TEST(arguments, arena_destroy(source_arena, 1));
@@ -2957,12 +2958,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_expanded_label_initializers(Unit
     selected.canonical_block_entries[1] = 0;
     selected.canonical_block_entries[2] = 2;
     BUSTER_TEST(arguments, codegen_test_canonical_block_offsets(retained_offsets, &canonical, &selected, &encoded));
-    scratch_end(projection_scratch);
+    c_test_scratch_end(projection_scratch);
     TemporalArena poison_scratch = scratch_begin(&arguments->arena, 1);
     u32* poison = arena_allocate(poison_scratch.arena, u32, 8);
     memset(poison, 0xa5, sizeof(u32) * 8u);
     BUSTER_TEST(arguments, retained_offsets[0] == 55 && retained_offsets[1] == 11 && retained_offsets[2] == 33);
-    scratch_end(poison_scratch);
+    c_test_scratch_end(poison_scratch);
     arena_set_position(arguments->arena, retained_start);
     String8 source = S8("unsigned long long probe(unsigned long long high, unsigned long long divisor) { "
         "static void *targets[] = {&&first, &&second}; "
@@ -3015,7 +3016,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_expanded_label_initializers(Unit
                 }
 #endif
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -3261,7 +3262,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_publication_c(UnitTestAr
                     BUSTER_TEST(arguments, artifact.error == OBJECT_ERROR_NONE && artifact.bytes.length > 0);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -3338,7 +3339,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_aarch64_symbol_addresses(UnitTes
                 BUSTER_TEST(arguments, written.error == OBJECT_ERROR_NONE && written.bytes.length != 0);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -3428,7 +3429,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_arm64_windows_tls_offsets(UnitTe
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -3747,7 +3748,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_switch_key_images(Unit
                                 }
                             }
                         }
-                        scratch_end(temporary);
+                        c_test_scratch_end(temporary);
                     }
                 }
             }

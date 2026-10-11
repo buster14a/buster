@@ -2,6 +2,7 @@
 #include <buster/lib/compiler/ir/ir_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/time.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL u32 ir_test_opcode_count(IrFunction* function, IrOpcode opcode)
@@ -506,7 +507,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_unary_categories_case(UnitT
             }
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -1064,7 +1065,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_switch_case(UnitTestArgumen
         targets_unchanged &= targets[index].value == original_targets[index].value;
     }
     BUSTER_TEST(arguments, keys_unchanged && targets_unchanged);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -1136,7 +1137,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_switch_keys(UnitTestArgumen
         result.test_count += duplicate.test_count;
         result.succeeded_test_count += duplicate.succeeded_test_count;
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -1292,7 +1293,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_parameter_validation(UnitTe
                     TemporalArena dirty = scratch_begin(0, 0);
                     u8* bytes = arena_allocate(dirty.arena, u8, 4096);
                     memset(bytes, 0xa5, 4096);
-                    scratch_end(dirty);
+                    c_test_scratch_end(dirty);
 #if BUSTER_BENCH_ALLOCATIONS
                     IrConstructionCounters before = ir_construction_counters();
 #endif
@@ -2078,7 +2079,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
                     TemporalArena poison = arena_begin_temporal(scratch);
                     u8* bytes = arena_allocate(scratch, u8, BUSTER_KB(16));
                     memset(bytes, 0xa5, BUSTER_KB(16));
-                    scratch_end(poison);
+                    c_test_scratch_end(poison);
                 }
                 u64 classifications = fixture.abi_contexts[IR_ABI_CONVENTION_SYSTEMV_X86_64].classified_values;
                 IrAbiValue cached = ir_type_abi_value(&fixture, grown_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
@@ -2697,7 +2698,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, arguments->arena->position == abi_attempt.position);
         u8* discarded = arena_allocate(arguments->arena, u8, 16384);
         memset(discarded, 0xcc, 16384);
-        scratch_end(abi_attempt);
+        c_test_scratch_end(abi_attempt);
     }
     // Mutating a language layout invalidates all conventions and dependent
     // aggregate classifications through one explicit program operation.

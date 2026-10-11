@@ -13,6 +13,7 @@
 #include <buster/lib/compiler/frontend/c/c_parse_internal.h>
 #include <buster/lib/string.h>
 #include <buster/lib/target.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 #if BUSTER_INCLUDE_TESTS
 
@@ -244,7 +245,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_offset_aliases(UnitTestArg
             CPreprocessResult semantic_preprocess = c_preprocess(temporary.arena, consumer, options);
             CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, semantic_preprocess, c_parse_ast(temporary.arena, semantic_preprocess));
             BUSTER_TEST(arguments, semantic_preprocess.diagnostic_count == 0 && analysis.diagnostic_count == 0);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -283,7 +284,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_offset_layouts(UnitTestArg
                 BUSTER_TEST(arguments, c_test_type_layout_offset_queries(temporary.arena, preprocess, &parse, &type, 1, members[source], offsets[source], 3, &statistics));
                 BUSTER_TEST(arguments, statistics.pass_solves == 1 && statistics.agenda_solves == 2 && statistics.agenda_fallbacks == 0);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -317,7 +318,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_offset_validation(UnitTest
             BUSTER_TEST(arguments, solves && statistics.pass_solves == solves);
             BUSTER_TEST(arguments, statistics.agenda_solves >= counts[sample] * 2 && statistics.agenda_fallbacks == 0);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -355,7 +356,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_offset_queries(UnitTestArg
                 BUSTER_TEST(arguments, statistics.agenda_types == statistics.agenda_solves);
                 BUSTER_TEST(arguments, statistics.agenda_fallbacks == 0);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -400,7 +401,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_offset_search_work(UnitTes
                 BUSTER_TEST(arguments, width == 0 ? scratch[width] == 0 : scratch[width] > 0);
                 BUSTER_TEST(arguments, !c_test_member_offset(temporary.arena, unit.preprocess, &unit.parse, type, S8("missing"), &offset));
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -440,7 +441,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_stable_region(UnitTestArgu
             state_types[size_index] = passes.statistics.pass_state_types;
             pass_attempts[size_index] = passes.statistics.pass_attempts;
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // Past the first region struct, which may create types the others share,
     // the ordered passes grow by the same amount per region struct: exactly
@@ -487,7 +488,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_chain(UnitTestArguments* a
             BUSTER_TEST(arguments,
                         c_type_layout_test_agenda_work(agenda.statistics, depth + 1ull, depth + 1ull, depth, depth, 2ull * depth + 1));
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -526,7 +527,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_fan_out(UnitTestArguments*
             BUSTER_TEST(arguments, agenda.resolved && agenda.size == 4ull * width && agenda.alignment == 4);
             BUSTER_TEST(arguments, c_type_layout_test_agenda_work(agenda.statistics, width + 1ull, width + 1ull, width, width, width + 2ull));
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -552,7 +553,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_diamond(UnitTestArguments*
         BUSTER_TEST(arguments, agenda.resolved && agenda.size == 8 && agenda.alignment == 4);
         BUSTER_TEST(arguments, c_type_layout_test_agenda_work(agenda.statistics, 4, 4, 3, 3, 6));
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -586,7 +587,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_cycles(UnitTestArguments* 
             BUSTER_TEST(arguments, agenda.statistics.agenda_solves == 1 && agenda.statistics.agenda_fallbacks == 0);
             BUSTER_TEST(arguments, agenda.statistics.agenda_notifications == 0);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -624,7 +625,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_order_dependent_reads(Unit
     }
     CTypeLayoutTestSweep sweep = c_type_layout_test_sweep(temporary.arena, &unit);
     BUSTER_TEST(arguments, sweep.mismatches == 0 && sweep.closure_overruns == 0 && sweep.unpushed_attempts == 0);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -662,7 +663,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_enumerator_folds(UnitTestA
         }
     }
     BUSTER_TEST(arguments, checked == count);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -840,7 +841,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_random_programs(UnitTestAr
         total.unpushed_attempts += sweep.unpushed_attempts;
         c_type_layout_test_statistics_add(&total.agenda, sweep.agenda);
         c_type_layout_test_statistics_add(&total.passes, sweep.passes);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     BUSTER_TEST(arguments, first_mismatching_seed == UINT64_MAX);
     BUSTER_TEST(arguments, total.mismatches == 0);
@@ -937,7 +938,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_scales(UnitTestArguments* 
                           factor, small.diagnostics, large.diagnostics, small.type_count, large.type_count, s.solves, l.solves, s.pass_solves,
                           l.pass_solves, s.pass_state_types, l.pass_state_types, s.agenda_types, l.agenda_types, item);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 

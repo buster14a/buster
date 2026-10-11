@@ -11,6 +11,7 @@
 #include <buster/lib/file.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_expect_preprocessed(UnitTestArguments* arguments, Arena* arena,
                                                                            CPreprocessResult actual, String8 expected_text)
@@ -161,7 +162,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_argument_storage_scaling_tests(UnitTe
             result.succeeded_test_count += compared.succeeded_test_count;
             scratch_peak[depth_index] = actual.detail->macro_expansion_peak_bytes;
             bytes[depth_index] = actual.detail->boundary.released_bytes + scratch_peak[depth_index];
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
         // Linear growth multiplies four-fold from 500 to 2000, quadratic
         // sixteen-fold; fixed costs only lower the linear ratio.
@@ -247,7 +248,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_argument_demand_tests(UnitTestArgumen
                 BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[token_index]),
                                    c_token_spelling(expected.spelling_base, expected.tokens[token_index]));
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 
@@ -270,7 +271,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_argument_demand_tests(UnitTestArgumen
             }
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
 
     // Any ordinary use still requires prescan, even beside # or ##. The
     // error belongs to the nested invocation, not to an earlier expansion.
@@ -293,7 +294,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_argument_demand_tests(UnitTestArgumen
                 BUSTER_STRING_TEST(arguments, actual.files[diagnostic.location.file], S8("needed.c"));
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -401,7 +402,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_rescan_boundary_tests(UnitTestArgumen
                 BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[index]),
                                    c_token_spelling(expected.spelling_base, expected.tokens[index]));
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
         String8 reference_names[] = {S8("clang"), S8("gcc")};
@@ -451,7 +452,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_rescan_boundary_tests(UnitTestArgumen
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
 #endif
     }
@@ -579,11 +580,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_trigraph_preprocess_tests(UnitTestArguments
                 {
                     c_preprocess_release(&actual);
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
-    scratch_end(files);
+    c_test_scratch_end(files);
     return result;
 }
 
@@ -628,10 +629,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_dynamic_builtin_macro_tests(UnitTestArgumen
             {
                 c_preprocess_release(&actual);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
-    scratch_end(files);
+    c_test_scratch_end(files);
     return result;
 }
 
@@ -687,7 +688,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_skipped_group_text_tests(UnitTestArguments*
                                              c_token_spelling(expected.spelling_base, expected.tokens[token_index])),
                                 diagnostic);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 
@@ -703,7 +704,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_skipped_group_text_tests(UnitTestArguments*
         BUSTER_STRING_TEST(arguments, c_token_spelling(stringized.spelling_base, stringized.tokens[0]), S8("\"`\""));
         BUSTER_TEST(arguments, stringized.tokens[1].kind == C_TOKEN_END_OF_FILE);
     }
-    scratch_end(stringized_temporary);
+    c_test_scratch_end(stringized_temporary);
 
     TemporalArena unused_argument_temporary = scratch_begin(&arguments->arena, 1);
     CPreprocessResult unused_argument = c_preprocess(unused_argument_temporary.arena,
@@ -715,7 +716,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_skipped_group_text_tests(UnitTestArguments*
     {
         BUSTER_TEST(arguments, unused_argument.tokens[0].kind == C_TOKEN_END_OF_FILE);
     }
-    scratch_end(unused_argument_temporary);
+    c_test_scratch_end(unused_argument_temporary);
 
     struct
     {
@@ -753,7 +754,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_skipped_group_text_tests(UnitTestArguments*
             }
         }
         BUSTER_TEST_RAW(arguments, found_expected_kind, diagnostic_context);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -868,7 +869,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_punctuator_separator_tests(UnitTestArgument
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
     // Both sources are invalid with their two separate tokens. Losing their
@@ -909,7 +910,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_punctuator_separator_tests(UnitTestArgument
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
@@ -954,7 +955,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_punctuator_separator_tests(UnitTestArgument
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #endif
     return result;
@@ -991,7 +992,7 @@ BUSTER_GLOBAL_LOCAL u64 c_file_table_scaling_work(UnitTestArguments* arguments, 
         work = c_preprocess_detail(preprocess)->file_table_compare_count;
         *files = preprocess.file_count;
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return work;
 }
 
@@ -1040,7 +1041,7 @@ BUSTER_GLOBAL_LOCAL u64 c_macro_parameter_scaling_work(UnitTestArguments* argume
     CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("macro-parameter-scaling.c")});
     *errors = preprocess.error_count;
     u64 work = c_preprocess_detail(preprocess)->macro_parameter_compare_count;
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return work;
 }
 
@@ -1111,7 +1112,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                                                                            trailing_conditionals[case_index].expected);
         result.test_count += compared.test_count;
         result.succeeded_test_count += compared.succeeded_test_count;
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     String8 no_warning_conditionals[] = {
         S8("#if 1\n#endif // FOO\n"),
@@ -1126,7 +1127,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, actual.error_count == 0);
         BUSTER_TEST(arguments, actual.warning_count == 0);
         BUSTER_TEST(arguments, actual.diagnostic_count == 0);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     TemporalArena include_files = scratch_begin(&arguments->arena, 1);
     String8 include_root = buster_test_temporary_path(include_files.arena, S8("trailing-directive-include"), S8(".dir"));
@@ -1159,10 +1160,10 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                                                                                S8("int header_token;"));
             result.test_count += compared.test_count;
             result.succeeded_test_count += compared.succeeded_test_count;
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
-    scratch_end(include_files);
+    c_test_scratch_end(include_files);
     struct
     {
         String8 source;
@@ -1197,7 +1198,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
             result.test_count += compared.test_count;
             result.succeeded_test_count += compared.succeeded_test_count;
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     String8 valid_macro_definitions = S8("#define s(x) #x\n"
                                          "#define v(...) #__VA_ARGS__\n"
@@ -1207,13 +1208,13 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
     CPreprocessResult valid_macros = c_preprocess(valid_macro_temporary.arena, valid_macro_definitions,
                                                   (CPreprocessOptions){.source_path = S8("valid-macro-definitions.c")});
     BUSTER_TEST(arguments, valid_macros.diagnostic_count == 0);
-    scratch_end(valid_macro_temporary);
+    c_test_scratch_end(valid_macro_temporary);
     TemporalArena assembly_macro_temporary = scratch_begin(&arguments->arena, 1);
     CPreprocessResult assembly_macro = c_preprocess(assembly_macro_temporary.arena, S8("#define g(x) # y\n"),
                                                     (CPreprocessOptions){.source_path = S8("assembly-macro-definition.c"),
                                                                          .assembly_comment_lines = true});
     BUSTER_TEST(arguments, assembly_macro.diagnostic_count == 0);
-    scratch_end(assembly_macro_temporary);
+    c_test_scratch_end(assembly_macro_temporary);
     String8 source = S8("#define ENABLED 1\n"
                         "#define MISSING_VALUE 0\n"
                         "#define ID(x) x\n"
@@ -1273,7 +1274,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                 BUSTER_STRING_TEST(arguments, preprocess.files[location.file], S8("macro-conditional-arguments.c"));
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // Preprocessing arithmetic widens each literal to intmax_t or uintmax_t
     // using its target type. Keep wchar choices explicit so this catches a
@@ -1319,7 +1320,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
             CPreprocessResult wide = c_preprocess(temporary.arena, wide_sources[targets[target_index].wide_unsigned], options);
             BUSTER_TEST(arguments, common.diagnostic_count == 0);
             BUSTER_TEST(arguments, wide.diagnostic_count == 0);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     TemporalArena utf8_temporary = scratch_begin(&arguments->arena, 1);
@@ -1330,7 +1331,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                                                                .data_layout = target_data_layout(targets[0].target),
                                                                .dialect = C_PREPROCESS_DIALECT_C23});
     BUSTER_TEST(arguments, utf8.diagnostic_count == 0);
-    scratch_end(utf8_temporary);
+    c_test_scratch_end(utf8_temporary);
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
     String8 reference_names[] = {S8("clang"), S8("gcc")};
     for (u32 reference_index = 0; reference_index < BUSTER_ARRAY_LENGTH(reference_names); reference_index += 1)
@@ -1361,7 +1362,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                 result.succeeded_test_count += reference_result.succeeded_test_count;
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #endif
 
@@ -1416,7 +1417,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #if !BUSTER_ANDROID && !BUSTER_IOS
     String8 runtime_source = S8("#define F(x) x\n#define ALIAS F\n#define ID(x) x\n"
@@ -1501,7 +1502,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #endif
     return result;

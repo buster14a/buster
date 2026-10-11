@@ -91,7 +91,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_publication_span_tests(UnitTestArguments* 
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -130,7 +130,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, function->operand_total_rows != function->instruction_count);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     for (u32 mask = 0; mask <= IR_FAST_ALL; mask += 1)
     {
@@ -193,7 +193,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, repeated.error == IR_VALIDATION_NONE);
             BUSTER_TEST(arguments, memcmp(&snapshot, &module->fast, sizeof(snapshot)) == 0);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // Build a nontrivial join first, then make every edge carry the same
     // dominating argument. This specifically exercises existing parameters;
@@ -268,7 +268,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
         probe.volatile_access = true;
         BUSTER_TEST(arguments, !ir_instruction_is_pure(program, function, &probe));
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     // Optional transforms must decline a producer-certified legacy shape that
     // the stricter canonical validator cannot prove. Such source is still
     // accepted by its existing consumer, so FAST must not create a new error.
@@ -310,7 +310,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
                              - before.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_OUTPUT_VALIDATIONS] == 0);
 #endif
     }
-    scratch_end(invalid_temporary);
+    c_test_scratch_end(invalid_temporary);
     // A certified module that promotion actually changed is scanned once at
     // the promotion-output boundary in test builds. FAST's input guard asks
     // the same predicate of the same unmutated rows, so it must start from
@@ -351,7 +351,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
 #undef IR_PREPARATION_EXPECT
 #endif
         }
-        scratch_end(reuse_temporary);
+        c_test_scratch_end(reuse_temporary);
     }
     // A safely backed budget-control input: no instruction/block traversal and
     // no value storage. The guard must decline before allocating or touching
