@@ -12,6 +12,15 @@
 static unsigned test_assertions, test_failures;
 #define CHECK(c) do { ++test_assertions; if (!(c)) { ++test_failures; fprintf(stderr, "TEST failure %d: %s\n", __LINE__, #c); } } while (0)
 
+static void test_set_environment(char const* name, char const* value)
+{
+#ifdef _WIN32
+    CHECK(_putenv_s(name, value ? value : "") == 0);
+#else
+    CHECK(value ? setenv(name, value, 1) == 0 : unsetenv(name) == 0);
+#endif
+}
+
 /* A failed child check names how the child ended and keeps its log. Cases
  * share one log path, so the failing log is copied to LOG.line-N before the
  * next case truncates it; the harness artifact uploads the test root. */
@@ -829,6 +838,47 @@ static void test_legacy_schema(char const* executable, char const* root)
         size_t count = fread(text, 1, sizeof(text) - 1, file);
         CHECK(count < sizeof(text) - 1 && !ferror(file) && strstr(text, "unsupported result schema 1 (expected 2)") != NULL);
         CHECK(fclose(file) == 0);
+    }
+}
+
+static void test_github_annotations(char const* executable, char const* root)
+{
+    char directory[TP_PATH_CAP], annotated_log[TP_PATH_CAP], quiet_log[TP_PATH_CAP];
+    int paths_ok = tp_path(directory, root, "github-annotations") && tp_mkdirs(directory) &&
+                   test_bundle(directory, 1) && tp_path(annotated_log, directory, "annotated.log") &&
+                   tp_path(quiet_log, directory, "quiet.log");
+    CHECK(paths_ok);
+    if (paths_ok)
+    {
+        char* args[] = {(char*)executable, "child", "compare", directory, NULL};
+        test_set_environment("GITHUB_ACTIONS", "true");
+        TpProcess annotated = tp_process(args, NULL, annotated_log, 3, -1, 0);
+        test_set_environment("GITHUB_ACTIONS", NULL);
+        CHECK(annotated.exit_code == 1 && !annotated.launch_error && !annotated.timed_out);
+        FILE* file = fopen(annotated_log, "rb");
+        char text[4096] = {0};
+        CHECK(file != NULL);
+        if (file)
+        {
+            size_t count = fread(text, 1, sizeof(text) - 1, file);
+            CHECK(count < sizeof(text) - 1 && !ferror(file));
+            CHECK(fclose(file) == 0);
+            CHECK(strstr(text, "THROUGHPUT_RESULT confirmed_regressions=1") != NULL &&
+                  strstr(text, "::error title=Compiler throughput regression::1 cases") != NULL);
+        }
+        TpProcess quiet = tp_process(args, NULL, quiet_log, 3, -1, 0);
+        CHECK(quiet.exit_code == 1 && !quiet.launch_error && !quiet.timed_out);
+        file = fopen(quiet_log, "rb");
+        memset(text, 0, sizeof(text));
+        CHECK(file != NULL);
+        if (file)
+        {
+            size_t count = fread(text, 1, sizeof(text) - 1, file);
+            CHECK(count < sizeof(text) - 1 && !ferror(file));
+            CHECK(fclose(file) == 0);
+            CHECK(strstr(text, "THROUGHPUT_RESULT confirmed_regressions=1") != NULL &&
+                  strstr(text, "::error") == NULL && strstr(text, "::warning") == NULL);
+        }
     }
 }
 
@@ -2084,6 +2134,8 @@ int main(int argc, char** argv)
     else if (argc >= 2 && !strcmp(argv[1], "child")) result = test_child(argc, argv);
     else if (argc == 2)
     {
+        // Expected synthetic regressions must not publish job annotations; children inherit the cleared environment.
+        test_set_environment("GITHUB_ACTIONS", NULL);
         char root[TP_PATH_CAP], executable[TP_PATH_CAP];
         CHECK(tp_absolute(argv[1], root) && tp_mkdirs(root) && tp_absolute(argv[0], executable));
         CHECK(tp_self_test() == 0);
@@ -2121,6 +2173,7 @@ int main(int argc, char** argv)
         test_diagnostic_probes(root);
         test_probe_identity(root);
         test_legacy_schema(executable, root);
+        test_github_annotations(executable, root);
         test_compile_options();
 #ifdef __linux__
         test_service_output_share(root);
