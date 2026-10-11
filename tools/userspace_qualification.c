@@ -465,7 +465,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
                 String8 cp_args[] = {S8("cp"), S8("-a"), S8("/usr/include/linux"), S8("/usr/include/asm-generic"),
                                     S8("/usr/include/x86_64-linux-gnu/asm"), uapi};
                 ClangSuiteCommand copied = userspace_command(arena, S8("."), (SliceString8)BUSTER_ARRAY_TO_SLICE(cp_args), 60);
-                valid = copied.result == PROCESS_RESULT_SUCCESS;
+                valid = copied.result == PROCESS_RESULT_SUCCESS && userspace_headers(arena, directory);
             }
             String8 reference_config = {0};
             bool stages[2] = {0};

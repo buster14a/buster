@@ -161,3 +161,78 @@ BUSTER_GLOBAL_LOCAL bool userspace_pack(Arena* arena, String8 directory, String8
     }
     return valid;
 }
+
+BUSTER_GLOBAL_LOCAL bool userspace_headers(Arena* arena, String8 directory)
+{
+    enum { MAX_DIRECTORIES = 4096 };
+    String8* pending = arena_allocate(arena, String8, MAX_DIRECTORIES);
+    u64 count = 1;
+    u64 cursor = 0;
+    u64 headers = 0;
+    pending[0] = S8("uapi");
+    String8List inventory = {0};
+    bool valid = true;
+    while (valid && cursor < count)
+    {
+        String8 relative = pending[cursor++];
+        MuslDirectoryEntry* entries = 0;
+        u64 entry_count = 0;
+        valid = musl_list_directory(arena, path_join(arena, directory, relative), &entries, &entry_count);
+        for (u64 i = 0; valid && i < entry_count; i += 1)
+        {
+            String8 path = path_join(arena, relative, entries[i].name);
+            if (entries[i].is_directory)
+            {
+                valid = count < MAX_DIRECTORIES;
+                if (valid)
+                {
+                    pending[count++] = path;
+                }
+            }
+            else
+            {
+                ByteSlice bytes = file_read(arena, path_join(arena, directory, path), (FileReadOptions){0});
+                valid = bytes.pointer && bytes.length;
+                if (valid)
+                {
+                    String8 text = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
+                    String8 license = S8("unverified: inspect retained header and package copyright");
+                    u64 start = string_first_sequence(text, S8("SPDX-License-Identifier:"));
+                    if (start != BUSTER_STRING_NO_MATCH)
+                    {
+                        u64 end = start;
+                        while (end < text.length && text.pointer[end] != '\n')
+                        {
+                            end += 1;
+                        }
+                        license = string_slice(text, start, end);
+                    }
+                    string8_list_push(arena, &inventory, string_format(arena, S8("path={S8}\nsha256={S8}\nlicense_evidence={S8}\n\n"),
+                                                                     path, stage_object_sha256_bytes(arena, bytes.pointer, bytes.length), license));
+                    headers += 1;
+                }
+            }
+        }
+    }
+    valid = clang_suite_write(arena, path_join(arena, directory, S8("uapi-inventory.txt")),
+                              string_join_arena(arena, string8_list_to_slice(arena, inventory), false)) && valid;
+    String8 kernel_arguments[] = {S8("uname"), S8("-srmo")};
+    ClangSuiteCommand kernel = userspace_command(arena, S8("."), (SliceString8)BUSTER_ARRAY_TO_SLICE(kernel_arguments), 60);
+    valid = clang_suite_write(arena, path_join(arena, directory, S8("kernel.txt")), kernel.output) &&
+            kernel.result == PROCESS_RESULT_SUCCESS && valid;
+    String8 package_arguments[] = {S8("dpkg-query"), S8("-W"), S8("linux-libc-dev")};
+    ClangSuiteCommand package = userspace_command(arena, S8("."), (SliceString8)BUSTER_ARRAY_TO_SLICE(package_arguments), 60);
+    String8 package_directory = path_join(arena, directory, S8("uapi-package"));
+    make_directory_recursive(arena, package_directory);
+    valid = userspace_save_command(arena, package_directory, package) && valid;
+    String8 copyright = clang_suite_read(arena, S8("/usr/share/doc/linux-libc-dev/copyright"));
+    if (copyright.length)
+    {
+        valid = clang_suite_write(arena, path_join(arena, package_directory, S8("copyright.txt")), copyright) && valid;
+    }
+    // Non-Debian hosts retain the failed package query as unverified metadata.
+    string_print(S8("USERSPACE_HEADERS files={u64} kernel={S8} package_status={S8} status={S8}\n"),
+                 headers, musl_first_line(kernel.output),
+                 package.result == PROCESS_RESULT_SUCCESS ? S8("recorded") : S8("unverified"), valid ? S8("recorded") : S8("fail"));
+    return valid;
+}

@@ -71,7 +71,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/userspace-build" source_size --base abb1c5afbcf55e120d83283ffbad402fc75bd80a 2>&1 | tee "$RUNNER_TEMP/userspace-evidence/source-size.txt"
+          "$RUNNER_TEMP/userspace-build" source_size --base da0e8ec5cc3af96139810f5fab4e2cd0933af34a 2>&1 | tee "$RUNNER_TEMP/userspace-evidence/source-size.txt"
       - name: Generate reviewable source-size acknowledgement
         if: ${{ !cancelled() && steps.bootstrap.outcome == 'success' }}
         shell: bash

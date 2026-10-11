@@ -26,7 +26,7 @@ through the run. A harness being present is not an observed qualification pass.
 | BusyBox 1.36.1 | `1a64f6a20aaf6ea4dbba68bbfa8cc1ab7e5c57c4` (`1_36_1`) | [LICENSE](https://github.com/mirror/busybox/blob/1a64f6a20aaf6ea4dbba68bbfa8cc1ab7e5c57c4/LICENSE): GPL-2.0-only for the combined distribution; component grants and notices remain separate. |
 | musl 1.2.6 | `9fa28ece75d8a2191de7c5bb53bed224c5947417` | [COPYRIGHT](https://github.com/ifduyue/musl/blob/9fa28ece75d8a2191de7c5bb53bed224c5947417/COPYRIGHT): MIT overall, with enumerated BSD and permissive third-party notices; preserve source-file notices. |
 | libc-test | `68edb8bd73dab8147ee54c8bec638f4d2b3cff37` | Existing exact pin from the libc-test guide. Full fixture/component license inventory remains to be retained by the qualification campaign; no blanket license claim. |
-| Linux UAPI | The executing image's `/usr/include/linux`, `asm-generic`, x86-64 `asm` | External header prerequisite, copied only into fresh results. Image/package and per-header identity/license census remains incomplete; do not claim a reproducible kernel-header pin. |
+| Linux UAPI | The executing image's `/usr/include/linux`, `asm-generic`, x86-64 `asm` | External header prerequisite, copied only into fresh results. The native inventory retains every copied header's SHA-256 and SPDX notice when present, plus `uname`, `dpkg-query` package identity and installed package copyright. Missing notices/metadata remain explicitly unverified; do not equate the executing image with an immutable source pin. |
 
 BusyBox's [ash](https://github.com/mirror/busybox/blob/1a64f6a20aaf6ea4dbba68bbfa8cc1ab7e5c57c4/shell/ash.c)
 retains its Berkeley copyright notice beside GPLv2-or-later component wording.
