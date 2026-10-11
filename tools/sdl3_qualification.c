@@ -150,6 +150,29 @@ static int sdl_run(const char* role, char* const args[], const char* seconds)
         status = 125;
     }
     printf("SDL_STAGE %s status=%d log=%s.log\n", role, status, prefix);
+    if (strstr(role, "configure") || strstr(role, "build") || strstr(role, "tests") || strstr(role, "fixture"))
+    {
+        n = snprintf(path, sizeof(path), "%s.log", prefix);
+        if (n >= 0 && n < (int)sizeof(path))
+        {
+            FILE* log = fopen(path, "rb");
+            if (log)
+            {
+                char excerpt[8193];
+                size_t bytes = fread(excerpt, 1, sizeof(excerpt) - 1, log);
+                excerpt[bytes] = 0;
+                printf("SDL_LOG_BEGIN %s\n%s\n", role, excerpt);
+                if (!feof(log) && fseek(log, -8192, SEEK_END) == 0)
+                {
+                    bytes = fread(excerpt, 1, sizeof(excerpt) - 1, log);
+                    excerpt[bytes] = 0;
+                    printf("SDL_LOG_TAIL %s\n%s\n", role, excerpt);
+                }
+                fclose(log);
+                printf("SDL_LOG_END %s\n", role);
+            }
+        }
+    }
     return status;
 }
 
@@ -263,6 +286,39 @@ static int sdl_tests(const char* output, const char* role)
     return result;
 }
 
+static int sdl_fixture_compile(const char* source, const char* compiler, bool candidate, char object[BUSTER_SDL_PATH])
+{
+    char include[BUSTER_SDL_PATH + 8];
+    int n = snprintf(include, sizeof(include), "-I%s/include", source);
+    sdl_path(object, sdl_out, candidate ? "fixture-buster.o" : "fixture-clang.o");
+    char* trusted[] = {(char*)compiler, "-Wall", "-Wextra", "-Werror", "-g", "-O0",
+        "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", include,
+        "-c", "tests/compat/sdl3_fixture.c", "-o", object, NULL};
+    char* buster[] = {(char*)compiler, "--cc", "-g", "-O0",
+        "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", include,
+        "-c", "tests/compat/sdl3_fixture.c", "-o", object, NULL};
+    int result = n >= 0 && n < (int)sizeof(include) ?
+        sdl_run(candidate ? "fixture-buster-compile" : "fixture-clang-compile", candidate ? buster : trusted, "60") : 125;
+    return result;
+}
+
+static int sdl_fixture_run(const char* object, const char* library, const char* role)
+{
+    char library_arg[BUSTER_SDL_PATH + 8], rpath_arg[BUSTER_SDL_PATH + 32], binary[BUSTER_SDL_PATH];
+    int a = snprintf(library_arg, sizeof(library_arg), "-L%s", library);
+    int b = snprintf(rpath_arg, sizeof(rpath_arg), "-Wl,-rpath,%s", library);
+    sdl_path(binary, sdl_out, role);
+    char* link[] = {"clang", (char*)object, library_arg, rpath_arg, "-lSDL3", "-lX11", "-lXtst", "-lpulse-simple", "-lpulse", "-lm", "-o", binary, NULL};
+    bool ok = a >= 0 && a < (int)sizeof(library_arg) && b >= 0 && b < (int)sizeof(rpath_arg);
+    int result = ok ? sdl_run(role, link, "30") : 125;
+    if (result == 0)
+    {
+        char* run[] = {binary, NULL};
+        result = sdl_run(role, run, "60");
+    }
+    return result;
+}
+
 int main(int argc, char** argv)
 {
     int result = 2;
@@ -272,7 +328,8 @@ int main(int argc, char** argv)
     }
     else if (argc == 4)
     {
-        char source[BUSTER_SDL_PATH], self[BUSTER_SDL_PATH], output[BUSTER_SDL_PATH];
+        char source[BUSTER_SDL_PATH], self[BUSTER_SDL_PATH];
+        static char output[BUSTER_SDL_PATH];
         bool checking = !strcmp(argv[1], "--check");
         const char* input = checking ? argv[2] : argv[1];
         bool ok = realpath(input, source) && realpath(argv[0], self) && mkdir(argv[3], 0700) == 0 && realpath(argv[3], output);
@@ -307,9 +364,20 @@ int main(int argc, char** argv)
             int reference_config = ok ? sdl_configure(source, reference, "clang", false) : 125;
             int reference_build = reference_config == 0 ? sdl_build(reference, "reference-build") : 125;
             int reference_tests = reference_build == 0 ? sdl_tests(reference, "reference-tests") : 125;
+            char trusted_object[BUSTER_SDL_PATH], buster_object[BUSTER_SDL_PATH];
+            int trusted_client = ok ? sdl_fixture_compile(source, "clang", false, trusted_object) : 125;
+            int buster_client = ok ? sdl_fixture_compile(source, self, true, buster_object) : 125;
+            int trusted_reference = reference_build == 0 && trusted_client == 0 ?
+                sdl_fixture_run(trusted_object, reference, "fixture-clang-reference") : 125;
+            int buster_reference = reference_build == 0 && buster_client == 0 ?
+                sdl_fixture_run(buster_object, reference, "fixture-buster-reference") : 125;
             int candidate_config = ok ? sdl_configure(source, candidate, self, true) : 125;
             int candidate_build = candidate_config == 0 ? sdl_build(candidate, "candidate-build") : 125;
             int candidate_tests = candidate_build == 0 ? sdl_tests(candidate, "candidate-tests") : 125;
+            int trusted_candidate = candidate_build == 0 && trusted_client == 0 ?
+                sdl_fixture_run(trusted_object, candidate, "fixture-clang-candidate") : 125;
+            int buster_candidate = candidate_build == 0 && buster_client == 0 ?
+                sdl_fixture_run(buster_object, candidate, "fixture-buster-candidate") : 125;
             bool pristine_after = ok && sdl_pristine(source);
             char path[BUSTER_SDL_PATH];
             sdl_path(path, output, "qualification.txt");
@@ -321,14 +389,17 @@ int main(int argc, char** argv)
                     "upstream=%s\nreference_configure=%d\nreference_build=%d\nreference_tests=%d\n"
                     "candidate_configure=%d\ncandidate_build=%d\ncandidate_tests=%d\n"
                     "pristine_after=%d\nnot_executed_status=125\n"
-                    "native_fixture=pending\ncross_abi=pending\n"
+                    "trusted_client_compile=%d\nbuster_client_compile=%d\n"
+                    "trusted_reference=%d\nbuster_reference=%d\ntrusted_candidate=%d\nbuster_candidate=%d\n"
                     "gpu=pending\naudible_device=pending\nperformance_9700x=pending\n",
                     BUSTER_SDL_PIN, reference_config, reference_build, reference_tests,
-                    candidate_config, candidate_build, candidate_tests, pristine_after);
+                    candidate_config, candidate_build, candidate_tests, pristine_after,
+                    trusted_client, buster_client, trusted_reference, buster_reference, trusted_candidate, buster_candidate);
                 saved = fclose(report) == 0 && n >= 0;
             }
             result = ok && saved && pristine_after && reference_config == 0 && reference_build == 0 &&
-                     reference_tests == 0 && candidate_config == 0 && candidate_build == 0 && candidate_tests == 0 ? 0 : 1;
+                     reference_tests == 0 && candidate_config == 0 && candidate_build == 0 && candidate_tests == 0 &&
+                     trusted_reference == 0 && buster_reference == 0 && trusted_candidate == 0 && buster_candidate == 0 ? 0 : 1;
         }
         else
         {
