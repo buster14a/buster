@@ -6,7 +6,13 @@
 // the program arena is touched. c_ir_constant_initializer_bytes owns the
 // checked fixed context array while its dynamic work remains in task scratch.
 // c_lower_to_ir_run owns the private, checked CIrQueryMachine buffer arena
-// and releases it after every core result. c_ir_scratch_reservation_size and
+// and releases it after every core result; it maps that arena whenever the
+// unit-lifetime query stack would leave function lowering less than half of
+// the thread scratch. Per-initializer scratch is sized by the work and
+// released by its user: c_ir_emit_zero_value grows its task stack on demand,
+// c_ir_zero_storage_compatible rewinds its type marks, and the nested
+// compound-literal cursors follow c_ir_initializer_nesting_depth, never the
+// unit's type count. c_ir_scratch_reservation_size and
 // c_ir_function_scratch_tail_reservation size large lowering workspaces before
 // their first allocation; c_ir_ssa_grow_slots, c_ir_ssa_parameter and the
 // c_ir_ssa_finish_cfg / c_ir_ssa_finish_reserve_publish steps of c_ir_ssa_finish
@@ -31278,6 +31284,11 @@ BUSTER_C_INTERNAL bool c_ir_zero_storage_compatible(CIntegerIrBuilder* builder, 
                       (root_type->kind == IR_TYPE_ARRAY || root_type->kind == IR_TYPE_STRUCT || root_type->kind == IR_TYPE_UNION);
     if (compatible)
     {
+        // The walk visits each reachable type once; its marks are indexed by
+        // type id. Release them on return, as each nested initializer asks
+        // this per subobject and a large unit has hundreds of thousands of
+        // types.
+        TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
         u32 capacity = builder->program->types.count;
         IrTypeId* pending = arena_allocate(builder->temporary_arena, IrTypeId, capacity);
         u8* seen = arena_allocate(builder->temporary_arena, u8, capacity);
@@ -31308,6 +31319,7 @@ BUSTER_C_INTERNAL bool c_ir_zero_storage_compatible(CIntegerIrBuilder* builder, 
                 }
             }
         }
+        scratch_end(temporary);
     }
     return compatible;
 }
@@ -31354,6 +31366,21 @@ BUSTER_C_INTERNAL bool c_ir_emit_zero_storage(CIntegerIrBuilder* builder, IrValu
     return valid;
 }
 
+BUSTER_C_INTERNAL bool c_ir_initializer_nesting_depth(CIntegerIrBuilder* builder, Arena* arena, IrTypeId root_type, u64* depth_out);
+
+// The first task stack holds this many rows; it doubles from there.
+#define C_IR_ZERO_TASK_INITIAL_CAPACITY 64u
+
+// Depth-first expansion of an aggregate's zero value. The task stack holds,
+// for each level of the current path, the siblings still to visit plus one
+// completion row, so it grows with the widest path through the type and not
+// with its byte size: zeroing one 40-byte record of four members, as every
+// element of a local table does, needs about 20 rows, where sizing it from
+// `layout.size * 8 + 64` asked for 384 per element and kept them. It grows
+// by doubling on demand, checked against the scratch reservation first, and
+// the whole stack is released on return: nothing it holds outlives the call
+// (outputs and operand arrays live in builder->arena, and the emitters it
+// calls bracket their own temporary-arena use).
 BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrTypeId root_type, CToken token)
 {
     typedef enum CIrZeroTaskKind
@@ -31371,126 +31398,161 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrT
         u32 operand_count;
         CIrZeroTaskKind kind;
     };
+    IrValueId result = IR_VALUE_ID_INVALID;
     IrType* root = ir_type_from_id(&builder->program->types, root_type);
     if (!root || !root->layout.resolved || root->layout.size > (UINT32_MAX - 64) / 8)
     {
         builder->failure_message = !root                    ? S8("cannot zero-initialize an unresolved IR type")
                                    : !root->layout.resolved ? S8("cannot zero-initialize an aggregate with unresolved layout")
                                                             : S8("aggregate is too large to zero-initialize");
-        return IR_VALUE_ID_INVALID;
     }
-    u32 capacity = (u32)(root->layout.size * 8 + 64);
-    CIrZeroTask* tasks = arena_allocate(builder->temporary_arena, CIrZeroTask, capacity);
-    IrValueId result = IR_VALUE_ID_INVALID;
-    u32 task_count = 1;
-    tasks[0] = (CIrZeroTask){
-        .output = &result,
-        .type = root_type,
-    };
-    while (task_count)
+    else
     {
-        CIrZeroTask task = tasks[--task_count];
-        IrType* type = ir_type_from_id(&builder->program->types, task.type);
-        if (!type)
+        TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
+        u32 capacity = C_IR_ZERO_TASK_INITIAL_CAPACITY;
+        CIrZeroTask* tasks = arena_allocate(builder->temporary_arena, CIrZeroTask, capacity);
+        u32 task_count = 1;
+        bool failed = false;
+        tasks[0] = (CIrZeroTask){
+            .output = &result,
+            .type = root_type,
+        };
+        while (task_count && !failed)
         {
-            builder->failure_message = S8("cannot zero-initialize an unresolved type");
-            return IR_VALUE_ID_INVALID;
-        }
-        if (task.kind == C_IR_ZERO_TASK_COMPLETE)
-        {
-            if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && task.operand_count > UINT16_MAX)
+            CIrZeroTask task = tasks[--task_count];
+            IrType* type = ir_type_from_id(&builder->program->types, task.type);
+            bool aggregate = type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT ||
+                                      type->kind == IR_TYPE_UNION);
+            if (!type)
             {
-                builder->failure_message = string_format(builder->arena, S8("aggregate has too many fields to lower ({u32})"), task.operand_count);
-                return IR_VALUE_ID_INVALID;
+                builder->failure_message = S8("cannot zero-initialize an unresolved type");
+                failed = true;
             }
-            IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
-            IrValueId aggregate = c_ir_emit_initializer_capture(builder, task.type, task.operands, task.fields, task.operand_count, instruction_source);
-            if (aggregate.value == IR_ID_UNDERLYING_INVALID)
+            else if (task.kind == C_IR_ZERO_TASK_COMPLETE)
             {
-                return IR_VALUE_ID_INVALID;
-            }
-            *task.output = aggregate;
-            continue;
-        }
-        bool aggregate = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION;
-        if (!aggregate)
-        {
-            IrValueId zero = IR_VALUE_ID_INVALID;
-            if (type->kind == IR_TYPE_FLOAT)
-            {
-                if (type->bit_width == 80)
+                if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && task.operand_count > UINT16_MAX)
                 {
-                    // The f80 constant carries the semantic ten bytes as two
-                    // integer immediates; do not route synthetic zero through
-                    // a host f64 literal or a generic floating conversion.
-                    zero = c_ir_emit_f80_constant_bits(builder, c_ir_token_source_range(builder, token), S8("0.0L"), 0, 0);
+                    builder->failure_message = string_format(builder->arena, S8("aggregate has too many fields to lower ({u32})"), task.operand_count);
+                    failed = true;
                 }
                 else
                 {
-                    CToken zero_token = {
-                        .offset = C_SPELLING_FLOAT_ZERO,
-                        .length = type->bit_width == 32 ? 4u : 3u,
-                        .kind = C_TOKEN_PREPROCESSING_NUMBER,
-                    };
-                    zero = c_ir_emit_float(builder, zero_token);
-                    zero = c_ir_emit_cast(builder, zero, task.type, c_ir_token_source_range(builder, token));
+                    IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
+                    IrValueId captured = c_ir_emit_initializer_capture(builder, task.type, task.operands, task.fields, task.operand_count, instruction_source);
+                    failed = captured.value == IR_ID_UNDERLYING_INVALID;
+                    *task.output = captured;
                 }
             }
-            else if (type->kind == IR_TYPE_INTEGER)
+            else if (!aggregate)
             {
-                zero = c_ir_emit_integer_value_typed(builder, 0, false, token, task.type);
+                IrValueId zero = IR_VALUE_ID_INVALID;
+                if (type->kind == IR_TYPE_FLOAT)
+                {
+                    if (type->bit_width == 80)
+                    {
+                        // The f80 constant carries the semantic ten bytes as two
+                        // integer immediates; do not route synthetic zero through
+                        // a host f64 literal or a generic floating conversion.
+                        zero = c_ir_emit_f80_constant_bits(builder, c_ir_token_source_range(builder, token), S8("0.0L"), 0, 0);
+                    }
+                    else
+                    {
+                        CToken zero_token = {
+                            .offset = C_SPELLING_FLOAT_ZERO,
+                            .length = type->bit_width == 32 ? 4u : 3u,
+                            .kind = C_TOKEN_PREPROCESSING_NUMBER,
+                        };
+                        zero = c_ir_emit_float(builder, zero_token);
+                        zero = c_ir_emit_cast(builder, zero, task.type, c_ir_token_source_range(builder, token));
+                    }
+                }
+                else if (type->kind == IR_TYPE_INTEGER)
+                {
+                    zero = c_ir_emit_integer_value_typed(builder, 0, false, token, task.type);
+                }
+                else if (type->kind == IR_TYPE_POINTER)
+                {
+                    zero = c_ir_emit_integer_value(builder, 0, false, token);
+                    zero = c_ir_emit_cast(builder, zero, task.type, c_ir_token_source_range(builder, token));
+                }
+                else if (type->kind == IR_TYPE_BOOLEAN)
+                {
+                    zero = c_ir_emit_integer_value(builder, 0, false, token);
+                    zero = c_ir_truth_value(builder, zero, c_ir_token_source_range(builder, token));
+                }
+                if (zero.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    builder->failure_message =
+                        string_format(builder->arena, S8("cannot zero-initialize type '{S8}'"), c_ir_diagnostic_type_name(builder->arena, type));
+                    failed = true;
+                }
+                *task.output = zero;
             }
-            else if (type->kind == IR_TYPE_POINTER)
+            else
             {
-                zero = c_ir_emit_integer_value(builder, 0, false, token);
-                zero = c_ir_emit_cast(builder, zero, task.type, c_ir_token_source_range(builder, token));
+                u64 child_count_u64 = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_count
+                                      : type->kind == IR_TYPE_UNION                                 ? (type->field_count ? 1 : 0)
+                                                                                                    : type->field_count;
+                // The completion row and every child go on the stack at once.
+                u64 needed = (u64)task_count + 1 + child_count_u64;
+                if (needed > capacity)
+                {
+                    u64 grown = BUSTER_MAX((u64)capacity * 2, needed);
+                    u64 position = builder->temporary_arena->position;
+                    if (grown > UINT32_MAX ||
+                        !c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(CIrZeroTask), grown,
+                                                       BUSTER_ALIGN_OF(CIrZeroTask)))
+                    {
+                        builder->failure_message = string_format(
+                            builder->arena, S8("aggregate zero-initializer exceeds the lowering scratch reservation ({u64} children)"), child_count_u64);
+                        failed = true;
+                    }
+                    else
+                    {
+                        CIrZeroTask* grown_tasks = arena_allocate(builder->temporary_arena, CIrZeroTask, grown);
+                        memcpy(grown_tasks, tasks, (u64)task_count * sizeof(*tasks));
+                        tasks = grown_tasks;
+                        capacity = (u32)grown;
+                    }
+                }
+                if (!failed)
+                {
+                    u32 child_count = (u32)child_count_u64;
+                    IrValueId* operands = arena_allocate(builder->arena, IrValueId, child_count);
+                    u64* fields = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? 0 : arena_allocate(builder->arena, u64, child_count);
+                    tasks[task_count++] = (CIrZeroTask){
+                        .output = task.output,
+                        .operands = operands,
+                        .fields = fields,
+                        .type = task.type,
+                        .operand_count = child_count,
+                        .kind = C_IR_ZERO_TASK_COMPLETE,
+                    };
+                    for (u32 child_index = child_count; child_index; child_index -= 1)
+                    {
+                        u32 index = child_index - 1;
+                        IrTypeId child_type = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_type : type->fields[index].type;
+                        if (fields)
+                        {
+                            fields[index] = index;
+                        }
+                        tasks[task_count++] = (CIrZeroTask){
+                            .output = &operands[index],
+                            .type = child_type,
+                        };
+                    }
+                }
             }
-            else if (type->kind == IR_TYPE_BOOLEAN)
-            {
-                zero = c_ir_emit_integer_value(builder, 0, false, token);
-                zero = c_ir_truth_value(builder, zero, c_ir_token_source_range(builder, token));
-            }
-            if (zero.value == IR_ID_UNDERLYING_INVALID)
-            {
-                builder->failure_message =
-                    string_format(builder->arena, S8("cannot zero-initialize type '{S8}'"), c_ir_diagnostic_type_name(builder->arena, type));
-                return zero;
-            }
-            *task.output = zero;
-            continue;
         }
-        u64 child_count_u64 = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_count
-                              : type->kind == IR_TYPE_UNION                                 ? (type->field_count ? 1 : 0)
-                                                                                            : type->field_count;
-        if (child_count_u64 > UINT32_MAX || child_count_u64 > capacity - task_count - 1)
+        // Some test and constant-evaluation builders alias the temporary
+        // arena with the output arena; rewinding there would drop operands.
+        if (builder->temporary_arena != builder->arena)
         {
-            builder->failure_message =
-                string_format(builder->arena, S8("aggregate zero-initializer exceeds its task capacity ({u64} children)"), child_count_u64);
-            return IR_VALUE_ID_INVALID;
+            scratch_end(temporary);
         }
-        u32 child_count = (u32)child_count_u64;
-        IrValueId* operands = arena_allocate(builder->arena, IrValueId, child_count);
-        u64* fields = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? 0 : arena_allocate(builder->arena, u64, child_count);
-        tasks[task_count++] = (CIrZeroTask){
-            .output = task.output,
-            .operands = operands,
-            .fields = fields,
-            .type = task.type,
-            .operand_count = child_count,
-            .kind = C_IR_ZERO_TASK_COMPLETE,
-        };
-        for (u32 child_index = child_count; child_index; child_index -= 1)
+        if (failed)
         {
-            u32 index = child_index - 1;
-            IrTypeId child_type = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_type : type->fields[index].type;
-            if (fields)
-            {
-                fields[index] = index;
-            }
-            tasks[task_count++] = (CIrZeroTask){
-                .output = &operands[index],
-                .type = child_type,
-            };
+            result = IR_VALUE_ID_INVALID;
         }
     }
     return result;
@@ -31706,7 +31768,20 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
         }
         u32 capacity = root_close - root_open + 1;
         frame->as.nested_compound_literal.state->tasks = arena_allocate(builder->temporary_arena, CIrNestedInitializerTask, capacity);
-        u32 cursor_capacity = builder->program->types.count ? builder->program->types.count : 1;
+        // The cursors are one path of by-value containers below a brace
+        // group, including anonymous members a designator crosses, so the
+        // root type's nesting depth bounds them. Sizing them from the unit's
+        // type count instead cost every nested literal megabytes of scratch
+        // in a large unit, which the function only released at its end. The
+        // capacity checks at each push stay the guard.
+        u64 cursor_depth = 0;
+        if (!c_ir_initializer_nesting_depth(builder, builder->temporary_arena, root_type, &cursor_depth) || cursor_depth > UINT32_MAX - 2)
+        {
+            builder->failure_message = S8("initializer working storage exceeds the scratch reservation");
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        u32 cursor_capacity = (u32)cursor_depth + 2;
         frame->as.nested_compound_literal.state->cursors =
             arena_allocate(builder->temporary_arena, CIrNestedInitializerCursor, cursor_capacity);
         frame->as.nested_compound_literal.state->tasks[0] = (CIrNestedInitializerTask){
@@ -64544,10 +64619,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             fits = c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, 1, workspace, 1);
             u64 requested_size = 0;
             fits = fits && c_ir_scratch_reservation_size(position, temporary_arena->reserved_size, &requested_size);
-            // Ordinary queries continue to reuse thread scratch. Only a query
-            // stack larger than its available workspace needs another mapping.
+            // Ordinary queries continue to reuse thread scratch. A query
+            // stack that would leave function lowering less than half of
+            // that workspace gets its own mapping: the stack is sized from
+            // the unit's largest declaration and lives for the whole unit,
+            // so in a tests-included self-compile (556,579 frames, 253 MB)
+            // it left every later function body about 15 MB.
             u64 query_position = position - (fits ? workspace : 0);
-            if (fits && query_position > temporary_arena->reserved_size)
+            if (fits && query_position > temporary_arena->reserved_size - workspace / 2)
             {
                 owned_temporary_arena = c_frontend_arena_create((ArenaCreation){.reserved_size = requested_size, .flags = {.no_pool = true}},
                                                                C_FRONTEND_RESERVATION_LOWERING);

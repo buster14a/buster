@@ -1275,6 +1275,16 @@ syntax-only and assembly/prebuilt-only input routes retain their behavior.
 Mach-O and COFF keep their existing target models; Wasm/eBPF compatibility
 behavior is unchanged. LLVM-bitcode and direct backend model requests remain
 an audit residual of issue #1289.
+On x86-64 Android every executable link is a PIE, with or without `-pie`
+(`-no-pie` cannot select another image there): the kernel places bionic's
+executable at a load bias, so a fixed-address image marked `ET_DYN` would run
+its preinit entries, IFUNC runner and every data pointer unrelocated. The same
+writer names `/system/bin/linker64` and `libc.so`, and its entry stub does not
+register RDX as a loader finalizer, because bionic's `linker64` leaves RDX
+unspecified at the entry point. `-shared` stays refused for Android, and
+Android AArch64 still stages a fixed-address image. `android/runtime_order.sh`
+executes an x86-64 image on the CI emulator (see the Android CI notes in
+[testing.md](testing.md)).
 On any other target a link that asks for either image is refused as an
 unsupported option, while a compile-only invocation ignores the link option,
 as GCC does.
@@ -1287,8 +1297,8 @@ value are argument errors, and a GPU target ignores the option. The bit
 reaches `st_other` on ELF only; Mach-O and COFF objects do not record it.
 
 The default fixed-address dynamic executable
-(`link_native_executable_elf64_x86_64_dynamic`, which the AArch64 and Android
-dynamic writers also build on) is hardened the way GNU ld's default is
+(`link_native_executable_elf64_x86_64_dynamic`, which the AArch64 Linux and
+Android dynamic writers also build on) is hardened the way GNU ld's default is
 (#2720). It has three loads: R (headers, `.interp`, `.dynstr`/`.dynsym`/
 `.hash`/version tables, `.rela.plt`/`.rela.dyn`, `.rodata`, `.eh_frame_hdr`,
 `.eh_frame`), R+X (the entry stub, `.text`, `.plt`) and RW. The RW load starts
@@ -1674,6 +1684,18 @@ aborts with an arena validation failure from 230,000 (#3254). The mobile
 builds of the driver fixture use smaller counts to keep their deadlines. A reservation that cannot be carved
 is a positioned `initializer working storage exceeds the scratch reservation`
 or `initializer nesting exceeds its capacity` diagnostic and a failed result.
+
+Automatic aggregate initializers lower through the nested compound-literal
+machine, which zero-fills each brace-enclosed element before storing its
+members. Its scratch is per element and released with it: the zero-value task
+stack grows with the widest path through the type (`c_ir_emit_zero_value`),
+the cursor stack follows the type's nesting depth, and the unit-lifetime query
+stack gets its own mapping when it would leave lowering less than half of the
+thread scratch. `c_test_ir_local_table_zero_scratch` lowers a 20,000-entry
+local table that previously exhausted the scratch (#2527); generating machine
+code for a function that large still aborts in the fast register allocator
+(#3413). A task stack that cannot grow is the diagnostic
+`aggregate zero-initializer exceeds the lowering scratch reservation`.
 
 ## ELF TLS companion lookup
 

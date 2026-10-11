@@ -2136,5 +2136,68 @@ class CanonicalInlinePairTest(unittest.TestCase):
                           "--canonical-inline-pair", "--", "-O3"])
 
 
+
+class AstPilotPairTest(unittest.TestCase):
+    def test_fixed_cell_gives_only_candidate_the_pilot_flag_on_the_g0_command(self):
+        for cell, flag, writes in (("syntax-only", "-fsyntax-only", False), ("object", "-c", True)):
+            with tempfile.TemporaryDirectory() as temporary, self.subTest(cell=cell):
+                root = os.path.abspath(temporary)
+                ide = os.path.join(root, "ide")
+                open(ide, "wb").close()
+                arguments = type("Args", (), {"baseline": ide, "candidate": ide, "perf": "perf", "repo_root": root,
+                                             "sudo": False, "fresh_copy": True, "ast_pilot_pair": cell})()
+                labs = lab.compare_labs(arguments, root, 2, [])
+                self.assertEqual((labs["a"].extra, labs["b"].extra), ([], ["-fc-ast-pilot"]))
+                for key in ("a", "b"):
+                    self.assertEqual(labs[key].compile, lab.AST_PILOT_COMPILE + [flag])
+                    self.assertIn("-g0", labs[key].compile)
+                    self.assertNotIn("-lm", labs[key].compile)
+                    self.assertEqual((labs[key].writes_output, labs[key].transcripts), (writes, True))
+                    self.assertEqual(labs[key].meta["config"]["ast_pilot_cell"], cell)
+                self.assertEqual("-o" in labs["b"].workload("OUT"), writes)
+
+    def test_default_compare_keeps_its_command_and_outputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = os.path.abspath(temporary)
+            ide = os.path.join(root, "ide")
+            open(ide, "wb").close()
+            arguments = type("Args", (), {"baseline": ide, "candidate": ide, "perf": "perf", "repo_root": root,
+                                         "sudo": False, "fresh_copy": True})()
+            labs = lab.compare_labs(arguments, root, 2, [])
+            self.assertEqual(labs["a"].workload("OUT"), [ide] + lab.DEFAULT_COMPILE + ["-o", "OUT"])
+            self.assertFalse(labs["a"].transcripts)
+            self.assertNotIn("ast_pilot_cell", labs["a"].meta["config"])
+
+    def test_syntax_only_transcript_is_the_compared_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = os.path.abspath(temporary)
+            ide = os.path.join(root, "ide")
+            with open(ide, "w") as handle:
+                handle.write("#!/bin/sh\necho \"note: $#\" >&2\n")
+            os.chmod(ide, 0o755)
+            run = lab.Lab(os.path.join(root, "lab"), cpu=None, ide=ide, repo_root=root, extra=["-fc-ast-pilot"],
+                          compile_command=lab.AST_PILOT_COMPILE + ["-fsyntax-only"], writes_output=False, transcripts=True)
+            out = os.path.join(root, "out.exe")
+            status, _, err = run.run_workload([], out)
+            self.assertEqual(status, 0)
+            self.assertNotIn("-o", run.workload(out))
+            with open(out) as handle:
+                text = handle.read()
+            self.assertEqual(text, "--- stdout\n--- stderr\nnote: %d\n" % (len(lab.AST_PILOT_COMPILE) + 2))
+            with open(out + ".diagnostics") as handle:
+                self.assertEqual(handle.read(), text)
+
+    def test_fixed_cell_rejects_request_flags_other_pairs_and_profile_steps(self):
+        for extra in (["--", "-O3"], ["--canonical-inline-pair"], ["--profile-steps", "topdown"]):
+            with tempfile.TemporaryDirectory() as temporary, self.subTest(extra=extra):
+                with self.assertRaises(SystemExit) as raised:
+                    lab.main(["compare", "--baseline", "a", "--candidate", "b", "--cpu", "-1",
+                              "--output", os.path.join(temporary, "out"), "--ast-pilot-pair", "object", *extra])
+                self.assertIn("--ast-pilot-pair accepts no", str(raised.exception.code))
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(SystemExit):
+            lab.main(["compare", "--baseline", "a", "--candidate", "b", "--cpu", "-1",
+                      "--output", os.path.join(temporary, "out"), "--ast-pilot-pair", "link"])
+
+
 if __name__ == "__main__":
     unittest.main()

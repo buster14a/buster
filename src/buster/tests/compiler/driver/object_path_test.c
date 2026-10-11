@@ -2802,12 +2802,51 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_android_preinit_dynamic(ByteSlice bytes,
     return tags;
 }
 
+// The value of the first `tag` before DT_NULL, or false without one.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_android_dynamic_value(ByteSlice bytes, u64 offset, u64 size, u64 wanted, u64* value)
+{
+    bool found = false;
+    bool terminated = false;
+    for (u64 entry = 0; !found && !terminated && entry + 16 <= size; entry += 16)
+    {
+        u64 tag = 0;
+        terminated = !compiler_driver_android_preinit_field(bytes, offset + entry, 8, &tag) || tag == 0;
+        found = !terminated && tag == wanted && compiler_driver_android_preinit_field(bytes, offset + entry + 8, 8, value);
+    }
+    return found;
+}
+
+// The file offset of `address` through the load that maps it.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_android_address_offset(ByteSlice bytes, u64 program_table, u64 program_count, u64 address, u64* offset)
+{
+    bool found = false;
+    for (u64 header = 0; !found && header < program_count; header += 1)
+    {
+        u64 base = program_table + header * 56;
+        u64 type = 0;
+        u64 file_offset = 0;
+        u64 virtual_address = 0;
+        u64 file_size = 0;
+        bool valid = compiler_driver_android_preinit_field(bytes, base, 4, &type) &&
+                     compiler_driver_android_preinit_field(bytes, base + 8, 8, &file_offset) &&
+                     compiler_driver_android_preinit_field(bytes, base + 16, 8, &virtual_address) &&
+                     compiler_driver_android_preinit_field(bytes, base + 32, 8, &file_size);
+        found = valid && type == 1 && address >= virtual_address && address - virtual_address < file_size;
+        if (found) *offset = file_offset + (address - virtual_address);
+    }
+    return found;
+}
+
 // Issue 1243: an Android executable is staged through the Linux dynamic
 // writers, so it publishes `.preinit_array` through DT_PREINIT_ARRAY for the
 // bionic linker too. The emulator suite cannot execute a freshly linked file
 // from its app sandbox, so this link-only control checks the image itself on
 // every host: both tags are present, the array is one 8-byte entry inside a
 // writable load, and that entry addresses code inside an executable load.
+// The kernel places the executable at a load bias, so on x86-64, whose
+// Android images are PIEs, the entry must also carry an R_X86_64_RELATIVE and
+// the image must name bionic's loader; android/runtime_order.sh executes such
+// an image on the emulator.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2894,6 +2933,41 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTest
             }
         }
         BUSTER_TEST(arguments, valid && writable && function != 0 && executable);
+        if (valid && target == 0)
+        {
+            u64 flags = 0;
+            u64 relocations = 0;
+            u64 relocation_size = 0;
+            u64 relocation_offset = 0;
+            u64 interpreter_offset = 0;
+            bool relocated = false;
+            bool pie = compiler_driver_android_dynamic_value(bytes, dynamic_offset, dynamic_size, 0x6ffffffb, &flags) && (flags & 0x08000000) != 0;
+            bool listed = compiler_driver_android_dynamic_value(bytes, dynamic_offset, dynamic_size, 7, &relocations) &&
+                          compiler_driver_android_dynamic_value(bytes, dynamic_offset, dynamic_size, 8, &relocation_size) &&
+                          compiler_driver_android_address_offset(bytes, program_table, program_count, relocations, &relocation_offset);
+            for (u64 entry = 0; listed && !relocated && entry + 24 <= relocation_size; entry += 24)
+            {
+                u64 slot = 0;
+                u64 information = 0;
+                u64 addend = 0;
+                relocated = compiler_driver_android_preinit_field(bytes, relocation_offset + entry, 8, &slot) &&
+                            compiler_driver_android_preinit_field(bytes, relocation_offset + entry + 8, 8, &information) &&
+                            compiler_driver_android_preinit_field(bytes, relocation_offset + entry + 16, 8, &addend) &&
+                            slot == preinit_address && information == 8 && addend == function;
+            }
+            bool interpreter = false;
+            for (u64 header = 0; header < program_count; header += 1)
+            {
+                u64 type = 0;
+                if (compiler_driver_android_preinit_field(bytes, program_table + header * 56, 4, &type) && type == 3)
+                {
+                    interpreter = compiler_driver_android_preinit_field(bytes, program_table + header * 56 + 8, 8, &interpreter_offset) &&
+                                  interpreter_offset <= bytes.length && bytes.length - interpreter_offset >= sizeof("/system/bin/linker64") &&
+                                  memcmp(bytes.pointer + interpreter_offset, "/system/bin/linker64", sizeof("/system/bin/linker64")) == 0;
+                }
+            }
+            BUSTER_TEST(arguments, pie && relocated && interpreter);
+        }
     }
     scratch_end(temporary);
     return result;
