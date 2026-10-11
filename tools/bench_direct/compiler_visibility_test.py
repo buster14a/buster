@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import io
 import json
+import itertools
 import os
 import sys
 import tempfile
@@ -39,6 +40,32 @@ def corpus_members() -> dict:
     documents = corpus()
     return {"throughput/summary.json": json.dumps(documents["summary"]),
             "throughput/metadata.json": json.dumps(documents["metadata"])}
+
+
+class ArtifactDownloadBoundsTest(unittest.TestCase):
+    def download(self, payload, **limits):
+        redirected = urllib.error.HTTPError("https://api.github.com/archive", 302, "redirect",
+                                            {"Location": "https://storage.invalid/archive"}, None)
+        opener = mock.Mock()
+        opener.open.side_effect = redirected
+        response = io.BytesIO(payload)
+        with mock.patch.object(compiler_github.urllib.request, "build_opener", return_value=opener), \
+                mock.patch.object(compiler_github.urllib.request, "urlopen", return_value=response) as storage:
+            result = compiler_github.Api(REPO, "test-token").download("https://api.github.com/archive", **limits)
+            self.assertNotIn("Authorization", storage.call_args.args[0].headers)
+        return result
+
+    def test_bounded_preparation_download_reuses_tokenless_redirect(self):
+        self.assertEqual(self.download(b"1234", max_bytes=4), b"1234")
+        with self.assertRaises(OSError):
+            self.download(b"12345", max_bytes=4)
+
+    def test_invalid_new_bound_is_rejected_before_request(self):
+        with mock.patch.object(compiler_github.urllib.request, "build_opener") as request:
+            for limit in (True, 0, -1, (2 << 30) + 1, "4"):
+                with self.subTest(limit=limit), self.assertRaises(ValueError):
+                    compiler_github.Api(REPO, "test-token").download("https://api.github.com/archive", max_bytes=limit)
+            request.assert_not_called()
 
 
 class FakeGitHub(compiler_github.Api):
@@ -168,34 +195,44 @@ class CheckLifecycleTest(unittest.TestCase):
         # Repeated delivery adopts the same check.
         self.assertEqual([row["id"] for row in compiler_github.announce(api, env)], [rows[0]["id"]])
         self.assertEqual(len(api.checks), 1)
+        self.assertIn(compiler_github.NATIVE_LIFECYCLE, api.checks[0]["output"]["summary"].splitlines())
 
-    def test_start_adopts_the_bridge_check_and_marks_it_running_when_the_host_starts(self) -> None:
+    def test_start_adopts_once_without_reading_physical_scheduling(self) -> None:
         api = FakeGitHub()
         bridge = api.add_check(HEAD, marker())
-        api.jobs = [compare_job("queued"), compare_job("queued"), compare_job("in_progress")]
-        clock = Clock()
-        rows = compiler_github.start(api, environment(), clock, clock.sleep)
+        api.jobs = [compare_job("queued"), compare_job("in_progress")]
+        rows = compiler_github.start(api, environment())
         self.assertEqual([row["id"] for row in rows], [bridge["id"]])
-        self.assertEqual((bridge["status"], bridge["started_at"]), ("in_progress", "2026-10-06T15:33:00Z"))
-        self.assertIn("Live step progress", bridge["output"]["summary"])
-        # The trusted harness revision never becomes the measured subject.
+        self.assertEqual(bridge["status"], "queued")
+        self.assertIn("Native Actions job state", bridge["output"]["summary"])
+        self.assertIn("does not claim measurement", bridge["output"]["summary"])
+        self.assertIn(compiler_github.NATIVE_LIFECYCLE, bridge["output"]["summary"].splitlines())
+        self.assertEqual(len(api.jobs), 2)
         self.assertFalse([row for row in api.checks if row["head_sha"] == TRUSTED])
-        self.assertEqual(clock.now, 2 * compiler_github.POLL_SECONDS)
 
-    def test_start_stops_polling_at_its_bound_and_leaves_the_check_queued(self) -> None:
+    def test_wait_longer_than_twenty_minutes_needs_no_controller(self) -> None:
         api = FakeGitHub()
         api.jobs = [compare_job("queued")]
-        clock = Clock()
-        rows = compiler_github.start(api, environment(), clock, clock.sleep)
+        rows = compiler_github.start(api, environment())
         self.assertEqual(rows[0]["status"], "queued")
-        self.assertIn("stopped polling", api.checks[0]["output"]["summary"])
-        self.assertLessEqual(clock.now, compiler_github.START_SECONDS)
+        self.assertEqual(len(api.jobs), 1)
+        done = {"status": "completed", "conclusion": "success", "output": {"title": "Measured", "summary": ""}}
+        compiler_github.complete_check(api, HEAD, "main", marker(), done)
+        compiler_github.start(api, environment())
+        self.assertEqual(api.checks[0]["status"], "completed")
+        self.assertEqual(api.checks[0]["output"]["title"], "Measured")
 
-    def test_a_host_job_that_never_ran_is_not_shown_running(self) -> None:
-        api = FakeGitHub()
-        api.jobs = [compare_job("completed", "skipped")]
-        clock = Clock()
-        self.assertEqual(compiler_github.start(api, environment(), clock, clock.sleep)[0]["status"], "queued")
+    def test_terminal_before_setup_is_final_for_both_modes(self) -> None:
+        for mode, conclusion in (("main", "success"), ("pull", "failure"), ("pull", "cancelled")):
+            with self.subTest(mode=mode, conclusion=conclusion):
+                api = FakeGitHub()
+                terminal = {"status": "completed", "conclusion": conclusion,
+                            "output": {"title": "First terminal result", "summary": ""}}
+                compiler_github.complete_check(api, HEAD, mode, marker(mode=mode), terminal)
+                compiler_github.start(api, environment(mode=mode))
+                self.assertEqual(len(api.checks), 1)
+                self.assertEqual(api.checks[0]["conclusion"], conclusion)
+                self.assertEqual(api.checks[0]["output"]["title"], "First terminal result")
 
     def test_foreign_and_other_attempt_checks_are_never_adopted(self) -> None:
         api = FakeGitHub()
@@ -204,7 +241,7 @@ class CheckLifecycleTest(unittest.TestCase):
         other_mode = api.add_check(HEAD, marker(), name="9700X compiler benchmark (pull request)")
         earlier = api.add_check(HEAD, marker(attempt="1"), status="completed")
         api.jobs = [compare_job("in_progress")]
-        rows = compiler_github.start(api, environment(attempt="2"), Clock(), lambda seconds: None)
+        rows = compiler_github.start(api, environment(attempt="2"))
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["external_id"], marker(attempt="2"))
         for row in (foreign_app, copied, other_mode):
@@ -241,6 +278,29 @@ class CheckLifecycleTest(unittest.TestCase):
         self.assertTrue(written)
         self.assertEqual((rows[0]["status"], rows[0]["conclusion"]), ("completed", "failure"))
 
+    def test_serialized_orphan_publisher_and_setup_keep_first_terminal_result(self) -> None:
+        for delivery in itertools.permutations(("setup", "publisher", "orphan")):
+            with self.subTest(delivery=delivery):
+                api = FakeGitHub()
+                row = api.add_check(HEAD, marker())
+                first_terminal = None
+                for writer in delivery:
+                    if writer == "setup":
+                        compiler_github.start(api, environment())
+                    elif writer == "publisher":
+                        compiler_github.complete_check(api, HEAD, "main", marker(),
+                                                       {"status": "completed", "conclusion": "success",
+                                                        "output": {"title": "Measured", "summary": "valid"}})
+                    else:
+                        compiler_github.reconcile_main(api, "d" * 40, HEAD, "newer attempt",
+                                                       "2026-10-09T09:00:00Z", [HEAD])
+                    if row["status"] == "completed":
+                        terminal = (row["conclusion"], row["output"]["title"])
+                        if first_terminal is None:
+                            first_terminal = terminal
+                        self.assertEqual(terminal, first_terminal)
+                self.assertIsNotNone(first_terminal)
+
     def test_main_reconciliation_closes_displaced_and_unpublished_attempts(self) -> None:
         api = FakeGitHub()
         api.commits = [{"sha": HEAD, "parents": [{"sha": PARENT}, {"sha": "d" * 40}]},
@@ -254,14 +314,61 @@ class CheckLifecycleTest(unittest.TestCase):
         current = api.add_check(HEAD, marker())
         closed = compiler_github.reconcile_main(api, HEAD, PARENT, "run", "2026-10-06T16:00:00Z")
         self.assertEqual(sorted(closed), sorted([displaced["id"], unpublished["id"]]))
-        self.assertEqual((displaced["conclusion"], displaced["output"]["title"]), ("skipped", "Not measured"))
+        self.assertEqual((displaced["conclusion"], displaced["output"]["title"]), ("neutral", "Not measured"))
         self.assertIn("displaced", displaced["output"]["summary"])
+        self.assertIn("execution metadata is unavailable", displaced["output"]["summary"])
+        self.assertNotIn("never started", displaced["output"]["summary"])
         self.assertNotIn("range comparison", displaced["output"]["summary"])
-        self.assertEqual(unpublished["conclusion"], "cancelled")
+        self.assertEqual(unpublished["conclusion"], "neutral")
         self.assertEqual(measured["conclusion"], "success")
         self.assertEqual((current["status"], pull_side["status"]), ("queued", "queued"))
 
-    def test_main_reconciliation_names_the_range_that_covers_a_skipped_commit(self) -> None:
+    def test_legacy_generic_and_executor_urls_remain_bounded_neutral_cleanup(self) -> None:
+        for details in (f"https://github.com/{REPO}/actions/runs/81/attempts/1",
+                        f"https://github.com/{REPO}/actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run"):
+            for status in ("queued", "in_progress"):
+                with self.subTest(details=details, status=status):
+                    api = FakeGitHub()
+                    old = api.add_check(PARENT, marker(PARENT, request="80"), status=status)
+                    old["details_url"] = details
+                    old["output"] = {"summary": f"Baseline `{OLDER}` (first parent).\nLegacy run."}
+                    closed = compiler_github.reconcile_main(api, HEAD, PARENT, "run", "now", [PARENT])
+                    self.assertEqual(closed, [old["id"]])
+                    self.assertEqual((old["status"], old["conclusion"]), ("completed", "neutral"))
+                    self.assertIn("execution metadata is unavailable", old["output"]["summary"])
+                    self.assertIn(f"Baseline `{OLDER}`", old["output"]["summary"])
+                    self.assertNotIn("never started", old["output"]["summary"])
+                    self.assertNotIn("its 9700X job started", old["output"]["summary"])
+
+    def test_main_reconciliation_defers_tagged_attempts_to_native_terminal_recovery(self) -> None:
+        # The custom check can be queued after compare physically started or
+        # was cancelled. Neither a next request nor the check state proves a skip.
+        for details in (f"https://github.com/{REPO}/actions/runs/81/attempts/1",
+                        f"https://github.com/{REPO}/actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run"):
+            for physical in ("in_progress", "cancelled"):
+                with self.subTest(details=details, physical=physical):
+                    api = FakeGitHub()
+                    old_marker = marker(PARENT, request="80")
+                    old = api.add_check(PARENT, old_marker)
+                    old["details_url"] = details
+                    old["output"] = {"summary": compiler_github.NATIVE_LIFECYCLE}
+                    api.jobs = [compare_job("completed" if physical == "cancelled" else physical,
+                                            "cancelled" if physical == "cancelled" else None)]
+                    closed = compiler_github.reconcile_main(api, HEAD, PARENT, "run", "now", [PARENT])
+                    self.assertEqual(closed, [])
+                    self.assertEqual((old["status"], old["conclusion"]), ("queued", None))
+                    self.assertFalse(api.writes)
+                    self.assertEqual(len(api.jobs), 1)  # The backstop does not inspect or poll jobs.
+                    # Native completion closes this exact attempt, even without a successor;
+                    # subsequent range reconciliation cannot overwrite the terminal result.
+                    compiler_github.complete_check(api, PARENT, "main", old_marker,
+                        {"status": "completed", "conclusion": "cancelled",
+                         "output": {"title": "Native terminal recovery", "summary": ""}})
+                    self.assertEqual(compiler_github.reconcile_main(api, HEAD, PARENT, "run", "later", [PARENT]), [])
+                    self.assertEqual((old["conclusion"], old["output"]["title"]),
+                                     ("cancelled", "Native terminal recovery"))
+
+    def test_main_reconciliation_names_the_range_that_covers_an_unmeasured_commit(self) -> None:
         api = FakeGitHub()
         api.commits = [{"sha": HEAD, "parents": [{"sha": PARENT}]}, {"sha": PARENT, "parents": [{"sha": OLDER}]},
                        {"sha": OLDER, "parents": [{"sha": "e" * 40}]}]
@@ -275,7 +382,7 @@ class CheckLifecycleTest(unittest.TestCase):
         self.assertEqual(compiler_github.baseline_label(chain, HEAD), "")
         closed = compiler_github.reconcile_main(api, HEAD, OLDER, "run", "2026-10-06T16:00:00Z", chain)
         self.assertEqual(closed, [displaced["id"]])
-        self.assertEqual(displaced["conclusion"], "skipped")
+        self.assertEqual(displaced["conclusion"], "neutral")
         self.assertIn(f"inside the range comparison of `{HEAD}` against `{OLDER}`", displaced["output"]["summary"])
 
     def test_pull_reconciliation_supersedes_only_earlier_heads_of_that_pull_request(self) -> None:
@@ -445,7 +552,13 @@ class RecoveryApi(FakeGitHub):
         tree = lambda sha, tree_sha: {"sha": sha, "commit": {"tree": {"sha": tree_sha}}}  # noqa: E731
         answers = {
             "/actions/runs/37486885378": {"id": 37486885378, "path": self.run_path, "event": "workflow_run",
-                                          "run_attempt": 1, "head_sha": TRUSTED},
+                                          "run_attempt": 1, "head_sha": TRUSTED, "head_branch": "main",
+                                          "repository": {"full_name": REPO}, "head_repository": {"full_name": REPO},
+                                          "display_title": f"9700X request 91.1 head {HEAD}"},
+            "/actions/runs/37486885378/attempts/1": {"id": 37486885378, "path": self.run_path, "event": "workflow_run",
+                                          "run_attempt": 1, "head_sha": TRUSTED, "head_branch": "main",
+                                          "repository": {"full_name": REPO}, "head_repository": {"full_name": REPO},
+                                          "display_title": f"9700X request 91.1 head {HEAD}"},
             "/actions/runs/37486885378/attempts/1/jobs": {"jobs": [
                 {"name": "Authorize the main commit comparison", "conclusion": "success", "run_attempt": 1},
                 {"name": "Compare the main commit compiler", "conclusion": self.compare, "run_attempt": 1,
@@ -454,7 +567,7 @@ class RecoveryApi(FakeGitHub):
                 {"id": 7, "name": f"buster-9700x-compiler-{HEAD}-1", "expired": False, "size_in_bytes": 100,
                  "archive_download_url": "https://api.invalid/zip", "expires_at": "2027-01-04T00:00:00Z"}
             ] * self.artifacts},
-            "/actions/runs/91": {"id": 91, "path": ".github/workflows/9700x-compiler-request.yml", "event": "push",
+            "/actions/runs/91": {"id": 91, "run_attempt": 1, "path": ".github/workflows/9700x-compiler-request.yml", "event": "push",
                                  "head_branch": "main", "status": "completed", "conclusion": "success",
                                  "head_sha": HEAD, "repository": {"full_name": REPO},
                                  "head_repository": {"full_name": REPO}},
@@ -463,6 +576,13 @@ class RecoveryApi(FakeGitHub):
             f"/compare/{HEAD}...main": {"status": "ahead"},
             f"/commits/{HEAD}/pulls": [],
         }
+        if bare == "/actions/runs/91/attempts/1":
+            return copy.deepcopy(answers["/actions/runs/91"])
+        if bare == f"/compare/{TRUSTED}...main":
+            return {"status": "ahead"}
+        if bare in ("/contents/docs/compiler-main-profile-routing-v1.tsv",
+                    "/contents/tools/compiler_main_profile_policy.c"):
+            raise urllib.error.HTTPError(path, 404, "historical policy absence", {}, None)
         return answers[bare] if bare in answers else super().request(path, data, method)
 
     def download(self, url: str) -> bytes:
@@ -548,8 +668,18 @@ class PublishTest(unittest.TestCase):
                       "BQ_COMPARE_RESULT": "success", "BQ_FIRST_PARENT": "b" * 40, "BQ_RANGE": "1",
                       "GH_TOKEN": "t", "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": os.devnull}
             original = api.request
-            routed = lambda path, data=None, method="": listing if "/runs/92/artifacts" in path else \
-                {"jobs": []} if path.startswith("/actions/runs/92/") else original(path, data, method)  # noqa: E731
+            def routed(path, data=None, method=""):
+                bare = urllib.parse.urlsplit(path).path
+                if bare == "/actions/runs/92/attempts/1":
+                    return {"id": 92, "run_attempt": 1, "path": compiler_github.BENCH_WORKFLOW,
+                            "event": "workflow_run", "head_branch": "main", "head_sha": TRUSTED,
+                            "repository": {"full_name": REPO}, "head_repository": {"full_name": REPO},
+                            "display_title": f"9700X request 91.1 head {HEAD}"}
+                if "/runs/92/artifacts" in path:
+                    return listing
+                if bare == "/actions/runs/92/attempts/1/jobs":
+                    return {"jobs": []}
+                return original(path, data, method)
             with mock.patch.dict(os.environ, values, clear=True), \
                     mock.patch.object(api, "request", routed), \
                     mock.patch.object(compiler_publish, "Api", lambda repository, token: api), \

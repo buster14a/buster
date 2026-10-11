@@ -1,0 +1,30 @@
+{
+  "commit": "db062b683d1a1e8f87f8e165c8e6776ebcff06e3",
+  "commit_patch_sha256": "7ba3c94659f245a5ce4c47508ad49cf853223cf0d10d9559c9e773976e4c6bf5",
+  "parent": "9553bfba1951648b768888d11aef1013d829ae2c",
+  "repository_worktree_clean_at_capture": true,
+  "review_status": "root says frozen review pending; this evidence does not claim review approval.",
+  "source_bytes_copied": false,
+  "source_bytes_note": "Source remains in the frozen Git object; content is bound by commit/tree/blob IDs and per-file SHA-256. The source files are not duplicated in this evidence tarball.",
+  "tracked_files": [
+    {
+      "git_blob": "e28427d130c196c288f8ac935ba3a8ed5e00c147",
+      "path": "src/buster/lib/compiler/ir/ir.c",
+      "sha256": "6359535f97d962c4128a8d17e9ecaca5229b18f7bbf1e603ac5cdda6ba77a56c",
+      "size_bytes": 344294
+    },
+    {
+      "git_blob": "7c751442ebab295f91211e25dbfbb4b98cb4a0cc",
+      "path": "src/buster/lib/compiler/ir/ir_internal.h",
+      "sha256": "6e3b3fc92564f0be71e7b9710d8c416253997ca79ae6c7b2110c39f3bfffb730",
+      "size_bytes": 972
+    },
+    {
+      "git_blob": "7049f54c5808bd5584cba110ad595fff64a508c3",
+      "path": "src/buster/tests/compiler/ir/ir_test.c",
+      "sha256": "272d2b1ed6df4387eb1969c2bbbe4692f672633479718f8a1925cbe5e4f99190",
+      "size_bytes": 188151
+    }
+  ],
+  "tree": "06d9565f0c81793a4071c3bb6f1e60c5c2246465"
+}

@@ -125,11 +125,15 @@ def validate_policy(value: dict, repository: str) -> dict:
     return value
 
 
-def read_policy(api, base: str) -> tuple[dict, str]:
-    """Read the current remote policy, not a workflow-start variable snapshot."""
-    hex_value(base, 40, "base")
+def read_policy(api, main: str) -> tuple[dict, str]:
+    """Read the current remote policy, not a workflow-start variable snapshot.
+
+    main is the request base, or for a catch-up the live main the trusted
+    integration layer found still admissible for that base (#1893).
+    """
+    hex_value(main, 40, "main")
     before = api.request("git/ref/heads/main")["object"]["sha"]
-    if before != base:
+    if before != main:
         raise AutomationMoved("main moved before automation authorization", 75)
     record = api.request("contents/" + POLICY_PATH, ref="main")
     if record.get("type") != "file" or record.get("encoding") != "base64":
@@ -140,7 +144,7 @@ def read_policy(api, base: str) -> tuple[dict, str]:
     raw = base64.b64decode("".join(encoded.split()), validate=True)
     value = validate_policy(decode(raw), api.repository)
     after = api.request("git/ref/heads/main")["object"]["sha"]
-    if after != base:
+    if after != main:
         raise AutomationMoved("main moved while reading the standing policy", 75)
     return value, digest(raw)
 
@@ -333,7 +337,9 @@ def authorize_request(api, pr: dict, actor: str, context: dict, classification: 
     verify_run(run, api.repository, run_id, WRITER_PATH, base, frozenset(("workflow_dispatch",)), bot=True)
     if run.get("display_title") != writer_title(request["key"]) or run.get("status") != "in_progress":
         raise AutomationError("writer request title or active attempt does not match")
-    policy, policy_digest = read_policy(api, base)
+    # Only the integration layer sets live_main, after its catch-up checks.
+    live_main = context.get("live_main") or base
+    policy, policy_digest = read_policy(api, live_main)
     require_enabled(api, policy)
     if policy_digest != request["policy_sha256"]:
         raise AutomationError("standing grant changed after scheduling")
@@ -349,7 +355,7 @@ def authorize_request(api, pr: dict, actor: str, context: dict, classification: 
         raise AutomationError("controller request was cancelled or failed")
     artifact = read_request_artifact(api, request)
     # The final live checks follow the potentially slow artifact download.
-    final_policy, final_digest = read_policy(api, base)
+    final_policy, final_digest = read_policy(api, live_main)
     require_enabled(api, final_policy)
     if final_digest != policy_digest:
         raise AutomationError("standing grant changed during authorization")

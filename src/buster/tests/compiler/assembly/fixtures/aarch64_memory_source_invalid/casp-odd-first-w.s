@@ -1,0 +1,2 @@
+.text
+casp w1, w2, w4, w5, [x5]

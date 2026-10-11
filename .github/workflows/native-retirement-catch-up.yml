@@ -4,10 +4,15 @@ name: Native retirement catch-up
 # repository-source snapshot falls behind its admitted sources (#1893).
 # It runs only trusted main code, writes no generated state and cannot merge:
 # the writer publishes the request through the existing standing grant and the
-# native merge queue admits it. Its only write is an empty commit on the
-# catch-up branch plus the PR that carries it. It never enables auto-merge:
+# native merge queue admits it. Its only writes are an empty commit leased onto
+# the catch-up branch, the PR that carries it, and closing (with a comment) a
+# request that is current or that failed CI. It never enables auto-merge:
 # GitHub starts no merge_group workflows for an entry GITHUB_TOKEN enqueued, so
 # the writer enables it with its publication credential after publishing.
+# A published request whose exact head failed CI complete is closed and
+# replaced only after main advances past its recorded base. The branch moves
+# only by a leased push from the head it was read at, the same lease the
+# writer publishes with, so a racing publication is never overwritten.
 
 on:
   push:
@@ -34,14 +39,28 @@ jobs:
       contents: write
       pull-requests: write
       actions: read
+      # Reads the exact published head's CI complete to replace a failed
+      # catch-up once main advances (one replacement per main revision).
+      checks: read
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - name: Check out immutable trusted main only
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.workflow_sha }}
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Open or retire the catch-up request
         run: python3 tools/native_retirement_controller.py catch-up --repo-root .

@@ -19,6 +19,8 @@ measure recognizes both as distinct timing cohorts and rejects mixed inventories
 draft_pull_request_run and deferred_base_name admit the draft-only macOS
 deferral (#1825) and nothing else; latest_run_jobs and _carried_forward_copy
 keep a "Re-run failed jobs" attempt's re-stamped deferrals at attempt 1 (#2052).
+step-change is the report-only merge_group median alarm (#3098): step_change_collect,
+step_change_detect, _step_change_split, step_change_markdown, publish_step_change.
 """
 import argparse
 from collections import Counter, defaultdict
@@ -125,6 +127,16 @@ COMPILER_BENCHMARK_CHECKS = {
     "9700X compiler benchmark": ("buster-9700x-compiler-main-v1", "9700x-compiler-request.yml", "push"),
     "9700X compiler benchmark (pull request)": ("buster-9700x-compiler-pr-v1", "9700x-direct-request.yml", "pull_request"),
 }
+COMPILER_BENCHMARK_DISPLAY_JOBS = {
+    "main": ("start-compiler", "Show the main commit comparison check"),
+    "pull": ("start-pull", "Show the pull request comparison check"),
+}
+COMPILER_BENCHMARK_CURRENT_DISPLAY_STEP = "Adopt the exact attempt check in one pass"
+COMPILER_BENCHMARK_LEGACY_RUNNING_DISPLAY_STEP = "Queue the check and mark it running when the 9700X starts"
+COMPILER_BENCHMARK_DISPLAY_STEPS = (
+    COMPILER_BENCHMARK_CURRENT_DISPLAY_STEP,
+    COMPILER_BENCHMARK_LEGACY_RUNNING_DISPLAY_STEP,
+)
 COMPILER_BENCHMARK_WORKFLOW = ".github/workflows/9700x-direct-bench.yml"
 BENCHMARK_MAINTAINER = {"login": "davidgmbb", "id": 39247043}
 GITHUB_ACTIONS_APP_ID = 15368
@@ -717,7 +729,7 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
             raise ValueError("Compiler benchmark announcement identity is invalid")
         publisher, publisher_path = request, request_path
         writer_specs = [("Show the queued compiler benchmark check", "Check out the trusted check writer",
-                         "Create the queued check")]
+                         ("Create the queued check",))]
     else:
         if publisher_link is not None:
             publisher_id = int(publisher_link[1])
@@ -733,12 +745,12 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
                 publisher.get("head_branch") != "main" or publisher["repository"]["id"] != request["repository"]["id"]:
             raise ValueError("Compiler benchmark publisher is not a same-repository trusted main run")
         pull = event == "pull_request"
-        writer_specs = [("Show the pull request comparison check" if pull else "Show the main commit comparison check",
-                         "Check out the trusted check writer", "Queue the check and mark it running when the 9700X starts")]
+        writer_name = COMPILER_BENCHMARK_DISPLAY_JOBS["pull" if pull else "main"][1]
+        writer_specs = [(writer_name, "Check out the trusted check writer", COMPILER_BENCHMARK_DISPLAY_STEPS)]
         if check.get("status") == "completed":
             writer_specs.append(("Publish the pull request compiler benchmark check" if pull else
                                  "Publish the compiler benchmark check", "Check out the trusted publisher",
-                                 "Validate the evidence and publish the check"))
+                                 ("Validate the evidence and publish the check",)))
     batch = read_metadata(publisher_path + "/jobs?per_page=100")
     rows = batch.get("jobs") if isinstance(batch, dict) else None
     if not isinstance(rows, list) or type(batch.get("total_count")) is not int or \
@@ -749,7 +761,7 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
     if not all(type(identity) is int and identity > 0 for identity in ids) or len(set(ids)) != len(ids):
         raise ValueError("Compiler benchmark publisher job IDs are invalid or duplicated")
     proved = []
-    for writer_name, checkout_step, write_step in writer_specs:
+    for writer_name, checkout_step, write_steps in writer_specs:
         writers = [row for row in rows if row.get("name") == writer_name]
         if len(writers) > 1:
             raise ValueError("Compiler benchmark trusted writer is duplicated")
@@ -758,12 +770,19 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
             steps = writer.get("steps")
             valid = (type(writer.get("run_id")) is int and writer["run_id"] == publisher["id"] and
                      type(writer.get("run_attempt")) is int and writer["run_attempt"] == publisher["run_attempt"] and
-                     writer.get("head_sha") == publisher["head_sha"] and isinstance(steps, list))
-            for name, statuses in ((checkout_step, ("completed",)), (write_step, ("in_progress", "completed"))):
-                found = [step for step in steps if isinstance(step, dict) and step.get("name") == name] if valid else []
-                valid = (len(found) == 1 and found[0].get("status") in statuses and
-                         (name != checkout_step or found[0].get("conclusion") == "success") and
-                         found[0].get("conclusion") != "skipped")
+                     writer.get("head_sha") == publisher["head_sha"] and
+                     writer.get("status") in ("in_progress", "completed") and isinstance(steps, list))
+            checkout_steps = ([step for step in steps if isinstance(step, dict) and
+                               step.get("name") == checkout_step] if valid else [])
+            valid = (len(checkout_steps) == 1 and checkout_steps[0].get("status") == "completed" and
+                     checkout_steps[0].get("conclusion") == "success")
+            write_matches = ([step for step in steps if isinstance(step, dict) and
+                              step.get("name") in write_steps] if valid else [])
+            valid = (len(write_matches) == 1 and
+                     ((write_matches[0].get("status") == "completed" and
+                       write_matches[0].get("conclusion") == "success") or
+                      (write_matches[0].get("status") == "in_progress" and
+                       write_matches[0].get("conclusion") is None)))
             if valid:
                 proved.append(writer)
     if not proved:
@@ -924,10 +943,30 @@ def separate_inactive_lint(jobs, event):
     return [job for job in jobs if job.get("name") not in INACTIVE_LINT_JOBS], errors
 
 
+def separate_no_code_plan(jobs, run_id, run_attempt, head_sha, event):
+    """Classification is bookkeeping; it never replaces an executed coverage row."""
+    names = {"No-code plan / Classify no-code changes"}
+    if event not in ("pull_request", "merge_group"):
+        names.add("No-code plan")  # GitHub may retain only a skipped reusable caller.
+    plans = [job for job in jobs if job.get("name") in names]
+    errors = []
+    if len(plans) > 1:
+        errors.append("no-code classification is ambiguous")
+    for job in plans:
+        expected = "success" if event in ("pull_request", "merge_group") else "skipped"
+        if (job.get("run_id") != run_id or job.get("head_sha") != head_sha or
+                type(job.get("run_attempt")) is not int or not 1 <= job["run_attempt"] <= run_attempt or
+                job.get("status") != "completed" or job.get("conclusion") != expected):
+            errors.append("no-code classification has invalid identity or result")
+    return [job for job in jobs if job.get("name") not in names], errors
+
+
 def separate_reuse_job(jobs, run_id, run_attempt, head_sha, *, required=False, event=None):
     """Keep the optional cheap admission out of the required job contract."""
+    jobs, planning_errors = separate_no_code_plan(jobs, run_id, run_attempt, head_sha, event)
     inactive = [job for job in jobs if job.get("name") in INACTIVE_LINT_JOBS]
     jobs, errors = separate_inactive_lint(jobs, event)
+    errors += planning_errors
     for job in inactive:
         if (job.get("run_id") != run_id or job.get("head_sha") != head_sha or
                 type(job.get("run_attempt")) is not int or
@@ -1457,6 +1496,230 @@ def queue_summarize(data):
                       "Success latency uses run updated_at of the latest attempt and includes reruns."]}
 
 
+# Report-only step-change detector (#709 phase F, #3098). It compares each
+# required job's median over the newest STEP_CHANGE_WINDOW successful
+# first-attempt merge_group runs with the preceding window; it never gates.
+STEP_CHANGE_WINDOW = 10
+STEP_CHANGE_MIN_RATIO = 0.30
+STEP_CHANGE_MIN_SECONDS = 180.0
+STEP_CHANGE_RUN_PAGES = 3
+STEP_CHANGE_MARKER = "<!-- buster-ci-step-change v1 -->"
+STEP_CHANGE_TITLE = "CI step change: required merge_group job duration regressed"
+STEP_CHANGE_ISSUE_AUTHOR = "github-actions[bot]"
+STEP_CHANGE_ISSUE_PAGES = 20
+SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
+
+
+def step_change_collect(repository, token, workflow, runs_needed):
+    """Newest successful first-attempt merge_group runs and their required job durations."""
+    required = set(combination_jobs())
+    selected = []
+    page = 1
+    exhausted = False
+    while len(selected) < runs_needed and not exhausted and page <= STEP_CHANGE_RUN_PAGES:
+        query = urllib.parse.urlencode({"event": "merge_group", "status": "success",
+                                        "exclude_pull_requests": "true", "per_page": 100, "page": page})
+        batch = api_get(repository, f"actions/workflows/{Path(workflow).name}/runs?{query}", token)["workflow_runs"]
+        exhausted = len(batch) < 100
+        for run in batch:
+            if run.get("run_attempt") == 1 and run.get("conclusion") == "success" and len(selected) < runs_needed:
+                selected.append({"id": run["id"], "head_sha": run["head_sha"], "created_at": run["created_at"],
+                                 "run_attempt": 1, "jobs": {}})
+        page += 1
+    for run in selected:
+        jobs = _stable_pages(repository, f"actions/runs/{run['id']}/jobs?filter=latest", "jobs", token, 1000)
+        for job in jobs:
+            start, finish = timestamp(job.get("started_at")), timestamp(job.get("completed_at"))
+            if job.get("name") in required and job.get("conclusion") == "success" and \
+                    start is not None and finish is not None and finish >= start:
+                run["jobs"][job["name"]] = (finish - start).total_seconds()
+    return {"schema": 1, "kind": "step-change-input", "repository": repository, "workflow": workflow,
+            "fetched_at": _utc_now(), "runs": selected}
+
+
+def _step_change_split(values):
+    """Earliest index minimizing absolute deviation from each side's median."""
+    best = None
+    for index in range(1, len(values)):
+        left, right = values[:index], values[index:]
+        cost = sum(abs(value - statistics.median(left)) for value in left) + \
+            sum(abs(value - statistics.median(right)) for value in right)
+        if statistics.median(right) > statistics.median(left) and (best is None or cost < best[0]):
+            best = (cost, index)
+    return best[1] if best is not None else len(values) - 1
+
+
+def step_change_detect(data, window=STEP_CHANGE_WINDOW, min_ratio=STEP_CHANGE_MIN_RATIO,
+                       min_seconds=STEP_CHANGE_MIN_SECONDS):
+    """Jobs whose recent-window median rose by more than both thresholds."""
+    if window < 2:
+        raise ValueError("The step-change window needs at least two runs")
+    runs = data.get("runs")
+    if not isinstance(runs, list):
+        raise ValueError("step-change requires a runs list")
+    seen = set()
+    for run in runs:
+        if not isinstance(run.get("id"), int) or isinstance(run.get("id"), bool) or run["id"] in seen:
+            raise ValueError("Missing or duplicate run ID would bias the median")
+        seen.add(run["id"])
+        if not isinstance(run.get("head_sha"), str) or not SHA_PATTERN.fullmatch(run["head_sha"]):
+            raise ValueError(f"Run {run['id']} has no exact head SHA")
+        if run.get("run_attempt") != 1 or timestamp(run.get("created_at")) is None:
+            raise ValueError(f"Run {run['id']} is not a timestamped first attempt")
+        if not isinstance(run.get("jobs"), dict):
+            raise ValueError(f"Run {run['id']} has no job durations")
+        for name, seconds in run["jobs"].items():
+            if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or \
+                    not 0 <= seconds < float("inf"):
+                raise ValueError(f"Run {run['id']} job {name!r} has an invalid duration")
+    ordered = sorted(runs, key=lambda run: (timestamp(run["created_at"]), run["id"]))[-2 * window:]
+    findings = []
+    insufficient = []
+    names = sorted({name for run in ordered for name in run["jobs"]})
+    for name in names:
+        series = [(run, run["jobs"][name]) for run in ordered if name in run["jobs"]]
+        baseline, recent = series[:-window], series[-window:]
+        if len(baseline) < window or len(recent) < window:
+            insufficient.append(name)
+        else:
+            before = statistics.median(seconds for _, seconds in baseline)
+            after = statistics.median(seconds for _, seconds in recent)
+            if after - before > min_seconds and after > before * (1.0 + min_ratio):
+                index = _step_change_split([seconds for _, seconds in series])
+                first, last = series[index], series[index - 1] if index > 0 else None
+                findings.append({
+                    "job": name, "baseline_median_seconds": before, "recent_median_seconds": after,
+                    "increase_seconds": after - before, "increase_ratio": after / before - 1.0 if before else None,
+                    "first_slow_run": {"id": first[0]["id"], "head_sha": first[0]["head_sha"],
+                                       "created_at": first[0]["created_at"], "seconds": first[1]},
+                    "last_fast_run": None if last is None else {
+                        "id": last[0]["id"], "head_sha": last[0]["head_sha"],
+                        "created_at": last[0]["created_at"], "seconds": last[1]},
+                    "baseline_run_ids": [run["id"] for run, _ in baseline],
+                    "recent_run_ids": [run["id"] for run, _ in recent]})
+    findings.sort(key=lambda finding: (-finding["increase_seconds"], finding["job"]))
+    return {"schema": 1, "kind": "step-change-report",
+            "policy": {"event": "merge_group", "window_runs": window, "min_ratio": min_ratio,
+                       "min_seconds": min_seconds, "statistic": "median", "gate": False},
+            "runs_considered": len(ordered), "findings": findings, "insufficient": insufficient}
+
+
+def _minutes(seconds):
+    return f"{seconds / 60.0:.1f} min"
+
+
+def step_change_markdown(report, repository):
+    """The single tracking issue body; job names come from the trusted workflow."""
+    policy = report["policy"]
+    runs_url = f"https://github.com/{repository}/actions/runs/"
+    lines = [STEP_CHANGE_MARKER, "",
+             f"Report-only step-change detector (`tools/github_ci_time.py step-change`, #3098). It compares each "
+             f"required `Buster CI` job's median over the newest {policy['window_runs']} successful first-attempt "
+             f"`merge_group` runs with the preceding {policy['window_runs']}, and flags rises above "
+             f"{policy['min_ratio']:.0%} **and** {policy['min_seconds'] / 60.0:g} minutes. It never gates merges.", ""]
+    if report["findings"]:
+        lines += ["| Job | Preceding median | Recent median | Change | First slow run | Last fast run |",
+                  "| --- | ---: | ---: | ---: | --- | --- |"]
+        for finding in report["findings"]:
+            first, last = finding["first_slow_run"], finding["last_fast_run"]
+            ratio = finding["increase_ratio"]
+            change = f"+{_minutes(finding['increase_seconds'])}" + (f" (+{ratio:.0%})" if ratio is not None else "")
+            last_text = "—" if last is None else \
+                f"[{last['id']}]({runs_url}{last['id']}) `{last['head_sha'][:10]}` ({_minutes(last['seconds'])})"
+            lines.append(f"| {finding['job']} | {_minutes(finding['baseline_median_seconds'])} | "
+                         f"{_minutes(finding['recent_median_seconds'])} | {change} | "
+                         f"[{first['id']}]({runs_url}{first['id']}) `{first['head_sha'][:10]}` "
+                         f"({_minutes(first['seconds'])}) | {last_text} |")
+        lines += ["", "The first slow run is the best split of the combined window, not a proven cause: check its "
+                  "head commit and the matrix-phase artifacts before attributing the change. Close this issue once "
+                  "the change is explained or fixed; a later step change opens a new one."]
+    else:
+        lines.append("No required job currently exceeds both thresholds.")
+    if report["insufficient"]:
+        lines += ["", "Too few observations for: " + ", ".join(report["insufficient"]) + "."]
+    return "\n".join(lines) + "\n"
+
+
+def api_write(repository, path, token, method, payload, timeout=API_TIMEOUT_SECONDS):
+    headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
+               "User-Agent": "buster-ci-timing", "Content-Type": "application/json",
+               "Authorization": "Bearer " + token}
+    request = urllib.request.Request(f"https://api.github.com/repos/{repository}/{path}", method=method,
+                                     data=json.dumps(payload).encode("utf-8"), headers=headers)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        result = json.load(response)
+    return result
+
+
+def _step_change_keys(text):
+    return set(re.findall(r"<!-- step-change-key ([^>]+) -->", text or ""))
+
+
+def _step_change_issues(repository, token):
+    """Open tracking issues; the author is rechecked so an ignored filter cannot duplicate one."""
+    issues = []
+    page = 1
+    ended = False
+    while not ended:
+        if page > STEP_CHANGE_ISSUE_PAGES:
+            raise ValueError("Too many open issues to find the step-change tracking issue")
+        query = urllib.parse.urlencode({"state": "open", "creator": STEP_CHANGE_ISSUE_AUTHOR,
+                                        "per_page": 100, "page": page})
+        batch = api_get(repository, f"issues?{query}", token)
+        if not isinstance(batch, list):
+            raise ValueError("Malformed issue listing")
+        issues += [issue for issue in batch
+                   if "pull_request" not in issue and (issue.get("user") or {}).get("login") == STEP_CHANGE_ISSUE_AUTHOR
+                   and STEP_CHANGE_MARKER in (issue.get("body") or "")]
+        ended = len(batch) < 100
+        page += 1
+    return issues
+
+
+def publish_step_change(report, repository, token):
+    """Open or update the single tracking issue; a quiet window changes nothing."""
+    action = "none"
+    if report["findings"]:
+        if not token:
+            raise ValueError("Publishing the step-change issue requires GH_TOKEN")
+        keys = [f"{finding['job']}@{finding['first_slow_run']['id']}" for finding in report["findings"]]
+        body = step_change_markdown(report, repository) + "".join(
+            f"<!-- step-change-key {key} -->\n" for key in keys)
+        existing = _step_change_issues(repository, token)
+        if not existing:
+            created = api_write(repository, "issues", token, "POST", {"title": STEP_CHANGE_TITLE, "body": body})
+            action = f"opened #{created['number']}"
+        else:
+            issue = min(existing, key=lambda issue: issue["number"])
+            new = [key for key in keys if key not in _step_change_keys(issue.get("body"))]
+            if issue.get("body") != body:
+                api_write(repository, f"issues/{issue['number']}", token, "PATCH", {"body": body})
+                action = f"updated #{issue['number']}"
+            if new:
+                api_write(repository, f"issues/{issue['number']}/comments", token, "POST",
+                          {"body": "New step change: " + ", ".join(f"`{key}`" for key in new) +
+                           ". The issue body holds the current table."})
+    return action
+
+
+def step_change(args):
+    if args.input:
+        data = json.loads(Path(args.input).read_text(encoding="utf-8"))
+    else:
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository):
+            raise ValueError("Repository must have owner/name form")
+        data = step_change_collect(args.repository, os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN"),
+                                   args.workflow, 2 * args.window)
+    report = step_change_detect(data, args.window, args.min_ratio, args.min_seconds)
+    report["issue_action"] = publish_step_change(
+        report, args.repository, os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")) if args.publish_issue else "not-requested"
+    if args.summary:
+        with open(args.summary, "a", encoding="utf-8") as summary:
+            summary.write("## Required job step changes\n\n" + step_change_markdown(report, args.repository) +
+                          f"\nIssue: {report['issue_action']}\n")
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1488,6 +1751,16 @@ def main():
     queue_report = sub.add_parser("queue-summarize")
     queue_report.add_argument("input")
     queue_report.add_argument("--output")
+    change = sub.add_parser("step-change", help="Report-only rise in required merge_group job medians")
+    change.add_argument("--repository", default="buster14a/buster")
+    change.add_argument("--workflow", default=".github/workflows/ci.yml")
+    change.add_argument("--input", help="Offline step-change-input JSON instead of the REST API")
+    change.add_argument("--window", type=int, default=STEP_CHANGE_WINDOW)
+    change.add_argument("--min-ratio", type=float, default=STEP_CHANGE_MIN_RATIO)
+    change.add_argument("--min-seconds", type=float, default=STEP_CHANGE_MIN_SECONDS)
+    change.add_argument("--publish-issue", action="store_true", help="Open or update the single tracking issue")
+    change.add_argument("--summary", help="Append the Markdown report here (for example GITHUB_STEP_SUMMARY)")
+    change.add_argument("--output")
     args = parser.parse_args()
     status = 0
     try:
@@ -1503,6 +1776,10 @@ def main():
             report_gate_failure(data, os.getenv("GITHUB_STEP_SUMMARY"))
         elif args.command == "queue-collect":
             data = queue_collect(args)
+        elif args.command == "step-change":
+            if not 2 <= args.window <= 50:
+                raise ValueError("Use a step-change window of 2..50 runs")
+            data = step_change(args)
         elif args.command == "queue-summarize":
             data = queue_summarize(json.loads(Path(args.input).read_text(encoding="utf-8")))
         else:

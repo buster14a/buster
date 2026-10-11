@@ -21,14 +21,27 @@ its existing post-merge main comparison remains asynchronous and report-only.
 Neither that comparison nor RAD Debugger compatibility is a pre-merge required
 check in the main ruleset or the merge-admission workflow inventory.
 
-The only PR exception is an affirmative owner request: a workload/data change,
-`compiler-compare.request`, or `scaling.request`. The trusted authorizer verifies
+The only PR exception is an affirmative owner request for an experiment or an
+explicit task/issue requirement for applicable performance evidence: a
+workload/data change, `compiler-compare.request`, or `scaling.request` carries
+that request through the existing gate. Routine bug fixes, CI repairs, conflict
+resolution and branch refreshes do not by themselves authorize such a change.
+Record the request/acceptance reference in the handoff; an already authorized
+request needs no second unrelated manual approval. See the
+[request decisions and examples](../../docs/agents/benchmarking.md#request-decisions-and-examples).
+The trusted authorizer verifies
 both the complete PR file inventory and a fresh request-file change at the
 exact head relative to **every parent**. Compiler/scaling markers also need a
 new request line present in every parent diff: merging old marker histories
 alone is not a renewed experiment. An unrelated update, generic invocation
 or merge that merely inherits a request from main cannot replay it. To request
-a new candidate comparison, change the request file in the new head commit.
+a deliberately requested new candidate comparison, add a fresh request line
+in the new head commit. A changed head alone is not a renewed request.
+Before requesting again, read the exact-head check and its matching run/attempt
+and receipt. Reuse complete published evidence only for its original source,
+binary, baseline, workload, profile and configuration identities; stale prose
+saying "queued" is not a rerun reason. Different inputs or a new head need new
+evidence for a performance claim, within the applicable experiment or hold.
 The authorizer log records the head and request paths; the host gate requires
 that same request head and run attempt. The workload/configuration and hardware
 remain bound by the existing receipts and harness.
@@ -40,8 +53,12 @@ head, the request path must differ from both parents, so resolving main into
 a branch without a new request does not consume the host.
 
 Every performance claim still needs actual relevant Zen 5 evidence (#2761).
-A skipped PR benchmark leaves performance validation incomplete. Moving routine
-measurements after merge does not waive requested acceptance measurements.
+A skipped PR benchmark leaves performance validation incomplete. Report normal
+correctness/policy CI, validation of the performance claim, and task acceptance
+separately. Moving routine measurements after merge does not waive requested
+acceptance measurements or release another issue's pre-merge hold. A source-path
+classifier proves machine-verifiable routing/provenance, not human intent;
+the agent guidance governs whether a request should be created.
 
 ## Gate
 
@@ -96,6 +113,37 @@ account under the same owner-only gate. `start-pull` and `publish-pull` are
 hosted and are the only jobs of that path with `checks: write`. Its check
 name, `9700X compiler benchmark (pull request)`, and marker prefix,
 `buster-9700x-compiler-pr-v1:<head>`, differ from the main comparison's.
+
+### Full Clang analyzer profile
+
+The fixed `clang-analyze-full-v1` profile uses this same owner-authorized
+`compare-pull` route after its trusted harness is on `main`. The exact request
+line is `profile: clang-analyze-full-v1` in
+`benchmarks/9700x/compiler-compare.request`. Append one occurrence in the
+exact head commit for each explicit run; a historical occurrence does not
+replay the profile. The trusted harness requires exactly one new occurrence
+relative to every parent, and the hosted publisher rechecks that delta against
+GitHub's request-file contents and compares the retained bytes with the exact
+head. The normal request gate still requires a fresh file change in the exact
+PR head. No workflow, runner label,
+hardware allowance or request identity is added. The baseline driver from
+trusted `main` owns the native phase order, arguments, limits and process
+accounting, and launches separately built baseline and candidate analyzer
+drivers against one candidate-HEAD Release split-source compile database.
+
+The fixed workload selects 182 inventory rows (135 candidate executions and
+47 proven aliases), uses eight shards and two jobs, and retains two independent
+preflights plus the matched baseline/candidate/candidate/baseline full runs.
+Each full run has a separate aggregate verification. The existing 90-minute
+job timeout is unchanged: setup is bounded to eight minutes, the native
+campaign to 75 minutes, and two minutes are reserved for evidence export, with
+five minutes left for workflow checkout, startup and upload. The publisher
+accepts evidence only when the full inventory, diagnostics, driver provenance,
+wait4 observations and every full-run process-tree sampler completeness
+record revalidate from retained raw files. Sampled tree RSS remains sampled;
+wait4 RSS is only the largest individual high-water and cannot establish a
+simultaneous process-tree peak. The result reports process observations and
+completeness without a performance verdict.
 
 Every compiler receipt must record the observed CPU model of the host that
 measured it. The harness refuses to measure, and the publisher refuses to
@@ -210,16 +258,16 @@ request's verified head, never the trusted harness revision `github.sha`.
   decides whether the comparison starts. For a pull request, `start-pull`
   creates the check after authorization; that path has no workflow-level
   wait, because a new push cancels the older run.
-- **In progress.** `start-compiler` / `start-pull` (`actions: read`,
-  `checks: write`, plus `contents: read` or `pull-requests: read` for
-  reconciliation) share the host job's gate, so they run only after this
-  attempt's authorization. Each adopts the attempt's check, or creates it,
-  and polls this attempt's jobs through the Actions API. It marks the check
-  in progress with the 9700X job's own `started_at` and a link to its live
-  steps (preparation: checkouts and builds; then measurement). It stops
-  polling at the latest after 20 minutes and leaves the check queued if the
-  runner is still busy. These are the only display-only jobs; they never fail
-  the run.
+- **Queued setup and live execution.** `start-compiler` / `start-pull` share
+  the host job's authorization gate. Each creates or adopts this exact
+  attempt's queued check in one short hosted pass, performs the existing
+  bounded reconciliation, and exits. Neither waits, sleeps or polls for the
+  9700X scheduler. The custom check can remain queued while the host is
+  running: the linked Actions `compare` / `compare-pull` job is the
+  authoritative live record of runner wait, preparation and measurement.
+  A successful setup job proves bookkeeping only, not that a measurement
+  started or passed. Its log records `api_requests` and
+  `control_execution_seconds`.
 - **Completed.** `publish-compiler` / `publish-pull` complete the same check:
   success for a valid measurement, failure for a refused authorization or
   missing or invalid evidence, neutral for a superseded pull request head.
@@ -234,17 +282,92 @@ request's verified head, never the trusted harness revision `github.sha`.
   completed check is never rewritten, so a late or repeated older attempt
   cannot replace a newer result. A deliberate re-run of either workflow is a
   new attempt with its own check; GitHub shows the newest.
-- **Orphans.** Main runs are serialized, so when a main comparison starts,
-  `start-compiler` completes the open checks of up to 15 earlier first-parent
-  main commits. A check that never started is `skipped` / **Not measured**
-  (displaced while pending, or cancelled before any job ran). One whose host
-  job started but which no publisher completed is `cancelled`. `start-pull`
-  completes an open check of an earlier head of the same pull request as
-  superseded. An `always()` publisher already finishes a cancelled run that
-  started, so reconciliation is the backstop for runs that never ran. A
-  commit's check stays queued only until the next main comparison starts,
-  and it stays queued indefinitely only if `BENCH_COMPILER_ENABLED` is turned
-  off in between.
+
+  Keep the request workflow's run/attempt distinct from the benchmark
+  executor's run/attempt. Recovery re-reads the exact attempt endpoints and
+  binds the executor's trusted run name,
+  `9700X request REQUEST.ATTEMPT head HEAD`, to the original request and
+  measured head. Its own recovery run is separate bookkeeping provenance;
+  it does not replace either original identity. All six hosted check-writing
+  jobs serialize under `buster-9700x-check-writer`, with
+  `cancel-in-progress: false` and `queue: max`. Completed checks are immutable:
+  duplicate, delayed or out-of-order setup/recovery cannot reopen them or
+  overwrite a newer attempt. Queue saturation beyond GitHub's 100 pending
+  jobs is visible cancellation and incomplete validation, never success.
+- **Orphans and cancellation.** The existing bounded first-parent/range and
+  earlier-PR-head reconciliation remains a backstop. New announce/setup
+  output carries the stable `Lifecycle protocol: terminal-native-v1.`
+  annotation; these main rows defer to native terminal recovery, because a
+  queued custom state cannot establish physical execution state. Older rows,
+  including generic/exact executor URLs, close as `neutral` with execution
+  metadata explicitly unavailable. Completion of the bench
+  workflow also starts the short trusted
+  `.github/workflows/9700x-lifecycle.yml` recovery workflow; a non-successful
+  main request completion starts it even when no benchmark executor follows.
+  Thus the final cancelled request is reconciled without waiting for a later
+  request. Recovery uses `tools/bench_direct/lifecycle.c` with
+  `recover RUN ATTEMPT` and re-reads that exact attempt's API records. For an
+  unresolved owned check, a non-successful source request takes precedence
+  over the executor outcome: cancelled is `cancelled`, skipped is `skipped`,
+  and an unpublished success or failure is `failure`. Recovery never creates
+  a successful measurement; successful publication still requires the
+  existing evidence validator. Unavailable provenance/API records are
+  reported as unavailable, never as a pass. No host job is started and the
+  9700X receives no publication credential.
+
+  If a callback failed or ran before a controller repair landed, an owner can
+  dispatch the same lifecycle workflow on `main` with the original completed
+  `run_id` and exact `run_attempt`. Choose the benchmark executor ID, or the
+  main request ID if it ended before an executor existed. Both decimal inputs
+  must be positive. Only `davidgmbb` (actor ID 39247043), also the triggering
+  actor, can run this hosted replay on `refs/heads/main`. Checkout is pinned to
+  that dispatch's trusted `github.sha`; re-running an old callback alone keeps
+  its old controller revision. The native controller re-reads the selected
+  terminal attempt and its original request, then requires the same
+  repository, workflow path, source head, trusted executor title, app and
+  external marker before closing an unfinished check. Completed checks remain
+  immutable. The replay shares the existing short writer queue, has the same
+  60-request/180-second controller bounds and five-minute job deadline, and
+  retains separate recovery provenance and costs in both logs and JSONL.
+  Pipeline failure remains a failed job. It never dispatches work,
+  retries measurement, chooses a head, or promotes bookkeeping to success.
+- **Disabled sampling research recovery.** The native lifecycle controller
+  also closes an already admitted `9700X compiler sampling research` check
+  after its exact trusted executor finishes without validated publication.
+  It requires the owner's same-repository pull-request source, request and
+  executor attempts both `1`, the separate app-15368 research name and
+  `buster-main-sampling-v1` marker, a 64-character lowercase hexadecimal campaign digest, and
+  the bounded phase/packet identity (`acquire:0`, `pilot:0..2`,
+  `confirm:0..39`). Its unique `sampling-terminal-native-v1` protocol,
+  original request line and exact executor line must agree; conflicting or
+  duplicate joins are rejected. Both the exact executor URL and GitHub's
+  canonical `/runs/<same-check-id>` URL preserve that ownership.
+  The pre-existing check is the trusted publisher's native-admission
+  boundary; recovery never admits a selector, recreates a missing research
+  row or validates packet evidence. It records incomplete, unqualified
+  bookkeeping with the routine profile disabled, using `cancelled` for
+  cancellation and `failure` for other unpublished outcomes. Published
+  terminal rows stay immutable. This is separate from the ordinary compiler
+  benchmark check and cannot produce `Valid unqualified sampling packet`
+  or a successful measurement. The same bounded pass and hosted writer
+  queue apply, with no physical work. Sampling job observations identify
+  `Sampling qualification packet` as physical; queue and publisher jobs
+  remain hosted control.
+- **Disabled preparation research recovery.** The same controller separately
+  recognizes only `9700X compiler preparation research` from app 15368 and
+  `buster-compiler-preparation-v1:PLAN_SHA:qualify:0:REQUEST:EXECUTOR:1`,
+  with a 64-character lowercase hexadecimal plan digest. The unique
+  `preparation-terminal-native-v1` protocol and canonical Request/Workflow
+  attempt-1 lines must agree with the owner's exact source and completed
+  trusted executor. Sampling names, markers or protocols cannot authorize a
+  preparation write, and the reverse is also rejected. This contract closes
+  only pre-existing admitted preparation bookkeeping as
+  `Incomplete unqualified preparation research`, `cancelled` or `failure`,
+  with qualification unqualified and the routine profile disabled. It cannot
+  create a missing research row, validate preparation evidence or overwrite
+  a terminal result. The same request/time/writer bounds apply. Native Actions
+  identifies `Compiler preparation qualification` as physical and its queue
+  and publisher as hosted control; recovery starts no work.
 - **Commit report.** `comment-compiler`, the only bench job with
   `contents: write` (the permission of the commit-comment API), upserts one
   general comment on the main commit with `compiler_comment.py`. It downloads
@@ -278,6 +401,31 @@ request's verified head, never the trusted harness revision `github.sha`.
   measurement run and trusted harness, and the recovery run separately as a
   publication.
 
+### Lifecycle cost observations
+
+Keep control bookkeeping separate from physical measurements. Setup logs
+record `api_requests` and `control_execution_seconds`; native recovery pass
+records additionally expose `api_retries`, `api_failures`, `closed`,
+`already_terminal`, `other_executor` and `unavailable`.
+
+Per-job JSONL observations use schema `buster-9700x-lifecycle-cost-v1`, role
+`hosted-control` or `physical`, and separate `queue_delay_seconds` and
+`execution_seconds` fields. Derive them from matching Actions job records:
+
+| Quantity | Interval |
+| --- | --- |
+| Hosted control queue delay | Control job `created_at` to `started_at` |
+| Hosted control execution | Control job `started_at` to `completed_at` |
+| Physical job queue delay | `compare` / `compare-pull` `created_at` to `started_at` |
+| Physical occupancy | Physical job `started_at` to `completed_at` |
+
+Name the original request and executor run/attempt beside each observation;
+recovery has its own hosted Actions job record. Missing timestamps are `null`
+(unavailable), never zero. Physical occupancy includes preparation,
+measurement and export; report retained preparation/timed-phase observations
+separately and do not add them to that occupancy. These are per-attempt costs,
+not proof of a repository-wide speedup or of performance acceptance.
+
 ## Administrator steps
 
 None of these can be performed by a pull request.
@@ -304,3 +452,16 @@ None of these can be performed by a pull request.
 Leftovers of the removed service that only an administrator can delete: the
 `benchmark-9700x` environment, the Actions requester policy that named
 `9700x-service-dispatch.yml`, and the variable `BENCH_SERVICE_DISPATCH_ENABLED`.
+
+## Disabled sampling research route
+
+The same workflow has separate hosted queue/publication jobs and a tokenless
+`sampling` job for #3212's explicitly versioned acquisition/pilot/confirm
+selectors. Owner numeric identity, source repository, first request/executor
+attempt and every-parent freshness remain required. Current trusted policy's
+disabled allowlist is checked natively before physical assignment; the frozen
+measurement harness is pinned independently. Historical request provenance
+uses associated old-commit membership and its pull number, because that pull's
+live head may advance between packets. The native once-only ledger and trusted
+GitHub attempt history retain cancellations and charge whole physical job time.
+See the [predeclared sampling contract](../../docs/compiler-main-sampling.md).

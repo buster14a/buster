@@ -78,13 +78,25 @@ def run_identity(run, run_id, sha, event, branch):
 
 
 def unique_row(payload, field):
-    # Exactly one source run and one policy job are permitted. A capped or
-    # incomplete page cannot prove uniqueness; do not silently filter it.
-    require(isinstance(payload, dict) and type(payload.get("total_count")) is int and
-            payload["total_count"] == 1, "missing or ambiguous " + field)
+    require(isinstance(payload, dict) and type(payload.get("total_count")) is int,
+            "missing or ambiguous " + field)
     rows = payload.get(field)
-    require(isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict),
-            "incomplete " + field)
+    require(isinstance(rows, list) and len(rows) == payload["total_count"] and
+            all(isinstance(row, dict) for row in rows), "incomplete " + field)
+    # The only additional job allowed is exact-source trusted planning. It is
+    # bookkeeping, never a replacement for freshly executed policy steps.
+    if field == "jobs" and len(rows) == 2:
+        planners = [row for row in rows if row.get("name") == "No-code plan / Classify no-code changes"]
+        policies = [row for row in rows if row.get("name") == JOB_NAME]
+        require(len(planners) == len(policies) == 1, "unexpected policy job inventory")
+        planner, policy = planners[0], policies[0]
+        require(planner.get("status") == "completed" and planner.get("conclusion") == "success" and
+                positive_int(planner.get("id")) and positive_int(planner.get("runner_id")) and
+                all(planner.get(key) == policy.get(key) for key in
+                    ("run_id", "run_attempt", "head_sha", "head_branch", "workflow_name")),
+                "invalid policy planner identity")
+        rows = policies
+    require(len(rows) == 1, "missing or ambiguous " + field)
     return rows[0]
 
 

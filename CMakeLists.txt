@@ -1093,7 +1093,7 @@ buster_register_module(integer "${BUSTER_SOURCE_DIR}/integer${COMMON_EXTENSION}"
 buster_register_module(float "${BUSTER_SOURCE_DIR}/float${COMMON_EXTENSION}")
 buster_register_module(file "${BUSTER_SOURCE_DIR}/file${COMMON_EXTENSION}")
 buster_register_module(compiler_c_frontend
-    "${BUSTER_SOURCE_DIR}/compiler/frontend/c/c_source${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/compiler/frontend/c/c_parse${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/compiler/frontend/c/c_gen${COMMON_EXTENSION}")
+    "${BUSTER_SOURCE_DIR}/compiler/frontend/c/c_source${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/compiler/frontend/c/c_parse${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/compiler/frontend/c/c_ast_types${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/compiler/frontend/c/c_ast${COMMON_EXTENSION};${BUSTER_SOURCE_DIR}/compiler/frontend/c/c_gen${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_encoding "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_encoding${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_exact_bridge "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_exact_bridge${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_control_semantics "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_control_semantics${COMMON_EXTENSION}")
@@ -1162,6 +1162,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/image_test.c
     src/buster/tests/compiler/metamorphic/metamorphic_test.c
     src/buster/tests/compiler/frontend/c/c_test.c
+    src/buster/tests/compiler/frontend/c/c_ast_test.c
     src/buster/tests/compiler/frontend/c/once_test.c
     src/buster/tests/compiler/frontend/c/type_layout_test.c
     src/buster/tests/compiler/frontend/c/macro_conditional_test.c
@@ -1229,6 +1230,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/codegen/ebpf_test_vm.h
     src/buster/tests/compiler/codegen/ebpf_call_test_internal.h
     src/buster/tests/compiler/frontend/c/c_test.h
+    src/buster/tests/compiler/frontend/c/c_ast_test.h
     src/buster/tests/compiler/frontend/c/once_test.h
     src/buster/tests/compiler/frontend/c/type_layout_test.h
     src/buster/tests/compiler/frontend/c/macro_conditional_test.h

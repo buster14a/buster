@@ -1,0 +1,32 @@
+{
+  "base": "8ea54465a2309f95bcb160143ce4804e05a8dbc8",
+  "command": "build/issue3170-clang21-driver-20261009 source_size --rev HEAD --base 8ea54465a2309f95bcb160143ce4804e05a8dbc8",
+  "driver": {
+    "compiler": "Ubuntu clang 21.1.8",
+    "path_at_execution": "build/issue3170-clang21-driver-20261009",
+    "provenance_file": "source-size-driver-provenance-c183.txt",
+    "provenance_sha256": "d92ad13ce7b8d18dbe81afb840c5942315babf38d5684ea7efd879c1b8d861aa",
+    "sha256": "d89904948069caaa1ed9b8aa427f386c9ac4310596b4b768ae81be0ead7d65c1",
+    "source_revision": "c1831b7abf89d63cea5c1b285761a840d1738369",
+    "source_tree": "f295f3d4ed5e8ea981d87c9e2c61995d6c2906f5"
+  },
+  "result": {
+    "baseline_refreshed": false,
+    "build_growth_acknowledged_by": "7a75db7c21ce7623c27d4f6ea2826ccc83c8bc8f",
+    "build_growth_bytes": 256070,
+    "production_growth_bytes": 4992,
+    "production_limit_bytes": 32768,
+    "status": "pass"
+  },
+  "result_file": "source-size-local-4a5e-vs-8ea.log",
+  "result_sha256": "84fdfbc13342cd166ac6c61203fbf12e9d9f9618c342b6abebfc2ee0b4b083b9",
+  "revision": "4a5e2e5aa55624eec920244eb0e8ada86aa7d073",
+  "schema": "issue3130-source-size-provenance-v1",
+  "source_size_entrypoint_inputs": {
+    "build.c_git_blob": "937d7c9e7a58752e82078b8cecfb0069f66d045a",
+    "matches_driver_source_bytes": true,
+    "scope": "This run is a source inventory report; it is not a build of the integrated source.",
+    "tools/source_size.c_git_blob": "9e17418af2d91b1c91177ddb9d2edffe34e3663e"
+  },
+  "tree": "5ad874305f3665e14c1fa61b1c5417091ed4425c"
+}

@@ -242,6 +242,63 @@ incomplete. The collector must not mark those unknown fields complete to obtain
 a signal. This is a remaining delivery/acceptance boundary for #2824, rather
 than a claim that the synthetic detector proves live cohort qualification.
 
+## Merge-queue step-change alarm (#3098)
+
+The scheduled `step-change` job in
+[ci-timing-history.yml](../.github/workflows/ci-timing-history.yml) runs
+`python3 tools/github_ci_time.py step-change`. It catches large, sustained
+critical-path regressions quickly. It does not replace the cohort policy above,
+which #2824 owns.
+
+It reads the 20 newest successful first-attempt `merge_group` runs of
+`Buster CI` and the duration (`completed_at - started_at`) of each successful
+job in the current `require-jobs` inventory. For each job, it compares the
+median of the newest 10 runs with the median of the preceding 10. A job is
+flagged only when its median rose by more than 30% **and** by more than 180
+seconds. Improvements, small jobs and short series do not raise an alert;
+series with too few runs are listed as insufficient.
+
+Each finding names:
+- the job and both medians;
+- the first slow run and its head SHA;
+- the last fast run.
+
+The first slow run is the split of the 20-run series that minimizes absolute
+deviation from each side's median, so an isolated slow run does not move it. It
+identifies the boundary, not the cause.
+
+With `--publish-issue`, the job opens or updates one tracking issue. That issue
+is created by `github-actions[bot]` and carries a
+`<!-- buster-ci-step-change v1 -->` marker. A newly flagged job and first slow
+run also adds a comment. A quiet window changes nothing: close the issue once the
+change is explained, and a later step change opens a new one.
+
+The job has `actions: read` and `issues: write`. It is advisory, adds no
+required check, and never gates merges. Deterministic counter gating is #3094.
+
+Replay offline without network access:
+
+~~~sh
+python3 tools/github_ci_time.py step-change \
+  --input tools/fixtures/step_change_2026_10_07.json
+~~~
+
+The fixture records the October 7 incident from the REST API. Linux x86-64
+release went from a 707 s median to 1595.5 s at merge_group run 37667271117
+(head `cc2f84737b`); the last fast run was 37654113058. macOS AArch64 and
+Windows x86-64 release moved at the same run. `--window`, `--min-ratio` and
+`--min-seconds` override the defaults for investigation only; the scheduled
+policy is the default. `StepChangeTests` in
+[github_ci_time_test.py](../tools/github_ci_time_test.py) covers the following:
+- the recorded event;
+- the threshold edges;
+- outliers;
+- input ordering;
+- insufficient series;
+- malformed input;
+- collection filtering;
+- single-issue publication.
+
 ## Validation and remaining acceptance
 
 Native synthetic controls cover strict JSON/Unicode/depth/duplicate/finite-value

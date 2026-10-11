@@ -19,11 +19,17 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  no_code_plan:
+    name: No-code plan
+    if: ${{ github.server_url == 'https://github.com' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    uses: ./.github/workflows/ci-no-code-plan.yml
+
   # The macOS leg lives in throughput-harness-macos.yml with a path filter
   # (#1825), so the Linux comparison below never waits for a macOS runner.
   # Keep its Unix harness step identical to this one.
   harness:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    needs: no_code_plan
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true') }}
     strategy:
       fail-fast: false
       matrix:
@@ -31,10 +37,22 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ${{ matrix.os }}
+          matrix-index: ${{ strategy.job-index }}
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Native harness tests (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -81,6 +99,12 @@ jobs:
           mkdir -p build
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build
           ./build/build bench_throughput self-test --sanitize
+      - name: Retain machine records in existing evidence
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: build/throughput-tool-tests
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -94,11 +118,16 @@ jobs:
           if-no-files-found: warn
 
   regression-guard:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true') }}
     runs-on: ubuntu-26.04
-    needs: harness
+    needs: [harness, no_code_plan]
     timeout-minutes: 35
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       # Neither fork code nor compiler output receives credentials or a shared
       # cache. Both compilers are built sequentially, before any measurement.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -106,11 +135,23 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha || inputs.baseline_ref || github.sha }}
           path: baseline
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: baseline
+          source-repository: ${{ github.repository }}
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: candidate
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate
+          source-repository: ${{ github.repository }}
       - name: Record checked-out revisions
         shell: bash
         run: |
@@ -134,6 +175,12 @@ jobs:
           else
             printf 'Benchmark incomplete. Inspect the build and compiler logs; no performance verdict was produced.\n' >> "$GITHUB_STEP_SUMMARY"
           fi
+      - name: Retain machine records in existing evidence
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: candidate/build/throughput-ci-results
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -148,19 +195,30 @@ jobs:
           if-no-files-found: warn
 
   direct-ssa-census:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true') }}
     runs-on: ubuntu-26.04
-    needs: harness
+    needs: [harness, no_code_plan]
     timeout-minutes: 35
     env:
       BUSTER_TEST_JOBS: '2'
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       # Diagnostic-only compiler, isolated from the uninstrumented timing job.
       # #497's registered geometric work budgets are compiled out otherwise.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Install existing Linux linker dependency
         shell: bash
         run: |
@@ -226,6 +284,12 @@ jobs:
           REFERENCE_RESULT: ${{ steps.reference.outcome }}
         run: |
           printf '## Direct-SSA diagnostic census\n\nRegistered tests: **%s**. Direct SSA: **%s**. Shared local promotion: **%s**.\n\nArtifacts retain source metrics, raw allocation reports, compiler/input identities and failures. This instrumented job is not a timing comparison, a sanitizer or self-host gate, or dedicated Ryzen 9700X performance acceptance for #447.\n' "$TEST_RESULT" "$DIRECT_RESULT" "$REFERENCE_RESULT" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain machine records in existing evidence
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: direct-ssa-census-evidence
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

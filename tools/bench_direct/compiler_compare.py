@@ -29,7 +29,8 @@ and timings, and is written even when a step fails. The candidate's build runs
 as the runner account before measurement, so the receipt is evidence produced
 under the direct path's owner-only trust boundary, not a sealed result.
 
-Map: queue_head (pull-mode supersession), build (one ide), toolchain, export_tree (bounded evidence export), collect_evidence,
+Map: queue_head (pull-mode supersession), build (one ide), toolchain, export_tree (bounded evidence export),
+read_exported_json (classification reads the export, #2929), collect_evidence,
 measure_throughput (corpus leg), scaling_requested and measure_scaling (scaling leg),
 main. Validity rules live in compiler_receipt.classify.
 """
@@ -42,6 +43,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import socket
@@ -52,15 +54,29 @@ import time
 from pathlib import Path
 
 from compiler_github import ARTIFACT_LIMIT, RECONCILE_DEPTH
-from compiler_receipt import (IDENTITY_KEYS, MODES, PROFILE, RECEIPT_SCHEMA, SCALING_PROFILE, SCALING_REQUEST, SHA,
-                              THROUGHPUT_PROFILE, classify, classify_scaling, classify_throughput, dumps, host_problem,
-                              render, scaling_digest, throughput_digest)
+from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE_PROFILE, INLINE_ACCEPTANCE_REQUEST_LINE,
+                              INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUEST_LINE,
+                              ANALYZER_REQUEST_LINES,
+                              ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, MAIN40_PROFILE, MAIN_PROFILES, named_main_profile, RECEIPT_SCHEMA, SCALING_PROFILE,
+                              SCALING_REQUEST, SHA, THROUGHPUT_PROFILE, classify, classify_scaling,
+                              classify_throughput, classify_throughput_exit, dumps, host_problem, inline_acceptance_requested,
+                              render, scaling_digest, throughput_digest, validate_inline_acceptance,
+                              analyzer_bootstrap_provenance, analyzer_profile_summary)
 from compiler_receipt import observed_cpu_model as cpu_model
 
 BUILD_TIMEOUT_SECONDS = 1800
 LAB_TIMEOUT_SECONDS = 3000
 THROUGHPUT_TIMEOUT_SECONDS = 1800
 SCALING_TIMEOUT_SECONDS = 1200
+INLINE_ACCEPTANCE_TIMEOUT_SECONDS = 3 * 60 * 60
+ANALYZER_DRIVER_BUILD_TIMEOUT_SECONDS = 600
+ANALYZER_GENERATE_TIMEOUT_SECONDS = 900
+ANALYZER_HELPER_TIMEOUT_SECONDS = 76 * 60
+ANALYZER_SETUP_BUDGET_SECONDS = 8 * 60
+ANALYZER_PROFILE_BUDGET_SECONDS = 85 * 60
+ANALYZER_POSTPROCESS_RESERVE_SECONDS = 2 * 60
+ANALYZER_RESOURCE_FILE_LIMIT = 16384
+ANALYZER_RESOURCE_BYTE_LIMIT = 256 * 1024 * 1024
 GIT_TIMEOUT_SECONDS = 120
 EVIDENCE_FILE_LIMIT = 32 * 1024 * 1024
 # A required JSON member must stay within the publisher's per-member read limit
@@ -128,6 +144,271 @@ def reap_group(group: int) -> bool:
     return not group_members(group)
 
 
+
+OWNED_PHASE_CONTEXT = None
+
+
+class OwnedPhaseFailed(RuntimeError):
+    """A contained snapshot phase failed; stop all later physical or destructive work."""
+
+
+class NativePhaseContext:
+    """Minimal direct bridge to the trusted native owner; process-tree policy stays in C."""
+    def __init__(self, driver: Path, work: Path, evidence: Path, receipt: dict, *, utility: bool = False, owned_preflight: bool = False, main_owned: bool = False):
+        from compiler_owned_phase import POPULATION_SCHEMA, UTILITY_POPULATION_SCHEMA, MAIN_POPULATION_SCHEMA
+        if type(utility) is not bool or type(owned_preflight) is not bool or type(main_owned) is not bool:
+            raise ValueError("native ownership route flags must be boolean")
+        if utility and main_owned:
+            raise ValueError("native ownership routes are mutually exclusive")
+        if main_owned and receipt.get("mode") != "main":
+            raise ValueError("supported native ownership requires main mode")
+        self.utility, self.main_owned = utility, main_owned
+        owned_preflight = owned_preflight or utility or main_owned
+        self.owned_preflight = owned_preflight
+        self.driver = driver.resolve(strict=True)
+        if not driver.is_absolute() or driver != self.driver or not self.driver.is_relative_to(TRUSTED_ROOT) or \
+                not stat.S_ISREG(self.driver.lstat().st_mode) or not os.access(self.driver, os.X_OK):
+            raise ValueError("snapshot native driver must be a canonical executable in the trusted checkout")
+        relative = self.driver.relative_to(TRUSTED_ROOT).parts
+        if len(relative) != 5 or relative[:3] != (".cache", "bootstrap-driver", "posix") or \
+                not re.fullmatch(r"[a-f0-9]{64}", relative[3]) or not re.fullmatch(r"build-[A-Za-z0-9-]+", relative[4]):
+            raise ValueError("snapshot native driver must be the exact trusted POSIX bootstrap cache artifact")
+        self.driver_hash = sha256(self.driver)
+        self.bootstrap_marker = Path(str(self.driver) + ".complete")
+        from compiler_owned_phase import sha
+        self.bootstrap_hash = sha(bounded_owned_member(self.bootstrap_marker))
+        self.work, self.evidence, self.receipt = work, evidence, receipt
+        self.directory = evidence / "owned-phases"
+        self.directory.mkdir()
+        self.stopped = False
+        self.receipt["phase_ownership"] = {"schema": MAIN_POPULATION_SCHEMA if main_owned else UTILITY_POPULATION_SCHEMA if utility else POPULATION_SCHEMA, "state": "pending",
+                                          "trusted_root": str(TRUSTED_ROOT), "directory": str(self.directory.resolve()),
+                                          "trusted_revision": receipt["identity"]["trusted_revision"] if owned_preflight else git(TRUSTED_ROOT, "rev-parse", "HEAD"),
+                                          "trusted_tree": None if owned_preflight else git(TRUSTED_ROOT, "rev-parse", "HEAD^{tree}"),
+                                          "driver_sha256": self.driver_hash,
+                                          "driver_path": str(self.driver), "bootstrap_marker_sha256": self.bootstrap_hash,
+                                          "work_root": str(work.resolve()), "evidence_root": str(evidence.resolve()),
+                                          "python_path": sys.executable, "owned_preflight": owned_preflight, "count": 0, "phases": []}
+        if owned_preflight:
+            # Even the context's own source observations are individually owned;
+            # a failed initialization never reaches a later metadata/build child.
+            revision = self.execute(["git", "-C", str(TRUSTED_ROOT), "rev-parse", "HEAD"],
+                                    TRUSTED_ROOT, None, GIT_TIMEOUT_SECONDS, kind="capture").stdout.decode().strip()
+            if revision != receipt["identity"]["trusted_revision"]:
+                self.stopped = True
+                self.receipt["phase_ownership"]["state"] = "failed"
+                self.receipt["work_retained"] = str(work)
+                raise OwnedPhaseFailed("Utility trusted source revision differs from the admitted identity")
+            tree = self.execute(["git", "-C", str(TRUSTED_ROOT), "rev-parse", "HEAD^{tree}"],
+                                TRUSTED_ROOT, None, GIT_TIMEOUT_SECONDS, kind="capture").stdout.decode().strip()
+            if not re.fullmatch(r"[a-f0-9]{40}", tree):
+                self.stopped = True
+                self.receipt["phase_ownership"]["state"] = "failed"
+                self.receipt["work_retained"] = str(work)
+                raise OwnedPhaseFailed("Utility trusted source tree is malformed")
+            self.receipt["phase_ownership"]["trusted_tree"] = tree
+
+    def execute(self, argv: list[str], cwd: Path, log: Path | None, timeout: int,
+                *, kind: str = "run", allow_exit_failure: bool = False,
+                exit_policy: str = "zero") -> subprocess.CompletedProcess:
+        # Prelaunch and proof/log publication failures latch just like native
+        # failure: even callers that catch OSError cannot admit another child.
+        try:
+            result = self._execute(argv, cwd, log, timeout, kind=kind, allow_exit_failure=allow_exit_failure,
+                                   exit_policy=exit_policy)
+        except BaseException:
+            self.stopped = True
+            self.receipt["phase_ownership"]["state"] = "failed"
+            self.receipt["work_retained"] = str(self.work)
+            raise
+        return result
+
+    def _execute(self, argv: list[str], cwd: Path, log: Path | None, timeout: int,
+                 *, kind: str = "run", allow_exit_failure: bool = False,
+                 exit_policy: str = "zero") -> subprocess.CompletedProcess:
+        from compiler_owned_phase import PHASE_LIMIT, read_record, sha, validate_record, validate_bootstrap
+        if self.stopped:
+            raise OwnedPhaseFailed("snapshot native owner already stopped; no later child is admitted")
+        corpus = exit_policy == "corpus-report-only-v1"
+        if exit_policy not in ("zero", "corpus-report-only-v1") or (corpus and
+                (kind != "run" or allow_exit_failure or self.receipt.get("phase") != "throughput")):
+            raise OwnedPhaseFailed("snapshot nonzero run policy is restricted to the ordinary corpus")
+        if type(timeout) is not int or not 0 < timeout <= 10800 or not argv or \
+                any(not isinstance(item, str) or not item or any(byte in item for byte in ("\0", "\n", "\r", "\t"))
+                    for item in argv):
+            self.stopped = True
+            raise OwnedPhaseFailed("snapshot native phase argv/timeout unsupported")
+        if sha256(self.driver) != self.driver_hash:
+            self.stopped = True
+            raise OwnedPhaseFailed("trusted native phase executable changed")
+        if sha(bounded_owned_member(self.bootstrap_marker)) != self.bootstrap_hash:
+            raise OwnedPhaseFailed("trusted native bootstrap marker changed")
+        population = self.receipt["phase_ownership"]
+        if getattr(self, "owned_preflight", False) and kind == "capture":
+            from compiler_owned_phase import preflight_capture_recipe
+            if preflight_capture_recipe(self.receipt, population, argv) != (timeout, allow_exit_failure) or \
+                    str(cwd.resolve(strict=True)) != str(TRUSTED_ROOT) or self.receipt.get("phase", "preflight") != "preflight":
+                raise OwnedPhaseFailed("owned preflight capture is not an exact read-only Git/version probe")
+        ordinal = len(population["phases"]) + 1
+        if ordinal > PHASE_LIMIT:
+            self.stopped = True
+            raise OwnedPhaseFailed("snapshot native phase count exceeds its fixed bound")
+        root = cwd.resolve(strict=True)
+        if corpus:
+            candidate = population.get("candidate_root")
+            bins = population.get("binaries_root")
+            work = population.get("work_root")
+            identity = self.receipt.get("identity", {})
+            legacy_utility = (getattr(self, "utility", False) or getattr(self, "main_owned", False)) and self.receipt.get("preparation_policy") == "legacy-rebuild"
+            prefix = ["./build.sh", "bench_throughput"] if legacy_utility else [str(candidate) + "/build/throughput-tools/throughput"]
+            expected = [*prefix, "run",
+                "--baseline", str(bins) + "/ide-base", "--candidate", str(bins) + "/ide-cand",
+                "--output", str(work) + "/throughput", "--baseline-id", identity.get("base"),
+                "--candidate-id", identity.get("head"), *THROUGHPUT_PROFILE["arguments"]]
+            if argv != expected or str(root) != candidate or timeout != THROUGHPUT_TIMEOUT_SECONDS:
+                raise OwnedPhaseFailed("ordinary corpus exit policy command/root/profile differs from the fixed route")
+        path = self.directory / f"{ordinal:04d}.json"
+        row = {"ordinal": ordinal, "file": path.name, "phase": self.receipt.get("phase", "preflight"),
+               "kind": kind, "argv": list(argv), "cwd": str(root), "timeout": timeout,
+               "allow_exit_failure": allow_exit_failure, "bridge_wall_us": 0, "receipt_sha256": ""}
+        if corpus:
+            row["exit_policy"] = exit_policy
+        population["phases"].append(row)
+        population["count"] = ordinal
+        checkpoint_problem = checkpoint(self.receipt, self.evidence, row["phase"])
+        if checkpoint_problem:
+            raise OwnedPhaseFailed(checkpoint_problem)
+        started = time.monotonic_ns()
+        process = None
+        interrupted = None
+        uncertain = False
+        wrapper_status = None
+        try:
+            process = subprocess.Popen([str(self.driver), "compiler_closure", "owned-phase", str(path), str(root),
+                                        str(timeout), self.driver_hash, self.bootstrap_hash, "--", *argv], cwd=TRUSTED_ROOT,
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                       start_new_session=True)
+            wrapper_status = process.wait(timeout=timeout + 120)
+        except BaseException as error:
+            interrupted = error
+            if process is not None and process.poll() is None:
+                # Popen retains the exact positive PID lease until wait(). Its
+                # send_signal never targets a released group or unrelated PID.
+                try:
+                    process.send_signal(signal.SIGINT if isinstance(error, KeyboardInterrupt) else signal.SIGTERM)
+                    wrapper_status = process.wait(timeout=120)
+                except (OSError, subprocess.TimeoutExpired):
+                    uncertain = True
+            elif process is None:
+                uncertain = True
+        native, stdout, stderr, problem = None, b"", b"", ""
+        try:
+            raw = bounded_owned_member(path)
+            stdout = bounded_owned_member(Path(str(path) + ".stdout"), empty=True)
+            stderr = bounded_owned_member(Path(str(path) + ".stderr"), empty=True)
+            command = bounded_owned_member(Path(str(path) + ".argv"))
+            marker = bounded_owned_member(Path(str(path) + ".bootstrap.complete"))
+            native = read_record(raw)
+            row["receipt_sha256"] = sha(raw)
+            from compiler_owned_phase import command_bytes
+            if command != command_bytes(argv):
+                raise ValueError("native phase saved argv differs from the trusted call")
+            issues = validate_record(native, argv, str(root), timeout, self.driver_hash, stdout, stderr,
+                                     nominal=not (allow_exit_failure or corpus), receipt_path=str(path))
+            issues.extend(validate_bootstrap(native, marker, population))
+            if allow_exit_failure or corpus:
+                issues.extend(validate_owned_capture(native))
+            if getattr(self, "owned_preflight", False) and kind == "capture" and (
+                    not os.WIFEXITED(native.get("exit_status", 0)) or
+                    os.waitstatus_to_exitcode(native["exit_status"]) not in (0, 1)):
+                issues.append("owned preflight probe did not reach its expected clean exit 0/1")
+            if corpus and (not os.WIFEXITED(native.get("exit_status", 0)) or
+                    os.waitstatus_to_exitcode(native["exit_status"]) not in (0, 1)):
+                issues.append("ordinary corpus did not reach exit 0 or report-only exit 1")
+            problem = "; ".join(issues)
+        except (OSError, ValueError, UnicodeError) as error:
+            problem = str(error)
+        if log is not None:
+            with log.open("ab") as stream:
+                stream.write(("$ " + " ".join(argv) + "\n").encode())
+                stream.write(stdout)
+                stream.write(stderr)
+                stream.write(f"\nnative-wrapper-exit={wrapper_status}\n".encode())
+        row["bridge_wall_us"] = (time.monotonic_ns() - started) // 1000
+        cleanup = isinstance(native, dict) and native.get("cleanup_proven") is True and \
+                  native.get("reservation_retained") == 0 and native.get("ownership_lost") == 0
+        if uncertain or not cleanup:
+            self.stopped = True
+            population["state"] = "failed"
+            self.receipt["cleanup_proven"] = False
+            self.receipt["work_retained"] = str(self.work)
+            (self.evidence / "cleanup-uncertain").write_text(
+                "Native snapshot phase owner cleanup unproven; retain work and admit no next phase.\n", encoding="utf-8")
+            checkpoint(self.receipt, self.evidence, row["phase"])
+            raise ClosureCleanupUncertain("snapshot native phase cleanup missing or uncertain: " + problem)
+        if interrupted is not None or problem or wrapper_status not in (0, 1) or \
+                (not (allow_exit_failure or corpus) and wrapper_status != 0):
+            self.stopped = True
+            population["state"] = "failed"
+            checkpoint(self.receipt, self.evidence, row["phase"])
+            raise OwnedPhaseFailed("snapshot native phase failed/cancelled: " +
+                                   (problem or repr(interrupted) or str(wrapper_status)))
+        return subprocess.CompletedProcess(argv, os.waitstatus_to_exitcode(native["exit_status"]), stdout, stderr)
+
+    def finish(self) -> None:
+        population = self.receipt["phase_ownership"]
+        population["state"] = "failed" if self.stopped else "complete"
+
+
+def bounded_owned_member(path: Path, *, empty: bool = False) -> bytes:
+    with os.fdopen(os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > EVIDENCE_MEMBER_LIMIT or (not empty and before.st_size == 0):
+            raise ValueError("native snapshot phase member missing, oversized or irregular")
+        raw = stream.read(EVIDENCE_MEMBER_LIMIT + 1)
+        after = os.fstat(stream.fileno())
+        if len(raw) != before.st_size or before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
+            raise ValueError("native snapshot phase member changed while being read")
+        return raw
+
+
+def validate_owned_capture(native: dict) -> list[str]:
+    """A read-only probe may expect a nonzero exit; timeouts/cancellation/orphans always stop."""
+    reasons = []
+    status = native.get("exit_status")
+    if type(status) is not int or not 0 <= status <= 65535 or not os.WIFEXITED(status) or \
+            native.get("state") != ("complete" if status == 0 else "failed") or \
+            any(native.get(key) != 0 for key in ("timed_out", "cancelled", "capture_failed", "output_truncated",
+                                                "cleanup_signalled", "cleanup_reaped", "tree_cleanup_failed")):
+        reasons.append("native snapshot probe did not reach a clean terminal exit")
+    return reasons
+
+
+def captured_run(argv: list[str], **options) -> subprocess.CompletedProcess:
+    """Historical probes stay unchanged; snapshot measurement probes use the same native owner."""
+    if OWNED_PHASE_CONTEXT is None:
+        return subprocess.run(argv, **options)
+    context = OWNED_PHASE_CONTEXT
+    try:
+        if any(key not in ("cwd", "capture_output", "text", "timeout", "check") for key in options):
+            raise OwnedPhaseFailed("snapshot probe has unsupported process options")
+        default_cwd = TRUSTED_ROOT if getattr(context, "owned_preflight", False) else os.getcwd()
+        result = OWNED_PHASE_CONTEXT.execute(argv, Path(options.get("cwd") or default_cwd), None,
+                                            options.get("timeout", GIT_TIMEOUT_SECONDS), kind="capture",
+                                            allow_exit_failure=not options.get("check", False))
+        if options.get("text"):
+            result.stdout = result.stdout.decode()
+            result.stderr = result.stderr.decode()
+        if options.get("check") and result.returncode:
+            raise subprocess.CalledProcessError(result.returncode, argv, result.stdout, result.stderr)
+    except BaseException:
+        context.stopped = True
+        context.receipt["phase_ownership"]["state"] = "failed"
+        context.receipt["work_retained"] = str(context.work)
+        raise
+    return result
+
+
 def run(argv: list[str], cwd: Path, log: Path, timeout: int) -> int:
     """Run argv in its own process group with output appended to log; returns the exit status.
 
@@ -136,6 +417,8 @@ def run(argv: list[str], cwd: Path, log: Path, timeout: int) -> int:
     scratch/evidence during the next phase. The original status is logged first; if the group cannot be
     proven empty the status is CLEANUP_STATUS (125) so no later measurement begins.
     """
+    if OWNED_PHASE_CONTEXT is not None:
+        return OWNED_PHASE_CONTEXT.execute(argv, cwd, log, timeout).returncode
     with log.open("ab") as stream:
         stream.write(("$ " + " ".join(argv) + "\n").encode())
         stream.flush()
@@ -168,7 +451,7 @@ def run(argv: list[str], cwd: Path, log: Path, timeout: int) -> int:
 
 
 def git(candidate: Path, *arguments: str) -> str:
-    return subprocess.run(["git", "-C", str(candidate), *arguments], check=True, capture_output=True,
+    return captured_run(["git", "-C", str(candidate), *arguments], check=True, capture_output=True,
                           text=True, timeout=GIT_TIMEOUT_SECONDS).stdout.strip()
 
 
@@ -177,7 +460,7 @@ def queue_head(repository: str, ref: str) -> str:
     environment = dict(os.environ, GIT_TERMINAL_PROMPT="0")
     head = None
     try:
-        result = subprocess.run(["git", "ls-remote", f"https://github.com/{repository}.git", ref],
+        result = captured_run(["git", "ls-remote", f"https://github.com/{repository}.git", ref],
                                 capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS, env=environment,
                                 check=False)
         if result.returncode == 0:
@@ -200,7 +483,10 @@ def build(candidate: Path, commit: str, log: Path) -> tuple[str, float]:
     """Check out commit and build a tests-off Release ide; returns (problem, seconds)."""
     started = time.monotonic()
     problem = ""
-    status = run(["git", "-C", str(candidate), "checkout", "--quiet", "--detach", commit], candidate, log,
+    checkout = ["git", "-C", str(candidate), "checkout", "--quiet", "--detach", commit]
+    if OWNED_PHASE_CONTEXT is not None:
+        checkout[1:1] = ["-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null"]
+    status = run(checkout, candidate, log,
                  GIT_TIMEOUT_SECONDS)
     for argv in (["./build.sh", "generate", "--cc", "clang", "--no-include-tests"],
                  ["./build.sh", "build", "--config", "Release", "-t", "ide"]):
@@ -220,8 +506,14 @@ def build(candidate: Path, commit: str, log: Path) -> tuple[str, float]:
 def toolchain() -> dict:
     versions = {}
     for tool, flag in TOOLS:
+        if OWNED_PHASE_CONTEXT is not None and shutil.which(tool) is None:
+            from compiler_owned_phase import MANDATORY_VERSION_TOOLS
+            if tool in MANDATORY_VERSION_TOOLS:
+                raise FileNotFoundError(f"owned preflight requires configured tool {tool}")
+            versions[tool] = "NA (FileNotFoundError)"
+            continue
         try:
-            result = subprocess.run([tool, flag], capture_output=True, text=True, timeout=30, check=False)
+            result = captured_run([tool, flag], capture_output=True, text=True, timeout=30, check=False)
             text = (result.stdout + result.stderr).strip().splitlines()
             versions[tool] = text[0] if text else "NA (no output)"
         except (OSError, subprocess.TimeoutExpired) as error:
@@ -330,6 +622,42 @@ def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, 
     return problems, omissions
 
 
+def read_exported_json(path: Path) -> tuple[object, str]:
+    """(document, "") from the exported copy, or (None, why) for anything but a bounded regular JSON file.
+
+    Classification must see the bytes the publisher will see, not the measurement tree they were copied
+    from (#2929), so this reads the evidence member without following a symlink and within
+    EVIDENCE_MEMBER_LIMIT. Every failure is a returned reason, never an exception.
+    """
+    document: object = None
+    problem = ""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            problem = "not a regular file"
+        else:
+            with os.fdopen(os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as reader:
+                data = reader.read(EVIDENCE_MEMBER_LIMIT + 1)
+            if len(data) > EVIDENCE_MEMBER_LIMIT:
+                problem = f"exceeds the {EVIDENCE_MEMBER_LIMIT} byte member limit"
+            else:
+                document = json.loads(data.decode("utf-8"))
+    except (OSError, ValueError, RecursionError) as error:
+        problem = str(error) or error.__class__.__name__
+    return document, problem
+
+
+def read_exported_pair(directory: Path, names: tuple[str, str], label: str) -> tuple[list, list[str]]:
+    """The two named JSON members of an exported evidence directory, and a reason for each unreadable one."""
+    documents: list = []
+    reasons: list[str] = []
+    for name in names:
+        document, problem = read_exported_json(directory / name)
+        documents.append(document)
+        if problem:
+            reasons.append(f"exported evidence {label}/{name} unreadable: {problem}")
+    return documents, reasons
+
+
 def note_omissions(omissions: dict, name: str, found: list) -> None:
     """Record a bounded omission list in the receipt's section so omissions are never silent."""
     if found:
@@ -345,26 +673,44 @@ def collect_evidence(lab: Path, evidence: Path, omissions: dict) -> list[str]:
 
 
 def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, base: str, head: str,
-                       binaries: dict, omissions: dict) -> tuple[list[str], dict]:
-    """Run the corpus on both binaries from the checked-out base; (reasons, receipt section)."""
+                       binaries: dict, omissions: dict, harness: Path | None = None) -> tuple[list[str], dict]:
+    """Run and validate the exported corpus before admitting a later snapshot child."""
     output = work / "throughput"
-    status = run(["./build.sh", "bench_throughput", "run", "--baseline", str(bins / "ide-base"),
-                  "--candidate", str(bins / "ide-cand"), "--output", str(output), "--baseline-id", base,
-                  "--candidate-id", head, *THROUGHPUT_PROFILE["arguments"]],
-                 candidate, evidence / "throughput.log", THROUGHPUT_TIMEOUT_SECONDS)
-    documents = []
-    reasons = [] if status == 0 else [f"bench_throughput run exited {status} (see throughput.log)"]
-    if output.is_dir():
-        problems, found = export_tree(output, evidence / "throughput", evidence, EVIDENCE_IGNORE, THROUGHPUT_REQUIRED)
-        reasons.extend(problems)
-        note_omissions(omissions, "throughput", found)
-    for name in ("summary.json", "metadata.json"):
-        try:
-            documents.append(json.loads((output / name).read_text(encoding="utf-8")))
-        except (OSError, ValueError):
-            documents.append(None)
-    reasons.extend(classify_throughput(documents[0], documents[1], binaries))
-    return reasons, dict(throughput_digest(documents[0]), exit=status)
+    argv = [*([str(harness)] if harness else ["./build.sh", "bench_throughput"]), "run",
+            "--baseline", str(bins / "ide-base"), "--candidate", str(bins / "ide-cand"),
+            "--output", str(output), "--baseline-id", base, "--candidate-id", head,
+            *THROUGHPUT_PROFILE["arguments"]]
+    context = OWNED_PHASE_CONTEXT
+    try:
+        if context is None:
+            status = run(argv, candidate, evidence / "throughput.log", THROUGHPUT_TIMEOUT_SECONDS)
+        else:
+            status = context.execute(argv, candidate, evidence / "throughput.log", THROUGHPUT_TIMEOUT_SECONDS,
+                                     exit_policy="corpus-report-only-v1").returncode
+        reasons = []
+        if output.is_dir():
+            problems, found = export_tree(output, evidence / "throughput", evidence, EVIDENCE_IGNORE, THROUGHPUT_REQUIRED)
+            reasons.extend(problems)
+            note_omissions(omissions, "throughput", found)
+        # Classify the exact exported bytes the hosted publisher will read.
+        documents, unreadable = read_exported_pair(evidence / "throughput", THROUGHPUT_REQUIRED, "throughput")
+        reasons.extend(unreadable)
+        reasons.extend(classify_throughput_exit(status, documents[0], documents[1], binaries))
+        section = dict(throughput_digest(documents[0]), exit=status, exit_policy="corpus-report-only-v1")
+        if context is not None:
+            context.receipt["throughput"] = section
+            if reasons:
+                raise OwnedPhaseFailed("ordinary corpus incomplete: " + "; ".join(reasons))
+            row = context.receipt["phase_ownership"]["phases"][-1]
+            row["corpus_summary_sha256"] = hashlib.sha256(bounded_owned_member(evidence / "throughput/summary.json")).hexdigest()
+            row["corpus_metadata_sha256"] = hashlib.sha256(bounded_owned_member(evidence / "throughput/metadata.json")).hexdigest()
+    except BaseException:
+        if context is not None:
+            context.stopped = True
+            context.receipt["phase_ownership"]["state"] = "failed"
+            context.receipt["work_retained"] = str(context.work)
+        raise
+    return reasons, section
 
 
 SCRATCH_MARKER = ".buster-compiler-compare-scratch"
@@ -434,20 +780,407 @@ def prepare_scratch(directory: Path) -> None:
 def scaling_requested(candidate: Path, base: str, head: str) -> bool:
     """Whether the pull request adds or changes SCALING_REQUEST (it must remain in the head)."""
     changed = git(candidate, "diff", "--name-only", base, head, "--", SCALING_REQUEST)
-    present = subprocess.run(["git", "-C", str(candidate), "cat-file", "-e", f"{head}:{SCALING_REQUEST}"],
+    present = captured_run(["git", "-C", str(candidate), "cat-file", "-e", f"{head}:{SCALING_REQUEST}"],
                              capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode == 0
     return bool(changed) and present
 
 
+def request_selector_count(candidate: Path, revision: str, selector: str) -> int | None:
+    """Selector occurrences in one committed request file; None means git could not prove the blob."""
+    object_name = f"{revision}:{ANALYZER_REQUEST_PATH}"
+    try:
+        commit = captured_run(["git", "-C", str(candidate), "cat-file", "-e", f"{revision}^{{commit}}"],
+                                capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False)
+        if commit.returncode:
+            return None
+        listing = captured_run(["git", "-C", str(candidate), "ls-tree", "-z", revision, "--",
+                                  ANALYZER_REQUEST_PATH], capture_output=True, timeout=GIT_TIMEOUT_SECONDS,
+                                 check=False)
+        if listing.returncode:
+            return None
+        entries = listing.stdout.split(b"\0")
+        if entries[-1:] == [b""]:
+            entries.pop()
+        if not entries:
+            return 0
+        if len(entries) != 1 or b"\t" not in entries[0]:
+            return None
+        metadata, listed_path = entries[0].split(b"\t", 1)
+        fields = metadata.split()
+        if len(fields) != 3 or fields[0] not in (b"100644", b"100755") or fields[1] != b"blob" or \
+                not re.fullmatch(rb"[0-9a-f]{40,64}", fields[2]) or \
+                listed_path != ANALYZER_REQUEST_PATH.encode("utf-8"):
+            return None
+        shown = captured_run(["git", "-C", str(candidate), "show", object_name],
+                               capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False)
+        if shown.returncode:
+            return None
+        # Count exact UTF-8 selector lines from bytes so unrelated malformed
+        # bytes cannot make a newly added request fall back to the legacy profile.
+        return shown.stdout.splitlines().count(selector.encode("utf-8"))
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def request_selector_parent_deltas(candidate: Path, head: str, selector: str) -> list[int] | None:
+    """Return exact current-commit selector-count deltas against each parent, or None if unprovable."""
+    try:
+        parents_line = git(candidate, "rev-list", "--parents", "-n", "1", head).split()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None
+    if not parents_line or parents_line[0] != head or not 1 <= len(parents_line[1:]) <= 2:
+        return None
+    head_count = request_selector_count(candidate, head, selector)
+    if head_count is None:
+        return None
+    parent_counts = [request_selector_count(candidate, parent, selector) for parent in parents_line[1:]]
+    if any(count is None for count in parent_counts):
+        return None
+    return [head_count - count for count in parent_counts if count is not None]
+
+
+def request_selector_added_at_head(candidate: Path, head: str, selector: str) -> bool:
+    """Require one new exact selector occurrence in the current commit versus every parent."""
+    deltas = request_selector_parent_deltas(candidate, head, selector)
+    return deltas is not None and all(delta == 1 for delta in deltas)
+
+
+def analyzer_profile_requested(candidate: Path, head: str) -> bool:
+    """Whether one versioned analyzer selector was freshly added at this head."""
+    selected, _ = analyzer_profile_request_selection(candidate, head)
+    return selected is not None
+
+
+def analyzer_profile_request_selection(candidate: Path, head: str) -> tuple[str | None, str]:
+    """Select one profile only when its exact line is the sole fresh selector at every parent."""
+    deltas = {line: request_selector_parent_deltas(candidate, head, line) for line in ANALYZER_REQUEST_LINES}
+    if any(value is None for value in deltas.values()):
+        return None, "could not prove the analyzer profile selector counts against every head parent"
+    positive = [line for line, values in deltas.items() if any(value > 0 for value in values)]
+    if not positive:
+        return None, ""
+    if len(positive) != 1:
+        return None, "only one versioned analyzer selector may be freshly added at the head"
+    selected = positive[0]
+    selected_deltas = deltas[selected]
+    if selected_deltas is None or any(value != 1 for value in selected_deltas):
+        return None, "analyzer selector must be added exactly once relative to every head parent"
+    for line, values in deltas.items():
+        if line != selected and (values is None or any(value != 0 for value in values)):
+            return None, "the other recognized analyzer selector count must remain unchanged at every head parent"
+    return selected, ""
+
+
+def analyzer_profile_request_status(candidate: Path, head: str) -> tuple[bool, str]:
+    """Compatibility boolean wrapper for callers interested only in selection state."""
+    selected, problem = analyzer_profile_request_selection(candidate, head)
+    return selected is not None, problem
+
+
+def request_selector_increased_at_head(candidate: Path, head: str, selector: str) -> bool:
+    """Detect any new selector occurrence in the current commit versus every parent."""
+    deltas = request_selector_parent_deltas(candidate, head, selector)
+    return deltas is not None and all(delta > 0 for delta in deltas)
+
+
+def analyzer_budget_timeout(deadline: float, maximum: int) -> int:
+    """Whole-second command timeout remaining before a fixed profile deadline."""
+    return max(0, min(maximum, int(deadline - time.monotonic())))
+
+
+def analyzer_source_immutability_problem(candidate: Path) -> str:
+    """Reject tracked edits and non-ignored untracked files left by any analyzer arm."""
+    try:
+        result = captured_run(["git", "-C", str(candidate), "status", "--porcelain=v1",
+                                "--untracked-files=all"], capture_output=True, timeout=GIT_TIMEOUT_SECONDS,
+                               check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return f"candidate source immutability could not be checked: {error}"
+    if result.returncode:
+        return f"candidate source immutability check exited {result.returncode}"
+    if result.stdout:
+        return "analyzer profile left tracked or non-ignored untracked candidate source files"
+    return ""
+
+
+def analyzer_clang_provenance() -> dict:
+    """Bind the analyzer's resolved Clang executable and complete resource-file tree."""
+    command = shutil.which("clang")
+    if not command:
+        raise RuntimeError("clang is not available on PATH")
+    executable = Path(command).resolve(strict=True)
+    if not stat.S_ISREG(os.lstat(executable).st_mode):
+        raise RuntimeError("resolved clang executable is not a regular file")
+    version = captured_run([str(executable), "--version"], capture_output=True, text=True,
+                             timeout=30, check=False)
+    resource = captured_run([str(executable), "-print-resource-dir"], capture_output=True, text=True,
+                              timeout=30, check=False)
+    if version.returncode != 0 or resource.returncode != 0:
+        raise RuntimeError("clang version or resource-directory query failed")
+    resource_directory = Path(resource.stdout.strip()).resolve(strict=True)
+    if not resource_directory.is_dir() or not resource.stdout.strip():
+        raise RuntimeError("clang resource directory is missing or not a directory")
+    resource_digest = hashlib.sha256()
+    resource_bytes = resource_files = 0
+    for directory, names, leaves in os.walk(resource_directory, followlinks=False):
+        base = Path(directory)
+        for name in sorted(names):
+            if (base / name).is_symlink():
+                raise RuntimeError("clang resource directory contains a symlinked subdirectory")
+        for name in sorted(leaves):
+            path = base / name
+            try:
+                info = os.lstat(path)
+                if not stat.S_ISREG(info.st_mode):
+                    raise RuntimeError("clang resource directory contains a non-regular file")
+                if path.is_symlink():
+                    raise RuntimeError("clang resource directory contains a symlinked file")
+                resource_bytes += info.st_size
+                resource_files += 1
+                if resource_bytes > ANALYZER_RESOURCE_BYTE_LIMIT or resource_files > ANALYZER_RESOURCE_FILE_LIMIT:
+                    raise RuntimeError("clang resource directory exceeds its evidence bound")
+                digest = sha256(path)
+                resource_digest.update(path.relative_to(resource_directory).as_posix().encode("utf-8"))
+                resource_digest.update(b"\0")
+                resource_digest.update(str(info.st_size).encode("ascii"))
+                resource_digest.update(b"\0")
+                resource_digest.update(digest.encode("ascii"))
+                resource_digest.update(b"\n")
+            except OSError as error:
+                raise RuntimeError(f"clang resource file could not be bound: {error}") from error
+    if not resource_files:
+        raise RuntimeError("clang resource directory has no regular files")
+    return {"schema": "buster-analyzer-clang-provenance-v1", "path": str(executable),
+            "sha256": sha256(executable), "size_bytes": os.lstat(executable).st_size,
+            "version": (version.stdout + version.stderr).strip()[:4096],
+            "version_sha256": hashlib.sha256((version.stdout + version.stderr).encode()).hexdigest(),
+            "resource_directory": str(resource_directory), "resource_tree_sha256": resource_digest.hexdigest(),
+            "resource_file_count": resource_files, "resource_total_bytes": resource_bytes}
+
+
+def build_analyzer_driver(candidate: Path, commit: str, role: str, analyzer_root: Path,
+                          evidence: Path, receipt: dict, setup_deadline: float) -> tuple[str, Path | None]:
+    """Build and retain one revision's exact native build driver and bootstrap manifest."""
+    started = time.monotonic()
+    log = evidence / f"analyzer-driver-{role}.log"
+    (analyzer_root / "drivers").mkdir(parents=True, exist_ok=True)
+    checkout_timeout = analyzer_budget_timeout(setup_deadline, GIT_TIMEOUT_SECONDS)
+    status = run(["git", "-C", str(candidate), "checkout", "--quiet", "--detach", commit], candidate, log,
+                 checkout_timeout) if checkout_timeout else 124
+    if status == 0:
+        observed = git(candidate, "rev-parse", "HEAD")
+        receipt.setdefault("analyzer_driver_checkouts", {})[role] = observed
+        if observed != commit:
+            status = 1
+            receipt["reasons"].append(f"{role} analyzer build-driver checkout {observed} does not match {commit}")
+        else:
+            (analyzer_root / "drivers" / f"{role}.checkout").write_text(observed + "\n", encoding="ascii")
+    if status == 0:
+        driver_timeout = analyzer_budget_timeout(setup_deadline, ANALYZER_DRIVER_BUILD_TIMEOUT_SECONDS)
+        status = run(["./build.sh", "clang_analyze_benchmark", "--print-executable"], candidate, log,
+                     driver_timeout) if driver_timeout else 124
+    path = None
+    problem = ""
+    if status != 0:
+        problem = f"{role} native analyzer driver build exited {status} (see {log.name})"
+    else:
+        lines = [line.partition(" ")[2].strip() for line in log.read_text(encoding="utf-8", errors="replace").splitlines()
+                 if line.startswith("BUSTER_ANALYZER_DRIVER ")]
+        if len(lines) != 1 or not Path(lines[0]).is_absolute():
+            problem = f"{role} build did not report one absolute native driver path"
+        else:
+            source = Path(lines[0])
+            marker = Path(lines[0] + ".complete")
+            try:
+                source_stat = os.lstat(source)
+                marker_stat = os.lstat(marker)
+                if not stat.S_ISREG(source_stat.st_mode) or not stat.S_ISREG(marker_stat.st_mode):
+                    raise OSError("driver or bootstrap marker is not a regular file")
+                driver_bytes = source.read_bytes()
+                marker_bytes = marker.read_bytes()
+                provenance = analyzer_bootstrap_provenance(driver_bytes, marker_bytes)
+                provenance["source_revision"] = observed
+                target = analyzer_root / "drivers" / f"{role}.driver"
+                target_marker = analyzer_root / "drivers" / f"{role}.complete"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(driver_bytes)
+                target.chmod(0o755)
+                target_marker.write_bytes(marker_bytes)
+                if hashlib.sha256(target.read_bytes()).hexdigest() != provenance["sha256"]:
+                    raise OSError("copied native build driver hash changed")
+                receipt.setdefault("analyzer_driver_provenance", {})[role] = provenance
+                path = target
+            except (OSError, ValueError, UnicodeDecodeError) as error:
+                problem = f"{role} native build-driver provenance is incomplete: {error}"
+    receipt.setdefault("timings", {}).setdefault("analyzer_setup_seconds", {})[f"build_driver_{role}"] = round(
+        time.monotonic() - started, 3)
+    if problem:
+        receipt["reasons"].append(problem)
+    return problem, path
+
+
+def collect_analyzer_files(root: Path) -> dict[str, bytes]:
+    """Read regular, non-symlink analyzer evidence files without following links."""
+    files = {}
+    for directory, names, leaves in os.walk(root, followlinks=False):
+        base = Path(directory)
+        kept = []
+        for name in sorted(names):
+            path = base / name
+            if path.is_symlink():
+                continue
+            kept.append(name)
+        names[:] = kept
+        for name in sorted(leaves):
+            path = base / name
+            try:
+                mode = os.lstat(path).st_mode
+                if not stat.S_ISREG(mode):
+                    continue
+                files[path.relative_to(root).as_posix()] = path.read_bytes()
+            except OSError:
+                continue
+    return files
+
+
+def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path,
+                             receipt: dict, summaries: list,
+                             request_line: str = ANALYZER_REQUEST_LINE) -> None:
+    """Run the selected analyzer profile from the trusted merge-base driver."""
+    selected_profile = ANALYZER_PROFILE_BY_LINE[request_line]
+    profile_started = time.monotonic()
+    setup_deadline = profile_started + ANALYZER_SETUP_BUDGET_SECONDS
+    profile_deadline = profile_started + ANALYZER_PROFILE_BUDGET_SECONDS
+    reasons = receipt["reasons"]
+    analyzer_root = work / "analyzer"
+    analyzer_root.mkdir(parents=True, exist_ok=True)
+    (analyzer_root / "profile").mkdir()
+    receipt["analyzer_request_line"] = request_line
+    receipt["analyzer_profile"] = selected_profile
+    receipt["profile"] = selected_profile
+    request_path = candidate / "benchmarks/9700x/compiler-compare.request"
+    try:
+        request_stat = os.lstat(request_path)
+        if not stat.S_ISREG(request_stat.st_mode):
+            raise OSError("request is not a regular file")
+        request_bytes = request_path.read_bytes()
+        (analyzer_root / "request.txt").write_bytes(request_bytes)
+        receipt["analyzer_request_sha256"] = hashlib.sha256(request_bytes).hexdigest()
+        try:
+            request_bytes.decode("utf-8")
+        except UnicodeDecodeError as error:
+            reasons.append(f"candidate analyzer request is not UTF-8: {error}")
+    except OSError as error:
+        reasons.append(f"candidate analyzer request could not be retained: {error}")
+    clang_provenance = None
+    try:
+        clang_provenance = analyzer_clang_provenance()
+        receipt["analyzer_clang_provenance"] = clang_provenance
+        (analyzer_root / "clang.json").write_text(dumps(clang_provenance) + "\n", encoding="utf-8")
+    except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as error:
+        reasons.append(f"trusted Clang provenance is incomplete: {error}")
+    if arguments.mode != "pull":
+        reasons.append(f"{selected_profile['name']} is supported only by the authorized pull-compare route")
+    inline_selector_deltas = request_selector_parent_deltas(candidate, arguments.head,
+                                                            INLINE_ACCEPTANCE_REQUEST_LINE)
+    if inline_selector_deltas is None:
+        reasons.append("could not prove the inline acceptance selector count against every head parent")
+    elif any(delta > 0 for delta in inline_selector_deltas):
+        reasons.append(f"{selected_profile['name']} cannot be combined with the inline acceptance selector")
+    if scaling_requested(candidate, arguments.base, arguments.head):
+        reasons.append(f"{selected_profile['name']} cannot be combined with a scaling.request profile")
+    drivers: dict[str, Path] = {}
+    if not reasons:
+        for role, commit in (("baseline", arguments.base), ("candidate", arguments.head)):
+            mark(receipt, evidence, f"analyzer-build-driver-{role}")
+            problem, driver = build_analyzer_driver(candidate, commit, role, analyzer_root, evidence, receipt,
+                                                    setup_deadline)
+            if problem:
+                break
+            if driver is not None:
+                drivers[role] = driver
+    try:
+        if git(candidate, "rev-parse", "HEAD") != arguments.head:
+            mark(receipt, evidence, "analyzer-restore-candidate")
+            restore_timeout = analyzer_budget_timeout(setup_deadline, GIT_TIMEOUT_SECONDS)
+            checkout_status = run(["git", "-C", str(candidate), "checkout", "--quiet", "--detach", arguments.head],
+                                  candidate, evidence / "analyzer-restore-candidate.log", restore_timeout) if restore_timeout else 124
+            if checkout_status != 0:
+                reasons.append(f"candidate checkout restore exited {checkout_status}")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
+        reasons.append(f"candidate checkout restore failed: {error}")
+    database_directory = work / "analyzer-build"
+    if len(drivers) == 2 and not reasons and clang_provenance is not None:
+        mark(receipt, evidence, "analyzer-generate-candidate-database")
+        measured = time.monotonic()
+        generate_timeout = analyzer_budget_timeout(setup_deadline, ANALYZER_GENERATE_TIMEOUT_SECONDS)
+        status = run([str(drivers["baseline"]), "generate", "--build-directory", str(database_directory), "--ci",
+                      "--no-sanitize", "--no-fuzz", "--no-lto", "--linker", "DEFAULT", "--",
+                      "-DBUSTER_UNITY_BUILD=OFF"], candidate, evidence / "analyzer-generate.log",
+                     generate_timeout) if generate_timeout else 124
+        receipt["timings"].setdefault("analyzer_setup_seconds", {})["compile_database_seconds"] = round(
+            time.monotonic() - measured, 3)
+        if status != 0:
+            reasons.append(f"trusted baseline driver analyzer database generation exited {status}")
+        else:
+            database = database_directory / "compile_commands.json"
+            try:
+                database_stat = os.lstat(database)
+                if not stat.S_ISREG(database_stat.st_mode):
+                    raise OSError("compile_commands.json is not a regular file")
+                (analyzer_root / "compile_commands.json").write_bytes(database.read_bytes())
+            except OSError as error:
+                reasons.append(f"candidate analyzer compile database is unavailable: {error}")
+    helper_status = None
+    if len(drivers) == 2 and not reasons and clang_provenance is not None:
+        mark(receipt, evidence, "analyzer-matched-full-runs")
+        measured = time.monotonic()
+        helper_timeout = min(ANALYZER_HELPER_TIMEOUT_SECONDS,
+                             analyzer_budget_timeout(profile_deadline, ANALYZER_PROFILE_BUDGET_SECONDS) -
+                             ANALYZER_POSTPROCESS_RESERVE_SECONDS)
+        if helper_timeout <= 0:
+            helper_timeout = 0
+        helper_status = run([str(drivers["baseline"]), "clang_analyze_benchmark", "--baseline-driver",
+                             str(drivers["baseline"]), "--candidate-driver", str(drivers["candidate"]),
+                             "--clang", clang_provenance["path"],
+                             "--database", str(database_directory), "--output", str(analyzer_root / "profile")],
+                            candidate, analyzer_root / "profile" / "helper.log", helper_timeout) if helper_timeout else 124
+        receipt["timings"]["analyzer_measurement_seconds"] = round(time.monotonic() - measured, 3)
+        if helper_status != 0:
+            reasons.append(f"native analyzer profile helper exited {helper_status}; incomplete trials are retained")
+    if drivers and len(drivers) == 2:
+        source_problem = analyzer_source_immutability_problem(candidate)
+        if source_problem:
+            reasons.append(source_problem)
+    raw = collect_analyzer_files(analyzer_root)
+    summary, validation = analyzer_profile_summary(raw, receipt.get("identity", {}), request_line)
+    receipt["analyzer"] = summary
+    reasons.extend(item for item in validation if item not in reasons)
+    try:
+        mark(receipt, evidence, "analyzer-evidence")
+        (analyzer_root / "summary.json").write_text(dumps(summary) + "\n", encoding="utf-8")
+        required = (*ANALYZER_REQUIRED_FILES, "summary.json")
+        problems, found = export_tree(analyzer_root, evidence / "analyzer", evidence, EVIDENCE_IGNORE, required)
+        reasons.extend(problems)
+        if found:
+            reasons.append(f"analyzer evidence export omitted {len(found)} raw members; full independent replay requires every row and log")
+        note_omissions(receipt.setdefault("evidence_omissions", {}), "analyzer", found)
+    except OSError as error:
+        reasons.append(f"analyzer evidence summary could not be retained: {error}")
+    summaries[:] = [summary]
+    if receipt.get("state") != "superseded":
+        receipt["state"] = "measured" if not reasons and summary.get("status") == "complete" else "failed"
+
+
 def measure_scaling(candidate: Path, bins: Path, work: Path, evidence: Path,
-                    binaries: dict, omissions: dict) -> tuple[list[str], dict]:
+                    binaries: dict, omissions: dict, harness: Path | None = None) -> tuple[list[str], dict]:
     """Run every scaling series on the candidate from the checked-out base; (reasons, digest)."""
     reasons: list[str] = []
     bundles: dict = {}
     for name, arguments in SCALING_PROFILE["series"].items():
         output = work / "scaling" / name
         output.parent.mkdir(parents=True, exist_ok=True)
-        status = run(["./build.sh", "bench_throughput", "scale", "--compiler", str(bins / "ide-cand"),
+        status = run([*([str(harness)] if harness else ["./build.sh", "bench_throughput"]), "scale", "--compiler", str(bins / "ide-cand"),
                       "--output", str(output), *arguments], candidate, evidence / f"scaling-{name}.log",
                      SCALING_TIMEOUT_SECONDS)
         if output.is_dir():
@@ -455,12 +1188,8 @@ def measure_scaling(candidate: Path, bins: Path, work: Path, evidence: Path,
                                           SCALING_REQUIRED)
             reasons.extend(problems)
             note_omissions(omissions, f"scaling/{name}", found)
-        documents = []
-        for leaf in ("scaling.json", "scaling-metadata.json"):
-            try:
-                documents.append(json.loads((output / leaf).read_text(encoding="utf-8")))
-            except (OSError, ValueError):
-                documents.append(None)
+        documents, unreadable = read_exported_pair(evidence / "scaling" / name, SCALING_REQUIRED, f"scaling/{name}")
+        reasons.extend(unreadable)
         bundles[name] = {"summary": documents[0], "metadata": documents[1]}
         if status != 0:
             reasons.append(f"bench_throughput scale ({name}) exited {status} (see scaling-{name}.log)")
@@ -475,10 +1204,28 @@ def parse(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--summary", type=Path, required=True)
+    parser.add_argument("--closure-policy", choices=("legacy-rebuild", "snapshot-v1"), default="legacy-rebuild",
+                        help="snapshot-v1 is qualification-only until approved before/after and A/A evidence")
+    parser.add_argument("--closure-driver", type=Path, help="canonical immutable trusted native driver; required by snapshot-v1")
+    parser.add_argument("--utility-owned-phases", action="store_true",
+                        help="explicit main-only Utility research: individually supervise every child in either preparation leg")
+    parser.add_argument("--main-owned-phases", action="store_true",
+                        help="supported automatic-main native ownership; requires an authenticated dormant policy")
+    parser.add_argument("--main-profile", choices=sorted(MAIN_PROFILES),
+                        help="fixed named main recipe; requires --main-owned-phases")
     parser.add_argument("--mode", choices=sorted(MODES), required=True)
     for name in IDENTITY_KEYS[1:]:
         parser.add_argument("--" + name.replace("_", "-"), required=True)
-    return parser.parse_args(argv)
+    arguments = parser.parse_args(argv)
+    if arguments.utility_owned_phases and (arguments.mode != "main" or arguments.closure_driver is None):
+        parser.error("--utility-owned-phases requires main mode and the trusted --closure-driver")
+    if arguments.main_owned_phases and (arguments.utility_owned_phases or arguments.mode != "main" or arguments.closure_driver is None):
+        parser.error("--main-owned-phases requires main mode and trusted driver, exclusively from Utility")
+    if arguments.main_profile is not None and not arguments.main_owned_phases:
+        parser.error("--main-profile requires --main-owned-phases")
+    if arguments.main_owned_phases and arguments.main_profile is None:
+        arguments.main_profile = PROFILE["name"]
+    return arguments
 
 
 def checkpoint(receipt: dict, evidence: Path, phase: str) -> str:
@@ -519,16 +1266,78 @@ def mark(receipt: dict, evidence: Path, phase: str) -> None:
         receipt.setdefault("notes", []).append(problem)
 
 
+class ClosureCleanupUncertain(RuntimeError):
+    """A native owner could not prove cleanup; preserve its work and stop the attempt."""
+
+
+def closure_phase(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path,
+                  receipt: dict, operation: str) -> str:
+    """Minimal bridge to the trusted native driver; all closure policy and filesystem work stay in C."""
+    started = time.monotonic()
+    record = evidence / f"closure-{operation}.json"
+    expected = receipt.get("closure", {}).get("snapshot", {}).get("manifest_sha256", "-")
+    driver = OWNED_PHASE_CONTEXT.driver if OWNED_PHASE_CONTEXT is not None else TRUSTED_ROOT / "build.sh"
+    status = run([str(driver), "compiler_closure", operation, str(candidate),
+                  str(work / "frozen-baseline"), arguments.base, arguments.base_tree, str(record), expected],
+                 TRUSTED_ROOT, evidence / "closure.log", BUILD_TIMEOUT_SECONDS)
+    receipt["timings"][f"closure_{operation}_seconds"] = round(time.monotonic() - started, 3)
+    native, problem = read_exported_json(record)
+    if isinstance(native, dict):
+        receipt["closure"][operation] = native
+        if operation == "snapshot" and type(native.get("harness_preparation_us")) is int and native["harness_preparation_us"] >= 0:
+            receipt["timings"]["harness_preparation_seconds"] = native["harness_preparation_us"] / 1_000_000
+    if not isinstance(native, dict) or native.get("cleanup_proven") is not True:
+        receipt["cleanup_proven"] = False
+        receipt["work_retained"] = str(work)
+        (evidence / "cleanup-uncertain").write_text("Native closure child ownership or cleanup unproven; retain attempt root.\n", encoding="utf-8")
+        raise ClosureCleanupUncertain(f"native frozen-baseline {operation} ownership/cleanup receipt missing or unproven")
+    if status != 0 or problem or not isinstance(native, dict) or native.get("state") != "complete" or \
+            type(native.get("harness_preparation_us")) is not int or native["harness_preparation_us"] < 0:
+        problem = f"native frozen-baseline {operation} exited {status}: {problem or 'incomplete receipt'}"
+    return problem
+
+
 def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path, bins: Path, log: Path,
             receipt: dict, summaries: list) -> None:
     """Build both revisions and run the lab, corpus and scaling legs; the lab summary goes to summaries."""
+    if arguments.mode == "pull" and getattr(arguments, "analyzer_profile_requested", False):
+        measure_analyzer_profile(arguments, candidate, work, evidence, receipt, summaries,
+                                 arguments.analyzer_request_line)
+        return
     reasons = receipt["reasons"]
+    selected_profile = named_main_profile(arguments.main_profile) if getattr(arguments, "main_owned_phases", False) else PROFILE
+    request_problem = getattr(arguments, "analyzer_profile_request_problem", "")
+    if request_problem and request_problem not in reasons:
+        reasons.append(request_problem)
     summary = None
+    snapshot_closure = getattr(arguments, "closure_policy", "legacy-rebuild") == "snapshot-v1"
+    receipt["preparation_policy"] = "snapshot-v1" if snapshot_closure else "legacy-rebuild"
+    harness = candidate / "build/throughput-tools/throughput" if snapshot_closure else None
+    if snapshot_closure:
+        receipt["closure"] = {"policy": "snapshot-v1", "fallback": None}
+    if OWNED_PHASE_CONTEXT is not None:
+        receipt["phase_ownership"].update(candidate_root=str(candidate.resolve()), binaries_root=str(bins.resolve()),
+                                          lab_path=str(arguments.lab.resolve()))
+
+    inline_requested = arguments.mode == "pull" and inline_acceptance_requested(candidate)
+    receipt["inline_acceptance"] = {"requested": inline_requested,
+        "request_line": INLINE_ACCEPTANCE_REQUEST_LINE if inline_requested else None,
+        "profile": INLINE_ACCEPTANCE_PROFILE if inline_requested else None,
+        "status": "pending" if inline_requested else "not requested"}
     if not reasons:
         for role, commit in (("baseline", arguments.base), ("candidate", arguments.head), ("closure", arguments.base)):
             mark(receipt, evidence, f"build-{role}")
-            problem, seconds = build(candidate, commit, log)
-            receipt["timings"]["build_seconds"][role] = round(seconds, 3)
+            if role == "closure" and snapshot_closure:
+                started = time.monotonic()
+                checkout = ["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null",
+                            "-C", str(candidate), "checkout", "--quiet", "--detach", commit]
+                status = run(checkout,
+                             candidate, log, GIT_TIMEOUT_SECONDS)
+                receipt["timings"]["closure_checkout_seconds"] = round(time.monotonic() - started, 3)
+                problem = f"baseline checkout exited {status}" if status else closure_phase(arguments, candidate, work, evidence, receipt, "restore")
+            else:
+                problem, seconds = build(candidate, commit, log)
+                receipt["timings"]["build_seconds"][role] = round(seconds, 3)
             if problem:
                 reasons.append(problem)
                 break
@@ -539,32 +1348,79 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                 shutil.copyfile(candidate / "build" / "CMakeCache.txt", evidence / f"{role}.CMakeCache.txt")
                 receipt["binaries"][role] = {"sha256": sha256(binary), "size_bytes": binary.stat().st_size,
                                              "revision": commit}
+                if role == "baseline" and snapshot_closure:
+                    mark(receipt, evidence, "closure-snapshot")
+                    problem = closure_phase(arguments, candidate, work, evidence, receipt, "snapshot")
+                    if problem:
+                        reasons.append(problem)
+                        break
+                if role == "candidate" and inline_requested:
+                    mark(receipt, evidence, "inline-acceptance")
+                    inline_dir = work / "inline-acceptance"
+                    helper = Path(__file__).with_name("inline_acceptance.py").resolve()
+                    measured = time.monotonic()
+                    inline_status = run([sys.executable, "-B", str(helper),
+                                         "--lab", str(arguments.lab.resolve()), "--candidate-ide", str(binary),
+                                         "--repo-root", str(candidate), "--head-revision", arguments.head,
+                                         "--cpu", str(PROFILE["cpu"]), "--output", str(inline_dir)],
+                                        candidate, evidence / "inline-acceptance.log", INLINE_ACCEPTANCE_TIMEOUT_SECONDS)
+                    receipt["timings"]["inline_acceptance_seconds"] = round(time.monotonic() - measured, 3)
+                    inline = receipt["inline_acceptance"]
+                    inline["exit"] = inline_status
+                    export_problems, omissions = export_tree(inline_dir, evidence / "inline_acceptance", evidence,
+                                                              EVIDENCE_IGNORE, ("acceptance.json", "stage1/identities.json",
+                                                                                "selfhost/identities.json"))
+                    inline["evidence_omissions"] = omissions
+                    errors = list(export_problems)
+                    inline_summary, problem = read_exported_json(evidence / "inline_acceptance" / "acceptance.json")
+                    if problem:
+                        errors.append(f"issue #48 inline self-host acceptance receipt unreadable: {problem}")
+                    else:
+                        inline["summary"] = inline_summary
+                        errors.extend(validate_inline_acceptance(inline_summary, arguments.head,
+                                                                 receipt["binaries"]["candidate"]["sha256"]))
+                    if inline_status != 0:
+                        errors.append(f"issue #48 inline self-host acceptance exited {inline_status}")
+                    inline["errors"] = errors
+                    inline["status"] = "complete" if not errors else "failed"
 
     if not reasons:
         lab = work / "lab"
         mark(receipt, evidence, "lab")
         measured = time.monotonic()
-        status = run([sys.executable, "-B", str(arguments.lab.resolve()), "compare",
-                      "--baseline", str(bins / "ide-base"), "--candidate", str(bins / "ide-cand"),
-                      "--repo-root", str(candidate), "--cpu", str(PROFILE["cpu"]), "--output", str(lab),
-                      "--target-minutes", str(PROFILE["target_minutes"]), "--warmups", str(PROFILE["warmups"])],
-                     candidate, evidence / "lab.log", LAB_TIMEOUT_SECONDS)
+        lab_command = [sys.executable, "-B", str(arguments.lab.resolve()), "compare",
+                       "--baseline", str(bins / "ide-base"), "--candidate", str(bins / "ide-cand"),
+                       "--repo-root", str(candidate), "--cpu", str(selected_profile["cpu"]), "--output", str(lab),
+                       "--target-minutes", str(selected_profile["target_minutes"]), "--warmups", str(selected_profile["warmups"])]
+        if selected_profile is MAIN40_PROFILE:
+            lab_command += ["--pairs", "40", "--seed", "20261003", "--min-effect", "0.5"]
+        status = run(lab_command, candidate, evidence / "lab.log",
+                     300 if selected_profile is MAIN40_PROFILE else LAB_TIMEOUT_SECONDS)
         receipt["timings"]["measurement_seconds"] = round(time.monotonic() - measured, 3)
         receipt["lab"]["exit"] = status
         mark(receipt, evidence, "lab-evidence")
         reasons.extend(collect_evidence(lab, evidence, receipt.setdefault("evidence_omissions", {})))
-        try:
-            summary = json.loads((lab / "summary.json").read_text(encoding="utf-8"))
+        summary, problem = read_exported_json(evidence / "lab" / "summary.json")
+        if problem:
+            reasons.append(f"lab summary unreadable: {problem}")
+        else:
             summaries[:] = [summary]
-        except (OSError, ValueError) as error:
-            reasons.append(f"lab summary unreadable: {error}")
         if status != 0:
             reasons.append(f"uarch_lab compare exited {status}")
+        if getattr(arguments, "main_owned_phases", False):
+            validity = classify(summary, receipt["binaries"], expected_profile=selected_profile["name"])
+            if reasons or validity:
+                reasons.extend(item for item in validity if item not in reasons)
+                if OWNED_PHASE_CONTEXT is not None:
+                    OWNED_PHASE_CONTEXT.stopped = True
+                    receipt["phase_ownership"]["state"] = "failed"
+                receipt["work_retained"] = str(work)
+                raise OwnedPhaseFailed("MAIN-owned lab data incomplete; no later child is admitted")
         mark(receipt, evidence, "throughput")
         measured = time.monotonic()
         corpus, receipt["throughput"] = measure_throughput(candidate, bins, work, evidence, arguments.base,
                                                            arguments.head, receipt["binaries"],
-                                                           receipt.setdefault("evidence_omissions", {}))
+                                                           receipt.setdefault("evidence_omissions", {}), harness)
         receipt["timings"]["throughput_seconds"] = round(time.monotonic() - measured, 3)
         reasons.extend(corpus)
         if arguments.mode == "pull" and scaling_requested(candidate, arguments.base, arguments.head):
@@ -572,23 +1428,71 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             measured = time.monotonic()
             receipt["scaling_profile"] = SCALING_PROFILE
             scaled, receipt["scaling"] = measure_scaling(candidate, bins, work, evidence, receipt["binaries"],
-                                                      receipt.setdefault("evidence_omissions", {}))
+                                                      receipt.setdefault("evidence_omissions", {}), harness)
             receipt["timings"]["scaling_seconds"] = round(time.monotonic() - measured, 3)
             reasons.extend(scaled)
         mark(receipt, evidence, "validate")
+        raw_closure = {}
+        if snapshot_closure:
+            problem = closure_phase(arguments, candidate, work, evidence, receipt, "verify")
+            if problem:
+                reasons.append(problem)
+            for operation in ("snapshot", "restore", "verify"):
+                try:
+                    with os.fdopen(os.open(evidence / f"closure-{operation}.json.manifest.tsv",
+                                           os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as reader:
+                        raw_closure[operation] = reader.read(EVIDENCE_MEMBER_LIMIT + 1)
+                except OSError:
+                    pass
+        if OWNED_PHASE_CONTEXT is not None:
+            OWNED_PHASE_CONTEXT.finish()
+            owned_raw = {}
+            for row in receipt["phase_ownership"]["phases"]:
+                path = OWNED_PHASE_CONTEXT.directory / row["file"]
+                try:
+                    owned_raw[row["file"]] = {"receipt": bounded_owned_member(path),
+                        "command": bounded_owned_member(Path(str(path) + ".argv")),
+                        "stdout": bounded_owned_member(Path(str(path) + ".stdout"), empty=True),
+                        "stderr": bounded_owned_member(Path(str(path) + ".stderr"), empty=True),
+                        "bootstrap": bounded_owned_member(Path(str(path) + ".bootstrap.complete"))}
+                except (OSError, ValueError):
+                    pass
+            raw_closure["owned_phases"] = owned_raw
+        try:
+            raw_closure["owned_throughput"] = {"summary": bounded_owned_member(evidence / "throughput/summary.json"),
+                "metadata": bounded_owned_member(evidence / "throughput/metadata.json")}
+        except (OSError, ValueError):
+            pass
+        if snapshot_closure or OWNED_PHASE_CONTEXT is not None:
+            from compiler_owned_phase import UTILITY_POPULATION_SCHEMA, MAIN_POPULATION_SCHEMA
+            reasons.extend(validate_closure(receipt, raw_closure,
+                expected_policy="snapshot-v1" if snapshot_closure else "legacy-rebuild", require_owned_phases=True,
+                expected_phase_schema=MAIN_POPULATION_SCHEMA if getattr(arguments, "main_owned_phases", False) else
+                                      UTILITY_POPULATION_SCHEMA if getattr(arguments, "utility_owned_phases", False) else None,
+                require_owned_preflight=getattr(OWNED_PHASE_CONTEXT, "owned_preflight", False),
+                expected_profile=selected_profile["name"] if getattr(arguments, "main_owned_phases", False) else None))
         for role, name in (("baseline", "ide-base"), ("candidate", "ide-cand")):
             if sha256(bins / name) != receipt["binaries"][role]["sha256"]:
                 reasons.append(f"{role} binary changed during measurement")
-        reasons.extend(classify(summary, receipt["binaries"]))
+        reasons.extend(classify(summary, receipt["binaries"],
+                                expected_profile=selected_profile["name"] if getattr(arguments, "main_owned_phases", False) else None))
         if isinstance(summary, dict):
             receipt["lab"].update(schema=summary.get("schema"), verdict=summary.get("verdict"),
                                   complete_pairs=(summary.get("plan") or {}).get("complete_pairs"))
         if not reasons:
             receipt["state"] = "measured"
+    if inline_requested:
+        reasons.extend(receipt["inline_acceptance"].get("errors", []))
+        if receipt["inline_acceptance"]["status"] == "pending":
+            receipt["inline_acceptance"]["status"] = "failed"
+            reasons.append("issue #48 inline self-host acceptance was requested but did not reach its candidate-build phase")
+        if receipt["inline_acceptance"]["status"] != "complete":
+            receipt["state"] = "failed"
 
 
 
 def main(argv: list[str] | None = None) -> int:
+    global OWNED_PHASE_CONTEXT
     arguments = parse(argv)
     started = time.monotonic()
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -600,16 +1504,52 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     prepare_scratch(work)
     prepare_scratch(evidence)
+    analyzer_request_line, analyzer_request_problem = None, ""
+    if arguments.mode == "pull":
+        analyzer_request_line, analyzer_request_problem = analyzer_profile_request_selection(candidate, arguments.head)
+    analyzer_requested = analyzer_request_line is not None
+    arguments.analyzer_profile_requested = analyzer_requested
+    arguments.analyzer_request_line = analyzer_request_line
+    arguments.analyzer_profile_request_problem = analyzer_request_problem
     identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}
+    utility = getattr(arguments, "utility_owned_phases", False)
+    main_owned = getattr(arguments, "main_owned_phases", False)
+    selected_profile = named_main_profile(arguments.main_profile) if main_owned else PROFILE
+    early_owned = utility or main_owned or (arguments.mode == "main" and arguments.closure_policy == "snapshot-v1")
     receipt = {"schema": RECEIPT_SCHEMA, "mode": arguments.mode, "state": "failed", "reasons": [], "identity": identity,
-               "profile": PROFILE, "throughput_profile": THROUGHPUT_PROFILE, "host": {"hostname": socket.gethostname(), "cpu_model": cpu_model()},
-               "toolchain": toolchain(), "binaries": {}, "lab": {},
-               "timings": {"started_at": started_at, "build_seconds": {}}}
+               "profile": ANALYZER_PROFILE_BY_LINE[analyzer_request_line] if analyzer_requested else selected_profile,
+               "throughput_profile": THROUGHPUT_PROFILE if not analyzer_requested else None,
+               "host": {"hostname": socket.gethostname(), "cpu_model": "" if early_owned else cpu_model()},
+               "toolchain": {} if early_owned else toolchain(), "binaries": {}, "lab": {},
+               "timings": {"started_at": started_at, "build_seconds": {}},
+               "inline_acceptance": {"requested": False, "status": "not requested"}}
     reasons = receipt["reasons"]
+    if analyzer_request_problem:
+        reasons.append(analyzer_request_problem)
     log = evidence / "build.log"
     bins = work / "bin"
     bins.mkdir()
     summary = None
+    initialization_failed, initialization_aborted = False, None
+    if early_owned:
+        receipt["preparation_policy"] = arguments.closure_policy
+        try:
+            OWNED_PHASE_CONTEXT = NativePhaseContext(arguments.closure_driver, work, evidence, receipt, utility=utility, owned_preflight=True, main_owned=main_owned)
+            receipt["phase_ownership"].update(candidate_root=str(candidate), binaries_root=str(bins.resolve()),
+                                               lab_path=str(arguments.lab.resolve()))
+            receipt["host"]["cpu_model"] = cpu_model()
+            receipt["toolchain"] = toolchain()
+        except BaseException as error:
+            initialization_failed = True
+            if isinstance(receipt.get("phase_ownership"), dict):
+                receipt["phase_ownership"]["state"] = "failed"
+            if OWNED_PHASE_CONTEXT is not None:
+                OWNED_PHASE_CONTEXT.stopped = True
+            reasons.append(f"native phase initialization failed: {error.__class__.__name__}: {error}")
+            receipt["state"] = "failed"
+            receipt["work_retained"] = str(work)
+            if not isinstance(error, Exception):
+                initialization_aborted = error
 
     # Identity first. A main commit has the base on its first-parent chain (its
     # first parent, or a range's measured ancestor) and, when a queue merge
@@ -619,24 +1559,33 @@ def main(argv: list[str] | None = None) -> int:
     problem = host_problem(receipt)
     if problem:
         reasons.append(problem)
-    try:
-        if arguments.mode == "main":
-            second = subprocess.run(["git", "-C", str(candidate), "rev-parse", "--verify", "--quiet", "HEAD^2"],
-                                    capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS, check=False).stdout.strip()
-            chain = git(candidate, "rev-list", "--first-parent", f"--max-count={RECONCILE_DEPTH}", "HEAD^1").split()
-            parents = (arguments.base if arguments.base in chain else "base is not on the first-parent chain",
-                       second or git(candidate, "rev-parse", "HEAD"))
-            if arguments.base in chain:
-                receipt["coverage"] = {"first_parent": chain[0], "range": str(chain.index(arguments.base) + 1)}
-        else:
-            ancestry = subprocess.run(["git", "-C", str(candidate), "merge-base", "--is-ancestor", arguments.base, "HEAD"],
-                                      capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode == 0
-            parents = (arguments.base if ancestry else "base is not an ancestor", git(candidate, "rev-parse", "HEAD"))
-        observed = (git(candidate, "rev-parse", "HEAD"), *parents, git(candidate, "rev-parse", "HEAD^{tree}"),
-                    git(candidate, "rev-parse", arguments.base + "^{tree}"))
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
-        observed = None
-        reasons.append(f"candidate checkout cannot be inspected: {error}")
+    observed = None
+    if not initialization_failed:
+        try:
+            if arguments.mode == "main":
+                second = captured_run(["git", "-C", str(candidate), "rev-parse", "--verify", "--quiet", "HEAD^2"],
+                                        capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS, check=False).stdout.strip()
+                chain = git(candidate, "rev-list", "--first-parent", f"--max-count={RECONCILE_DEPTH}", "HEAD^1").split()
+                parents = (arguments.base if arguments.base in chain else "base is not on the first-parent chain",
+                           second or git(candidate, "rev-parse", "HEAD"))
+                if arguments.base in chain:
+                    receipt["coverage"] = {"first_parent": chain[0], "range": str(chain.index(arguments.base) + 1)}
+            else:
+                ancestry = captured_run(["git", "-C", str(candidate), "merge-base", "--is-ancestor", arguments.base, "HEAD"],
+                                          capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode == 0
+                parents = (arguments.base if ancestry else "base is not an ancestor", git(candidate, "rev-parse", "HEAD"))
+            observed = (git(candidate, "rev-parse", "HEAD"), *parents, git(candidate, "rev-parse", "HEAD^{tree}"),
+                        git(candidate, "rev-parse", arguments.base + "^{tree}"))
+        except BaseException as error:
+            if not early_owned and not isinstance(error, (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError)):
+                raise
+            observed = None
+            reasons.append(f"candidate checkout cannot be inspected: {error}")
+            if early_owned:
+                initialization_failed = True
+                receipt["work_retained"] = str(work)
+                if not isinstance(error, Exception):
+                    initialization_aborted = error
     expected = (arguments.head, arguments.base, arguments.pull_head, arguments.head_tree, arguments.base_tree)
     if observed is not None and observed != expected:
         reasons.append(f"candidate checkout {observed} does not match the authorized identity {expected}")
@@ -651,14 +1600,22 @@ def main(argv: list[str] | None = None) -> int:
         receipt["notes"] = [f"{arguments.ref} could not be read before measurement; measured anyway"]
 
     summaries: list = []
-    aborted = None
+    aborted = initialization_aborted
     try:
-        measure(arguments, candidate, work, evidence, bins, log, receipt, summaries)
+        if not early_owned and getattr(arguments, "closure_policy", "legacy-rebuild") == "snapshot-v1":
+            if getattr(arguments, "closure_driver", None) is None:
+                raise OwnedPhaseFailed("snapshot-v1 requires the trusted native --closure-driver")
+            OWNED_PHASE_CONTEXT = NativePhaseContext(arguments.closure_driver, work, evidence, receipt)
+        if not initialization_failed:
+            measure(arguments, candidate, work, evidence, bins, log, receipt, summaries)
     except BaseException as error:  # noqa: BLE001 - recorded, then re-raised after the receipt is written
         reasons.append(f"attempt aborted in phase {receipt.get('phase', 'start')}: {error.__class__.__name__}: {error}")
         receipt["state"] = "failed"
         if not isinstance(error, Exception):
             aborted = error
+    if OWNED_PHASE_CONTEXT is not None:
+        OWNED_PHASE_CONTEXT.finish()
+        OWNED_PHASE_CONTEXT = None
     summary = summaries[-1] if summaries else None
     receipt["timings"]["total_seconds"] = round(time.monotonic() - started, 3)
     receipt["timings"]["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

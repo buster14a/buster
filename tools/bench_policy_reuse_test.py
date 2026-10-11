@@ -38,7 +38,8 @@ class FakeApi:
         self.main.update(status="in_progress", conclusion=None)
         self.source = run_record(SOURCE_ID, "merge_group", "gh-readonly-queue/main/pr-2268-example",
                                  "2026-10-03T10:20:56Z", "2026-10-03T10:21:50Z")
-        names = ("Set up job", "Checkout", "Prove stateless validation survives merge bursts") + reuse.REQUIRED_STEPS + (reuse.FINISH_STEP, "Complete job")
+        names = ("Set up job", "Machine specifications", "Checkout", "Record actual checkout identity",
+                 "Prove stateless validation survives merge bursts") + reuse.REQUIRED_STEPS + (reuse.FINISH_STEP, "Complete job")
         self.job = {"id": JOB_ID, "run_id": SOURCE_ID, "run_attempt": 1,
                     "head_sha": SHA, "head_branch": self.source["head_branch"],
                     "workflow_name": reuse.JOB_NAME, "name": reuse.JOB_NAME,
@@ -95,6 +96,26 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(receipt["workflow_blob"], api.blob["sha"])
         self.assertEqual(len(api.calls), 8)
         self.assertEqual(len(receipt["job"]["steps"]), len(api.job["steps"]))
+
+    def test_planner_bookkeeping_never_replaces_policy_execution(self):
+        api = FakeApi()
+        planner = dict(api.job, id=404, name="No-code plan / Classify no-code changes")
+        api.jobs = {"total_count": 2, "jobs": [planner, api.job]}
+        self.assertEqual(self.verify(api)["job"]["id"], JOB_ID)
+        for key, value in (("status", "queued"), ("conclusion", "failure"),
+                           ("head_sha", "b" * 40), ("run_attempt", 2), ("runner_id", 0),
+                           ("name", "unexpected")):
+            broken = deepcopy(api)
+            broken.jobs["jobs"][0][key] = value
+            with self.subTest(planner=key):
+                self.assert_refused(broken)
+        omitted = deepcopy(api)
+        omitted.jobs["jobs"][1].update(conclusion="skipped", runner_id=0, steps=[])
+        self.assert_refused(omitted)
+        for step in reuse.WORK_STEPS:
+            broken = deepcopy(api)
+            next(row for row in broken.jobs["jobs"][1]["steps"] if row["name"] == step)["conclusion"] = "skipped"
+            self.assert_refused(broken)
 
     def test_wrong_run_identity(self):
         changes = {"id": 404, "workflow_id": 404, "path": ".github/workflows/ci.yml",
@@ -364,7 +385,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("  push:\n    branches: [main]\n", text)
         self.assertIn("  workflow_dispatch:\n", text)
         self.assertNotRegex(text, r"(?m)^\s+(paths|paths-ignore):")
-        self.assertEqual(re.findall(r"(?m)^  (\w+):$", text.split("\njobs:\n")[1]), ["policy"])
+        self.assertEqual(re.findall(r"(?m)^  (\w+):$", text.split("\njobs:\n")[1]), ["no_code_plan", "policy"])
         self.assertIn("    name: " + reuse.JOB_NAME + "\n", text)
         self.assertIn("    permissions:\n      contents: read\n      actions: read\n", text)
         self.assertNotIn(": write", text)

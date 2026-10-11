@@ -270,6 +270,14 @@ the final load's place; the identifier-based place reader does not parse the
 address-of operand. Parenthesized and pointer-update destinations keep their
 existing routes.
 
+Dereferenced update operands evaluate a casted computed pointer through the
+existing expression continuation, including `++*(unsigned char *)(bytes + i)`.
+Its returned pointer value determines the object; the pointer expression's
+side effects run once. The identifier-only cast path remains the fast path.
+`c_test_pointer_update_operand_runtime` checks prefix/postfix casted arithmetic
+and pointer updates, plus pointer-to-pointer and member-pointer controls, in
+both frontend forms under FAST and QUALITY (#1241).
+
 `c_test_call_assignment_values` checks semantic/canonical lowering on six
 native target layouts in GNU17/GNU23 and both frontend forms. Canonical call
 counts and supported desktop execution cover initializer, argument, condition,
@@ -665,7 +673,21 @@ without facts for identical bitcode and diagnostics.
   `c_test_gnu_omitted_conditional` checks fixed integer/IEEE/array/address images,
   malformed GNU11/17/23 neighbors, both frontend forms, fast/quality allocation, native O0/O2
   execution and GCC/Clang GNU17 controls (GitHub #1259). The separate complex
-  and x87 static-initializer folders retain their existing conditional limits.
+  static-initializer folder retains its existing conditional limit. The x87
+  static-initializer folder folds GNU omitted-middle and ordinary three-arm
+  arithmetic conditionals with a token-bounded explicit work stack, preserving
+  the common arithmetic type before writing the selected value. Nested arm
+  conditionals, unselected integer division, integer-to-float common-type
+  rounding, deep enclosing parentheses, and right-nested conditional chains
+  are pinned by
+  `c_test_wide_float_global_folding`; complex static conditional initializers
+  remain a separate limitation. The evaluator recognizes a conditional at the
+  root of an initializer subrange (after enclosing parentheses and
+  `__extension__` prefixes); the condition and leaf arms still use the existing
+  arithmetic-only grammar. Relational or logical conditions, such as
+  `(1.0L < 2.0L) ? 3.0L : 4.0L`, remain unsupported. A conditional nested inside
+  an arithmetic operand or cast still reaches the arithmetic-only folder, for
+  example `(1 ? 2.0L : 3.0L) + 1.0L`.
 - Static pointer folding retains casts that precede trailing arithmetic:
   `(char *)&object + 1` scales by `sizeof(char)`, including scalar globals
   and local statics. Only a cast covering the entire operand range may be
@@ -772,10 +794,45 @@ without facts for identical bitcode and diagnostics.
 - `debug_add_canonical_globals` carries the defining IR symbol's internal
   linkage into the debug variable. File-scope static data then uses a DWARF
   variable DIE without `DW_AT_external` and CodeView `S_LDATA32`; public data
-  retains `DW_AT_external` and `S_GDATA32`. This mapping does not rename or
-  reparent function-scope statics or classify static procedures (#2719). PDB
-  remaps both data-record type indices independently per module during type
-  merging; `S_LDATA32` stays in its module stream.
+  retains `DW_AT_external` and `S_GDATA32`. PDB remaps both data-record type
+  indices independently per module during type merging; `S_LDATA32` stays in
+  its module stream.
+- A function-scope static keeps its unique `.L.<function>.<name>.<n>` spelling
+  as `IrSymbol.link_name`, which object files and debug relocations use, but
+  `IrSymbol.name` is the source spelling, so debug info names it `calls` rather
+  than `.L.compute.calls.8`. The C frontend also records the declaring
+  function in `IrSymbol.owner_function` (valid when `has_owner_function`). The
+  name change must not land without the nesting: two functions' same-named
+  statics would otherwise be file-scope variables with one name, and a
+  debugger would resolve it to the wrong one. `debug_add_canonical_globals`
+  therefore groups each static after the file-scope data, by owning debug
+  function with a counting sort, and marks it `DebugVariable.is_static_local`;
+  `DebugFunction.static_start`/`static_count` name that function's run. DWARF
+  emits the variable DIE (abbreviation 30) as a child of the subprogram, and
+  CodeView emits `S_LDATA32` between the procedure record and its `S_END`; the
+  file-scope loops skip these variables. A static whose function has no debug
+  function stays a file-scope variable.
+- The nesting is at subprogram level, not in the lexical block that declares
+  the static, because `IrSymbol` records no block. A debugger therefore cannot
+  tell such a static from a same-named parameter, local, sibling static or
+  file-scope object that its block shadows.
+  `debug_static_name_collides` detects those cases, and the static then keeps
+  its unique link spelling as its debug name, as before the source-name change.
+  A static whose name is unique in its function and the file is named by its
+  source spelling. Placing the static in its `DW_TAG_lexical_block` or
+  CodeView `S_BLOCK32` (the block-level part of slice 3b) remains open under
+  #2719.
+- `debug_fill_ir_type` marks a struct or union whose canonical layout is
+  unresolved at the end of lowering (a tag never completed in the unit) as
+  `DebugType.is_declaration`; a tag completed later keeps its complete
+  layout. DWARF emits such a tag as `DW_AT_declaration` with a name and no
+  size or children, through abbreviations 31 and 32 that are present only when
+  the model has one, so the abbreviation table of a unit with none is
+  unchanged. CodeView still lowers it as an empty record (#2719).
+- `DebugFunction.is_internal` carries an internal-linkage function symbol.
+  CodeView then emits `S_LPROC32` instead of `S_GPROC32`, with the same record
+  layout; `pdb_rewrite_symbol_types` remaps the procedure type index of both
+  kinds when merging modules (#2719).
 - Source-map regions retain append order for equal `start` keys. Finalization
   uses an allocation-free ordered scan or four stable byte-wise radix passes
   over the 32-bit key. The one temporary row buffer is rewound before origin
@@ -948,13 +1005,18 @@ without facts for identical bitcode and diagnostics.
   zeroed overwritten slots, complete-aggregate replacement and sibling
   retention across target layouts and both frontend forms, plus native runs
   through FAST and QUALITY.
-- Promoted initializer members retain the selected canonical union type and
-  union-member index separately from the outer aggregate's projection slot.
-  Clearing compares that identity and the union's object offset, so switching
-  promoted anonymous-union members resets the complete union while consecutive
-  writes into the same member preserve its other subobjects.
-  `c_test_promoted_union_initializer_overrides` covers numeric/pointer switches,
-  same-member preservation, nested anonymous promotion and named-union controls.
+- Promoted initializer designators record active union selections by
+  concrete object offset, type and parent activation, rather than relying on
+  the last designator seen. Same-arm writes therefore preserve sibling fields
+  across unrelated writes and disjoint GNU ranges; changing an arm clears that
+  union and its nested selections. Whole-aggregate overwrites evict nested
+  selections, and materialized range values import their selected states under
+  fresh destination activations. Positional default union members and deeply
+  promoted anonymous paths use the same state ledger. The
+  `c_test_promoted_union_initializer_overrides` fixture checks static byte
+  images, relocation records and native runtime witnesses for same-arm,
+  overlapping and disjoint ranges, two-axis inside and outside targets,
+  intervening sibling writes, switched-arm zeroing and deep anonymous paths.
 - `c_parse_validate_constexpr_declaration` validates a leaf root from one local
   work entry, without acquiring scratch or clearing the translation-unit type
   universe. Arrays, structs and unions retain the explicit private graph walk.
@@ -1694,16 +1756,81 @@ one publication per member, refusal neighbors and both canonical frontend
 forms on Linux x86-64/AArch64 and Windows x86-64. The registered
 `c_test_expression_enum_runtime` executes the same scope/order family on
 supported desktop native targets in FAST and QUALITY and both forms.
-The local initializer walk also publishes direct enum type names in explicitly
-typed scalar block initializers at that lexical point, before later operands
-and comma declarators. It uses only the owning enum's member range.
+The local initializer walk also publishes the definitions an initializer's type
+names make, at that lexical point, before later operands and comma declarators:
+an enum type name (also qualified, `const enum { ... }`, or with a fixed
+underlying type, `enum : char { ... }`), and the enumerators nested in a struct
+or union definition, in any explicitly typed initializer (scalar, aggregate or
+inferred array), in a `__builtin_offsetof` type operand and in a GNU
+`__auto_type` initializer. `c_parse_define_initializer_type`
+is the one producer. It registers the record, publishes its nested enumerators
+into the declaration's scope, and only then binds the record's member array
+bounds, so `sizeof(struct { enum { A = 3 } e; char c[A]; })` sizes `c` with the
+inner `A` even when an outer `A` is visible (C17 6.2.1p4); a clash in the same
+scope is a `redefinition of enumerator` diagnostic and never a silent miscompile.
+An enum uses only its own member range. `c_parse_type_definition_at` recognizes
+the definition; a definition with attributes between its keyword and its body
+(`enum __attribute__((packed)) { ... }`) is refused with an unsupported
+diagnostic in a block initializer, because the expression parser sizes such a
+type name wrongly and an unrecognized body would bind to an outer name of the
+same spelling. A `for` declaration in every dialect and a C23 `auto` or
+`constexpr` initializer publish the same way, at the definition's own point,
+as Clang does (#3252, maintainer decision 2026-10-09): `for (int i =
+sizeof(struct { enum { A = 3 } e; char c[A]; }); ...)` sizes `c` with the inner
+`A` and the loop's condition and body see it, and the name ends with the loop.
+Clang 18 accepts each of these, including the pre-C23 `for` form, and gives
+those values; GCC rejects the `auto` and `constexpr` forms and, under
+`-pedantic-errors`, the pre-C23 `for` one. C17 6.8.5p3 is read, as Clang
+reads it, as limiting the for declaration's declarators, not the type names in
+its initializer; a tag or enum defined in the declaration's own specifiers
+(`for (enum { Q = 3 } e = Q; ...)`) stays refused (#2392). A C23 `auto`
+initializer defines its types through `c_parse_bind_auto_initializer_identifiers`
+like GNU `__auto_type`, and a `constexpr` initializer is validated only after
+its definitions are published, so a constant it reads binds them.
 `c_test_initializer_enum_scope` checks acceptance/refusal, unique publication
-and both canonical frontend forms on the same three layouts.
+and both canonical frontend forms on the same three layouts, plus GNU17 and C23
+cases through `c_test_enum_scope_case`.
 `c_test_initializer_enum_runtime` executes initializer order, cast/literal,
-tag, static-local and later-declarator cases in FAST and QUALITY
-and both forms on supported desktop targets. Inferred array initializers,
-constexpr/GNU inferred declarations, for initializers, file-scope initializers, qualified type
-names and expression-defined record members remain pending under #1615.
+tag, static-local, aggregate, inferred-array, record-member-bound, qualified,
+offsetof and later-declarator cases in FAST and QUALITY
+and both forms on supported desktop targets.
+
+At file scope `c_analyze_semantics_core` walks each non-function declaration in
+source order, before parsing that declaration's own type, and
+`c_parse_bind_expression_aggregates` registers the enum, struct and union
+definitions in its expression type names (initializers, array and member bounds,
+`_Static_assert`). The ordinary file-scope publication loop then publishes their
+enumerators with the others, so a clash is diagnosed once, and a later enumerator
+or member bound, in the same declaration or a following one, reads an earlier one
+through `c_parse_pending_enum_member` (`_Static_assert(sizeof(enum { R = 2 }) == 4,
+""); enum { S = R + 1 };`). A definition inside a function declarator's parameter
+list (`int (*p)(int [sizeof(enum { R = 2 })])`) is in that prototype's scope
+(C17 6.2.1p4): the walk marks its members `is_prototype_scope`, a `(` that
+follows a `(*...)` declarator group, a parenthesised declarator name (`typedef int (F)(...)`) or a declarator name at the top of the declaration (`typedef int F(int a[...])`, with nothing open and before any initializer; attribute and operator groups such as `__attribute__((...))`, `sizeof`, `__alignof__` and `__builtin_*` never open one) opening the list, and neither publication
+nor pending lookup sees them, so they neither clash with nor reach the file.
+File-scope enumerators are still published together after the declarations, but an
+enumerator's scope begins at its own definition (C17 6.2.1p7), so
+`c_parse_diagnose_early_expression_enum_uses` then rereads the file-scope
+declarations that are not function definitions (a body's own binding already
+refuses) and diagnoses each identifier that resolves to an expression-defined
+enumerator defined at a later token as `use of undeclared identifier`
+(`int y = R; unsigned long x = sizeof(enum { R = 2 });` is refused, as GCC and
+Clang refuse it; a later use is accepted). A token counts as a use by what
+precedes it: a member selection, a declarator after a type word or `*`, a
+closing bracket and a list separator outside parentheses, brackets and
+initializers do not, so a record member or a local named like the enumerator is
+not a use. The scan is a heuristic over tokens, not a binding pass. A clash with a later
+declaration is reported at the enumerator. Classification of prototype lists keeps
+its open-parenthesis state in arena-allocated bit arrays sized by the range's
+token count, so nesting depth has no limit. Remaining under #1615: an enum defined as a later argument of a call-like group (`__builtin_types_compatible_p(int, enum { R = 2 })`) is not walked, only one that follows a `(`; prototype-scope
+names in a function definition's parameter bounds, which are also visible in its
+body (`int f(int a[sizeof(enum { R = 2 })]) { return R; }` is refused, and so is
+`int f(int a[sizeof(struct { enum { A = 3 } e; char c[A]; })])`), a prototype
+parameter that defines an enum directly (`int (*p)(enum { R = 2 } x)`) which still
+leaks to the file as before, `sizeof` of a fixed-underlying-type enum in a
+file-scope initializer (not folded), and attributes on a definition in a
+file-scope expression. `c_test_file_scope_expression_enum_scope` and
+`c_test_file_scope_expression_enum_runtime` cover this.
 
 `c_test_enumerator_types` pins both contracts across Linux x86-64/AArch64 and
 Windows x86-64. `c_test_msvc_enum_abi` pins the MSVC ordinary/fixed distinction,

@@ -291,6 +291,17 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   `tests/basic_c_long_double_aggregate_{caller,callee}.c`, linked against the
   host compiler in both directions, because a caller and a callee this
   compiler produced agree with each other whatever they agree on.
+  The x87 wrapper test asks the classification and the size, not the
+  alignment: `struct __attribute__((packed)) { long double v; }` is sixteen
+  bytes of alignment one and still returns as the X87/X87_UP pair in ST(0) and
+  travels as a sixteen-byte MEMORY argument, which Clang and GCC both compile.
+  As a *fixed* argument it takes eightbyte stack slots (an odd slot count ahead
+  of it is not padded to sixteen) where an aligned `long double` does; as a
+  *variadic* argument and through `va_arg` the overflow cursor rounds to its
+  alignment of eight. `compiler_driver_test_sysv_packed_x87_overaligned_va_arg`
+  pins both slot parities, a wrapper member at an unaligned offset, a discarded
+  result and a nested wrapper against Clang and GCC in both call directions;
+  `c_test_packed_wide_float_wrapper_signatures` pins the signatures.
   Reading one back out of a `va_list` admits exactly the two shapes the
   argument side does, and for the same reason. The X87/X87_UP pair classifies
   into memory, so a variadic `long double` is never in the register save area

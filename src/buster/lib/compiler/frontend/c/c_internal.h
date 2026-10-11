@@ -237,6 +237,20 @@ BUSTER_C_EXTERN void c_parse_declaration_type(CTypeParseMachine* machine, CParse
 BUSTER_C_EXTERN bool c_parse_validate_constexpr_declaration(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                             CPreprocessResult preprocess, CDeclaration* declaration);
 BUSTER_C_EXTERN CTypeId c_parse_add_type(CParseResult* result, CType type);
+BUSTER_C_EXTERN CTypeId c_parse_intern_type(CParseResult* result, CType type);
+BUSTER_C_EXTERN CTypeId c_parse_interned_type(CParseResult const* result, CType type);
+// What c_parse_primitive_type reads from a run of specifier words, before it
+// diagnoses or appends anything; see c_parse_primitive_type_read.
+typedef struct CParsePrimitiveSpelling CParsePrimitiveSpelling;
+struct CParsePrimitiveSpelling
+{
+    CType type;
+    u32 declarator_start;
+    u32 first_type;
+    bool seen_type;
+    bool valid_specifiers;
+};
+BUSTER_C_EXTERN CParsePrimitiveSpelling c_parse_primitive_type_read(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_semantic_type_identity_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                    CScopeId scope, u32 start, u32 end, CTypeIdentityQuery* answer, String8* message);
 // Whether a call through this function type ends control flow because the
@@ -273,6 +287,14 @@ struct CDeclarationBinding
     bool is_weak;
     bool is_constructor;
     bool is_destructor;
+    // The first __attribute__((visibility("..."))) written on the declaration,
+    // a CSymbolVisibility; UNSPECIFIED when there is none. Only an attribute at
+    // the declaration's own level counts: one inside a parameter list, a
+    // struct body or on a struct tag does not name the declared symbol.
+    u8 visibility;
+    // A visibility attribute whose argument is not one of the four string
+    // literals; c_parse_validate_alias_targets refuses it.
+    bool visibility_invalid;
     // __attribute__((returns_twice)): a call to the function may return a
     // second time, as setjmp does (issue 1431).
     bool is_returns_twice;
@@ -282,7 +304,6 @@ struct CDeclarationBinding
     bool is_weakref;
     // __attribute__((ifunc("resolver"))), which has no lowering yet.
     bool is_ifunc;
-    u8 reserved[2];
     String8 weakref_target;
 };
 
@@ -487,6 +508,20 @@ struct CStringLiteralMemo
 BUSTER_C_EXTERN CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
+// Per-body validation scratch (#1256). While c_parse_validate_lowering_constraints
+// validates one function body, an allocation from the guarded scratch arena
+// that would pass the body's limit returns 0 and marks the body exhausted;
+// every later guarded allocation of that body returns 0 too. Callers skip the
+// work the array was for. Any other arena, and the guarded one outside a body,
+// allocates exactly as arena_allocate does. c_parse_body_scratch_fits is the
+// same check for a caller that allocates the bytes itself right after it;
+// c_parse_body_scratch_refuse marks an open body exhausted outright.
+BUSTER_C_EXTERN void* c_parse_body_scratch_allocate(Arena* arena, u64 element_size, u64 count, u64 alignment);
+BUSTER_C_EXTERN bool c_parse_body_scratch_fits(Arena* arena, u64 size, u64 alignment);
+BUSTER_C_EXTERN bool c_parse_body_scratch_guarded(Arena const* arena);
+BUSTER_C_EXTERN Arena* c_parse_body_scratch_arena(void);
+BUSTER_C_EXTERN void c_parse_body_scratch_refuse(void);
+#define C_PARSE_BODY_SCRATCH_ARRAY(arena, T, count) ((T*)c_parse_body_scratch_allocate((arena), sizeof(T), (count), BUSTER_ALIGN_OF(T)))
 
 // One language constraint, not a claim that an expression or translation unit
 // has passed all semantic checks. These helpers use C bindings/types only;
@@ -501,6 +536,7 @@ BUSTER_C_EXTERN bool c_semantic_call_accepts_arity(u32 parameter_count, bool is_
 BUSTER_C_EXTERN String8 c_semantic_call_arity_message(Arena* arena, String8 name, u32 parameter_count, bool is_variadic, u32 argument_count);
 BUSTER_C_EXTERN CCallArityDiagnostic c_semantic_check_named_call_arities(Arena* arena, CAnalysisResult* analysis,
                                                                       CPreprocessResult preprocess, u32 start, u32 end);
+BUSTER_C_EXTERN u32 c_switch_first_overlapping_label(Arena* scratch, u64 const* lows, u64 const* highs, u64 order_flip, u32 count);
 BUSTER_C_EXTERN bool c_parse_builtin_type_layout(Target target, CTypeKind kind, u64* size_out, u32* alignment_out);
 BUSTER_C_EXTERN u8 c_semantic_integer_rank(CTypeKind kind);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_kind(u8 rank, bool is_signed);
@@ -588,7 +624,11 @@ struct CRecordLayoutCursor
     // Set when a bit-field's natural storage unit may not cover its bits or
     // may overhang the record, so the IR layout has to fit a unit for it.
     bool needs_unit_fitting;
-    u8 reserved[4];
+    // Set when a size, offset or bit position no longer fits the u64 bit
+    // arithmetic; the positions saturate and c_record_layout_size answers
+    // UINT64_MAX, which is above every object-size limit.
+    bool overflowed;
+    u8 reserved[3];
 };
 
 typedef struct CRecordLayoutPlacement CRecordLayoutPlacement;
@@ -682,6 +722,7 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_CONSTANT_P,
     C_SYMBOL_BUILTIN_CHOOSE_EXPR,
     C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P,
+    C_SYMBOL_BUILTIN_CLASSIFY_TYPE,
     C_SYMBOL_BUILTIN_OBJECT_SIZE,
     C_SYMBOL_BUILTIN_ASSUME_ALIGNED,
     C_SYMBOL_BUILTIN_DEBUGTRAP,
@@ -716,10 +757,12 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_RETURN_ADDRESS,
     C_SYMBOL_BUILTIN_ALLOCA,
     C_SYMBOL_BUILTIN_COMPLEX,
+    C_SYMBOL_BUILTIN_ABSOLUTE_VALUE,
     C_SYMBOL_BUILTIN_COUNT,
 } CSymbolBuiltin;
 BUSTER_C_EXTERN CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String8 spelling);
+BUSTER_C_EXTERN CTypeKind c_semantic_absolute_value_kind(CSymbolBuiltin builtin, String8 spelling);
 BUSTER_C_EXTERN bool c_semantic_builtin_returns_void(CSymbolBuiltin builtin);
 
 typedef enum CIntegerTransformOperation
@@ -743,6 +786,7 @@ BUSTER_C_EXTERN CIntegerTransformBuiltin c_semantic_integer_transform_builtin(Ta
 BUSTER_C_EXTERN u64 c_integer_transform_bits(CIntegerTransformBuiltin builtin, u64 value, u64 count);
 BUSTER_C_EXTERN u32 c_parse_constraint_expression_end(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_semantic_bfloat16_builtin_spelling(String8 name);
+BUSTER_C_EXTERN bool c_semantic_vendor_storage_half_argument(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_semantic_vendor_builtin_signature(Target target, String8 name, CVendorBuiltin* signature);
 BUSTER_C_EXTERN CTypeId c_semantic_vendor_builtin_type(CParseResult* result, Target target, CVendorBuiltinType descriptor);
 BUSTER_C_EXTERN bool c_semantic_vendor_builtin_supported(Target target, String8 name);
@@ -753,6 +797,16 @@ BUSTER_C_EXTERN CTypeKind c_semantic_uint64_kind(Target target);
 BUSTER_C_EXTERN CTypeKind c_semantic_byte_swap_kind(Target target, CSymbolBuiltin builtin, String8 spelling);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_builtin_fold_kind(Target target, CSymbolBuiltin builtin, String8 spelling);
 BUSTER_C_EXTERN bool c_semantic_integer_builtin_fold(CSymbolBuiltin builtin, u32 width, u64 bits, u64* answer_out);
+typedef struct CMathLibmShape
+{
+    String8 link_name;
+    u32 arity;
+    CTypeKind argument_kind;
+    CTypeKind result_kind;
+    bool integer_second;
+} CMathLibmShape;
+
+BUSTER_C_EXTERN CMathLibmShape c_semantic_math_libm_shape(String8 name);
 BUSTER_C_EXTERN bool c_semantic_math_link_is_long_double(String8 link_name);
 
 struct CSymbolTable
@@ -834,6 +888,8 @@ typedef enum CSymbolWellKnown
     C_SYMBOL_WELL_KNOWN_DESTRUCTOR_GNU,
     C_SYMBOL_WELL_KNOWN_RETURNS_TWICE,
     C_SYMBOL_WELL_KNOWN_RETURNS_TWICE_GNU,
+    C_SYMBOL_WELL_KNOWN_VISIBILITY,
+    C_SYMBOL_WELL_KNOWN_VISIBILITY_GNU,
     // The two decorations c_parse_skip_attributes steps over beside the
     // attribute spellings above; every specifier scan runs it once per
     // declaration, so the ladder it replaced ran on every identifier there.
@@ -865,6 +921,7 @@ BUSTER_CT_CHECK(C_SYMBOL_WELL_KNOWN_COUNT <= 64);
 #define C_ATTRIBUTE_WORDS_CONSTRUCTOR (C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR_GNU))
 #define C_ATTRIBUTE_WORDS_DESTRUCTOR (C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR_GNU))
 #define C_ATTRIBUTE_WORDS_RETURNS_TWICE (C_SYMBOL_WELL_KNOWN_BIT(RETURNS_TWICE) | C_SYMBOL_WELL_KNOWN_BIT(RETURNS_TWICE_GNU))
+#define C_ATTRIBUTE_WORDS_VISIBILITY (C_SYMBOL_WELL_KNOWN_BIT(VISIBILITY) | C_SYMBOL_WELL_KNOWN_BIT(VISIBILITY_GNU))
 
 // _Noreturn is a declaration specifier, not a GNU attribute query spelling.
 BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_attribute_noreturn_word(String8 spelling)
@@ -1081,6 +1138,8 @@ struct CIrDecodedString
 };
 
 typedef struct CTypeParseFrame CTypeParseFrame;
+typedef struct CAstTypeBodyIndex CAstTypeBodyIndex;
+typedef struct CAstTypeBody CAstTypeBody;
 typedef struct CTypeMutation CTypeMutation;
 typedef struct CParseExpressionTypeTask CParseExpressionTypeTask;
 typedef struct CParsePromotedMemberWork CParsePromotedMemberWork;
@@ -1304,6 +1363,65 @@ typedef enum CConstantEvaluationMode
     C_CONSTANT_EVALUATION_TYPE,
 } CConstantEvaluationMode;
 
+// Interned primitive and pointer rows (GitHub #3102). c_parse_primitive_type,
+// c_parse_pointer_chain and the type machine's `&` each build a fresh row for
+// every type name or address they read, and an expression's type name is read
+// once per operator-scan level and again by its leaf, so nearly all the rows
+// the static-initializer and per-body validation queries mint are copies. While
+// `enabled` -- only in c_parse_validate_lowering_constraints, from the
+// static-initializer walk through the loop over function bodies --
+// c_parse_intern_type returns the earlier row instead. The header exists only
+// when the caller asked for it (CParserResult.type_interning, which the driver
+// sets with the tree under -fc-ast-pilot), so the default path appends every
+// row as before.
+//
+// The window is what keeps the copies unobservable but for the table's size.
+// Such a row is immutable, carries no tag, link, bound or alignment record, and
+// lowers to a scalar or pointer IR type that lowering interns itself; and the
+// window opens after every declaration has its rows, and nothing in it rewrites
+// a declaration's, so a row it interns follows every row that can refer to it.
+// Lowering maps rows in passes, in table order, and a struct resolves only once
+// the rows of its members are mapped: interning a member's row would move it
+// ahead of its struct and resolve the struct a pass earlier, which reorders the
+// IR types and so the `-g` type entries. Within the window an interned row only
+// ever replaces a later copy of itself, which resolves in the same pass. Every
+// aggregate a body or file-scope initializer type name defines, qualified ones
+// such as `(const struct { char *p; })` included, gets its row and its members'
+// rows from the declaration pass before the window opens;
+// c_type_parse_core_step steps over the leading qualifiers and reads that row
+// back, so no member segment is read while the window is open. `suspended` is a
+// defensive guard for the member-row order should a later change define an
+// aggregate inside the window: it counts the member segments the machine is
+// reading, and nothing is interned while any is. Restrict-qualified rows are
+// never interned, because c_type_parse_root_finish diagnoses an invalid
+// `restrict` only on rows a query appends.
+//
+// The header hangs off CAggregateLookup.type_interning, outside the
+// checkpointed CParseResult that every query copies. `rows` is an append-only
+// log of the interned row ids; its live prefix is
+// CParseResult.interned_type_count, which a rollback restores with type_count,
+// so a row a rollback removed is never returned and a row some other site
+// appends at the same id is never mistaken for one. `slots` is open
+// addressing over the log (entry + 1, 0 empty); a probe passes over stale and
+// mismatching entries until an empty slot, so it finds the one live entry of
+// a key exactly, whatever was rolled back before. A lookup
+// (c_parse_interned_type) works whether or not the window is open.
+struct CTypeInterning
+{
+    u32* rows;
+    u32* slots;
+    u32 row_capacity;
+    // A power of two, or zero before the first entry.
+    u32 slot_count;
+    // Slots written since the table was last built, stale ones included.
+    u32 slot_used;
+    // Aggregate member segments in flight (c_type_parse_aggregate_range_step);
+    // the machine's failure path takes back those it discards.
+    u32 suspended;
+    // The interning window (above); outside it every row is appended.
+    bool enabled;
+};
+
 // Name index of one aggregate's direct members, for the member searches in
 // c_parse.c (c_parse_member_type and c_parse_promoted_member_type). A record
 // of at least C_MEMBER_INDEX_MIN_MEMBERS members gets one on its first named
@@ -1341,6 +1459,23 @@ struct CMemberIndexEntry
     CMemberIndexState state;
 };
 
+// What a static assertion needs to know about oversized types (#1479). An
+// oversized size saturates or exceeds the limit, so an assertion that measured
+// one folds a meaningless value: its own diagnostic would only restate the
+// size error. c_parse_static_assert_check and
+// c_parse_validate_deferred_assertions compare oversized_layouts around their
+// own fold, so an unrelated assertion is always reported.
+struct CObjectSizeFacts
+{
+    // Layout answers past the target object-size limit, counted by
+    // c_parse_type_layout_core.
+    u64 oversized_layouts;
+    // An immediate assertion failed or was suppressed. Its diagnostic, or the
+    // size error it relies on, needs the size validation that an earlier
+    // diagnostic gates, so c_analyze_semantics_core runs it once at the end.
+    bool validation_requested;
+};
+
 struct CMemberLookup
 {
     // Indexed by type id; grown on demand, zero-filled.
@@ -1368,6 +1503,16 @@ struct CMemberCursor
 
 struct CTypeParseMachine
 {
+    // The tree expression typer (c_ast_types.c, GitHub #3102). `syntax_tree`
+    // is the unit's syntax tree when the caller built one, and null leaves the
+    // machine the only source of expression types. `ast_bodies` is the
+    // function-definition index built once per validation, `ast_types` the
+    // typed function body being validated (null outside one, and for a body
+    // the tree does not cover), and `ast_type_statistics` the optional counts.
+    CAst const* syntax_tree;
+    CAstTypeStatistics* ast_type_statistics;
+    CAstTypeBodyIndex* ast_bodies;
+    CAstTypeBody* ast_types;
     CParseExpressionQuery* expression_queries;
     u8* expression_query_flags;
     CParseResult* expression_query_result;
@@ -1420,6 +1565,11 @@ struct CTypeParseMachine
     bool result_nonplace_projection;
     bool failed;
     bool semantic_constant_queries;
+    // Set once c_parse_validate_lowering_constraints has inferred every
+    // file-scope and local array bound. Later writes only give a count to a
+    // bound that had none, so a layout read from an inferred count can no
+    // longer change and the layout cache may keep it.
+    bool inferred_bounds_final;
     bool validate_expression_constraints;
     bool runtime_expression_constraints;
     bool type_identity_queries_active;
@@ -1442,6 +1592,145 @@ struct CParsePromotedMemberWork
     u32 parent;
     u32 via_field;
 };
+
+// ---- tree expression typer (c_ast_types.c) ----------------------------------
+//
+// What the typer made of one type query. ANSWER carries the type and the
+// nonplace-projection fact exactly as a valid, constraint-free machine answer
+// would; MISS means the range maps to no expression node, DECLINE that it maps
+// to one the typer does not vouch for in this mode, and INACTIVE that no typed
+// body covers the query (or the machine is in a state the typer leaves alone).
+typedef enum CAstTypeStatus
+{
+    C_AST_TYPE_INACTIVE,
+    C_AST_TYPE_MISS,
+    C_AST_TYPE_DECLINE,
+    C_AST_TYPE_ANSWER,
+    // An answer that is the row a replay of the queried string literal
+    // appends; `type` is invalid until c_parse_expression_tree_query replays it.
+    C_AST_TYPE_STRING,
+} CAstTypeStatus;
+
+typedef struct CAstTypeAnswer CAstTypeAnswer;
+struct CAstTypeAnswer
+{
+    CTypeId type;
+    CAstTypeStatus status;
+    // The CAstKind of the node the range mapped to (answer or decline).
+    u32 node_kind;
+    // [replay_start, replay_end), when not empty, is a string-literal token
+    // whose typing the answer must replay exactly as the machine's task would
+    // (c_parse_expression_tree_query): a checked cast's operand, or under
+    // C_AST_TYPE_STRING the queried literal itself.
+    u32 replay_start;
+    u32 replay_end;
+    bool nonplace_projection;
+};
+
+BUSTER_C_EXTERN void c_ast_types_bodies_prepare(CTypeParseMachine* machine, CParseResult const* result);
+BUSTER_C_EXTERN void c_ast_types_body_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
+                                            CDeclaration const* declaration);
+BUSTER_C_EXTERN void c_ast_types_body_end(CTypeParseMachine* machine);
+// One file-scope object's initializer [start, end), typed for the queries
+// c_parse_validate_static_initializers makes about it, with names the binder
+// did not record resolved in `scope`; the region lasts until
+// c_ast_types_initializer_end. It is typed on the first query the literal
+// fast path does not answer; until then c_ast_types_waiting holds, and a
+// literal query takes the literal path.
+BUSTER_C_EXTERN void c_ast_types_initializer_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess, CScopeId scope,
+                                                   u32 start, u32 end);
+BUSTER_C_EXTERN void c_ast_types_initializer_end(CTypeParseMachine* machine);
+BUSTER_C_EXTERN bool c_ast_types_waiting(CTypeParseMachine const* machine);
+BUSTER_C_EXTERN CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
+                                                  u32 start, u32 end);
+// The machine state a tree answer leaves, as a valid machine answer with no
+// constraint would.
+BUSTER_C_EXTERN void c_ast_types_publish(CTypeParseMachine* machine, CParseResult* result, CAstTypeAnswer answer, u32 end);
+
+// c_parse.c queries the typer reads: the literal leaf, the member search, the
+// integer-kind predicate, the scalar rows and the two machine-state guards.
+// The machine's literal leaf: a lone number or character literal's scalar row.
+BUSTER_C_EXTERN CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, u32 start,
+                                                             u32 end);
+BUSTER_C_EXTERN CTypeId c_parse_member_type(Arena* arena, CParseResult* result, CTypeId type, u32 symbol, String8 name, u32* bit_width_out,
+                                            CTypeId* aggregate_out, u32* member_out);
+BUSTER_C_EXTERN bool c_parse_expression_integer_kind(CTypeKind kind);
+// The immutable scalar row for `kind` once analysis has published them, a new
+// row before that; the tests-build probe publishes them as analysis does.
+BUSTER_C_EXTERN CTypeId c_parse_expression_scalar_type(CParseResult* result, CTypeKind kind);
+// The machine's operator rules the typer applies to operand types it already
+// holds: the operand kind (an enum's compatible type), the integer promotion
+// with a bit-field width, the usual arithmetic conversions, the real-kind
+// predicate and a cast's scalar conversion constraint.
+BUSTER_C_EXTERN CTypeKind c_parse_expression_value_kind(CParseResult* result, CTypeId id);
+BUSTER_C_EXTERN CTypeKind c_parse_expression_promoted_kind_with_width(Target target, CTypeKind kind, u32 bit_field_width);
+BUSTER_C_EXTERN CTypeId c_parse_expression_arithmetic_type(CParseResult* result, Target target, CTypeId left_id, CTypeId right_id,
+                                                           u32 left_bit_field_width, u32 right_bit_field_width);
+BUSTER_C_EXTERN bool c_parse_expression_real_kind(CTypeKind kind);
+BUSTER_C_EXTERN String8 c_parse_scalar_conversion_message(Target target, CTypeKind to, CTypeKind from, bool runtime);
+// Whether [start, end) has the shape of a place, the constraint the machine's
+// `&` checks.
+BUSTER_C_EXTERN bool c_parse_expression_place_shape(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end);
+// The binding strength the machine's operator scan gives a token: 1 for the
+// comma, 2 for the assignment family, then 4 (`||`) to 13 (`*`); 0 for none.
+BUSTER_C_EXTERN u32 c_parse_expression_operator_precedence(CToken token);
+// Whether no type-identity site (_Generic, __builtin_types_compatible_p) lies
+// in [start, end); false when the position index is not built, which proves
+// nothing.
+BUSTER_C_EXTERN bool c_parse_type_identity_sites_absent(CParseResult* result, u32 start, u32 end);
+// Whether c_parse_pending_enum_member could answer a single identifier: an
+// enumerator list still being parsed.
+BUSTER_C_EXTERN bool c_parse_pending_enum_possible(CParseResult const* result);
+
+// A tree answer held for verify mode; defined below for tests builds.
+typedef struct CAstTypePending CAstTypePending;
+
+#if BUSTER_INCLUDE_TESTS
+// Verify mode (c_test_ast_type_verify_set): every tree answer is also computed
+// without the tree and compared. The mark records the model's table sizes
+// before that run.
+typedef struct CAstTypeVerifyMark CAstTypeVerifyMark;
+struct CAstTypeVerifyMark
+{
+    u32 types;
+    u32 diagnostics;
+    u32 array_bounds;
+    u32 members;
+    u32 enum_members;
+    u32 entities;
+    u32 scopes;
+    u32 parameters;
+};
+BUSTER_C_EXTERN bool c_ast_types_verifying(void);
+BUSTER_C_EXTERN CAstTypeVerifyMark c_ast_types_verify_begin(CParseResult const* result);
+BUSTER_C_EXTERN void c_ast_types_verify_hold_replay(CParseResult* result, CAstTypePending* pending);
+BUSTER_C_EXTERN void c_ast_types_verify_end(CTypeParseMachine* machine, CParseResult* result, CAstTypePending const* pending, u32 start, u32 end,
+                                            bool machine_valid, CTypeId machine_type, CTypeId* type_out);
+// A designator probe the const-assignment walk skips
+// (c_parse_designator_probe), answered by the machine anyway: it must fail
+// and leave the diagnostics and table sizes at the mark.
+BUSTER_C_EXTERN void c_ast_types_verify_probe(CParseResult const* result, CAstTypeVerifyMark mark, bool machine_valid);
+#endif
+
+// A tree answer held for verify mode: the answer and the table sizes before
+// the literal path or the machine answers the same range, and for a replayed
+// answer the rows its replay appended, taken back off the tables so the
+// machine's appends can be held to them. Only tests builds fill one;
+// production passes none.
+#if BUSTER_INCLUDE_TESTS
+#define C_AST_TYPE_REPLAY_ROWS 2u
+struct CAstTypePending
+{
+    CAstTypeAnswer answer;
+    CAstTypeVerifyMark mark;
+    u32 replay_types;
+    u32 replay_bounds;
+    // More rows than C_AST_TYPE_REPLAY_ROWS are counted but not kept, which
+    // the comparison reports as a mismatch.
+    CType replay_type_rows[C_AST_TYPE_REPLAY_ROWS];
+    CArrayBound replay_bound_rows[C_AST_TYPE_REPLAY_ROWS];
+};
+#endif
 
 BUSTER_C_EXTERN bool c_semantic_asm_clobber_valid(Target target, String8 clobber);
 BUSTER_C_EXTERN String8 c_semantic_asm_clobber_name(Target target, String8 clobber);
@@ -1480,6 +1769,41 @@ struct CIrConstantValue
 };
 
 BUSTER_C_EXTERN bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment);
+
+// The one offsetof member-designator walk (#1570), shared by the parser's
+// constant evaluator (c_parse_constant_offsetof) and lowering
+// (c_ir_constant_offsetof_attempt). It owns the designator grammar
+// `member ( '[' index ']' | '.' member )*`, index admission (an integer or
+// boolean of at most 128 bits whose converted value is nonnegative) and the
+// target-size_t member and index arithmetic. Each caller resolves member
+// names and element sizes in its own type system (#1247), and finds the `]`
+// matching an INDEX step with its own delimiter table.
+typedef enum COffsetofStep
+{
+    C_OFFSETOF_STEP_INVALID,
+    C_OFFSETOF_STEP_MEMBER,
+    C_OFFSETOF_STEP_INDEX,
+    C_OFFSETOF_STEP_END,
+} COffsetofStep;
+
+typedef struct COffsetofWalk COffsetofWalk;
+struct COffsetofWalk
+{
+    u64 offset;
+    u64 maximum;
+    u32 cursor;
+    u32 end;
+    bool expect_member;
+    bool valid;
+    u8 reserved[2];
+};
+
+BUSTER_C_EXTERN COffsetofWalk c_offsetof_walk_begin(Target target, u32 cursor, u32 end, u64 offset, bool expect_member, bool valid);
+BUSTER_C_EXTERN COffsetofStep c_offsetof_walk_next(COffsetofWalk* walk, CToken const* tokens);
+BUSTER_C_EXTERN void c_offsetof_walk_member(COffsetofWalk* walk, bool found, u64 member_offset);
+BUSTER_C_EXTERN void c_offsetof_walk_index(COffsetofWalk* walk, IrType const* index_type, IrInteger index, bool element_resolved, u64 element_size,
+                                           u32 close);
+BUSTER_C_EXTERN void c_offsetof_walk_runtime_index(COffsetofWalk* walk, bool element_resolved, u32 close);
 BUSTER_C_EXTERN bool c_ir_constant_wide_float_cast(CIrConstantValue const* source, IrType* source_type,
                                                      IrType const* target, CIrConstantValue* result);
 BUSTER_C_EXTERN bool c_ir_constant_wide_float_to_integer(CIrConstantValue const* source, IrType const* source_type,
@@ -1516,6 +1840,11 @@ typedef enum CIrAtomicBuiltin
     // boolean, and the store of zero that releases it again.
     C_IR_ATOMIC_BUILTIN_TEST_AND_SET,
     C_IR_ATOMIC_BUILTIN_CLEAR,
+    // GCC's legacy compare-and-swap pair.  Both take the expected value by
+    // value, not through a pointer: `val` answers the previous contents and
+    // `bool` answers whether they matched.
+    C_IR_ATOMIC_BUILTIN_SYNC_BOOL_COMPARE_AND_SWAP,
+    C_IR_ATOMIC_BUILTIN_SYNC_VAL_COMPARE_AND_SWAP,
     C_IR_ATOMIC_BUILTIN_COUNT,
 } CIrAtomicBuiltin;
 
@@ -1528,6 +1857,9 @@ struct CIrAtomicBuiltinSpelling
     bool new_value;
     bool generic;
     bool sequential;
+    // `__sync_lock_test_and_set` is an acquire barrier and `__sync_lock_release`
+    // a release one; every other `__sync_*` spelling is a full barrier.
+    bool lock;
 };
 
 BUSTER_C_EXTERN CIrAtomicBuiltinSpelling c_ir_atomic_builtin_spelling(String8 name);
@@ -1553,6 +1885,7 @@ BUSTER_C_EXTERN String8 c_semantic_asm_x87_operands_message(u64 const* constrain
 
 BUSTER_C_EXTERN String8 c_ir_math_builtin_link_name(String8 name);
 BUSTER_C_EXTERN u32 c_semantic_memory_builtin_arity(String8 name);
+BUSTER_C_EXTERN bool c_semantic_overflow_builtin_generic(String8 name);
 
 typedef enum CIrSimdArgument
 {

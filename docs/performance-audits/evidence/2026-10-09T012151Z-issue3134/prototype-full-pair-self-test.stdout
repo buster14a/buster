@@ -1,0 +1,11 @@
+SHADOW_SELF_TEST name=directory-entry-sort-canonical status=pass
+SHADOW_SELF_TEST name=unchanged-whole-tree-positive status=pass
+SHADOW_SELF_TEST name=higher-priority-negative-lookup-addition-invalidates status=pass
+SHADOW_SELF_TEST name=included-file-content-change-invalidates status=pass
+SHADOW_SELF_TEST name=state-roundtrip status=pass
+SHADOW_SELF_TEST name=corrupt-state-is-a-miss status=pass
+SHADOW_SELF_TEST name=state-symlink-is-not-read-or-written status=pass
+SHADOW_SELF_TEST name=oversized-state-is-not-read status=pass
+SHADOW_SELF_TEST name=symlink-input-is-ineligible status=pass
+SHADOW_SELF_TEST name=content-match-never-authorizes-reuse status=pass
+SHADOW_SELF_TEST checks=10 failures=0 cleanup=pass

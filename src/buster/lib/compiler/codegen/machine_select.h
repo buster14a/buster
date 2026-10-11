@@ -214,6 +214,13 @@ struct MachineSelectionModule
 BUSTER_F_DECL MachineSelectionValidationError machine_selection_validate_function(Arena* arena, IrProgram* program, IrFunction* function);
 BUSTER_F_DECL MachineSelectionValueFacts machine_selection_value_facts_allocate(Arena* arena, u32 value_count);
 
+// Emission order of a lowered function's canonical blocks: reverse postorder
+// from the entry over the published CFG, so every reachable block follows its
+// dominators and only a retreating (loop back) edge jumps to a lower block. A
+// conditional's first target follows its source; unreachable blocks keep
+// canonical order at the end. Null means canonical order itself.
+BUSTER_F_DECL u32* machine_selection_canonical_layout(Arena* arena, IrFunction const* function);
+
 struct MachineFunction;
 // Remap canonical edges after block expansion. Deterministic literal assembly
 // keeps its one executable successor; general asm-goto edges leave the target

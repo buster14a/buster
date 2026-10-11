@@ -90,6 +90,10 @@ GENERATED_RETIREMENT_PATHS = frozenset((
     "tools/native_retirement_dependency_binding.generated.h",
 ))
 RETIREMENT_TRUST_PATHS = frozenset((
+    "tools/ci_no_code.c",
+    ".github/workflows/ci-no-code-plan.yml",
+    "tools/merge_queue_admission.py",
+    ".github/workflows/merge-queue-reconcile.yml",
     ".github/workflows/api-migration-policy.yml",
     ".github/workflows/native-retirement-admission.yml",
     ".github/workflows/native-retirement-contract.yml",
@@ -111,6 +115,7 @@ RETIREMENT_TRUST_PATHS = frozenset((
     "tools/native_retirement_sdks.py",
 ))
 RETIREMENT_POLICY_SCHEMA_PATHS = frozenset((
+    "docs/current-native-object-census-v1.json",
     ".github/native-retirement-automation.json",
     "docs/native-retirement-support-v1.tsv",
     "docs/native-retirement-dependencies-legacy-v1.json",

@@ -162,6 +162,58 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_float_global(Arena* are
     return result;
 }
 
+// Exercise the VA operation leaf with complete types and missing table storage.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_va_instruction_type_storage(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // These controls exercise the operation leaf; row and function bounds are
+    // validated by their separate canonical IR checks.
+    IrType types[] = {
+        {.kind = IR_TYPE_VA_LIST},
+        {.kind = IR_TYPE_FUNCTION, .is_variadic = true},
+        {.kind = IR_TYPE_POINTER, .element_type = {.value = 0}},
+        {.kind = IR_TYPE_VOID},
+        {.kind = IR_TYPE_INTEGER},
+    };
+    IrValueId operands[] = {{.value = 0}};
+    IrValue values[] = {
+        {.canonical_type = {.value = 2}, .category = IR_VALUE_VALUE},
+        {.canonical_type = {.value = 0}, .category = IR_VALUE_VALUE},
+    };
+    IrProgram program = {.types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+    IrFunction function = {.canonical_type = {.value = 1}, .values = values, .value_count = BUSTER_ARRAY_LENGTH(values)};
+    typedef struct IrTestVaInstructionCase
+    {
+        IrOpcode opcode;
+        IrTypeId canonical_type;
+        IrValueId result;
+        u32 operand_count;
+    } IrTestVaInstructionCase;
+    IrTestVaInstructionCase cases[] = {
+        {IR_OPCODE_VA_START, {.value = 0}, {.value = 1}, 0},
+        {IR_OPCODE_VA_COPY, {.value = 0}, {.value = 1}, 1},
+        {IR_OPCODE_VA_END, {.value = 3}, IR_VALUE_ID_INVALID, 1},
+        {IR_OPCODE_VA_ARG, {.value = 4}, {.value = 1}, 1},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        values[1].canonical_type = cases[index].canonical_type;
+        IrInstruction instruction = {
+            .operands = operands,
+            .canonical_type = cases[index].canonical_type,
+            .result = cases[index].result,
+            .operand_count = cases[index].operand_count,
+            .opcode = (u8)cases[index].opcode,
+        };
+        BUSTER_TEST(arguments, ir_test_validate_va_instruction_operation(&program, &function, types + 1, &instruction) == IR_VALIDATION_NONE);
+        program.types.types = 0;
+        BUSTER_TEST(arguments,
+                    ir_test_validate_va_instruction_operation(&program, &function, types + 1, &instruction) == IR_VALIDATION_OPERATION);
+        program.types.types = types;
+    }
+    return result;
+}
+
 // Keep every backing object local and vary one structural fault at a time.
 // Rejection must precede pointer arithmetic and signature-dependent iteration.
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_call_validation(UnitTestArguments* arguments)
@@ -773,6 +825,109 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_binary_categories(UnitTestA
                                                                             cases[index].operand_type, cases[index].result_type);
         result.test_count += categories.test_count;
         result.succeeded_test_count += categories.succeeded_test_count;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_array_categories(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // The positive rows cover nonempty ARRAY, VECTOR and an empty ARRAY.
+    // Each failure changes only one category in an otherwise complete module.
+    for (u32 variant = 0; variant < 9; variant += 1)
+    {
+        IrType types[] = {
+            {.id = {.value = 0}, .kind = IR_TYPE_VOID, .layout = {.alignment = 1, .resolved = true}},
+            {.id = {.value = 1}, .kind = IR_TYPE_INTEGER, .bit_width = 64, .is_signed = true,
+             .layout = {.size = 8, .alignment = 8, .resolved = true}},
+            {.id = {.value = 2}, .kind = IR_TYPE_ARRAY, .element_type = {.value = 1}, .element_count = 1,
+             .layout = {.size = 8, .alignment = 8, .resolved = true}},
+            {.id = {.value = 3}, .kind = IR_TYPE_VECTOR, .element_type = {.value = 1}, .element_count = 2,
+             .layout = {.size = 16, .alignment = 16, .resolved = true}},
+            {.id = {.value = 4}, .kind = IR_TYPE_ARRAY, .element_type = {.value = 1}, .element_count = 0,
+             .layout = {.size = 0, .alignment = 8, .resolved = true}},
+            {.id = {.value = 5}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 0}},
+        };
+        u32 array_type_index = variant < 3 ? 2 : variant < 7 ? 3 : 4;
+        u32 array_operand_count = variant < 3 ? 1 : variant < 7 ? 2 : 0;
+        bool bad_operand = variant == 1 || variant == 4 || variant == 5;
+        bool bad_result = variant == 2 || variant == 6 || variant == 8;
+        IrValueId local_places[] = {{.value = 0}, {.value = 1}};
+        bool local_uses_memory[] = {true, true};
+        IrValueId value_operands[] = {{.value = 2}, {.value = 3}};
+        IrValueId place_operands[] = {{.value = 0}, {.value = 1}};
+        IrValueId first_place_operand[] = {{.value = 0}, {.value = 3}};
+        IrValueId last_place_operand[] = {{.value = 2}, {.value = 1}};
+        IrValueId* construction_operands = value_operands;
+        if (bad_operand)
+        {
+            construction_operands = variant == 4 ? first_place_operand : variant == 5 ? last_place_operand : place_operands;
+        }
+        IrValue values[] = {
+            {.canonical_type = {.value = 1}, .definition = {.value = 0}, .category = IR_VALUE_PLACE},
+            {.canonical_type = {.value = 1}, .definition = {.value = 1}, .category = IR_VALUE_PLACE},
+            {.canonical_type = {.value = 1}, .definition = {.value = 2}, .category = IR_VALUE_VALUE},
+            {.canonical_type = {.value = 1}, .definition = {.value = 3}, .category = IR_VALUE_VALUE},
+            {.canonical_type = {.value = array_type_index}, .definition = {.value = 4},
+             .category = bad_result ? IR_VALUE_PLACE : IR_VALUE_VALUE},
+        };
+        IrInstruction instructions[] = {
+            {.opcode = IR_OPCODE_LOCAL, .canonical_type = {.value = 1}, .canonical_local = {.value = 0},
+             .result = {.value = 0}, .next = {.value = 1}},
+            {.opcode = IR_OPCODE_LOCAL, .canonical_type = {.value = 1}, .canonical_local = {.value = 1},
+             .result = {.value = 1}, .next = {.value = 2}},
+            {.opcode = IR_OPCODE_LOAD, .canonical_type = {.value = 1}, .operands = local_places,
+             .operand_count = 1, .result = {.value = 2}, .next = {.value = 3}},
+            {.opcode = IR_OPCODE_LOAD, .canonical_type = {.value = 1}, .operands = local_places + 1,
+             .operand_count = 1, .result = {.value = 3}, .next = {.value = 4}},
+            {.opcode = IR_OPCODE_ARRAY, .canonical_type = {.value = array_type_index},
+             .operands = array_operand_count ? construction_operands : 0,
+             .operand_count = array_operand_count, .result = {.value = 4}, .next = {.value = 5}},
+            {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+             .next = IR_INSTRUCTION_ID_INVALID},
+        };
+        IrBlock block = {.id = {.value = 0}, .first_instruction = {.value = 0}, .last_instruction = {.value = 5},
+                         .sealed = true, .terminated = true};
+        IrFunction function = {.id = {.value = 0}, .canonical_type = {.value = 5}, .state = IR_FUNCTION_LOWERED,
+                               .entry = {.value = 0}, .blocks = &block, .block_count = 1, .instructions = instructions,
+                               .instruction_count = BUSTER_ARRAY_LENGTH(instructions), .values = values,
+                               .value_count = BUSTER_ARRAY_LENGTH(values), .local_places = local_places,
+                               .local_uses_memory = local_uses_memory, .local_count = BUSTER_ARRAY_LENGTH(local_places)};
+        IrModule module = {.functions = &function, .function_count = 1};
+        IrProgram program = {.arena = arguments->arena, .modules = &module, .module_count = 1,
+                             .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+        bool malformed = bad_operand || bad_result;
+        u8 instruction_snapshot[sizeof(instructions[4])];
+        u8 result_snapshot[sizeof(values[4])];
+        u8 block_snapshot[sizeof(block)];
+        memcpy(instruction_snapshot, instructions + 4, sizeof(instruction_snapshot));
+        memcpy(result_snapshot, values + 4, sizeof(result_snapshot));
+        memcpy(block_snapshot, &block, sizeof(block_snapshot));
+        IrValidationError expected = malformed ? IR_VALIDATION_OPERATION : IR_VALIDATION_NONE;
+        IrValidationResult validation = ir_validate_canonical_module(&program, &module);
+        IrValidationResult reference = ir_test_validate_canonical_module_reference(&program, &module);
+        BUSTER_TEST(arguments, validation.error == expected);
+        BUSTER_TEST(arguments, reference.error == expected);
+        if (malformed && validation.error == expected && reference.error == expected)
+        {
+            BUSTER_TEST(arguments, validation.function.value == 0 && validation.block.value == 0 && validation.instruction.value == 4);
+            BUSTER_TEST(arguments, reference.function.value == 0 && reference.block.value == 0 && reference.instruction.value == 4);
+            IrValidationResult prepared = ir_prepare_canonical_module(&program, &module, false);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_OPERATION);
+            BUSTER_TEST(arguments, prepared.function.value == 0 && prepared.block.value == 0 && prepared.instruction.value == 4);
+            BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_CANONICAL_INPUT);
+            BUSTER_TEST(arguments, !function.published_cfg && !module.local_promotion_complete && !module.fast_complete);
+            BUSTER_TEST(arguments, memcmp(instruction_snapshot, instructions + 4, sizeof(instruction_snapshot)) == 0);
+            BUSTER_TEST(arguments, memcmp(result_snapshot, values + 4, sizeof(result_snapshot)) == 0);
+            BUSTER_TEST(arguments, memcmp(block_snapshot, &block, sizeof(block_snapshot)) == 0);
+        }
+        else if (!malformed && validation.error == IR_VALIDATION_NONE)
+        {
+            IrValidationResult prepared = ir_prepare_canonical_module(&program, &module, false);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, function.published_cfg != 0);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(&program, &module).error == IR_VALIDATION_NONE);
+        }
     }
     return result;
 }
@@ -1650,6 +1805,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     result.test_count += protocol.test_count;
     result.succeeded_test_count += protocol.succeeded_test_count;
     BUSTER_TEST_FIXTURE(arguments, ir_validate_equivalence_tests);
+    BUSTER_TEST_FIXTURE(arguments, ir_test_va_instruction_type_storage);
 
     IrFieldAccessPiece expected_field_access[][IR_FIELD_ACCESS_PIECE_CAPACITY] = {
         {{.offset = 0, .size = 1}},
@@ -1724,6 +1880,10 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     UnitTestResult binary_categories = ir_test_canonical_binary_categories(arguments);
     result.test_count += binary_categories.test_count;
     result.succeeded_test_count += binary_categories.succeeded_test_count;
+
+    UnitTestResult array_categories = ir_test_canonical_array_categories(arguments);
+    result.test_count += array_categories.test_count;
+    result.succeeded_test_count += array_categories.succeeded_test_count;
 
     UnitTestResult call_validation = ir_test_canonical_call_validation(arguments);
     result.succeeded_test_count += call_validation.succeeded_test_count;

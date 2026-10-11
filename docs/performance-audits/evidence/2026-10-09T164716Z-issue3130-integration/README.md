@@ -1,0 +1,9 @@
+# Issue #3130 integration validation evidence
+
+This appendix records local correctness and source-size validation for the canonical integrated source commit `176e46cb1ffa2ceeea24dbd4afca2e2f97859c9b` (tree `a399aeaf0cd29e138c84c37a4b3ff69a264494d5`). Its ordered parents are the frozen issue source `fdbc2806fa4e6bc5ed65bfc7be9ad9bfc3c01a6e` and selected main `fbc7b5a7027270a877fcb0298bd81e72e5f8cb50` (tree `eefd0288b7572dbde6d49cc8f1ef55032953a7de`).
+
+[`captures-and-toolchain.tar.xz`](captures-and-toolchain.tar.xz) contains the raw local logs, the incomplete test-capture attempts and their wrapper record, and pinned toolchain provenance. The direct IDE test capture is complete and ends with exit 0 and the full 6,840,338/6,840,338 unit, 62/62 module, and 0/0 external counts. The earlier 3,369-byte `test_all` capture remains partial; its terminal counts and exit were recorded from the live `test_all` session and match the complete direct IDE run. The two incomplete direct recaptures are kept as invalid attempts with no terminal result. See [`RUNS.json`](RUNS.json) for commands, observed statuses, and each member's role; [`MANIFEST.json`](MANIFEST.json) binds the archive and its members by size and SHA-256. [`LICENSE-SCOPE.md`](LICENSE-SCOPE.md) records the exact license scope.
+
+The earlier [final #3130 performance audit](../../2026-10-09T133729Z.md) and its core evidence and validation appendix remain unchanged. Its physical V2 comparison remains the NoGo disposition; this local validation is not a performance comparison. The baseline self-host was cold and the integrated self-host ran after test_all, so their elapsed times are not comparable.
+
+At this validation freeze, exact combined hosted CI and native-queue results were pending. The selected main used for this integration was `fbc7b5a7027270a877fcb0298bd81e72e5f8cb50`; later main advancement is not silently represented as tested here.

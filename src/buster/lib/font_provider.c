@@ -258,7 +258,6 @@ String8 font_file_get_path(FontIndex index)
         // with a plain load, so it has to happen while the process is still
         // serial -- font_provider_prewarm() is the way to force that.
         BUSTER_CHECK_SERIAL_INITIALIZATION();
-        font_config_initialized = true;
         TemporalArena temp = scratch_begin(0, 0);
         String8 candidates[BUSTER_FONT_CANDIDATE_CAPACITY] = {0};
         u64 candidate_count = 0;
@@ -395,6 +394,9 @@ String8 font_file_get_path(FontIndex index)
         }
 
         scratch_end(temp);
+        // Last, after the table it guards is complete: a failed search above
+        // ends the process, so nothing reads the flag between here and there.
+        font_config_initialized = true;
     }
 
     BUSTER_CHECK(font_config_initialized);

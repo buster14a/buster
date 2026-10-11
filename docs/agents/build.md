@@ -77,6 +77,39 @@ allocator modes before reuse. `./build.sh self_host_audit_self_test` exercises
 the checker without building the compiler. See [the invariant and evidence
 contract](../self-host-audit.md); this does not replace the ordinary gate.
 
+### Self-host work ceilings
+
+Both `test_self_host` and the release shard's artifact fan-out fail the
+self-host chain right after stage 1 links when stage 1's deterministic work
+exceeds a checked-in ceiling (`self_host_work_gate_action`). Stage 1 is
+compiled by the trusted Clang-built `ide`, so the counts depend only on the
+compiler source and the target's headers; they carry none of the runner noise
+that wall time does. The counters come from the `c_type_layout.*` fields that
+`ide cc -fsource-metrics=` always writes, which mirror the `-v`
+`C_TYPE_LAYOUT` line:
+
+| Counter | Ceiling (`build.c`) | Stage 1 with #3093 (Linux / macOS / Windows) | Stage 1 at #2406 (Linux) |
+| --- | --- | ---: | ---: |
+| `c_type_layout.solves` | `SELF_HOST_WORK_CEILING_LAYOUT_SOLVES` = 400 | 188 / 189 / 186 | 31,473 |
+| `c_type_layout.pass_state_types` | `SELF_HOST_WORK_CEILING_LAYOUT_PASS_STATE_TYPES` = 36,000,000 | 16.0 M / 16.0 M / 17.9 M | 4.94 B |
+
+Each ceiling is about twice the highest desktop value, so ordinary source
+growth does not trip it, while a change in the solver's complexity class does.
+#2406 is the motivating case: it multiplied both counters by more than 190 and
+passed every check, because `SELF_HOST_TIMEOUT_SECONDS` only catches hangs.
+A failure prints the counter, its value, the ceiling and its `build.c` name.
+To find the cause, compare the `C_TYPE_LAYOUT` line from `ide cc -v` on the
+merge base and the change.
+
+**Raising a ceiling requires citing the cause in the same PR.** The PR that
+makes stage 1 do more work raises the ceiling, names the change responsible and
+gives the measured before and after values. A ceiling is never raised to clear
+an unexplained failure. Lowering a ceiling after a fix needs no justification.
+Every run of the gate first runs `self_host_work_gate_self_test`. That
+negative control checks that the current counts pass, that a count one over
+either ceiling fails with its name, value and ceiling, and that #2406's
+recorded stage-1 counts fail on both counters.
+
 ## Build
 
 Three layers: `./build.sh` / `./build.ps1` bootstrap `build.c` using **tcc**,
@@ -218,7 +251,7 @@ direct matrix schedules the command beside `clang_analyze` too). A production
 header that defines functions must be included before the test region, as
 `simd.h` is.
 
-Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `bench_throughput`, `bench_throughput_ci`, `generate`, `build` (default), `clang_analyze`, `optnone_audit`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`, `test_cpython`, `test_raddebugger`,
+Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `bench_throughput`, `bench_throughput_ci`, `compiler_profile_qualification`, `generate`, `build` (default), `clang_analyze`, `optnone_audit`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`, `test_cpython`, `test_raddebugger`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
 `test_timing_summary_self_test`, `musl_directory_self_test`, `generate_guard_self_test`,
@@ -230,6 +263,15 @@ Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `benc
 `test_all_combinations`,
 `test_all_combinations_ci`, `test_uefi`, `source_size`; `self_host_from_existing` is an internal
 build-driver worker command used only by the pooled artifact-fanout target.
+
+The native `compiler_profile_qualification` command owns disabled, explicitly
+admitted sampling research packets (#3212). `--plan` prints the immutable
+acquisition/pilot/confirmation ledger and `--self-test` exercises hosted
+parser, identity, budget and process-containment fixtures. Its trusted workflow
+`--execute` path validates bounded API records before claiming or preparing
+anything; it is not an ad-hoc host runner. Native execution preserves every
+attempt and never infers qualification from a child exit. See
+[sampling qualification](../compiler-main-sampling.md).
 
 `source_size` reports the tracked bytes of a revision by category and enforces
 the per-change ratchet on hand-maintained production and build code; see
@@ -414,7 +456,15 @@ that does not finish is a compiler that never will, and waiting on one wedges
 a serialized CI runner for hours while Ninja buffers the edge's output and the
 log says nothing. On expiry the child is killed and the run fails naming the
 stage and its command line. Every other run waits indefinitely, because their
-cost scales with what they are given.
+cost scales with what they are given. The comment above the bound records each
+compile stage's measured worst hosted cost (`SELF_HOST_STAGE1_SECONDS`,
+`SELF_HOST_STAGE2_SECONDS`, `SELF_HOST_MACHINE_STAGE_SECONDS`; Windows stage 2
+has its own figure) and the `merge_group` runs it came from. A stage that takes more than `SELF_HOST_SLOW_FACTOR` (3) times its
+documented cost still passes but prints a `SELF_HOST_STAGE_SLOW_V1` line, plus a
+`::warning` annotation under GitHub Actions, so cost drift shows up before it
+reaches the bound. `self_host_stage_slow_self_test` checks that decision at the
+start of every self-host run. Wall time does not gate regressions; refresh the
+figures from hosted logs when the stage workload changes on purpose.
 The fixed-point pair uses the default FAST allocator. On non-Windows hosts,
 the stage-2 compiler also compiles a QUALITY generation with
 `-fregister-allocator=quality` and runs its benchmark. Windows retains

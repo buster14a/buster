@@ -1298,6 +1298,9 @@ BUSTER_CT_CHECK(sizeof(MachineInlineAssembly) == 64);
 // the row use the overflow path directly.
 // System V x86-64 needs two parts; an AArch64 HFA can contain four.
 #define MACHINE_VA_ARG_PART_LIMIT 4
+// Largest alignment of a SysV x86-64 MEMORY-class aggregate that VA_ARG rounds
+// the overflow area up to: the widest vector the target stores in one slot.
+#define MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT 64u
 // ELF AAPCS64: three pointers followed by two independent signed 32-bit offsets.
 // Darwin and Windows use their separate one-pointer va_list representations.
 #define MACHINE_A64_VA_STACK_OFFSET 0u
@@ -1561,6 +1564,7 @@ typedef enum MachineSymbolReference
     MACHINE_SYMBOL_REFERENCE_GOT,
     MACHINE_SYMBOL_REFERENCE_PLT,
     MACHINE_SYMBOL_REFERENCE_MACH_PAGE,
+    MACHINE_SYMBOL_REFERENCE_ELF_PAGE,
     MACHINE_SYMBOL_REFERENCE_COUNT,
 } MachineSymbolReference;
 
@@ -1935,7 +1939,9 @@ BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena
 // can then accumulate its compact value facts inside an existing row walk.
 // `position_independent` is -fPIC resolved for this target: it picks the
 // thread-local model and selects the GOT and PLT forms for the symbols
-// another object could interpose. The unqualified entry point above passes
+// another object could interpose. On AArch64 ELF it selects the page-pair
+// address forms and refuses thread-local access, whose TLSDESC model does not
+// exist yet. The unqualified entry point above passes
 // false, which is every caller that is not module code generation.
 // `module` is the context machine_select_module_prepare built once for the
 // module before its functions select; a null one makes the x86-64 selector
@@ -1950,7 +1956,8 @@ BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_x86_64(Arena
                                                                             bool position_independent, bool assume_validated,
                                                                             bool preserve_debug_values, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                            bool assume_validated, bool preserve_debug_values);
+                                                                            bool position_independent, bool assume_validated,
+                                                                            bool preserve_debug_values);
 BUSTER_F_DECL MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function);
 
@@ -2041,6 +2048,16 @@ struct MachineFastPrepass
     // loops those ranges meet and never asks which loop, so nesting and
     // overlap fuse.
     u64* loop_spans;
+    // Block live-out and live-in of the values a write-back can store:
+    // escaping and not rematerializable. `live_index` maps such a value to
+    // its dense bit, or UINT32_MAX; `live_out` and `live_in` hold
+    // `live_words` words per block. All are null when the function has one
+    // block or the planes would pass `MACHINE_FAST_LIVENESS_WORD_LIMIT`;
+    // every value then counts as live.
+    u32* live_index;
+    u64* live_out;
+    u64* live_in;
+    u32 live_words;
     u32 loop_span_count;
     u32 active_register_count;
     // Callee-saved subset of implicit opcode clobbers, folded into the

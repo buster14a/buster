@@ -1,0 +1,91 @@
+{
+  "schema": "buster.issue3130.current-source-census.v1",
+  "producer": {
+    "local_commit": "e99f087d4d87bb31ba7fbf43f2dbfc1afd1613a7",
+    "tree": "501876983e66df54ba9bc9012213c2c1e97ba7b5",
+    "note": "Local source commit identity. A later GitHub API commit may have a different reachable commit SHA while preserving this exact tree."
+  },
+  "source_hashes": {
+    "build.c": "4cdd725a724835a548c7f1db9d2b8f030e17bc8e2c0c56e4214622a0e1e21d9d",
+    "tools/clang_analyze.c": "4e4beb298c23fcf25d616431b4f13abc035fa327490c47aa7bb34b1bbae2c8e6"
+  },
+  "bootstrap": {
+    "compiler": "/usr/lib/llvm-21/bin/clang",
+    "compiler_version": "Ubuntu clang version 21.1.8 (++20251221032922+2078da43e25a-1~exp1~20251221153059.70)",
+    "compile_command": "/usr/lib/llvm-21/bin/clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/analyzer-driver-o0-rebased",
+    "optimization": "default O0",
+    "driver_sha256": "8639c929c50f155e790d995ce9d90c1f44a29a58b921a5576c46b4e23c8824b0"
+  },
+  "database": {
+    "generation_command": "PATH=/usr/lib/llvm-21/bin:$PATH build/analyzer-driver-o0-rebased generate --build-directory build/issue3130-final-ci-direct --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF",
+    "cmake_c_compiler": "/usr/lib/llvm-21/bin/clang",
+    "argv0_shape": "direct absolute compiler path /usr/lib/llvm-21/bin/clang; the hosted /usr/bin/clang spelling was not available and is not inferred here",
+    "path": "build/issue3130-final-ci-direct/compile_commands.json",
+    "bytes": 998858,
+    "sha256": "4796d6a705ab2eb73e7810f6c9865b1ec4818063cc76226dd285c961dca3a49f",
+    "entries": 364
+  },
+  "prepare": {
+    "command": "PATH=/usr/lib/llvm-21/bin:$PATH build/analyzer-driver-o0-rebased clang_analyze build/issue3130-final-ci-direct/compile_commands.json --config Release --shards 8 --timeout 600 --prepare --results build/issue3130-final-ci-direct-prepare",
+    "status": "pass",
+    "selected_rows": 182,
+    "unique_executions": 135,
+    "aliases": 47,
+    "candidate_groups": 12,
+    "proven_groups": 12,
+    "excluded_config_or_language": 182,
+    "planning_us": 8089796,
+    "context_proof_us": 7921526,
+    "manifest": {
+      "path": "current-source-plan-v2.txt.gz",
+      "raw_bytes": 2831147,
+      "raw_sha256": "b7625b6e0258bf3a00dd6ed970fbe164f6f0eadeeff8597214ece5f36785c4ee",
+      "gzip_command": "gzip -n -c",
+      "gzip_bytes": 326604,
+      "gzip_sha256": "51a01063fcaad98a54fda14672e83a67e6ed9e29eb02ebacc7d983017ab2fa30"
+    },
+    "log": {
+      "path": "current-source-prepare.log",
+      "sha256": "92093df89b8907ff07069577582d29b78aaa56eacd78d0142a042724da461745"
+    }
+  },
+  "validation": {
+    "native_self_test": {
+      "checks": 128,
+      "expected_rejections": 47,
+      "failures": 0,
+      "driver_sha256": "8639c929c50f155e790d995ce9d90c1f44a29a58b921a5576c46b4e23c8824b0",
+      "log_sha256": "0aaa2b6a2d9c7f147b28359acc75d9f588ea8e445039391651351170917873bc"
+    },
+    "worker_budget_reader_suite": {
+      "tests": 12,
+      "passed": 12,
+      "elapsed_ms": 305840,
+      "driver_sha256": "8639c929c50f155e790d995ce9d90c1f44a29a58b921a5576c46b4e23c8824b0",
+      "log_sha256": "70f940dbdd547f7854a57c38f2dc4817a33e0f2ec689663f21fdd488d10cc118"
+    }
+  },
+  "source_size": {
+    "measured_revision": "fb1c5dd8ae8799ed3a37b8bb7646db3715c2e227",
+    "base_revision": "834d0fe665c1723af12df9a1ba44bb19a3670ba6",
+    "baseline_revision": "c1b9a6cf054bd28165c163a31e8d32866285e71f",
+    "build_bytes": 8206174,
+    "base_build_bytes": 7961360,
+    "build_growth_bytes": 244814,
+    "build_change_limit_bytes": 32768,
+    "changed_build_files": {
+      "tools/clang_analyze.c": 240428,
+      "tools/analyzer_worker_budget.py": 4386
+    },
+    "production_growth_bytes": 0,
+    "status": "unacknowledged; baseline generation is deferred until the exact reachable server growth revision is imported",
+    "report_path": "source-size.txt",
+    "report_sha256": "6fde80be29ba46ed1d26945223642dcb5bc7e2c4d66d920bf4d756b8b0fd0c96"
+  },
+  "qualification_limits": [
+    "The direct compiler path is not the hosted /usr/bin/clang argv0 spelling; the exact-head hosted analyzer job must verify that path shape.",
+    "The census is a planning and eligibility result, not a full analyzer performance measurement.",
+    "No approved Zen5 matched workload run was performed; no speedup is claimed.",
+    "Cloud descendant process and RSS enumeration completeness is unavailable; sampled values do not establish whole-process-tree resource acceptance."
+  ]
+}

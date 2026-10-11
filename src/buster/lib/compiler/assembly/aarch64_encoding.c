@@ -116,7 +116,11 @@ BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_ARITY_4_COUNT == 16);
 #define A64_METADATA_FIELD_UNMAPPED BUSTER_AARCH64_GENERATED_FIELD_UNMAPPED
 
 #if BUSTER_INCLUDE_TESTS
-BUSTER_GLOBAL_LOCAL u32 a64_metadata_packed_access_counter;
+// Thread-local rather than atomic: the tests assert "no packed access on this
+// thread" between a reset and a read, so a lane running another test's
+// accessors must not be able to disturb the count, and every thread keeps a
+// private increment with no shared cache line.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 a64_metadata_packed_access_counter;
 BUSTER_GLOBAL_LOCAL void a64_metadata_note_packed_access(void)
 {
     a64_metadata_packed_access_counter += 1;

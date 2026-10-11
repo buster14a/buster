@@ -1,0 +1,513 @@
+HEAD=e32c9c40cb7e0bf1ce061183724946d1434bd1c9
+TREE=4310f86cf35b41acdca079f52ad8133505fd4800
+COMMAND=./build.sh clang_analyze --self-test
+TCC=/workspace/scratch/550ea6746c17/local-tcc-pinned-install/bin/tcc
+tcc version 0.9.28rc 2026-09-04 HEAD@0fb5430 (x86_64 Linux)
+CLANG=/workspace/scratch/550ea6746c17/local-clang21-recovery2/fresh-prefix-20261009T1300/usr/lib/llvm-21/bin/clang
+Ubuntu clang version 21.1.8 (++20251221032922+2078da43e25a-1~exp1~20251221153059.70)
+Target: x86_64-pc-linux-gnu
+Thread model: posix
+InstalledDir: /workspace/scratch/550ea6746c17/local-clang21-recovery2/fresh-prefix-20261009T1300/usr/lib/llvm-21/bin
+2451bd5e44d0fe575e3088eb29725b4b0820e5c335a3fdb889ae036f55b57f56  /workspace/scratch/550ea6746c17/local-clang21-recovery2/fresh-prefix-20261009T1300/usr/lib/llvm-21/bin/clang
+fd419f2d3eddfbdece987a7757da8f66794ab933dde48fa685c2ad1c9478225e  /workspace/scratch/550ea6746c17/local-clang21-recovery2/fresh-prefix-20261009T1300/usr/lib/x86_64-linux-gnu/libLLVM.so.21.1
+ANALYZE_SELF_TEST name=dispatch-covers-every-shard-once status=pass
+ANALYZE_SELF_TEST_BEGIN name=reference-driver-option-refused expect=reject
+expected-error: clang_analyze [database] [--config Release] [--shards N] [--jobs N] [--timeout seconds] [--results fresh-directory] [--prepare | --shard zero-based-index | --aggregate | --qualify-workers] [--clang path] [--quiet]; or --self-test
+ANALYZE_SELF_TEST name=reference-driver-option-refused status=pass
+ANALYZE_SELF_TEST_BEGIN name=reference-driver-inline-option-refused expect=reject
+expected-error: clang_analyze [database] [--config Release] [--shards N] [--jobs N] [--timeout seconds] [--results fresh-directory] [--prepare | --shard zero-based-index | --aggregate | --qualify-workers] [--clang path] [--quiet]; or --self-test
+ANALYZE_SELF_TEST name=reference-driver-inline-option-refused status=pass
+ANALYZE_SELF_TEST name=expected-diagnostics-are-scoped status=pass
+ANALYZE_SELF_TEST_BEGIN name=expect-rejection-requires-worker expect=reject
+expected-error: clang_analyze [database] [--config Release] [--shards N] [--jobs N] [--timeout seconds] [--results fresh-directory] [--prepare | --shard zero-based-index | --aggregate | --qualify-workers] [--clang path] [--quiet]; or --self-test
+ANALYZE_SELF_TEST name=expect-rejection-requires-worker status=pass
+ANALYZE_SELF_TEST name=compile-command-quoting status=pass
+ANALYZE_SELF_TEST name=preserve-semantic-compile-arguments status=pass
+ANALYZE_SELF_TEST name=native-process-oracle status=pass
+ANALYZE_SELF_TEST_BEGIN name=missing-children-preserves-lower-bound expect=reject
+ANALYZE_SELF_TEST name=missing-children-preserves-lower-bound status=pass
+ANALYZE_SELF_TEST_BEGIN name=complete-descendant-sampling expect=accept
+ANALYZE_SELF_TEST name=complete-descendant-sampling status=pass
+ANALYZE_SELF_TEST_BEGIN name=exiting-child-race-is-tolerated expect=accept
+ANALYZE_SELF_TEST name=exiting-child-race-is-tolerated status=pass
+ANALYZE_SELF_TEST_BEGIN name=vanished-child-removed-from-parent-list expect=accept
+ANALYZE_SELF_TEST name=vanished-child-removed-from-parent-list status=pass
+ANALYZE_SELF_TEST_BEGIN name=unknown-parentage-is-incomplete-and-excluded-from-rss expect=reject
+ANALYZE_SELF_TEST name=unknown-parentage-is-incomplete-and-excluded-from-rss status=pass
+ANALYZE_SELF_TEST_BEGIN name=live-child-missing-statm-is-incomplete expect=reject
+ANALYZE_SELF_TEST name=live-child-missing-statm-is-incomplete status=pass
+ANALYZE_SELF_TEST_BEGIN name=live-child-missing-children-is-incomplete expect=reject
+ANALYZE_SELF_TEST name=live-child-missing-children-is-incomplete status=pass
+ANALYZE_SELF_TEST_BEGIN name=proc-self-resolves-mounted-pid expect=accept
+ANALYZE_SELF_TEST name=proc-self-resolves-mounted-pid status=pass
+ANALYZE_SELF_TEST_BEGIN name=-DFIXTURE_OK expect=accept
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_DISPATCH ordinal=1 shard=1
+ANALYZE_SHARD shard=0 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=1 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_DISPATCH ordinal=2 shard=2
+ANALYZE_DISPATCH ordinal=3 shard=3
+ANALYZE_SHARD shard=2 units=1 elapsed_us=2724 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_SHARD shard=3 units=3 elapsed_us=6974 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_RUN elapsed_us=59111 peak_pending_workers=2 jobs=2 samples=4 peak_live_processes=1 sampled_peak_tree_rss_bytes=5251072 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-0 status=pass
+ANALYZE_SELF_TEST name=-DFIXTURE_OK status=pass
+ANALYZE_SELF_TEST_BEGIN name=reordered-workers-complete-coverage expect=accept
+ANALYZE_DISPATCH ordinal=0 shard=2
+ANALYZE_DISPATCH ordinal=1 shard=7
+ANALYZE_SHARD shard=2 units=1 elapsed_us=4242 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_SHARD shard=7 units=1 elapsed_us=19068 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_DISPATCH ordinal=2 shard=3
+ANALYZE_DISPATCH ordinal=3 shard=0
+ANALYZE_SHARD shard=0 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=3 units=2 elapsed_us=4370 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_DISPATCH ordinal=4 shard=6
+ANALYZE_DISPATCH ordinal=5 shard=5
+ANALYZE_SHARD shard=5 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=6 units=0 elapsed_us=1 peak_child_rss_bytes=0 status=pass
+ANALYZE_DISPATCH ordinal=6 shard=1
+ANALYZE_DISPATCH ordinal=7 shard=4
+ANALYZE_SHARD shard=4 units=0 elapsed_us=1 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=1 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=0 shards=8 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_RUN elapsed_us=106637 peak_pending_workers=2 jobs=2 samples=8 peak_live_processes=1 sampled_peak_tree_rss_bytes=5292032 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/priority-order-0 status=pass
+ANALYZE_SELF_TEST name=reordered-workers-complete-coverage status=pass
+ANALYZE_SELF_TEST name=reordered-workers-retain-every-result status=pass
+ANALYZE_SELF_TEST_BEGIN name=reordered-independent-aggregate expect=accept
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=0 shards=8 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_SELF_TEST name=reordered-independent-aggregate status=pass
+ANALYZE_SELF_TEST_BEGIN name=worker-budget-complete-inventories expect=accept
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_DISPATCH ordinal=1 shard=1
+ANALYZE_SHARD shard=0 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=1 units=0 elapsed_us=1 peak_child_rss_bytes=0 status=pass
+ANALYZE_DISPATCH ordinal=2 shard=2
+ANALYZE_DISPATCH ordinal=3 shard=3
+ANALYZE_SHARD shard=2 units=1 elapsed_us=5828 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_SHARD shard=3 units=3 elapsed_us=7418 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_RUN elapsed_us=58100 peak_pending_workers=2 jobs=2 samples=4 peak_live_processes=1 sampled_peak_tree_rss_bytes=5414912 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/worker-budget-0/sample-0-jobs-2 status=pass
+ANALYZE_WORKER_SAMPLE sample=0 jobs=2 elapsed_us=58109 children_cpu_us=27391 host_logical_cpus=9 eligible=4 inventory_sha256=48de87a09b3ebbc8d84ca19bed7b6512c5f74e7ed37d8eebe3ab426172c32b54 status=pass
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_DISPATCH ordinal=1 shard=1
+ANALYZE_DISPATCH ordinal=2 shard=2
+ANALYZE_DISPATCH ordinal=3 shard=3
+ANALYZE_SHARD shard=0 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=1 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=2 units=1 elapsed_us=2064 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_SHARD shard=3 units=3 elapsed_us=7795 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_RUN elapsed_us=27107 peak_pending_workers=4 jobs=4 samples=2 peak_live_processes=1 sampled_peak_tree_rss_bytes=5443584 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/worker-budget-0/sample-1-jobs-4 status=pass
+ANALYZE_WORKER_SAMPLE sample=1 jobs=4 elapsed_us=27116 children_cpu_us=23038 host_logical_cpus=9 eligible=4 inventory_sha256=48de87a09b3ebbc8d84ca19bed7b6512c5f74e7ed37d8eebe3ab426172c32b54 status=pass
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_DISPATCH ordinal=1 shard=1
+ANALYZE_DISPATCH ordinal=2 shard=2
+ANALYZE_DISPATCH ordinal=3 shard=3
+ANALYZE_SHARD shard=0 units=0 elapsed_us=1 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=1 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=2 units=1 elapsed_us=1712 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_SHARD shard=3 units=3 elapsed_us=6048 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_RUN elapsed_us=27907 peak_pending_workers=4 jobs=4 samples=2 peak_live_processes=1 sampled_peak_tree_rss_bytes=5443584 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/worker-budget-0/sample-2-jobs-4 status=pass
+ANALYZE_WORKER_SAMPLE sample=2 jobs=4 elapsed_us=27916 children_cpu_us=18346 host_logical_cpus=9 eligible=4 inventory_sha256=48de87a09b3ebbc8d84ca19bed7b6512c5f74e7ed37d8eebe3ab426172c32b54 status=pass
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_DISPATCH ordinal=1 shard=1
+ANALYZE_SHARD shard=0 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=1 units=0 elapsed_us=1 peak_child_rss_bytes=0 status=pass
+ANALYZE_DISPATCH ordinal=2 shard=2
+ANALYZE_DISPATCH ordinal=3 shard=3
+ANALYZE_SHARD shard=2 units=1 elapsed_us=1267 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_SHARD shard=3 units=3 elapsed_us=4371 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_RUN elapsed_us=176490 peak_pending_workers=2 jobs=2 samples=4 peak_live_processes=1 sampled_peak_tree_rss_bytes=5443584 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/worker-budget-0/sample-3-jobs-2 status=pass
+ANALYZE_WORKER_SAMPLE sample=3 jobs=2 elapsed_us=176500 children_cpu_us=15641 host_logical_cpus=9 eligible=4 inventory_sha256=48de87a09b3ebbc8d84ca19bed7b6512c5f74e7ed37d8eebe3ab426172c32b54 status=pass
+ANALYZE_SELF_TEST name=worker-budget-complete-inventories status=pass
+ANALYZE_SELF_TEST name=complete-inventory-and-module-pair status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST_BEGIN name=independent-aggregate expect=accept
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_SELF_TEST name=independent-aggregate status=pass
+ANALYZE_SELF_TEST_BEGIN name=missing-shard expect=reject
+expected-error: missing, duplicate, stale or malformed analyzer result: shard=3 path=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-0/shard-3/result.txt
+expected-error: missing analyzer TU: shard=3 file=alpha.c
+expected-error: missing analyzer TU: shard=3 file=alpha_test.c
+expected-error: missing analyzer TU: shard=3 file=beta.c
+ANALYZE_AGGREGATE eligible=4 checked=1 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_SELF_TEST name=missing-shard status=pass
+ANALYZE_SELF_TEST_BEGIN name=truncated-result expect=reject
+expected-error: missing, duplicate, stale or malformed analyzer result: shard=3 path=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-0/shard-3/result.txt
+expected-error: missing analyzer TU: shard=3 file=beta.c
+ANALYZE_AGGREGATE eligible=4 checked=3 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_SELF_TEST name=truncated-result status=pass
+ANALYZE_SELF_TEST_BEGIN name=unaccounted-result expect=reject
+expected-error: missing, duplicate, stale or malformed analyzer result: shard=3 path=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-0/shard-3/result.txt
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_SELF_TEST name=unaccounted-result status=pass
+ANALYZE_SELF_TEST_BEGIN name=duplicate-TU expect=reject
+expected-error: missing, duplicate, stale or malformed analyzer result: shard=3 path=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-0/shard-3/result.txt
+expected-error: missing analyzer TU: shard=3 file=alpha_test.c
+expected-error: missing analyzer TU: shard=3 file=beta.c
+ANALYZE_AGGREGATE eligible=4 checked=2 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_SELF_TEST name=duplicate-TU status=pass
+ANALYZE_SELF_TEST_BEGIN name=omitted-TU expect=reject
+expected-error: missing analyzer TU: shard=3 file=alpha.c
+expected-error: missing analyzer TU: shard=3 file=alpha_test.c
+expected-error: missing analyzer TU: shard=3 file=beta.c
+ANALYZE_AGGREGATE eligible=4 checked=1 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_SELF_TEST name=omitted-TU status=pass
+ANALYZE_SELF_TEST_BEGIN name=wrong-shard expect=reject
+expected-error: missing, duplicate, stale or malformed analyzer result: shard=3 path=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-0/shard-3/result.txt
+expected-error: missing analyzer TU: shard=3 file=alpha.c
+expected-error: missing analyzer TU: shard=3 file=alpha_test.c
+expected-error: missing analyzer TU: shard=3 file=beta.c
+ANALYZE_AGGREGATE eligible=4 checked=1 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_SELF_TEST name=wrong-shard status=pass
+ANALYZE_SELF_TEST_BEGIN name=stale-result expect=reject
+expected-error: missing, duplicate, stale or malformed analyzer result: shard=3 path=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-0/shard-3/result.txt
+expected-error: missing analyzer TU: shard=3 file=alpha.c
+expected-error: missing analyzer TU: shard=3 file=alpha_test.c
+expected-error: missing analyzer TU: shard=3 file=beta.c
+ANALYZE_AGGREGATE eligible=4 checked=1 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_SELF_TEST name=stale-result status=pass
+ANALYZE_SELF_TEST_BEGIN name=restored-coverage expect=accept
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_SELF_TEST name=restored-coverage status=pass
+ANALYZE_SELF_TEST_BEGIN name=missing-log expect=reject
+expected-error: missing or changed analyzer log: shard=3 file=alpha.c
+expected-error: missing, duplicate, stale or malformed analyzer result: shard=3 path=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-0/shard-3/result.txt
+expected-error: missing analyzer TU: shard=3 file=alpha.c
+expected-error: missing analyzer TU: shard=3 file=alpha_test.c
+expected-error: missing analyzer TU: shard=3 file=beta.c
+ANALYZE_AGGREGATE eligible=4 checked=1 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_SELF_TEST name=missing-log status=pass
+ANALYZE_SELF_TEST_BEGIN name=changed-log expect=reject
+expected-error: missing or changed analyzer log: shard=3 file=alpha.c
+expected-error: missing, duplicate, stale or malformed analyzer result: shard=3 path=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-0/shard-3/result.txt
+expected-error: missing analyzer TU: shard=3 file=alpha.c
+expected-error: missing analyzer TU: shard=3 file=alpha_test.c
+expected-error: missing analyzer TU: shard=3 file=beta.c
+ANALYZE_AGGREGATE eligible=4 checked=1 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_SELF_TEST name=changed-log status=pass
+ANALYZE_SELF_TEST_BEGIN name=restored-log expect=accept
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_SELF_TEST name=restored-log status=pass
+ANALYZE_SELF_TEST_BEGIN name=duplicate-worker-refused expect=reject
+expected-error: analyzer requires a fresh directory (or shard already claimed): /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-0/shard-3
+ANALYZE_SELF_TEST name=duplicate-worker-refused status=pass
+ANALYZE_SELF_TEST_BEGIN name=changed-config-refused expect=reject
+expected-error: analyzer manifest differs from the selected database/options: /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-0
+expected-error: missing, duplicate, stale or malformed analyzer result: shard=0 path=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-0/shard-0/result.txt
+expected-error: missing, duplicate, stale or malformed analyzer result: shard=1 path=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-0/shard-1/result.txt
+expected-error: missing, duplicate, stale or malformed analyzer result: shard=2 path=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-0/shard-2/result.txt
+expected-error: missing, duplicate, stale or malformed analyzer result: shard=3 path=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-0/shard-3/result.txt
+expected-error: missing analyzer TU: shard=0 file=debug.c
+ANALYZE_AGGREGATE eligible=1 checked=0 excluded_config_or_language=5 failures=0 shards=4 peak_child_rss_bytes=0 status=fail expected=1
+ANALYZE_SELF_TEST name=changed-config-refused status=pass
+ANALYZE_SELF_TEST_BEGIN name=-DFIXTURE_WARNING expect=reject
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_DISPATCH ordinal=1 shard=1
+ANALYZE_SHARD shard=0 units=0 elapsed_us=1 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=1 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_DISPATCH ordinal=2 shard=2
+ANALYZE_DISPATCH ordinal=3 shard=3
+ANALYZE_SHARD shard=2 units=1 elapsed_us=1937 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_UNIT shard=3 unit=0 status=warning expected=1 elapsed_us=2390 file=alpha.c
++ /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/fixture.exe --analyze -Xanalyzer -analyzer-output=text -fno-color-diagnostics -Wno-error=unused-command-line-argument -DFIXTURE_WARNING -fwrapv -fno-strict-aliasing -funsigned-char alpha.c
+fixture.c:1:1: warning: analyzer negative control
+ANALYZE_SHARD shard=3 units=3 elapsed_us=10659 peak_child_rss_bytes=4927488 status=fail expected=1
+expected-error: analyzer worker failed: shard=3
+expected-error: analyzer shard=3 status=warning file=alpha.c
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=1 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_RUN elapsed_us=54894 peak_pending_workers=2 jobs=2 samples=4 peak_live_processes=1 sampled_peak_tree_rss_bytes=5640192 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-1 status=fail expected=1
+ANALYZE_SELF_TEST name=-DFIXTURE_WARNING status=pass
+ANALYZE_SELF_TEST_BEGIN name=reordered-worker-failure-propagates expect=reject
+ANALYZE_DISPATCH ordinal=0 shard=2
+ANALYZE_DISPATCH ordinal=1 shard=7
+ANALYZE_SHARD shard=7 units=1 elapsed_us=1768 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_SHARD shard=2 units=1 elapsed_us=2936 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_DISPATCH ordinal=2 shard=3
+ANALYZE_DISPATCH ordinal=3 shard=0
+ANALYZE_SHARD shard=0 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_UNIT shard=3 unit=0 status=warning expected=1 elapsed_us=1671 file=alpha.c
++ /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/fixture.exe --analyze -Xanalyzer -analyzer-output=text -fno-color-diagnostics -Wno-error=unused-command-line-argument -DFIXTURE_WARNING -fwrapv -fno-strict-aliasing -funsigned-char alpha.c
+fixture.c:1:1: warning: analyzer negative control
+ANALYZE_SHARD shard=3 units=2 elapsed_us=3568 peak_child_rss_bytes=4927488 status=fail expected=1
+expected-error: analyzer worker failed: shard=3
+ANALYZE_DISPATCH ordinal=4 shard=6
+ANALYZE_DISPATCH ordinal=5 shard=5
+ANALYZE_SHARD shard=6 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=5 units=0 elapsed_us=1 peak_child_rss_bytes=0 status=pass
+ANALYZE_DISPATCH ordinal=6 shard=1
+ANALYZE_DISPATCH ordinal=7 shard=4
+ANALYZE_SHARD shard=4 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=1 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+expected-error: analyzer shard=3 status=warning file=alpha.c
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=1 shards=8 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_RUN elapsed_us=118058 peak_pending_workers=2 jobs=2 samples=8 peak_live_processes=1 sampled_peak_tree_rss_bytes=5681152 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/priority-order-1 status=fail expected=1
+ANALYZE_SELF_TEST name=reordered-worker-failure-propagates status=pass
+ANALYZE_SELF_TEST name=reordered-workers-retain-every-result status=pass
+ANALYZE_SELF_TEST_BEGIN name=reordered-failure-aggregate expect=reject
+expected-error: analyzer shard=3 status=warning file=alpha.c
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=1 shards=8 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_SELF_TEST name=reordered-failure-aggregate status=pass
+ANALYZE_SELF_TEST_BEGIN name=worker-budget-failure-propagates expect=reject
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_DISPATCH ordinal=1 shard=1
+ANALYZE_SHARD shard=1 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=0 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_DISPATCH ordinal=2 shard=2
+ANALYZE_DISPATCH ordinal=3 shard=3
+ANALYZE_UNIT shard=3 unit=0 status=warning expected=1 elapsed_us=2346 file=alpha.c
++ /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/fixture.exe --analyze -Xanalyzer -analyzer-output=text -fno-color-diagnostics -Wno-error=unused-command-line-argument -DFIXTURE_WARNING -fwrapv -fno-strict-aliasing -funsigned-char alpha.c
+fixture.c:1:1: warning: analyzer negative control
+ANALYZE_SHARD shard=2 units=1 elapsed_us=5400 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_SHARD shard=3 units=3 elapsed_us=12607 peak_child_rss_bytes=4927488 status=fail expected=1
+expected-error: analyzer worker failed: shard=3
+expected-error: analyzer shard=3 status=warning file=alpha.c
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=1 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_RUN elapsed_us=53185 peak_pending_workers=2 jobs=2 samples=4 peak_live_processes=1 sampled_peak_tree_rss_bytes=5775360 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/worker-budget-1/sample-0-jobs-2 status=fail expected=1
+ANALYZE_WORKER_SAMPLE sample=0 jobs=2 elapsed_us=53193 children_cpu_us=36313 host_logical_cpus=9 eligible=4 inventory_sha256=0db8c50d4f38e65d0523c1c0455fc0c0aa6bd226597cbba84cea1f0190048bdc status=fail expected=1
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_DISPATCH ordinal=1 shard=1
+ANALYZE_DISPATCH ordinal=2 shard=2
+ANALYZE_DISPATCH ordinal=3 shard=3
+ANALYZE_SHARD shard=0 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=1 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_UNIT shard=3 unit=0 status=warning expected=1 elapsed_us=1630 file=alpha.c
++ /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/fixture.exe --analyze -Xanalyzer -analyzer-output=text -fno-color-diagnostics -Wno-error=unused-command-line-argument -DFIXTURE_WARNING -fwrapv -fno-strict-aliasing -funsigned-char alpha.c
+fixture.c:1:1: warning: analyzer negative control
+ANALYZE_SHARD shard=2 units=1 elapsed_us=3353 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_SHARD shard=3 units=3 elapsed_us=10422 peak_child_rss_bytes=4927488 status=fail expected=1
+expected-error: analyzer worker failed: shard=3
+expected-error: analyzer shard=3 status=warning file=alpha.c
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=1 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_RUN elapsed_us=26934 peak_pending_workers=4 jobs=4 samples=2 peak_live_processes=1 sampled_peak_tree_rss_bytes=5779456 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/worker-budget-1/sample-1-jobs-4 status=fail expected=1
+ANALYZE_WORKER_SAMPLE sample=1 jobs=4 elapsed_us=26943 children_cpu_us=25573 host_logical_cpus=9 eligible=4 inventory_sha256=0db8c50d4f38e65d0523c1c0455fc0c0aa6bd226597cbba84cea1f0190048bdc status=fail expected=1
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_DISPATCH ordinal=1 shard=1
+ANALYZE_DISPATCH ordinal=2 shard=2
+ANALYZE_DISPATCH ordinal=3 shard=3
+ANALYZE_SHARD shard=0 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=1 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=2 units=1 elapsed_us=2426 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_UNIT shard=3 unit=0 status=warning expected=1 elapsed_us=4473 file=alpha.c
++ /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/fixture.exe --analyze -Xanalyzer -analyzer-output=text -fno-color-diagnostics -Wno-error=unused-command-line-argument -DFIXTURE_WARNING -fwrapv -fno-strict-aliasing -funsigned-char alpha.c
+fixture.c:1:1: warning: analyzer negative control
+ANALYZE_SHARD shard=3 units=3 elapsed_us=8990 peak_child_rss_bytes=4927488 status=fail expected=1
+expected-error: analyzer worker failed: shard=3
+expected-error: analyzer shard=3 status=warning file=alpha.c
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=1 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_RUN elapsed_us=27505 peak_pending_workers=4 jobs=4 samples=2 peak_live_processes=1 sampled_peak_tree_rss_bytes=5779456 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/worker-budget-1/sample-2-jobs-4 status=fail expected=1
+ANALYZE_WORKER_SAMPLE sample=2 jobs=4 elapsed_us=27514 children_cpu_us=31198 host_logical_cpus=9 eligible=4 inventory_sha256=0db8c50d4f38e65d0523c1c0455fc0c0aa6bd226597cbba84cea1f0190048bdc status=fail expected=1
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_DISPATCH ordinal=1 shard=1
+ANALYZE_SHARD shard=0 units=0 elapsed_us=1 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=1 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_DISPATCH ordinal=2 shard=2
+ANALYZE_DISPATCH ordinal=3 shard=3
+ANALYZE_SHARD shard=2 units=1 elapsed_us=1830 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_UNIT shard=3 unit=0 status=warning expected=1 elapsed_us=1766 file=alpha.c
++ /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/fixture.exe --analyze -Xanalyzer -analyzer-output=text -fno-color-diagnostics -Wno-error=unused-command-line-argument -DFIXTURE_WARNING -fwrapv -fno-strict-aliasing -funsigned-char alpha.c
+fixture.c:1:1: warning: analyzer negative control
+ANALYZE_SHARD shard=3 units=3 elapsed_us=4366 peak_child_rss_bytes=4927488 status=fail expected=1
+expected-error: analyzer worker failed: shard=3
+expected-error: analyzer shard=3 status=warning file=alpha.c
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=1 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_RUN elapsed_us=59731 peak_pending_workers=2 jobs=2 samples=4 peak_live_processes=1 sampled_peak_tree_rss_bytes=5779456 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/worker-budget-1/sample-3-jobs-2 status=fail expected=1
+ANALYZE_WORKER_SAMPLE sample=3 jobs=2 elapsed_us=59740 children_cpu_us=19675 host_logical_cpus=9 eligible=4 inventory_sha256=0db8c50d4f38e65d0523c1c0455fc0c0aa6bd226597cbba84cea1f0190048bdc status=fail expected=1
+ANALYZE_SELF_TEST name=worker-budget-failure-propagates status=pass
+ANALYZE_SELF_TEST name=complete-inventory-and-module-pair status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST_BEGIN name=-DFIXTURE_STDOUT expect=reject
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_DISPATCH ordinal=1 shard=1
+ANALYZE_SHARD shard=0 units=0 elapsed_us=1 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=1 units=0 elapsed_us=1 peak_child_rss_bytes=0 status=pass
+ANALYZE_DISPATCH ordinal=2 shard=2
+ANALYZE_DISPATCH ordinal=3 shard=3
+ANALYZE_SHARD shard=2 units=1 elapsed_us=2718 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_UNIT shard=3 unit=0 status=warning expected=1 elapsed_us=3305 file=alpha.c
++ /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/fixture.exe --analyze -Xanalyzer -analyzer-output=text -fno-color-diagnostics -Wno-error=unused-command-line-argument -DFIXTURE_STDOUT -fwrapv -fno-strict-aliasing -funsigned-char alpha.c
+fixture.c:1:1: warning: stdout negative control
+ANALYZE_SHARD shard=3 units=3 elapsed_us=7309 peak_child_rss_bytes=4927488 status=fail expected=1
+expected-error: analyzer worker failed: shard=3
+expected-error: analyzer shard=3 status=warning file=alpha.c
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=1 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_RUN elapsed_us=58944 peak_pending_workers=2 jobs=2 samples=4 peak_live_processes=1 sampled_peak_tree_rss_bytes=5844992 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-2 status=fail expected=1
+ANALYZE_SELF_TEST name=-DFIXTURE_STDOUT status=pass
+ANALYZE_SELF_TEST name=complete-inventory-and-module-pair status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST_BEGIN name=-DFIXTURE_FAILURE expect=reject
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_DISPATCH ordinal=1 shard=1
+ANALYZE_SHARD shard=1 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=0 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_DISPATCH ordinal=2 shard=2
+ANALYZE_DISPATCH ordinal=3 shard=3
+ANALYZE_UNIT shard=3 unit=0 status=failure expected=1 elapsed_us=1808 file=alpha.c
++ /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/fixture.exe --analyze -Xanalyzer -analyzer-output=text -fno-color-diagnostics -Wno-error=unused-command-line-argument -DFIXTURE_FAILURE -fwrapv -fno-strict-aliasing -funsigned-char alpha.c
+ANALYZE_SHARD shard=2 units=1 elapsed_us=3749 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_SHARD shard=3 units=3 elapsed_us=9176 peak_child_rss_bytes=4927488 status=fail expected=1
+expected-error: analyzer worker failed: shard=3
+expected-error: analyzer shard=3 status=failure file=alpha.c
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=1 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_RUN elapsed_us=52917 peak_pending_workers=2 jobs=2 samples=4 peak_live_processes=1 sampled_peak_tree_rss_bytes=5914624 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-3 status=fail expected=1
+ANALYZE_SELF_TEST name=-DFIXTURE_FAILURE status=pass
+ANALYZE_SELF_TEST name=complete-inventory-and-module-pair status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST_BEGIN name=-DFIXTURE_CRASH expect=reject
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_DISPATCH ordinal=1 shard=1
+ANALYZE_SHARD shard=1 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=0 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_DISPATCH ordinal=2 shard=2
+ANALYZE_DISPATCH ordinal=3 shard=3
+ANALYZE_UNIT shard=3 unit=0 status=crash expected=1 elapsed_us=2212 file=alpha.c
++ /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/fixture.exe --analyze -Xanalyzer -analyzer-output=text -fno-color-diagnostics -Wno-error=unused-command-line-argument -DFIXTURE_CRASH -fwrapv -fno-strict-aliasing -funsigned-char alpha.c
+ANALYZE_SHARD shard=2 units=1 elapsed_us=3001 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_SHARD shard=3 units=3 elapsed_us=8578 peak_child_rss_bytes=4927488 status=fail expected=1
+expected-error: analyzer worker failed: shard=3
+expected-error: analyzer shard=3 status=crash file=alpha.c
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=1 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_RUN elapsed_us=52839 peak_pending_workers=2 jobs=2 samples=4 peak_live_processes=1 sampled_peak_tree_rss_bytes=5984256 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-4 status=fail expected=1
+ANALYZE_SELF_TEST name=-DFIXTURE_CRASH status=pass
+ANALYZE_SELF_TEST name=complete-inventory-and-module-pair status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST_BEGIN name=-DFIXTURE_TIMEOUT expect=reject
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_DISPATCH ordinal=1 shard=1
+ANALYZE_SHARD shard=0 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=1 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_DISPATCH ordinal=2 shard=2
+ANALYZE_DISPATCH ordinal=3 shard=3
+ANALYZE_SHARD shard=2 units=1 elapsed_us=1522 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_UNIT shard=3 unit=0 status=timeout expected=1 elapsed_us=1002006 file=alpha.c
++ /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/fixture.exe --analyze -Xanalyzer -analyzer-output=text -fno-color-diagnostics -Wno-error=unused-command-line-argument -DFIXTURE_TIMEOUT -fwrapv -fno-strict-aliasing -funsigned-char alpha.c
+ANALYZE_SHARD shard=3 units=3 elapsed_us=1005887 peak_child_rss_bytes=4927488 status=fail expected=1
+expected-error: analyzer worker failed: shard=3
+expected-error: analyzer shard=3 status=timeout file=alpha.c
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=1 shards=4 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_RUN elapsed_us=1037744 peak_pending_workers=2 jobs=2 samples=43 peak_live_processes=1 sampled_peak_tree_rss_bytes=6053888 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-5 status=fail expected=1
+ANALYZE_SELF_TEST name=-DFIXTURE_TIMEOUT status=pass
+ANALYZE_SELF_TEST name=complete-inventory-and-module-pair status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST_BEGIN name=-DFIXTURE_LARGE_OUTPUT expect=accept
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_DISPATCH ordinal=1 shard=1
+ANALYZE_SHARD shard=0 units=0 elapsed_us=1 peak_child_rss_bytes=0 status=pass
+ANALYZE_SHARD shard=1 units=0 elapsed_us=0 peak_child_rss_bytes=0 status=pass
+ANALYZE_DISPATCH ordinal=2 shard=2
+ANALYZE_DISPATCH ordinal=3 shard=3
+ANALYZE_SHARD shard=2 units=1 elapsed_us=1529 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_SHARD shard=3 units=3 elapsed_us=52781 peak_child_rss_bytes=7417856 status=pass
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=0 shards=4 peak_child_rss_bytes=7417856 status=pass
+ANALYZE_RUN elapsed_us=126604 peak_pending_workers=2 jobs=2 samples=5 peak_live_processes=1 sampled_peak_tree_rss_bytes=6123520 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/case-6 status=pass
+ANALYZE_SELF_TEST name=-DFIXTURE_LARGE_OUTPUT status=pass
+ANALYZE_SELF_TEST name=complete-inventory-and-module-pair status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST name=continue-after-failure status=pass
+ANALYZE_SELF_TEST_BEGIN name=one-shard-one-job expect=accept
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_SHARD shard=0 units=4 elapsed_us=6871 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=0 shards=1 peak_child_rss_bytes=4927488 status=pass
+ANALYZE_RUN elapsed_us=26351 peak_pending_workers=1 jobs=1 samples=2 peak_live_processes=1 sampled_peak_tree_rss_bytes=6815744 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/single status=pass
+ANALYZE_SELF_TEST name=one-shard-one-job status=pass
+ANALYZE_SELF_TEST_BEGIN name=no-result-cache expect=reject
+expected-error: analyzer requires a fresh directory (or shard already claimed): /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/single
+ANALYZE_SELF_TEST name=no-result-cache status=pass
+ANALYZE_SELF_TEST_BEGIN name=prepare-worker-aggregate expect=accept
+ANALYZE_SHARD shard=0 units=4 elapsed_us=5429 peak_child_rss_bytes=95649792 status=pass
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=0 shards=1 peak_child_rss_bytes=95649792 status=pass
+ANALYZE_SELF_TEST name=prepare-worker-aggregate status=pass
+ANALYZE_SELF_TEST_BEGIN name=launch-failure expect=reject
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_UNIT shard=0 unit=0 status=launch-failure expected=1 elapsed_us=396 file=alpha.c
++ /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/not-a-compiler --analyze -Xanalyzer -analyzer-output=text -fno-color-diagnostics -Wno-error=unused-command-line-argument -DFIXTURE_OK -fwrapv -fno-strict-aliasing -funsigned-char alpha.c
+ANALYZE_UNIT shard=0 unit=1 status=launch-failure expected=1 elapsed_us=190 file=alpha_test.c
++ /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/not-a-compiler --analyze -Xanalyzer -analyzer-output=text -fno-color-diagnostics -Wno-error=unused-command-line-argument -DFIXTURE_OK -fwrapv -fno-strict-aliasing -funsigned-char alpha_test.c
+ANALYZE_UNIT shard=0 unit=2 status=launch-failure expected=1 elapsed_us=181 file=beta.c
++ /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/not-a-compiler --analyze -Xanalyzer -analyzer-output=text -fno-color-diagnostics -Wno-error=unused-command-line-argument -DFIXTURE_OK -fwrapv -fno-strict-aliasing -funsigned-char beta.c
+ANALYZE_UNIT shard=0 unit=3 status=launch-failure expected=1 elapsed_us=187 file=gamma.c
++ /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/not-a-compiler --analyze -Xanalyzer -analyzer-output=text -fno-color-diagnostics -Wno-error=unused-command-line-argument -DFIXTURE_OK -fwrapv -fno-strict-aliasing -funsigned-char gamma.c
+ANALYZE_SHARD shard=0 units=4 elapsed_us=1008 peak_child_rss_bytes=4927488 status=fail expected=1
+expected-error: analyzer worker failed: shard=0
+expected-error: analyzer shard=0 status=launch-failure file=alpha.c
+expected-error: analyzer shard=0 status=launch-failure file=alpha_test.c
+expected-error: analyzer shard=0 status=launch-failure file=beta.c
+expected-error: analyzer shard=0 status=launch-failure file=gamma.c
+ANALYZE_AGGREGATE eligible=4 checked=4 excluded_config_or_language=2 failures=4 shards=1 peak_child_rss_bytes=4927488 status=fail expected=1
+ANALYZE_RUN elapsed_us=26227 peak_pending_workers=1 jobs=1 samples=2 peak_live_processes=1 sampled_peak_tree_rss_bytes=6971392 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/missing-executable status=fail expected=1
+ANALYZE_SELF_TEST name=launch-failure status=pass
+ANALYZE_SELF_TEST_BEGIN name=malformed-or-empty-database expect=reject
+expected-error: invalid, empty or duplicate analyzer inventory: /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/compile_commands.json config=Release offset=2
+ANALYZE_SELF_TEST name=malformed-or-empty-database status=pass
+ANALYZE_SELF_TEST_BEGIN name=malformed-or-empty-database expect=reject
+expected-error: invalid, empty or duplicate analyzer inventory: /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/compile_commands.json config=Release offset=3
+ANALYZE_SELF_TEST name=malformed-or-empty-database status=pass
+ANALYZE_SELF_TEST_BEGIN name=malformed-or-empty-database expect=reject
+expected-error: invalid, empty or duplicate analyzer inventory: /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/compile_commands.json config=Release offset=1
+ANALYZE_SELF_TEST name=malformed-or-empty-database status=pass
+ANALYZE_SELF_TEST_BEGIN name=malformed-or-empty-database expect=reject
+expected-error: invalid, empty or duplicate analyzer inventory: /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/compile_commands.json config=Release offset=21
+ANALYZE_SELF_TEST name=malformed-or-empty-database status=pass
+ANALYZE_SELF_TEST_BEGIN name=malformed-or-empty-database expect=reject
+expected-error: invalid, empty or duplicate analyzer inventory: /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/compile_commands.json config=Release offset=2164
+ANALYZE_SELF_TEST name=malformed-or-empty-database status=pass
+ANALYZE_SELF_TEST_BEGIN name=malformed-or-empty-database expect=reject
+expected-error: invalid, empty or duplicate analyzer inventory: /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/compile_commands.json config=Release offset=2164
+ANALYZE_SELF_TEST name=malformed-or-empty-database status=pass
+ANALYZE_SELF_TEST_BEGIN name=duplicate-database-entry expect=reject
+expected-error: duplicate analyzer TU: alpha.c
+expected-error: invalid, empty or duplicate analyzer inventory: /workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/compile_commands.json config=Release offset=2557
+ANALYZE_SELF_TEST name=duplicate-database-entry status=pass
+ANALYZE_SELF_TEST_BEGIN name=real-clang-command expect=accept
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_SHARD shard=0 units=1 elapsed_us=43937 peak_child_rss_bytes=87142400 status=pass
+ANALYZE_AGGREGATE eligible=1 checked=1 excluded_config_or_language=0 failures=0 shards=1 peak_child_rss_bytes=87142400 status=pass
+ANALYZE_RUN elapsed_us=51205 peak_pending_workers=1 jobs=1 samples=3 peak_live_processes=1 sampled_peak_tree_rss_bytes=7045120 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/real-clang status=pass
+ANALYZE_SELF_TEST name=real-clang-command status=pass
+ANALYZE_SELF_TEST_BEGIN name=transitive-header-is-reanalyzed expect=reject
+ANALYZE_DISPATCH ordinal=0 shard=0
+ANALYZE_UNIT shard=0 unit=0 status=warning expected=1 elapsed_us=24316 file=real.c
++ /workspace/scratch/550ea6746c17/local-clang21-recovery2/fresh-prefix-20261009T1300/usr/lib/llvm-21/bin/clang --analyze -Xanalyzer -analyzer-output=text -fno-color-diagnostics -Wno-error=unused-command-line-argument -fwrapv -fno-strict-aliasing -funsigned-char real.c
+real.c:2:26: warning: Dereference of null pointer [core.NullDereference]
+    2 | int value(void) { return VALUE; }
+      |                          ^~~~~
+./input.h:1:15: note: expanded from macro 'VALUE'
+    1 | #define VALUE (*(int*)0)
+      |               ^~~~~~~~~~
+real.c:2:26: note: Dereference of null pointer
+    2 | int value(void) { return VALUE; }
+      |                          ^~~~~
+./input.h:1:15: note: expanded from macro 'VALUE'
+    1 | #define VALUE (*(int*)0)
+      |               ^~~~~~~~~~
+1 warning generated.
+ANALYZE_SHARD shard=0 units=1 elapsed_us=24347 peak_child_rss_bytes=88203264 status=fail expected=1
+expected-error: analyzer worker failed: shard=0
+expected-error: analyzer shard=0 status=warning file=real.c
+ANALYZE_AGGREGATE eligible=1 checked=1 excluded_config_or_language=0 failures=1 shards=1 peak_child_rss_bytes=88203264 status=fail expected=1
+ANALYZE_RUN elapsed_us=51707 peak_pending_workers=1 jobs=1 samples=3 peak_live_processes=1 sampled_peak_tree_rss_bytes=7057408 process_tree_status=incomplete process_tree_reason=children-unavailable results=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773/changed-header status=fail expected=1
+ANALYZE_SELF_TEST name=transitive-header-is-reanalyzed status=pass
+ANALYZE_SELF_TEST_RESULT checks=93 expected_rejections=36 failures=0 evidence=/workspace/scratch/550ea6746c17/issue3130-frozen-checkout/build/analyzer-self-test-18891899773 status=pass
+EXIT=0

@@ -23,6 +23,7 @@
 // parse-independent upper bound for per-reference landing continuations.
 // machine_selection_finish_canonical_edges prunes unexecuted assembly targets
 // and remaps canonical edges after target-specific block expansion.
+// machine_selection_canonical_layout orders canonical blocks for emission.
 
 bool machine_selection_is_operand_free_assembly(IrFunction* function, IrInstruction* instruction)
 {
@@ -288,6 +289,65 @@ bool machine_selection_assembly_label_target(MachineAssemblyLabelPlan const* pla
         }
     }
     return found;
+}
+
+u32* machine_selection_canonical_layout(Arena* arena, IrFunction const* function)
+{
+    IrPublishedCfg const* cfg = function->published_cfg;
+    u32 block_count = function->block_count;
+    u32* layout = arena_allocate(arena, u32, block_count);
+    u8* visited = arena_allocate(arena, u8, block_count);
+    u32* stack = arena_allocate(arena, u32, block_count);
+    u32* cursors = arena_allocate(arena, u32, block_count);
+    memset(visited, 0, block_count);
+    // Postorder fills the layout from the back, so it reads in reverse
+    // postorder. Successors are walked last-target first, which places a
+    // conditional's first target right after its source.
+    u32 tail = block_count;
+    u32 depth = 1;
+    stack[0] = function->entry.value;
+    cursors[0] = cfg->blocks[function->entry.value].successor_count;
+    visited[function->entry.value] = 1;
+    while (depth)
+    {
+        u32 block = stack[depth - 1u];
+        if (cursors[depth - 1u])
+        {
+            cursors[depth - 1u] -= 1u;
+            u32 successor = cfg->edges[cfg->blocks[block].successor_offset + cursors[depth - 1u]].destination.value;
+            if (!visited[successor])
+            {
+                visited[successor] = 1;
+                stack[depth] = successor;
+                cursors[depth] = cfg->blocks[successor].successor_count;
+                depth += 1;
+            }
+        }
+        else
+        {
+            tail -= 1u;
+            layout[tail] = block;
+            depth -= 1u;
+        }
+    }
+    // Reverse postorder occupies [tail, block_count); unreachable blocks
+    // follow in canonical order.
+    u32 reached = block_count - tail;
+    memmove(layout, layout + tail, sizeof(u32) * reached);
+    for (u32 block = 0; block < block_count; block += 1)
+    {
+        if (!visited[block])
+        {
+            layout[reached] = block;
+            reached += 1u;
+        }
+    }
+    bool identity = true;
+    for (u32 index = 0; identity && index < block_count; index += 1)
+    {
+        identity = layout[index] == index;
+    }
+    return identity ? 0 : layout;
 }
 
 bool machine_selection_finish_canonical_edges(Arena* arena, MachineFunction* machine, IrFunction* source,

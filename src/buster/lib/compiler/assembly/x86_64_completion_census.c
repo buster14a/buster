@@ -41,6 +41,10 @@ struct BusterX86CompletionCensusSourceResult
     u8 mismatch_source_byte;
     u8 bytes_match;
     u8 relocations_match;
+    bool source_generated;
+    bool assembly_attempted;
+    String8 source_text;
+    AssemblyEncodeResult encoded;
 };
 
 BUSTER_GLOBAL_LOCAL void buster_x86_completion_source_reason_set(BusterX86CompletionCensusSourceReason* reason,
@@ -1572,13 +1576,14 @@ BUSTER_GLOBAL_LOCAL BusterX86CompletionCensusSourceReason buster_x86_completion_
 BUSTER_GLOBAL_LOCAL BusterX86CompletionCensusSourceResult buster_x86_completion_source_check(
     Arena* arena, Target target, BusterX86MetadataForm form, BusterX86MetadataPhysicalQuery query,
     u8 const* direct_bytes, u32 direct_byte_count, BusterX86MetadataRelocation const* direct_relocations,
-    u32 direct_relocation_count, bool att)
+    u32 direct_relocation_count, bool att, bool collect_form_observations)
 {
     BusterX86CompletionCensusSourceResult result = {
         .classification = BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE,
         .reason = BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE,
         .diagnostic_kind = ASSEMBLY_DIAGNOSTIC_COUNT,
-        .mismatch_index = UINT32_MAX};
+        .mismatch_index = UINT32_MAX,
+        .encoded = {.selected_form_id = UINT32_MAX}};
     String8 source = {0};
     AssemblyEncodeResult encoded = {0};
     u32 shared = 0;
@@ -1590,6 +1595,8 @@ BUSTER_GLOBAL_LOCAL BusterX86CompletionCensusSourceResult buster_x86_completion_
     }
     source = att ? buster_x86_completion_att_source(arena, form, query, &result.reason)
                  : buster_x86_completion_intel_source(arena, form, query, &result.reason);
+    result.source_text = source;
+    result.source_generated = source.length != 0;
     if (!source.length)
     {
         if (result.reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE)
@@ -1598,7 +1605,11 @@ BUSTER_GLOBAL_LOCAL BusterX86CompletionCensusSourceResult buster_x86_completion_
     }
     encoded = assembly_encode(arena, source,
                               (AssemblyEncodeOptions){.target = target,
-                                                       .syntax = att ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL});
+                                                       .syntax = att ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL,
+                                                       .collect_form_observations =
+                                                           collect_form_observations});
+    result.encoded = encoded;
+    result.assembly_attempted = true;
     result.byte_count = (u32)encoded.bytes.length;
     result.relocation_count = encoded.relocation_count;
     result.diagnostic_kind = encoded.diagnostic_count ? (u16)encoded.diagnostics[0].kind : ASSEMBLY_DIAGNOSTIC_COUNT;
@@ -1668,12 +1679,82 @@ BUSTER_GLOBAL_LOCAL void buster_x86_completion_record_diagnostic(BusterX86Comple
     else result->diagnostic_dropped_count += 1;
 }
 
+BUSTER_GLOBAL_LOCAL void buster_x86_completion_capture_direct_witness(
+    BusterX86CompletionCensusQuery query, BusterX86CompletionCensusResult* result, u32 form_id, u64 stable_hash,
+    BusterX86MetadataEmitResult emitted, u8 const* bytes,
+    BusterX86MetadataRelocation const relocations[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY])
+{
+    result->direct_witness_expected_count += 1;
+    if (result->direct_witnesses_requested)
+    {
+        if (!query.direct_witnesses || result->direct_witness_count >= query.direct_witness_capacity)
+        {
+            result->direct_witness_dropped_count += 1;
+            result->direct_witnesses_complete = false;
+        }
+        else
+        {
+            BusterX86CompletionCensusDirectWitness witness = {
+                .form_id = form_id,
+                .stable_hash = stable_hash,
+                .status = (u16)emitted.status,
+                .byte_count = emitted.byte_count,
+                .relocation_count = emitted.relocation_count,
+                .captured_byte_count = BUSTER_MIN(emitted.byte_count, BUSTER_X86_COMPLETION_CENSUS_DIRECT_BYTE_CAPACITY),
+                .captured_relocation_count = BUSTER_MIN(emitted.relocation_count, BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY),
+            };
+            witness.bytes_complete = emitted.byte_count <= BUSTER_X86_COMPLETION_CENSUS_DIRECT_BYTE_CAPACITY;
+            witness.relocations_complete = emitted.relocation_count <= BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY;
+            if (witness.captured_byte_count) memcpy(witness.bytes, bytes, witness.captured_byte_count);
+            if (witness.captured_relocation_count)
+                memcpy(witness.relocations, relocations, witness.captured_relocation_count * sizeof(*relocations));
+            query.direct_witnesses[result->direct_witness_count++] = witness;
+            if (!witness.bytes_complete || !witness.relocations_complete)
+                result->direct_witnesses_complete = false;
+        }
+    }
+    return;
+}
+
+BUSTER_GLOBAL_LOCAL void buster_x86_completion_capture_source_witness(
+    BusterX86CompletionCensusQuery query, BusterX86CompletionCensusResult* result, u32 form_id, u64 stable_hash,
+    u8 dialect, BusterX86CompletionCensusSourceResult source)
+{
+    result->source_witness_expected_count += 1;
+    if (result->source_witnesses_requested)
+    {
+        if (!query.source_witnesses || result->source_witness_count >= query.source_witness_capacity)
+        {
+            result->source_witness_dropped_count += 1;
+            result->source_witnesses_complete = false;
+        }
+        else
+        {
+            query.source_witnesses[result->source_witness_count++] = (BusterX86CompletionCensusSourceWitness){
+                .form_id = form_id,
+                .stable_hash = stable_hash,
+                .dialect = dialect,
+                .classification = source.classification,
+                .reason = (u8)source.reason,
+                .source_generated = source.source_generated,
+                .assembly_attempted = source.assembly_attempted,
+                .source = source.source_text,
+                .encoded = source.encoded,
+            };
+        }
+    }
+    return;
+}
 BusterX86CompletionCensusResult buster_x86_completion_census_run(BusterX86CompletionCensusQuery query)
 {
     BusterX86CompletionCensusResult result = {
         .required_form_count = buster_x86_metadata_form_count(),
         .intel_all_passed = true,
         .att_all_passed = true,
+        .direct_witnesses_requested = query.direct_witnesses != 0 || query.direct_witness_capacity != 0,
+        .direct_witnesses_complete = (query.direct_witnesses != 0 || query.direct_witness_capacity != 0) && query.direct_witnesses != 0,
+        .source_witnesses_requested = query.source_witnesses != 0 || query.source_witness_capacity != 0,
+        .source_witnesses_complete = (query.source_witnesses != 0 || query.source_witness_capacity != 0) && query.source_witnesses != 0,
     };
     bool run_intel = false;
     bool run_att = false;
@@ -1775,6 +1856,8 @@ BusterX86CompletionCensusResult buster_x86_completion_census_run(BusterX86Comple
                         .physical = direct_query, .form_id = form_id, .output = direct_bytes, .output_capacity = sizeof(direct_bytes),
                         .relocations = direct_relocations, .relocation_capacity = BUSTER_ARRAY_LENGTH(direct_relocations)});
                 }
+                buster_x86_completion_capture_direct_witness(query, &result, form_id, form.stable_hash, emitted,
+                                                              direct_bytes, direct_relocations);
                 record.canonical_query = true;
                 record.canonical_operand_count = (u16)canonical.operand_count;
                 record.metadata_status = (u16)emitted.status;
@@ -1798,7 +1881,8 @@ BusterX86CompletionCensusResult buster_x86_completion_census_run(BusterX86Comple
                     {
                         source = buster_x86_completion_source_check(
                             query.arena, query.target, form, direct_query, direct_bytes, emitted.byte_count, direct_relocations,
-                            emitted.relocation_count, false);
+                            emitted.relocation_count, false, query.source_witnesses != 0 || query.source_witness_capacity != 0);
+                        buster_x86_completion_capture_source_witness(query, &result, form_id, form.stable_hash, 0, source);
                         record.intel_class = source.classification;
                         record.intel_capable = source.classification == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT ||
                                                source.classification == BUSTER_X86_COMPLETION_CENSUS_SOURCE_NORMALIZED_RELOCATION ||
@@ -1830,7 +1914,8 @@ BusterX86CompletionCensusResult buster_x86_completion_census_run(BusterX86Comple
                     {
                         source = buster_x86_completion_source_check(
                             query.arena, query.target, form, direct_query, direct_bytes, emitted.byte_count, direct_relocations,
-                            emitted.relocation_count, true);
+                            emitted.relocation_count, true, query.source_witnesses != 0 || query.source_witness_capacity != 0);
+                        buster_x86_completion_capture_source_witness(query, &result, form_id, form.stable_hash, 1, source);
                         record.att_class = source.classification;
                         record.att_capable = source.classification == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT ||
                                              source.classification == BUSTER_X86_COMPLETION_CENSUS_SOURCE_NORMALIZED_RELOCATION ||
@@ -1899,6 +1984,12 @@ BusterX86CompletionCensusResult buster_x86_completion_census_run(BusterX86Comple
     result.structural_complete = result.records_complete && result.form_partition_complete && result.normalized_partition_complete &&
                                  result.metadata_partition_complete;
     result.diagnostics_complete = !query.diagnostics || result.diagnostic_dropped_count == 0;
+    result.direct_witnesses_complete &= result.direct_witnesses_requested &&
+                                       result.direct_witness_expected_count == result.direct_witness_count &&
+                                       result.direct_witness_dropped_count == 0;
+    result.source_witnesses_complete &= result.source_witnesses_requested &&
+                                       result.source_witness_expected_count == result.source_witness_count &&
+                                       result.source_witness_dropped_count == 0;
     return result;
 }
 
@@ -2014,7 +2105,7 @@ BusterX86CompletionCensusClass buster_x86_completion_census_test_source_class(Ar
     if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
         return BUSTER_X86_COMPLETION_CENSUS_DIRECT_EMIT_FAILURE;
     source = buster_x86_completion_source_check(arena, target, form, query, bytes, emitted.byte_count, relocations,
-                                                 emitted.relocation_count, att);
+                                                 emitted.relocation_count, att, false);
     return (BusterX86CompletionCensusClass)source.classification;
 }
 #endif

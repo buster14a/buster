@@ -77,8 +77,9 @@ broaden private-runner access.
 - Pinned actionlint passes across `.github/workflows/*.yml`.
 - All five core workflows have unfiltered pull_request and merge_group triggers;
   fork and same-repository PRs use hosted runners for required validation.
-  CI validates the merge revision; TCC retains its existing
-  explicit PR-head checkout. Merge-group events use the group revision.
+  CI and Canonical TCC bootstrap validate the same `github.sha`: the PR
+  merge revision for pull requests and the exact group revision for
+  merge-group events. TCC records the checkout, tree and `build.c` blob IDs.
 - No live fork PR or merge-group execution was performed. No fork PR appeared
   in the most recent 100 PRs inspected. Queue execution must be validated when
   queueing is enabled; configuration and fixtures do not prove live behavior.

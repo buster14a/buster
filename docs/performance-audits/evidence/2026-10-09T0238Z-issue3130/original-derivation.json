@@ -1,0 +1,25 @@
+{
+  "artifact": {
+    "bytes": 168213,
+    "path": "original-artifact.zip",
+    "sha256": "c42682fb9453d117f587c05bdd3e068c97c52ed7867c760d761cb646181cb07d"
+  },
+  "compile_database_sha256": "ab1b45f16ee66f659d84b231c60bad532ac334c7dcf6693de09f83b9a1d8cb7a",
+  "configuration": "Release",
+  "evidence_scope": "historical original per-row analyzer artifact; not the post-rebase candidate census",
+  "exact_invocation_groups": 135,
+  "format": "buster-clang-analyzer-original-invocation-derivation-v1",
+  "historical_repeated_row_elapsed_us": 199157025,
+  "identity": [
+    "exact working directory bytes",
+    "exact selected source path bytes",
+    "ordered projected analyzer argv bytes"
+  ],
+  "manifest_sha256": "2fe7f0549a36fe4cde86e760094df45fd2f8a1589fe7ff4d7c33c6f413fadf21",
+  "repeated_rows": 47,
+  "selected_rows": 182,
+  "shards": 8,
+  "source_revision": "44c7ebaa0f7d8900e14c157f0f6243ba7d26a53a",
+  "sum_unit_elapsed_us": 2073968711,
+  "timeout_seconds": 600
+}

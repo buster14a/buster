@@ -1,0 +1,180 @@
+{
+  "physical_performance_disposition": {
+    "result": "NoGo for the bounded same-run analyzer deduplication prototype",
+    "source": "docs/performance-audits/2026-10-09T133729Z.md",
+    "this_validation_does_not_recompute_or_change_that_result": true
+  },
+  "remaining_gates_at_freeze": {
+    "approved_9700x_performance_claim_for_final_no-go_source": "not run; the only physical comparison is the separately recorded valid H5 V2 NoGo experiment",
+    "exact_combined_hosted_ci": "pending",
+    "native_merge_queue_for_final_combined_source": "pending"
+  },
+  "runs": [
+    {
+      "capture": "captures/fbc-baseline-release-self-host.log",
+      "command": "./build.sh test_self_host --config Release",
+      "elapsed_seconds": 545.69,
+      "exit_status": 0,
+      "fixed_point_sha256": "7e4d0fabb89aa3c11ee70a9126aa49895b47162d155608fcf33e3776d0e8fc75",
+      "fixed_point_size_bytes": 39652648,
+      "id": "fbc-baseline-release-self-host",
+      "max_rss_kib": 2865492,
+      "source_commit": "fbc7b5a7027270a877fcb0298bd81e72e5f8cb50",
+      "stage1_stage2_identical": true,
+      "timing_note": "cold initial compilation; not compared against the warm integrated run"
+    },
+    {
+      "capture": "captures/176e-generate-release.log",
+      "command": "./build.sh generate --config Release",
+      "elapsed_seconds": 2.6,
+      "exit_status": 0,
+      "id": "176e-release-generate",
+      "source_commit": "176e46cb1ffa2ceeea24dbd4afca2e2f97859c9b"
+    },
+    {
+      "capture": "captures/176e-test-all-partial.log",
+      "capture_note": "3,369-byte original console/tee capture ends before terminal summary; exit/counts were recorded from the live test_all session and separately corroborated by the complete direct IDE test capture below.",
+      "command": "./build.sh build --config Release -t test_all",
+      "exit_status": 0,
+      "external_tests": {
+        "passed": 0,
+        "total": 0
+      },
+      "id": "176e-release-test-all",
+      "module_tests": {
+        "passed": 62,
+        "total": 62
+      },
+      "source_commit": "176e46cb1ffa2ceeea24dbd4afca2e2f97859c9b",
+      "unit_tests": {
+        "passed": 6840338,
+        "total": 6840338
+      }
+    },
+    {
+      "capture": "captures/176e-direct-ide-attempt-1-session-cutoff.log",
+      "command": "env BUSTER_SANITIZER_POLICY_MODE=unsupported ./build/Release/ide test --verbose=1",
+      "exec_session_id": "15506",
+      "id": "176e-direct-ide-attempt-1",
+      "last_log_mtime_utc": "2026-10-09T16:33:15Z",
+      "note": "No terminal module summary, footer, or exit status. The exact 120-second cutoff is observed from the log timestamps; orchestration timeout is the inferred cause.",
+      "observed_duration_seconds": 120,
+      "outer_tool_return": {
+        "authority": "not a complete test result; terminal test summary/footer absent from raw capture",
+        "exit_code": 0
+      },
+      "source_commit": "176e46cb1ffa2ceeea24dbd4afca2e2f97859c9b",
+      "start_utc": "2026-10-09T16:31:15Z",
+      "status": "incomplete"
+    },
+    {
+      "capture": "captures/176e-direct-ide-attempt-2-detached-cutoff.log",
+      "command": "env BUSTER_SANITIZER_POLICY_MODE=unsupported ./build/Release/ide test --verbose=1",
+      "id": "176e-direct-ide-attempt-2",
+      "launcher_observation": "The wrapper output included three \u201cfatal library error, lookup self\u201d messages from ps; PGID/SID fields were blank, no status file was produced, and the log stopped about one second after launch. The host bwrap uses --die-with-parent; detached child termination is the known cause.",
+      "launcher_pid_namespace_local": 8,
+      "launcher_record": "captures/attempt-2-launch.txt",
+      "note": "No terminal status file. The detached child was cut off when its command bwrap parent exited; retain as an invalid capture attempt, not a test result.",
+      "source_commit": "176e46cb1ffa2ceeea24dbd4afca2e2f97859c9b",
+      "start_utc": "2026-10-09T16:37:51Z",
+      "status": "incomplete",
+      "status_file": "absent",
+      "wrapper": "captures/attempt-2-run-ide-test.sh"
+    },
+    {
+      "capture": "captures/176e-direct-ide-complete.log",
+      "command": "env BUSTER_SANITIZER_POLICY_MODE=unsupported ./build/Release/ide test --verbose=1",
+      "elapsed_seconds": 213.93,
+      "end_utc": "2026-10-09T16:46:12Z",
+      "exec_cell_id": "914",
+      "exec_session_id": "78274",
+      "exit_status": 0,
+      "external_tests": {
+        "passed": 0,
+        "total": 0
+      },
+      "id": "176e-direct-ide-complete",
+      "ide_sha256": "aba3e601fbc0d6140fb349b441e8514d00f02f895ed49005981136229a276b0b",
+      "max_rss_kib": 1098996,
+      "module_tests": {
+        "passed": 62,
+        "total": 62
+      },
+      "source_commit": "176e46cb1ffa2ceeea24dbd4afca2e2f97859c9b",
+      "start_utc": "2026-10-09T16:42:38Z",
+      "unit_tests": {
+        "passed": 6840338,
+        "total": 6840338
+      }
+    },
+    {
+      "capture": "captures/176e-analyzer-self-test.log",
+      "checks": 93,
+      "command": "./build.sh clang_analyze --self-test",
+      "exit_status": 0,
+      "expected_rejections": 36,
+      "failures": 0,
+      "id": "176e-analyzer-native-self-test",
+      "process_tree_observation": "incomplete; children-unavailable on this cloud host; bounded tests passed",
+      "source_commit": "176e46cb1ffa2ceeea24dbd4afca2e2f97859c9b"
+    },
+    {
+      "build_delta_bytes": 0,
+      "capture": "captures/176e-source-size-vs-fbc.log",
+      "command": "./build.sh source_size --rev HEAD --base fbc7b5a7027270a877fcb0298bd81e72e5f8cb50",
+      "exit_status": 0,
+      "id": "176e-source-size-vs-selected-fbc",
+      "limit_bytes": 32768,
+      "production_delta_bytes": 4992,
+      "source_commit": "176e46cb1ffa2ceeea24dbd4afca2e2f97859c9b"
+    },
+    {
+      "capture": "captures/176e-integrated-release-self-host.log",
+      "command": "./build.sh test_self_host --config Release",
+      "elapsed_seconds": 79.03,
+      "exit_status": 0,
+      "fixed_point_sha256": "be8c08dcaa3255d30569416262163b1549753338503b89e9da1abb1cfa8abcbc",
+      "fixed_point_size_bytes": 39653336,
+      "id": "176e-integrated-release-self-host",
+      "max_rss_kib": 805420,
+      "source_commit": "176e46cb1ffa2ceeea24dbd4afca2e2f97859c9b",
+      "stage1_stage2_identical": true,
+      "timing_note": "warm after test_all; baseline and integrated elapsed values are not a performance comparison"
+    }
+  ],
+  "schema": "buster-issue3130-integration-validation-v1",
+  "source": {
+    "commit": "176e46cb1ffa2ceeea24dbd4afca2e2f97859c9b",
+    "local_runtime": "Linux x86_64 cloud workspace; not the approved Ryzen 7 9700X host",
+    "parents_ordered": [
+      {
+        "commit": "fdbc2806fa4e6bc5ed65bfc7be9ad9bfc3c01a6e",
+        "role": "frozen issue 3130 source",
+        "tree": "b518d8e7b6efc2490d5461cc76ab6f6da2706180"
+      },
+      {
+        "commit": "fbc7b5a7027270a877fcb0298bd81e72e5f8cb50",
+        "role": "selected main at integration",
+        "tree": "eefd0288b7572dbde6d49cc8f1ef55032953a7de"
+      }
+    ],
+    "selected_main_is_not_latest_main_at_audit_freeze": true,
+    "tree": "a399aeaf0cd29e138c84c37a4b3ff69a264494d5"
+  },
+  "toolchain": {
+    "clang": {
+      "binary_sha256": "2451bd5e44d0fe575e3088eb29725b4b0820e5c335a3fdb889ae036f55b57f56",
+      "version": "Ubuntu clang 21.1.8"
+    },
+    "cmake": "3.28.3",
+    "gcc": "Ubuntu 13.3.0-6ubuntu2~24.04",
+    "mold": "2.30.0",
+    "ninja": "1.11.1",
+    "recovery_provenance": "toolchain/recovery-provenance.json",
+    "tcc": {
+      "binary_sha256": "bf08d09e467c69e27084980e93bb1edcb2e6fa19bed4fc146bd69cdf80c7a102",
+      "source_commit": "0fb54300b56512754221d80adda85ddb9815bceb",
+      "version": "0.9.28rc 2026-09-04 HEAD@0fb5430"
+    }
+  }
+}

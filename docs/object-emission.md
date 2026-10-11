@@ -146,34 +146,88 @@ independently produces the conditional-branch refusal input.
 ## ELF64 import semantics
 
 `object_read_elf64` accepts allocated PROGBITS/NOBITS payloads, supported
-unwind records and init/fini arrays. Existing preinit records are admitted into
-the initializer model; `.preinit_array` names receive priority zero. The current
-runtime control checks a preinit entry before a constructor in the same image.
-It does not establish a distinct loader-facing preinit phase. The
-[ELF initialization contract](https://gabi.xinuos.com/v42/elf/08-dynamic.html#initialization-and-termination-functions)
-requires executable preinit entries to run before dependency constructors and
-prohibits them in shared objects. That phase, section-type-independent ordering
-and the shared-object prohibition remain open under
-[#1243](https://github.com/buster14a/buster/issues/1243).
+unwind records and init/fini arrays. Exactly the section named `.preinit_array`
+(of type `SHT_PREINIT_ARRAY` or `SHT_PROGBITS`) is a preinit array, as for `ld`
+and `lld`; it takes `IR_INITIALIZER_PRIORITY_PREINIT`, which
+`IR_INITIALIZER_PRIORITY_ORDER_KEY` sorts ahead of every constructor priority,
+a dependency's `constructor(0)` included, whatever the input order. The sentinel
+exists only in `ObjectFile.initializer_priorities` of ELF objects; the COFF
+writer spells it as priority zero and Mach-O states no priorities, so it never
+reaches either as a name or a number. A `.preinit_array.5` or a type-16 section
+of another name is ordinary data, as the host linkers leave it, and the
+assembler refuses a `@preinit_array` section of another name. A preinit entry
+in a `-shared` output is refused with a named diagnostic, as `ld` does.
+
+A dynamic executable (x86-64 fixed-address or `-pie`, AArch64, and the
+Android images staged through them) publishes its preinit entries through
+`DT_PREINIT_ARRAY`/`DT_PREINIT_ARRAYSZ`, so the loader runs them with argc,
+argv and envp before the constructors of the shared objects it loads, as for
+`ld` and `lld` (#1243). `link_elf_preinit_array_split` moves the leading
+preinit run of the merged constructor array onto the end of the writable data
+with its relocations, so the entry stub calls only the constructors. A static
+executable has no loader and no dependency constructors; its entry stub still
+calls the preinit entries first. See the
+[ELF initialization contract](https://gabi.xinuos.com/v42/elf/08-dynamic.html#initialization-and-termination-functions).
 
 The bounded refusal repair for #1243 rejects unsupported allocated section
 types, legacy `.ctors`/`.dtors` and their priority families, `.init`/`.fini`
 fragments, and exception tables the reader previously discarded. An unsupported
 allocated note is refused too; its contract must be understood before it can be dropped.
-One canonical GNU property note is understood: the optional x86 IBT/SHSTK or
-AArch64 BTI/PAC/GCS `FEATURE_1_AND` record. Its output feature intersection is
-zero because Buster's generated code does not assert those features, so this
-note is omitted. Unknown bits, additional properties, required ISA properties,
-other note formats, and unsupported flags/alignment are refused.
+The GNU property section is understood as a bounded walk. It is a sequence of
+`NT_GNU_PROPERTY_TYPE_0` notes (owner `GNU`, eight-byte padding), and each
+descriptor is a sequence of properties whose headers and padded data must lie
+inside their descriptor and section. A section may hold several notes; GCC
+writes a `FEATURE_1_AND` note beside the `*_USED` note under
+`-fcf-protection=full`. Two kinds of record are dropped: the optional x86 IBT/SHSTK or
+AArch64 BTI/PAC/GCS `FEATURE_1_AND` record, whose output feature intersection is
+zero because Buster's generated code does not assert those features, and on
+x86-64 the informational `GNU_PROPERTY_X86_ISA_1_USED` (`0xc0010002`) and
+`GNU_PROPERTY_X86_FEATURE_2_USED` (`0xc0010001`) records, which a linker drops
+whenever any input lacks them. The binutils 2.47 assembler writes the `*_USED` records by default
+([#3175](https://github.com/buster14a/buster/issues/3175)). Unknown bits in `FEATURE_1_AND`, any other
+property type (including `GNU_PROPERTY_X86_ISA_1_NEEDED` and other required
+records), a property size other than four, truncated or overlong note and
+property sizes, trailing bytes, other note formats, and unsupported
+flags/alignment are refused.
 Unallocated unknown metadata and unsupported debug section types retain their
 skip policy. Supported DWARF payloads still pass through without DIE decoding.
 
 Ordinary NOTYPE/OBJECT/FUNC/SECTION/TLS symbols keep their existing mapping.
 STT_FILE records are metadata and may use SHN_ABS. Other reserved section
 definitions (including absolute/common values and extended indexes) and
-unsupported runtime symbol types, including GNU IFUNC, are refused. Calling an
-IFUNC resolver as a normal function or dropping a weak absolute definition
-would produce a successful link with different behavior.
+unsupported runtime symbol types are refused. Dropping a weak absolute
+definition would produce a successful link with different behavior.
+
+A GNU IFUNC (`STT_GNU_IFUNC`) defined in code is represented: the reader marks
+the symbol `indirect`, and `link_elf_indirect_functions_rebind` rewrites it
+before any writer runs, the way `ld` and `lld` give it a PLT entry and an
+`IRELATIVE` slot. The name defines a thunk that jumps through a writable slot,
+so calls, address-taken references and GOT loads all reach one canonical
+address and never the resolver. A runner calls each resolver once and fills the
+slots. In an executable it is the first `.preinit_array` entry, which a dynamic
+image publishes as `DT_PREINIT_ARRAY`, so the loader runs it after relocation
+and before every constructor; a static image's stub calls it first. A
+`-shared` object has no runner: each slot carries an `R_X86_64_IRELATIVE`, the
+last of its dynamic relocations, so ld.so fills it while relocating the library,
+before any initializer runs, including an executable's `DT_PREINIT_ARRAY`
+callbacks that call into the library. On AArch64 the runner
+passes hwcap 0, so a resolver that dispatches on hwcap selects its baseline
+implementation. An undefined IFUNC, or one outside code, stays refused, and
+the C frontend's own `ifunc` attribute is still refused by name.
+`compiler_driver_elf_ifunc_tests` checks single resolution and address identity
+against the host linker for static, dynamic, `-pie` and `-shared` images, and a
+host-linked executable whose preinit callback calls a `-shared` library's IFUNC.
+`.ctors`/`.dtors` and `.init`/`.fini` inputs stay refused: GNU ld 2.42 folds
+`.ctors` into `.init_array` in reverse but emits a null `.fini_array` slot for
+`.dtors`, and lld 18 runs neither, so no consistent oracle exists, and the
+fragments need the crti/crtn prologue Buster's entry stub does not link.
+
+The Mach-O and COFF
+readers refuse the same definitions in their own forms: an external `N_ABS` or
+`N_INDR` symbol or a Mach-O common (`N_UNDF` with a size), and an external
+`IMAGE_SYM_ABSOLUTE` symbol or a COFF common (section 0 with a size). Local
+absolutes such as COFF `@comp.id`/`@feat.00` remain ignored producer metadata
+(`compiler_driver_archive_test_foreign_reserved_symbols`).
 
 These failures return `OBJECT_ERROR_UNSUPPORTED_TARGET` with a diagnostic naming
 the section or symbol and its numeric type/index. Reserved symbol section
@@ -188,10 +242,15 @@ architectures. `compiler_driver_elf_semantic_tests` imports host-compiled inputs
 on Linux x86-64/AArch64, checks attributable refusal and no artifact, and requires
 the host linker/runtime to preserve each input's meaning. A same-image
 preinit/constructor control continues to link and run through both linkers, as
-does a canonical optional GNU property control. It does not cover dependency
-constructor ordering, preinit section types with other names, or preinit in a
-shared output. Raw note controls cover every known feature combination,
-unknown/required properties, malformed shape, and payload bounds.
+does a canonical optional GNU property control. `compiler_driver_elf_preinit_tests`
+covers a preinit entry against a dependency's `constructor(0)` in both link
+orders, against a host-built shared library's constructor in a dynamic
+executable, the data-only sections above and the shared-output refusal, against
+the host linker; `link_test` and `object_test` cover the merge order and the
+writer mappings. Raw note controls cover every known feature combination,
+unknown/required properties, malformed shape, and payload bounds;
+`object_test_elf_property_note_walk` adds multi-note and `*_USED` sections and
+truncated or overlong `descsz`/`datasz` values on both architectures.
 
 ## The work ledger: `ObjectWriteStatistics`
 
@@ -368,7 +427,9 @@ their section-base/public-function identities. The same original text bytes
 must survive both paths. This control does not use the production object
 reader, writer or symbol planner as its metadata oracle.
 
-#1281 remains open: this slice does not qualify its x86/debug-anchor,
-constructor priority, weak/hidden binding, PLT/TLS, assembly-dialect or own-
-assembler acceptance rows. Actual qualification still requires source review
+#1281 remains open: this slice does not qualify the AArch64 debug-anchor,
+PLT/TLS or own-assembler rows. The x86-64 ELF listing rows (weak and hidden
+binding, constructor priority, PLT calls, section-symbol anchors, TLS
+general-dynamic padding, and the `-S -masm=att` refusal) are described in
+[the driver guide](agents/driver.md) and qualified by their own tests. Actual qualification still requires source review
 and fresh hosted results at the published repair head.

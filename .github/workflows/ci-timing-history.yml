@@ -161,6 +161,37 @@ jobs:
         run: |
           printf 'Collection has visible gaps; retained authentic partial observations may still be published.\n' >> "$GITHUB_STEP_SUMMARY"
           exit 1
+  step-change:
+    # Report-only (#3098): opens or updates one tracking issue; never a check or gate.
+    name: Report required job step changes
+    if: github.repository == 'buster14a/buster' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
+      - name: Trusted detector checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - name: Compare merge_group job medians and report step changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/github_ci_time.py step-change --repository "$GITHUB_REPOSITORY" --publish-issue --summary "$GITHUB_STEP_SUMMARY" --output "$RUNNER_TEMP/step-change.json"
   publish:
     name: Publish advisory CI history
     needs: collect

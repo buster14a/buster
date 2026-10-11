@@ -1659,6 +1659,474 @@ def reconcile(reference, candidate, output, require_clean_candidate, require_cle
     return report
 
 
+# This reader is deliberately separate from frozen schema 2.  Its checked
+# evidence is diagnostic; no declaration, receipt or command-line flag can
+# authorize retirement acceptance in this bootstrap.
+CURRENT_NATIVE_PROFILE = "current-native-v1"
+CURRENT_NATIVE_SCHEMA = "buster-current-native-object-validation-v1"
+CURRENT_NATIVE_POLICY_PATH = "docs/current-native-object-census-v1.json"
+CURRENT_NATIVE_ALLOCATORS = ("fast", "quality")
+CURRENT_NATIVE_ROW_COUNT = 39456
+CURRENT_NATIVE_GROUP_COUNT = 19728
+CURRENT_NATIVE_REFERENCE_REVISION = "034d33d738f819114f00ff1db671518e9201ff8b"
+CURRENT_NATIVE_REFERENCE_TREE = "cfdcd084ba016be0899bd29e42057d3bf4cc0e97"
+CURRENT_NATIVE_REFERENCE_BACKEND = "historical-mir-stack-alias"
+
+
+def current_native_hex(value, length, label):
+    assert isinstance(value, str) and len(value) == length
+    assert all(byte in "0123456789abcdef" for byte in value), label
+    return value
+
+
+def current_native_json(raw):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            assert key not in result, f"duplicate JSON key: {key}"
+            result[key] = value
+        return result
+    return json.loads(raw, object_pairs_hook=unique)
+
+
+def current_native_number(value, bits, label):
+    assert isinstance(value, str), f"non-string numeric field: {label}"
+    return unsigned_decimal(value, bits, label)
+
+
+def current_native_artifact(directory, descriptor):
+    assert isinstance(descriptor, dict) and set(descriptor) == {"path", "bytes", "sha256"}
+    path = relative_path(descriptor["path"])
+    assert path.as_posix() == descriptor["path"] and "\\" not in descriptor["path"]
+    current_native_number(descriptor["bytes"], 64, "artifact bytes")
+    current_native_hex(descriptor["sha256"], 64, "artifact SHA-256")
+    for parent in (path, *path.parents):
+        assert not (directory / parent).is_symlink(), f"symlink in artifact path: {path}"
+    assert (directory / path).is_file()
+    raw = (directory / path).read_bytes()
+    assert len(raw) == int(descriptor["bytes"]), path
+    assert hashlib.sha256(raw).hexdigest() == descriptor["sha256"], path
+    return raw
+
+
+def current_native_build(directory, role, revision, tree, receipt_sha256):
+    """Bind bytes to caller-selected hosted receipt; do not attest its issuer."""
+    current_native_hex(revision, 40, "compiler revision")
+    current_native_hex(tree, 40, "compiler source tree")
+    current_native_hex(receipt_sha256, 64, "caller build receipt")
+    name = "candidate" if role == "candidate" else "baseline"
+    path = directory / (name + "-build.json")
+    assert path.is_file() and not path.is_symlink()
+    raw = path.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == receipt_sha256
+    receipt = current_native_json(raw)
+    assert set(receipt) == {"schema", "repository", "provider", "revision", "source_tree",
+                            "dirty", "binary", "builder", "build_argv", "build_log",
+                            "source_snapshot", "run_id", "run_attempt", "workflow_path",
+                            "workflow_revision", "backend"}
+    assert receipt["schema"] == "buster-current-native-hosted-build-v1"
+    assert receipt["repository"] == "buster14a/buster" and receipt["provider"] == "github-actions"
+    assert receipt["revision"] == revision and receipt["source_tree"] == tree
+    assert receipt["dirty"] is False
+    assert receipt["backend"] == ("current-native" if role == "candidate"
+                                  else CURRENT_NATIVE_REFERENCE_BACKEND)
+    assert receipt["binary"]["path"] == name + "-ide.exe"
+    assert current_native_artifact(directory, receipt["binary"])
+    assert current_native_artifact(directory, receipt["builder"])
+    assert current_native_artifact(directory, receipt["build_log"])
+    source_snapshot = current_native_json(current_native_artifact(directory, receipt["source_snapshot"]))
+    assert isinstance(source_snapshot, dict)
+    assert source_snapshot.get("revision") == revision and source_snapshot.get("source_tree") == tree
+    assert isinstance(receipt["build_argv"], list) and receipt["build_argv"]
+    assert all(isinstance(value, str) and value and "\0" not in value
+               for value in receipt["build_argv"])
+    for field in ("run_id", "run_attempt"):
+        assert current_native_number(receipt[field], 64, field) > 0
+    current_native_hex(receipt["workflow_revision"], 40, "build workflow revision")
+    assert relative_path(receipt["workflow_path"]).as_posix() == receipt["workflow_path"]
+    assert receipt["workflow_path"].startswith(".github/workflows/")
+    return {"revision": revision, "source_tree": tree, "binary_sha256": receipt["binary"]["sha256"],
+            "build_receipt_sha256": receipt_sha256, "backend": receipt["backend"]}
+
+
+def current_native_protocol(raw, prefix, fields):
+    # Protocol lines have byte LF framing, with optional CR immediately before LF.
+    lines = [line.removesuffix(b"\r") for line in raw.split(b"\n")]
+    marker = prefix.encode("ascii") + b" "
+    matching = [line for line in lines if line.startswith(marker)]
+    assert len(matching) == 1, f"missing or duplicate {prefix}"
+    text = matching[0].decode("ascii")
+    tokens = text.split(" ")
+    assert tokens[0] == prefix and len(tokens) == len(fields) + 1
+    parsed = {}
+    for token, field in zip(tokens[1:], fields):
+        key, separator, value = token.partition("=")
+        assert separator and key == field and value, f"invalid {prefix} field"
+        parsed[key] = value
+    return parsed
+
+
+def current_native_telemetry(raw, row):
+    codegen_fields = ("cpu", "vector_bits", "functions", "instructions", "values",
+                      "stack_value_bytes", "stack_frame_bytes", "max_stack_frame_bytes",
+                      "code_bytes", "forwarded_wide_vector_loads", "native_vector_operations",
+                      "split_vector_operations", "vzeroupper", "simd_operations", "allocator",
+                      "fallback_functions")
+    codegen = current_native_protocol(raw, "CODEGEN", codegen_fields)
+    target = current_native_protocol(raw, "TARGET", ("cpu", "features"))
+    verify = current_native_protocol(raw, "CODEGEN_VERIFY",
+                                     ("version", "ir", "mir", "scheduled", "allocator"))
+    assert codegen["allocator"] == verify["allocator"] == row["allocator"]
+    assert codegen["cpu"] == target["cpu"] == row["cpu"]
+    assert target["features"] == row["cpu_features"]
+    for field in codegen_fields:
+        if field not in {"cpu", "allocator"}:
+            bits = 32 if field in {"vector_bits", "functions", "max_stack_frame_bytes",
+                                   "fallback_functions"} else 64
+            current_native_number(codegen[field], bits, field)
+    values = {field: current_native_number(verify[field], 32, field)
+              for field in ("version", "ir", "mir", "scheduled")}
+    assert values["version"] == 1 and values["ir"] > 0
+    functions = int(codegen["functions"])
+    assert (values["mir"] > 0 if functions else values["mir"] == 0)
+    assert values["scheduled"] <= values["mir"]
+    assert codegen["fallback_functions"] == "0", "fallback is not a count reference"
+    lines = [line.removesuffix(b"\r") for line in raw.split(b"\n")]
+    details = [line for line in lines if line.startswith(b"CODEGEN_FALLBACK")
+               and not line.startswith(b"CODEGEN_FALLBACK_CENSUS ")]
+    assert not details, "zero-fallback evidence has fallback diagnostics"
+    if row["allocator"] != "none":
+        census = current_native_protocol(raw, "CODEGEN_FALLBACK_CENSUS", ("version", "records"))
+        assert census == {"version": "1", "records": "0"}
+    else:
+        assert not any(line.startswith(b"CODEGEN_FALLBACK_CENSUS") for line in lines)
+    return functions
+
+
+def current_native_object(raw, target):
+    """Check relocatable format/architecture; exact target ABI is argv-bound."""
+    x86 = target.startswith("x86_64-")
+    if "windows" in target or target.endswith("-uefi"):
+        assert len(raw) >= 20
+        assert int.from_bytes(raw[:2], "little") == (0x8664 if x86 else 0xaa64)
+        assert int.from_bytes(raw[2:4], "little") > 0
+        assert int.from_bytes(raw[16:18], "little") == 0
+    elif "apple" in target:
+        assert len(raw) >= 32 and raw[:4] == b"\xcf\xfa\xed\xfe"
+        assert int.from_bytes(raw[4:8], "little") == (0x01000007 if x86 else 0x0100000c)
+        assert int.from_bytes(raw[12:16], "little") == 1
+    else:
+        assert len(raw) >= 64 and raw[:7] == b"\x7fELF\x02\x01\x01"
+        assert int.from_bytes(raw[16:18], "little") == 1
+        assert int.from_bytes(raw[18:20], "little") == (62 if x86 else 183)
+
+
+def current_native_preprocess_argv(argv):
+    removed = {"-v", "-fverify-codegen", "-fmachine-fallback", "-fno-machine-fallback",
+               "-fcodegen-fallback-census"}
+    result = []
+    index = 0
+    while index < len(argv):
+        value = argv[index]
+        if value == "-o":
+            assert index + 1 < len(argv)
+            index += 2
+            continue
+        if value not in removed:
+            result.append("-E" if value == "-c" else value)
+        index += 1
+    return result
+
+
+def current_native_process(directory, descriptor, invocation_sha256):
+    process = current_native_json(current_native_artifact(directory, descriptor))
+    assert set(process) == {"kind", "status", "stdout", "stderr", "invocation_sha256"}
+    assert process["invocation_sha256"] == invocation_sha256, "process/invocation mismatch"
+    assert process["kind"] == "0" and process["status"] == "0", "compiler process failed"
+    stdout = current_native_artifact(directory, process["stdout"])
+    stderr = current_native_artifact(directory, process["stderr"])
+    return stdout, stderr
+
+
+def current_native_argv(directory, manifest, row, recipes, dependency_adapters, raw):
+    assert raw.endswith(b"\0") and b"\0\0" not in raw
+    argv = [part.decode("utf-8") for part in raw[:-1].split(b"\0")]
+    baseline = row["allocator"] == "none"
+    recorded_root = Path(argv[0]).parent
+    assert recorded_root.is_absolute() and recorded_root.name == directory.name
+    executable = "baseline-ide.exe" if baseline else "candidate-ide.exe"
+    lowering = "-ffrontend-ssa" if row["frontend_lowering"] == "direct-ssa" else "-fno-frontend-ssa"
+    expected = [str(recorded_root / executable), "cc", "-c", "-g0", "-v", "-fwrapv",
+                "-fno-strict-aliasing", "-funsigned-char", "-target", row["target"],
+                "-mcpu=" + row["cpu"], "-fPIC" if row["PIC"] == "1" else "-fno-pic",
+                lowering, "-fregister-allocator=" + row["allocator"], "-fverify-codegen",
+                "-fmachine-fallback" if baseline else "-fno-machine-fallback", "-nostdinc",
+                "-isystem", str(recorded_root / "dependencies" / "resource-include"),
+                ]
+    if manifest.get("project_include_sha256", ""):
+        if row["target"] in {"x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"}:
+            arch = "x86_64" if row["target"].startswith("x86_64-") else "aarch64"
+            expected.extend(["-isystem", str(recorded_root / "dependencies" / "project-include" / "musl" / arch / "include"),
+                             "-isystem", str(recorded_root / "dependencies" / "project-include" / "musl" / "include")])
+        if row["fixture"] in HOSTED_FIXTURES:
+            sdk_root = recorded_root / "dependencies" / "project-include" / "sdk"
+            target = row["target"]
+            if "windows" in target:
+                expected.append("-U__GNUC__")
+                if target.startswith("x86_64-"):
+                    expected.append("-D__x86_64=1")
+                expected.extend(["-isystem", str(sdk_root / "mingw-adapter"),
+                                 "-isystem", str(sdk_root / "windows")])
+            elif "apple" in target:
+                if (target.endswith("-ios") and
+                        "dependencies/project-include/sdk/darwin-adapter/Availability.h" in dependency_adapters):
+                    expected.extend(["-isystem", str(sdk_root / "darwin-adapter")])
+                expected.extend(["-isystem", str(sdk_root / "darwin")])
+            elif "android" in target:
+                arch = target.split("-", 1)[0]
+                expected.extend(["-isystem", str(sdk_root / "android" / (arch + "-linux-android")),
+                                 "-isystem", str(sdk_root / "android")])
+        expected.append("-I" + str(recorded_root / "inputs" / "tests"))
+        expected.append("-I" + str(recorded_root / "dependencies" / "project-include"))
+    else:
+        expected.append("-I" + str(recorded_root / "inputs" / "tests"))
+    expected.extend([str(recorded_root / "inputs" / row["fixture"]), "-o",
+                str(recorded_root / "groups" / row["group"] / (row["allocator"] + ".o"))])
+    expected.extend(recipes[row["fixture"]])
+    if not baseline:
+        expected.append("-fcodegen-fallback-census")
+    assert argv == expected, f"argv mismatch for row {row['row']}"
+    return argv
+
+
+def current_native_record(directory, manifest, row, record, compiler, closure, recipes,
+                          adapters, skip):
+    assert set(record) == {"identity", "compiler", "closure_sha256", "skip", "argv",
+                           "process", "object", "preprocessing", "functions",
+                           "expected_reference_functions"}
+    identity = {field: row[field] for field in ("group", *IDENTITY_FIELDS)}
+    assert record["identity"] == identity, "record/group identity mismatch"
+    assert record["compiler"] == compiler, "compiler identity mismatch"
+    assert record["closure_sha256"] == closure, "input/include closure mismatch"
+    if skip:
+        assert record["skip"] == {"applicability": skip[0], "reason": skip[1]}
+        assert all(record[field] is None for field in ("argv", "process", "object", "preprocessing"))
+        assert record["functions"] == record["expected_reference_functions"] == "0"
+        return None
+    assert record["skip"] is None, "producer cannot classify a supported object away"
+    assert record["argv"]["path"] == row["argv_evidence"]
+    argv_raw = current_native_artifact(directory, record["argv"])
+    argv = current_native_argv(directory, manifest, row, recipes, adapters, argv_raw)
+    invocation = {"identity": identity, "compiler": compiler, "closure_sha256": closure,
+                  "argv_sha256": record["argv"]["sha256"]}
+    stdout, stderr = current_native_process(directory, record["process"], canonical_digest(invocation))
+    functions = current_native_telemetry(stdout + b"\n" + stderr, row)
+    assert current_native_number(record["functions"], 32, "copied function count") == functions
+    assert record["object"]["path"] == f"groups/{row['group']}/{row['allocator']}.o"
+    current_native_object(current_native_artifact(directory, record["object"]), row["target"])
+    preprocessing = record["preprocessing"]
+    assert set(preprocessing) == {"argv", "process"}
+    pp_argv = current_native_artifact(directory, preprocessing["argv"])
+    assert pp_argv.endswith(b"\0") and b"\0\0" not in pp_argv
+    assert [part.decode("utf-8") for part in pp_argv[:-1].split(b"\0")] == current_native_preprocess_argv(argv)
+    pp_invocation = dict(invocation, argv_sha256=preprocessing["argv"]["sha256"])
+    pp_stdout, unused_stderr = current_native_process(
+        directory, preprocessing["process"], canonical_digest(pp_invocation))
+    return functions, len(pp_stdout), hashlib.sha256(pp_stdout).hexdigest()
+
+
+def current_native_compare(reference, observed, expected_functions):
+    assert reference is not None and observed is not None, "missing executed count reference"
+    assert observed == reference, "function count or preprocessing differs from historical reference"
+    assert current_native_number(expected_functions, 32, "expected reference count") == reference[0]
+
+
+def current_native_checkout_inputs(directory, manifest, inputs, checkout=None):
+    """Require current checkout bytes in addition to legacy approved-ledger checks."""
+    checkout = Path(checkout) if checkout is not None else Path(__file__).resolve().parents[1]
+    for copied, policy, field in (
+        ("support-contract.tsv", "docs/native-retirement-support-v1.tsv", "support_contract_sha256"),
+        ("applicability-ledger.tsv", "docs/native-retirement-applicability-v1.tsv", "applicability_ledger_sha256"),
+    ):
+        trusted = checkout / policy
+        assert trusted.is_file() and not trusted.is_symlink()
+        trusted_raw = trusted.read_bytes()
+        assert manifest[field] == hashlib.sha256(trusted_raw).hexdigest(), "current-native ledger differs from current checkout"
+        assert (directory / copied).read_bytes() == trusted_raw
+    for path, source in inputs.items():
+        current_native_artifact(checkout, {"path": path, "bytes": source["bytes"], "sha256": source["sha256"]})
+
+
+def current_native_population(manifest, inputs, rows):
+    assert manifest["version"] == "3" and manifest["profile"] == CURRENT_NATIVE_PROFILE
+    assert manifest["rows"] == str(CURRENT_NATIVE_ROW_COUNT)
+    assert manifest["reference_groups"] == str(CURRENT_NATIVE_GROUP_COUNT)
+    # Reuse only the frozen inventory/support obligations, never its result gate.
+    frozen_shape = dict(manifest, profile=FULL_CENSUS_PROFILE)
+    validate_profile(frozen_shape, inputs, FULL_ROW_COUNT)
+    assert len(rows) == CURRENT_NATIVE_ROW_COUNT
+    subjects = [row["path"] for row in inputs.values() if row["role"] == "subject"]
+    assert subjects == sorted(subjects), "subjects must retain canonical path order"
+    expected = [(fixture, target, frontend, pic, mode)
+                for fixture in subjects for target in TARGETS
+                for frontend in ("local-backed-canonical", "direct-ssa")
+                for pic in ("0", "1") for mode in CURRENT_NATIVE_ALLOCATORS]
+    assert [(row["fixture"], row["target"], row["frontend_lowering"], row["PIC"], row["allocator"])
+            for row in rows] == expected, "incomplete current-native cross-product"
+    shard = current_native_number(manifest["shard_index"], 32, "shard index")
+    assert shard < FULL_SHARD_COUNT
+    for index, row in enumerate(rows):
+        assert row["row"] == str(index) and row["group"] == str(index // 2)
+        assert row["selected"] == str(int(index // 2 % FULL_SHARD_COUNT == shard))
+        source = inputs[row["fixture"]]
+        assert row["fixture_recipe"] == source["fixture_recipe"]
+        assert row["compile_obligation"] == source["compile_obligation"]
+        assert row["compile_obligation"] in {SUPPORTED_OBJECT_OBLIGATION, NON_OBJECT_CONTROL_OBLIGATION}
+        assert row["cpu"] == expected_cpu(row["fixture"], row["target"], manifest["cpu"])
+        assert row["cpu_features"] and row["diagnostic_obligation"] == "none"
+        assert tuple(row[field] for field in ("target_abi", "link_obligation", "execution_obligation")) == TARGETS[row["target"]]
+        assert row["argv_evidence"] == f"groups/{row['group']}/{row['allocator']}.argv"
+
+
+def current_native_gaps(directory, manifest, rows):
+    # Authenticate all frozen192 bytes first.  The two-mode projection changes
+    # neither that policy nor any admitted object's obligation to succeed.
+    frozen_rows = []
+    for row in rows[::2]:
+        for mode in ALLOCATORS:
+            frozen_rows.append(dict(row, row=str(int(row["group"]) * 4 + ALLOCATORS.index(mode)),
+                                    allocator=mode))
+    identities, unused_rows, digest = validate_supported_gap_ledger(
+        directory, manifest, frozen_rows, FULL_CENSUS_PROFILE)
+    projected = {identity for identity in identities if identity[-1] in CURRENT_NATIVE_ALLOCATORS}
+    assert len(projected) == 128
+    return projected, digest
+
+
+def validate_current_native(directory, expected):
+    assert directory.is_dir() and not directory.is_symlink()
+    directory = directory.resolve()
+    assert all(not path.is_symlink() for path in directory.rglob("*")), "symlink in current evidence inventory"
+    manifest = properties(directory / "manifest.txt")
+    assert manifest["version"] == "3" and manifest["profile"] == CURRENT_NATIVE_PROFILE
+    assert manifest["manifest_only"] == "0" and manifest["identity_hash"] == "sha256"
+    assert manifest["environment"] == "explicit-replacement-in-environment.tsv"
+    assert manifest["unfrozen_dependencies"] == "none-for-object-census"
+    assert manifest["sysroot"] == "target-correct-hosted-sdks"
+    assert manifest["system_include"] == "target-correct-libc-project-include"
+    assert manifest["source_dependencies"] == "tracked-tests-plus-snapshotted-resource-include-plus-authenticated-project-include-plus-pinned-github-closure"
+    assert expected["candidate_revision"] != CURRENT_NATIVE_REFERENCE_REVISION, "archive-only candidate"
+    candidate = current_native_build(directory, "candidate", expected["candidate_revision"],
+                                     expected["candidate_tree"], expected["candidate_build_receipt_sha256"])
+    reference = current_native_build(directory, "reference", CURRENT_NATIVE_REFERENCE_REVISION,
+                                     CURRENT_NATIVE_REFERENCE_TREE, expected["reference_build_receipt_sha256"])
+    for compiler, prefix in ((candidate, "compiler"), (reference, "baseline")):
+        assert manifest[prefix + "_revision_claim"] == compiler["revision"]
+        assert manifest[prefix + "_sha256"] == compiler["binary_sha256"]
+        name = "candidate-ide.exe" if prefix == "compiler" else "baseline-ide.exe"
+        exact_sha(directory / name, manifest[prefix + "_bytes"], compiler["binary_sha256"])
+    inputs, ledger = validate_inputs(directory, manifest)
+    current_native_checkout_inputs(directory, manifest, inputs)
+    validate_dependencies(directory, manifest)
+    validate_environment(directory)
+    for path in ("dependency-policy.json", "dependency-source-snapshot.json", "dependency-resolved-descriptor.json"):
+        assert (directory / path).is_file(), "current evidence requires live authoritative closure"
+    fields, rows = table_with_fields(directory / "rows.tsv")
+    assert fields == ROW_FIELDS
+    current_native_population(manifest, inputs, rows)
+    adapters = validate_dependency_binding(directory, manifest, FULL_CENSUS_PROFILE, inputs)
+    gaps, gap_digest = current_native_gaps(directory, manifest, rows)
+    applicability, applicability_digest = validate_applicability_ledger(
+        directory, manifest, rows, inputs, FULL_CENSUS_PROFILE, gaps)
+    closure = canonical_digest({"inputs": canonical_map_digest(ledger),
+                                "resource_include": manifest["resource_include_sha256"],
+                                "project_include": manifest["project_include_sha256"],
+                                "dependency_receipt": manifest["dependency_receipt_sha256"],
+                                "environment": sha256(directory / "environment.tsv")})
+    assert (directory / "current-records.json").is_file() and not (directory / "current-records.json").is_symlink()
+    records_raw = (directory / "current-records.json").read_bytes()
+    data = current_native_json(records_raw)
+    assert set(data) == {"schema", "candidate_records", "reference_records"}
+    assert data["schema"] == "buster-current-native-observations-v1"
+    selected = [row for row in rows if row["selected"] == "1"]
+    def index_records(records, reference_side):
+        assert isinstance(records, list)
+        result = {}
+        for record in records:
+            identity = record["identity"]
+            key = identity["group"] if reference_side else (identity["group"], identity["allocator"])
+            assert key not in result, "duplicate current-native record"
+            result[key] = record
+        return result
+    candidates = index_records(data["candidate_records"], False)
+    references = index_records(data["reference_records"], True)
+    assert set(candidates) == {(row["group"], row["allocator"]) for row in selected}
+    assert set(references) == {row["group"] for row in selected}
+    recipes = {path: expected_fixture_recipe(path)[1] for path in inputs}
+    skipped = 0
+    for row in selected[::2]:
+        auth_class, auth_reason = applicability.get((row["fixture"], row["target"]), ("", ""))
+        skip = expected_nonexecuted(row, auth_class, auth_reason)
+        historical = dict(row, allocator="none", argv_evidence=f"groups/{row['group']}/none.argv")
+        ref = current_native_record(directory, manifest, historical, references[row["group"]],
+                                    reference, closure, recipes, adapters, skip)
+        assert references[row["group"]]["expected_reference_functions"] == references[row["group"]]["functions"]
+        for mode in CURRENT_NATIVE_ALLOCATORS:
+            live = rows[int(row["row"]) + CURRENT_NATIVE_ALLOCATORS.index(mode)]
+            record = candidates[(row["group"], mode)]
+            observed = current_native_record(directory, manifest, live, record, candidate,
+                                             closure, recipes, adapters, skip)
+            if skip:
+                skipped += 1
+            else:
+                current_native_compare(ref, observed, record["expected_reference_functions"])
+    return {"profile": CURRENT_NATIVE_PROFILE, "schema": CURRENT_NATIVE_SCHEMA,
+            "manifest": manifest, "candidate": candidate, "reference": reference,
+            "closure_sha256": closure, "rows_sha256": canonical_map_digest(field_map(rows, ROW_IDENTITY_FIELDS, "row")),
+            "gap_ledger_sha256": gap_digest, "applicability_ledger_sha256": applicability_digest,
+            "selected_rows": [int(row["row"]) for row in selected],
+            "reference_groups": sorted(int(group) for group in references),
+            "nonexecuted_rows": skipped, "records_sha256": hashlib.sha256(records_raw).hexdigest()}
+
+
+def partition_current_native(reports):
+    assert len(reports) == FULL_SHARD_COUNT, "missing current-native shard"
+    reports = sorted(reports, key=lambda report: int(report["manifest"]["shard_index"]))
+    assert [report["manifest"]["shard_index"] for report in reports] == ["0", "1", "2", "3"]
+    first = reports[0]
+    keys = ("profile", "schema", "candidate", "reference", "closure_sha256", "rows_sha256",
+            "gap_ledger_sha256", "applicability_ledger_sha256")
+    for report in reports:
+        assert report["profile"] == CURRENT_NATIVE_PROFILE and report["schema"] == CURRENT_NATIVE_SCHEMA
+        assert all(report[key] == first[key] for key in keys), "cross-shard identity mismatch"
+        assert stable_manifest(report["manifest"]) == stable_manifest(first["manifest"])
+    selected = [row for report in reports for row in report["selected_rows"]]
+    groups = [group for report in reports for group in report["reference_groups"]]
+    assert sorted(selected) == list(range(CURRENT_NATIVE_ROW_COUNT)), "candidate partition incomplete or duplicated"
+    assert sorted(groups) == list(range(CURRENT_NATIVE_GROUP_COUNT)), "reference partition incomplete or duplicated"
+    return first
+
+
+def validate_current_shards(directories, output, expected):
+    reports = [validate_current_native(directory, expected) for directory in directories]
+    first = partition_current_native(reports)
+    assert sum(item["nonexecuted_rows"] for item in reports) == 3120
+    report = {key: first[key] for key in ("profile", "schema", "candidate", "reference",
+                                          "closure_sha256", "rows_sha256", "gap_ledger_sha256",
+                                          "applicability_ledger_sha256")}
+    report.update({"candidate_rows": CURRENT_NATIVE_ROW_COUNT, "reference_groups": CURRENT_NATIVE_GROUP_COUNT,
+                   "shards": FULL_SHARD_COUNT, "candidate_modes": list(CURRENT_NATIVE_ALLOCATORS),
+                   "nonexecuted_rows": sum(item["nonexecuted_rows"] for item in reports),
+                   "observations_sha256": [item["records_sha256"] for item in reports],
+                   "evidence_checks_passed": True, "acceptance_authorized": False,
+                   "retirement_accepted": False, "provenance_trust": "caller-bound-hosted-receipt",
+                   "validator_sha256": sha256(Path(__file__)),
+                   "acceptance_blocker": "separately-reviewed-current-native-policy-and-trusted-writer-required",
+                   "reserved_policy_path": CURRENT_NATIVE_POLICY_PATH})
+    Path(output).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1671,6 +2139,13 @@ def main():
     shards_parser.add_argument("--require-clean-candidate", action="store_true")
     shards_parser.add_argument("--require-clean-acceptance", action="store_true")
     shards_parser.add_argument("--reference-supplements", action="store_true")
+    current_parser = subparsers.add_parser("validate-current-shards")
+    current_parser.add_argument("directories", nargs="+", type=Path)
+    current_parser.add_argument("--out", required=True, type=Path)
+    current_parser.add_argument("--candidate-revision", required=True)
+    current_parser.add_argument("--candidate-tree", required=True)
+    current_parser.add_argument("--candidate-build-receipt-sha256", required=True)
+    current_parser.add_argument("--reference-build-receipt-sha256", required=True)
     compare_parser = subparsers.add_parser("compare")
     compare_parser.add_argument("reference", type=Path)
     compare_parser.add_argument("candidate", type=Path)
@@ -1693,6 +2168,11 @@ def main():
                                          arguments.require_clean_candidate,
                                          arguments.require_clean_acceptance,
                                          arguments.reference_supplements), sort_keys=True))
+    elif arguments.command == "validate-current-shards":
+        expected = {field: getattr(arguments, field) for field in
+                    ("candidate_revision", "candidate_tree", "candidate_build_receipt_sha256",
+                     "reference_build_receipt_sha256")}
+        print(json.dumps(validate_current_shards(arguments.directories, arguments.out, expected), sort_keys=True))
     else:
         print(json.dumps(reconcile(validate(arguments.reference), validate(arguments.candidate),
                                    arguments.out, arguments.require_clean_candidate,

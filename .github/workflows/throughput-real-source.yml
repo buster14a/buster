@@ -36,10 +36,21 @@ jobs:
       BUSTER_TEST_JOBS: '1'
       BUSTER_MATRIX_THREADS: '1'
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Retain exact source for review and reproduction
         shell: bash
         env:
@@ -51,6 +62,11 @@ jobs:
           git rev-parse 'HEAD^{tree}' > evidence/tree.txt
           git archive --format=tar HEAD > evidence/source.tar
           sha256sum evidence/source.tar > evidence/source.tar.sha256
+      - name: Retain machine records in existing evidence
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: evidence
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: real-source-qualification-source-${{ github.event.pull_request.head.sha || github.sha }}
@@ -65,6 +81,12 @@ jobs:
           ref: c859b25da02955fef659d658b8f324b5cde87be3
           path: external/cjson
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: external/cjson
+          source-repository: DaveGamble/cJSON
       - name: Prepare pristine Lua Git input outside timing
         id: lua_git
         if: ${{ !cancelled() }}
@@ -74,6 +96,13 @@ jobs:
           ref: 6e22fedb74cf0c9b6656e9fce8b7331db847c605
           path: external/lua-git
           persist-credentials: false
+      - name: Record actual checkout identity 3
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: external/lua-git
+          source-repository: lua/lua
       - name: Prepare authenticated Lua release outside timing
         id: lua_release
         if: ${{ !cancelled() }}
@@ -425,6 +454,12 @@ jobs:
           assert any(item["source"] == "sqlite3.c" and item["role"] == "object"
                      for item in receipts[2]["artifacts"])
           PY
+      - name: Retain machine records in existing evidence 2
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: evidence
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

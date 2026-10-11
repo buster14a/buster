@@ -571,6 +571,11 @@ BUSTER_F_DECL u64 process_control_atomic_load(ProcessControlAtomic* address);
 BUSTER_F_DECL void process_control_atomic_store(ProcessControlAtomic* address, u64 value);
 BUSTER_F_DECL bool process_control_atomic_set_if_zero(ProcessControlAtomic* address, u64 value);
 
+// A sequentially consistent load. Reading an AtomicU64 with a plain expression
+// is only atomic where the type is _Atomic; MSVC and single-threaded builds use
+// a plain u64, so cross-thread readers go through this instead.
+BUSTER_F_DECL u64 atomic_u64_load(AtomicU64* address);
+
 // All three return the value the address held before the addition. In
 // single-threaded builds they compile to plain arithmetic.
 BUSTER_F_DECL u64 atomic_u64_increment(AtomicU64* address);
@@ -602,9 +607,7 @@ struct ProgramState
 {
     ProgramInput input;
     Arena* arena;
-    u64 is_debugger_present_called : 1;
-    u64 _is_debugger_present : 1;
-    u64 reserved : 62;
+    u64 reserved;
 };
 
 typedef struct LaneContext LaneContext;

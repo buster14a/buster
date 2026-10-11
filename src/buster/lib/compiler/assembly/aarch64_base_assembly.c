@@ -137,6 +137,7 @@ typedef enum A64BaseFamily
     A64_BASE_FAMILY_EXTEND,
     A64_BASE_FAMILY_BITFIELD_EXTRACT,
     A64_BASE_FAMILY_BITFIELD_INSERT,
+    A64_BASE_FAMILY_BITFIELD_CLEAR,
     A64_BASE_FAMILY_EXTRACT,
     A64_BASE_FAMILY_CARRY,
     A64_BASE_FAMILY_NEGATE_CARRY,
@@ -278,6 +279,7 @@ BUSTER_GLOBAL_LOCAL const A64BaseMnemonic a64_base_mnemonics[] = {
     A64_BASE_ENTRY("ubfx", A64_BASE_FAMILY_BITFIELD_EXTRACT, 2, 0),
     A64_BASE_ENTRY("sbfiz", A64_BASE_FAMILY_BITFIELD_INSERT, 0, 0),
     A64_BASE_ENTRY("bfi", A64_BASE_FAMILY_BITFIELD_INSERT, 1, 0),
+    A64_BASE_ENTRY("bfc", A64_BASE_FAMILY_BITFIELD_CLEAR, 0, 0),
     A64_BASE_ENTRY("ubfiz", A64_BASE_FAMILY_BITFIELD_INSERT, 2, 0),
     A64_BASE_ENTRY("extr", A64_BASE_FAMILY_EXTRACT, 0, 0),
     A64_BASE_ENTRY("adc", A64_BASE_FAMILY_CARRY, 0, 0),
@@ -1608,7 +1610,7 @@ BUSTER_GLOBAL_LOCAL u32 a64_base_bitfield_word(u32 opc, u8 bits, u32 immr, u32 i
     return a64_base_sf(bits) | (opc << 29) | UINT32_C(0x13000000) | (sf << 22) | (immr << 16) | (imms << 10) | a64_base_rn(n) | a64_base_rd(d);
 }
 
-// SBFM/BFM/UBFM and the LSL/LSR/ASR/ROR, extend, extract and insert aliases.
+// SBFM/BFM/UBFM and the LSL/LSR/ASR/ROR, extend, extract, insert and BFC aliases.
 BUSTER_GLOBAL_LOCAL bool a64_base_encode_bitfield(u8 family, u32 variant, u32 bits_field, A64BaseOperand const* operands, u32 count, u32* word)
 {
     A64BaseOperand const* d = operands;
@@ -1651,6 +1653,15 @@ BUSTER_GLOBAL_LOCAL bool a64_base_encode_bitfield(u8 family, u32 variant, u32 bi
         // Signed extends write W or X (SXTW only X); unsigned extends write W.
         valid = count == 2 && a64_base_gpr_zr(n, 32) && (variant == 0 ? (bits_field != 31 || bits == 64) : bits == 32);
         encoded = a64_base_bitfield_word(variant, bits, 0, bits_field, n, d);
+    }
+    else if (valid && family == A64_BASE_FAMILY_BITFIELD_CLEAR)
+    {
+        valid = count == 3 && a64_base_unsigned(operands + 1, bits - 1u, &first) &&
+                a64_base_unsigned(operands + 2, bits, &second) && second >= 1 && first + second <= bits;
+        A64BaseOperand zero = {.kind = A64_BASE_OPERAND_GPR};
+        zero.reg.bits = bits;
+        zero.reg.number = 31;
+        encoded = a64_base_bitfield_word(1, bits, (u32)((bits - first) % bits), (u32)(second - 1u), &zero, d);
     }
     else if (valid && (family == A64_BASE_FAMILY_BITFIELD_EXTRACT || family == A64_BASE_FAMILY_BITFIELD_INSERT))
     {
@@ -2487,6 +2498,7 @@ BUSTER_GLOBAL_LOCAL bool a64_base_encode(A64BaseMnemonic entry, A64BaseOperand c
     case A64_BASE_FAMILY_EXTEND:
     case A64_BASE_FAMILY_BITFIELD_EXTRACT:
     case A64_BASE_FAMILY_BITFIELD_INSERT:
+    case A64_BASE_FAMILY_BITFIELD_CLEAR:
         valid = a64_base_encode_bitfield(entry.family, entry.variant, entry.bits, operands, count, word);
         break;
     case A64_BASE_FAMILY_EXTRACT:

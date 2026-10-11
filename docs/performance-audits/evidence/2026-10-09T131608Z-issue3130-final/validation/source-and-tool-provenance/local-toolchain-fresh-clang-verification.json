@@ -1,0 +1,41 @@
+{
+  "captured_at_utc": "2026-10-09T13:01:43.589596+00:00",
+  "fresh_clang": {
+    "binary_bytes": 137408,
+    "binary_path": "/workspace/scratch/550ea6746c17/local-clang21-recovery2/fresh-prefix-20261009T1300/usr/lib/llvm-21/bin/clang",
+    "binary_sha256": "2451bd5e44d0fe575e3088eb29725b4b0820e5c335a3fdb889ae036f55b57f56",
+    "matches_previous_verified_binary_hash": true,
+    "version_exit_code": 0,
+    "version_stdout": "Ubuntu clang version 21.1.8 (++20251221032922+2078da43e25a-1~exp1~20251221153059.70)\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /workspace/scratch/550ea6746c17/local-clang21-recovery2/fresh-prefix-20261009T1300/usr/lib/llvm-21/bin\n"
+  },
+  "other_tools": {
+    "tcc_sha256": "0219889f984c32a730e68deaeb30f2ba771904ff9315c84e60cfae90f5404f18",
+    "tcc_version": "tcc version 0.9.28rc 2026-09-04 HEAD@0fb5430 (x86_64 Linux)",
+    "time_sha256": "3b11dec50514a8473e9f6efa7a34d584d0657538c09988f61b72d38ad4991a10"
+  },
+  "package_index_signature": {
+    "primary_fingerprint": "6084F3CF814B57C1CF12EFD515CF4D18AF4F7421",
+    "report_path": "metadata/local-toolchain-recovery2-verification.json",
+    "six_downloaded_deb_hashes_match_signed_index": true
+  },
+  "physical_benchmark_run": false,
+  "provenance_file": {
+    "path": "metadata/fresh-clang21-shared-library-recovery2-provenance.json",
+    "sha256": "5fde420deac90d3a2950358089b6d0f2348eee2076ade33bcd4d7393d694f876"
+  },
+  "scope": "Local compiler/package provenance only; no project tests or source-size checks. No binary or .deb copied into the stage.",
+  "shared_library": {
+    "fresh_bytes": 138493144,
+    "fresh_path": "/workspace/scratch/550ea6746c17/local-clang21-recovery2/fresh-prefix-20261009T1300/usr/lib/x86_64-linux-gnu/libLLVM.so.21.1",
+    "fresh_sha256": "fd419f2d3eddfbdece987a7757da8f66794ab933dde48fa685c2ad1c9478225e",
+    "interpretation": "Clang startup succeeds in the fresh prefix with the exact package member. The earlier exit 135 is explained by an externally truncated local shared library; it is not evidence of a project defect.",
+    "matches_exact_signed_deb_member": true,
+    "prior_bytes": 128638976,
+    "prior_matches_recorded_truncation": true,
+    "prior_path": "/workspace/scratch/550ea6746c17/local-clang21-recovery2/prefix/usr/lib/x86_64-linux-gnu/libLLVM.so.21.1",
+    "prior_sha256": "e0d7893c4ee93fb0e205f1e55b6d494b35746a7a2a3fc555bb7ac3c253dbb3ae",
+    "prior_startup_exit": 135
+  },
+  "source_size_run": false,
+  "tests_run": false
+}

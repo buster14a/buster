@@ -358,6 +358,34 @@ static A64GeneratedBlobReaderCase const a64_generated_blob_reader_cases[] = {
 // without walking megabytes of pinned metadata in a sanitized Debug run.
 #define A64_GENERATED_BLOB_SWEEP_LIMIT 1024u
 
+#if !BUSTER_SINGLE_THREADED
+typedef struct A64PackedCounterThread A64PackedCounterThread;
+struct A64PackedCounterThread
+{
+    u32 form_id;
+    u32 field_count;
+    u32 count_before_reset;
+    u32 count_after_encode;
+    bool encoded;
+    u8 reserved[7];
+};
+
+// Runs on a thread of its own: it observes whatever count it inherited, resets
+// the counter, and encodes one form. The counter is thread-local, so it starts
+// at zero here no matter what the creating thread has accumulated, and neither
+// the reset nor the accessors it reaches may leak back into the creator.
+BUSTER_GLOBAL_LOCAL ThreadReturnType a64_packed_counter_thread(void* argument)
+{
+    A64PackedCounterThread* state = (A64PackedCounterThread*)argument;
+    u32 values[8] = {0};
+    u32 word = 0;
+    state->count_before_reset = buster_aarch64_metadata_test_packed_access_count();
+    buster_aarch64_metadata_test_reset_packed_access_counter();
+    state->encoded = buster_aarch64_metadata_raw_encode(state->form_id, values, state->field_count, &word);
+    state->count_after_encode = buster_aarch64_metadata_test_packed_access_count();
+}
+#endif
+
 UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1616,6 +1644,35 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, buster_aarch64_metadata_raw_encode(production_forms[0].form_id, packed_control_values,
                                                                packed_control_form.field_count, &packed_control_word));
     BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() > 0);
+
+#if !BUSTER_SINGLE_THREADED
+    // The counter is per thread. A worker that accumulates accesses and resets
+    // its own count must leave this thread's count untouched in both
+    // directions, so a zero-count assertion here cannot be disturbed by
+    // packed accesses on any other thread.
+    {
+        u32 control_count = buster_aarch64_metadata_test_packed_access_count();
+        A64PackedCounterThread worker = {.form_id = production_forms[0].form_id, .field_count = packed_control_form.field_count};
+        OsThreadHandle* thread = os_thread_create((ThreadCreateOptions){.callback = &a64_packed_counter_thread, .argument = &worker});
+        BUSTER_TEST(arguments, thread != 0);
+        if (thread)
+        {
+            BUSTER_TEST(arguments, os_thread_join(thread));
+            BUSTER_TEST(arguments, worker.count_before_reset == 0);
+            BUSTER_TEST(arguments, worker.encoded && worker.count_after_encode > 0);
+            BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() == control_count);
+
+            buster_aarch64_metadata_test_reset_packed_access_counter();
+            thread = os_thread_create((ThreadCreateOptions){.callback = &a64_packed_counter_thread, .argument = &worker});
+            BUSTER_TEST(arguments, thread != 0);
+            if (thread)
+            {
+                BUSTER_TEST(arguments, os_thread_join(thread));
+                BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() == 0);
+            }
+        }
+    }
+#endif
 
     // The fast production path must remain independent of the packed/base64
     // metadata accessors. Build inputs directly from the generated plan and

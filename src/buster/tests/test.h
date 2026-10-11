@@ -107,6 +107,8 @@ struct TestProcessObservation
     String8 resolved_executable;
     String8 expectation;
     SliceString8 argv;
+    SliceString8 environment_keys;
+    SliceString8 environment_values;
     u64 deadline_us;
     u64 elapsed_us;
     u64 capture_mask;
@@ -122,6 +124,37 @@ struct TestProcessObservation
     bool observe_resources;
     u8 reserved[1];
 };
+
+typedef struct TestProcessEnvironment TestProcessEnvironment;
+struct TestProcessEnvironment
+{
+    SliceString8 keys;
+    SliceString8 values;
+};
+
+typedef struct TestOracleProbeContract TestOracleProbeContract;
+struct TestOracleProbeContract
+{
+    SliceString8 argv;
+    TestProcessEnvironment environment;
+    String8 unsupported_stderr;
+    u64 capture_mask;
+    u32 unsupported_exit_code;
+    bool use_process_environment;
+    bool new_process_group;
+    bool search_path;
+    u8 reserved[5];
+};
+
+typedef enum TestOracleProbeDisposition
+{
+    TEST_ORACLE_PROBE_FAILURE,
+    TEST_ORACLE_PROBE_CAPABLE,
+    // A complete, specifically recognized unavailable probe. This is not a
+    // passing assertion; required CI maps it to INCOMPLETE and fails.
+    TEST_ORACLE_PROBE_NOT_RUN,
+    TEST_ORACLE_PROBE_INCOMPLETE,
+} TestOracleProbeDisposition;
 #endif
 
 typedef struct UnitTestResult UnitTestResult;
@@ -189,6 +222,10 @@ BUSTER_F_DECL bool buster_test_require_arguments(UnitTestArguments* arguments, U
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL bool buster_test_process_observation_matches(const TestProcessObservation* observation, ProcessResult expected);
 BUSTER_F_DECL bool buster_test_process_observation_expected_refusal(const TestProcessObservation* observation, String8 expected_diagnostic);
+BUSTER_F_DECL TestProcessEnvironment buster_test_process_environment_with_override(Arena* arena, String8 name, String8 value);
+BUSTER_F_DECL TestOracleProbeDisposition buster_test_oracle_probe_disposition(
+    const TestProcessObservation* observation, bool profile_authenticated, bool healthy_control, bool success_artifact_valid,
+    bool output_artifact_absent, const TestOracleProbeContract* contract, bool required);
 BUSTER_F_DECL void buster_test_process_failure_show(UnitTestArguments* arguments, const TestProcessObservation* observation);
 #endif
 BUSTER_F_DECL String8 buster_test_temporary_path(Arena* arena, String8 name, String8 suffix);
