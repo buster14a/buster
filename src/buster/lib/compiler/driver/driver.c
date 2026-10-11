@@ -2053,6 +2053,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             {
                 compiler_driver_argument_error(arena, &invocation, S8("expected OLD=NEW in {S8}"), argument);
             }
+            else if (!invocation.macro_prefix_maps || invocation.macro_prefix_map_count >= macro_prefix_map_capacity)
+            {
+                invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+                invocation.diagnostic = S8("macro prefix map storage is inconsistent");
+            }
             else
             {
                 invocation.macro_prefix_maps[invocation.macro_prefix_map_count++] = (CMacroPrefixMap){
