@@ -105,6 +105,17 @@ retained for the later current-main integration. This acknowledgment adds no
 9700X benchmark request or performance claim;
 `benchmarks/9700x/compiler-compare.request` remains unchanged from main.
 
+PR #3461 adds opt-in Linux userspace orchestration, upstream compiler adapters,
+action/header provenance inventories and a branch/manual diagnostic workflow.
+The native hosted `source_size --write-baseline` command generated the committed
+baseline for snapshot `cc83cc82c80367084f1d4face6b1ab62604710b9` in run
+`38132268529` (artifact `11699737833`, ZIP SHA-256
+`fc4689a3d112967dada282fc669790083dbc67b8057adc6bcb6c7dedd821017d`).
+Build code grew 49,647 bytes against `da0e8ec5cc3af96139810f5fab4e2cd0933af34a`
+at that snapshot. Later configuration fixes and asset relocation belong to the
+same acknowledged change; exact-head source-size reporting remains required.
+No production compiler source, frozen corpus or retirement binding is changed.
+
 Categories are independent. Deleting tests, fixtures, generated tables or
 documentation never earns room for production or build code, and only the
 ratcheted totals are limited, so moving code between files or splitting a file
