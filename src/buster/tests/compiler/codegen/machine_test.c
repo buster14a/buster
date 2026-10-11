@@ -11560,6 +11560,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, exact_map.expansion_rows == MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT);
     BUSTER_TEST(arguments, exact_map.expansion_nonexact_rows == exact_map.expansion_rows);
     BUSTER_TEST(arguments, exact_map.dense_encoding_tables == 64);
+    BUSTER_TEST(arguments, exact_map.dense_encoding_ready_tables == 64);
+    BUSTER_TEST(arguments, exact_map.dense_encoding_failed_tables == 0);
     BUSTER_TEST(arguments, exact_map.immediate_patch_tables == 9);
     BUSTER_TEST(arguments, exact_map.memory_base_tables == 8);
     BUSTER_TEST(arguments, exact_map.displacement_patch_tables == 8);
