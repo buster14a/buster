@@ -12777,7 +12777,8 @@ BUSTER_C_SHARED CTypeId c_parse_intern_qualified_type(CParseResult* result, CTyp
             if (room)
             {
                 u32* rows = arena_allocate(result->arena, u32, capacity);
-                if (entry)
+                // A log not allocated yet has no live entries to keep.
+                if (entry && interning->qualified_rows)
                 {
                     memcpy(rows, interning->qualified_rows, sizeof(*rows) * entry);
                 }
@@ -12839,6 +12840,8 @@ CTestQualifiedShare c_test_qualified_share(CParseResult* result, CTypeId base)
         CTypeInterning* interning = owned ? owned : &lent;
         bool enabled = interning->enabled;
         u32 suspended = interning->suspended;
+        // A lent header starts with an empty log.
+        result->interned_qualified_count = owned ? result->interned_qualified_count : 0;
         result->aggregate_lookup->type_interning = interning;
         interning->enabled = true;
         interning->suspended = 0;
