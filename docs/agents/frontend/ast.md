@@ -753,6 +753,52 @@ preprocessor reports. `__float128` is now a builtin type word.
 `_Float128`, `_Float64x` and `_Float128x` stay identifiers that a header may
 typedef.
 
+## Lowering from the tree
+
+Under `-fc-ast-pilot` the driver also hands the tree to lowering, in
+`CIRLowerOptions.syntax_tree`. Without it, lowering is unchanged. The tree
+outlives lowering: the driver releases it at the end of the unit, after the
+backend. Lowering reads nodes only while `c_lower_to_ir_with_options` runs,
+and no IR record, type or source range refers to a node.
+
+**First slice: root conditionals.** `c_ir_root_conditional` decides whether a
+token range, after its outer parentheses are stripped, is a `?:` at the root.
+If it is, it reports the `?` and the `:`. The expression, condition and
+logical-value steps and the query machine ask this about 800 k times on the
+self-host. Each time, the token scan walks the range.
+
+With the tree, `c_ir_tree_conditionals_build` runs once, before the first
+function is lowered. It indexes every top-level function body's `CONDITIONAL`
+and `CONDITIONAL_OMITTED` nodes, and for each one it records three tokens:
+- **`?`**: the node's anchor.
+- **Start**: the condition's first token. This is the smallest anchor on its
+  leftmost path (the `&&` before a `LABEL_ADDRESS`). It is then widened over
+  each `(` whose `)` closes before the `?`, because the tree has no node for
+  parentheses.
+- **`:`**: the token before the else operand's first token, after stepping
+  back over that operand's opening parentheses. A `CONDITIONAL_OMITTED`'s `:`
+  is the token after its `?`.
+
+A record whose `:` cannot be found this way is left out, but its `?` is still
+indexed. Each body keeps its `?` tokens and its records in ascending order.
+
+A query inside a body is answered in one of three ways:
+- **False**, when no `?` lies in the range. Every `?` in a body is the anchor
+  of one of its conditional nodes, so the scan would find none.
+- **True**, when a record starts at the range's start and its `:` is before
+  the range's last token, unless an empty middle operand is refused outside
+  GNU dialects as the scan refuses it. From that start, the record's `?` is
+  the first root `?`, since a condition holds no unparenthesized `?` or
+  assignment. Its `:` is the one the scan pairs with that `?`. So the scan
+  returns the same four tokens.
+- **The token scan** for everything else: a range with a root comma or
+  assignment before the `?`, a nested function's body, and file-scope
+  initializers.
+
+Debug and sanitized builds check every answer against the scan.
+`CAstLowerStatistics` counts the answers, and `-v` prints them as a
+`C_AST_LOWER` row.
+
 ## Consumer and retirement map
 
 These token walkers currently rediscover structure that the tree records once.
@@ -1296,5 +1342,35 @@ the same way and diagnostic only:
 - The memo answers 58% of the pass's member lookups.
 - The default path is within +0.006%.
 - Zen 5 validation stays incomplete (#2761).
+
+For the first lowering slice, [root conditionals from the
+tree](#lowering-from-the-tree), these budgets were declared before its
+measured runs. Lowering runs only when an object is produced, so the input is
+the base revision's unity self-host source compiled with `-g0 -c`. Four
+Callgrind arms are counted on tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `a6705764`, which the candidate branches from. The budgets:
+- **Correctness.**
+  - In Debug and sanitized builds, every root-conditional answer the tree
+    gives, true or false, is checked against the token scan
+    (`BUSTER_REFERENCE_CHECKS`). The pilot's `-c` tests run under that check.
+  - Diagnostics are identical with and without the flag.
+  - `-c` objects (`-g0` and `-g`) are byte-identical across the four arms.
+- **Coverage.** On the self-host, the tree answers at least 80% of the
+  root-conditional queries made inside top-level function bodies. Answers
+  count both the true and the false ones. The rest go to the scan.
+- **The slice's own effect (C against B).**
+  - `c_ir_root_conditional`'s inclusive instructions, with the tree's answers
+    included, fall by at least 50%.
+  - The whole compile costs fewer instructions, with the index build charged.
+- **Default path (D against A).** No index exists without the tree, so the
+  difference stays within ±0.05% Ir on `-c` (`-g0`) and on `-fsyntax-only`.
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete (#2761), and
+  the hook stays opt-in.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
