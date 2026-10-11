@@ -30,12 +30,6 @@ typedef enum A64CChildKind
     A64C_CHILD_NORMAL_NONZERO,
 } A64CChildKind;
 
-typedef enum A64CRefusalKind
-{
-    A64C_REFUSAL_UNKNOWN,
-    A64C_REFUSAL_DOCUMENTED,
-} A64CRefusalKind;
-
 typedef struct A64CChild A64CChild;
 struct A64CChild
 {
@@ -89,7 +83,6 @@ struct A64CSettings
     u32 symbolic_exclusion_count;
     u32 unique_line_count;
     u32 compared_line_count;
-    u32 documented_refusal_count;
     u32 unknown_refusal_count;
     u32 difference_count;
     bool io_failed;
@@ -355,18 +348,6 @@ BUSTER_GLOBAL_LOCAL String8 a64c_diagnostic_excerpt(Arena* arena, A64CChild chil
     String8 result = child.error.length ? child.error : child.output;
     if (result.length > 320) { result = string_slice(result, 0, 320); }
     result = a64c_normalize(arena, result);
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL A64CRefusalKind a64c_refusal_kind(Arena* arena, String8 instruction, A64CChild child)
-{
-    // This is the one exact refusal recorded by #2688 and still named as an
-    // unsupported operand example by docs/agents/driver.md at the frozen base.
-    // Keep it exact: a mnemonic-wide FMLA exemption would hide supported SIMD.
-    String8 normalized = a64c_normalize(arena, instruction);
-    bool exact_documented_shape = string_equal(normalized, S8("fmla v0.4s, v1.4s, v2.s[0]"));
-    A64CRefusalKind result = child.kind == A64C_CHILD_NORMAL_NONZERO && a64c_child_error_text(child) && exact_documented_shape ?
-        A64C_REFUSAL_DOCUMENTED : A64C_REFUSAL_UNKNOWN;
     return result;
 }
 
@@ -709,7 +690,7 @@ BUSTER_GLOBAL_LOCAL bool a64c_objdump_words(String8 output, u32 expected, u32* w
 
 BUSTER_GLOBAL_LOCAL bool a64c_row_partition_complete(A64CSettings* settings)
 {
-    u64 accounted = (u64)settings->compared_line_count + settings->documented_refusal_count + settings->unknown_refusal_count;
+    u64 accounted = (u64)settings->compared_line_count + settings->unknown_refusal_count;
     bool result = settings->unique_line_count != 0 && accounted == settings->unique_line_count;
     return result;
 }
@@ -810,8 +791,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult a64c_self_test(Arena* arena, String8 self_exec
     A64CSettings settings = {.arena = arena, .self_executable = self_executable,
         .timeout_seconds = 10};
     A64CChild refusal = a64c_stub_child(&settings, S8("ide"), S8("refusal"));
-    A64CRefusalKind positive = a64c_refusal_kind(arena, S8("fmla v0.4s, v1.4s, v2.s[0]"), refusal);
-    A64CRefusalKind negative = a64c_refusal_kind(arena, S8("add x0, x0, #1"), refusal);
     A64CChild observer = a64c_stub_child(&settings, S8("llvm-mc"), S8("failure"));
     A64CChild dump_error = a64c_stub_child(&settings, S8("llvm-objdump"), S8("failure"));
     A64CChild empty = a64c_stub_child(&settings, S8("llvm-objdump"), S8("empty"));
@@ -821,13 +800,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult a64c_self_test(Arena* arena, String8 self_exec
     A64CChild missing = a64c_stub_child(&settings, S8("llvm-objdump"), S8("missing"));
     A64CChild extra_byte = a64c_stub_child(&settings, S8("llvm-objdump"), S8("extra-byte"));
     A64CSettings complete_counts = {.fixture_count = 1, .compile_attempt_count = 3, .compiled_fixture_count = 1,
-        .compiled_listing_count = 3, .unique_line_count = 2, .compared_line_count = 1, .documented_refusal_count = 1};
+        .compiled_listing_count = 3, .unique_line_count = 2, .compared_line_count = 2};
     A64CSettings unknown_counts = complete_counts;
-    unknown_counts.documented_refusal_count = 0;
+    unknown_counts.compared_line_count = 1;
     unknown_counts.unknown_refusal_count = 1;
     A64CSettings difference_counts = complete_counts;
-    difference_counts.documented_refusal_count = 0;
-    difference_counts.compared_line_count = 2;
     difference_counts.difference_count = 1;
     A64CSettings incomplete_counts = complete_counts;
     incomplete_counts.unique_line_count = 3;
@@ -837,8 +814,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult a64c_self_test(Arena* arena, String8 self_exec
     bool word_valid = word.kind == A64C_CHILD_SUCCESS && a64c_objdump_words(word.output, 1, hex_word);
     bool controls[] = {
         refusal.kind == A64C_CHILD_NORMAL_NONZERO && a64c_contains(refusal.error, S8("error: unsupported AArch64 instruction")),
-        positive == A64C_REFUSAL_DOCUMENTED,
-        negative == A64C_REFUSAL_UNKNOWN,
         observer.kind == A64C_CHILD_NORMAL_NONZERO && a64c_contains(observer.error, S8("stub observer failure")),
         dump_error.kind == A64C_CHILD_NORMAL_NONZERO && a64c_contains(dump_error.error, S8("stub observer failure")),
         empty.kind == A64C_CHILD_SUCCESS && empty.output.length == 0 && !a64c_objdump_words(empty.output, 1, byte_word),
@@ -1030,20 +1005,12 @@ BUSTER_GLOBAL_LOCAL bool a64c_single_candidate(A64CSettings* settings, String8 l
     }
     else if (assembled.kind == A64C_CHILD_NORMAL_NONZERO && a64c_child_error_text(assembled))
     {
-        A64CRefusalKind refusal = a64c_refusal_kind(settings->arena, line, assembled);
-        if (refusal == A64C_REFUSAL_DOCUMENTED)
-        {
-            settings->documented_refusal_count += 1;
-            a64c_emit(settings, string_format(settings->arena,
-                S8("CENSUS_DOCUMENTED_REFUSAL batch={u32} instruction={S8}\n"), batch, line));
-        }
-        else
-        {
-            settings->unknown_refusal_count += 1;
-            a64c_emit(settings, string_format(settings->arena,
-                S8("CENSUS_UNKNOWN_REFUSAL batch={u32} instruction={S8} llvm_word={u32} diagnostic={S8}\n"),
-                batch, line, reference_word, a64c_diagnostic_excerpt(settings->arena, assembled)));
-        }
+        // No refusal is exempt: #2932 made the one documented #2688 refusal
+        // (by-element FMLA) encodable, so every refusal is an unknown gap.
+        settings->unknown_refusal_count += 1;
+        a64c_emit(settings, string_format(settings->arena,
+            S8("CENSUS_UNKNOWN_REFUSAL batch={u32} instruction={S8} llvm_word={u32} diagnostic={S8}\n"),
+            batch, line, reference_word, a64c_diagnostic_excerpt(settings->arena, assembled)));
         result = !settings->io_failed;
     }
     else
@@ -1102,7 +1069,7 @@ BUSTER_GLOBAL_LOCAL bool a64c_compare_batch(A64CSettings* settings, String8* lin
         }
         else if (candidate.kind == A64C_CHILD_NORMAL_NONZERO && a64c_child_error_text(candidate))
         {
-            u64 refusal_outcomes_before = (u64)settings->documented_refusal_count + settings->unknown_refusal_count;
+            u64 refusal_outcomes_before = settings->unknown_refusal_count;
             result = a64c_emit(settings, string_format(settings->arena,
                 S8("CENSUS_BATCH_REFUSAL_ISOLATION batch={u32} lines={u32}\n"), batch, count));
             for (u32 index = 0; index < count && result; index += 1)
@@ -1110,7 +1077,7 @@ BUSTER_GLOBAL_LOCAL bool a64c_compare_batch(A64CSettings* settings, String8* lin
                 String8 single_name = string_format(settings->arena, S8("{S8}-single-{u32}"), batch_name, index);
                 result = a64c_single_candidate(settings, lines[start + index], single_name, reference_words[index], batch);
             }
-            u64 refusal_outcomes_after = (u64)settings->documented_refusal_count + settings->unknown_refusal_count;
+            u64 refusal_outcomes_after = settings->unknown_refusal_count;
             if (result && refusal_outcomes_after == refusal_outcomes_before)
             {
                 a64c_emit(settings, string_format(settings->arena,
@@ -1319,12 +1286,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult a64c_run(Arena* arena, SliceString8 arguments,
             u32 expected_compile_attempt_count = settings.fixture_count >= settings.skipped_include_count ?
                 (settings.fixture_count - settings.skipped_include_count) * A64C_OPTIMIZATION_COUNT : 0;
             String8 summary = string_format(arena,
-                S8("AARCH64_ASSEMBLY_CENSUS_SUMMARY output={S8} fixtures={u32} angle_include_exclusions={u32} compiled_fixtures={u32} compiled_listings={u32} compile_attempts={u32} expected_compile_attempts={u32} compile_failures={u32} source_coverage={S8} assembly_lines={u32} symbolic_or_nonconstant_exclusions={u32} unique_constant_lines={u32} compared_lines={u32} documented_refusals={u32} unknown_refusals={u32} differences={u32} row_partition_complete={u32} source_complete={u32} child_processes={u64} captured_bytes={u64} budget_exceeded={u32} result={S8}\n"),
+                S8("AARCH64_ASSEMBLY_CENSUS_SUMMARY output={S8} fixtures={u32} angle_include_exclusions={u32} compiled_fixtures={u32} compiled_listings={u32} compile_attempts={u32} expected_compile_attempts={u32} compile_failures={u32} source_coverage={S8} assembly_lines={u32} symbolic_or_nonconstant_exclusions={u32} unique_constant_lines={u32} compared_lines={u32} unknown_refusals={u32} differences={u32} row_partition_complete={u32} source_complete={u32} child_processes={u64} captured_bytes={u64} budget_exceeded={u32} result={S8}\n"),
                 settings.output_directory, settings.fixture_count, settings.skipped_include_count, settings.compiled_fixture_count,
                 settings.compiled_listing_count, settings.compile_attempt_count, expected_compile_attempt_count,
                 settings.compile_failure_count, source_coverage, settings.assembly_line_count,
                 settings.symbolic_exclusion_count, settings.unique_line_count, settings.compared_line_count,
-                settings.documented_refusal_count, settings.unknown_refusal_count, settings.difference_count,
+                settings.unknown_refusal_count, settings.difference_count,
                 (u32)row_partition_complete, (u32)source_complete, settings.child_count,
                 settings.captured_bytes, (u32)settings.child_budget_exceeded, outcome);
             a64c_emit(&settings, summary);

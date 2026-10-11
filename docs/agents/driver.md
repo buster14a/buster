@@ -839,8 +839,8 @@ Not in this vocabulary, and still refused unless another owner accepts them:
   handles label LDR);
 - CASP, LDAPR (RCPC), LDTR/STTR, CRC32 and pointer authentication;
 - AdvSIMD forms beyond the list above that the direct SIMD owner does not
-  cover, such as by-element arithmetic (`fmla v0.4s, v1.4s, v2.s[0]`) and
-  multi-register or replicating structure loads and stores.
+  cover. By-element FMLA such as `fmla v0.4s, v1.4s, v2.s[0]` is encoded and
+  asserted by `aarch64_base_assembly_tests` (#2932).
 
 `aarch64_base_assembly_tests` checks the encoder against llvm-mc-derived words
 for each family, plus refusal and feature-gating controls. The driver round
@@ -1807,14 +1807,13 @@ Use `--clang`, `--llvm-mc`, `--llvm-objdump`, `--out` and `--timeout-seconds`
 to pin tools and retain evidence. The output directory must be new. Process,
 capture, fixture, instruction and elapsed-time bounds fail closed. Unknown
 assembler refusals, observer failures, empty comparisons and encoding differences
-fail; every successful row partition accounts for comparisons and exact documented
-refusals. Producer exclusions are reported as `PASS_WITH_EXCLUSIONS`, which does
-not establish coverage for the excluded C fixtures. The sole refusal exception is
-the exact historical by-element FMLA spelling documented by #2688; broader
-mnemonic exemptions are not accepted.
+fail; every successful row partition accounts for each row as a comparison or an
+unknown refusal. Producer exclusions are reported as `PASS_WITH_EXCLUSIONS`, which
+does not establish coverage for the excluded C fixtures. No refusal is exempt:
+the by-element FMLA spelling once documented by #2688 is encoded since #2932.
 
 `./build.sh test_aarch64_assembly_census --self-test` runs deterministic native
-subprocess controls for refusal classification, observer failures, empty and
+subprocess controls for refusal detection, observer failures, empty and
 malformed disassembly, raw-word parsing and unequal encodings. The hosted workflow
 retains source/tool/binary identities, listings, constant rows, object files,
 disassembly and the report on success or failure.
