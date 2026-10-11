@@ -2129,6 +2129,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          tree.statements.initializer_hints, tree.statements.auto_skips, tree.statements.declarator_declines, tree.statements.fallbacks,
                          c_ast_statement_fallback_name(tree.statements.fallbacks ? tree.statements.reason : C_AST_STATEMENT_FALLBACK_NONE),
                          tree.statements.fallbacks ? tree.statements.fallback_token : UINT32_MAX);
+            // Counts: lowering's root-conditional queries inside indexed bodies, by how each ended.
+            string_print(S8("C_AST_LOWER bodies={u64} conditionals={u64} steps={u64} answers={u64} negatives={u64} fallbacks={u64}\n"),
+                         tree.lower.bodies, tree.lower.conditionals, tree.lower.steps, tree.lower.answers, tree.lower.negatives, tree.lower.fallbacks);
         }
         if (invocation.fast_passes)
         {

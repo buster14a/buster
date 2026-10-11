@@ -6012,7 +6012,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     .omit_debug_locals = !invocation.debug_info,
                                                                     .pin_debug_locals = invocation.debug_info &&
                                                                                         (!invocation.pinned_debug_locals_explicit ||
-                                                                                         invocation.enable_pinned_debug_locals)});
+                                                                                         invocation.enable_pinned_debug_locals),
+                                                                    .syntax_tree = pilot_tree_built ? &pilot_tree : 0,
+                                                                    .ast_lower_statistics = pilot_tree_built ? &result.c_ast.lower : 0});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     result.type_layout = lowered.type_layout;
@@ -7995,6 +7997,12 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.c_ast.statements.reason = unit.c_ast.statements.reason;
             result.c_ast.statements.fallback_token = unit.c_ast.statements.fallback_token;
         }
+        result.c_ast.lower.bodies += unit.c_ast.lower.bodies;
+        result.c_ast.lower.conditionals += unit.c_ast.lower.conditionals;
+        result.c_ast.lower.steps += unit.c_ast.lower.steps;
+        result.c_ast.lower.answers += unit.c_ast.lower.answers;
+        result.c_ast.lower.negatives += unit.c_ast.lower.negatives;
+        result.c_ast.lower.fallbacks += unit.c_ast.lower.fallbacks;
         result.local_promotion.candidate_locals += unit.local_promotion.candidate_locals;
         result.local_promotion.promoted_locals += unit.local_promotion.promoted_locals;
         result.local_promotion.removed_loads += unit.local_promotion.removed_loads;
