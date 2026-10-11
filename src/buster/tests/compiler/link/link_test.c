@@ -3868,6 +3868,113 @@ BUSTER_GLOBAL_LOCAL bool link_test_elf_section_in_program_header(ByteSlice image
     return result;
 }
 
+// Pin the published AArch64 dynamic layout contract (#1314).
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_dynamic_layout_facts(UnitTestArguments* arguments, ByteSlice image)
+{
+    UnitTestResult result = {0};
+    enum
+    {
+        AARCH64_ELF_RELOCATION_SIZE = 24,
+        AARCH64_ELF_PLT_ENTRY_SIZE = 16,
+    };
+    u16 machine = 0;
+    if (image.length >= 64)
+    {
+        memcpy(&machine, image.pointer + 18, sizeof(machine));
+    }
+    BUSTER_TEST(arguments, machine == 183);
+    u64 plt_header = 0;
+    u64 got_header = 0;
+    u64 relocation_header = 0;
+    u64 symbol_header = 0;
+    bool sections_found = link_test_elf_section_find(image, S8(".plt"), 0, &plt_header) &&
+                          link_test_elf_section_find(image, S8(".got.plt"), 0, &got_header) &&
+                          link_test_elf_section_find(image, S8(".rela.plt"), 0, &relocation_header) &&
+                          link_test_elf_section_find(image, S8(".dynsym"), 0, &symbol_header);
+    BUSTER_TEST(arguments, sections_found);
+    if (machine == 183 && sections_found)
+    {
+        u64 plt_offset = link_read_u64(image.pointer, plt_header + 24);
+        u64 plt_size = link_read_u64(image.pointer, plt_header + 32);
+        u64 got_address = link_read_u64(image.pointer, got_header + 16);
+        u64 got_size = link_read_u64(image.pointer, got_header + 32);
+        u64 relocation_offset = link_read_u64(image.pointer, relocation_header + 24);
+        u64 relocation_address = link_read_u64(image.pointer, relocation_header + 16);
+        u64 relocation_size = link_read_u64(image.pointer, relocation_header + 32);
+        u64 symbol_address = link_read_u64(image.pointer, symbol_header + 16);
+        bool section_bounds = plt_offset <= image.length && plt_size <= image.length - plt_offset &&
+                              relocation_offset <= image.length && relocation_size <= image.length - relocation_offset &&
+                              relocation_size % AARCH64_ELF_RELOCATION_SIZE == 0 && got_address <= UINT64_MAX - got_size;
+        BUSTER_TEST(arguments, section_bounds);
+        u64 code_load = link_test_elf_program_header(image, 1, 1);
+        u64 write_load = link_test_elf_program_header(image, 1, 2);
+        BUSTER_TEST(arguments, code_load && link_read_u32(image.pointer, code_load + 4) == 5 &&
+                                   link_test_elf_section_in_program_header(image, S8(".plt"), code_load));
+        BUSTER_TEST(arguments, write_load && link_read_u32(image.pointer, write_load + 4) == 6 &&
+                                   link_test_elf_section_in_program_header(image, S8(".got.plt"), write_load));
+        bool has_pltgot = link_test_elf_dynamic_entry(image, 3, 0);
+        bool has_bind_now = link_test_elf_dynamic_entry(image, 24, 0);
+        u64 jump_relocation_address = 0;
+        u64 plt_relocation_size = 0;
+        u64 dynamic_symbol_address = 0;
+        bool has_jump_relocation = link_test_elf_dynamic_entry(image, 23, &jump_relocation_address);
+        bool has_plt_relocation_size = link_test_elf_dynamic_entry(image, 2, &plt_relocation_size);
+        bool has_dynamic_symbol = link_test_elf_dynamic_entry(image, 6, &dynamic_symbol_address);
+        BUSTER_TEST(arguments, !has_pltgot && has_bind_now);
+        BUSTER_TEST(arguments, has_jump_relocation && jump_relocation_address == relocation_address);
+        BUSTER_TEST(arguments, has_dynamic_symbol && dynamic_symbol_address == symbol_address);
+        u64 rela_address = 0;
+        u64 rela_size = 0;
+        bool has_rela = link_test_elf_dynamic_entry(image, 7, &rela_address);
+        bool has_rela_size = link_test_elf_dynamic_entry(image, 8, &rela_size);
+        u64 jump_count = 0;
+        u64 copy_count = 0;
+        bool valid_types = true;
+        bool copy_entries_follow_jumps = true;
+        bool copy_seen = false;
+        bool jump_slots_valid = true;
+        if (section_bounds)
+        {
+            for (u64 entry = 0; entry < relocation_size; entry += AARCH64_ELF_RELOCATION_SIZE)
+            {
+                u64 relocation = relocation_offset + entry;
+                u64 offset = link_read_u64(image.pointer, relocation);
+                u64 info = link_read_u64(image.pointer, relocation + 8);
+                u32 type = (u32)info;
+                if (type == 1026)
+                {
+                    u64 thunk = plt_offset + (jump_count + 1) * AARCH64_ELF_PLT_ENTRY_SIZE;
+                    jump_slots_valid = jump_slots_valid && !copy_seen && offset >= got_address && offset < got_address + got_size &&
+                                       (info >> 32) == jump_count + 1 && thunk <= image.length && AARCH64_ELF_PLT_ENTRY_SIZE <= image.length - thunk &&
+                                       link_read_u32(image.pointer, thunk + 8) == UINT32_C(0xd61f0220) &&
+                                       link_read_u32(image.pointer, thunk + 12) == UINT32_C(0xd503201f);
+                    jump_count += 1;
+                }
+                else if (type == 1024)
+                {
+                    copy_seen = true;
+                    copy_count += 1;
+                }
+                else
+                {
+                    valid_types = false;
+                }
+                copy_entries_follow_jumps = copy_entries_follow_jumps && !(type == 1026 && copy_seen);
+            }
+        }
+        BUSTER_TEST(arguments, valid_types);
+        BUSTER_TEST(arguments, copy_entries_follow_jumps);
+        BUSTER_TEST(arguments, jump_slots_valid);
+        BUSTER_TEST(arguments, section_bounds && plt_size == (jump_count + 1) * AARCH64_ELF_PLT_ENTRY_SIZE);
+        BUSTER_TEST(arguments, has_plt_relocation_size && plt_relocation_size == jump_count * AARCH64_ELF_RELOCATION_SIZE);
+        BUSTER_TEST(arguments, !has_rela || (has_rela_size && rela_address == jump_relocation_address + plt_relocation_size &&
+                                             rela_size == copy_count * AARCH64_ELF_RELOCATION_SIZE));
+        BUSTER_TEST(arguments, has_plt_relocation_size &&
+                                   plt_relocation_size + (has_rela ? rela_size : 0) == relocation_size);
+    }
+    return result;
+}
+
 // The fixed-address dynamic executable's layout is hardened as GNU ld's default
 // is (#2720): R, R+X and RW loads with no writable-and-executable page,
 // read-only data and the dynamic tables outside the executable load,
@@ -3900,6 +4007,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_hardened_layout(UnitTestArgumen
         if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE && linked.executable.length >= 64))
         {
             ByteSlice image = linked.executable;
+            if (architectures[architecture] == CPU_ARCH_AARCH64)
+            {
+                link_test_aarch64_dynamic_layout_facts(arguments, image);
+            }
             u64 read_load = link_test_elf_program_header(image, 1, 0);
             u64 code_load = link_test_elf_program_header(image, 1, 1);
             u64 write_load = link_test_elf_program_header(image, 1, 2);
@@ -8457,6 +8568,10 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         bool valid = got_linked.error == LINK_ERROR_NONE && link_test_elf_section_find(got_linked.executable, S8(".text"), 0, &text_header) &&
                      link_test_elf_section_find(got_linked.executable, S8(".rodata"), 0, &data_header);
         BUSTER_TEST(arguments, valid);
+        if (valid && dynamic)
+        {
+            link_test_aarch64_dynamic_layout_facts(arguments, got_linked.executable);
+        }
         if (valid)
         {
             u64 text_address = link_read_u64(got_linked.executable.pointer, text_header + 16);
@@ -8589,6 +8704,10 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                     .entry_symbol = S8("main"),
                                                                                 });
     BUSTER_TEST(arguments, aarch64_libc_executable.error == LINK_ERROR_NONE);
+    if (aarch64_libc_executable.error == LINK_ERROR_NONE)
+    {
+        link_test_aarch64_dynamic_layout_facts(arguments, aarch64_libc_executable.executable);
+    }
     ObjectRelocationKind imported_aarch64_branch_kinds[] = {OBJECT_RELOCATION_AARCH64_CALL26, OBJECT_RELOCATION_AARCH64_JUMP26};
     u32 imported_aarch64_branch_words[] = {UINT32_C(0x94000000), UINT32_C(0x14000000)};
     for (u32 branch_index = 0; branch_index < BUSTER_ARRAY_LENGTH(imported_aarch64_branch_kinds); branch_index += 1)
@@ -8875,6 +8994,10 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                    .runtime_data_symbol_count = BUSTER_ARRAY_LENGTH(copy_alias_exports),
                                                                                });
     BUSTER_TEST(arguments, aarch64_copy_executable.error == LINK_ERROR_NONE);
+    if (aarch64_copy_executable.error == LINK_ERROR_NONE)
+    {
+        link_test_aarch64_dynamic_layout_facts(arguments, aarch64_copy_executable.executable);
+    }
     // Two slots -- environ with tzname -- and one jump slot per import, the
     // three data names plus the hosted stub's `exit` and `__cxa_atexit`.  No x86-64 type of
     // either kind survives.
@@ -8921,6 +9044,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, valid);
         if (valid)
         {
+            link_test_aarch64_dynamic_layout_facts(arguments, page_linked.executable);
             u64 text_offset = link_read_u64(page_linked.executable.pointer, text_header + 24);
             u64 text_address = link_read_u64(page_linked.executable.pointer, text_header + 16);
             A64MCInst page = {0};
@@ -9135,6 +9259,10 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                           BUSTER_ARRAY_LENGTH(aarch64_version_exports),
                                                                                   });
     BUSTER_TEST(arguments, aarch64_version_executable.error == LINK_ERROR_NONE);
+    if (aarch64_version_executable.error == LINK_ERROR_NONE)
+    {
+        link_test_aarch64_dynamic_layout_facts(arguments, aarch64_version_executable.executable);
+    }
     String8 aarch64_version_recorded = {0};
     BUSTER_TEST(arguments, link_test_elf_symbol_version(aarch64_version_executable.executable, S8("abs"), &aarch64_version_recorded, 0) &&
                                string_equal(aarch64_version_recorded, S8("GLIBC_2.2.5")));
@@ -9156,6 +9284,10 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                     .entry_symbol = S8("main"),
                                                                                 });
     BUSTER_TEST(arguments, aarch64_tls_executable.error == LINK_ERROR_NONE);
+    if (aarch64_tls_executable.error == LINK_ERROR_NONE)
+    {
+        link_test_aarch64_dynamic_layout_facts(arguments, aarch64_tls_executable.executable);
+    }
     u64 thread_local_data_header = 0;
     u64 thread_local_zero_header = 0;
     u64 tls_got_header = 0;
