@@ -1,12 +1,7 @@
 name: Git qualification
-# Initial explicitly requested branch-only cloud census. No PR/main/queue trigger.
+# Opt-in cloud correctness census; no PR/main/queue/push trigger.
 on:
   workflow_dispatch:
-  push:
-    branches: [codex/3180-git-local-qualification]
-    paths:
-      - '.github/workflows/git-qualification.yml'
-      - 'tools/git_qualification.c'
 permissions:
   contents: read
 concurrency:
@@ -32,7 +27,6 @@ jobs:
           gcc -std=c11 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/git_qualification.c -o "$RUNNER_TEMP/git-controls-gcc"
           "$RUNNER_TEMP/git-controls-gcc" --self-test
   local-operations:
-    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[git-census]') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 40
     env:

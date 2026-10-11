@@ -29,7 +29,9 @@ Those exclusions are frozen before either build, rather than changed in
 response to a compiler failure. Test scripts can still need host Perl.
 
 This is a first build/blocker census. It is not whole-project qualification.
-Latest exact revisions, runs, outcomes and blocker ownership belong on #3180.
+The [retained first census](../../compatibility-evidence/git-v2.51.0/README.md)
+records actual outcomes and explicit unrun gates. Latest revisions, runs and
+blocker ownership belong on #3180.
 
 ## Licenses and external input boundary
 
