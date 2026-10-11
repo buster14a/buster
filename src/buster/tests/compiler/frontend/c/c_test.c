@@ -42370,7 +42370,7 @@ BUSTER_GLOBAL_LOCAL String8 c_test_nested_tag_source(Arena* arena, u32 depth)
     u64 length = 0;
     for (u32 level = 0; level < depth; level += 1)
     {
-        c_test_append_source(bytes, capacity, &length, string_format(arena, S8("struct Tag{u32} {\n"), level));
+        c_test_append_source(bytes, capacity, &length, string_format(arena, S8("struct Tag{u32} {{\n"), level));
     }
     c_test_append_source(bytes, capacity, &length, S8("int value;\n"));
     for (u32 level = depth; level > 1; level -= 1)
