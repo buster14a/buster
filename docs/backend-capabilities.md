@@ -8,7 +8,7 @@ Reviewed revision `2b90c52fcd8aa9d9dc59b23e7c02fdbc852e1aef`.
 
 `supported` has positive evidence, `partial` has bounded evidence and a note, `unsupported-diagnostic` records an explicit rejection, and `not-applicable` marks a separate boundary. `unknown` is not a pass. Evidence levels: `validate` → Parse/validate; `encode` → Exact encode; `object-link` → Object/link; `oracle` → Independent oracle; `execute` → Executed semantics; `integration` → Self-host/real project.
 
-Evidence marked **requires X** is skipped (not passed) when X is absent. Requirements: `node`: Node.js with WebAssembly support; skipped when absent; `clang`: Clang LLVM consumer; skipped when absent; `gpu-toolchains`: GPU toolchain profile in .github/workflows/gpu-toolchains.yml.
+Evidence marked **requires X** is skipped (not passed) when X is absent. Requirements: `node`: Node.js with WebAssembly support; skipped when absent; `clang`: Clang LLVM consumer; skipped when absent; `gpu-toolchains`: GPU toolchain profile in .github/workflows/gpu-toolchains.yml; `gcc-and-clang`: Both GCC and Clang on PATH (Linux scalar ABI oracle); skipped when absent.
 
 A registered target or emitted bytes are not a support claim. Direct code generation and external GPU orchestration are separate rows.
 
@@ -22,7 +22,7 @@ A registered target or emitted bytes are not a support claim. Direct code genera
 | [Wasm64 Memory64 (wasm64-unknown-freestanding)](../WASM64.md) | supported (encode) | unsupported-diagnostic | unknown | supported (encode, oracle, execute) | unsupported-diagnostic | unsupported-diagnostic | unknown | unknown | unknown | supported (oracle, execute) |
 | [Wasm32 WASI Preview 1 (wasm32-wasip1)](../WASI.md) | supported (execute) | unsupported-diagnostic | unknown | unsupported-diagnostic | unsupported-diagnostic | unsupported-diagnostic | unknown | unknown | unknown | supported (execute) |
 | [eBPF (bpfel-unknown-linux)](../src/buster/lib/compiler/ebpf/ebpf.c) | supported (encode) | unsupported-diagnostic | unsupported-diagnostic | unsupported-diagnostic | unsupported-diagnostic | unsupported-diagnostic | unsupported-diagnostic | unknown | unknown | unknown |
-| [LLVM bitcode (-emit-llvm)](../LLVM_BITCODE.md) | supported (encode, oracle, execute) | partial (oracle) | supported (oracle) | unknown | unknown | unknown | unknown | unknown | not-applicable | supported (oracle) |
+| [LLVM bitcode (-emit-llvm)](../LLVM_BITCODE.md) | supported (encode, oracle, execute) | partial (oracle) | supported (encode) | unknown | unknown | unknown | unknown | unknown | not-applicable | supported (oracle) |
 | [Direct Vulkan 1.2 SPIR-V compute](spirv-compute.md) | unsupported-diagnostic | unsupported-diagnostic | unsupported-diagnostic | unsupported-diagnostic | unsupported-diagnostic | unknown | unknown | unknown | unknown | partial (encode) |
 | [External GPU toolchains (SPIR-V, PTX, AMDGCN, Metal, DXIL)](gpu-target-pipelines.md) | not-applicable | not-applicable | not-applicable | not-applicable | not-applicable | not-applicable | not-applicable | not-applicable | partial (oracle) | not-applicable |
 
@@ -84,7 +84,7 @@ A registered target or emitted bytes are not a support claim. Direct code genera
 | TLS | unknown | — | — | Not yet audited for this backend. |
 | Debug info | unknown | — | — | Not yet audited for this backend. |
 | Object/link | unknown | — | — | Emits a core module directly; no relocatable object/link contract is claimed. |
-| Execution/independent oracle | supported | oracle, execute | `compiler_driver_test_wasm_node_policy` in `src/buster/tests/compiler/driver/driver_test.c` (requires `node`) | — |
+| Execution/independent oracle | supported | oracle, execute | `compiler_driver_test_wasm64_function_tables` in `src/buster/tests/compiler/driver/driver_test.c` (requires `node`) | Node validates and executes the emitted table/typed-call module. compiler_driver_test_wasm_node_policy covers Node process-lifecycle policy only, not engine execution. |
 
 ## Wasm32 WASI Preview 1 (wasm32-wasip1)
 
@@ -120,9 +120,9 @@ A registered target or emitted bytes are not a support claim. Direct code genera
 
 | Feature | Status | Levels | Evidence | Note |
 |---|---|---|---|---|
-| Scalar calls | supported | encode, oracle, execute | `llvm_bitcode_test_scalar_abi_wire` in `src/buster/tests/compiler/llvm/bitcode_test.c`<br>`llvm_bitcode_test_scalar_abi_runtime` in `src/buster/tests/compiler/llvm/bitcode_test.c` (requires `clang`) | — |
+| Scalar calls | supported | encode, oracle, execute | `llvm_bitcode_test_scalar_abi_wire` in `src/buster/tests/compiler/llvm/bitcode_test.c`<br>`llvm_bitcode_test_scalar_abi_runtime` in `src/buster/tests/compiler/llvm/bitcode_test.c` (requires `gcc-and-clang`) | — |
 | Aggregate call ABI | partial | oracle | `llvm_bitcode_test_aggregate_va_arg` in `src/buster/tests/compiler/llvm/bitcode_test.c` (requires `clang`)<br>diagnostic `unsupported LLVM aggregate ABI part` (source only) | Only the documented aggregate ABI parts are lowered. |
-| Variadic calls | supported | oracle | `llvm_bitcode_test_canonical_variadics` in `src/buster/tests/compiler/llvm/bitcode_test.c` (requires `clang`) | — |
+| Variadic calls | supported | encode | `llvm_bitcode_test_canonical_variadics` in `src/buster/tests/compiler/llvm/bitcode_test.c` | Canonical va_list operations are built directly in IR and encoded; no independent consumer is mapped for this row. |
 | Indirect calls | unknown | — | — | Not yet audited for this backend. |
 | Atomics | unknown | — | — | Not yet audited for this backend. |
 | SIMD/vectors | unknown | — | — | Not yet audited for this backend. |

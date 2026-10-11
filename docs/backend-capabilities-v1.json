@@ -136,7 +136,8 @@
  "requirements": {
   "node": "Node.js with WebAssembly support; skipped when absent",
   "clang": "Clang LLVM consumer; skipped when absent",
-  "gpu-toolchains": "GPU toolchain profile in .github/workflows/gpu-toolchains.yml"
+  "gpu-toolchains": "GPU toolchain profile in .github/workflows/gpu-toolchains.yml",
+  "gcc-and-clang": "Both GCC and Clang on PATH (Linux scalar ABI oracle); skipped when absent"
  },
  "cells": [
   {
@@ -226,7 +227,8 @@
      "file": "src/buster/tests/compiler/driver/driver_test.c",
      "symbol": "compiler_driver_test_atomic_pair_contention",
      "provides": [
-      "object-link"
+      "object-link",
+      "execute"
      ]
     }
    ]
@@ -598,14 +600,15 @@
    "evidence": [
     {
      "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "symbol": "compiler_driver_test_wasm_node_policy",
+     "symbol": "compiler_driver_test_wasm64_function_tables",
      "provides": [
       "oracle",
       "execute"
      ],
      "requires": "node"
     }
-   ]
+   ],
+   "note": "Node validates and executes the emitted table/typed-call module. compiler_driver_test_wasm_node_policy covers Node process-lifecycle policy only, not engine execution."
   },
   {
    "backend": "wasm32-wasip1",
@@ -833,7 +836,7 @@
       "oracle",
       "execute"
      ],
-     "requires": "clang"
+     "requires": "gcc-and-clang"
     }
    ]
   },
@@ -868,11 +871,11 @@
      "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
      "symbol": "llvm_bitcode_test_canonical_variadics",
      "provides": [
-      "oracle"
-     ],
-     "requires": "clang"
+      "encode"
+     ]
     }
-   ]
+   ],
+   "note": "Canonical va_list operations are built directly in IR and encoded; no independent consumer is mapped for this row."
   },
   {
    "backend": "llvm-bitcode",
