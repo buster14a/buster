@@ -64,8 +64,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          llvm_mc=$(command -v llvm-mc-21)
+          llvm_objcopy=$(command -v llvm-objcopy-21)
           oracle_linker=$(command -v ld.lld-21)
           printf 'BUSTER_A64_ORACLE_LINKER=%s\n' "$oracle_linker" >> "$GITHUB_ENV"
+          "$llvm_mc" --version | tee -a "$RUNNER_TEMP/assembler-form-evidence/toolchain.txt"
+          "$llvm_objcopy" --version | tee -a "$RUNNER_TEMP/assembler-form-evidence/toolchain.txt"
           "$oracle_linker" --version | tee -a "$RUNNER_TEMP/assembler-form-evidence/toolchain.txt"
           readelf --version | tee -a "$RUNNER_TEMP/assembler-form-evidence/toolchain.txt"
       - name: Bootstrap the native build driver
@@ -186,23 +190,53 @@ jobs:
           set -euo pipefail
           evidence="$RUNNER_TEMP/assembler-form-evidence"
           exec > >(tee "$evidence/optional-extension-probes.log") 2>&1
-          for seed in ptrue addha; do
-            fixture="src/buster/tests/compiler/assembly/fixtures/aarch64_optional_$seed.s"
-            llvm-mc-21 -triple=aarch64-linux-gnu -mattr=+sve,+sme -show-encoding "$fixture" | tee "$evidence/optional-$seed-reference.txt"
-            for features in baseline sme; do
-              extra=()
-              if test "$features" = sme; then extra=(-mattr=+sme); fi
-              output="$evidence/optional-$seed-$features.o"
-              if build/Release/ide cc -target aarch64-linux "${extra[@]}" -c "$fixture" -o "$output" > "$evidence/optional-$seed-$features.log" 2>&1; then
-                echo "unexpected source acceptance: $seed $features"
-                exit 1
-              else
-                status=$?
-                test "$status" -ne 0
-                test ! -s "$output"
-                test -s "$evidence/optional-$seed-$features.log"
-                cat "$evidence/optional-$seed-$features.log"
-              fi
+          fixture=src/buster/tests/compiler/assembly/fixtures/aarch64_optional_addha.s
+          llvm-mc-21 -triple=aarch64-linux-gnu -mattr=+sve,+sme -show-encoding "$fixture" | tee "$evidence/optional-addha-reference.txt"
+          for features in baseline sme; do
+            extra=()
+            if test "$features" = sme; then extra=(-mattr=+sme); fi
+            output="$evidence/optional-addha-$features.o"
+            if build/Release/ide cc -target aarch64-linux "${extra[@]}" -c "$fixture" -o "$output" > "$evidence/optional-addha-$features.log" 2>&1; then
+              echo "unexpected source acceptance: addha $features"
+              exit 1
+            else
+              status=$?
+              test "$status" -ne 0
+              test ! -s "$output"
+              test -s "$evidence/optional-addha-$features.log"
+              cat "$evidence/optional-addha-$features.log"
+            fi
+          done
+          for fixture in \
+            src/buster/tests/compiler/assembly/fixtures/aarch64_optional_ptrue.s \
+            src/buster/tests/compiler/assembly/fixtures/aarch64_sve_ptrue.s; do
+            stem="${fixture##*/}"
+            output="$evidence/$stem-baseline.o"
+            if build/Release/ide cc -target aarch64-linux -c "$fixture" -o "$output" > "$evidence/$stem-baseline.log" 2>&1; then
+              echo "unexpected source acceptance: ptrue baseline ($fixture)"
+              exit 1
+            else
+              status=$?
+              test "$status" -ne 0
+              test ! -s "$output"
+              test -s "$evidence/$stem-baseline.log"
+              cat "$evidence/$stem-baseline.log"
+            fi
+          done
+          for fixture in \
+            src/buster/tests/compiler/assembly/fixtures/aarch64_optional_ptrue.s \
+            src/buster/tests/compiler/assembly/fixtures/aarch64_sve_ptrue.s; do
+            stem="${fixture##*/}"
+            reference="$evidence/$stem-reference.o"
+            reference_text="$evidence/$stem-reference.text"
+            llvm-mc-21 -triple=aarch64-linux-gnu -mattr=+sve,+sme -filetype=obj "$fixture" -o "$reference"
+            llvm-objcopy-21 -O binary --only-section=.text "$reference" "$reference_text"
+            for feature in sme sve; do
+              output="$evidence/$stem-$feature.o"
+              text="$evidence/$stem-$feature.text"
+              build/Release/ide cc -target aarch64-linux "-mattr=+$feature" -c "$fixture" -o "$output"
+              llvm-objcopy-21 -O binary --only-section=.text "$output" "$text"
+              cmp "$reference_text" "$text"
             done
           done
       - name: Generate native source-size acknowledgment

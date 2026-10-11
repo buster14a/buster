@@ -1842,12 +1842,15 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("aes")) == TARGET_CPU_FEATURE_X86_AES);
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_AARCH64, S8("avx2")) == TARGET_CPU_FEATURE_NONE);
+    BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_AARCH64, S8("sve")) == TARGET_CPU_FEATURE_AARCH64_SVE);
+    BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(TARGET_CPU_FEATURE_AARCH64_SVE), S8("sve"));
     BUSTER_TEST(arguments, target_cpu_feature_names_are_sorted());
 
     TargetCpuFeatures apple_m1_expected = target_cpu_features_from_array(apple_m1_features_array, BUSTER_ARRAY_LENGTH(apple_m1_features_array));
     TargetCpuFeatures apple_m1_default = target_cpu_features_default(CPU_ARCH_AARCH64, CPU_MODEL_A64_APPLE_M1);
     BUSTER_TEST(arguments, target_cpu_features_equal(apple_m1_default, apple_m1_expected));
     BUSTER_TEST(arguments, !target_cpu_features_contains(apple_m1_default, TARGET_CPU_FEATURE_AARCH64_SME));
+    BUSTER_TEST(arguments, !target_cpu_features_contains(apple_m1_default, TARGET_CPU_FEATURE_AARCH64_SVE));
     Target apple_m1_target = {
         .cpu_arch = CPU_ARCH_AARCH64,
         .cpu_model = CPU_MODEL_A64_APPLE_M1,
@@ -1870,6 +1873,13 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         .cpu_features = target_cpu_features_add(generic_aarch64_expected, TARGET_CPU_FEATURE_AARCH64_SME),
     };
     BUSTER_TEST(arguments, target_cpu_features_are_valid(explicit_sme_target));
+    Target explicit_sve_target = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .cpu_model = CPU_MODEL_A64_GENERIC,
+        .cpu_features_explicit = true,
+        .cpu_features = target_cpu_features_add(generic_aarch64_expected, TARGET_CPU_FEATURE_AARCH64_SVE),
+    };
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(explicit_sve_target));
     Target explicit_apple_m1_target = apple_m1_target;
     explicit_apple_m1_target.cpu_features_explicit = true;
     explicit_apple_m1_target.cpu_features = apple_m1_expected;

@@ -80,7 +80,7 @@ Compiler (`src/buster/lib/compiler/`):
 | `debug/`, `dwarf/`, `codeview/`, `pdb/` | Canonical debug model and platform debug-format emitters. |
 | `object/object.{c,h}` | Format-neutral object model plus ELF64, COFF, and Mach-O readers/writers. |
 | `link/link.{c,h}` | Section merging, symbol resolution, hosted native executable linking, and imports-free PE32+ UEFI application output. |
-| `jit/jit.{c,h}` | Host-native in-process object loader with explicit imports and W^X finalization. |
+| `jit/jit.{c,h}` | Host-native in-process object loader with explicit imports and W^X finalization; `ide run` uses it on x86-64 Linux with an explicit libc-function allowlist. |
 | `wasm/wasm.{c,h}` | Direct canonical-IR-to-core-Wasm64 emitter using Memory64. |
 | `ebpf/ebpf.{c,h}` | Linux eBPF direct backend with its own instruction, ELF, relocation, and BTF encoders. |
 | `gpu/gpu.{c,h}` | Target parsing, deterministic command planning/execution, tool discovery, temporary ownership, and artifact validation for external SPIR-V, NVPTX/PTX, AMDGCN/HSA, Metal AIR/metallib, and DXIL pipelines. |

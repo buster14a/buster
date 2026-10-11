@@ -1400,6 +1400,7 @@ bool target_cpu_features_are_valid(Target target)
                 TARGET_CPU_FEATURE_AARCH64_SSBS,
                 TARGET_CPU_FEATURE_AARCH64_TRACEV8_4,
                 TARGET_CPU_FEATURE_AARCH64_SME,
+                TARGET_CPU_FEATURE_AARCH64_SVE,
             };
             TargetCpuFeatures known = target_cpu_features_from_array(known_feature_list, (u32)BUSTER_ARRAY_LENGTH(known_feature_list));
             if (!target_cpu_features_subset(features, known))
@@ -1957,6 +1958,7 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("sse4.2"), .feature = TARGET_CPU_FEATURE_X86_SSE4_2, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sse4a"), .feature = TARGET_CPU_FEATURE_X86_SSE4A, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("ssse3"), .feature = TARGET_CPU_FEATURE_X86_SSSE3, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("sve"), .feature = TARGET_CPU_FEATURE_AARCH64_SVE, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("svm"), .feature = TARGET_CPU_FEATURE_X86_SVM, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("tbm"), .feature = TARGET_CPU_FEATURE_X86_TBM, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("tdx"), .feature = TARGET_CPU_FEATURE_X86_TDX, .arch = CPU_ARCH_X86_64},
