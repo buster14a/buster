@@ -9609,6 +9609,27 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_alias(Target target, Assem
     return true;
 }
 
+// GNU as accepts (and objdump prints) the memory-looking `(%dx)` for the
+// IN/OUT port. It names the DX register itself, so only the bare 16-bit DX
+// inside one parenthesis pair qualifies; `(%rdx)`, `0(%dx)` and segment or
+// index spellings stay memory syntax and are rejected like GNU as does.
+BUSTER_GLOBAL_LOCAL bool assembly_x86_att_port_dx_parse(String8 text, AssemblySyntax syntax, AssemblyRegister* result)
+{
+    bool parsed = false;
+    if (syntax == ASSEMBLY_SYNTAX_ATT && text.length >= 2 && text.pointer[0] == '(' && text.pointer[text.length - 1] == ')')
+    {
+        AssemblyRegister reg = {0};
+        String8 inner = assembly_trim(string_slice(text, 1, text.length - 1));
+        parsed = assembly_register_parse(inner, syntax, &reg) && reg.class == ASSEMBLY_REGISTER_GPR && reg.width == 16 &&
+                 reg.index == 2;
+        if (parsed)
+        {
+            *result = reg;
+        }
+    }
+    return parsed;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_applies(AssemblyOpcode opcode, u32 operand_index, u32 operand_count)
 {
     if (opcode == ASSEMBLY_OPCODE_X86_LEA || assembly_x86_opcode_is_rotate(opcode) ||
@@ -10188,6 +10209,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     u32 symbol_count_before_dfv = builder->result.symbol_count;
     bool has_dfv = false;
     u8 dfv = 0;
+    bool port_io_mnemonic = assembly_word_equal(mnemonic, S8("in")) || assembly_word_equal(mnemonic, S8("out"));
     while (operand_start < operands_text.length)
     {
         if (operand_count >= BUSTER_ARRAY_LENGTH(operands))
@@ -10249,6 +10271,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             text = assembly_trim(string_slice(text, 1, text.length));
         }
         if (!att_immediate && assembly_register_parse(text, syntax, &operand->reg))
+        {
+            operand->kind = ASSEMBLY_OPERAND_REGISTER;
+        }
+        else if (port_io_mnemonic && assembly_x86_att_port_dx_parse(text, syntax, &operand->reg))
         {
             operand->kind = ASSEMBLY_OPERAND_REGISTER;
         }
@@ -10805,9 +10831,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                              (assembly_word_equal(mnemonic, S8("rstorssp")) || assembly_word_equal(mnemonic, S8("clrssbsy")));
     bool implicit_att_memory = syntax == ASSEMBLY_SYNTAX_ATT;
     if (implicit_att_memory && assembly_word_equal(mnemonic, S8("cldemote"))) implicit_memory_width = 8;
-    else if (implicit_att_memory && (assembly_word_equal(mnemonic, S8("stmxcsr")) || assembly_word_equal(mnemonic, S8("ldmxcsr"))))
-        // MXCSR is one 32-bit control word and AT&T carries no size suffix on
-        // the spelling a libc's <fenv.h> uses.
+    else if (assembly_word_equal(mnemonic, S8("stmxcsr")) || assembly_word_equal(mnemonic, S8("ldmxcsr")))
+        // MXCSR is one 32-bit control word: AT&T carries no size suffix on
+        // the spelling a libc's <fenv.h> uses, and GNU as also infers m32 for
+        // an unsized Intel `[mem]`. An explicit ptr width is kept and checked.
         implicit_memory_width = 32;
     else if (implicit_att_memory &&
              (assembly_word_equal(mnemonic, S8("wrssd")) || assembly_word_equal(mnemonic, S8("wrussd"))))

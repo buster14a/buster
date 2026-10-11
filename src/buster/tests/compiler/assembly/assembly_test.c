@@ -3115,6 +3115,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_att_port_suffixes(UnitTestArgum
         {{S8("in eax,255\n"), S8("inl $255,%eax\n")}, 2, {0xe5, 0xff}},
         {{S8("out 255,eax\n"), S8("outl %eax,$255\n")}, 2, {0xe7, 0xff}},
         {{S8("OUT DX,AL\n"), S8("OUTB %al,%dx\n")}, 1, {0xee}},
+        // GNU objdump prints the port as `(%dx)` and GNU as accepts it.
+        {{S8("in al,dx\n"), S8("in (%dx),%al\n")}, 1, {0xec}},
+        {{S8("out dx,al\n"), S8("out %al,(%dx)\n")}, 1, {0xee}},
+        {{S8("in al,dx\n"), S8("inb (%dx),%al\n")}, 1, {0xec}},
+        {{S8("out dx,al\n"), S8("outb %al,(%dx)\n")}, 1, {0xee}},
+        {{S8("in ax,dx\n"), S8("inw (%dx),%ax\n")}, 2, {0x66, 0xed}},
+        {{S8("out dx,ax\n"), S8("outw %ax,(%dx)\n")}, 2, {0x66, 0xef}},
+        {{S8("in eax,dx\n"), S8("in ( %dx ),%eax\n")}, 1, {0xed}},
+        {{S8("out dx,eax\n"), S8("outl %eax,(%dx)\n")}, 1, {0xef}},
     };
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX, .cpu_model = CPU_MODEL_BASELINE};
     // Architectural fixed opcodes, including the 66 prefix for 16-bit data.
@@ -3149,6 +3158,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_att_port_suffixes(UnitTestArgum
         S8("inb (%rdx),%al\n"), S8("outb %al,(%rdx)\n"),
         S8("inb $256,%al\n"), S8("outb %al,$256\n"),
         S8("inq %dx,%rax\n"), S8("outq %rax,%dx\n"),
+        S8("in (%edx),%al\n"), S8("out %al,(%edx)\n"),
+        S8("in 0(%dx),%al\n"), S8("in %ds:(%dx),%al\n"),
+        S8("in (%dx,%dx),%al\n"), S8("in ((%dx)),%al\n"),
+        S8("inb (%dx),%ax\n"), S8("in (%dl),%al\n"),
+        S8("mov (%dx),%al\n"),
     };
     for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(invalid_sources); row += 1)
     {
@@ -3194,6 +3208,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_x64_breakpoint_and_fp_environme
         {{S8("ldmxcsr dword ptr [rdi+4]\n"), S8("ldmxcsr 4(%rdi)\n")}, 4, {0x0f, 0xae, 0x57, 0x04}},
         {{S8("stmxcsr dword ptr [rbp-4]\n"), S8("stmxcsr -4(%rbp)\n")}, 4, {0x0f, 0xae, 0x5d, 0xfc}},
         {{S8("ldmxcsr dword ptr [r10+rax*4+12]\n"), S8("ldmxcsr 12(%r10,%rax,4)\n")}, 6, {0x41, 0x0f, 0xae, 0x54, 0x82, 0x0c}},
+        // GNU as infers MXCSR's only m32 width for an unsized Intel operand.
+        {{S8("ldmxcsr [rax]\n"), S8("ldmxcsr (%rax)\n")}, 3, {0x0f, 0xae, 0x10}},
+        {{S8("stmxcsr [rax]\n"), S8("stmxcsr (%rax)\n")}, 3, {0x0f, 0xae, 0x18}},
+        {{S8("ldmxcsr [rdi+4]\n"), S8("ldmxcsr 4(%rdi)\n")}, 4, {0x0f, 0xae, 0x57, 0x04}},
+        {{S8("stmxcsr [rbp-4]\n"), S8("stmxcsr -4(%rbp)\n")}, 4, {0x0f, 0xae, 0x5d, 0xfc}},
+        {{S8("ldmxcsr [r10+rax*4+12]\n"), S8("ldmxcsr 12(%r10,%rax,4)\n")}, 6, {0x41, 0x0f, 0xae, 0x54, 0x82, 0x0c}},
     };
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX, .cpu_model = CPU_MODEL_BASELINE};
     for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
@@ -3229,6 +3249,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_x64_breakpoint_and_fp_environme
         AssemblyEncodeResult rejected = assembly_encode(arguments->arena, invalid_sources[row],
             (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
         BUSTER_TEST_RAW(arguments, rejected.diagnostic_count != 0 && !rejected.bytes.length, invalid_sources[row]);
+    }
+    // An explicit Intel width other than MXCSR's m32 stays rejected.
+    String8 invalid_intel_sources[] = {
+        S8("ldmxcsr qword ptr [rax]\n"), S8("stmxcsr word ptr [rax]\n"), S8("ldmxcsr byte ptr [rax]\n"),
+        S8("ldmxcsr eax\n"), S8("stmxcsr\n"),
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(invalid_intel_sources); row += 1)
+    {
+        AssemblyEncodeResult rejected = assembly_encode(arguments->arena, invalid_intel_sources[row],
+            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST_RAW(arguments, rejected.diagnostic_count != 0 && !rejected.bytes.length, invalid_intel_sources[row]);
     }
     return result;
 }
