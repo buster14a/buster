@@ -3184,7 +3184,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
             invocation.diagnostic = S8("UEFI output is supported only for x86_64 and aarch64 targets");
         }
-        else if (!invocation.has_gpu_target && invocation.target.os == OPERATING_SYSTEM_UEFI && invocation.linker_argument_count)
+        else if (!invocation.has_gpu_target && invocation.target.os == OPERATING_SYSTEM_UEFI && invocation.linker_argument_count &&
+                 invocation.query != COMPILER_DRIVER_QUERY_LINKER_VERSION)
         {
             compiler_driver_argument_error(arena, &invocation, S8("raw linker arguments are not supported for UEFI targets: {S8}"),
                                            invocation.linker_arguments[0]);
