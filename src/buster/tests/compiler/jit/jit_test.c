@@ -1036,9 +1036,9 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
 #endif
 
 #if BUSTER_CPU_ARCH_AARCH64
-    // An unbound external DATA symbol is rejected consistently for every
-    // supported AArch64 direct relocation.  Keep the pair as one fixture so
-    // the PAGE21/PAGEOFF12 contract cannot silently diverge.
+    // Missing DATA bindings use the resolver for every admitted AArch64
+    // relative form, whether the binding list is empty or unrelated. Keep
+    // PAGE/GOT pairs as well as individual relocations in the preflight cases.
     u32 unbound_data_words[] = {UINT32_C(0x90000009), UINT32_C(0x91000041)};
     ObjectSection unbound_data_section = {
         .name = S8(".text"),
@@ -1075,33 +1075,57 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
         .relocation_count = BUSTER_ARRAY_LENGTH(unbound_data_relocations),
         .target = target_native,
     };
-    JitProgram unbound_page_pair_program = jit_link_object(&unbound_data_object, (JitOptions){0});
-    BUSTER_TEST(arguments, unbound_page_pair_program.error == JIT_ERROR_EXTERNAL_DATA);
-    BUSTER_STRING_TEST(arguments, unbound_page_pair_program.failing_symbol, unbound_data_symbol.name);
-    BUSTER_TEST(arguments, !unbound_page_pair_program.allocation_base && !unbound_page_pair_program.allocation_size &&
-                               !unbound_page_pair_program.auxiliary_allocation_base && !unbound_page_pair_program.auxiliary_allocation_size);
-    for (u32 unbound_index = 0; unbound_index < BUSTER_ARRAY_LENGTH(unbound_data_relocations); unbound_index += 1)
+    u64 unrelated_data_value = 0;
+    JitHostBinding unrelated_data_binding = {
+        .name = S8("jit_test_unrelated_data"),
+        .address = &unrelated_data_value,
+        .kind = OBJECT_SYMBOL_DATA,
+    };
+    ObjectRelocationKind unbound_data_kinds[] = {
+        OBJECT_RELOCATION_AARCH64_MACH_PAGE21,
+        OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12,
+        OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21,
+        OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12,
+        OBJECT_RELOCATION_AARCH64_PREL32,
+    };
+    for (u32 binding_case = 0; binding_case < 2; binding_case += 1)
     {
-        ObjectRelocation unbound_relocation = unbound_data_relocations[unbound_index];
-        ObjectFile unbound_object = unbound_data_object;
-        unbound_object.relocations = &unbound_relocation;
-        unbound_object.relocation_count = 1;
-        JitProgram unbound_program = jit_link_object(&unbound_object, (JitOptions){0});
-        BUSTER_TEST(arguments, unbound_program.error == JIT_ERROR_EXTERNAL_DATA);
-        BUSTER_STRING_TEST(arguments, unbound_program.failing_symbol, unbound_data_symbol.name);
-        BUSTER_TEST(arguments, !unbound_program.allocation_base && !unbound_program.allocation_size &&
-                                   !unbound_program.auxiliary_allocation_base && !unbound_program.auxiliary_allocation_size);
+        JitOptions unbound_options = {
+            .bindings = binding_case ? &unrelated_data_binding : 0,
+            .binding_count = binding_case,
+        };
+        for (u32 pair_case = 0; pair_case < 2; pair_case += 1)
+        {
+            ObjectRelocation pair_relocations[2] = {unbound_data_relocations[0], unbound_data_relocations[1]};
+            if (pair_case)
+            {
+                pair_relocations[0].kind = OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21;
+                pair_relocations[1].kind = OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12;
+            }
+            ObjectFile unbound_pair_object = unbound_data_object;
+            unbound_pair_object.relocations = pair_relocations;
+            JitProgram unbound_pair_program = jit_link_object(&unbound_pair_object, unbound_options);
+            BUSTER_TEST(arguments, unbound_pair_program.error == JIT_ERROR_UNRESOLVED_IMPORT);
+            BUSTER_STRING_TEST(arguments, unbound_pair_program.failing_symbol, unbound_data_symbol.name);
+            BUSTER_TEST(arguments, !unbound_pair_program.allocation_base && !unbound_pair_program.allocation_size &&
+                                       !unbound_pair_program.auxiliary_allocation_base && !unbound_pair_program.auxiliary_allocation_size);
+            jit_program_release(&unbound_pair_program);
+        }
+        for (u32 unbound_index = 0; unbound_index < BUSTER_ARRAY_LENGTH(unbound_data_kinds); unbound_index += 1)
+        {
+            ObjectRelocation unbound_relocation = unbound_data_relocations[0];
+            unbound_relocation.kind = unbound_data_kinds[unbound_index];
+            ObjectFile unbound_object = unbound_data_object;
+            unbound_object.relocations = &unbound_relocation;
+            unbound_object.relocation_count = 1;
+            JitProgram unbound_program = jit_link_object(&unbound_object, unbound_options);
+            BUSTER_TEST(arguments, unbound_program.error == JIT_ERROR_UNRESOLVED_IMPORT);
+            BUSTER_STRING_TEST(arguments, unbound_program.failing_symbol, unbound_data_symbol.name);
+            BUSTER_TEST(arguments, !unbound_program.allocation_base && !unbound_program.allocation_size &&
+                                       !unbound_program.auxiliary_allocation_base && !unbound_program.auxiliary_allocation_size);
+            jit_program_release(&unbound_program);
+        }
     }
-    ObjectRelocation unbound_prel32_relocation = unbound_data_relocations[0];
-    unbound_prel32_relocation.kind = OBJECT_RELOCATION_AARCH64_PREL32;
-    ObjectFile unbound_prel32_object = unbound_data_object;
-    unbound_prel32_object.relocations = &unbound_prel32_relocation;
-    unbound_prel32_object.relocation_count = 1;
-    JitProgram unbound_prel32_program = jit_link_object(&unbound_prel32_object, (JitOptions){0});
-    BUSTER_TEST(arguments, unbound_prel32_program.error == JIT_ERROR_EXTERNAL_DATA);
-    BUSTER_STRING_TEST(arguments, unbound_prel32_program.failing_symbol, unbound_data_symbol.name);
-    BUSTER_TEST(arguments, !unbound_prel32_program.allocation_base && !unbound_prel32_program.allocation_size &&
-                               !unbound_prel32_program.auxiliary_allocation_base && !unbound_prel32_program.auxiliary_allocation_size);
 
 // Apple's public MAP_JIT contract permits one region per process, and this
 // module links its native executable fixture below. Keep additional successful

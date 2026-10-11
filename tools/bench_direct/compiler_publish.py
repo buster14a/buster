@@ -7,6 +7,9 @@ the only jobs there that complete the check. It reads this run's evidence
 artifact through the API as data (a size-bounded zip; nothing in it is
 executed), re-checks the receipt against the identities authorization produced
 in the same attempt, requires the observed host to be the approved Zen 5 host,
+requires the job's retained #2758 machine-specification record
+(machine-specifications/report.json, see machine_record) to name that host
+with the receipt's own CPU model and this run, attempt and compare job,
 re-derives validity from the lab's own summary.json and the throughput
 corpus's own summary.json and metadata.json (#2761), and, when the receipt
 names the scaling profile (#424), each scaling bundle's own scaling.json and
@@ -40,10 +43,14 @@ re-derives a past main attempt's identity from GitHub's records
 (recovered_identity, bind_request), re-reads that attempt's retained
 evidence, and emits only the comment entry. It writes no check and runs no
 measurement; expired or unverifiable evidence is reported and not published.
+Only an attempt whose authenticated workflow revision has no record retention
+step may lack the machine record (machine_record_required); a record that is
+present is still checked.
 
 Map: validate_inline_bundle and validate_ast_pilot_bundle (opt-in flag pairs),
 validate_real_source_bundle and validate_production_profile_bundle (#2761 opt-in legs),
-decide (pure decision), read_evidence, verify_analyzer_request_freshness
+decide (pure decision), machine_record and machine_record_required (#2758
+host facts), read_evidence, verify_analyzer_request_freshness
 (fresh request selectors), queue_delay, links,
 commit_report, recovered_identity, bind_request, report_check_url, main.
 Api lives in compiler_github.
@@ -72,7 +79,7 @@ from compiler_github import (ARTIFACT_LIMIT, BENCH_WORKFLOW, COMPARE_JOBS, SERVE
 from inline_acceptance import metrics as inline_metrics, validate_documents as validate_inline_documents
 from ast_pilot_acceptance import (cell_record as ast_pilot_cell_record, validate_documents as validate_ast_pilot_documents,
                                   validate_probe as validate_ast_pilot_probe)
-from compiler_receipt import (validate_closure, ANALYZER_PROFILE, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUIRED_FILES,
+from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUIRED_FILES,
                               ANALYZER_REQUEST_LINES, ANALYZER_REQUEST_PATH, DECIMAL, IDENTITY_KEYS,
                               INLINE_ACCEPTANCE_REQUEST_LINE, INLINE_ACCEPTANCE_PROFILE,
                               AST_PILOT_ACCEPTANCE_REQUEST_LINE, AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_CELLS,
@@ -91,6 +98,16 @@ ANALYZER_MEMBER_LIMIT = 32 * 1024 * 1024
 ANALYZER_BUNDLE_LIMIT = ARTIFACT_LIMIT * 3 // 4
 AUTHORIZE_JOBS = {"main": "Authorize the main commit comparison"}
 REPORT_MARKDOWN_LIMIT = 36000
+# The #2758 startup record, retained by the 9700X comparison job (#2761).
+MACHINE_RECORD = "machine-specifications/report.json"
+MACHINE_SCHEMA = "buster-machine-specifications-v1"
+MACHINE_JOBS = {"main": "compare", "pull": "compare-pull"}
+MACHINE_STATUSES = ("available", "partial", "unknown", "unavailable", "not_applicable")
+MACHINE_REQUIRED = ("schema", "run_id", "run_attempt", "job", "cpu_model", "machine_arch")
+# A bench workflow revision retains the record exactly when one of its steps is named this.
+MACHINE_RETENTION_STEP = "machine-specification record\n"
+MACHINE_OPTIONAL = ("cpu_vendor", "cpu_logical_online", "cpu_process_available", "cpu_affinity",
+                    "memory_total_bytes", "kernel_release", "execution_context")
 
 
 def artifact_name(head: str, attempt: str) -> str:
@@ -803,11 +820,87 @@ def main_owned_evidence(api: Api, run_id: str, name: str, route: dict) -> tuple[
         digest = hashlib.sha256(payload).hexdigest()
         if len(payload) != artifact["size_in_bytes"] or "sha256:" + digest != artifact["digest"]:
             raise ValueError("owned ordinary downloaded ZIP differs from its immutable API artifact")
-        receipt, summary, throughput = main_owned_files(main_archive_files(payload), route, api=api)
+        files = main_archive_files(payload)
+        receipt, summary, throughput = main_owned_files(files, route, api=api)
+        throughput["machine"] = files.get(MACHINE_RECORD)
         artifact = dict(artifact, verified_archive_sha256=digest)
         return receipt, summary, "", artifact, throughput
     except (OSError, ValueError, KeyError, TypeError, UnicodeError, urllib.error.URLError) as error:
         return None, None, "Main-owned evidence refused: " + str(error), artifact, {}
+
+
+def machine_record(raw: object, receipt: object, mode: str, run_id: str, attempt: str,
+                   require: bool = True) -> tuple[list[str], dict]:
+    """(problems, facts) for the retained #2758 machine-specification record.
+
+    Required facts must be `available` and agree with the approved host, the
+    receipt's observed CPU model and the attempt being published. Optional
+    facts are reported with the collector's own status and reason, never
+    filled in. Only publication-only recovery of an attempt whose authenticated
+    workflow revision predates retention (machine_record_required) passes
+    require=False; a record that is present is always checked.
+    """
+    problems: list[str] = []
+    facts: dict = {}
+    record = None
+    if raw is None:
+        if require:
+            problems.append(f"machine-specification record {MACHINE_RECORD} is missing from the evidence artifact")
+    else:
+        try:
+            record = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
+        except (DuplicateKey, UnicodeDecodeError, ValueError, AttributeError):
+            record = None
+        if not isinstance(record, dict) or not record or any(
+                not isinstance(value, dict) or set(value) != {"value", "status", "reason"} or
+                not all(isinstance(value[key], str) for key in value) or value["status"] not in MACHINE_STATUSES
+                for value in record.values()):
+            problems.append(f"machine-specification record {MACHINE_RECORD} is malformed")
+            record = None
+    if record is not None:
+        for key in (*MACHINE_REQUIRED, *MACHINE_OPTIONAL):
+            field = record.get(key)
+            if field is None:
+                facts[key] = "absent from the record"
+            elif field["status"] == "available":
+                facts[key] = field["value"]
+            else:
+                facts[key] = field["status"] + (f" ({field['reason']})" if field["reason"] else "")
+        missing = [key for key in MACHINE_REQUIRED if (record.get(key) or {}).get("status") != "available"]
+        for key in missing:
+            problems.append(f"machine-specification record lacks required host fact {key}: {facts[key]}")
+        if not missing:
+            value = {key: record[key]["value"] for key in MACHINE_REQUIRED}
+            host = receipt.get("host") if isinstance(receipt, dict) else None
+            observed = host.get("cpu_model") if isinstance(host, dict) else None
+            if value["schema"] != MACHINE_SCHEMA:
+                problems.append(f"machine-specification record schema {value['schema']!r} is not {MACHINE_SCHEMA}")
+            if not APPROVED_HOST.search(value["cpu_model"]):
+                problems.append(f"machine-specification record CPU {value['cpu_model']!r} is not the approved "
+                                "Zen 5 host (AMD Ryzen 7 9700X)")
+            if not isinstance(observed, str) or value["cpu_model"].strip() != observed.strip():
+                problems.append(f"machine-specification record CPU {value['cpu_model']!r} differs from the "
+                                f"receipt's observed CPU {observed!r}")
+            if value["machine_arch"] != "x86_64":
+                problems.append(f"machine-specification record architecture {value['machine_arch']!r} is not x86_64")
+            identity = {"run_id": run_id, "run_attempt": attempt, "job": MACHINE_JOBS.get(mode, "")}
+            for key, wanted in identity.items():
+                if not wanted or value[key] != wanted:
+                    problems.append(f"machine-specification record {key} {value[key]!r} is not this attempt's {wanted!r}")
+    return problems, facts
+
+
+def machine_record_required(api: Api, revision: str) -> bool:
+    """Whether the bench workflow at an authenticated run revision retains the machine record.
+
+    Only a readable workflow without the retention step is a legacy revision
+    whose recovered attempt may lack the record; a malformed revision, an
+    unreadable or absent file and every later revision require it.
+    """
+    content = None
+    if isinstance(revision, str) and SHA.fullmatch(revision):
+        content, unused_problem = _github_file(api, revision, BENCH_WORKFLOW)
+    return not content or MACHINE_RETENTION_STEP in content.decode("utf-8", errors="replace")
 
 
 def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict | None = None) -> tuple[object, object, str, dict, dict]:
@@ -839,6 +932,9 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                     break
                 aliases.add(alias)
                 members[info.filename] = info
+            machine_info = members.get(MACHINE_RECORD) if not problem else None
+            machine = None if machine_info is None else \
+                archive.read(machine_info) if machine_info.file_size <= MEMBER_LIMIT else b""
             receipt_info = members.get("receipt.json") if not problem else None
             if receipt_info is not None and receipt_info.file_size <= MEMBER_LIMIT:
                 try:
@@ -885,7 +981,8 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         problem = f"evidence member analyzer/summary.json has duplicate JSON key {error.args[0]!r}"
                     except (UnicodeDecodeError, ValueError):
                         problem = "evidence member analyzer/summary.json is malformed JSON"
-                throughput = {"analyzer": {"summary": summary, "files": raw_files} if not problem else None}
+                throughput = {"analyzer": {"summary": summary, "files": raw_files} if not problem else None,
+                              "machine": machine}
                 return receipt, summary, problem, artifact, throughput
             values = []
             scaling = [f"scaling/{name}/{leaf}" for name in SCALING_PROFILE["series"]
@@ -905,7 +1002,8 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
             receipt, summary = values[:2]
             throughput = {"summary": values[2], "metadata": values[3],
                           "scaling": {name: {"summary": values[4 + 2 * index], "metadata": values[5 + 2 * index]}
-                                      for index, name in enumerate(SCALING_PROFILE["series"])}}
+                                      for index, name in enumerate(SCALING_PROFILE["series"])},
+                          "machine": machine}
             if isinstance(receipt, dict) and receipt.get("closure") is not None:
                 closure_files: dict = {}
                 for operation in ("snapshot", "restore", "verify"):
@@ -987,9 +1085,9 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
     return receipt, summary, problem, artifact, throughput
 
 
-def _github_file(api: Api, revision: str) -> tuple[bytes | None, str]:
-    """Read the exact request file at a commit from GitHub's immutable contents API."""
-    path = urllib.parse.quote(ANALYZER_REQUEST_PATH, safe="/")
+def _github_file(api: Api, revision: str, name: str = ANALYZER_REQUEST_PATH) -> tuple[bytes | None, str]:
+    """Read one exact file (the request file by default) at a commit from GitHub's immutable contents API."""
+    path = urllib.parse.quote(name, safe="/")
     try:
         value = api.request(f"/contents/{path}?{urllib.parse.urlencode({'ref': revision})}")
     except urllib.error.HTTPError as error:
@@ -5155,10 +5253,13 @@ def main() -> int:
     else:
         api = Api(repository, get("GH_TOKEN"))
         notes: list[str] = []
+        workflow_revision = ""
         if recover:
             expected, authorize_result, compare_result, problems = recovered_identity(api, repository, run_id, attempt)
             head = expected["head"]
             authorized = authorize_result == "success" and not problems
+            # The original run's own workflow revision, before the Main route rebinds trusted_revision.
+            workflow_revision = expected["trusted_revision"]
         else:
             expected = {"mode": mode, "repository": repository, "ref": get("BQ_REF"), "pull": get("BQ_PULL"),
                         "pull_head": get("BQ_PULL_HEAD"), "base": get("BQ_BASE_COMMIT"),
@@ -5175,6 +5276,8 @@ def main() -> int:
         throughput: dict = {}
         problem = ""
         route = None
+        machine_problems: list[str] = []
+        machine_facts: dict = {}
         if mode == "main" and authorized:
             try:
                 route = main_route(api, repository, run_id, attempt)
@@ -5196,9 +5299,13 @@ def main() -> int:
                 problems = bind_request(api, expected, receipt, trusted_main_route=route)
                 notes.extend(problems)
                 authorized = not problems
+            if isinstance(receipt, dict):
+                require = not recover or machine_record_required(api, workflow_revision)
+                machine_problems, machine_facts = machine_record(throughput.get("machine"), receipt, mode, run_id,
+                                                                 attempt, require=require)
         conclusion, title, reasons = decide(expected, authorized, compare_result, receipt, summary,
                                             get("BQ_REGRESSION_POLICY"), throughput, not recover,
-                                            [problem] if problem else [],
+                                            ([problem] if problem else []) + machine_problems,
                                             **({"expected_phase_schema": route["main_phase_schema"],
                                                 "expected_profile": route["main_profile"],
                                                 "expected_preparation_policy": route["main_preparation_policy"],
@@ -5212,6 +5319,8 @@ def main() -> int:
         if mode == "main" and expected.get("range"):
             shown["coverage"] = {"first_parent": expected.get("first_parent"), "range": expected.get("range")}
         shown["reasons"] = reasons
+        if machine_facts:
+            shown["machine"] = machine_facts
         if route is not None:
             shown["main_route"] = {key: route[key] for key in ("main_owned", *MAIN_ROUTE_FIELDS)}
         # The corpus as its own retained summary says, never the host's digest.

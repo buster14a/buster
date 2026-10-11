@@ -9,6 +9,7 @@ without the network.
 
 from __future__ import annotations
 
+import base64
 import copy
 import io
 import json
@@ -27,7 +28,7 @@ import compiler_comment  # noqa: E402
 import compiler_github  # noqa: E402
 import compiler_publish  # noqa: E402
 import compiler_receipt  # noqa: E402
-from compiler_test import BINARIES, EXPECTED, archive, corpus, receipt, summary  # noqa: E402
+from compiler_test import BINARIES, EXPECTED, archive, corpus, machine_bytes, receipt, summary  # noqa: E402
 
 REPO = "buster14a/buster"
 HEAD, TRUSTED, PARENT, OLDER = "a" * 40, "9" * 40, "b" * 40, "c" * 40
@@ -537,6 +538,8 @@ class RecoveryApi(FakeGitHub):
     def __init__(self, compare: str = "success", artifacts: int = 1, run_path: str = compiler_github.BENCH_WORKFLOW):
         super().__init__()
         self.compare, self.artifacts, self.run_path = compare, artifacts, run_path
+        # The original run's bench workflow; this default predates machine-record retention.
+        self.workflow = "jobs:\n  compare:\n"
         self.payload = archive({"receipt.json": json.dumps(self.recorded()), "lab/summary.json": json.dumps(summary()), **corpus_members()})
         self.add_check(HEAD, compiler_receipt.check_marker(HEAD), status="completed")
 
@@ -580,6 +583,11 @@ class RecoveryApi(FakeGitHub):
             return copy.deepcopy(answers["/actions/runs/91"])
         if bare == f"/compare/{TRUSTED}...main":
             return {"status": "ahead"}
+        if bare == "/contents/" + compiler_github.BENCH_WORKFLOW:
+            if urllib.parse.parse_qs(urllib.parse.urlsplit(path).query) != {"ref": [TRUSTED]}:
+                raise urllib.error.HTTPError(path, 404, "not the original run revision", {}, None)
+            raw = self.workflow.encode()
+            return {"type": "file", "encoding": "base64", "size": len(raw), "content": base64.b64encode(raw).decode()}
         if bare in ("/contents/docs/compiler-main-profile-routing-v1.tsv",
                     "/contents/tools/compiler_main_profile_policy.c"):
             raise urllib.error.HTTPError(path, 404, "historical policy absence", {}, None)
@@ -643,6 +651,26 @@ class RecoveryTest(unittest.TestCase):
             code, published = self.run_recovery(api)
         self.assertEqual((code, published), (1, {}))
 
+    def test_recovery_waives_the_machine_record_only_for_a_legacy_workflow_revision(self) -> None:
+        modern = "jobs:\n  compare:\n    steps:\n      - name: Retain the machine-specification record\n"
+        record = machine_bytes(run_id={"value": "37486885378", "status": "available", "reason": ""})
+        for label, workflow, machine, conclusion in (
+                ("legacy revision without a record", "jobs:\n  compare:\n", None, "success"),
+                ("modern revision without a record", modern, None, "failure"),
+                ("modern revision with its record", modern, record, "success"),
+                ("legacy revision with a stale record", "jobs:\n  compare:\n", machine_bytes(), "failure")):
+            with self.subTest(label=label):
+                api = RecoveryApi()
+                api.workflow = workflow
+                if machine is not None:
+                    api.payload = archive({"receipt.json": json.dumps(api.recorded()), "lab/summary.json": json.dumps(summary()),
+                                           **corpus_members(), compiler_publish.MACHINE_RECORD: machine})
+                code, published = self.run_recovery(api)
+                self.assertEqual((code, published["conclusion"]), (0, conclusion))
+                if conclusion == "failure":
+                    self.assertIn("machine-specification record", published["markdown"])
+                self.assertEqual(api.writes, [])
+
     def test_recovered_failure_keeps_its_meaning(self) -> None:
         code, published = self.run_recovery(RecoveryApi(compare="failure"))
         self.assertEqual((code, published["conclusion"]), (0, "failure"))
@@ -650,11 +678,14 @@ class RecoveryTest(unittest.TestCase):
 
 
 class PublishTest(unittest.TestCase):
-    def test_publisher_completes_the_started_check_and_emits_the_entry(self) -> None:
+    def publish(self, record: bytes | None) -> tuple[RecoveryApi, dict, dict]:
+        """(api, started check, job outputs) after one main-mode publication of a valid receipt."""
         api = RecoveryApi()
         api.checks = []
         started = api.add_check(HEAD, marker(request="91", attempt="1"), status="in_progress")
-        api.payload = archive({"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary()), **corpus_members()})
+        machine = {} if record is None else {compiler_publish.MACHINE_RECORD: record}
+        api.payload = archive({"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary()),
+                               **corpus_members(), **machine})
         listing = {"artifacts": [{"id": 8, "name": f"buster-9700x-compiler-{HEAD}-1", "expired": False,
                                   "size_in_bytes": 100, "archive_download_url": "https://api.invalid/zip",
                                   "expires_at": "2027-01-04T00:00:00Z"}]}
@@ -686,6 +717,10 @@ class PublishTest(unittest.TestCase):
                     mock.patch("sys.stdout", new_callable=io.StringIO):
                 self.assertEqual(compiler_publish.main(), 0)
             written = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        return api, started, written
+
+    def test_publisher_completes_the_started_check_and_emits_the_entry(self) -> None:
+        api, started, written = self.publish(machine_bytes())
         self.assertEqual(len(api.checks), 1)
         self.assertEqual((started["status"], started["conclusion"]), ("completed", "success"))
         self.assertIn("[Evidence artifact]", started["output"]["summary"])
@@ -694,6 +729,15 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(published["check_url"], started["html_url"])
         self.assertEqual(compiler_comment.validate_entry(published, REPO), [])
         self.assertIn(f"`{'b' * 40}` (first parent)", published["markdown"])
+        self.assertIn('"cpu_vendor": "unknown (not exposed', started["output"]["text"])
+
+    def test_publisher_refuses_a_missing_or_stale_machine_record(self) -> None:
+        stale = machine_bytes(run_id={"value": "90", "status": "available", "reason": ""})
+        for record, reason in ((None, "is missing from the evidence artifact"), (stale, "run_id '90' is not")):
+            with self.subTest(reason=reason):
+                started = self.publish(record)[1]
+                self.assertEqual((started["status"], started["conclusion"]), ("completed", "failure"))
+                self.assertIn(reason, started["output"]["summary"])
 
 
 if __name__ == "__main__":

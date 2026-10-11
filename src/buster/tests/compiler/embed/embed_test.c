@@ -189,10 +189,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_host_data(UnitTestArguments* argum
             .address = &host_scale,
             .kind = BUSTER_EMBED_SYMBOL_DATA,
         };
+        BusterEmbedImport unrelated_import = import;
+        unrelated_import.name = (BusterEmbedString){"unrelated_data", sizeof("unrelated_data") - 1};
+        // This data-only source reaches DATA resolution before any function
+        // import can mask it. Both failures must leave the module retryable.
+        for (u32 binding_case = 0; binding_case < 2; binding_case += 1)
+        {
+            BusterEmbedStatus unresolved = buster_embed_module_load(
+                module, binding_case ? &unrelated_import : 0, binding_case);
+            BUSTER_TEST(arguments, unresolved == BUSTER_EMBED_STATUS_UNRESOLVED_IMPORT);
+            BUSTER_TEST(arguments, embed_test_contains(buster_embed_module_message(module), "unresolved JIT import"));
+            BUSTER_TEST(arguments, embed_test_contains(buster_embed_module_message(module), "host_scale"));
+            BUSTER_TEST(arguments, buster_embed_module_status(module) == BUSTER_EMBED_STATUS_OK);
+            void* unavailable = &host_scale;
+            BUSTER_TEST(arguments, buster_embed_module_symbol(
+                                      module, (BusterEmbedString){"run", 3}, &unavailable) == BUSTER_EMBED_STATUS_NOT_LOADED);
+            BUSTER_TEST(arguments, !unavailable);
+        }
         BusterEmbedStatus load_status = buster_embed_module_load(module, &import, 1);
         BUSTER_TEST(arguments, load_status == BUSTER_EMBED_STATUS_OK);
         if (load_status == BUSTER_EMBED_STATUS_OK)
         {
+            BUSTER_TEST(arguments, buster_embed_module_message(module).length == 0);
             void* address = 0;
             BusterEmbedStatus status = buster_embed_module_symbol(module, (BusterEmbedString){"run", 3}, &address);
             BUSTER_TEST(arguments, status == BUSTER_EMBED_STATUS_OK);
