@@ -2,9 +2,14 @@
 """Synthetic tests for the backend capability catalogue validator."""
 
 import copy
+import contextlib
+import io
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import backend_capabilities as capabilities
 
@@ -16,12 +21,6 @@ class BackendCapabilityTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.write("docs/backend.md", "backend documentation\n")
         self.write("src/buster/lib/backend.c", 'return "backend diagnostic";\n')
-        self.write(
-            "src/buster/tests/test.c",
-            'UnitTestResult fixture_test(void) { return UNIT_TEST_PASS; }\n'
-            'void register_test(void) { fixture_test(); }\n'
-            '"backend diagnostic";\n',
-        )
         self.data = {
             "schema": capabilities.SCHEMA,
             "reviewed_revision": "a" * 40,
@@ -54,12 +53,23 @@ class BackendCapabilityTests(unittest.TestCase):
                 }],
             }],
         }
+        self.write_tests('UnitTestResult fixture_test(void) { return UNIT_TEST_PASS; }\n'
+                         '"backend diagnostic";\n')
+        self.write("docs/backend-capabilities-v1.json", json.dumps(self.data))
 
     def write(self, name, text):
         path = self.root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
         return path
+
+    def write_tests(self, functions, entries=(("fixture_tests", "fixture_test"),)):
+        table = "TestDescriptor test_descriptors[TEST_ID_COUNT] = {\n"
+        table += "".join(
+            f'    [TEST_ID_FIXTURE_{index}] = {{S8_INITIALIZER("{module}"), &{function}}},\n'
+            for index, (module, function) in enumerate(entries)
+        )
+        self.write("src/buster/tests/test.c", functions + "\n" + table + "};\n")
 
     def errors(self, mutate=None):
         data = copy.deepcopy(self.data)
@@ -139,6 +149,9 @@ class BackendCapabilityTests(unittest.TestCase):
         self.write("src/buster/tests/test.c", (self.root / "src/buster/tests/test.c").read_text()
                    + "REGISTERED_ANCHOR\n")
         self.assertEqual([], capabilities.validate_catalogue(anchor_data, self.root, "catalogue.json"))
+        anchor_evidence = capabilities.derived_report(anchor_data, self.root)["cells"][0]["evidence"][0]
+        self.assertEqual([], anchor_evidence["modules"])
+        self.assertNotIn("test_command", anchor_evidence)
 
         mutations = (
             (lambda data: data["cells"][0]["evidence"][0].update(file="missing.c"), "file does not exist"),
@@ -154,7 +167,11 @@ class BackendCapabilityTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assert_error(self.errors(mutate), expected)
 
-        self.write("src/buster/tests/test.c", "UnitTestResult fixture_test(void) { return UNIT_TEST_PASS; }\n")
+        self.write_tests(
+            "UnitTestResult fixture_test(void) { return UNIT_TEST_PASS; }\n"
+            "UnitTestResult other_test(void) { return UNIT_TEST_PASS; }\n",
+            (("other_tests", "other_test"),),
+        )
         self.assert_error(self.errors(), "occurs 1 times under src/buster/tests")
 
         anchor_data["cells"][0]["evidence"][0]["anchor"] = "missing anchor"
@@ -167,7 +184,7 @@ class BackendCapabilityTests(unittest.TestCase):
         self.assertEqual([], self.errors())
         report = capabilities.derived_report(self.data, self.root)
         self.assertTrue(report["cells"][0]["diagnostics"][0]["diagnostic_tested"])
-        self.write("src/buster/tests/test.c", "UnitTestResult fixture_test(void) { }\nfixture_test();\n")
+        self.write_tests("UnitTestResult fixture_test(void) { }\nfixture_test();\n")
         self.assertEqual([], self.errors())
         self.assertFalse(
             capabilities.derived_report(self.data, self.root)["cells"][0]["diagnostics"][0]["diagnostic_tested"])
@@ -241,11 +258,98 @@ class BackendCapabilityTests(unittest.TestCase):
         self.assertIn("[Fixture backend](backend.md)", rendered)
         self.assertIn("Evidence marked **requires X** depends on tool X.", rendered)
         self.assertIn("requires `node`; missing: skip", rendered)
+        self.assertIn(
+            "build/Release/ide test --module=fixture_tests --ci=1",
+            rendered,
+        )
         self.assertIn("diagnostic `backend diagnostic` (tested)", rendered)
         report = capabilities.derived_report(self.data, self.root)
+        self.assertEqual(["fixture_tests"], report["cells"][0]["evidence"][0]["modules"])
+        self.assertEqual(
+            "build/Release/ide test --module=fixture_tests --ci=1",
+            report["cells"][0]["evidence"][0]["test_command"],
+        )
         self.assertEqual(["encode"], report["cells"][0]["levels"])
         self.assertEqual(1, report["summary"]["fixture"]["supported"])
         self.assertEqual(self.data["requirements"], report["requirements"])
+
+    def test_graph_direct_manifest_entry(self):
+        modules, errors = capabilities.registered_test_modules(self.root)
+        self.assertEqual([], errors)
+        self.assertEqual(["fixture_tests"], modules["fixture_test"])
+
+    def test_graph_transitive_manifest_entry(self):
+        self.write_tests(
+            "UnitTestResult entry_tests(void) { return fixture_helper(); }\n"
+            "UnitTestResult fixture_helper(void) { return fixture_test(); }\n"
+            "UnitTestResult fixture_test(void) { return UNIT_TEST_PASS; }\n",
+            (("transitive_tests", "entry_tests"),),
+        )
+        modules, errors = capabilities.registered_test_modules(self.root)
+        self.assertEqual([], errors)
+        self.assertEqual(["transitive_tests"], modules["fixture_test"])
+
+    def test_graph_symbol_reached_from_two_modules(self):
+        self.write_tests(
+            "UnitTestResult first_tests(void) { return fixture_test(); }\n"
+            "UnitTestResult second_tests(void) { return fixture_test(); }\n"
+            "UnitTestResult fixture_test(void) { return UNIT_TEST_PASS; }\n",
+            (("first_tests", "first_tests"), ("second_tests", "second_tests")),
+        )
+        modules, errors = capabilities.registered_test_modules(self.root)
+        self.assertEqual([], errors)
+        self.assertEqual(["first_tests", "second_tests"], modules["fixture_test"])
+
+    def test_graph_unreachable_symbol_fails_validation(self):
+        self.write_tests(
+            "UnitTestResult registered_tests(void) { return UNIT_TEST_PASS; }\n"
+            "UnitTestResult unregistered_tests(void) { return fixture_test(); }\n"
+            "UnitTestResult fixture_test(void) { return UNIT_TEST_PASS; }\n",
+            (("registered_tests", "registered_tests"),),
+        )
+        self.assert_error(self.errors(), "fixture_test' is not reachable from any registered test module")
+
+    def run_ci_report(self, log, environment=None):
+        log_path = self.write("run.log", log)
+        output = io.StringIO()
+        errors = io.StringIO()
+        environment = {"GITHUB_SHA": "b" * 40} if environment is None else environment
+        with patch.dict(os.environ, environment, clear=True):
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                result = capabilities.main(["--ci-report", str(log_path), "--root", str(self.root)])
+        return result, output.getvalue(), errors.getvalue()
+
+    def test_ci_report_passed_failed_not_run_and_unset_run_url(self):
+        records = (
+            ("TEST_MODULE_TIMING index=0 module=fixture_tests duration_ns=10 passed=1 failed=0 assertions=1 status=pass\n",
+             "passed"),
+            ("TEST_MODULE_TIMING index=0 module=fixture_tests duration_ns=10 passed=0 failed=1 assertions=1 status=fail\n",
+             "failed"),
+            ("", "not run"),
+        )
+        for log, status in records:
+            with self.subTest(status=status):
+                result, output, errors = self.run_ci_report(log)
+                self.assertEqual(0, result, errors)
+                self.assertIn(f"| fixture_tests | {status} |", output)
+                self.assertIn(f"Revision: `{('b' * 40)}`", output)
+                self.assertNotIn("actions/runs/", output)
+
+    def test_ci_report_rejects_malformed_timing_line(self):
+        result, output, errors = self.run_ci_report("TEST_MODULE_TIMING malformed\n")
+        self.assertEqual(1, result)
+        self.assertEqual("", output)
+        self.assertIn("malformed TEST_MODULE_TIMING", errors)
+
+    def test_ci_report_writes_to_step_summary_when_set(self):
+        summary = self.root / "summary.md"
+        result, output, errors = self.run_ci_report(
+            "",
+            {"GITHUB_SHA": "c" * 40, "GITHUB_STEP_SUMMARY": str(summary)},
+        )
+        self.assertEqual(0, result, errors)
+        self.assertEqual("", output)
+        self.assertIn("not run", summary.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

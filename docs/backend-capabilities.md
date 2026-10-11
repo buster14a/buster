@@ -31,27 +31,27 @@ A registered target or emitted bytes are not a support claim. Direct code genera
 | Feature | Status | Levels | Evidence | Note |
 |---|---|---|---|---|
 | Scalar calls | supported | integration | anchor `S8_INITIALIZER("test_self_host")` in `build.c` | Self-host fixed point builds and reruns the compiler with itself. |
-| Aggregate call ABI | supported | encode, object-link | `machine_test_native_aggregate` in `src/buster/tests/compiler/codegen/machine_test.c`<br>`compiler_driver_test_sysv_empty_aggregates` in `src/buster/tests/compiler/driver/driver_test.c` | — |
-| Variadic calls | supported | object-link | `compiler_driver_test_sysv_indirect_variadic` in `src/buster/tests/compiler/driver/driver_test.c`<br>`compiler_driver_test_sysv_wide_aggregate_va_arg` in `src/buster/tests/compiler/driver/driver_test.c` | — |
-| Indirect calls | supported | object-link | `compiler_driver_test_sysv_indirect_variadic` in `src/buster/tests/compiler/driver/driver_test.c` | — |
-| Atomics | supported | object-link, execute | `c_test_atomic_compound_assignment_runtime` in `src/buster/tests/compiler/frontend/c/c_test.c`<br>`compiler_driver_test_atomic_pair_contention` in `src/buster/tests/compiler/driver/driver_test.c` | — |
-| SIMD/vectors | partial | encode, execute | `machine_test_wide_vector_boundaries` in `src/buster/tests/compiler/codegen/machine_test.c`<br>`machine_test_win64_vector_execute` in `src/buster/tests/compiler/codegen/machine_test.c` | Vector values and ABI boundaries are covered; this row does not claim every SIMD intrinsic form. |
-| TLS | supported | object-link | `compiler_driver_test_native_tls` in `src/buster/tests/compiler/driver/driver_test.c` | — |
-| Debug info | supported | object-link | `compiler_driver_test_dwarf5_objects` in `src/buster/tests/compiler/driver/driver_test.c`<br>`compiler_driver_test_debug_scalar_local_locations` in `src/buster/tests/compiler/driver/driver_test.c` | DWARF evidence; CodeView/PDB are tracked by their own test modules. |
-| Object/link | supported | object-link, integration | `compiler_driver_test_dwarf5_objects` in `src/buster/tests/compiler/driver/driver_test.c`<br>anchor `S8_INITIALIZER("test_self_host")` in `build.c` | — |
-| Execution/independent oracle | supported | execute, integration | `c_test_atomic_compound_assignment_runtime` in `src/buster/tests/compiler/frontend/c/c_test.c`<br>anchor `S8_INITIALIZER("test_self_host")` in `build.c` | — |
+| Aggregate call ABI | supported | encode, object-link | `machine_test_native_aggregate` in `src/buster/tests/compiler/codegen/machine_test.c`<br>test `build/Release/ide test --module=machine_tests --ci=1`<br>`compiler_driver_test_sysv_empty_aggregates` in `src/buster/tests/compiler/driver/driver_test.c`<br>test `build/Release/ide test --module=compiler_driver_tests --ci=1` | — |
+| Variadic calls | supported | object-link | `compiler_driver_test_sysv_indirect_variadic` in `src/buster/tests/compiler/driver/driver_test.c`<br>test `build/Release/ide test --module=compiler_driver_tests --ci=1`<br>`compiler_driver_test_sysv_wide_aggregate_va_arg` in `src/buster/tests/compiler/driver/driver_test.c`<br>test `build/Release/ide test --module=compiler_driver_tests --ci=1` | — |
+| Indirect calls | supported | object-link | `compiler_driver_test_sysv_indirect_variadic` in `src/buster/tests/compiler/driver/driver_test.c`<br>test `build/Release/ide test --module=compiler_driver_tests --ci=1` | — |
+| Atomics | supported | object-link, execute | `c_test_atomic_compound_assignment_runtime` in `src/buster/tests/compiler/frontend/c/c_test.c`<br>test `build/Release/ide test --module=c_frontend_tests --ci=1`<br>`compiler_driver_test_atomic_pair_contention` in `src/buster/tests/compiler/driver/driver_test.c`<br>test `build/Release/ide test --module=compiler_driver_tests --ci=1` | — |
+| SIMD/vectors | partial | encode, execute | `machine_test_wide_vector_boundaries` in `src/buster/tests/compiler/codegen/machine_test.c`<br>test `build/Release/ide test --module=machine_tests --ci=1`<br>`machine_test_win64_vector_execute` in `src/buster/tests/compiler/codegen/machine_test.c`<br>test `build/Release/ide test --module=machine_tests --ci=1` | Vector values and ABI boundaries are covered; this row does not claim every SIMD intrinsic form. |
+| TLS | supported | object-link | `compiler_driver_test_native_tls` in `src/buster/tests/compiler/driver/driver_test.c`<br>test `build/Release/ide test --module=compiler_driver_tests --ci=1` | — |
+| Debug info | supported | object-link | `compiler_driver_test_dwarf5_objects` in `src/buster/tests/compiler/driver/driver_test.c`<br>test `build/Release/ide test --module=compiler_driver_tests --ci=1`<br>`compiler_driver_test_debug_scalar_local_locations` in `src/buster/tests/compiler/driver/driver_test.c`<br>test `build/Release/ide test --module=compiler_driver_tests --ci=1` | DWARF evidence; CodeView/PDB are tracked by their own test modules. |
+| Object/link | supported | object-link, integration | `compiler_driver_test_dwarf5_objects` in `src/buster/tests/compiler/driver/driver_test.c`<br>test `build/Release/ide test --module=compiler_driver_tests --ci=1`<br>anchor `S8_INITIALIZER("test_self_host")` in `build.c` | — |
+| Execution/independent oracle | supported | execute, integration | `c_test_atomic_compound_assignment_runtime` in `src/buster/tests/compiler/frontend/c/c_test.c`<br>test `build/Release/ide test --module=c_frontend_tests --ci=1`<br>anchor `S8_INITIALIZER("test_self_host")` in `build.c` | — |
 
 ## AArch64 native
 
 | Feature | Status | Levels | Evidence | Note |
 |---|---|---|---|---|
 | Scalar calls | unknown | — | — | Not yet audited for this backend. |
-| Aggregate call ABI | partial | encode | `machine_test_a64_large_aggregate_copy` in `src/buster/tests/compiler/codegen/machine_test.c` | Large aggregate copy lowering only; AAPCS64 aggregate argument evidence not yet audited. |
-| Variadic calls | supported | object-link | `compiler_driver_test_aarch64_platform_variadic` in `src/buster/tests/compiler/driver/driver_test.c` | — |
+| Aggregate call ABI | partial | encode | `machine_test_a64_large_aggregate_copy` in `src/buster/tests/compiler/codegen/machine_test.c`<br>test `build/Release/ide test --module=machine_tests --ci=1` | Large aggregate copy lowering only; AAPCS64 aggregate argument evidence not yet audited. |
+| Variadic calls | supported | object-link | `compiler_driver_test_aarch64_platform_variadic` in `src/buster/tests/compiler/driver/driver_test.c`<br>test `build/Release/ide test --module=compiler_driver_tests --ci=1` | — |
 | Indirect calls | unknown | — | — | Not yet audited for this backend. |
 | Atomics | unknown | — | — | Not yet audited for this backend. |
-| SIMD/vectors | partial | encode | `aarch64_direct_simd_tests` in `src/buster/tests/compiler/assembly/aarch64_direct_simd_test.c` | Assembler-level SIMD encoding; canonical vector codegen evidence not yet audited. |
-| TLS | supported | object-link | `compiler_driver_test_aarch64_elf_tlsdesc` in `src/buster/tests/compiler/driver/driver_test.c`<br>`compiler_driver_test_aarch64_elf_tls_initial_exec` in `src/buster/tests/compiler/driver/driver_test.c` | — |
+| SIMD/vectors | partial | encode | `aarch64_direct_simd_tests` in `src/buster/tests/compiler/assembly/aarch64_direct_simd_test.c`<br>test `build/Release/ide test --module=aarch64_direct_simd_tests --ci=1` | Assembler-level SIMD encoding; canonical vector codegen evidence not yet audited. |
+| TLS | supported | object-link | `compiler_driver_test_aarch64_elf_tlsdesc` in `src/buster/tests/compiler/driver/driver_test.c`<br>test `build/Release/ide test --module=compiler_driver_tests --ci=1`<br>`compiler_driver_test_aarch64_elf_tls_initial_exec` in `src/buster/tests/compiler/driver/driver_test.c`<br>test `build/Release/ide test --module=compiler_driver_tests --ci=1` | — |
 | Debug info | unknown | — | — | Not yet audited for this backend. |
 | Object/link | unknown | — | — | Not yet audited for this backend. |
 | Execution/independent oracle | unknown | — | — | Routine Apple CI runs AArch64; per-feature execution evidence not yet mapped. |
@@ -68,23 +68,23 @@ A registered target or emitted bytes are not a support claim. Direct code genera
 | SIMD/vectors | unknown | — | — | Shares native code generation; UEFI-specific evidence not yet audited. |
 | TLS | unknown | — | — | Shares native code generation; UEFI-specific evidence not yet audited. |
 | Debug info | unknown | — | — | Shares native code generation; UEFI-specific evidence not yet audited. |
-| Object/link | supported | object-link | `link_test_uefi_pe64` in `src/buster/tests/compiler/link/link_test.c` | x86-64 and AArch64 PE32+ images. |
+| Object/link | supported | object-link | `link_test_uefi_pe64` in `src/buster/tests/compiler/link/link_test.c`<br>test `build/Release/ide test --module=link_tests --ci=1` | x86-64 and AArch64 PE32+ images. |
 | Execution/independent oracle | unknown | — | — | Firmware execution is a separate gate described in docs/uefi-target.md. |
 
 ## Wasm64 Memory64 (wasm64-unknown-freestanding)
 
 | Feature | Status | Levels | Evidence | Note |
 |---|---|---|---|---|
-| Scalar calls | supported | encode | `compiler_driver_test_wasm_integers` in `src/buster/tests/compiler/driver/driver_test.c` | — |
+| Scalar calls | supported | encode | `compiler_driver_test_wasm_integers` in `src/buster/tests/compiler/driver/driver_test.c`<br>test `build/Release/ide test --module=compiler_driver_tests --ci=1` | — |
 | Aggregate call ABI | unsupported-diagnostic | — | diagnostic `aggregate or unsupported parameter ABI in WebAssembly function` (source only) | Local aggregate copies are supported; aggregate parameter ABI is not. |
 | Variadic calls | unknown | — | — | Not yet audited for this backend. |
-| Indirect calls | supported | encode, oracle, execute | `compiler_driver_test_wasm64_function_tables` in `src/buster/tests/compiler/driver/driver_test.c` (requires `node`; missing: skip) | Scalar function-pointer table ABI with typed indirect calls. |
+| Indirect calls | supported | encode, oracle, execute | `compiler_driver_test_wasm64_function_tables` in `src/buster/tests/compiler/driver/driver_test.c`<br>test `build/Release/ide test --module=compiler_driver_tests --ci=1` (requires `node`; missing: skip) | Scalar function-pointer table ABI with typed indirect calls. |
 | Atomics | unsupported-diagnostic | — | diagnostic `atomic operations are unsupported by WebAssembly` (source only) | — |
 | SIMD/vectors | unsupported-diagnostic | — | diagnostic `exact SIMD intrinsics are unsupported by Wasm64; select an explicit source fallback` (source only) | — |
 | TLS | unknown | — | — | Not yet audited for this backend. |
 | Debug info | unknown | — | — | Not yet audited for this backend. |
 | Object/link | unknown | — | — | Emits a core module directly; no relocatable object/link contract is claimed. |
-| Execution/independent oracle | supported | oracle, execute | `compiler_driver_test_wasm64_function_tables` in `src/buster/tests/compiler/driver/driver_test.c` (requires `node`; missing: skip) | Node validates and executes the emitted table/typed-call module. compiler_driver_test_wasm_node_policy covers Node process-lifecycle policy only, not engine execution. |
+| Execution/independent oracle | supported | oracle, execute | `compiler_driver_test_wasm64_function_tables` in `src/buster/tests/compiler/driver/driver_test.c`<br>test `build/Release/ide test --module=compiler_driver_tests --ci=1` (requires `node`; missing: skip) | Node validates and executes the emitted table/typed-call module. compiler_driver_test_wasm_node_policy covers Node process-lifecycle policy only, not engine execution. |
 
 ## Wasm32 WASI Preview 1 (wasm32-wasip1)
 
@@ -105,7 +105,7 @@ A registered target or emitted bytes are not a support claim. Direct code genera
 
 | Feature | Status | Levels | Evidence | Note |
 |---|---|---|---|---|
-| Scalar calls | supported | encode | `codegen_test_ebpf_local_calls` in `src/buster/tests/compiler/codegen/ebpf_call_test_internal.h`<br>`codegen_test_ebpf_scalars` in `src/buster/tests/compiler/codegen/ebpf_test_internal.h` | — |
+| Scalar calls | supported | encode | `codegen_test_ebpf_local_calls` in `src/buster/tests/compiler/codegen/ebpf_call_test_internal.h`<br>test `build/Release/ide test --module=codegen_tests --ci=1`<br>`codegen_test_ebpf_scalars` in `src/buster/tests/compiler/codegen/ebpf_test_internal.h`<br>test `build/Release/ide test --module=codegen_tests --ci=1` | — |
 | Aggregate call ABI | unsupported-diagnostic | — | diagnostic `aggregate eBPF subprogram arguments are unsupported` (source only) | — |
 | Variadic calls | unsupported-diagnostic | — | diagnostic `variadic functions are unsupported by eBPF` (source only) | — |
 | Indirect calls | unsupported-diagnostic | — | diagnostic `indirect calls are unsupported by the eBPF backend` (source only) | — |
@@ -120,16 +120,16 @@ A registered target or emitted bytes are not a support claim. Direct code genera
 
 | Feature | Status | Levels | Evidence | Note |
 |---|---|---|---|---|
-| Scalar calls | supported | encode, oracle, execute | `llvm_bitcode_test_scalar_abi_wire` in `src/buster/tests/compiler/llvm/bitcode_test.c`<br>`llvm_bitcode_test_scalar_abi_runtime` in `src/buster/tests/compiler/llvm/bitcode_test.c` (requires `gcc-and-clang`; missing: fail) | — |
-| Aggregate call ABI | partial | oracle | `llvm_bitcode_test_aggregate_va_arg` in `src/buster/tests/compiler/llvm/bitcode_test.c` (requires `clang`; missing: skip)<br>diagnostic `unsupported LLVM aggregate ABI part` (source only) | Only the documented aggregate ABI parts are lowered. |
-| Variadic calls | supported | encode | `llvm_bitcode_test_canonical_variadics` in `src/buster/tests/compiler/llvm/bitcode_test.c` | Canonical va_list operations are built directly in IR and encoded; no independent consumer is mapped for this row. |
+| Scalar calls | supported | encode, oracle, execute | `llvm_bitcode_test_scalar_abi_wire` in `src/buster/tests/compiler/llvm/bitcode_test.c`<br>test `build/Release/ide test --module=llvm_bitcode_tests --ci=1`<br>`llvm_bitcode_test_scalar_abi_runtime` in `src/buster/tests/compiler/llvm/bitcode_test.c`<br>test `build/Release/ide test --module=llvm_bitcode_tests --ci=1` (requires `gcc-and-clang`; missing: fail) | — |
+| Aggregate call ABI | partial | oracle | `llvm_bitcode_test_aggregate_va_arg` in `src/buster/tests/compiler/llvm/bitcode_test.c`<br>test `build/Release/ide test --module=llvm_bitcode_tests --ci=1` (requires `clang`; missing: skip)<br>diagnostic `unsupported LLVM aggregate ABI part` (source only) | Only the documented aggregate ABI parts are lowered. |
+| Variadic calls | supported | encode | `llvm_bitcode_test_canonical_variadics` in `src/buster/tests/compiler/llvm/bitcode_test.c`<br>test `build/Release/ide test --module=llvm_bitcode_tests --ci=1` | Canonical va_list operations are built directly in IR and encoded; no independent consumer is mapped for this row. |
 | Indirect calls | unknown | — | — | Not yet audited for this backend. |
 | Atomics | unknown | — | — | Not yet audited for this backend. |
 | SIMD/vectors | unknown | — | — | Not yet audited for this backend. |
 | TLS | unknown | — | — | Not yet audited for this backend. |
 | Debug info | unknown | — | — | Not yet audited for this backend. |
 | Object/link | not-applicable | — | — | Bitcode is consumed by external LLVM tools; Buster does not link it. |
-| Execution/independent oracle | supported | oracle | `llvm_bitcode_test_consumers` in `src/buster/tests/compiler/llvm/bitcode_test.c` (requires `clang`; missing: skip) | — |
+| Execution/independent oracle | supported | oracle | `llvm_bitcode_test_consumers` in `src/buster/tests/compiler/llvm/bitcode_test.c`<br>test `build/Release/ide test --module=llvm_bitcode_tests --ci=1` (requires `clang`; missing: skip) | — |
 
 ## Direct Vulkan 1.2 SPIR-V compute
 
@@ -144,7 +144,7 @@ A registered target or emitted bytes are not a support claim. Direct code genera
 | TLS | unknown | — | — | Not yet audited for this backend. |
 | Debug info | unknown | — | — | Not yet audited for this backend. |
 | Object/link | unknown | — | — | Not yet audited for this backend. |
-| Execution/independent oracle | partial | encode | `spirv_test_transform` in `src/buster/tests/compiler/spirv/spirv_test.c` | Independent spirv-val validation and device execution are not mapped to a registered test here. |
+| Execution/independent oracle | partial | encode | `spirv_test_transform` in `src/buster/tests/compiler/spirv/spirv_test.c`<br>test `build/Release/ide test --module=spirv_compute_tests --ci=1` | Independent spirv-val validation and device execution are not mapped to a registered test here. |
 
 ## External GPU toolchains (SPIR-V, PTX, AMDGCN, Metal, DXIL)
 
