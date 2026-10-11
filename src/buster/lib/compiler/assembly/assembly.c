@@ -556,8 +556,11 @@ struct AssemblyInstruction
     u8 aarch64_control_reserved;
     // `:lo12:sym` / `sym@PAGEOFF` and numeric `:lo12:value` use the same
     // checked emitter; numeric values are encoded as scaled immediates.
+    // `aarch64_got` selects the ELF GOT spellings instead: `adrp Xd, :got:sym`
+    // (no `aarch64_lo12` row) and `ldr Xt, [Xn, :got_lo12:sym]` (#3192).
     bool aarch64_lo12;
     bool aarch64_lo12_numeric;
+    bool aarch64_got;
     AssemblyExpression aarch64_lo12_expression;
     BusterAarch64SystemInstruction aarch64_system_instruction;
     u16 aarch64_system_register_encoding;
@@ -8985,6 +8988,8 @@ BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, Strin
         TARGET_CPU_FEATURE_AARCH64_SSBS,
         TARGET_CPU_FEATURE_AARCH64_TRACEV8_4,
         TARGET_CPU_FEATURE_AARCH64_SME,
+        TARGET_CPU_FEATURE_AARCH64_SVE,
+        TARGET_CPU_FEATURE_AARCH64_SME_I16I64,
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(x86_feature_bits) + BUSTER_ARRAY_LENGTH(aarch64_feature_bits) ==
                     (u32)TARGET_CPU_FEATURE_COUNT - 2);
@@ -9610,6 +9615,27 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_alias(Target target, Assem
     return true;
 }
 
+// GNU as accepts (and objdump prints) the memory-looking `(%dx)` for the
+// IN/OUT port. It names the DX register itself, so only the bare 16-bit DX
+// inside one parenthesis pair qualifies; `(%rdx)`, `0(%dx)` and segment or
+// index spellings stay memory syntax and are rejected like GNU as does.
+BUSTER_GLOBAL_LOCAL bool assembly_x86_att_port_dx_parse(String8 text, AssemblySyntax syntax, AssemblyRegister* result)
+{
+    bool parsed = false;
+    if (syntax == ASSEMBLY_SYNTAX_ATT && text.length >= 2 && text.pointer[0] == '(' && text.pointer[text.length - 1] == ')')
+    {
+        AssemblyRegister reg = {0};
+        String8 inner = assembly_trim(string_slice(text, 1, text.length - 1));
+        parsed = assembly_register_parse(inner, syntax, &reg) && reg.class == ASSEMBLY_REGISTER_GPR && reg.width == 16 &&
+                 reg.index == 2;
+        if (parsed)
+        {
+            *result = reg;
+        }
+    }
+    return parsed;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_applies(AssemblyOpcode opcode, u32 operand_index, u32 operand_count)
 {
     if (opcode == ASSEMBLY_OPCODE_X86_LEA || assembly_x86_opcode_is_rotate(opcode) ||
@@ -10189,6 +10215,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     u32 symbol_count_before_dfv = builder->result.symbol_count;
     bool has_dfv = false;
     u8 dfv = 0;
+    bool port_io_mnemonic = assembly_word_equal(mnemonic, S8("in")) || assembly_word_equal(mnemonic, S8("out"));
     while (operand_start < operands_text.length)
     {
         if (operand_count >= BUSTER_ARRAY_LENGTH(operands))
@@ -10250,6 +10277,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             text = assembly_trim(string_slice(text, 1, text.length));
         }
         if (!att_immediate && assembly_register_parse(text, syntax, &operand->reg))
+        {
+            operand->kind = ASSEMBLY_OPERAND_REGISTER;
+        }
+        else if (port_io_mnemonic && assembly_x86_att_port_dx_parse(text, syntax, &operand->reg))
         {
             operand->kind = ASSEMBLY_OPERAND_REGISTER;
         }
@@ -10806,9 +10837,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                              (assembly_word_equal(mnemonic, S8("rstorssp")) || assembly_word_equal(mnemonic, S8("clrssbsy")));
     bool implicit_att_memory = syntax == ASSEMBLY_SYNTAX_ATT;
     if (implicit_att_memory && assembly_word_equal(mnemonic, S8("cldemote"))) implicit_memory_width = 8;
-    else if (implicit_att_memory && (assembly_word_equal(mnemonic, S8("stmxcsr")) || assembly_word_equal(mnemonic, S8("ldmxcsr"))))
-        // MXCSR is one 32-bit control word and AT&T carries no size suffix on
-        // the spelling a libc's <fenv.h> uses.
+    else if (assembly_word_equal(mnemonic, S8("stmxcsr")) || assembly_word_equal(mnemonic, S8("ldmxcsr")))
+        // MXCSR is one 32-bit control word: AT&T carries no size suffix on
+        // the spelling a libc's <fenv.h> uses, and GNU as also infers m32 for
+        // an unsized Intel `[mem]`. An explicit ptr width is kept and checked.
         implicit_memory_width = 32;
     else if (implicit_att_memory &&
              (assembly_word_equal(mnemonic, S8("wrssd")) || assembly_word_equal(mnemonic, S8("wrussd"))))
@@ -12761,6 +12793,10 @@ BUSTER_GLOBAL_LOCAL void assembly_aarch64_base_instruction_parse(AssemblyBuilder
                             : status == A64_BASE_ASSEMBLY_REQUIRES_FULLFP16 ? S8("instruction requires the fullfp16 target feature")
                             : status == A64_BASE_ASSEMBLY_REQUIRES_NEON ? S8("instruction requires the neon target feature")
                             : status == A64_BASE_ASSEMBLY_REQUIRES_LSE ? S8("instruction requires the lse target feature")
+                            : status == A64_BASE_ASSEMBLY_REQUIRES_SVE_OR_SME
+                                  ? S8("instruction requires the sve or sme target feature")
+                            : status == A64_BASE_ASSEMBLY_REQUIRES_SME ? S8("instruction requires the sme target feature")
+                            : status == A64_BASE_ASSEMBLY_REQUIRES_SME_I16I64 ? S8("instruction requires the sme-i16i64 target feature")
                             : lane_result == ASSEMBLY_AARCH64_COMPLEX_SIMD_LANE_FEATURE_TARGET_UNSUPPORTED
                                   ? S8("instruction is unsupported by the selected target features")
                                                                        : (String8){0};
@@ -13340,12 +13376,14 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_statement(AssemblyBuilder* b
     }
 }
 
-// Page addressing in a standalone unit (#2933, #3127). `adrp x0, sym` names
-// its symbol directly, and the low 12 bits are `:lo12:sym` on ELF and COFF or
-// `sym@PAGEOFF` (with `sym@PAGE` on ADRP) on Mach-O. The modifier is replaced
-// by #0 so the ordinary encoders see a plain immediate; the checked emitter
-// then retains a symbolic relocation or patches a numeric scaled immediate. Other
-// modifier/instruction combinations are refused here with a specific message.
+// Page addressing in a standalone unit (#2933, #3127, #3192). `adrp x0, sym`
+// names its symbol directly, and the low 12 bits are `:lo12:sym` on ELF and
+// COFF or `sym@PAGEOFF` (with `sym@PAGE` on ADRP) on Mach-O. On ELF, `adrp
+// Xd, :got:sym` and `ldr Xt, [Xn, :got_lo12:sym]` address a GOT slot instead.
+// The modifier is replaced by #0 so the ordinary encoders see a plain
+// immediate; the checked emitter then retains a symbolic relocation or
+// patches a numeric scaled immediate. Other modifier/instruction combinations
+// are refused here with a specific message.
 typedef enum AssemblyAarch64ModifierResult
 {
     ASSEMBLY_AARCH64_MODIFIER_ABSENT,
@@ -13353,16 +13391,48 @@ typedef enum AssemblyAarch64ModifierResult
     ASSEMBLY_AARCH64_MODIFIER_REFUSED,
 } AssemblyAarch64ModifierResult;
 
-// The index of an unquoted `:lo12:` in the text, or its length when absent.
-BUSTER_GLOBAL_LOCAL u64 assembly_aarch64_lo12_find(String8 text)
+// The unquoted ELF modifier spellings the standalone unit recognizes.
+typedef enum AssemblyAarch64ColonModifier
+{
+    ASSEMBLY_AARCH64_COLON_MODIFIER_NONE,
+    ASSEMBLY_AARCH64_COLON_MODIFIER_GOT,
+    ASSEMBLY_AARCH64_COLON_MODIFIER_LO12,
+    ASSEMBLY_AARCH64_COLON_MODIFIER_GOT_LO12,
+} AssemblyAarch64ColonModifier;
+
+BUSTER_GLOBAL_LOCAL u64 assembly_aarch64_colon_modifier_length(AssemblyAarch64ColonModifier modifier)
+{
+    u64 length = modifier == ASSEMBLY_AARCH64_COLON_MODIFIER_GOT_LO12 ? S8(":got_lo12:").length
+                 : modifier == ASSEMBLY_AARCH64_COLON_MODIFIER_LO12   ? S8(":lo12:").length
+                 : modifier == ASSEMBLY_AARCH64_COLON_MODIFIER_GOT    ? S8(":got:").length
+                                                                      : 0;
+    return length;
+}
+
+// The index of an unquoted ELF `:lo12:`, `:got:` or `:got_lo12:` modifier in
+// the text, or its length when absent (`kind` is NONE then). `:got_lo12:` is
+// recognized before its `:got:` prefix.
+BUSTER_GLOBAL_LOCAL u64 assembly_aarch64_modifier_find(String8 text, AssemblyAarch64ColonModifier* kind)
 {
     u64 result = text.length;
+    u64 got_lo12_length = assembly_aarch64_colon_modifier_length(ASSEMBLY_AARCH64_COLON_MODIFIER_GOT_LO12);
+    u64 lo12_length = assembly_aarch64_colon_modifier_length(ASSEMBLY_AARCH64_COLON_MODIFIER_LO12);
+    u64 got_length = assembly_aarch64_colon_modifier_length(ASSEMBLY_AARCH64_COLON_MODIFIER_GOT);
     u64 colon = assembly_unquoted_character(text, 0, S8(":"));
     while (result == text.length && colon < text.length)
     {
-        if (colon + 6 <= text.length && assembly_word_equal(string_slice(text, colon, colon + 6), S8(":lo12:")))
+        AssemblyAarch64ColonModifier match =
+            colon + got_lo12_length <= text.length && assembly_word_equal(string_slice(text, colon, colon + got_lo12_length), S8(":got_lo12:"))
+                ? ASSEMBLY_AARCH64_COLON_MODIFIER_GOT_LO12
+            : colon + lo12_length <= text.length && assembly_word_equal(string_slice(text, colon, colon + lo12_length), S8(":lo12:"))
+                ? ASSEMBLY_AARCH64_COLON_MODIFIER_LO12
+            : colon + got_length <= text.length && assembly_word_equal(string_slice(text, colon, colon + got_length), S8(":got:"))
+                ? ASSEMBLY_AARCH64_COLON_MODIFIER_GOT
+                : ASSEMBLY_AARCH64_COLON_MODIFIER_NONE;
+        if (match != ASSEMBLY_AARCH64_COLON_MODIFIER_NONE)
         {
             result = colon;
+            *kind = match;
         }
         else
         {
@@ -13400,7 +13470,7 @@ BUSTER_GLOBAL_LOCAL u64 assembly_aarch64_at_modifier_find(String8 text, bool* pa
 }
 
 // The symbol expression left in an operand once its modifier is removed:
-// `:lo12:sym+8` and `sym@PAGEOFF+8` both leave `sym+8`.
+// `:lo12:sym+8`, `:got_lo12:sym` and `sym@PAGEOFF+8` all leave `sym+8`.
 BUSTER_GLOBAL_LOCAL String8 assembly_aarch64_modifier_strip(AssemblyBuilder* builder, String8 text, bool macho, bool* valid)
 {
     String8 result = {0};
@@ -13420,20 +13490,26 @@ BUSTER_GLOBAL_LOCAL String8 assembly_aarch64_modifier_strip(AssemblyBuilder* bui
             result = string_format(builder->arena, S8("{S8}{S8}"), head, tail);
         }
     }
-    else if (assembly_aarch64_lo12_find(text) == 0)
+    else
     {
-        result = assembly_trim(string_slice(text, 6, text.length));
+        AssemblyAarch64ColonModifier modifier = ASSEMBLY_AARCH64_COLON_MODIFIER_NONE;
+        if (assembly_aarch64_modifier_find(text, &modifier) == 0)
+        {
+            result = assembly_trim(string_slice(text, assembly_aarch64_colon_modifier_length(modifier), text.length));
+        }
     }
-    *valid = result.length != 0 && assembly_aarch64_lo12_find(result) == result.length;
+    AssemblyAarch64ColonModifier leftover = ASSEMBLY_AARCH64_COLON_MODIFIER_NONE;
+    *valid = result.length != 0 && assembly_aarch64_modifier_find(result, &leftover) == result.length;
     return result;
 }
 
 BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewrite(AssemblyBuilder* builder, String8 statement, u32 line,
                                                                                      u32 column, String8* rewritten,
-                                                                                     AssemblyExpression* expression, bool* relocated, bool* numeric)
+                                                                                     AssemblyExpression* expression, bool* relocated, bool* numeric, bool* got)
 {
     AssemblyAarch64ModifierResult result = ASSEMBLY_AARCH64_MODIFIER_ABSENT;
     *numeric = false;
+    *got = false;
     statement = assembly_trim(statement);
     u64 mnemonic_end = 0;
     while (mnemonic_end < statement.length && !assembly_space(statement.pointer[mnemonic_end]))
@@ -13443,16 +13519,19 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
     String8 mnemonic = string_slice(statement, 0, mnemonic_end);
     String8 operands = assembly_trim(string_slice(statement, mnemonic_end, statement.length));
     bool macho = builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS;
+    bool coff = builder->target.os == OPERATING_SYSTEM_WINDOWS;
     bool page_offset = false;
-    bool has_lo12 = assembly_aarch64_lo12_find(operands) < operands.length;
+    AssemblyAarch64ColonModifier operands_modifier = ASSEMBLY_AARCH64_COLON_MODIFIER_NONE;
+    bool has_colon = assembly_aarch64_modifier_find(operands, &operands_modifier) < operands.length;
     bool has_at = assembly_aarch64_at_modifier_find(operands, &page_offset) < operands.length;
-    if (has_lo12 || has_at)
+    if (has_colon || has_at)
     {
         String8 message = {0};
         String8 tokens[ASSEMBLY_MAX_OPERANDS] = {0};
         u32 token_count = 0;
         u32 modified = 0;
         u32 modified_count = 0;
+        AssemblyAarch64ColonModifier modified_modifier = ASSEMBLY_AARCH64_COLON_MODIFIER_NONE;
         bool split = true;
         u64 cursor = 0;
         while (split && cursor < operands.length)
@@ -13464,23 +13543,31 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
             {
                 tokens[token_count] = assembly_trim(token);
                 bool token_page_offset = false;
-                if (assembly_aarch64_lo12_find(tokens[token_count]) < tokens[token_count].length ||
+                AssemblyAarch64ColonModifier token_modifier = ASSEMBLY_AARCH64_COLON_MODIFIER_NONE;
+                if (assembly_aarch64_modifier_find(tokens[token_count], &token_modifier) < tokens[token_count].length ||
                     assembly_aarch64_at_modifier_find(tokens[token_count], &token_page_offset) < tokens[token_count].length)
                 {
                     modified = token_count;
                     modified_count += 1;
+                    modified_modifier = token_modifier;
                 }
                 token_count += 1;
             }
         }
         bool adrp = assembly_word_equal(mnemonic, S8("adrp"));
         bool add = assembly_word_equal(mnemonic, S8("add"));
+        bool ldr = assembly_word_equal(mnemonic, S8("ldr"));
+        // The modified token's ELF modifier kind, or NONE for a Mach-O
+        // @-modifier.
+        bool got_page = modified_modifier == ASSEMBLY_AARCH64_COLON_MODIFIER_GOT;
+        bool got_lo12 = modified_modifier == ASSEMBLY_AARCH64_COLON_MODIFIER_GOT_LO12;
         String8 symbol_text = {0};
         String8 replacement = {0};
         bool strip_valid = true;
-        if (has_lo12 && macho)
+        if (has_colon && macho)
         {
-            message = S8("':lo12:' is not a Mach-O modifier; write sym@PAGEOFF");
+            message = operands_modifier == ASSEMBLY_AARCH64_COLON_MODIFIER_LO12 ? S8("':lo12:' is not a Mach-O modifier; write sym@PAGEOFF")
+                                             : S8("AArch64 ':got:' and ':got_lo12:' operand modifiers are ELF-only");
         }
         else if (has_at && !macho)
         {
@@ -13489,6 +13576,40 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
         else if (!split || modified_count != 1)
         {
             message = S8("a relocation modifier must appear once, in a well-formed operand");
+        }
+        else if ((got_page || got_lo12) && coff)
+        {
+            message = S8("AArch64 ':got:' and ':got_lo12:' operand modifiers are ELF-only");
+        }
+        else if (got_page)
+        {
+            if (!adrp || modified != 1 || token_count != 2)
+            {
+                message = S8("a ':got:' modifier is valid only as the second operand of adrp");
+            }
+            else
+            {
+                symbol_text = assembly_aarch64_modifier_strip(builder, tokens[modified], macho, &strip_valid);
+                replacement = symbol_text;
+                *got = true;
+            }
+        }
+        else if (got_lo12)
+        {
+            String8 memory = tokens[modified];
+            u64 comma = assembly_unquoted_character(memory, 0, S8(","));
+            if (!ldr || memory.length < 2 || memory.pointer[0] != '[' || memory.pointer[memory.length - 1] != ']' ||
+                comma >= memory.length)
+            {
+                message = S8("a ':got_lo12:' modifier is valid only as the offset of a plain [base, offset] ldr");
+            }
+            else
+            {
+                String8 base = assembly_trim(string_slice(memory, 1, comma));
+                symbol_text = assembly_aarch64_modifier_strip(builder, string_slice(memory, comma + 1, memory.length - 1), macho, &strip_valid);
+                replacement = string_format(builder->arena, S8("[{S8}, #0]"), base);
+                *got = true;
+            }
         }
         else if (adrp)
         {
@@ -13551,6 +13672,14 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
                 // Keep the existing symbol-only format contract.
                 message = S8("a Mach-O page modifier requires a symbol expression");
             }
+            else if (*got && !parsed.has_symbol)
+            {
+                message = S8("an AArch64 GOT operand modifier requires a symbol expression");
+            }
+            else if (*got && parsed.addend != 0)
+            {
+                message = S8("an AArch64 GOT relocation takes no addend");
+            }
             else
             {
                 *expression = parsed;
@@ -13583,20 +13712,24 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
     AssemblyExpression expression = {0};
     bool relocated = false;
     bool numeric = false;
+    bool got = false;
     AssemblyAarch64ModifierResult modifier = ASSEMBLY_AARCH64_MODIFIER_ABSENT;
     if (target.cpu_arch == CPU_ARCH_AARCH64 && builder->unit_control_relocations)
     {
-        modifier = assembly_aarch64_modifier_rewrite(builder, statement, line, column, &statement, &expression, &relocated, &numeric);
+        modifier = assembly_aarch64_modifier_rewrite(builder, statement, line, column, &statement, &expression, &relocated, &numeric, &got);
     }
     if (modifier != ASSEMBLY_AARCH64_MODIFIER_REFUSED)
     {
         u32 instruction_count = builder->instruction_count;
         assembly_instruction_parse_statement(builder, statement, line, column, offset, target, syntax);
-        if ((relocated || numeric) && builder->instruction_count == instruction_count + 1)
+        if ((relocated || numeric || got) && builder->instruction_count == instruction_count + 1)
         {
-            builder->instructions[instruction_count].aarch64_lo12 = true;
+            // A GOT adrp carries `aarch64_got` alone; its PAGE21 emission
+            // reads it directly, while a GOT ldr also takes the low-12 row.
+            builder->instructions[instruction_count].aarch64_lo12 = relocated || numeric;
             builder->instructions[instruction_count].aarch64_lo12_numeric = numeric;
             builder->instructions[instruction_count].aarch64_lo12_expression = expression;
+            builder->instructions[instruction_count].aarch64_got = got;
         }
     }
 }
@@ -14517,7 +14650,9 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                     buster_aarch64_control_semantic_row(instruction->aarch64_control_row_index, &page_row) &&
                     page_row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_ADRP_PAGE21)
                 {
-                    if (!assembly_relocation_append(builder, instruction->offset, expression, ASSEMBLY_RELOCATION_AARCH64_PAGE21, 0))
+                    if (!assembly_relocation_append(builder, instruction->offset, expression,
+                                                    instruction->aarch64_got ? ASSEMBLY_RELOCATION_AARCH64_GOT_PAGE21
+                                                                             : ASSEMBLY_RELOCATION_AARCH64_PAGE21, 0))
                     {
                         assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
                                             S8("AArch64 page relocation addend is out of range"));
@@ -14708,10 +14843,19 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
         AssemblyRelocationKind kind = add ? ASSEMBLY_RELOCATION_AARCH64_ADD_LO12
                                       : memory ? (AssemblyRelocationKind)(ASSEMBLY_RELOCATION_AARCH64_LDST8_LO12 + (simd_quad ? 4 : size_log2))
                                                : ASSEMBLY_RELOCATION_COUNT;
+        // A GOT slot is loaded by a 64-bit LDR (unsigned offset) only: the
+        // ELF relocation has no narrower or SIMD spelling, and the object
+        // reader refuses an xzr destination.
+        bool got_load = (word & UINT32_C(0xffc00000)) == UINT32_C(0xf9400000) && (word & 31) != 31;
+        if (instruction->aarch64_got)
+        {
+            kind = got_load ? ASSEMBLY_RELOCATION_AARCH64_GOT_LD64_LO12 : ASSEMBLY_RELOCATION_COUNT;
+        }
         if (!encoded || !zero_immediate || kind == ASSEMBLY_RELOCATION_COUNT)
         {
             assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
-                                S8("a low-12 modifier applies only to an unshifted ADD immediate or an unsigned-offset load or store"));
+                                instruction->aarch64_got ? S8("a ':got_lo12:' modifier requires a 64-bit unsigned-offset ldr destination")
+                                                         : S8("a low-12 modifier applies only to an unshifted ADD immediate or an unsigned-offset load or store"));
             emission_failed = true;
         }
         else if (instruction->aarch64_lo12_numeric)

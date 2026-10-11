@@ -33,7 +33,10 @@
 // lets an edge conform leave one its destination does not read dirty for the
 // source's other successors. A fixed or tied operand that
 // needs an occupied register moves the live occupant to a free one
-// (`machine_fast_vacate`) rather than storing it. `machine_fast_placement_build_pinned` then lays the frame out
+// (`machine_fast_vacate`) rather than storing it. A reload prefers the
+// register the value was first bound to (`MachineFastState.preferred_registers`),
+// so the copies that repair cross-path disagreement mostly vanish.
+// `machine_fast_placement_build_pinned` then lays the frame out
 // for both scan modes: `machine_fast_close_live_ranges` widens selector slots
 // and proven direct-chain allocator homes to every row where their contents
 // may still be read — `machine_fast_close_slot_ranges` and
@@ -232,6 +235,11 @@ struct MachineFastState
     // (the float rows scribble low vector registers) safe no-ops.
     // Advisory register per virtual register from the prepass, 0xFF for none.
     u8 const* register_hints;
+    // The register each value was first bound to, 0xFF until then. A free
+    // pick for a reload takes it while it is free, so a value reloaded on
+    // different paths tends to land where its definition put it and the
+    // joins those paths meet at agree on its register.
+    u8* preferred_registers;
     u32 active_register_count;
     u32 clock;
     u32 current_point;
@@ -1468,7 +1476,8 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_pick_hinted(MachineFastState* state, u64 cl
 #endif
 #if MACHINE_FAST_CONSUMER_HINTS
     // A live hint names the register a nearby constrained consumer already
-    // requires, so binding here costs nothing later. It only ever selects
+    // requires, so binding here costs nothing later, or for a reload the
+    // register the value's definition chose. It only ever selects
     // among lanes already free: it cannot evict, and the candidate mask
     // already excludes forbidden, pinned and out-of-class registers.
     if (hint != UINT32_MAX && !prefers_callee_saved && hint < 64u && ((free >> hint) & 1u))
@@ -1547,8 +1556,11 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_ensure(MachineFastState* state, u32 virtual
             state->age[current] = ++state->clock;
             return current;
         }
-        target = machine_fast_pick(state, machine_fast_class_mask(state, virtual_register), forbidden_mask,
-                                   machine_fast_crosses_call(state, virtual_register));
+        // A reload returns the value to the register its definition chose
+        // when that is still free (`MachineFastState.preferred_registers`).
+        u32 preferred = state->preferred_registers[virtual_register];
+        target = machine_fast_pick_hinted(state, machine_fast_class_mask(state, virtual_register), forbidden_mask,
+                                          machine_fast_crosses_call(state, virtual_register), preferred == 0xff ? UINT32_MAX : preferred);
     }
     if (current == target)
     {
@@ -1613,6 +1625,8 @@ BUSTER_GLOBAL_LOCAL void machine_fast_bind(MachineFastState* state, u32 virtual_
     state->held_mask |= machine_fast_lane(target);
     state->dirty_mask |= machine_fast_lane(target);
     state->virtual_register_locations[virtual_register] = target;
+    state->preferred_registers[virtual_register] =
+        state->preferred_registers[virtual_register] == 0xff ? (u8)target : state->preferred_registers[virtual_register];
     state->age[target] = ++state->clock;
     state->placement->callee_saved_mask |= (1ull << target) & state->description->callee_saved_mask;
 }
@@ -3872,6 +3886,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             .next_call = prepass->next_call,
             .rematerialize_immediates = prepass->rematerialize_immediates,
             .register_hints = prepass->register_hints,
+            .preferred_registers = arena_allocate(arena, u8, function->virtual_register_count ? function->virtual_register_count : 1u),
             .pinned_registers = pinned_registers,
             .pinned_mask = pinned_mask,
             .pin_active_masks = pin_active_masks,
@@ -3926,6 +3941,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         MachineBuilderStream retro_edits;
         machine_stream_initialize(&retro_edits, sizeof(MachineEdit));
         memset(state.virtual_register_locations, 0xff, (u64)function->virtual_register_count * sizeof(*state.virtual_register_locations));
+        memset(state.preferred_registers, 0xff, function->virtual_register_count);
         memset(state.owner, 0xff, (u64)description->register_count * sizeof(*state.owner));
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {

@@ -595,6 +595,15 @@ BUSTER_F_DECL void c_source_cache_clear(CSourceCache* cache);
 BUSTER_F_DECL void c_source_cache_destroy(CSourceCache* cache);
 BUSTER_F_DECL CSourceCacheStats c_source_cache_stats(CSourceCache const* cache);
 
+// Phase-one trigraph replacement: the dialect's default, or an explicit
+// -ftrigraphs/-fno-trigraphs override.
+typedef enum CTrigraphMode
+{
+    C_TRIGRAPH_MODE_DIALECT,
+    C_TRIGRAPH_MODE_ENABLED,
+    C_TRIGRAPH_MODE_DISABLED,
+} CTrigraphMode;
+
 typedef struct CPreprocessOptions CPreprocessOptions;
 struct CPreprocessOptions
 {
@@ -628,6 +637,7 @@ struct CPreprocessOptions
     u32 expansion_limit;
     u32 include_depth_limit;
     CPreprocessDialect dialect;
+    CTrigraphMode trigraph_mode;
     bool disable_external_includes;
     // GNU-as sources use `#` for line comments, so a `.S` run treats a `#`
     // line whose word is no known directive as a comment instead of an
@@ -1558,6 +1568,11 @@ struct CParserResult
     // tree (-fc-ast-pilot); without it every row is appended, as the default
     // path always has.
     bool type_interning;
+    // Nothing will lower this unit (the driver's -fsyntax-only), so no
+    // consumer reads the bytes of a string literal: the literal memo records
+    // a narrow fragment's length alone, counted, not decoded. Without it each
+    // first sight decodes and records the bytes lowering reuses.
+    bool string_literal_lengths_only;
 };
 
 // Definition token -> lowest type id ever given that definition_start.
@@ -1814,7 +1829,9 @@ struct CParseResult
     CNumberFacts const* number_facts;
     // The decoded bytes of narrow string-literal fragments, decoded once per
     // final-stream token: semantic analysis records them, lowering reads them
-    // (CStringLiteralMemo in c_internal.h). Null for hand-built results.
+    // (CStringLiteralMemo in c_internal.h). Only their lengths when the unit
+    // will not be lowered (CParserResult.string_literal_lengths_only). Null
+    // for hand-built results.
     CStringLiteralMemo* string_literals;
     // Outside the checkpointed body, like position_index, so a rollback or a
     // by-value operand copy keeps counting into the same record. Null for
