@@ -232,18 +232,43 @@ BUSTER_GLOBAL_LOCAL s32 compiler_driver_archive_test_bound_byte(LinkObjectResult
     if (link->error == LINK_ERROR_NONE)
     {
         ByteSlice data = link->object.sections[OBJECT_SECTION_DATA].data;
-        for (u32 index = 0; index < link->object.symbol_count; index += 1)
+        for (u32 index = 0; index < link->object.symbol_count && result < 0; index += 1)
         {
             ObjectSymbol* symbol = &link->object.symbols[index];
             if (string_equal(symbol->name, name) && symbol->section == OBJECT_SECTION_DATA && symbol->value < data.length)
             {
                 result = data.pointer[symbol->value];
-                break;
             }
         }
     }
     return result;
 }
+
+enum CompilerDriverArchiveContextObjectIndex
+{
+    COMPILER_DRIVER_ARCHIVE_CONTEXT_MAIN,
+    COMPILER_DRIVER_ARCHIVE_CONTEXT_ROOT_BOTH,
+    COMPILER_DRIVER_ARCHIVE_CONTEXT_P,
+    COMPILER_DRIVER_ARCHIVE_CONTEXT_Q,
+    COMPILER_DRIVER_ARCHIVE_CONTEXT_Q_ALT,
+    COMPILER_DRIVER_ARCHIVE_CONTEXT_INERT_BASE,
+};
+
+typedef struct CompilerDriverArchiveContextCase CompilerDriverArchiveContextCase;
+struct CompilerDriverArchiveContextCase
+{
+    ObjectFile* root;
+    ObjectArchive* archives;
+    u32 archive_count;
+    ObjectFile** expected_selected;
+    u32 expected_count;
+    LinkError link_error;
+    String8 unresolved_symbol;
+    s32 q_value;
+    s32 p_value;
+    bool indexed;
+    bool retained_prelude;
+};
 
 // Archive boundaries are not neutral partitions (#1353): closure is per
 // archive occurrence, so a backward dependency across a split strands its
@@ -252,170 +277,159 @@ BUSTER_GLOBAL_LOCAL s32 compiler_driver_archive_test_bound_byte(LinkObjectResult
 // preserve selection. An earlier competing provider is not inert.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_context_laws(UnitTestArguments* arguments)
 {
-    enum ArchiveContextObjectIndex
-    {
-        ARCHIVE_CONTEXT_MAIN,
-        ARCHIVE_CONTEXT_ROOT_BOTH,
-        ARCHIVE_CONTEXT_P,
-        ARCHIVE_CONTEXT_Q,
-        ARCHIVE_CONTEXT_Q_ALT,
-        ARCHIVE_CONTEXT_INERT_BASE,
-    };
-
-    typedef struct ArchiveContextCase ArchiveContextCase;
-    struct ArchiveContextCase
-    {
-        String8 name;
-        ObjectFile* root;
-        ObjectArchive* archives;
-        u32 archive_count;
-        ObjectFile** expected_selected;
-        u32 expected_count;
-        LinkError link_error;
-        String8 unresolved_symbol;
-        s32 q_value;
-        s32 p_value;
-        bool indexed;
-        bool retained_prelude;
-    };
-
     UnitTestResult result = {0};
     OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
-    ObjectSymbol main_symbols[] = {
-        {.name = S8("main"), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .size = 1, .global = true},
-        {.name = S8("q"), .section = OBJECT_SECTION_UNDEFINED, .global = true},
-    };
-    ObjectSymbol root_both_symbols[] = {
-        {.name = S8("main"), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .size = 1, .global = true},
-        {.name = S8("p"), .section = OBJECT_SECTION_UNDEFINED, .global = true},
-        {.name = S8("q"), .section = OBJECT_SECTION_UNDEFINED, .global = true},
-    };
-    ObjectSymbol p_symbols[] = {
-        {.name = S8("p"), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .size = 1, .global = true},
-    };
-    ObjectSymbol q_symbols[] = {
-        {.name = S8("q"), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .size = 1, .global = true},
-        {.name = S8("p"), .section = OBJECT_SECTION_UNDEFINED, .global = true},
-    };
-    ObjectSymbol q_alt_symbols[] = {
-        {.name = S8("q"), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .size = 1, .global = true},
-    };
-
-    for (u32 test_case_index = 0; test_case_index < 11; test_case_index += 1)
+    for (u32 format = 0; format < BUSTER_ARRAY_LENGTH(systems); format += 1)
     {
-        for (u32 format = 0; format < BUSTER_ARRAY_LENGTH(systems); format += 1)
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        Arena* arena = arguments->arena;
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = systems[format]};
+        ObjectSymbol main_symbols[] = {
+            {.name = S8("main"), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .size = 1, .global = true},
+            {.name = S8("q"), .section = OBJECT_SECTION_UNDEFINED, .global = true},
+        };
+        ObjectSymbol root_both_symbols[] = {
+            {.name = S8("main"), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .size = 1, .global = true},
+            {.name = S8("p"), .section = OBJECT_SECTION_UNDEFINED, .global = true},
+            {.name = S8("q"), .section = OBJECT_SECTION_UNDEFINED, .global = true},
+        };
+        ObjectSymbol p_symbols[] = {
+            {.name = S8("p"), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .size = 1, .global = true},
+        };
+        ObjectSymbol q_symbols[] = {
+            {.name = S8("q"), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .size = 1, .global = true},
+            {.name = S8("p"), .section = OBJECT_SECTION_UNDEFINED, .global = true},
+        };
+        ObjectSymbol q_alt_symbols[] = {
+            {.name = S8("q"), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .size = 1, .global = true},
+        };
+        ObjectSymbol inert_symbols[9];
+        ObjectFile objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_INERT_BASE + 9];
+        objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_MAIN] = compiler_driver_archive_test_object(arena, target, main_symbols, BUSTER_ARRAY_LENGTH(main_symbols), 0);
+        objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_ROOT_BOTH] = compiler_driver_archive_test_object(arena, target, root_both_symbols, BUSTER_ARRAY_LENGTH(root_both_symbols), 0);
+        objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_P] = compiler_driver_archive_test_object(arena, target, p_symbols, BUSTER_ARRAY_LENGTH(p_symbols), 42);
+        objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_Q] = compiler_driver_archive_test_object(arena, target, q_symbols, BUSTER_ARRAY_LENGTH(q_symbols), 42);
+        objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_Q_ALT] = compiler_driver_archive_test_object(arena, target, q_alt_symbols, BUSTER_ARRAY_LENGTH(q_alt_symbols), 41);
+        ObjectFile inert_objects[9];
+        for (u32 inert = 0; inert < BUSTER_ARRAY_LENGTH(inert_objects); inert += 1)
         {
-            TemporalArena temporary = arena_begin_temporal(arguments->arena);
-            Arena* arena = arguments->arena;
-            Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = systems[format]};
-            ObjectSymbol inert_symbols[9];
-            ObjectFile objects[ARCHIVE_CONTEXT_INERT_BASE + 9];
-            objects[ARCHIVE_CONTEXT_MAIN] = compiler_driver_archive_test_object(arena, target, main_symbols, BUSTER_ARRAY_LENGTH(main_symbols), 0);
-            objects[ARCHIVE_CONTEXT_ROOT_BOTH] = compiler_driver_archive_test_object(arena, target, root_both_symbols, BUSTER_ARRAY_LENGTH(root_both_symbols), 0);
-            objects[ARCHIVE_CONTEXT_P] = compiler_driver_archive_test_object(arena, target, p_symbols, BUSTER_ARRAY_LENGTH(p_symbols), 42);
-            objects[ARCHIVE_CONTEXT_Q] = compiler_driver_archive_test_object(arena, target, q_symbols, BUSTER_ARRAY_LENGTH(q_symbols), 42);
-            objects[ARCHIVE_CONTEXT_Q_ALT] = compiler_driver_archive_test_object(arena, target, q_alt_symbols, BUSTER_ARRAY_LENGTH(q_alt_symbols), 41);
-            ObjectFile inert_objects[9];
-            for (u32 inert = 0; inert < BUSTER_ARRAY_LENGTH(inert_objects); inert += 1)
-            {
-                inert_symbols[inert] = (ObjectSymbol){
-                    .name = string_format(arena, S8("inert_{u32}"), inert),
-                    .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .size = 1, .global = true,
-                };
-                inert_objects[inert] = compiler_driver_archive_test_object(arena, target, &inert_symbols[inert], 1, (u8)inert);
-                objects[ARCHIVE_CONTEXT_INERT_BASE + inert] = inert_objects[inert];
-            }
+            inert_symbols[inert] = (ObjectSymbol){
+                .name = string_format(arena, S8("inert_{u32}"), inert),
+                .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .size = 1, .global = true,
+            };
+            inert_objects[inert] = compiler_driver_archive_test_object(arena, target, &inert_symbols[inert], 1, (u8)inert);
+            objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_INERT_BASE + inert] = inert_objects[inert];
+        }
 
-            ObjectFile combined_pq_members[] = {objects[ARCHIVE_CONTEXT_P], objects[ARCHIVE_CONTEXT_Q]};
-            ObjectFile combined_qp_members[] = {objects[ARCHIVE_CONTEXT_Q], objects[ARCHIVE_CONTEXT_P]};
-            ObjectFile only_p_members[] = {objects[ARCHIVE_CONTEXT_P]};
-            ObjectFile only_q_members[] = {objects[ARCHIVE_CONTEXT_Q]};
-            ObjectFile padded8_members[8] = {objects[ARCHIVE_CONTEXT_P], objects[ARCHIVE_CONTEXT_Q]};
-            ObjectFile padded9_members[9] = {objects[ARCHIVE_CONTEXT_P], objects[ARCHIVE_CONTEXT_Q]};
-            ObjectFile unselected9_members[9];
-            ObjectFile conflicting_members[] = {
-                objects[ARCHIVE_CONTEXT_Q_ALT], objects[ARCHIVE_CONTEXT_P], objects[ARCHIVE_CONTEXT_Q],
-            };
-            for (u32 inert = 0; inert < 6; inert += 1) padded8_members[2 + inert] = inert_objects[inert];
-            for (u32 inert = 0; inert < 7; inert += 1) padded9_members[2 + inert] = inert_objects[inert];
-            for (u32 inert = 0; inert < BUSTER_ARRAY_LENGTH(unselected9_members); inert += 1)
-            {
-                unselected9_members[inert] = inert_objects[inert];
-            }
+        ObjectFile combined_pq_members[] = {objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_P], objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_Q]};
+        ObjectFile combined_qp_members[] = {objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_Q], objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_P]};
+        ObjectFile only_p_members[] = {objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_P]};
+        ObjectFile only_q_members[] = {objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_Q]};
+        ObjectFile padded8_members[8] = {objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_P], objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_Q]};
+        ObjectFile padded9_members[9] = {objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_P], objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_Q]};
+        ObjectFile unselected9_members[9];
+        ObjectFile conflicting_members[] = {
+            objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_Q_ALT], objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_P],
+            objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_Q],
+        };
+        for (u32 inert = 0; inert < 6; inert += 1) padded8_members[2 + inert] = inert_objects[inert];
+        for (u32 inert = 0; inert < 7; inert += 1) padded9_members[2 + inert] = inert_objects[inert];
+        for (u32 inert = 0; inert < BUSTER_ARRAY_LENGTH(unselected9_members); inert += 1)
+        {
+            unselected9_members[inert] = inert_objects[inert];
+        }
 
-            ObjectArchive archives_baseline_reverse[] = {{.objects = combined_pq_members, .object_count = BUSTER_ARRAY_LENGTH(combined_pq_members)}};
-            ObjectArchive archives_invalid_split_backward[] = {
-                {.objects = only_p_members, .object_count = BUSTER_ARRAY_LENGTH(only_p_members)},
-                {.objects = only_q_members, .object_count = BUSTER_ARRAY_LENGTH(only_q_members)},
-            };
-            ObjectArchive archives_baseline_forward[] = {{.objects = combined_qp_members, .object_count = BUSTER_ARRAY_LENGTH(combined_qp_members)}};
-            ObjectArchive archives_valid_split_forward[] = {
-                {.objects = only_q_members, .object_count = BUSTER_ARRAY_LENGTH(only_q_members)},
-                {.objects = only_p_members, .object_count = BUSTER_ARRAY_LENGTH(only_p_members)},
-            };
-            ObjectArchive archives_initially_demanded_baseline[] = {
-                {.objects = combined_pq_members, .object_count = BUSTER_ARRAY_LENGTH(combined_pq_members)},
-            };
-            ObjectArchive archives_initially_demanded_split[] = {
-                {.objects = only_p_members, .object_count = BUSTER_ARRAY_LENGTH(only_p_members)},
-                {.objects = only_q_members, .object_count = BUSTER_ARRAY_LENGTH(only_q_members)},
-            };
-            ObjectArchive archives_explicit_repeat[] = {
-                {.objects = only_p_members, .object_count = BUSTER_ARRAY_LENGTH(only_p_members)},
-                {.objects = only_q_members, .object_count = BUSTER_ARRAY_LENGTH(only_q_members)},
-                {.objects = only_p_members, .object_count = BUSTER_ARRAY_LENGTH(only_p_members)},
-            };
-            ObjectArchive archives_padding8[] = {{.objects = padded8_members, .object_count = BUSTER_ARRAY_LENGTH(padded8_members)}};
-            ObjectArchive archives_padding9[] = {{.objects = padded9_members, .object_count = BUSTER_ARRAY_LENGTH(padded9_members)}};
-            ObjectArchive archives_inert_prelude[] = {
-                {.objects = unselected9_members, .object_count = BUSTER_ARRAY_LENGTH(unselected9_members)},
-                {.objects = combined_pq_members, .object_count = BUSTER_ARRAY_LENGTH(combined_pq_members)},
-            };
-            ObjectArchive archives_invalid_padding_conflict[] = {
-                {.objects = conflicting_members, .object_count = BUSTER_ARRAY_LENGTH(conflicting_members)},
-            };
-            ObjectFile* selected_qp[] = {&objects[ARCHIVE_CONTEXT_Q], &objects[ARCHIVE_CONTEXT_P]};
-            ObjectFile* selected_pq[] = {&objects[ARCHIVE_CONTEXT_P], &objects[ARCHIVE_CONTEXT_Q]};
-            ObjectFile* selected_q[] = {&objects[ARCHIVE_CONTEXT_Q]};
-            ObjectFile* selected_q_alt[] = {&objects[ARCHIVE_CONTEXT_Q_ALT]};
-            ArchiveContextCase cases[] = {
-                {.name = S8("baseline-reverse"), .root = &objects[ARCHIVE_CONTEXT_MAIN], .archives = archives_baseline_reverse,
-                 .archive_count = BUSTER_ARRAY_LENGTH(archives_baseline_reverse), .expected_selected = selected_qp, .expected_count = 2,
-                 .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42},
-                {.name = S8("invalid-split-backward"), .root = &objects[ARCHIVE_CONTEXT_MAIN], .archives = archives_invalid_split_backward,
-                 .archive_count = BUSTER_ARRAY_LENGTH(archives_invalid_split_backward), .expected_selected = selected_q, .expected_count = 1,
-                 .link_error = LINK_ERROR_UNRESOLVED_SYMBOL, .unresolved_symbol = S8("p"), .q_value = 42, .p_value = -1},
-                {.name = S8("baseline-forward"), .root = &objects[ARCHIVE_CONTEXT_MAIN], .archives = archives_baseline_forward,
-                 .archive_count = BUSTER_ARRAY_LENGTH(archives_baseline_forward), .expected_selected = selected_qp, .expected_count = 2,
-                 .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42},
-                {.name = S8("valid-split-forward"), .root = &objects[ARCHIVE_CONTEXT_MAIN], .archives = archives_valid_split_forward,
-                 .archive_count = BUSTER_ARRAY_LENGTH(archives_valid_split_forward), .expected_selected = selected_qp, .expected_count = 2,
-                 .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42},
-                {.name = S8("initially-demanded-baseline"), .root = &objects[ARCHIVE_CONTEXT_ROOT_BOTH],
-                 .archives = archives_initially_demanded_baseline, .archive_count = BUSTER_ARRAY_LENGTH(archives_initially_demanded_baseline),
-                 .expected_selected = selected_pq, .expected_count = 2, .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42},
-                {.name = S8("initially-demanded-split"), .root = &objects[ARCHIVE_CONTEXT_ROOT_BOTH],
-                 .archives = archives_initially_demanded_split, .archive_count = BUSTER_ARRAY_LENGTH(archives_initially_demanded_split),
-                 .expected_selected = selected_pq, .expected_count = 2, .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42},
-                {.name = S8("explicit-repeat"), .root = &objects[ARCHIVE_CONTEXT_MAIN], .archives = archives_explicit_repeat,
-                 .archive_count = BUSTER_ARRAY_LENGTH(archives_explicit_repeat), .expected_selected = selected_qp, .expected_count = 2,
-                 .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42},
-                {.name = S8("padding-eight"), .root = &objects[ARCHIVE_CONTEXT_MAIN], .archives = archives_padding8,
-                 .archive_count = BUSTER_ARRAY_LENGTH(archives_padding8), .expected_selected = selected_qp, .expected_count = 2,
-                 .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42},
-                {.name = S8("padding-nine"), .root = &objects[ARCHIVE_CONTEXT_MAIN], .archives = archives_padding9,
-                 .archive_count = BUSTER_ARRAY_LENGTH(archives_padding9), .expected_selected = selected_qp, .expected_count = 2,
-                 .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42, .indexed = true},
-                {.name = S8("inert-prelude"), .root = &objects[ARCHIVE_CONTEXT_MAIN], .archives = archives_inert_prelude,
-                 .archive_count = BUSTER_ARRAY_LENGTH(archives_inert_prelude), .expected_selected = selected_qp, .expected_count = 2,
-                 .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42, .indexed = true, .retained_prelude = true},
-                {.name = S8("invalid-padding-conflict"), .root = &objects[ARCHIVE_CONTEXT_MAIN],
-                 .archives = archives_invalid_padding_conflict, .archive_count = BUSTER_ARRAY_LENGTH(archives_invalid_padding_conflict),
-                 .expected_selected = selected_q_alt, .expected_count = 1, .link_error = LINK_ERROR_NONE, .q_value = 41, .p_value = -1},
-            };
-            ArchiveContextCase* test_case = &cases[test_case_index];
-            BUSTER_UNUSED(test_case->name);
+        ObjectArchive archives_baseline_reverse[] = {{.objects = combined_pq_members, .object_count = BUSTER_ARRAY_LENGTH(combined_pq_members)}};
+        ObjectArchive archives_invalid_split_backward[] = {
+            {.objects = only_p_members, .object_count = BUSTER_ARRAY_LENGTH(only_p_members)},
+            {.objects = only_q_members, .object_count = BUSTER_ARRAY_LENGTH(only_q_members)},
+        };
+        ObjectArchive archives_baseline_forward[] = {{.objects = combined_qp_members, .object_count = BUSTER_ARRAY_LENGTH(combined_qp_members)}};
+        ObjectArchive archives_valid_split_forward[] = {
+            {.objects = only_q_members, .object_count = BUSTER_ARRAY_LENGTH(only_q_members)},
+            {.objects = only_p_members, .object_count = BUSTER_ARRAY_LENGTH(only_p_members)},
+        };
+        ObjectArchive archives_initially_demanded_baseline[] = {
+            {.objects = combined_pq_members, .object_count = BUSTER_ARRAY_LENGTH(combined_pq_members)},
+        };
+        ObjectArchive archives_initially_demanded_split[] = {
+            {.objects = only_p_members, .object_count = BUSTER_ARRAY_LENGTH(only_p_members)},
+            {.objects = only_q_members, .object_count = BUSTER_ARRAY_LENGTH(only_q_members)},
+        };
+        ObjectArchive archives_explicit_repeat[] = {
+            {.objects = only_p_members, .object_count = BUSTER_ARRAY_LENGTH(only_p_members)},
+            {.objects = only_q_members, .object_count = BUSTER_ARRAY_LENGTH(only_q_members)},
+            {.objects = only_p_members, .object_count = BUSTER_ARRAY_LENGTH(only_p_members)},
+        };
+        ObjectArchive archives_padding8[] = {{.objects = padded8_members, .object_count = BUSTER_ARRAY_LENGTH(padded8_members)}};
+        ObjectArchive archives_padding9[] = {{.objects = padded9_members, .object_count = BUSTER_ARRAY_LENGTH(padded9_members)}};
+        ObjectArchive archives_inert_prelude[] = {
+            {.objects = unselected9_members, .object_count = BUSTER_ARRAY_LENGTH(unselected9_members)},
+            {.objects = combined_pq_members, .object_count = BUSTER_ARRAY_LENGTH(combined_pq_members)},
+        };
+        ObjectArchive archives_invalid_padding_conflict[] = {
+            {.objects = conflicting_members, .object_count = BUSTER_ARRAY_LENGTH(conflicting_members)},
+        };
+        ObjectFile* selected_qp[] = {
+            &objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_Q], &objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_P],
+        };
+        ObjectFile* selected_pq[] = {
+            &objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_P], &objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_Q],
+        };
+        ObjectFile* selected_q[] = {&objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_Q]};
+        ObjectFile* selected_q_alt[] = {&objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_Q_ALT]};
+        ObjectFile* main = &objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_MAIN];
+        ObjectFile* root_both = &objects[COMPILER_DRIVER_ARCHIVE_CONTEXT_ROOT_BOTH];
+        CompilerDriverArchiveContextCase cases[] = {
+            // baseline-reverse
+            {.root = main, .archives = archives_baseline_reverse,
+             .archive_count = BUSTER_ARRAY_LENGTH(archives_baseline_reverse), .expected_selected = selected_qp, .expected_count = 2,
+             .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42},
+            // invalid-split-backward
+            {.root = main, .archives = archives_invalid_split_backward,
+             .archive_count = BUSTER_ARRAY_LENGTH(archives_invalid_split_backward), .expected_selected = selected_q, .expected_count = 1,
+             .link_error = LINK_ERROR_UNRESOLVED_SYMBOL, .unresolved_symbol = S8("p"), .q_value = 42, .p_value = -1},
+            // baseline-forward
+            {.root = main, .archives = archives_baseline_forward,
+             .archive_count = BUSTER_ARRAY_LENGTH(archives_baseline_forward), .expected_selected = selected_qp, .expected_count = 2,
+             .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42},
+            // valid-split-forward
+            {.root = main, .archives = archives_valid_split_forward,
+             .archive_count = BUSTER_ARRAY_LENGTH(archives_valid_split_forward), .expected_selected = selected_qp, .expected_count = 2,
+             .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42},
+            // initially-demanded-baseline
+            {.root = root_both, .archives = archives_initially_demanded_baseline,
+             .archive_count = BUSTER_ARRAY_LENGTH(archives_initially_demanded_baseline), .expected_selected = selected_pq,
+             .expected_count = 2, .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42},
+            // initially-demanded-split
+            {.root = root_both, .archives = archives_initially_demanded_split,
+             .archive_count = BUSTER_ARRAY_LENGTH(archives_initially_demanded_split), .expected_selected = selected_pq,
+             .expected_count = 2, .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42},
+            // explicit-repeat
+            {.root = main, .archives = archives_explicit_repeat,
+             .archive_count = BUSTER_ARRAY_LENGTH(archives_explicit_repeat), .expected_selected = selected_qp, .expected_count = 2,
+             .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42},
+            // padding-eight
+            {.root = main, .archives = archives_padding8,
+             .archive_count = BUSTER_ARRAY_LENGTH(archives_padding8), .expected_selected = selected_qp, .expected_count = 2,
+             .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42},
+            // padding-nine
+            {.root = main, .archives = archives_padding9,
+             .archive_count = BUSTER_ARRAY_LENGTH(archives_padding9), .expected_selected = selected_qp, .expected_count = 2,
+             .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42, .indexed = true},
+            // inert-prelude
+            {.root = main, .archives = archives_inert_prelude,
+             .archive_count = BUSTER_ARRAY_LENGTH(archives_inert_prelude), .expected_selected = selected_qp, .expected_count = 2,
+             .link_error = LINK_ERROR_NONE, .q_value = 42, .p_value = 42, .indexed = true, .retained_prelude = true},
+            // invalid-padding-conflict
+            {.root = main, .archives = archives_invalid_padding_conflict,
+             .archive_count = BUSTER_ARRAY_LENGTH(archives_invalid_padding_conflict), .expected_selected = selected_q_alt,
+             .expected_count = 1, .link_error = LINK_ERROR_NONE, .q_value = 41, .p_value = -1},
+        };
 
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            CompilerDriverArchiveContextCase* test_case = &cases[index];
             UnitTestResult compared = compiler_driver_archive_test_compare(arguments, *test_case->root, test_case->archives,
                                                                             test_case->archive_count, true);
             result.test_count += compared.test_count;
@@ -441,13 +455,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_context_laws(Uni
                     BUSTER_TEST(arguments, actual[1 + selected].symbols == test_case->expected_selected[selected]->symbols);
                 }
             }
-            if (test_case->retained_prelude && selection_count_matches)
-            {
-                for (u32 selected = 0; selected < test_case->expected_count; selected += 1)
-                {
-                    BUSTER_TEST(arguments, actual[1 + selected].symbols == selected_qp[selected]->symbols);
-                }
-            }
             if (test_case->indexed) BUSTER_TEST(arguments, state.arena != 0);
             else BUSTER_TEST(arguments, !state.arena);
 
@@ -469,8 +476,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_context_laws(Uni
                 }
             }
             if (state.arena) arena_destroy(state.arena, 1);
-            scratch_end(temporary);
         }
+        scratch_end(temporary);
     }
     return result;
 }
