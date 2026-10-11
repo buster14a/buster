@@ -31,6 +31,7 @@
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/frontend/c/c_ast.h>
+#include <buster/lib/compiler/frontend/c/c_gen_internal.h>
 #include <buster/lib/compiler/frontend/c/c_parse_internal.h>
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/string.h>
@@ -2043,6 +2044,14 @@ enum
     // each checked against the machine: about 1,400 (1,370 for
     // aarch64-windows).
     C_AST_CORPUS_TYPE_PROBE_FLOOR = 1200,
+    // Lowering's root-conditional splits read from the tree, each checked
+    // against the token rule (c_ast_corpus_lowering): about 76,600 from the
+    // fixtures on Linux x86-64 (446 units lowered), 1,480 of them splitting
+    // at a conditional, and about 414,900 in all with the frontend's own
+    // sources (21,100 conditionals).
+    C_AST_CORPUS_LOWER_ANSWER_FLOOR = 60000,
+    C_AST_CORPUS_LOWER_CONDITIONAL_FLOOR = 1200,
+    C_AST_CORPUS_HOSTED_LOWER_ANSWER_FLOOR = 380000,
 };
 
 BUSTER_GLOBAL_LOCAL bool c_ast_corpus_in(String8 const* paths, u32 count, String8 path)
@@ -2081,6 +2090,14 @@ struct CAstCorpusTally
     // Designator probes the const-assignment walk skipped and verify mode
     // checked against the machine.
     u64 type_probes;
+    // Lowering's tree reads over the inputs that lower without a diagnostic
+    // (c_ast_corpus_lowering): units lowered both ways, the splits the tree
+    // answered, those verify mode compared with the token rule, and the
+    // answers that split at a conditional.
+    u64 lower_units;
+    u64 lower_answers;
+    u64 lower_compared;
+    u64 lower_conditionals;
     // The declaration split from the tree (c_parse_ast_from_tree) over the
     // same inputs: units it published, records and body assertion ranges it
     // published, units it handed to the token walker and why, and every
@@ -2217,6 +2234,111 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
     return result;
 }
 
+// The first difference between two lowered programs, or empty: the module's
+// function and global counts, and for every function its block, value and
+// instruction counts and each instruction's opcode, type, result, links and
+// operand, target and immediate lists.
+BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_programs_differ(Arena* arena, IrProgram const* left, IrProgram const* right)
+{
+    String8 difference = {0};
+    bool present = left && right && left->module_count == right->module_count && left->module_count;
+    if (!present)
+    {
+        difference = left || right ? S8("one lowering published no program, or the module counts differ") : (String8){0};
+    }
+    for (u32 module_index = 0; present && module_index < left->module_count && !difference.length; module_index += 1)
+    {
+        IrModule const* a = &left->modules[module_index];
+        IrModule const* b = &right->modules[module_index];
+        if (a->function_count != b->function_count || a->global_count != b->global_count)
+        {
+            difference = string_format(arena, S8("module {u32}: {u32}/{u32} functions, {u32}/{u32} globals"), module_index, a->function_count,
+                                       b->function_count, a->global_count, b->global_count);
+        }
+        for (u32 function_index = 0; function_index < a->function_count && !difference.length; function_index += 1)
+        {
+            IrFunction const* f = &a->functions[function_index];
+            IrFunction const* g = &b->functions[function_index];
+            bool same = f->block_count == g->block_count && f->value_count == g->value_count && f->instruction_count == g->instruction_count &&
+                        f->state == g->state;
+            for (u32 index = 0; same && index < f->instruction_count; index += 1)
+            {
+                IrInstruction const* x = &f->instructions[index];
+                IrInstruction const* y = &g->instructions[index];
+                same = x->opcode == y->opcode && x->canonical_type.value == y->canonical_type.value && x->result.value == y->result.value &&
+                       x->next.value == y->next.value && x->operand_count == y->operand_count && x->target_count == y->target_count &&
+                       x->immediate_count == y->immediate_count;
+                for (u32 operand = 0; same && operand < x->operand_count; operand += 1)
+                {
+                    same = x->operands[operand].value == y->operands[operand].value;
+                }
+                for (u32 target = 0; same && target < x->target_count; target += 1)
+                {
+                    same = x->targets[target].value == y->targets[target].value;
+                }
+                for (u32 immediate = 0; same && immediate < x->immediate_count; immediate += 1)
+                {
+                    same = x->immediates[immediate] == y->immediates[immediate];
+                }
+            }
+            if (!same)
+            {
+                difference = string_format(arena, S8("function '{S8}' lowers differently"), f->name);
+            }
+        }
+    }
+    return difference;
+}
+
+// Lowering's tree reads (CIRLowerOptions.syntax_tree, GitHub #3102) on one
+// input that analyzes cleanly: the unit is lowered without the tree, and with
+// it in verify mode, where the token rule also answers every split the tree
+// answered and each must agree. Both lowerings must end alike, with the same
+// diagnostics and the same program, instruction by instruction.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_lowering(UnitTestArguments* arguments, String8 label, CPreprocessResult preprocess, CAst const* ast,
+                                                         CAstCorpusTally* tally)
+{
+    UnitTestResult result = {0};
+    ArenaCreation creation = {.reserved_size = BUSTER_GB(16), .flags = {.no_pool = true}};
+    Arena* arena = arena_create(creation);
+    if (BUSTER_REQUIRE(arguments, arena != 0))
+    {
+        CIRLowerResult plain = c_analyze_with_options(arena, label, preprocess, c_parse_ast(arena, preprocess), preprocess.target, (CIRLowerOptions){0});
+        CAstLowerStatistics statistics = {0};
+        c_test_ir_tree_verify_take();
+        c_test_ir_tree_verify_set(true);
+        CIRLowerResult read = c_analyze_with_options(arena, label, preprocess, c_parse_ast(arena, preprocess), preprocess.target,
+                                                     (CIRLowerOptions){.syntax_tree = ast, .syntax_tree_statistics = &statistics});
+        c_test_ir_tree_verify_set(false);
+        CTestIrTreeVerify verify = c_test_ir_tree_verify_take();
+        BUSTER_TEST_RAW(arguments, plain.diagnostic_count == read.diagnostic_count,
+                        string_format(arguments->arena, S8("{S8}: {u32} lowering diagnostics without the tree, {u32} with it"), label,
+                                      plain.diagnostic_count, read.diagnostic_count));
+        String8 difference = c_ast_corpus_programs_differ(arguments->arena, plain.program, read.program);
+        BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(arguments->arena, S8("{S8}: {S8}"), label, difference));
+        BUSTER_TEST_RAW(arguments, verify.compared == statistics.answers,
+                        string_format(arguments->arena, S8("{S8}: {u64} tree splits, {u64} verified"), label, statistics.answers, verify.compared));
+        for (u32 index = 0; index < verify.first_count; index += 1)
+        {
+            CTestIrTreeMismatch const* mismatch = verify.first + index;
+            String8 first = mismatch->start < preprocess.token_count ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[mismatch->start])
+                                                                     : S8("?");
+            BUSTER_TEST_RAW(arguments, false,
+                            string_format(arguments->arena,
+                                          S8("{S8}: tree split of tokens [{u32}, {u32}) at '{S8}' disagrees with the token rule: tree {u32}, tokens {u32}"),
+                                          label, mismatch->start, mismatch->end, first, (u32)mismatch->tree, (u32)mismatch->tokens));
+        }
+        BUSTER_TEST_RAW(arguments, verify.mismatches == verify.first_count,
+                        string_format(arguments->arena, S8("{S8}: {u64} tree splits disagree with the token rule"), label, verify.mismatches));
+        tally->lower_units += plain.program && !plain.diagnostic_count;
+        tally->lower_answers += statistics.answers;
+        tally->lower_compared += verify.compared;
+        tally->lower_conditionals += verify.conditionals;
+        arena_destroy(arena, 1);
+    }
+    return result;
+}
+
 // One input: preprocess, run the earlier syntax pass and the tree builder, and
 // hold the tree to the claims above. `label` names the input in failures (a
 // path, or the source text of a construct); `required` makes a preprocessing
@@ -2260,6 +2382,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_unit(UnitTestArguments* argument
                 BUSTER_TEST_RAW(arguments, mismatch.length == 0, string_format(temporary.arena, S8("{S8}: {S8}"), label, mismatch));
                 tally->records += record_count;
                 c_ast_test_merge(&result, c_ast_corpus_types(arguments, label, preprocess, &built.ast, tally));
+                c_ast_test_merge(&result, c_ast_corpus_lowering(arguments, label, preprocess, &built.ast, tally));
             }
             tally->built += 1;
             tally->nodes += built.ast.node_count;
@@ -2406,6 +2529,28 @@ BUSTER_GLOBAL_LOCAL CAstCorpusConstruct const c_ast_corpus_constructs[] = {
      C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("int __attribute__((unused)) a8, b8; int f8(void) __attribute__((noreturn)); [[nodiscard]] int g8(void); int h8(void) [[deprecated]];"),
      C_PREPROCESS_DIALECT_C23},
+    // Root-conditional splits for lowering's tree reads (c_ast_corpus_lowering):
+    // a parenthesized middle operand, nested and chained conditionals, GNU's
+    // omitted operand, a conditional under an assignment and inside a comma
+    // root (which the tree leaves to the token rule), redundant parentheses,
+    // a statement expression, __extension__ and conditions and arms that hold
+    // casts, compound literals, calls and commas.
+    {S8_INITIALIZER("int g9(int); struct P9 { int a; };\n"
+                    "int f9(int a, int b, int c, int *p)\n"
+                    "{\n"
+                    "    int x = a ? (b) : c, y = a ? b ? 1 : 2 : c ? 3 : 4, z = ((a ? b : c)), w = a ?: b, v = (a, b) ? (c, a) : (b, c);\n"
+                    "    x = a ? b : c, y = b; z += (a ? b : c) + (b ? c : a); w = __extension__ (a ? b : c);\n"
+                    "    v = ({ int t = a ? b : c; t; }) ? g9(a ? 1 : 2) : (int)(b ? c : a);\n"
+                    "    x = (struct P9){a ? b : c}.a ? p[a ? 0 : 1] : (a ?: (b ? c : 0));\n"
+                    "    if (a ? b : c) { x = 1; } while (a && (b ? c : 0)) { a = 0; }\n"
+                    "    x = sizeof(a ? p : 0, a) + sizeof(a ? 1 : 2.0, p); int *q = p; (void)(a ? g9(1) : g9(2), g9(3));\n"
+                    "    for (x = 0; x < 3; x++, a ? b++ : c++) { y = (a ? b : c, *q); }\n"
+                    "    if ((a ? b : c, b)) { x = 2; } x = (a ? b : c, b) ? 1 : 0;\n"
+                    "    return a ? (b, c) : sizeof(int) ? x : y;\n"
+                    "}\n"),
+     C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int f10(int a, int b, int c) { int x = a ? b : c; x = (a ? (b ? 1 : 2) : c) ? x : -x; return x ? a ? b : c : ((c)); }"),
+     C_PREPROCESS_DIALECT_C17},
 };
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_constructs_run(UnitTestArguments* arguments, CAstCorpusTally* tally)
@@ -2575,6 +2720,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_sources(UnitTestArguments* argum
     BUSTER_TEST(arguments, !hosted || tally->split_units == split_units_before + BUSTER_ARRAY_LENGTH(paths));
     BUSTER_TEST(arguments, !hosted || tally->split_records >= C_AST_CORPUS_HOSTED_SPLIT_RECORD_FLOOR);
     BUSTER_TEST(arguments, !hosted || tally->type_answers >= C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR);
+    BUSTER_TEST(arguments, !hosted || tally->lower_answers >= C_AST_CORPUS_HOSTED_LOWER_ANSWER_FLOOR);
     return result;
 }
 #endif
@@ -2609,6 +2755,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
     BUSTER_TEST(arguments, tally.pinned == BUSTER_ARRAY_LENGTH(c_ast_corpus_pins));
     BUSTER_TEST(arguments, tally.type_answers >= C_AST_CORPUS_TYPE_ANSWER_FLOOR && tally.type_compared == tally.type_answers);
     BUSTER_TEST(arguments, tally.type_probes >= C_AST_CORPUS_TYPE_PROBE_FLOOR);
+    BUSTER_TEST(arguments, tally.lower_answers >= C_AST_CORPUS_LOWER_ANSWER_FLOOR && tally.lower_compared == tally.lower_answers &&
+                               tally.lower_conditionals >= C_AST_CORPUS_LOWER_CONDITIONAL_FLOOR);
     BUSTER_TEST(arguments, tally.split_records >= C_AST_CORPUS_SPLIT_RECORD_FLOOR && tally.split_compared >= tally.split_records);
 #if BUSTER_LINUX && !BUSTER_ANDROID
     c_ast_test_merge(&result, c_ast_corpus_sources(arguments, &tally));

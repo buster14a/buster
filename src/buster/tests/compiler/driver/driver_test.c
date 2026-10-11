@@ -4898,7 +4898,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
     String8 input = buster_test_temporary_path(arena, S8("buster-c-ast-pilot"), S8(".c"));
     String8 invalid = buster_test_temporary_path(arena, S8("buster-c-ast-pilot-invalid"), S8(".c"));
     String8 object = buster_test_temporary_path(arena, S8("buster-c-ast-pilot"), S8(".o"));
-    String8 source = S8("typedef struct { int a; int b; } P;\nstatic int add(P p) { return p.a + p.b; }\nint main(void) { P p = {1, 2}; return add(p) != 3; }\n");
+    String8 source = S8("typedef struct { int a; int b; } P;\nstatic int add(P p) { return p.a > 0 ? p.a + p.b : p.b; }\n"
+                        "int main(void) { P p = {1, 2}; return add(p) != 3; }\n");
     String8 invalid_source = S8("int main(void) { return (1 + ); }\n");
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)) && file_write(invalid, BUSTER_SLICE_TO_BYTE_SLICE(invalid_source))))
     {
@@ -4906,26 +4907,34 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
         String8 pilots[] = {S8(""), S8("-fc-ast-pilot"), S8("-fc-ast-pilot=implicit"), S8("-fc-ast-pilot=hybrid"), S8("-fc-ast-pilot=explicit")};
         CompilerDriverCAstPilot modes[] = {COMPILER_DRIVER_C_AST_PILOT_OFF, COMPILER_DRIVER_C_AST_PILOT_IMPLICIT, COMPILER_DRIVER_C_AST_PILOT_IMPLICIT,
                                            COMPILER_DRIVER_C_AST_PILOT_HYBRID, COMPILER_DRIVER_C_AST_PILOT_EXPLICIT};
-        ByteSlice reference = {0};
-        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(pilots); index += 1)
+        // Every layout gives the default's object, with and without debug
+        // information. Lowering reads add's root conditional from the tree
+        // (CIRLowerOptions.syntax_tree) and indexes both bodies.
+        String8 levels[] = {S8("-g0"), S8("-g")};
+        for (u32 level = 0; level < BUSTER_ARRAY_LENGTH(levels); level += 1)
         {
-            String8 command[] = {pilots[index], S8("-nostdinc"), S8("-g0"), S8("-c"), S8("-o"), object, input};
-            u64 skipped = index == 0;
-            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){command + skipped, BUSTER_ARRAY_LENGTH(command) - skipped});
-            BUSTER_TEST(arguments, invocation.c_ast_pilot == modes[index]);
-            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
-            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
-            BUSTER_TEST(arguments, (compiled.c_ast.units == 1) == (index != 0));
-            ByteSlice bytes = file_read(arena, object, (FileReadOptions){0});
-            if (BUSTER_REQUIRE(arguments, bytes.pointer && bytes.length))
+            ByteSlice reference = {0};
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(pilots); index += 1)
             {
-                if (index == 0)
+                String8 command[] = {pilots[index], S8("-nostdinc"), levels[level], S8("-c"), S8("-o"), object, input};
+                u64 skipped = index == 0;
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){command + skipped, BUSTER_ARRAY_LENGTH(command) - skipped});
+                BUSTER_TEST(arguments, invocation.c_ast_pilot == modes[index]);
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                BUSTER_TEST(arguments, (compiled.c_ast.units == 1) == (index != 0));
+                BUSTER_TEST(arguments, (compiled.c_ast.lower.answers != 0) == (index != 0) && (compiled.c_ast.lower.bodies == 2) == (index != 0));
+                ByteSlice bytes = file_read(arena, object, (FileReadOptions){0});
+                if (BUSTER_REQUIRE(arguments, bytes.pointer && bytes.length))
                 {
-                    reference = bytes;
-                }
-                else
-                {
-                    BUSTER_TEST(arguments, bytes.length == reference.length && memory_compare(bytes.pointer, reference.pointer, bytes.length));
+                    if (index == 0)
+                    {
+                        reference = bytes;
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, bytes.length == reference.length && memory_compare(bytes.pointer, reference.pointer, bytes.length));
+                    }
                 }
             }
         }
@@ -4943,6 +4952,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
         // Semantic analysis typed both bodies from the tree and answered some of
         // their expression-type queries from it (c_ast_types.c).
         BUSTER_TEST(arguments, verbose.c_ast.types.bodies == 2 && verbose.c_ast.types.nodes_accepted != 0 && verbose.c_ast.types.answers != 0);
+        // -fsyntax-only does not lower, so lowering reads nothing from the tree.
+        BUSTER_TEST(arguments, verbose.c_ast.lower.bodies == 0 && verbose.c_ast.lower.answers == 0);
         BUSTER_STRING_TEST(arguments, compiler_driver_c_ast_pilot_name(COMPILER_DRIVER_C_AST_PILOT_HYBRID), S8("hybrid"));
 
         String8 unknown[] = {S8("-fc-ast-pilot=bogus"), S8("-fsyntax-only"), input};

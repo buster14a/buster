@@ -184,12 +184,16 @@
 //   CAstTypeBodyIndex, CAstTypeBody              top-level index, per-region arrays
 //   c_ast_types_bodies_prepare, c_ast_types_find_definition,
 //   c_ast_types_find_initializer
+//   c_ast_definitions_index, _find               the definitions alone, for
+//                                                lowering's tree reads
 //   c_ast_types_region_create, _fill             reserves, then types, one region
 //   c_ast_types_body_begin, c_ast_types_body_end the per-body entry points
 //   c_ast_types_initializer_begin, _end,         the per-initializer entry points
 //   c_ast_types_waiting
 //   c_ast_types_looked_up_entity                 an initializer's unbound names
-//   c_ast_types_span, c_ast_types_expand         span rules
+//   c_ast_spans_rule, c_ast_spans_expand         span rules (CAstSpans, shared
+//                                                with lowering)
+//   c_ast_spans_locate, c_ast_spans_build        range to node; spans alone
 //   c_ast_types_type_body, c_ast_types_type_node the eager pass and its rules
 //   c_ast_types_member_lookup                    the pass's member memo
 //   c_ast_types_builtin_call                     void builtins, failing calls
@@ -199,7 +203,7 @@
 //   c_ast_types_cast,                             rows
 //   c_ast_types_compound_literal,
 //   c_ast_types_address
-//   c_ast_types_locate, c_ast_types_answer       query lookup and the decision
+//   c_ast_types_answer                           query lookup and the decision
 //   c_ast_types_lookups_agree                    query-scope name checks
 //   c_ast_types_publish                          machine state after an answer
 //   c_ast_types_verify_*, c_test_*               the differential (tests builds),
@@ -267,6 +271,7 @@ struct CAstTypeMemberMemo
 BUSTER_CT_CHECK(C_AST_TYPE_MEMBER_MEMO_COUNT == 64);
 // c_ast_types_type_body fills the entity array with all-ones bytes.
 BUSTER_CT_CHECK(C_AST_TYPE_NONE == UINT32_MAX);
+BUSTER_CT_CHECK(C_AST_TYPE_NONE == C_AST_SPAN_NONE);
 
 // The `{` token of every top-level function definition, ascending, and the
 // FUNCTION_DEFINITION node it opens; and the first token of every top-level
@@ -285,26 +290,19 @@ struct CAstTypeBodyIndex
 };
 
 // One typed function body, or one file-scope object's initializer. Arrays are
-// indexed by node - begin.
+// indexed by node - begin. `spans` holds the node interval, its tokens and the
+// span columns (CAstSpans in c_internal.h, shared with lowering's tree reads).
 struct CAstTypeBody
 {
-    CAst const* ast;
+    CAstSpans spans;
     CParseResult* result;
-    CToken const* tokens;
-    u32 const* matches;
     CAstTypeStatistics* statistics;
     CTypeId* types;
-    u32* first;
-    u32* end;
     // An initializer only: the entity a name the binder recorded no use for
     // resolved to by spelling in `scope`, kept on each node that carries
     // C_AST_TYPE_FLAG_LOOKUP for an identifier, a cast or a compound literal.
     // Null in a body, where those names are bound.
     u32* entities;
-    // The previous node (relative index + 1) that starts at the same token, 0
-    // for none; start_head holds the newest, which is the outermost.
-    u32* link;
-    u32* start_head;
     u8* flags;
     // A member node's bit-field width (0 for an ordinary member); read only
     // for MEMBER and MEMBER_ARROW nodes.
@@ -312,14 +310,6 @@ struct CAstTypeBody
     Target target;
     // An initializer's lookup scope.
     CScopeId scope;
-    u32 begin;
-    // The body's COMPOUND_STATEMENT, or the initializer's root node.
-    u32 node;
-    // The body's tokens: [token_start, token_end), the braces excluded; or
-    // the initializer's.
-    u32 token_start;
-    u32 token_end;
-    u32 token_total;
     bool scalars_published;
     // GNU dialect: the machine reads `c ?: b` as a conditional.
     bool gnu;
@@ -365,6 +355,62 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_types_first_child(CAst const* ast, u32 node)
 BUSTER_GLOBAL_LOCAL bool c_ast_types_top_level_definition(CAst const* ast, u32 child)
 {
     return ast->kinds[child] == C_AST_FUNCTION_DEFINITION && child >= 1 && ast->kinds[child - 1] == C_AST_COMPOUND_STATEMENT;
+}
+
+// The walk c_ast_types_bodies_prepare makes for its definitions, for a reader
+// outside semantic analysis (lowering's tree reads): two backward passes over
+// the TRANSLATION_UNIT's children, a count and then a fill in ascending order.
+BUSTER_C_SHARED CAstDefinitionIndex c_ast_definitions_index(Arena* arena, CAst const* ast)
+{
+    CAstDefinitionIndex index = {0};
+    if (ast && ast->node_count && ast->root < ast->node_count && ast->kinds[ast->root] == C_AST_TRANSLATION_UNIT)
+    {
+        u32 floor = c_ast_subtree_begin(ast, ast->root);
+        u32 count = 0;
+        u32 cursor = ast->root;
+        while (cursor > floor && ast->extents[cursor - 1] && ast->extents[cursor - 1] <= cursor)
+        {
+            u32 child = cursor - 1;
+            count += c_ast_types_top_level_definition(ast, child);
+            cursor = c_ast_subtree_begin(ast, child);
+        }
+        index.braces = arena_allocate(arena, u32, count + 1);
+        index.bodies = arena_allocate(arena, u32, count + 1);
+        index.count = count;
+        u32 slot = count;
+        cursor = ast->root;
+        while (slot && cursor > floor && ast->extents[cursor - 1] && ast->extents[cursor - 1] <= cursor)
+        {
+            u32 child = cursor - 1;
+            if (c_ast_types_top_level_definition(ast, child))
+            {
+                slot -= 1;
+                index.braces[slot] = ast->tokens[child - 1];
+                index.bodies[slot] = child - 1;
+            }
+            cursor = c_ast_subtree_begin(ast, child);
+        }
+    }
+    return index;
+}
+
+BUSTER_C_SHARED u32 c_ast_definitions_find(CAstDefinitionIndex const* index, u32 brace)
+{
+    u32 low = 0;
+    u32 high = index->count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (index->braces[middle] < brace)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low < index->count && index->braces[low] == brace ? index->bodies[low] : C_AST_SPAN_NONE;
 }
 
 // Whether c_parse_validate_lowering_constraints has published the immutable
@@ -497,27 +543,27 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_types_find_initializer(CAst const* ast, CAstTypeBo
 
 // The closer of the delimiter opening at `open`, or C_AST_TYPE_NONE; the same
 // answer c_parse_matching_delimiter_indexed gives, read from the built index.
-BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 c_ast_types_match(CAstTypeBody const* body, u32 open)
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 c_ast_spans_match(CAstSpans const* spans, u32 open)
 {
-    u32 close = open < body->token_total ? body->matches[open] - 1 : C_AST_TYPE_NONE;
+    u32 close = open < spans->token_total ? spans->matches[open] - 1 : C_AST_TYPE_NONE;
     return close > open ? close : C_AST_TYPE_NONE;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_punctuator_at(CAstTypeBody const* body, u32 token, CPunctuator punctuator)
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_spans_punctuator_at(CAstSpans const* spans, u32 token, CPunctuator punctuator)
 {
-    return token < body->token_total && c_token_is_punctuator(&body->tokens[token], punctuator);
+    return token < spans->token_total && c_token_is_punctuator(&spans->tokens[token], punctuator);
 }
 
 // The span of the node at `relative`, widened over every balanced pair of
 // parentheses that wraps it exactly. The tree has no node for a parenthesis, so
 // an operator's own span begins or ends outside its operand's.
-BUSTER_GLOBAL_LOCAL void c_ast_types_expand(CAstTypeBody const* body, u32 relative, u32* first_out, u32* end_out)
+BUSTER_C_SHARED void c_ast_spans_expand(CAstSpans const* spans, u32 relative, u32* first_out, u32* end_out)
 {
-    u32 first = body->first[relative];
-    u32 end = body->end[relative];
+    u32 first = spans->first[relative];
+    u32 end = spans->end[relative];
     if (first != C_AST_TYPE_NONE)
     {
-        while (first > 0 && c_ast_types_punctuator_at(body, first - 1, C_PUNCTUATOR_LEFT_PARENTHESIS) && c_ast_types_match(body, first - 1) == end)
+        while (first > 0 && c_ast_spans_punctuator_at(spans, first - 1, C_PUNCTUATOR_LEFT_PARENTHESIS) && c_ast_spans_match(spans, first - 1) == end)
         {
             first -= 1;
             end += 1;
@@ -531,9 +577,9 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_expand(CAstTypeBody const* body, u32 relati
 // cannot be established (an unmatched delimiter, an operand without a span, a
 // span outside the unit), and then the node can be neither queried nor
 // accepted.
-BUSTER_GLOBAL_LOCAL bool c_ast_types_span(CAstTypeBody const* body, u32 node, u32 relative, u32* first_out, u32* end_out)
+BUSTER_GLOBAL_LOCAL bool c_ast_spans_rule(CAstSpans const* spans, u32 node, u32 relative, u32* first_out, u32* end_out)
 {
-    CAst const* ast = body->ast;
+    CAst const* ast = spans->ast;
     u32 kind = ast->kinds[node];
     u32 token = ast->tokens[node];
     u32 first = C_AST_TYPE_NONE;
@@ -564,7 +610,7 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_span(CAstTypeBody const* body, u32 node, u3
     break;
     case C_AST_STATEMENT_EXPRESSION:
     {
-        u32 close = c_ast_types_match(body, token);
+        u32 close = c_ast_spans_match(spans, token);
         first = close != C_AST_TYPE_NONE ? token : C_AST_TYPE_NONE;
         end = close != C_AST_TYPE_NONE ? close + 1 : C_AST_TYPE_NONE;
     }
@@ -573,7 +619,7 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_span(CAstTypeBody const* body, u32 node, u3
     case C_AST_SIZEOF_TYPE:
     case C_AST_ALIGNOF_TYPE:
     {
-        u32 close = c_ast_types_match(body, token + 1);
+        u32 close = c_ast_spans_match(spans, token + 1);
         first = close != C_AST_TYPE_NONE ? token : C_AST_TYPE_NONE;
         end = close != C_AST_TYPE_NONE ? close + 1 : C_AST_TYPE_NONE;
     }
@@ -584,8 +630,8 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_span(CAstTypeBody const* body, u32 node, u3
         u32 callee = c_ast_types_first_child(ast, node);
         u32 expanded_first = C_AST_TYPE_NONE;
         u32 expanded_end = C_AST_TYPE_NONE;
-        c_ast_types_expand(body, callee - body->begin, &expanded_first, &expanded_end);
-        u32 close = c_ast_types_match(body, token);
+        c_ast_spans_expand(spans, callee - spans->begin, &expanded_first, &expanded_end);
+        u32 close = c_ast_spans_match(spans, token);
         if (expanded_first != C_AST_TYPE_NONE && close != C_AST_TYPE_NONE)
         {
             first = expanded_first;
@@ -600,7 +646,7 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_span(CAstTypeBody const* body, u32 node, u3
     {
         u32 expanded_first = C_AST_TYPE_NONE;
         u32 expanded_end = C_AST_TYPE_NONE;
-        c_ast_types_expand(body, relative - 1, &expanded_first, &expanded_end);
+        c_ast_spans_expand(spans, relative - 1, &expanded_first, &expanded_end);
         if (expanded_first != C_AST_TYPE_NONE)
         {
             first = expanded_first;
@@ -610,14 +656,14 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_span(CAstTypeBody const* body, u32 node, u3
     break;
     case C_AST_COMPOUND_LITERAL:
     {
-        u32 close = c_ast_types_match(body, ast->tokens[node - 1]);
+        u32 close = c_ast_spans_match(spans, ast->tokens[node - 1]);
         first = close != C_AST_TYPE_NONE ? token : C_AST_TYPE_NONE;
         end = close != C_AST_TYPE_NONE ? close + 1 : C_AST_TYPE_NONE;
     }
     break;
     case C_AST_INITIALIZER_LIST:
     {
-        u32 close = c_ast_types_match(body, token);
+        u32 close = c_ast_spans_match(spans, token);
         first = close != C_AST_TYPE_NONE ? token : C_AST_TYPE_NONE;
         end = close != C_AST_TYPE_NONE ? close + 1 : C_AST_TYPE_NONE;
     }
@@ -628,7 +674,7 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_span(CAstTypeBody const* body, u32 node, u3
         {
             u32 expanded_first = C_AST_TYPE_NONE;
             u32 expanded_end = C_AST_TYPE_NONE;
-            c_ast_types_expand(body, relative - 1, &expanded_first, &expanded_end);
+            c_ast_spans_expand(spans, relative - 1, &expanded_first, &expanded_end);
             if (expanded_first != C_AST_TYPE_NONE)
             {
                 first = token;
@@ -642,8 +688,8 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_span(CAstTypeBody const* body, u32 node, u3
             u32 left_end = C_AST_TYPE_NONE;
             u32 right_first = C_AST_TYPE_NONE;
             u32 right_end = C_AST_TYPE_NONE;
-            c_ast_types_expand(body, leftmost - body->begin, &left_first, &left_end);
-            c_ast_types_expand(body, relative - 1, &right_first, &right_end);
+            c_ast_spans_expand(spans, leftmost - spans->begin, &left_first, &left_end);
+            c_ast_spans_expand(spans, relative - 1, &right_first, &right_end);
             if (left_first != C_AST_TYPE_NONE && right_end != C_AST_TYPE_NONE)
             {
                 first = left_first;
@@ -653,10 +699,64 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_span(CAstTypeBody const* body, u32 node, u3
     }
     break;
     }
-    bool valid = first != C_AST_TYPE_NONE && end != C_AST_TYPE_NONE && first < end && end <= body->token_total;
+    bool valid = first != C_AST_TYPE_NONE && end != C_AST_TYPE_NONE && first < end && end <= spans->token_total;
     *first_out = valid ? first : C_AST_TYPE_NONE;
     *end_out = valid ? end : C_AST_TYPE_NONE;
     return valid;
+}
+
+// The node whose span is exactly [start, end) after stripping balanced outer
+// parentheses, or C_AST_TYPE_NONE: the newest such node, which is the
+// outermost. Its span is the range after the strip.
+BUSTER_C_SHARED u32 c_ast_spans_locate(CAstSpans const* spans, u32 start, u32 end)
+{
+    u32 relative = C_AST_TYPE_NONE;
+    bool searching = start < end && start >= spans->token_start && end <= spans->token_end;
+    while (searching)
+    {
+        u32 hit = spans->start_head[start - spans->token_start];
+        while (hit && relative == C_AST_TYPE_NONE)
+        {
+            relative = spans->end[hit - 1] == end ? hit - 1 : C_AST_TYPE_NONE;
+            hit = relative == C_AST_TYPE_NONE ? spans->link[hit - 1] : 0;
+        }
+        searching = relative == C_AST_TYPE_NONE && end > start + 2 && c_ast_spans_punctuator_at(spans, start, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                    c_ast_spans_match(spans, start) + 1 == end;
+        start += searching ? 1 : 0;
+        end -= searching ? 1 : 0;
+    }
+    return relative;
+}
+
+// Spans every expression node of the interval whose span lies inside the
+// tokens, and links each into the chain of its start token; any other node
+// keeps no span. The interval's nodes are visited in index order, so every
+// operand is spanned before the operator that reads it. This is the span half
+// of the typer's eager pass (c_ast_types_type_body), for a reader that types
+// nothing: lowering's tree reads (c_gen.c, CIrSyntaxTree). Returns the number
+// of nodes spanned.
+BUSTER_C_SHARED u32 c_ast_spans_build(CAstSpans* spans)
+{
+    CAst const* ast = spans->ast;
+    u32 spanned_count = 0;
+    memset(spans->start_head, 0, sizeof(*spans->start_head) * (spans->token_end - spans->token_start));
+    for (u32 node = spans->begin; node <= spans->node; node += 1)
+    {
+        u32 relative = node - spans->begin;
+        u32 first = C_AST_TYPE_NONE;
+        u32 end = C_AST_TYPE_NONE;
+        bool spanned = c_ast_types_expression_kind(ast->kinds[node]) && c_ast_spans_rule(spans, node, relative, &first, &end) &&
+                       first >= spans->token_start && end <= spans->token_end;
+        spans->first[relative] = spanned ? first : C_AST_TYPE_NONE;
+        spans->end[relative] = spanned ? end : C_AST_TYPE_NONE;
+        if (spanned)
+        {
+            spans->link[relative] = spans->start_head[first - spans->token_start];
+            spans->start_head[first - spans->token_start] = relative + 1;
+        }
+        spanned_count += spanned;
+    }
+    return spanned_count;
 }
 
 // ---- the typing rules ----------------------------------------------------------
@@ -717,12 +817,12 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_types_decayed_row(CParseResult const* result, CTyp
 // (`x, s.f`, `(T)s.f`) is left to the machine.
 BUSTER_GLOBAL_LOCAL u32 c_ast_types_operand_width(CAstTypeBody const* body, u32 node)
 {
-    u32 relative = node - body->begin;
-    u32 kind = body->ast->kinds[node];
-    u32 first = body->first[relative];
-    u32 end = body->end[relative];
-    bool member_tail = end >= first + 3 && body->tokens[end - 1].kind == C_TOKEN_IDENTIFIER &&
-                       (c_ast_types_punctuator_at(body, end - 2, C_PUNCTUATOR_DOT) || c_ast_types_punctuator_at(body, end - 2, C_PUNCTUATOR_ARROW));
+    u32 relative = node - body->spans.begin;
+    u32 kind = body->spans.ast->kinds[node];
+    u32 first = body->spans.first[relative];
+    u32 end = body->spans.end[relative];
+    bool member_tail = end >= first + 3 && body->spans.tokens[end - 1].kind == C_TOKEN_IDENTIFIER &&
+                       (c_ast_spans_punctuator_at(&body->spans, end - 2, C_PUNCTUATOR_DOT) || c_ast_spans_punctuator_at(&body->spans, end - 2, C_PUNCTUATOR_ARROW));
     return kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW ? body->widths[relative] : member_tail ? C_AST_TYPE_NONE : 0;
 }
 
@@ -780,8 +880,8 @@ BUSTER_GLOBAL_LOCAL CEntity const* c_ast_types_looked_up_entity(CAstTypeBody* bo
 BUSTER_GLOBAL_LOCAL void c_ast_types_identifier(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node, u32 relative)
 {
     CParseResult* result = body->result;
-    u32 token = body->ast->tokens[node];
-    bool identifier = token < body->token_total && body->tokens[token].kind == C_TOKEN_IDENTIFIER;
+    u32 token = body->spans.ast->tokens[node];
+    bool identifier = token < body->spans.token_total && body->spans.tokens[token].kind == C_TOKEN_IDENTIFIER;
     CEntity const* entity = identifier ? c_ast_types_bound_entity(result, token) : 0;
     u32 flags = C_AST_TYPE_FLAG_SAFE;
     if (identifier && !entity && body->entities)
@@ -810,8 +910,8 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_identifier(CAstTypeBody* body, CPreprocessR
 BUSTER_GLOBAL_LOCAL void c_ast_types_literal(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess, u32 node, u32 relative,
                                              CTokenKind token_kind)
 {
-    u32 token = body->ast->tokens[node];
-    if (body->scalars_published && token < body->token_total && body->tokens[token].kind == token_kind)
+    u32 token = body->spans.ast->tokens[node];
+    if (body->scalars_published && token < body->spans.token_total && body->spans.tokens[token].kind == token_kind)
     {
         CTypeId type = c_parse_expression_leaf_without_cast(machine->scratch_arena, *preprocess, body->result, (CScopeId){.value = C_ID_UNDERLYING_INVALID},
                                                             token, token + 1);
@@ -874,12 +974,12 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_member(CAstTypeBody* body, CTypeParseMachin
                                             bool arrow)
 {
     CParseResult* result = body->result;
-    u32 member_token = body->ast->tokens[node];
+    u32 member_token = body->spans.ast->tokens[node];
     u32 base_flags = body->flags[relative - 1];
     CTypeId aggregate = C_TYPE_ID_INVALID;
-    if ((base_flags & C_AST_TYPE_FLAG_ACCEPTED) && c_ast_types_member_base_kind(body->ast->kinds[node - 1]) && member_token >= 1 &&
-        member_token < body->token_total && body->tokens[member_token].kind == C_TOKEN_IDENTIFIER &&
-        c_ast_types_punctuator_at(body, member_token - 1, arrow ? C_PUNCTUATOR_ARROW : C_PUNCTUATOR_DOT))
+    if ((base_flags & C_AST_TYPE_FLAG_ACCEPTED) && c_ast_types_member_base_kind(body->spans.ast->kinds[node - 1]) && member_token >= 1 &&
+        member_token < body->spans.token_total && body->spans.tokens[member_token].kind == C_TOKEN_IDENTIFIER &&
+        c_ast_spans_punctuator_at(&body->spans, member_token - 1, arrow ? C_PUNCTUATOR_ARROW : C_PUNCTUATOR_DOT))
     {
         CTypeId base = body->types[relative - 1];
         CType const* value = result->types + base.value;
@@ -918,9 +1018,9 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_member(CAstTypeBody* body, CTypeParseMachin
 BUSTER_GLOBAL_LOCAL void c_ast_types_index(CAstTypeBody* body, u32 node, u32 relative)
 {
     CParseResult* result = body->result;
-    CAst const* ast = body->ast;
+    CAst const* ast = body->spans.ast;
     u32 base_node = c_ast_types_first_child(ast, node);
-    u32 base = base_node - body->begin;
+    u32 base = base_node - body->spans.begin;
     u32 index = relative - 1;
     u32 base_flags = body->flags[base];
     u32 index_flags = body->flags[index];
@@ -987,7 +1087,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_builtin_call(CAstTypeBody* body, CPreproces
     if (string_starts_with_sequence(name, S8("__builtin_")) && c_vendor_generic_builtin(name).operation == C_VENDOR_GENERIC_NONE)
     {
         CSymbolBuiltin builtin = c_symbol_builtin_from_spelling(name);
-        bool empty = body->ast->tokens[node] == callee_token + 1 && c_ast_types_match(body, callee_token + 1) == callee_token + 2;
+        bool empty = body->spans.ast->tokens[node] == callee_token + 1 && c_ast_spans_match(&body->spans, callee_token + 1) == callee_token + 2;
         CTypeId type = empty && c_semantic_builtin_returns_void(builtin) ? c_ast_types_scalar(body, C_TYPE_VOID) : C_TYPE_ID_INVALID;
         if (type.value < body->result->type_count)
         {
@@ -1008,13 +1108,13 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_builtin_call(CAstTypeBody* body, CPreproces
 BUSTER_GLOBAL_LOCAL void c_ast_types_call(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node, u32 relative)
 {
     CParseResult* result = body->result;
-    CAst const* ast = body->ast;
+    CAst const* ast = body->spans.ast;
     u32 callee = c_ast_types_first_child(ast, node);
     u32 callee_token = ast->tokens[callee];
     // The callee is the plain identifier directly before the `(`: a
     // parenthesized or computed callee takes a different machine path.
-    if (ast->kinds[callee] == C_AST_IDENTIFIER && ast->tokens[node] == callee_token + 1 && callee_token < body->token_total &&
-        body->tokens[callee_token].kind == C_TOKEN_IDENTIFIER && c_ast_types_punctuator_at(body, callee_token + 1, C_PUNCTUATOR_LEFT_PARENTHESIS))
+    if (ast->kinds[callee] == C_AST_IDENTIFIER && ast->tokens[node] == callee_token + 1 && callee_token < body->spans.token_total &&
+        body->spans.tokens[callee_token].kind == C_TOKEN_IDENTIFIER && c_ast_spans_punctuator_at(&body->spans, callee_token + 1, C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
         CEntity const* entity = c_ast_types_bound_entity(result, callee_token);
         if (c_ast_types_value_entity(entity, false) && entity->type.value < result->type_count && !c_ast_types_callee_reserved(preprocess, callee_token))
@@ -1051,8 +1151,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_pointer_like_kind(CTypeKind k
 // c_parse_range_is_null_pointer_constant accepts for its int row.
 BUSTER_GLOBAL_LOCAL bool c_ast_types_zero_literal(CAstTypeBody const* body, CPreprocessResult const* preprocess, u32 node)
 {
-    u32 token = body->ast->tokens[node];
-    bool number = body->ast->kinds[node] == C_AST_NUMBER && token < body->token_total;
+    u32 token = body->spans.ast->tokens[node];
+    bool number = body->spans.ast->kinds[node] == C_AST_NUMBER && token < body->spans.token_total;
     return number && string_equal(c_token_spelling(preprocess->spelling_base, preprocess->tokens[token]), S8("0"));
 }
 
@@ -1123,16 +1223,16 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_binary_safe(CAstTypeBody const* body, CPrep
 BUSTER_GLOBAL_LOCAL void c_ast_types_binary(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node, u32 relative)
 {
     CParseResult* result = body->result;
-    CAst const* ast = body->ast;
+    CAst const* ast = body->spans.ast;
     u32 kind = ast->kinds[node];
     u32 left_node = c_ast_types_first_child(ast, node);
     u32 right_node = node - 1;
-    u32 left_flags = body->flags[left_node - body->begin];
-    u32 right_flags = body->flags[right_node - body->begin];
+    u32 left_flags = body->flags[left_node - body->spans.begin];
+    u32 right_flags = body->flags[right_node - body->spans.begin];
     if ((left_flags & right_flags & C_AST_TYPE_FLAG_ACCEPTED) && left_node != right_node)
     {
-        CTypeId left = body->types[left_node - body->begin];
-        CTypeId right = body->types[right_node - body->begin];
+        CTypeId left = body->types[left_node - body->spans.begin];
+        CTypeId right = body->types[right_node - body->spans.begin];
         CTypeKind left_kind = result->types[left.value].kind;
         CTypeKind right_kind = result->types[right.value].kind;
         bool add = kind == C_AST_ADD;
@@ -1186,7 +1286,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_binary(CAstTypeBody* body, CPreprocessResul
 BUSTER_GLOBAL_LOCAL void c_ast_types_unary(CAstTypeBody* body, u32 node, u32 relative)
 {
     CParseResult* result = body->result;
-    u32 kind = body->ast->kinds[node];
+    u32 kind = body->spans.ast->kinds[node];
     u32 operand_flags = body->flags[relative - 1];
     if (operand_flags & C_AST_TYPE_FLAG_ACCEPTED)
     {
@@ -1231,12 +1331,12 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_unary(CAstTypeBody* body, u32 node, u32 rel
 // operand's unqualified type, when that row exists. It checks no constraint.
 BUSTER_GLOBAL_LOCAL void c_ast_types_assignment(CAstTypeBody* body, u32 node, u32 relative)
 {
-    u32 left_node = c_ast_types_first_child(body->ast, node);
-    u32 left_flags = body->flags[left_node - body->begin];
+    u32 left_node = c_ast_types_first_child(body->spans.ast, node);
+    u32 left_flags = body->flags[left_node - body->spans.begin];
     u32 right_flags = body->flags[relative - 1];
     if ((left_flags & right_flags & C_AST_TYPE_FLAG_ACCEPTED) && left_node + 1 != node)
     {
-        u32 row = c_ast_types_unqualified_row(body->result, body->types[left_node - body->begin]);
+        u32 row = c_ast_types_unqualified_row(body->result, body->types[left_node - body->spans.begin]);
         if (row != C_AST_TYPE_NONE)
         {
             c_ast_types_accept(body, relative, (CTypeId){.value = row}, c_ast_types_inherit(left_flags, right_flags));
@@ -1247,8 +1347,8 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_assignment(CAstTypeBody* body, u32 node, u3
 // `a, b`: the right operand's decayed type, when that row exists.
 BUSTER_GLOBAL_LOCAL void c_ast_types_comma(CAstTypeBody* body, u32 node, u32 relative)
 {
-    u32 left_node = c_ast_types_first_child(body->ast, node);
-    u32 left_flags = body->flags[left_node - body->begin];
+    u32 left_node = c_ast_types_first_child(body->spans.ast, node);
+    u32 left_flags = body->flags[left_node - body->spans.begin];
     u32 right_flags = body->flags[relative - 1];
     if ((left_flags & right_flags & C_AST_TYPE_FLAG_ACCEPTED) && left_node + 1 != node)
     {
@@ -1269,10 +1369,10 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_loose_operator(CAstTypeBody const* body, u3
     bool loose = false;
     for (u32 index = start; !loose && index < end; index += 1)
     {
-        CToken token = body->tokens[index];
+        CToken token = body->spans.tokens[index];
         if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
         {
-            u32 close = c_ast_types_match(body, index);
+            u32 close = c_ast_spans_match(&body->spans, index);
             loose = close == C_AST_TYPE_NONE || close >= end;
             index = loose ? index : close;
         }
@@ -1293,18 +1393,18 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_loose_operator(CAstTypeBody const* body, u3
 BUSTER_GLOBAL_LOCAL void c_ast_types_conditional(CAstTypeBody* body, u32 node, u32 relative)
 {
     CParseResult* result = body->result;
-    CAst const* ast = body->ast;
+    CAst const* ast = body->spans.ast;
     bool omitted = ast->kinds[node] == C_AST_CONDITIONAL_OMITTED;
     u32 condition = c_ast_types_first_child(ast, node);
     u32 else_node = node - 1;
     u32 then_node = omitted ? condition : c_ast_subtree_begin(ast, else_node) - 1;
-    u32 condition_flags = body->flags[condition - body->begin];
-    u32 then_flags = body->flags[then_node - body->begin];
-    u32 else_flags = body->flags[else_node - body->begin];
+    u32 condition_flags = body->flags[condition - body->spans.begin];
+    u32 then_flags = body->flags[then_node - body->spans.begin];
+    u32 else_flags = body->flags[else_node - body->spans.begin];
     bool arms = (then_flags & else_flags & C_AST_TYPE_FLAG_ACCEPTED) && condition < else_node && then_node < else_node && (!omitted || body->gnu) &&
-                !c_ast_types_loose_operator(body, ast->tokens[node] + 1, body->end[relative]);
-    u32 left = arms ? c_ast_types_decayed_row(result, body->types[then_node - body->begin]) : C_AST_TYPE_NONE;
-    u32 right = arms ? c_ast_types_decayed_row(result, body->types[else_node - body->begin]) : C_AST_TYPE_NONE;
+                !c_ast_types_loose_operator(body, ast->tokens[node] + 1, body->spans.end[relative]);
+    u32 left = arms ? c_ast_types_decayed_row(result, body->types[then_node - body->spans.begin]) : C_AST_TYPE_NONE;
+    u32 right = arms ? c_ast_types_decayed_row(result, body->types[else_node - body->spans.begin]) : C_AST_TYPE_NONE;
     CTypeId type = C_TYPE_ID_INVALID;
     if (left != C_AST_TYPE_NONE && right != C_AST_TYPE_NONE)
     {
@@ -1342,7 +1442,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_conditional(CAstTypeBody* body, u32 node, u
     }
     if (type.value < result->type_count)
     {
-        CTypeKind condition_kind = (condition_flags & C_AST_TYPE_FLAG_ACCEPTED) ? result->types[body->types[condition - body->begin].value].kind
+        CTypeKind condition_kind = (condition_flags & C_AST_TYPE_FLAG_ACCEPTED) ? result->types[body->types[condition - body->spans.begin].value].kind
                                                                               : C_TYPE_INVALID;
         // The scalar-condition rule tests only a condition that has a type.
         bool condition_safe = ((condition_flags & C_AST_TYPE_FLAG_ACCEPTED) && (condition_flags & C_AST_TYPE_FLAG_SAFE) &&
@@ -1414,13 +1514,13 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_primitive_word(u32 word)
 // the query looks up again (c_ast_types_lookups_agree).
 BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node, u32 relative, bool* lookup_out)
 {
-    CAst const* ast = body->ast;
+    CAst const* ast = body->spans.ast;
     CParseResult const* result = body->result;
     u32 type_name = c_ast_types_first_child(ast, node);
     u32 open = ast->tokens[node];
-    u32 close = c_ast_types_match(body, open);
+    u32 close = c_ast_spans_match(&body->spans, open);
     u32 star = close;
-    while (close != C_AST_TYPE_NONE && star > open + 1 && c_ast_types_punctuator_at(body, star - 1, C_PUNCTUATOR_STAR))
+    while (close != C_AST_TYPE_NONE && star > open + 1 && c_ast_spans_punctuator_at(&body->spans, star - 1, C_PUNCTUATOR_STAR))
     {
         star -= 1;
     }
@@ -1440,7 +1540,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody* body, CPreproces
     bool lookup = false;
     if (words && ast->kinds[first] == C_AST_TYPEDEF_NAME)
     {
-        bool identifier = open + 1 < body->token_total && body->tokens[open + 1].kind == C_TOKEN_IDENTIFIER;
+        bool identifier = open + 1 < body->spans.token_total && body->spans.tokens[open + 1].kind == C_TOKEN_IDENTIFIER;
         CEntity const* entity = identifier ? c_ast_types_bound_entity(body->result, open + 1) : 0;
         if (entity && body->entities)
         {
@@ -1482,7 +1582,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody* body, CPreproces
 BUSTER_GLOBAL_LOCAL void c_ast_types_cast(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node, u32 relative)
 {
     CParseResult* result = body->result;
-    CAst const* ast = body->ast;
+    CAst const* ast = body->spans.ast;
     bool lookup = false;
     CTypeId type = c_ast_types_type_name(body, preprocess, node, relative, &lookup);
     u32 operand_flags = body->flags[relative - 1];
@@ -1495,15 +1595,15 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_cast(CAstTypeBody* body, CPreprocessResult 
         // parentheses (`S8()` spells `(char8*)("text")`): the machine's
         // operand task strips enclosing parentheses before it probes the memo
         // and hands the token to the leaf, so either replays the same way.
-        u32 close = c_ast_types_match(body, ast->tokens[node]);
+        u32 close = c_ast_spans_match(&body->spans, ast->tokens[node]);
         u32 literal_token = ast->tokens[node - 1];
         u32 wraps = close != C_AST_TYPE_NONE && literal_token > close ? literal_token - (close + 1) : C_AST_TYPE_NONE;
         bool literal = ast->kinds[node - 1] == C_AST_STRING && ast->data[node - 1] == 1 && wraps != C_AST_TYPE_NONE &&
-                       body->end[relative] == literal_token + 1 + wraps;
+                       body->spans.end[relative] == literal_token + 1 + wraps;
         for (u32 level = 0; literal && level < wraps; level += 1)
         {
-            literal = c_ast_types_punctuator_at(body, close + 1 + level, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-                      c_ast_types_punctuator_at(body, literal_token + 1 + level, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            literal = c_ast_spans_punctuator_at(&body->spans, close + 1 + level, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                      c_ast_spans_punctuator_at(&body->spans, literal_token + 1 + level, C_PUNCTUATOR_RIGHT_PARENTHESIS);
         }
         CTypeKind from = operand ? result->types[body->types[relative - 1].value].kind : literal ? C_TYPE_ARRAY : C_TYPE_INVALID;
         bool aggregates = c_ast_types_aggregate_kind(to) || c_ast_types_aggregate_kind(from);
@@ -1548,7 +1648,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_address(CAstTypeBody* body, CPreprocessResu
     if (type.value < result->type_count)
     {
         u32 flags = c_ast_types_inherit(operand_flags, operand_flags);
-        bool place = c_parse_expression_place_shape(result, *preprocess, body->first[relative] + 1, body->end[relative]);
+        bool place = c_parse_expression_place_shape(result, *preprocess, body->spans.first[relative] + 1, body->spans.end[relative]);
         c_ast_types_accept(body, relative, type, place ? flags : flags & ~(u32)C_AST_TYPE_FLAG_SAFE);
     }
 }
@@ -1562,15 +1662,15 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_address(CAstTypeBody* body, CPreprocessResu
 // the scan reads no group.
 BUSTER_GLOBAL_LOCAL void c_ast_types_size_query(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node, u32 relative)
 {
-    u32 kind = body->ast->kinds[node];
-    u32 token = body->ast->tokens[node];
-    String8 name = token < body->token_total ? c_token_spelling(preprocess->spelling_base, preprocess->tokens[token]) : (String8){0};
+    u32 kind = body->spans.ast->kinds[node];
+    u32 token = body->spans.ast->tokens[node];
+    String8 name = token < body->spans.token_total ? c_token_spelling(preprocess->spelling_base, preprocess->tokens[token]) : (String8){0};
     bool keyword = kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_SIZEOF_TYPE
                        ? string_equal(name, S8("sizeof"))
                        : string_equal(name, S8("_Alignof")) || string_equal(name, S8("alignof"));
     bool expression = kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_ALIGNOF_EXPRESSION;
-    bool scanned = !expression || (body->flags[relative - 1] & C_AST_TYPE_FLAG_ACCEPTED) || !c_ast_types_holds_type_name(body->ast, node - 1);
-    CTypeId type = keyword && scanned && body->tokens[token].kind == C_TOKEN_IDENTIFIER
+    bool scanned = !expression || (body->flags[relative - 1] & C_AST_TYPE_FLAG_ACCEPTED) || !c_ast_types_holds_type_name(body->spans.ast, node - 1);
+    CTypeId type = keyword && scanned && body->spans.tokens[token].kind == C_TOKEN_IDENTIFIER
                        ? c_ast_types_scalar(body, target_uses_llp64_data_model(body->target) ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG)
                        : C_TYPE_ID_INVALID;
     if (type.value < body->result->type_count)
@@ -1582,7 +1682,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_size_query(CAstTypeBody* body, CPreprocessR
 
 BUSTER_GLOBAL_LOCAL void c_ast_types_type_node(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess, u32 node, u32 relative)
 {
-    u32 kind = body->ast->kinds[node];
+    u32 kind = body->spans.ast->kinds[node];
     switch (kind)
     {
     case C_AST_IDENTIFIER:
@@ -1602,7 +1702,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_node(CAstTypeBody* body, CTypeParseMac
     break;
     case C_AST_STRING:
     {
-        body->flags[relative] = (u8)(body->ast->data[node] == 1 ? C_AST_TYPE_FLAG_STRING : 0);
+        body->flags[relative] = (u8)(body->spans.ast->data[node] == 1 ? C_AST_TYPE_FLAG_STRING : 0);
     }
     break;
     case C_AST_MEMBER:
@@ -1690,7 +1790,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_node(CAstTypeBody* body, CTypeParseMac
 // The eager pass: one forward loop, children before parents.
 BUSTER_GLOBAL_LOCAL void c_ast_types_type_body(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess)
 {
-    CAst const* ast = body->ast;
+    CAst const* ast = body->spans.ast;
     u32 visited = 0;
     u32 accepted = 0;
     // Every node starts unaccepted, and a member node without a width. A
@@ -1698,7 +1798,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_body(CAstTypeBody* body, CTypeParseMac
     // both), and its link only through a chain it was linked into, so neither
     // is cleared. The span is stored for every node, before the node's rule
     // reads it: an operand of another kind has none.
-    u64 count = (u64)body->node - body->begin + 1;
+    u64 count = (u64)body->spans.node - body->spans.begin + 1;
     memset(body->flags, 0, sizeof(*body->flags) * count);
     memset(body->widths, 0, sizeof(*body->widths) * count);
     if (body->entities)
@@ -1706,20 +1806,20 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_body(CAstTypeBody* body, CTypeParseMac
         memset(body->entities, 0xff, sizeof(*body->entities) * count);
     }
     memset(body->members, 0, sizeof(body->members));
-    for (u32 node = body->begin; node <= body->node; node += 1)
+    for (u32 node = body->spans.begin; node <= body->spans.node; node += 1)
     {
-        u32 relative = node - body->begin;
+        u32 relative = node - body->spans.begin;
         bool expression = c_ast_types_expression_kind(ast->kinds[node]);
         u32 first = C_AST_TYPE_NONE;
         u32 end = C_AST_TYPE_NONE;
-        bool spanned = expression && c_ast_types_span(body, node, relative, &first, &end) && first >= body->token_start && end <= body->token_end;
-        body->first[relative] = spanned ? first : C_AST_TYPE_NONE;
-        body->end[relative] = spanned ? end : C_AST_TYPE_NONE;
+        bool spanned = expression && c_ast_spans_rule(&body->spans, node, relative, &first, &end) && first >= body->spans.token_start && end <= body->spans.token_end;
+        body->spans.first[relative] = spanned ? first : C_AST_TYPE_NONE;
+        body->spans.end[relative] = spanned ? end : C_AST_TYPE_NONE;
         visited += expression;
         if (spanned)
         {
-            body->link[relative] = body->start_head[first - body->token_start];
-            body->start_head[first - body->token_start] = relative + 1;
+            body->spans.link[relative] = body->spans.start_head[first - body->spans.token_start];
+            body->spans.start_head[first - body->spans.token_start] = relative + 1;
             c_ast_types_type_node(body, machine, preprocess, node, relative);
             accepted += (body->flags[relative] & C_AST_TYPE_FLAG_ACCEPTED) != 0;
         }
@@ -1770,25 +1870,28 @@ BUSTER_GLOBAL_LOCAL CAstTypeBody* c_ast_types_region_create(CTypeParseMachine* m
     if (reserved)
     {
         *body = (CAstTypeBody){
-            .ast = ast,
+            .spans =
+                {
+                    .ast = ast,
+                    .tokens = preprocess->tokens,
+                    .matches = result->position_index->matching_delimiters_plus_one,
+                    .first = first,
+                    .end = end,
+                    .link = link,
+                    .start_head = start_head,
+                    .begin = c_ast_subtree_begin(ast, node),
+                    .node = node,
+                    .token_start = token_start,
+                    .token_end = token_end,
+                    .token_total = (u32)preprocess->token_count,
+                },
             .result = result,
-            .tokens = preprocess->tokens,
-            .matches = result->position_index->matching_delimiters_plus_one,
             .types = types,
-            .first = first,
-            .end = end,
             .entities = entities,
-            .link = link,
-            .start_head = start_head,
             .flags = flags,
             .widths = widths,
             .target = preprocess->target,
             .scope = scope,
-            .begin = c_ast_subtree_begin(ast, node),
-            .node = node,
-            .token_start = token_start,
-            .token_end = token_end,
-            .token_total = (u32)preprocess->token_count,
             .scalars_published = machine->ast_bodies->scalars_published,
             .gnu = c_preprocess_dialect_is_gnu(preprocess->dialect),
             .waiting = initializer,
@@ -1803,7 +1906,7 @@ BUSTER_GLOBAL_LOCAL CAstTypeBody* c_ast_types_region_create(CTypeParseMachine* m
 // allocates nothing and may run while a validator holds scratch above them.
 BUSTER_GLOBAL_LOCAL void c_ast_types_region_fill(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess)
 {
-    memset(body->start_head, 0, sizeof(*body->start_head) * (body->token_end - body->token_start));
+    memset(body->spans.start_head, 0, sizeof(*body->spans.start_head) * (body->spans.token_end - body->spans.token_start));
     c_ast_types_type_body(body, machine, preprocess);
     body->waiting = false;
 }
@@ -1863,28 +1966,6 @@ BUSTER_C_SHARED void c_ast_types_initializer_end(CTypeParseMachine* machine)
 
 // ---- queries ---------------------------------------------------------------------
 
-// The node whose span is exactly [start, end) after stripping balanced outer
-// parentheses, or C_AST_TYPE_NONE.
-BUSTER_GLOBAL_LOCAL u32 c_ast_types_locate(CAstTypeBody const* body, u32 start, u32 end)
-{
-    u32 relative = C_AST_TYPE_NONE;
-    bool searching = start < end && start >= body->token_start && end <= body->token_end;
-    while (searching)
-    {
-        u32 hit = body->start_head[start - body->token_start];
-        while (hit && relative == C_AST_TYPE_NONE)
-        {
-            relative = body->end[hit - 1] == end ? hit - 1 : C_AST_TYPE_NONE;
-            hit = relative == C_AST_TYPE_NONE ? body->link[hit - 1] : 0;
-        }
-        searching = relative == C_AST_TYPE_NONE && end > start + 2 && c_ast_types_punctuator_at(body, start, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-                    c_ast_types_match(body, start) + 1 == end;
-        start += searching ? 1 : 0;
-        end -= searching ? 1 : 0;
-    }
-    return relative;
-}
-
 // Whether every name the answer rests on resolves, in the query's scope, as
 // the machine will resolve it: a callee by spelling to the entity the binder
 // bound it to (or to nothing, in which case the machine falls back to the
@@ -1897,14 +1978,14 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_types_locate(CAstTypeBody const* body, u32 start, 
 BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_agree(CAstTypeBody const* body, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                    u32 node)
 {
-    CAst const* ast = body->ast;
+    CAst const* ast = body->spans.ast;
     u32 floor = c_ast_subtree_begin(ast, node);
     u32 cursor = node;
     bool agree = true;
     bool more = true;
     while (agree && more)
     {
-        u32 flags = body->flags[cursor - body->begin];
+        u32 flags = body->flags[cursor - body->spans.begin];
         if (flags & C_AST_TYPE_FLAG_LOOKUP)
         {
             u32 kind = ast->kinds[cursor];
@@ -1912,7 +1993,7 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_agree(CAstTypeBody const* body, CPr
             u32 token = call ? ast->tokens[c_ast_types_first_child(ast, cursor)] : kind == C_AST_IDENTIFIER ? ast->tokens[cursor] : ast->tokens[cursor] + 1;
             CEntityId looked = c_parse_lookup_entity_token(result, preprocess->spelling_base, scope, &preprocess->tokens[token]);
             CEntity const* bound = c_ast_types_bound_entity(result, token);
-            u32 expected = body->entities && !call ? body->entities[cursor - body->begin]
+            u32 expected = body->entities && !call ? body->entities[cursor - body->spans.begin]
                            : bound                ? (u32)(bound - result->entities)
                                                   : C_AST_TYPE_NONE;
             // A call, and a node that types to nothing, also agree when the
@@ -1935,7 +2016,7 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
     CAstTypeAnswer answer = {.type = C_TYPE_ID_INVALID, .status = C_AST_TYPE_INACTIVE};
     // The same preconditions the machine's literal fast path insists on: an idle
     // machine with room for the frame and tasks the machine path would take.
-    bool ready = body->result == result && body->tokens == preprocess->tokens && !machine->failed && machine->frame_count < machine->frame_capacity &&
+    bool ready = body->result == result && body->spans.tokens == preprocess->tokens && !machine->failed && machine->frame_count < machine->frame_capacity &&
                  !machine->frame_count && machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL &&
                  machine->expression_task_count <= machine->expression_task_capacity &&
                  (u64)(end > start ? end - start : 0) + 1 <= machine->expression_task_capacity - machine->expression_task_count;
@@ -1950,7 +2031,7 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
             c_ast_types_region_fill(body, machine, preprocess);
             body->statistics->initializers += 1;
         }
-        u32 relative = c_ast_types_locate(body, start, end);
+        u32 relative = c_ast_spans_locate(&body->spans, start, end);
         if (relative == C_AST_TYPE_NONE)
         {
             body->statistics->misses += 1;
@@ -1960,7 +2041,7 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
         else
         {
             u32 flags = body->flags[relative];
-            u32 node = body->begin + relative;
+            u32 node = body->spans.begin + relative;
             bool checked = machine->validate_expression_constraints;
             bool replay = checked && !(flags & C_AST_TYPE_FLAG_SAFE) && (flags & C_AST_TYPE_FLAG_REPLAY);
             bool vouched = (flags & C_AST_TYPE_FLAG_ACCEPTED) && (!checked || (flags & C_AST_TYPE_FLAG_SAFE) || replay) &&
@@ -1969,7 +2050,7 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
             {
                 vouched = c_ast_types_lookups_agree(body, preprocess, result, scope, node);
             }
-            answer.node_kind = body->ast->kinds[node];
+            answer.node_kind = body->spans.ast->kinds[node];
             if (vouched)
             {
                 body->statistics->answers += 1;
@@ -1977,8 +2058,8 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
                 answer.type = body->types[relative];
                 answer.nonplace_projection = (flags & C_AST_TYPE_FLAG_NONPLACE) != 0;
                 // The literal operand's token (C_AST_TYPE_FLAG_REPLAY).
-                answer.replay_start = replay ? body->ast->tokens[node - 1] : 0;
-                answer.replay_end = replay ? body->ast->tokens[node - 1] + 1 : 0;
+                answer.replay_start = replay ? body->spans.ast->tokens[node - 1] : 0;
+                answer.replay_end = replay ? body->spans.ast->tokens[node - 1] + 1 : 0;
                 WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_ANSWERS, 1);
             }
             else if ((flags & C_AST_TYPE_FLAG_STRING) && !c_parse_pending_enum_possible(result) &&
@@ -1988,8 +2069,8 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
                 // the literal's own token, whose replay types the answer.
                 body->statistics->answers += 1;
                 answer.status = C_AST_TYPE_STRING;
-                answer.replay_start = body->ast->tokens[node];
-                answer.replay_end = body->ast->tokens[node] + 1;
+                answer.replay_start = body->spans.ast->tokens[node];
+                answer.replay_end = body->spans.ast->tokens[node] + 1;
                 WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_ANSWERS, 1);
             }
             else

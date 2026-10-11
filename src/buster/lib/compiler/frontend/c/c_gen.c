@@ -13,10 +13,14 @@
 // check the direct-SSA rows whose size only the body decides (c_ir_ssa_refuse
 // records the refusal). The remaining phase/state graph is in
 // docs/agents/compiler-phase-state.md.
-// There is no AST — lowering re-walks token ranges directly, resolving
-// identifiers through the parse result's scopes and answering structure
-// questions from a prebuilt matching-delimiter index
-// (c_ir_build_delimiter_index). The prepared control expressions of a function
+// Lowering re-walks token ranges directly, resolving identifiers through the
+// parse result's scopes and answering structure questions from a prebuilt
+// matching-delimiter index (c_ir_build_delimiter_index). The one exception is
+// the -fc-ast-pilot syntax tree (CIRLowerOptions.syntax_tree, GitHub #3102):
+// with it, c_ir_root_conditional reads a function body's root-conditional
+// splits from expression nodes (CIrSyntaxTree, c_ir_root_conditional_tree)
+// and scans tokens only for the ranges the tree does not answer; no node
+// index reaches the IR. The prepared control expressions of a function
 // are answered by token-indexed tables, not scans of their list:
 // c_ir_prepared_control_expression_find, _contains and _contains_range, kept
 // current by _begin, _end and _rollback (a typeof replay).
@@ -127,6 +131,9 @@
 //   c_ir_lower_compound_literal_step              ordered evaluation and final
 //                                                 per-subobject initializer values
 //   c_ir_lower_expression_core_step               the expression evaluator
+//   c_ir_root_conditional_tokens,                 the root `?:` split, by tokens
+//   c_ir_root_conditional_tree,                   or from the syntax tree
+//   c_ir_root_conditional                         (CIrSyntaxTree)
 //   c_ir_lower_dispatch                           lowering-machine dispatch
 //   c_ir_cleanup_*                                __attribute__((cleanup))
 //   c_ir_inline_assembly_*                        GNU inline assembly
@@ -156,9 +163,12 @@
 //                                                 overflow validation
 //   c_ir_arena_reservation_advance,                checked scratch capacities
 //   c_lower_to_ir_run                             before canonical publication
+//   c_ir_syntax_tree_create, _begin               the tree reads' per-lowering and
+//                                                 per-function setup
 //   c_lower_to_ir                                 the driver
 
 #include "c_internal.h"
+#include <buster/lib/compiler/frontend/c/c_ast.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 
 BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out);
@@ -3365,6 +3375,30 @@ struct CIrErrorAttributeCall
     u32 attribute_token;
 };
 
+// Lowering's reads of the unit's syntax tree (GitHub #3102), present only
+// when the caller passed one (CIRLowerOptions.syntax_tree, the driver's
+// -fc-ast-pilot) and the stream's delimiters nest properly. One record serves
+// the whole lowering: the top-level definitions are indexed once, and the
+// span index of the function being lowered (spans) is built in `arena` on the
+// body's first tree query and dropped when the next function begins. A query
+// outside that body, or in a function the tree does not index, scans tokens
+// as it always has. Node indices stay here: none reaches the IR.
+typedef struct CIrSyntaxTree CIrSyntaxTree;
+struct CIrSyntaxTree
+{
+    CAstDefinitionIndex definitions;
+    CAstSpans spans;
+    Arena* arena;
+    TemporalArena mark;
+    CAstLowerStatistics* statistics;
+    CAstLowerStatistics local_statistics;
+    // The function body's COMPOUND_STATEMENT, else C_AST_SPAN_NONE.
+    u32 body;
+    bool built;
+    // GNU dialect: `c ?: b` is a conditional, as c_ir_root_conditional reads it.
+    bool gnu;
+};
+
 struct CIntegerIrBuilder
 {
     CIrDirectSsa* direct_ssa;
@@ -3420,6 +3454,9 @@ struct CIntegerIrBuilder
     u32 label_count;
     CPreprocessResult preprocess;
     CParseResult parse;
+    // The syntax tree's reads (CIrSyntaxTree); null without a tree, and in
+    // every builder but a function body's.
+    CIrSyntaxTree* syntax_tree;
     // Each token's resolved entity id plus one, so an unresolved token is the
     // zero a fresh arena already holds; c_ir_identifier_entity subtracts one,
     // which returns C_ID_UNDERLYING_INVALID for it without a second test.
@@ -39157,8 +39194,12 @@ BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
     c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
 }
 
-BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
-                                               u32* expression_end)
+// The token rule of c_ir_root_conditional, below: after stripping wholly
+// redundant parentheses (but not a statement expression's), the first `?`
+// outside every group, with the `:` that closes it, unless an assignment
+// operator precedes that `?` at the root.
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_root_conditional_tokens(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question,
+                                                                  u32* colon, u32* expression_end)
 {
     while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
            !c_ir_group_is_statement_expression(builder, start, end))
@@ -39236,6 +39277,158 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 sta
         }
     }
     return false;
+}
+
+
+// What the syntax tree says of a range's root operator, for
+// c_ir_root_conditional.
+typedef enum CIrTreeRoot
+{
+    // The tree has no answer: the token rule decides.
+    C_IR_TREE_ROOT_UNKNOWN,
+    C_IR_TREE_ROOT_CONDITIONAL,
+    C_IR_TREE_ROOT_OTHER,
+} CIrTreeRoot;
+
+// The relative index of the expression node that spans [start, end) exactly,
+// after stripping balanced outer parentheses, in the body being lowered; else
+// C_AST_SPAN_NONE. The body's span index is built on its first query.
+BUSTER_C_INTERNAL u32 c_ir_syntax_tree_locate(CIrSyntaxTree* tree, u32 start, u32 end)
+{
+    u32 relative = C_AST_SPAN_NONE;
+    if (tree->body != C_AST_SPAN_NONE)
+    {
+        if (!tree->built)
+        {
+            tree->statistics->nodes_spanned += c_ast_spans_build(&tree->spans);
+            tree->statistics->bodies += 1;
+            tree->built = true;
+        }
+        relative = c_ast_spans_locate(&tree->spans, start, end);
+    }
+    return relative;
+}
+
+// c_ir_root_conditional from the tree. The range maps to its root expression
+// node (c_ast_spans_locate strips the same parentheses the token rule does,
+// and a statement expression is a node of its own, so it is never stripped).
+// A CONDITIONAL root splits at its `?` anchor and at the `:` just after its
+// middle operand, parentheses around that operand included; so does a GNU
+// CONDITIONAL_OMITTED, whose `:` follows the `?`. Every other root answers
+// "no": its root tokens hold no `?`, because a conditional below a
+// higher-precedence operator, or below an assignment, is parenthesized or
+// sits in an operand the token rule does not reach first. A COMMA root is
+// left to the token rule, which splits `a ? b : c, d` at that conditional;
+// so is a range that maps to no node.
+BUSTER_C_INTERNAL CIrTreeRoot c_ir_root_conditional_tree(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+                                                         u32* expression_end)
+{
+    CIrSyntaxTree* tree = builder->syntax_tree;
+    CAstSpans const* spans = &tree->spans;
+    u32 relative = c_ir_syntax_tree_locate(tree, start, end);
+    CIrTreeRoot root = C_IR_TREE_ROOT_UNKNOWN;
+    if (relative != C_AST_SPAN_NONE)
+    {
+        CAst const* ast = spans->ast;
+        u32 node = spans->begin + relative;
+        u32 kind = ast->kinds[node];
+        u32 question_token = ast->tokens[node];
+        u32 colon_token = C_AST_SPAN_NONE;
+        if (kind == C_AST_CONDITIONAL)
+        {
+            u32 middle = c_ast_subtree_begin(ast, node - 1) - 1;
+            u32 middle_first = C_AST_SPAN_NONE;
+            c_ast_spans_expand(spans, middle - spans->begin, &middle_first, &colon_token);
+        }
+        else if (kind == C_AST_CONDITIONAL_OMITTED && tree->gnu)
+        {
+            colon_token = question_token + 1;
+        }
+        bool conditional = colon_token < spans->token_end && c_token_is_punctuator(&spans->tokens[question_token], C_PUNCTUATOR_QUESTION) &&
+                           c_token_is_punctuator(&spans->tokens[colon_token], C_PUNCTUATOR_COLON);
+        bool declined = !conditional && (kind == C_AST_COMMA || kind == C_AST_CONDITIONAL || (kind == C_AST_CONDITIONAL_OMITTED && tree->gnu));
+        root = conditional ? C_IR_TREE_ROOT_CONDITIONAL : declined ? C_IR_TREE_ROOT_UNKNOWN : C_IR_TREE_ROOT_OTHER;
+        if (conditional)
+        {
+            *expression_start = spans->first[relative];
+            *question = question_token;
+            *colon = colon_token;
+            *expression_end = spans->end[relative];
+        }
+        tree->statistics->answers += !declined;
+        tree->statistics->declines += declined;
+    }
+    else
+    {
+        tree->statistics->misses += 1;
+    }
+    return root;
+}
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_ir_syntax_tree_verify_enabled;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestIrTreeVerify c_ir_syntax_tree_verify_state;
+
+void c_test_ir_tree_verify_set(bool enabled)
+{
+    c_ir_syntax_tree_verify_enabled = enabled;
+}
+
+CTestIrTreeVerify c_test_ir_tree_verify_take(void)
+{
+    CTestIrTreeVerify taken = c_ir_syntax_tree_verify_state;
+    c_ir_syntax_tree_verify_state = (CTestIrTreeVerify){0};
+    return taken;
+}
+
+// Verify mode: the token rule answers the same range, and every output must
+// agree with the tree's answer.
+BUSTER_C_INTERNAL void c_ir_root_conditional_verify(CIntegerIrBuilder* builder, u32 start, u32 end, bool answer, u32 const* outputs)
+{
+    u32 tokens[4] = {0};
+    bool expected = c_ir_root_conditional_tokens(builder, start, end, &tokens[0], &tokens[1], &tokens[2], &tokens[3]);
+    bool agree = expected == answer && (!answer || (tokens[0] == outputs[0] && tokens[1] == outputs[1] && tokens[2] == outputs[2] && tokens[3] == outputs[3]));
+    CTestIrTreeVerify* state = &c_ir_syntax_tree_verify_state;
+    state->compared += 1;
+    state->conditionals += answer;
+    if (!agree)
+    {
+        state->mismatches += 1;
+        if (state->first_count < BUSTER_ARRAY_LENGTH(state->first))
+        {
+            state->first[state->first_count] = (CTestIrTreeMismatch){.start = start, .end = end, .tree = answer, .tokens = expected};
+            state->first_count += 1;
+        }
+    }
+}
+#endif
+
+// Whether the root of [start, end) is a conditional operator, and where it
+// splits. With a syntax tree (CIrSyntaxTree) the root expression node answers
+// whenever the range is one; the token rule answers every other range, and
+// every range without a tree.
+BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+                                               u32* expression_end)
+{
+    CIrTreeRoot root = builder->syntax_tree ? c_ir_root_conditional_tree(builder, start, end, expression_start, question, colon, expression_end)
+                                            : C_IR_TREE_ROOT_UNKNOWN;
+    bool result = root == C_IR_TREE_ROOT_UNKNOWN ? c_ir_root_conditional_tokens(builder, start, end, expression_start, question, colon, expression_end)
+                                                 : root == C_IR_TREE_ROOT_CONDITIONAL;
+#if BUSTER_INCLUDE_TESTS
+    if (root != C_IR_TREE_ROOT_UNKNOWN && c_ir_syntax_tree_verify_enabled)
+    {
+        u32 outputs[4] = {0};
+        if (result)
+        {
+            outputs[0] = *expression_start;
+            outputs[1] = *question;
+            outputs[2] = *colon;
+            outputs[3] = *expression_end;
+        }
+        c_ir_root_conditional_verify(builder, start, end, result, outputs);
+    }
+#endif
+    return result;
 }
 
 BUSTER_C_INTERNAL void c_ir_expression_core_range(CIntegerIrBuilder* builder, u32* start_in_out, u32* end_in_out)
@@ -60643,6 +60836,71 @@ BUSTER_C_INTERNAL bool c_ir_function_scratch_tail_reservation(u64* position, u64
     return fits;
 }
 
+// Lowering's tree reads for one lowering (CIrSyntaxTree): the definitions
+// index, and an arena that can hold the span index of any one body, the
+// largest being bounded by the whole tree and the whole stream. Null when the
+// arena cannot be reserved, and lowering then scans tokens throughout.
+BUSTER_C_INTERNAL CIrSyntaxTree* c_ir_syntax_tree_create(Arena* arena, CAst const* ast, CPreprocessResult const* preprocess, u32 const* matches,
+                                                         CAstLowerStatistics* statistics)
+{
+    // At least the arena's first commit (four 64 KiB granules), which a small
+    // unit's bound falls below.
+    u64 reserved_size = BUSTER_MAX((u64)ast->node_count * sizeof(u32) * 3 + preprocess->token_count * sizeof(u32) + BUSTER_KB(64), BUSTER_MB(1));
+    Arena* spans_arena = arena_create((ArenaCreation){.reserved_size = reserved_size});
+    CIrSyntaxTree* tree = 0;
+    if (spans_arena)
+    {
+        tree = arena_allocate(arena, CIrSyntaxTree, 1);
+        *tree = (CIrSyntaxTree){
+            .definitions = c_ast_definitions_index(arena, ast),
+            .spans =
+                {
+                    .ast = ast,
+                    .tokens = preprocess->tokens,
+                    .matches = matches,
+                    .token_total = (u32)preprocess->token_count,
+                },
+            .arena = spans_arena,
+            .mark = arena_begin_temporal(spans_arena),
+            .body = C_AST_SPAN_NONE,
+            .gnu = c_preprocess_dialect_is_gnu(preprocess->dialect),
+        };
+        tree->statistics = statistics ? statistics : &tree->local_statistics;
+    }
+    return tree;
+}
+
+// Points the tree reads at the function about to be lowered: its body's
+// COMPOUND_STATEMENT, when the tree indexes the definition and its braces are
+// the declaration's, with fresh span arrays. Nothing is spanned until the
+// body's first query (c_ir_syntax_tree_locate).
+BUSTER_C_INTERNAL void c_ir_syntax_tree_begin(CIrSyntaxTree* tree, CDeclaration const* declaration)
+{
+    scratch_end(tree->mark);
+    tree->mark = arena_begin_temporal(tree->arena);
+    u64 token_end = (u64)declaration->body_start + declaration->body_token_count;
+    u32 body = declaration->body_start >= 1 && declaration->body_token_count && token_end < tree->spans.token_total
+                   ? c_ast_definitions_find(&tree->definitions, declaration->body_start - 1)
+                   : C_AST_SPAN_NONE;
+    bool matched = body != C_AST_SPAN_NONE && tree->spans.matches[declaration->body_start - 1] - 1 == token_end;
+    tree->body = matched ? body : C_AST_SPAN_NONE;
+    tree->built = false;
+    if (matched)
+    {
+        CAst const* ast = tree->spans.ast;
+        u32 begin = c_ast_subtree_begin(ast, body);
+        u32 count = body - begin + 1;
+        tree->spans.first = arena_allocate(tree->arena, u32, count);
+        tree->spans.end = arena_allocate(tree->arena, u32, count);
+        tree->spans.link = arena_allocate(tree->arena, u32, count);
+        tree->spans.start_head = arena_allocate(tree->arena, u32, declaration->body_token_count);
+        tree->spans.begin = begin;
+        tree->spans.node = body;
+        tree->spans.token_start = declaration->body_start;
+        tree->spans.token_end = (u32)token_end;
+    }
+}
+
 BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
                                                              CIRLowerOptions options, CIrLowerCapacityPlan plan, Arena* temporary_arena,
                                                              u64 function_reservation_limit)
@@ -63081,6 +63339,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         result.program = 0;
         return result;
     }
+    // The tree reads need the stream's delimiter index, which exists only when
+    // every delimiter nests properly.
+    CIrSyntaxTree* syntax_tree = options.syntax_tree && options.syntax_tree->node_count && stream_matching_delimiters_plus_one
+                                     ? c_ir_syntax_tree_create(temporary_arena, options.syntax_tree, &preprocess, stream_matching_delimiters_plus_one,
+                                                               options.syntax_tree_statistics)
+                                     : 0;
     bool reservation_failed = false;
     CIrDebugScopeScratch debug_scope_scratch = options.omit_debug_locals ? (CIrDebugScopeScratch){0} : c_ir_debug_scope_scratch_make(temporary_arena, parse.scope_count);
     // Counting a definition's locals by scanning every entity per function is
@@ -63352,7 +63616,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                    .sealed = !direct_ssa_enabled,
                                                });
         function->entry = block->id;
+        if (syntax_tree)
+        {
+            c_ir_syntax_tree_begin(syntax_tree, &declaration);
+        }
         CIntegerIrBuilder builder = {
+            .syntax_tree = syntax_tree,
             .direct_ssa_enabled = direct_ssa_enabled,
             .ssa_declaration_shortcut_disabled = options.disable_declaration_shortcut,
             .keep_debug_locals = options.pin_debug_locals,
@@ -63848,6 +64117,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .location = c_preprocess_token_location(&preprocess, preprocess.tokens[oversized_array_bound_token_plus_one - 1]),
             .kind = C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
         };
+    }
+    if (syntax_tree)
+    {
+        arena_destroy(syntax_tree->arena, 1);
     }
     arena_destroy(lowering_arena, 1);
     if (reservation_failed)

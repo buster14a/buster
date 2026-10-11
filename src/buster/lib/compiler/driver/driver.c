@@ -5600,7 +5600,11 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     .omit_debug_locals = !invocation.debug_info,
                                                                     .pin_debug_locals = invocation.debug_info &&
                                                                                         (!invocation.pinned_debug_locals_explicit ||
-                                                                                         invocation.enable_pinned_debug_locals)});
+                                                                                         invocation.enable_pinned_debug_locals),
+                                                                    // Under the pilot, lowering reads its root
+                                                                    // conditional splits from the tree too.
+                                                                    .syntax_tree = pilot_tree_built ? &pilot_tree : 0,
+                                                                    .syntax_tree_statistics = &result.c_ast.lower});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     result.type_layout = lowered.type_layout;
@@ -7317,6 +7321,11 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.types.declines += unit.c_ast.types.declines;
         result.c_ast.types.misses += unit.c_ast.types.misses;
         result.c_ast.types.gated += unit.c_ast.types.gated;
+        result.c_ast.lower.bodies += unit.c_ast.lower.bodies;
+        result.c_ast.lower.nodes_spanned += unit.c_ast.lower.nodes_spanned;
+        result.c_ast.lower.answers += unit.c_ast.lower.answers;
+        result.c_ast.lower.declines += unit.c_ast.lower.declines;
+        result.c_ast.lower.misses += unit.c_ast.lower.misses;
         result.local_promotion.candidate_locals += unit.local_promotion.candidate_locals;
         result.local_promotion.promoted_locals += unit.local_promotion.promoted_locals;
         result.local_promotion.removed_loads += unit.local_promotion.removed_loads;

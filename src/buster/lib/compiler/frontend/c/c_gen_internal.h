@@ -47,6 +47,31 @@ BUSTER_F_DECL bool c_test_ir_initializer_context_buffer_budget(void);
 BUSTER_F_DECL CIRLowerResult c_test_lower_to_ir_with_scratch_limits(Arena* arena, String8 source_path, CPreprocessResult preprocess,
                                                                     CAnalysisResult parse, Target target, CIRLowerOptions options,
                                                                     u64 query_reservation_limit, u64 function_reservation_limit);
+// Verify mode for lowering's syntax-tree reads (CIRLowerOptions.syntax_tree):
+// every root-conditional split the tree answers is also answered by the token
+// rule and compared, split positions included; the tree answer is still what
+// lowering uses. The mode and its counts are per thread.
+typedef struct CTestIrTreeMismatch CTestIrTreeMismatch;
+struct CTestIrTreeMismatch
+{
+    u32 start;
+    u32 end;
+    bool tree;
+    bool tokens;
+};
+typedef struct CTestIrTreeVerify CTestIrTreeVerify;
+struct CTestIrTreeVerify
+{
+    u64 compared;
+    // Answers that split at a conditional.
+    u64 conditionals;
+    u64 mismatches;
+    CTestIrTreeMismatch first[8];
+    u32 first_count;
+};
+BUSTER_F_DECL void c_test_ir_tree_verify_set(bool enabled);
+// The counts since the last take, which resets them.
+BUSTER_F_DECL CTestIrTreeVerify c_test_ir_tree_verify_take(void);
 // Rows and slots c_ir_label_find has visited since process start.
 BUSTER_F_DECL u64 c_test_ir_label_find_probes(void);
 BUSTER_F_DECL bool c_test_ir_scratch_reservation_size(u64 required_size, u64 current_size, u64* size_out);

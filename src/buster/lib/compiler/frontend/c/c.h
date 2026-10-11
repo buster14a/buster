@@ -1443,6 +1443,22 @@ struct CAstTypeStatistics
     u64 gated;
 };
 
+// Lowering's reads of the syntax tree (-fc-ast-pilot, CIrSyntaxTree in
+// c_gen.c), summed over a unit. A body is a function body whose span index
+// was built (on its first query); nodes_spanned counts the expression nodes
+// those builds gave a span. An answer is a root-conditional split read from
+// the tree; a decline mapped to a node the tree read leaves to the token scan
+// (a comma root); a miss mapped to no node or lay outside an indexed body.
+typedef struct CAstLowerStatistics CAstLowerStatistics;
+struct CAstLowerStatistics
+{
+    u64 bodies;
+    u64 nodes_spanned;
+    u64 answers;
+    u64 declines;
+    u64 misses;
+};
+
 typedef struct CParserResult CParserResult;
 struct CParserResult
 {
@@ -1884,6 +1900,16 @@ struct CIRLowerOptions
     // in its frame slot unless its one write is the entry initializer and an
     // instruction result names it (see IrProgram pin_debug_locals).
     bool pin_debug_locals;
+    // The unit's complete syntax tree when the caller built one (the driver's
+    // -fc-ast-pilot): lowering answers the root-conditional split of a
+    // function body's expressions from its expression nodes where it can
+    // (CIrSyntaxTree in c_gen.c), and scans tokens for everything else. Null
+    // means no tree, and lowering behaves exactly as it always has. The tree
+    // and the preprocessing result must outlive the lowering. No node index
+    // reaches the IR.
+    CAst const* syntax_tree;
+    // Optional: receives the tree reads' counts, added to what it holds.
+    CAstLowerStatistics* syntax_tree_statistics;
 };
 
 typedef struct CIRDirectSsaStatistics CIRDirectSsaStatistics;
