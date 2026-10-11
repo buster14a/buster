@@ -20,6 +20,13 @@ enum
     SPIRV_TEST_ID_LIMIT = 1024,
 };
 
+typedef struct SpirvTestRejection SpirvTestRejection;
+struct SpirvTestRejection
+{
+    String8 source;
+    bool instruction_rejection;
+};
+
 typedef struct SpirvTestModule SpirvTestModule;
 struct SpirvTestModule
 {
@@ -366,34 +373,43 @@ BUSTER_GLOBAL_LOCAL UnitTestResult spirv_test_rejections(UnitTestArguments* argu
     Arena* arena = arguments->arena;
     String8 input = buster_test_temporary_path(arena, S8("buster-direct-rejection"), S8(".c"));
     String8 output = buster_test_temporary_path(arena, S8("buster-direct-rejection"), S8(".spv"));
-    String8 cases[] = {
-        S8("void kernel(unsigned *b,unsigned i){ b[i+1u]=b[i]; }"),
-        S8("void kernel(unsigned *b,unsigned i){ b[0u]=b[i]; }"),
-        S8("void kernel(unsigned *b,unsigned i){ *(b+i)=1u; }"),
-        S8("void kernel(unsigned *b,unsigned i){ b[i]=b[i]/3u; }"),
-        S8("void kernel(unsigned *b,unsigned i){ b[i]=b[i]<<1u; }"),
-        S8("void kernel(unsigned *b,unsigned i){ if(i) b[i]=1u; }"),
-        S8("void kernel(unsigned *b,unsigned i){ while(i) b[i]=--i; }"),
-        S8("unsigned external(unsigned); void kernel(unsigned *b,unsigned i){ b[i]=external(i); }"),
-        S8("void barrier(void); void kernel(unsigned *b,unsigned i){ barrier(); b[i]=1u; }"),
-        S8("void kernel(unsigned *b,unsigned i){ b[i]=(unsigned)((float)b[i]*1.5f); }"),
-        S8("void kernel(int *b,unsigned i){ b[i]=1; }"),
-        S8("void kernel(volatile unsigned *b,unsigned i){ b[i]=1u; }"),
-        S8("void kernel(_Atomic unsigned *b,unsigned i){ b[i]=1u; }"),
-        S8("unsigned global; void kernel(unsigned *b,unsigned i){ b[i]=global; }"),
-        S8("void other(unsigned *b,unsigned i){ b[i]=1u; }"),
-        S8("unsigned kernel(unsigned *b,unsigned i){ b[i]=1u; return i; }"),
-        S8("void kernel(unsigned *b,unsigned i){ (void)b; (void)i; }"),
+    // spirv_check_rows reports this exact diagnostic for any unsupported canonical row.
+    String8 instruction_rejection = S8("SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported");
+    SpirvTestRejection cases[] = {
+        {S8("void kernel(unsigned *b,unsigned i){ b[i+1u]=b[i]; }"), true},
+        {S8("void kernel(unsigned *b,unsigned i){ b[0u]=b[i]; }"), true},
+        {S8("void kernel(unsigned *b,unsigned i){ *(b+i)=1u; }"), true},
+        {S8("void kernel(unsigned *b,unsigned i){ b[i]=b[i]/3u; }"), true},
+        {S8("void kernel(unsigned *b,unsigned i){ b[i]=b[i]<<1u; }"), true},
+        {S8("void kernel(unsigned *b,unsigned i){ if(i) b[i]=1u; }"), false},
+        {S8("void kernel(unsigned *b,unsigned i){ while(i) b[i]=--i; }"), false},
+        {S8("unsigned external(unsigned); void kernel(unsigned *b,unsigned i){ b[i]=external(i); }"), false},
+        {S8("void barrier(void); void kernel(unsigned *b,unsigned i){ barrier(); b[i]=1u; }"), false},
+        {S8("void kernel(unsigned *b,unsigned i){ b[i]=(unsigned)((float)b[i]*1.5f); }"), true},
+        {S8("void kernel(int *b,unsigned i){ b[i]=1; }"), false},
+        {S8("void kernel(volatile unsigned *b,unsigned i){ b[i]=1u; }"), false},
+        {S8("void kernel(_Atomic unsigned *b,unsigned i){ b[i]=1u; }"), false},
+        {S8("unsigned global; void kernel(unsigned *b,unsigned i){ b[i]=global; }"), false},
+        {S8("void other(unsigned *b,unsigned i){ b[i]=1u; }"), false},
+        {S8("unsigned kernel(unsigned *b,unsigned i){ b[i]=1u; return i; }"), false},
+        {S8("void kernel(unsigned *b,unsigned i){ (void)b; (void)i; }"), true},
     };
     ByteSlice sentinel = BUSTER_SLICE_TO_BYTE_SLICE(S8("unchanged-existing-artifact"));
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
     {
-        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[index])) && file_write(output, sentinel)))
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[index].source)) && file_write(output, sentinel)))
         {
             CompilerDriverResult rejected = spirv_test_compile(arena, input, output, S8("-ffrontend-ssa"));
             if (rejected.error == COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("unexpected direct SPIR-V acceptance case={u32}\n"), index);
             BUSTER_TEST(arguments, rejected.error != COMPILER_DRIVER_ERROR_NONE && rejected.diagnostic.length && !rejected.has_spirv && !rejected.spirv.bytes.length);
             BUSTER_TEST(arguments, !rejected.has_gpu && !rejected.has_object && !rejected.has_llvm_bitcode);
+            if (cases[index].instruction_rejection)
+            {
+                bool matched = rejected.error == COMPILER_DRIVER_ERROR_SPIRV && !rejected.spirv.success &&
+                               string_first_sequence(rejected.diagnostic, instruction_rejection) != BUSTER_STRING_NO_MATCH;
+                if (!matched) arguments->show(arguments, S8("direct SPIR-V rejection case={u32} diagnostic: {S8}\n"), index, rejected.diagnostic);
+                BUSTER_TEST(arguments, matched);
+            }
             ByteSlice after = file_read(arena, output, (FileReadOptions){0});
             BUSTER_TEST(arguments, after.pointer && after.length == sentinel.length && memory_compare(after.pointer, sentinel.pointer, sentinel.length));
         }
