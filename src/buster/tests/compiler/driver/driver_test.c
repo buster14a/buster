@@ -20282,6 +20282,88 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_function_address_ou
     return result;
 }
 
+// Driver compiles of C sources the Wasm backend refuses with an exact diagnostic and no output;
+// see docs/backend-capabilities-v1.json (#309).
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_rejection_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CompilerDriverWasmRejectionCase CompilerDriverWasmRejectionCase;
+    struct CompilerDriverWasmRejectionCase
+    {
+        String8 target;
+        String8 source;
+        String8 message;
+    };
+    CompilerDriverWasmRejectionCase cases[] = {
+        {S8("wasm32-wasip1"), S8("struct S { int a; int b; }; int probe(struct S s) { return s.a + s.b; } void _start(void) {}"),
+         S8("aggregate or unsupported parameter ABI in WebAssembly function")},
+        {S8("wasm64-unknown-freestanding"), S8("struct S { int a; int b; }; int probe(struct S s) { return s.a + s.b; } void _start(void) {}"),
+         S8("aggregate or unsupported parameter ABI in WebAssembly function")},
+        {S8("wasm32-wasip1"), S8("int probe(__int128 v) { return (int)v; } void _start(void) {}"),
+         S8("aggregate or unsupported parameter ABI in WebAssembly function")},
+        {S8("wasm32-wasip1"), S8("int probe(int* p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); } void _start(void) {}"),
+         S8("atomic operations are unsupported by WebAssembly")},
+        {S8("wasm64-unknown-freestanding"), S8("_Atomic int counter; int probe(void) { return counter; } void _start(void) {}"),
+         S8("atomic operations are unsupported by WebAssembly")},
+        {S8("wasm32-wasip1"), S8("typedef int (*F)(void); int probe(F p) { return p(); } void _start(void) {}"),
+         S8("indirect calls are unsupported by Wasm32")},
+    };
+    String8 forms[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-wasm-rejection-diagnostic"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-wasm-rejection-diagnostic"), S8(".wasm"));
+            bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[case_index].source));
+            OsFileDescriptor* prior = os_file_open(output, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
+            if (prior)
+            {
+                BUSTER_TEST(arguments, os_file_close(prior));
+                BUSTER_TEST(arguments, os_file_delete(output));
+            }
+            if (BUSTER_REQUIRE(arguments, written))
+            {
+                String8 command[] = {S8("-target"), cases[case_index].target, S8("-nostdinc"), forms[form], S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                if (BUSTER_REQUIRE(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE))
+                {
+                    CompilerDriverResult refused = compiler_driver_execute_invocation(arena, invocation);
+                    BUSTER_TEST_RAW(arguments, refused.error == COMPILER_DRIVER_ERROR_WASM, refused.diagnostic);
+                    BUSTER_TEST_RAW(arguments, string_first_sequence(refused.diagnostic, cases[case_index].message) != BUSTER_STRING_NO_MATCH,
+                                    string_format(arena, S8("{S8} {S8}: expected {S8}, got {S8}"),
+                                                  cases[case_index].target, forms[form], cases[case_index].message, refused.diagnostic));
+                    if (string_equal(cases[case_index].target, S8("wasm32-wasip1")))
+                    {
+                        BUSTER_TEST_RAW(arguments, string_first_sequence(refused.wasm.error.message, cases[case_index].message) != BUSTER_STRING_NO_MATCH,
+                                        refused.wasm.error.message);
+                    }
+                    else
+                    {
+                        BUSTER_TEST_RAW(arguments, string_first_sequence(refused.wasm64.error.message, cases[case_index].message) != BUSTER_STRING_NO_MATCH,
+                                        refused.wasm64.error.message);
+                    }
+                    BUSTER_TEST(arguments, !refused.has_wasm && !refused.has_wasm64);
+                    BUSTER_TEST(arguments, !refused.wasm.success && !refused.wasm.bytes.pointer && !refused.wasm.bytes.length &&
+                                           !refused.wasm64.success && !refused.wasm64.bytes.pointer && !refused.wasm64.bytes.length);
+                    OsFileDescriptor* file = os_file_open(output, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
+                    BUSTER_TEST(arguments, file == 0);
+                    if (file)
+                    {
+                        BUSTER_TEST(arguments, os_file_close(file));
+                        BUSTER_TEST(arguments, os_file_delete(output));
+                    }
+                }
+                BUSTER_TEST(arguments, os_file_delete(input));
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // Recompile each frontend form for byte stability, then use Node's own Wasm
 // validator and engine for positive calls and ABI-negative traps.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm64_function_tables(UnitTestArguments* arguments)
@@ -32375,6 +32457,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_export_names);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_function_addresses);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_function_address_outputs);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_rejection_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_function_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_stack);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_index_signedness);
