@@ -316,8 +316,12 @@ run_lifecycle_phase() {
             else
                 cancellation_signal=$lifecycle_receipt_value
             fi
-            lifecycle_receipt_field "$supervisor_receipt" native_launch '[01]' || supervisor_valid=0
-            native_launch=$lifecycle_receipt_value
+            if lifecycle_receipt_field "$supervisor_receipt" native_launch '[01]'; then
+                native_launch=$lifecycle_receipt_value
+            else
+                supervisor_valid=0
+                native_launch=0
+            fi
             if ! lifecycle_receipt_field "$supervisor_receipt" helper_error '[A-Za-z][A-Za-z0-9_]*'; then
                 supervisor_valid=0
             else
