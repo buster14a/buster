@@ -99,8 +99,7 @@ class ConfigureEvidenceTests(unittest.TestCase):
             b"# ninja log v7\n"
             b"0\t40\t1700000000\ta.c.obj\thash-first\n"
             b"0\t7\t1700000001\ta.c.obj\thash-last\n"
-            b"not a ninja edge
-"
+            b"not a ninja edge\n"
         )
         result = evidence.summarize_ninja_log(data)
         self.assertEqual(result["edges"], 1)
