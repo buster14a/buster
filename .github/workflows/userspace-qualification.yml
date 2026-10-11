@@ -92,7 +92,7 @@ jobs:
           name: userspace-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/userspace-evidence/
-            build/musl-*/
+            !${{ runner.temp }}/userspace-evidence/joint/uapi/**
             build/CMakeCache.txt
             build/compile_commands.json
           include-hidden-files: true

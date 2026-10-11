@@ -558,6 +558,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
                                              stage_object_sha256_bytes(arena, (u8*)reference_config.pointer, reference_config.length),
                                              valid ? S8("workload-pass") : S8("fail"));
                 valid = clang_suite_write(arena, path_join(arena, directory, S8("receipt.txt")), text) && valid;
+                valid = userspace_pack(arena, directory, musl_output) && valid;
             }
             result = valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
         }

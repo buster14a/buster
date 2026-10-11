@@ -140,3 +140,24 @@ BUSTER_GLOBAL_LOCAL bool userspace_inventory(Arena* arena, String8 directory, bo
     }
     return valid;
 }
+
+BUSTER_GLOBAL_LOCAL bool userspace_pack(Arena* arena, String8 directory, String8 musl_output)
+{
+    // upload-artifact treats paths case-insensitively. Preserve the exact
+    // Linux UAPI and musl object names inside tar streams instead.
+    String8 roots[] = {path_join(arena, directory, S8("uapi")), musl_output};
+    String8 names[] = {S8("uapi.tar.gz"), S8("musl.tar.gz")};
+    bool valid = true;
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(roots); i += 1)
+    {
+        if (roots[i].length && path_exists(arena, roots[i]))
+        {
+            String8 arguments[] = {S8("tar"), S8("-czf"), path_join(arena, directory, names[i]), S8("-C"),
+                                   path_parent(arena, roots[i]), quickjs_basename(roots[i])};
+            ClangSuiteCommand ran = userspace_command(arena, S8("."), (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), USERSPACE_COMMAND_SECONDS);
+            valid = ran.result == PROCESS_RESULT_SUCCESS && valid;
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(ran.error));
+        }
+    }
+    return valid;
+}

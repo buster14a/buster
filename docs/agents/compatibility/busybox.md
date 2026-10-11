@@ -79,7 +79,8 @@ BusyBox remain separate, unqualified cells.
 
 Each successful build is copied into its own initially empty chroot with only
 `/bin/busybox`, a project-owned [workload](../../../tests/userspace/workload.sh),
-and a fresh `/tmp`. ash standalone applet dispatch avoids host utility fallback.
+and a fresh `/tmp`. ash standalone applet dispatch and an explicit `/bin/busybox` self-exec path
+avoid host utility fallback or a dependency on mounted `/proc`.
 No host filesystem is mounted into the chroot. The workload checks pipelines,
 file copies/moves/symlinks, a tar roundtrip, selected text operations,
 child exit status, background waiting and SHA-256 against
@@ -102,7 +103,9 @@ runs only on its explicitly named development branch or manual dispatch. It
 does not add a PR/merge-group/main workload or a required check. Each job reports
 machine specifications and retains logs, outputs and compiler build metadata,
 including failures. Hidden `.config` and upstream dependency `.cmd` files are
-included in the retained evidence. Commands and the receipt report cloud correctness only.
+included in the retained evidence. Linux UAPI and musl objects are packed by
+the native driver into tar archives so case-sensitive names survive the
+artifact transport. Commands and the receipt report cloud correctness only.
 All clean/edit/header cost, process-tree memory, code-size and runtime performance
 acceptance remains incomplete until the existing approved 9700X service supplies
 the relevant exact-candidate/configuration evidence.
