@@ -4278,6 +4278,58 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_ifunc_attribute(UnitTest
     return result;
 }
 
+// A finished WebAssembly module and an eBPF object have no second name for a
+// definition, so each direct emitter refuses an __attribute__((alias)) by name
+// instead of dropping it: Wasm used to turn the call into an unresolved
+// import, eBPF to leave the name out of the object (#1338). The control is the
+// same program calling the target directly, which both emitters accept.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_alias_direct_emitters(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("int target(void) { return 1; }\nint other(void) __attribute__((alias(\"target\")));\nint main(void) { return other() == 1 ? 0 : 1; }\n"),
+        S8("int target(void) { return 1; }\nint main(void) { return target() == 1 ? 0 : 1; }\n"),
+    };
+    String8 targets[] = {S8("wasm64-unknown-freestanding"), S8("wasm32-wasip1"), S8("bpfel-unknown-linux")};
+    String8 refusals[] = {S8("WebAssembly output does not represent symbol aliases"), S8("WebAssembly output does not represent symbol aliases"),
+                          S8("eBPF output does not represent symbol aliases")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                String8 input = buster_test_temporary_path(arena, S8("buster-alias-direct-emitter"), S8(".c"));
+                String8 output = buster_test_temporary_path(arena, S8("buster-alias-direct-emitter"), S8(".o"));
+                bool aliased = source_index == 0;
+                if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(sources[source_index]))))
+                {
+                    String8 command[] = {S8("-target"), targets[target_index], S8("-nostdinc"), S8("-g0"), forms[form], S8("-c"), S8("-o"), output, input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 detail = string_format(arena, S8("target={S8} form={S8} aliased={u32}\ndiagnostic={S8}"), targets[target_index], forms[form],
+                                                   (u32)aliased, compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, (compiled.error == COMPILER_DRIVER_ERROR_NONE) == !aliased, detail);
+                    if (aliased)
+                    {
+                        BUSTER_TEST_RAW(arguments, string_first_sequence(compiled.diagnostic, refusals[target_index]) != BUSTER_STRING_NO_MATCH, detail);
+                        BUSTER_TEST_RAW(arguments, !compiled.has_wasm && !compiled.has_ebpf && !compiled.has_object, detail);
+                    }
+                    else
+                    {
+                        BUSTER_TEST_RAW(arguments, target_index == 2 ? compiled.has_ebpf : compiled.has_wasm, detail);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equivalence(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -30444,6 +30496,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_ownership);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_ifunc_attribute);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_alias_direct_emitters);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_c_ast_pilot);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_redundant_declarator_groups);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_void_function_pointer_roundtrip);

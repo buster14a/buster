@@ -94,6 +94,24 @@ The existing canonical validator rejects malformed registration targets and
 priorities; duplicate reserved linkage names or record/value count overflow
 fail without publishing artifact bytes.
 
+Canonical `IrModule.aliases` pairs (`__attribute__((alias("target")))`) emit
+version-1 `MODULE_CODE_ALIAS` records after every global and function record,
+with their names in the module value symbol table (#1338). Each record carries
+the target record's value type, address space 0, the target's value id, the
+alias symbol's own linkage (external, weak or internal) and visibility, and the
+target global's thread-local mode, so `@other = alias i32 (), ptr @target`
+replaces the unresolved `declare i32 @other()` older output contained. The
+alias symbol's own declaration rows are not emitted. An alias whose target is
+not a function or global definition in the emitted module fails with
+`LLVM bitcode alias target is not a function or global definition`; an
+indirect alias (`__attribute__((ifunc))`) still fails with `LLVM bitcode does
+not represent ifunc symbols`. `llvm_bitcode_test_alias` reads the alias
+records of `basic_c_llvm_alias.c` independently in both frontend forms,
+checks deterministic repeated emission, and links and runs the unit through
+Clang at `-O0` and `-O2`: function and data aliases, an alias used before its
+declaration with a static target, weak, hidden and internal aliases, and
+address equality with the target.
+
 Canonical scalar integer leading-zero count, trailing-zero count, and
 population count emit overloaded `llvm.ctlz.iN`, `llvm.cttz.iN`, and
 `llvm.ctpop.iN` declarations for widths 1 through 64. The first two pass
