@@ -42,6 +42,8 @@ Map (searchable symbols):
         validate_ast_pilot_acceptance                      issue #3397 -fc-ast-pilot pair
     THROUGHPUT_REAL_SOURCE_PROFILE, validate_throughput_real_source,
         throughput_real_source_digest                      real-source throughput (#2761)
+    PRODUCTION_PROFILE_PROFILE, validate_production_profile,
+        production_profile_fields                          PGO/LTO production profile (#2761)
     REGRESSION_POLICIES, regression_policy                 report-only switch
     range_label                                            main baseline relation
     render                                                 readable report
@@ -244,6 +246,33 @@ THROUGHPUT_REAL_SOURCE_PROFILE = {
                 "ABBA blocks and job order follow the recorded seed; every sample is retained",
     "stopping": "fixed: every pair of both rounds runs; no early stop, rerun, trimming or best-of-N",
     "decision": "report-only: the guard is off; paired medians and per-round sign tests are reported and never gate",
+    "report_only": True,
+}
+# Issue #2761: the Zen 5 route for PGO/LTO production-profile admission. One
+# fresh exact line in ANALYZER_REQUEST_PATH selects it on the pull-compare
+# route. The candidate head's own `./build.sh production_profile` builds its
+# trees, trains both profiles, inspects and tests the PGO+LTO compiler in an
+# isolated clone of the head, without its own hosted-style benchmark; then the
+# base revision's `bench_throughput run` times that run's Release compiler
+# against its PGO+LTO production compiler with THROUGHPUT_PROFILE's arguments.
+# Changing any value needs a new name. It is report-only like the corpus.
+PRODUCTION_PROFILE_REQUEST_LINE = "profile: production-profile-v1"
+PRODUCTION_PROFILE_LEDGER = "BUSTER_PGO_PHASES_V1"
+# production_profile_phase_expected with --no-benchmark: three toolchain probes,
+# seven trees x (configure, build), two trainings x (train, merge), inspect, test.
+PRODUCTION_PROFILE_PHASES = 23
+PRODUCTION_PROFILE_PROFILE = {
+    "name": "production-profile-v1",
+    "build": "candidate-HEAD ./build.sh production_profile --no-benchmark in an isolated clone of the head: seven "
+             "Release trees, ThinLTO and non-LTO trainings on the native corpus, debug-section inspection and "
+             "test_all on the PGO+LTO production compiler",
+    "build_arguments": ["--no-benchmark", "--jobs", "16", "--build-lanes", "4"],
+    "compilers": {"baseline": "release", "candidate": "pgo-lto"},
+    "workload": THROUGHPUT_PROFILE["workload"],
+    "harness": THROUGHPUT_PROFILE["harness"],
+    # The production compiler must emit the Release compiler's exact objects.
+    "arguments": [*THROUGHPUT_PROFILE["arguments"], "--require-identical-output"],
+    "decision": "report-only: the corpus decisions are reported and never gate",
     "report_only": True,
 }
 SCALING_SCHEMA = "buster-throughput-scaling-v1"
@@ -574,6 +603,51 @@ def throughput_real_source_digest(summary: object) -> list[dict]:
                        "wall_seconds": wall if isinstance(wall, list) else None,
                        "peak_rss_bytes": rss if isinstance(rss, list) else None})
     return digest
+
+
+def production_profile_fields(text: object) -> dict:
+    """The key=value lines of a production_profile summary.txt; an unreadable or repeated key leaves it out."""
+    fields: dict = {}
+    repeated: set = set()
+    for line in text.splitlines() if isinstance(text, str) else []:
+        key, separator, value = line.partition("=")
+        if separator:
+            if key in fields:
+                repeated.add(key)
+            fields[key] = value
+    return {key: value for key, value in fields.items() if key not in repeated}
+
+
+def validate_production_profile(build_status: object, summary_text: object, ledger_text: object, head: str,
+                                status: object, summary: object, metadata: object, binaries: object) -> list[str]:
+    """Reasons the evidence is not one complete PRODUCTION_PROFILE_PROFILE run on these binaries.
+
+    build_status is production_profile's exit, summary_text its summary.txt and ledger_text its
+    evidence/phases.tsv; status, summary and metadata are the timed corpus run's exit, summary.json
+    and metadata.json; binaries maps baseline/candidate to the measured release/pgo-lto hashes.
+    """
+    label = "production profile"
+    problems: list[str] = []
+    if type(build_status) is not int or build_status != 0:
+        problems.append(f"{label} build exited {build_status!r}, not 0")
+    fields = production_profile_fields(summary_text)
+    candidate = binaries.get("candidate") if isinstance(binaries, dict) and isinstance(binaries.get("candidate"), dict) else {}
+    for key, wanted in (("status", "passed"), ("source_revision", head), ("debug_sections", "absent"),
+                        ("correctness", "test_all"), ("benchmarks", "skipped"),
+                        ("production_compiler_sha256", candidate.get("sha256"))):
+        if not isinstance(wanted, str) or fields.get(key) != wanted:
+            problems.append(f"{label} summary.txt {key} is {fields.get(key)!r}, not {wanted!r}")
+    lines = ledger_text.splitlines() if isinstance(ledger_text, str) else []
+    header = f"{PRODUCTION_PROFILE_LEDGER}\tcomplete=1\tphases={PRODUCTION_PROFILE_PHASES}\texpected={PRODUCTION_PROFILE_PHASES}"
+    rows = [line.split("\t") for line in lines[2:]]
+    if not lines or lines[0] != header or len(rows) != PRODUCTION_PROFILE_PHASES or \
+            any(len(row) != 10 or row[6] != "passed" for row in rows):
+        problems.append(f"{label} phase ledger is not {PRODUCTION_PROFILE_PHASES} complete passed phases")
+    if isinstance(binaries, dict) and isinstance(binaries.get("baseline"), dict) and \
+            binaries["baseline"].get("sha256") == candidate.get("sha256"):
+        problems.append(f"{label} release and pgo-lto compilers are the same binary")
+    problems.extend(f"{label} corpus: {reason}" for reason in classify_throughput_exit(status, summary, metadata, binaries))
+    return problems
 
 
 def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expected_candidate_sha: str | None = None) -> list[str]:
@@ -3236,6 +3310,27 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
                 "%.1f / %.1f" % (rss[0] / 1048576, rss[1] / 1048576) if memory else "NA"))
         if real.get("exit") not in (None, 0):
             lines.append(f"Real-source throughput exit: {real.get('exit')}.")
+    production = receipt.get("production_profile") if isinstance(receipt, dict) else None
+    if isinstance(production, dict) and production.get("requested"):
+        profile = PRODUCTION_PROFILE_PROFILE
+        compilers = production.get("binaries") if isinstance(production.get("binaries"), dict) else {}
+        lines += ["", f"PGO/LTO production profile ({profile['name']}): {production.get('status', 'NA')} "
+                  "(the head's own Release compiler as base, its PGO+LTO production compiler as candidate, on the "
+                  f"{THROUGHPUT_PROFILE['name']} corpus; report-only). Release `%s`, PGO+LTO `%s`." % (
+                      str((compilers.get("baseline") or {}).get("sha256", "NA"))[:12],
+                      str((compilers.get("candidate") or {}).get("sha256", "NA"))[:12]), "",
+                  "| Workload / mode | Release wall (ms) | PGO+LTO wall (ms) | PGO+LTO / Release | Decision |",
+                  "| --- | ---: | ---: | ---: | --- |"]
+        for row in production.get("cells") if isinstance(production.get("cells"), list) else []:
+            wall = row.get("wall_seconds") if isinstance(row, dict) and isinstance(row.get("wall_seconds"), list) else []
+            ok = len(wall) == 2 and all(_finite_positive(value) for value in wall)
+            lines.append("| %s | %s | %s | %s | %s |" % (
+                row.get("name") if isinstance(row, dict) else "NA",
+                "%.1f" % (wall[0] * 1000) if ok else "NA", "%.1f" % (wall[1] * 1000) if ok else "NA",
+                "%.4f" % (wall[1] / wall[0]) if ok else "NA", row.get("decision") if isinstance(row, dict) else "NA"))
+        for key, title in (("build_exit", "build"), ("exit", "corpus")):
+            if production.get(key) not in (None, 0):
+                lines.append(f"PGO/LTO production profile {title} exit: {production.get(key)}.")
     reasons = receipt.get("reasons") if isinstance(receipt, dict) else None
     warnings = summary.get("warnings")
     for item in (*notes, *(reasons if isinstance(reasons, list) else ()),

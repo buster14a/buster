@@ -889,6 +889,43 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    library) and outbound HTTPS to `raw.githubusercontent.com`, `www.lua.org`
    and `www.sqlite.org`.
 
+   **Issue #2761 opt-in PGO/LTO production profile.** The same route accepts
+   one fresh exact line `profile: production-profile-v1`, selected by the same
+   every-parent freshness rule. It cannot be combined with an analyzer,
+   real-source or ast-pilot profile, so the leg fits the `compare-pull` job.
+   After the corpus leg, `measure_production_profile` makes a shared clone of
+   the head beside the base checkout, which stays untouched for the closure
+   checks. There the head's own
+   `./build.sh production_profile --no-benchmark --jobs 16 --build-lanes 4`
+   builds the seven trees and trains both profiles on the native corpus. It
+   then inspects the PGO+LTO compiler for debug sections and runs `test_all`
+   on it, exactly as [production-profile.md](../production-profile.md)
+   describes. The merge base's `bench_throughput run` then times that run's
+   `release` compiler (base) against its `pgo-lto` production compiler
+   (candidate). It uses the `throughput-corpus-v2` arguments plus
+   `--require-identical-output`, so sampling, rounds and decisions are those
+   of the ordinary corpus leg, and any object that differs between the two
+   compilers fails the run. It is report-only: a confirmed regression is
+   reported, never refused.
+
+   `compiler_publish.py` re-validates the receipt's `production_profile`
+   record against the evidence under `production_profile/`
+   (`validate_production_profile`). It refuses:
+   - a build exit other than 0;
+   - a `summary.txt` that is not `status=passed` for this head, or that lacks
+     `correctness=test_all` and `debug_sections=absent`, or that names a
+     production compiler hash other than the measured `pgo-lto` binary;
+   - a `BUSTER_PGO_PHASES_V1` ledger other than 23 complete passed phases;
+   - identical release and PGO+LTO binaries;
+   - any corpus evidence the ordinary corpus validator refuses.
+
+   The receipt's observed host must be the Ryzen 7 9700X, as for every
+   comparison. The host needs `llvm-profdata`, `llvm-readobj` and Clang's
+   profile runtime (`libclang_rt.profile`); a missing one fails the build
+   leg with its log.
+
+   COST_PLACEHOLDER
+
    **Without perf (#2768).** Before the first timed run the lab runs
    `perf stat -- true` once (`probe_counters`). If perf is missing, exits
    nonzero (for example under a strict `perf_event_paranoid`), or writes no

@@ -3775,5 +3775,217 @@ class RealSourceThroughputTest(unittest.TestCase):
             self.assertTrue(any("exited 2" in error for error in record["errors"]), record["errors"])
 
 
+
+def production_profile_evidence(head: str = "a" * 40) -> tuple[dict, dict]:
+    """A complete synthetic production-profile-v1 record and its exported bundle: release A256, pgo-lto B256."""
+    phases = compiler_receipt.PRODUCTION_PROFILE_PHASES
+    ledger = (f"{compiler_receipt.PRODUCTION_PROFILE_LEDGER}\tcomplete=1\tphases={phases}\texpected={phases}\n"
+              "index\tlabel\tkind\tvariant\tstart_us\tduration_us\toutcome\tuser_cpu_us\tsystem_cpu_us\tpeak_memory_bytes\n" +
+              "".join(f"{index + 1}\tphase-{index}\tcommand\t-\t{index}\t1\tpassed\t1\t1\t1\n" for index in range(phases)))
+    build_summary = (f"status=passed\nsource_revision={head}\nsource_tree={'d' * 40}\nproduction_compiler_sha256={B256}\n"
+                     "debug_sections=absent\ncorrectness=test_all\nbenchmarks=skipped\nphase_ledger=evidence/phases.tsv\n")
+    timed = corpus()
+    bundle = {"build_summary": build_summary, "ledger": ledger, "summary": timed["summary"], "metadata": timed["metadata"]}
+    record = {"requested": True, "request_line": compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE,
+              "profile": copy.deepcopy(compiler_receipt.PRODUCTION_PROFILE_PROFILE), "status": "complete",
+              "build_exit": 0, "exit": 0, "errors": [], "binaries": copy.deepcopy(BINARIES),
+              "cells": compiler_receipt.throughput_real_source_digest(timed["summary"])}
+    return record, bundle
+
+
+class ProductionProfileTest(unittest.TestCase):
+    """#2761: the fixed production-profile-v1 PGO/LTO profile on the pull-compare route."""
+
+    def validate(self, bundle: dict, build_status: object = 0, status: object = 0, binaries: dict = BINARIES,
+                 head: str = "a" * 40) -> list[str]:
+        return compiler_receipt.validate_production_profile(build_status, bundle["build_summary"], bundle["ledger"], head,
+                                                            status, bundle["summary"], bundle["metadata"], binaries)
+
+    def test_profile_is_frozen_report_only_and_times_the_ordinary_corpus(self) -> None:
+        profile = compiler_receipt.PRODUCTION_PROFILE_PROFILE
+        self.assertEqual(profile["name"], "production-profile-v1")
+        self.assertEqual(compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE, "profile: " + profile["name"])
+        self.assertIs(profile["report_only"], True)
+        self.assertEqual(profile["arguments"], [*compiler_receipt.THROUGHPUT_PROFILE["arguments"], "--require-identical-output"])
+        self.assertEqual(profile["compilers"], {"baseline": "release", "candidate": "pgo-lto"})
+        self.assertIn("--no-benchmark", profile["build_arguments"])
+        # The build leg's bound plus the corpus stays inside the unchanged 90-minute compare-pull job.
+        self.assertLessEqual(compiler_compare.PRODUCTION_PROFILE_BUILD_TIMEOUT_SECONDS, 45 * 60)
+        source = (Path(__file__).resolve().parents[2] / "tools/production_profile.c").read_text(encoding="utf-8")
+        self.assertIn(f'LEDGER_VERSION "{compiler_receipt.PRODUCTION_PROFILE_LEDGER}"', source)
+
+    def test_complete_evidence_validates_and_every_gap_fails(self) -> None:
+        unused_record, bundle = production_profile_evidence()
+        self.assertEqual(self.validate(bundle), [])
+        regressed = dict(bundle, **corpus("regression"))
+        self.assertEqual(self.validate(regressed, status=1), [], "a measured regression is reported, not refused")
+        def change(**fields):
+            return dict(bundle, **fields)
+        def summary_line(key: str, value: str) -> str:
+            return "".join(f"{key}={value}\n" if line.startswith(key + "=") else line + "\n"
+                           for line in bundle["build_summary"].splitlines())
+        ledger_lines = bundle["ledger"].splitlines(keepends=True)
+        cases = {
+            "failed build": (bundle, {"build_status": 2}),
+            "cancelled build": (bundle, {"build_status": None}),
+            "failed corpus": (bundle, {"status": 2}),
+            "cancelled corpus": (bundle, {"status": None}),
+            "missing build summary": (change(build_summary=None), {}),
+            "failed build summary": (change(build_summary=summary_line("status", "failed")), {}),
+            "other revision": (change(build_summary=summary_line("source_revision", "f" * 40)), {}),
+            "benchmarked build": (change(build_summary=summary_line("benchmarks", "complete")), {}),
+            "untested compiler": (change(build_summary=summary_line("correctness", "none")), {}),
+            "debug sections": (change(build_summary=summary_line("debug_sections", "present")), {}),
+            "other production compiler": (change(build_summary=summary_line("production_compiler_sha256", A256)), {}),
+            "repeated key": (change(build_summary=bundle["build_summary"] + "status=passed\n"), {}),
+            "missing ledger": (change(ledger=None), {}),
+            "incomplete ledger": (change(ledger=bundle["ledger"].replace("complete=1", "complete=0")), {}),
+            "partial ledger": (change(ledger="".join(ledger_lines[:-1])), {}),
+            "failed phase": (change(ledger=bundle["ledger"].replace("\tpassed\t", "\tfailed\t", 1)), {}),
+            "missing corpus": (change(summary=None, metadata=None), {}),
+            "partial corpus": (change(summary=dict(bundle["summary"], comparisons=bundle["summary"]["comparisons"][:-1])), {}),
+            "stale release": (bundle, {"binaries": {"baseline": {"sha256": "3" * 64}, "candidate": {"sha256": B256}}}),
+            "same binary": (bundle, {"binaries": {"baseline": {"sha256": B256}, "candidate": {"sha256": B256}}}),
+            "no binaries": (bundle, {"binaries": {}}),
+        }
+        for name, (changed, options) in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(self.validate(changed, **options), name)
+
+    def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
+        record, bundle = production_profile_evidence()
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["production_profile"] = record
+        values = {"expected": dict(EXPECTED, mode="pull"), "authorized": True, "compare_result": "success",
+                  "receipt": pull, "summary": summary(), "policy_value": "",
+                  "throughput": dict(corpus(), production_profile_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        failed = dict(copy.deepcopy(record), status="failed", build_exit=2)
+        stale = copy.deepcopy(record)
+        stale["cells"][0]["wall_seconds"] = [1.0, 0.1]
+        widened = copy.deepcopy(record)
+        widened["profile"]["build_arguments"] = ["--no-benchmark"]
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "partial bundle": {"throughput": dict(corpus(), production_profile_bundle={
+                key: value for key, value in bundle.items() if key != "ledger"})},
+            "failed run": {"receipt": dict(pull, production_profile=failed)},
+            "stale cells": {"receipt": dict(pull, production_profile=stale)},
+            "changed profile": {"receipt": dict(pull, production_profile=widened)},
+            "not a request": {"receipt": dict(pull, production_profile=dict(record, requested=False))},
+            "with real-source": {"receipt": dict(pull, throughput_real_source=real_source_evidence()[0]),
+                                 "throughput": dict(corpus(), production_profile_bundle=bundle,
+                                                    real_source_bundle=real_source_evidence()[1])},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("PGO/LTO production profile (production-profile-v1): complete", report)
+        self.assertIn("| tiny_startup/fast | 1000.0 | 1300.0 | 1.3000 |", report)
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Production Profile Test")
+            fixture_git(repo, "config", "user.email", "production-profile@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            fixture_git(repo, "add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            fixture_git(repo, "commit", "-qm", "seed")
+            line = compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                fixture_git(repo, "commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.production_profile_request_selection(
+                        repo, fixture_git(repo, "rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            fixture_git(repo, "commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.production_profile_request_selection(
+                repo, fixture_git(repo, "rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", production_profile=production_profile_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("production_profile")
+        self.assertIn("no production-profile record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+        self.assertEqual(verify(Api(1, 0), expected, dict(plain, state="superseded"), {}), "")
+
+    def test_compare_leg_records_build_and_corpus_failures(self) -> None:
+        head = "a" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("work", "evidence", "bin", "candidate"):
+                (root / name).mkdir()
+            def leg(run_status) -> dict:
+                receipt_value = {"timings": {}, "production_profile": {"requested": True, "status": "pending"}}
+                with mock.patch.object(compiler_compare, "run", side_effect=run_status) as run:
+                    compiler_compare.measure_production_profile(root / "candidate", root / "bin", root / "work",
+                                                                root / "evidence", head, receipt_value)
+                return receipt_value["production_profile"], run
+            record, run = leg(lambda argv, *rest: 0 if argv[0] == "git" else 2)
+            self.assertEqual(run.call_args.args[0][:2], ["./build.sh", "production_profile"])
+            self.assertEqual(run.call_args.args[1], root / "work" / "production-profile-source")
+            self.assertEqual((record["status"], record["build_exit"], record["exit"]), ("failed", 2, None))
+            self.assertTrue(any("build exited 2" in error for error in record["errors"]), record["errors"])
+            def built(argv, cwd, *rest):
+                if argv[:2] == ["./build.sh", "production_profile"]:
+                    output = cwd / "build" / "production-profile"
+                    for tree, content in (("release", b"release"), ("pgo-lto", b"pgo-lto")):
+                        (output / tree / "Release").mkdir(parents=True)
+                        (output / tree / "Release" / "ide").write_bytes(content)
+                    (output / "evidence").mkdir()
+                    unused_record, bundle = production_profile_evidence(head)
+                    (output / "summary.txt").write_text(bundle["build_summary"], encoding="utf-8")
+                    (output / "evidence" / "phases.tsv").write_text(bundle["ledger"], encoding="utf-8")
+                    return 0
+                if argv[0] == "git" and "clone" in argv:
+                    (cwd.parent / "work" / "production-profile-source").mkdir()
+                return 0 if argv[0] == "git" else 3
+            record, run = leg(built)
+            self.assertEqual(run.call_args.args[0][:3], ["./build.sh", "bench_throughput", "run"])
+            self.assertEqual(run.call_args.args[0][-len(compiler_receipt.PRODUCTION_PROFILE_PROFILE["arguments"]):],
+                             compiler_receipt.PRODUCTION_PROFILE_PROFILE["arguments"])
+            self.assertEqual(sorted(record["binaries"]), ["baseline", "candidate"])
+            self.assertFalse((root / "evidence" / "production_profile" / "release").exists())
+            self.assertTrue((root / "evidence" / "production_profile" / "evidence" / "phases.tsv").is_file())
+            self.assertEqual((record["status"], record["build_exit"], record["exit"]), ("failed", 0, 3))
+            self.assertTrue(any("corpus" in error for error in record["errors"]), record["errors"])
+
 if __name__ == "__main__":
     unittest.main()
