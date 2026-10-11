@@ -117,6 +117,12 @@
 // TLS exports reuse link_elf_thread_local_offset and packed loaded section indices;
 // their dynamic symbols carry STT_TLS offsets rather than image addresses.
 //
+// Mach-O imports keep one identity: a call reaches the import's stub and a
+// GOT load its bound __got slot, while an absolute pointer in __DATA
+// (__data, __const, the initializer and thread-local templates) is itself
+// a dyld bind site with the relocation's addend (link_mach_import_pointer,
+// #3547). Any other direct reference to imported data is refused.
+//
 // AArch64 fixed-address TLS relaxation (link_aarch64_tls_relax): sites are
 // heap-sorted by section and offset; an initial-exec ADRP/LDR pair may have
 // unrelated instructions between the halves and is matched by register
@@ -13582,6 +13588,46 @@ BUSTER_GLOBAL_LOCAL u64 link_uleb128_write(u8* bytes, u64 offset, u64 value)
     return offset;
 }
 
+BUSTER_GLOBAL_LOCAL u64 link_sleb128_write(u8* bytes, u64 offset, s64 value)
+{
+    bool more = true;
+    while (more)
+    {
+        u8 byte = (u8)(value & 0x7f);
+        value = value < 0 ? ~(~value >> 7) : value >> 7;
+        more = !((value == 0 && !(byte & 0x40)) || (value == -1 && (byte & 0x40)));
+        if (more)
+        {
+            byte |= 0x80;
+        }
+        bytes[offset++] = byte;
+    }
+    return offset;
+}
+
+// The sections link_native_executable_mach_o64 lays out in its writable
+// __DATA segment (segment index 2); everything else that can carry a fixup
+// sits in __TEXT.  __const is here too: ld64 moves a __const that needs
+// fixups into __DATA_CONST, which dyld writes before protecting it, and this
+// writer keeps it writable in __DATA, so dyld binds and rebases it the same way.
+BUSTER_GLOBAL_LOCAL bool link_mach_data_segment_section(u32 section)
+{
+    return section == OBJECT_SECTION_DATA || section == OBJECT_SECTION_ZERO || section == OBJECT_SECTION_READ_ONLY_DATA ||
+           section == OBJECT_SECTION_INIT_ARRAY || section == OBJECT_SECTION_FINI_ARRAY || section == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+           section == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+}
+
+// #3547: a pointer-sized word in __DATA that names an import holds that
+// import's own address, which only dyld knows.  It is bound like Apple ld
+// binds it -- BIND_TYPE_POINTER with the relocation's addend -- rather than
+// rebased to the call stub, whose address differs from the one every other
+// image and `dlsym` see, and which for imported data is code, not the object.
+BUSTER_GLOBAL_LOCAL bool link_mach_import_pointer(ObjectFile* object, ObjectRelocation* relocation)
+{
+    return relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 && link_mach_data_segment_section(relocation->section) &&
+           relocation->symbol < object->symbol_count && object->symbols[relocation->symbol].section == OBJECT_SECTION_UNDEFINED;
+}
+
 // The `align` field of a section command is the power of two, not the
 // alignment itself.
 BUSTER_GLOBAL_LOCAL u32 link_mach_alignment_power(u32 alignment)
@@ -14289,6 +14335,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         linkedit_vm_offset = align_forward(has_dwarf ? dwarf_vm_cursor : BUSTER_MAX(data_vm_end, data_file_offset + 1), MACH_PAGE_SIZE);
     }
     u32 rebase_count = 0;
+    u32 import_pointer_count = 0;
+    u64 import_pointer_name_size = 0;
     if (result.error == LINK_ERROR_NONE)
     {
         rebase_count = 0;
@@ -14299,7 +14347,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             {
                 continue;
             }
-            if (relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 && !(object->target.cpu_arch == CPU_ARCH_AARCH64 && relocation.section == OBJECT_SECTION_TEXT))
+            if (link_mach_import_pointer(object, &relocation))
+            {
+                import_pointer_count += 1;
+                import_pointer_name_size += object->symbols[relocation.symbol].name.length + 2;
+            }
+            else if (relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 && !(object->target.cpu_arch == CPU_ARCH_AARCH64 && relocation.section == OBJECT_SECTION_TEXT))
             {
                 rebase_count += 1;
             }
@@ -14329,7 +14382,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             {
                 ObjectRelocation* relocation = &object->relocations[relocation_index];
                 if (relocation->kind != OBJECT_RELOCATION_ABSOLUTE64 || (object->target.cpu_arch == CPU_ARCH_AARCH64 && relocation->section == OBJECT_SECTION_TEXT) ||
-                    (relocation->section < OBJECT_SECTION_COUNT && object_section_kind_is_debug((ObjectSectionKind)relocation->section)))
+                    (relocation->section < OBJECT_SECTION_COUNT && object_section_kind_is_debug((ObjectSectionKind)relocation->section)) ||
+                    link_mach_import_pointer(object, relocation))
                 {
                     continue;
                 }
@@ -14340,12 +14394,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 u8 segment_index = 0;
                 if (result.error == LINK_ERROR_NONE)
                 {
-                    segment_index = relocation->section == OBJECT_SECTION_DATA || relocation->section == OBJECT_SECTION_ZERO ||
-                                               relocation->section == OBJECT_SECTION_READ_ONLY_DATA ||
-                                               relocation->section == OBJECT_SECTION_INIT_ARRAY || relocation->section == OBJECT_SECTION_FINI_ARRAY ||
-                                               relocation->section == OBJECT_SECTION_THREAD_LOCAL_DATA || relocation->section == OBJECT_SECTION_THREAD_LOCAL_ZERO
-                                           ? 2
-                                           : 1;
+                    segment_index = link_mach_data_segment_section(relocation->section) ? 2 : 1;
                 }
                 u64 segment_offset = 0;
                 if (result.error == LINK_ERROR_NONE)
@@ -14390,7 +14439,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     u64 bind_capacity = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        bind_capacity = import_name_size + (u64)import_count * 20 + 4;
+        bind_capacity = import_name_size + (u64)import_count * 20 + 4 + import_pointer_name_size + (u64)import_pointer_count * 24;
     }
     u8*bind_bytes = 0;
     if (result.error == LINK_ERROR_NONE)
@@ -14419,6 +14468,29 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 memcpy(bind_bytes + bind_size, symbol->name.pointer, symbol->name.length);
                 bind_size += symbol->name.length;
                 bind_bytes[bind_size++] = 0;
+                bind_bytes[bind_size++] = 0x90;
+            }
+            // Then each __DATA word that points at an import, named by its
+            // own segment offset and carrying its addend.  The library
+            // ordinal and the pointer type set above still hold, so a site
+            // takes the same lookup as the import's __got slot.
+            for (u32 relocation_index = 0; import_pointer_count && relocation_index < object->relocation_count; relocation_index += 1)
+            {
+                ObjectRelocation* relocation = &object->relocations[relocation_index];
+                if (!link_mach_import_pointer(object, relocation))
+                {
+                    continue;
+                }
+                ObjectSymbol* symbol = &object->symbols[relocation->symbol];
+                bind_bytes[bind_size++] = 0x40;
+                bind_bytes[bind_size++] = '_';
+                memcpy(bind_bytes + bind_size, symbol->name.pointer, symbol->name.length);
+                bind_size += symbol->name.length;
+                bind_bytes[bind_size++] = 0;
+                bind_bytes[bind_size++] = 0x72;
+                bind_size = link_uleb128_write(bind_bytes, bind_size, section_offsets[relocation->section] + relocation->offset - data_file_offset);
+                bind_bytes[bind_size++] = 0x60;
+                bind_size = link_sleb128_write(bind_bytes, bind_size, relocation->addend);
                 bind_bytes[bind_size++] = 0x90;
             }
             bind_bytes[bind_size++] = 0;
@@ -14856,6 +14928,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             bool got_load = object_relocation_kind_is_x86_got(relocation->kind) ||
                             relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 ||
                             relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12;
+            bool import_pointer = link_mach_import_pointer(object, relocation);
             bool thread_local_pointer = false;
             if (result.error == LINK_ERROR_NONE)
             {
@@ -14882,11 +14955,21 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                         }
                     }
                 }
+                else if (import_pointer)
+                {
+                    // dyld writes the word from the bind stream; the file
+                    // holds zero until it does.
+                    if (import_indices[relocation->symbol] == UINT32_MAX)
+                    {
+                        result.error = LINK_ERROR_RELOCATION;
+                        result.symbol = symbol->name;
+                    }
+                }
                 else if (symbol->section == OBJECT_SECTION_UNDEFINED)
                 {
                     // Only a call may reach an import through its stub; any
                     // other direct reference to imported data would read the
-                    // stub's code.
+                    // stub's code.  A __DATA pointer to it is bound above.
                     if (!got_load && symbol->kind == OBJECT_SYMBOL_DATA &&
                         (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 ||
                          relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_ABSOLUTE64))
@@ -15130,6 +15213,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                         instruction |= (page_offset >> shift) << 10;
                         link_write_u32(bytes, output_offset, instruction);
                     }
+                }
+                else if (import_pointer)
+                {
+                    link_write_u64(bytes, output_offset, 0);
                 }
                 else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
                 {

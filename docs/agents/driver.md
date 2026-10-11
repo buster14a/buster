@@ -1762,6 +1762,18 @@ and a sparse type-index offset entry per 8 KiB of records. DbgHelp (cdb,
 WinDbg, `symchk`, `dbh`) faults with `0xc0000005` loading a PDB whose TPI
 stream names no hash stream (#3411). The regression is `pdb_test_tpi_hashes`.
 
+CodeView names a frame-resident location with `S_DEFRANGE_REGISTER_REL`
+against RBP (x86-64) or X29 (AArch64), the base codegen normalizes FRAME offsets
+to (`codeview_emit_frame_relative`). `S_DEFRANGE_FRAMEPOINTER_REL` is not used:
+it needs an `S_FRAMEPROC` record this producer does not emit, and cdb and RAD
+drop it without one. A frame-resident piece of a split variable uses the same
+record with the `spilledUdtMember` flag and its 12-bit offset in the parent; a
+piece past that offset stays unavailable. Consecutive line entries for one
+source line become one C13 row, so a `file:line` breakpoint resolves to a
+single range. Regressions: `codeview_test_long_location_range`,
+`codeview_test_line_ranges`, `codeview_test_pointer_sizes` and the CodeView
+consumer in `codegen_test_machine_debug_locations`.
+
 With `-g`, named scalar locals that need more than one defining instruction to
 describe stay in distinct frame slots, so their location lists follow stores
 through reassignment and control-flow joins. A frame location starts after its
@@ -1834,13 +1846,17 @@ sized from the by-value nesting depth of the initialized type
 a flat table does not limit them. Driver regressions
 (`compiler_driver_test_large_static_initializers`) compile with `-c` a
 1,000,000-element `unsigned char` array, a 250,000-entry `const char *` table
-and a 200,000-entry struct array. Remaining limits: a flat initializer past
-about 1.7 million elements stops in `c_parse_typed_constant`; a single
-function of about 225,000 non-foldable statements exhausts the machine scratch
-in `codegen.c` (both tracked by #2527); and an array of
-`struct { int a; const char *s; short v[3]; }` compiles to 220,000 entries but
-aborts with an arena validation failure from 230,000 (#3254). The mobile
-builds of the driver fixture use smaller counts to keep their deadlines. A reservation that cannot be carved
+and a 200,000-entry struct array. Semantic analysis no longer sizes its
+initializer work by the tokens of the whole braced list: the typed-constant
+task stack in `c_parse_typed_constant` grows on demand, and the array-count
+inference frames and continuations are also bounded by the type count.
+`c_test_parse_large_static_initializers` analyses a 230,000-entry
+`struct { int a; const char *s; short v[3]; }` table (#3254) and a
+4,000,000-element byte table, both of which aborted on the 256 MiB thread
+scratch before. Measured with `ide cc -c`: 8,000,000 bytes take 3.2 s and
+471 MB; 1,000,000 entries of that struct take 15 s and 2.7 GB, so time, not a
+reservation, is the next limit. The mobile builds of the driver fixture use
+smaller counts to keep their deadlines. A reservation that cannot be carved
 is a positioned `initializer working storage exceeds the scratch reservation`
 or `initializer nesting exceeds its capacity` diagnostic and a failed result.
 
@@ -1851,10 +1867,31 @@ stack grows with the widest path through the type (`c_ir_emit_zero_value`),
 the cursor stack follows the type's nesting depth, and the unit-lifetime query
 stack gets its own mapping when it would leave lowering less than half of the
 thread scratch. `c_test_ir_local_table_zero_scratch` lowers a 20,000-entry
-local table that previously exhausted the scratch (#2527); generating machine
-code for a function that large still aborts in the fast register allocator
-(#3413). A task stack that cannot grow is the diagnostic
+local table that previously exhausted the scratch (#2527). A task stack that
+cannot grow is the diagnostic
 `aggregate zero-initializer exceeds the lowering scratch reservation`.
+
+### Large functions in the backend
+
+Machine selection, placement, scheduling and encoding of one function share
+the thread scratch, which is 256 MiB by default. `codegen_machine_scratch_bound` plans the
+function's need from its IR instruction, value and block counts before
+selection. The plan has a linear term several times the measured peak (about
+290 bytes per machine row under FAST, 410 under QUALITY) and a term for the
+FAST allocator's block-by-register liveness planes. When the bound exceeds
+what is left of the thread scratch, `codegen_machine_scratch_begin` installs
+private reservations of that size as the thread's scratch arenas for this one
+function, so nested pass scratch grows with it too, and restores the originals
+afterwards. Ordinary functions, including every function of the self-host,
+never take this path. A bound past 256 GiB, or a reservation the system
+refuses, fails the function with `kind=capacity reason=machine-scratch`
+instead of an arena validation abort (#3413).
+`c_test_large_function_machine_scratch_runtime` compiles and runs a
+5,000-entry local table, about 555,000 machine rows in one block, under both
+allocators; `codegen_test_machine_scratch_plan` checks the plan, the
+replacement and its restoration. Backend time, not memory, is the next limit
+for such functions: 128,000 and 256,000 `sink += x + i;` statements in one
+function take about 10 s and 42 s.
 
 ## ELF TLS companion lookup
 

@@ -381,6 +381,18 @@ fixture as well as compiling both architectures.
   through `machine_a64_cast_copies_constant` and `MACHINE_A64_MOV_RI`; its
   classification pass counts the copy-cast reads and the marking runs after
   branch fusion against the same use counts, edge arguments included.
+- x86-64 selection folds a constant `INDEX` index into its base address
+  offset (`machine_x64_index_constant_offset`). When the index is a
+  `CONSTANT_INTEGER` whose value, read at the index's width and signedness, is
+  non-negative and whose scaled offset fits a 32-bit displacement, the element
+  address is selected through `machine_x64_select_place_address_offset`. A
+  direct frame array then gets one `LEA_FRAME`, which the frame-address recipe
+  above rematerializes; a pointer gets one `LEA_OFFSET`, or a copy at offset
+  zero. Otherwise the result is a mutable copy of the base plus a scaled index,
+  which no recipe covers. A constant that only such rows and constant-copying
+  casts read is `fused_dead`. A `GLOBAL` base folds like a pointer, so its
+  element address is not rematerialized. Negative indices keep the computed
+  form. AArch64 selection does not fold `INDEX` indices yet.
 - FAST/QUALITY start a join's or loop header's general block parameters in
   registers. `machine_fast_parameter_contract` gives each non-pinned,
   non-mutable general parameter a caller-saved (or already-saved) register
@@ -405,11 +417,20 @@ fixture as well as compiling both architectures.
   register target when no resident source occupies that register, otherwise
   through the free register into its tile cell. On unity `ide.c` (x86-64
   `-march=native -g0`) this kept 45 FAST edges off the staged form and
-  removed about 680 stack-referencing instructions per mode. An edge with a
-  vector or mask assignment, or with no free register, still stages its
-  resident sources through the tile; the same input has no vector or mask
-  edge, and its no-free-register edges stage about 600 (FAST) and 2.4k
-  (QUALITY scan) sources. Either way a source with a rematerialization recipe (constant or
+  removed about 680 stack-referencing instructions per mode. When no
+  register is free across the whole edge, which happens on wide edges when
+  the targets, sources and unsaved callee-saved registers cover the register
+  file, a target that no copy reads and that is not loaded early stages
+  instead (`machine_fast_edge_staging_register`): its value is dead until
+  its own copy. That register is overwritten by the copies, so a copy cycle
+  instead saves one value in its first copy's tile cell and reloads it at
+  the end of the cycle. On unity `ide.c` every no-free-register edge had
+  such a target and cycles were rare (none in FAST, two in the QUALITY
+  scan); 52 of 53 FAST edges left the staged form, removing 5.1 KB of
+  `.text` and about 780 stack-referencing instructions per mode. An edge
+  with a vector or mask assignment, or with neither register, still stages
+  its resident sources through the tile; the same input has no vector or
+  mask edge. Either way a source with a rematerialization recipe (constant or
   frame address) reads no register and rematerializes straight into its
   destination (`MACHINE_FAST_EDGE_SOURCE_RECREATED`). On unity `ide.c` the
   parallel move removed about 46 k stack-referencing instructions and 2% of
