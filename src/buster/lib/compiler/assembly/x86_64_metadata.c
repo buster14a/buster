@@ -139,9 +139,12 @@ X86_64EncodedInstruction x86_64_encode_register_operation(X86_64RegisterOperatio
 // BUSTER_CHECK_SERIAL_INITIALIZATION so a caller that forgot is told rather
 // than left to race.
 //
-// One decode covers every table. Per-table laziness was measured and bought
-// nothing: the lookup indexes yield string-pool offsets and form ids, so a
-// consumer that reaches any table reaches most of them.
+// One decode covers the pool and the lookup indexes. Per-table laziness was
+// measured and bought nothing for them: the indexes yield string-pool offsets
+// and form ids, so a consumer that reaches any index reaches most of them.
+// The form and operand records are the exception: they are most of the
+// decoded bytes, and a compile reads a few hundred of the 11.013 forms, so
+// each record decodes from its own base64 groups on its first serial read.
 //
 // Record validity is cached beside the tables. They are immutable, so a record
 // that validates once validates forever, and the public accessors would
@@ -177,6 +180,14 @@ BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_pool_nul_distances[BUSTER_X86_GENERA
 #define BUSTER_X86_METADATA_NUL_KNOWN_WORDS ((BUSTER_X86_GENERATED_STRING_POOL_SIZE + 63u) / 64u)
 BUSTER_GLOBAL_LOCAL u64 buster_x86_metadata_pool_nul_known[BUSTER_X86_METADATA_NUL_KNOWN_WORDS];
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedForm buster_x86_metadata_form_records[BUSTER_X86_GENERATED_FORM_COUNT];
+// The form records are 64% of the decoded bytes, and a compile reads a few
+// hundred of the 11.013, so each record is decoded from its own base64 groups
+// on its first serial read (#1295) rather than the whole blob at prewarm; the
+// other tables stay whole-decoded, since their lookups reach most of them.
+// buster_x86_metadata_prewarm_all_forms decodes every record, from one
+// whole-blob decode, for a caller about to hand the tables to a gang.
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_form_records_decoded[BUSTER_X86_GENERATED_FORM_COUNT];
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_records_complete;
 // Validity is a per-record answer that never changes, so it is cached rather
 // than recomputed per lookup -- but it is asked for a few hundred of the
 // 11.013 forms per compile, so the walk that used to validate all of them
@@ -191,6 +202,10 @@ BUSTER_GLOBAL_LOCAL BusterX86GeneratedForm buster_x86_metadata_form_records[BUST
 #define BUSTER_X86_METADATA_RECORD_INVALID 2u
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_form_record_validity[BUSTER_X86_GENERATED_FORM_COUNT];
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedOperand buster_x86_metadata_operand_records[BUSTER_X86_GENERATED_OPERAND_COUNT];
+// Operand records follow the form records: each decodes on its first serial
+// read, and buster_x86_metadata_prewarm_all_forms decodes them all.
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_operand_records_decoded[BUSTER_X86_GENERATED_OPERAND_COUNT];
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_operand_records_complete;
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_coverage_record_validity[BUSTER_X86_GENERATED_COVERAGE_COUNT];
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedTextRange buster_x86_metadata_mnemonic_ranges[BUSTER_X86_GENERATED_MNEMONIC_RANGE_COUNT];
 BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_mnemonic_candidates[BUSTER_X86_GENERATED_MNEMONIC_CANDIDATE_COUNT];
@@ -389,6 +404,43 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_blob(u8* decoded, BusterX86M
     memset(decoded + group_index * 3u, 0, (group_count - group_index) * 3u);
 }
 
+// Decodes bytes [first_byte, first_byte + byte_count) of `blob` into `out`
+// from only the groups that cover them, with the whole-blob decode's edge
+// cases: characters past a chunk's string decode as zero, and groups past the
+// chunk table are zero.  A record that straddles a chunk boundary decodes its
+// groups from both chunks, since groups themselves never straddle one.
+// The largest range a caller decodes: one form record (checked below).
+#define BUSTER_X86_METADATA_RANGE_DECODE_CAPACITY 156u
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_blob_range(u8* out, BusterX86MetadataBlob blob, u64 first_byte, u64 byte_count)
+{
+    u8 groups[((BUSTER_X86_METADATA_RANGE_DECODE_CAPACITY + 4u) / 3u + 1u) * 3u];
+    u64 first_group = first_byte / 3u;
+    u64 end_group = (first_byte + byte_count + 2u) / 3u;
+    BUSTER_CHECK(byte_count <= BUSTER_X86_METADATA_RANGE_DECODE_CAPACITY && (end_group - first_group) * 3u <= sizeof(groups));
+    WORK_LEDGER_RECORD(TARGET_X86_BASE64_BYTES_DECODED, (end_group - first_group) * 3u);
+    for (u64 group = first_group; group < end_group;)
+    {
+        u64 chunk = group / BUSTER_X86_METADATA_BLOB_GROUPS_PER_CHUNK;
+        u64 within = group % BUSTER_X86_METADATA_BLOB_GROUPS_PER_CHUNK;
+        u64 run = BUSTER_MIN((u64)BUSTER_X86_METADATA_BLOB_GROUPS_PER_CHUNK - within, end_group - group);
+        u8* destination = groups + (group - first_group) * 3u;
+        if (chunk < blob.chunk_count)
+        {
+            u64 character_offset = within * 4u;
+            u64 length = blob.chunk_lengths[chunk];
+            u64 available = length > character_offset ? length - character_offset : 0u;
+            buster_x86_metadata_decode_base64_chunk_scalar(destination, available ? blob.chunks[chunk] + character_offset : blob.chunks[chunk],
+                                                           available, run);
+        }
+        else
+        {
+            memset(destination, 0, run * 3u);
+        }
+        group += run;
+    }
+    memcpy(out, groups + (first_byte - first_group * 3u), byte_count);
+}
+
 // Little-endian field assembly, as the generated u16/u32/u64 readers do it.
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE u16 buster_x86_metadata_blob_u16(const u8* bytes)
 {
@@ -421,94 +473,223 @@ BUSTER_CT_CHECK(sizeof(BusterX86GeneratedHashRange) == 16);
 BUSTER_CT_CHECK(sizeof(BusterX86GeneratedCoverage) == 32);
 #define BUSTER_X86_METADATA_OPERAND_RECORD_SIZE 16u
 #define BUSTER_X86_METADATA_FORM_RECORD_SIZE 156u
+// operand_first (u32) then operand_count (u16) in a form record.
+#define BUSTER_X86_METADATA_FORM_OPERAND_RANGE_OFFSET 88u
+BUSTER_CT_CHECK(BUSTER_X86_METADATA_FORM_RECORD_SIZE <= BUSTER_X86_METADATA_RANGE_DECODE_CAPACITY);
 #define BUSTER_X86_METADATA_TEXT_RANGE_RECORD_SIZE 12u
 #define BUSTER_X86_METADATA_CANDIDATE_RECORD_SIZE 4u
 #define BUSTER_X86_METADATA_HASH_RANGE_RECORD_SIZE 16u
 #define BUSTER_X86_METADATA_COVERAGE_RECORD_SIZE 25u
 
+// Whether operand `index` lies inside the operands blob, as the generated
+// reader asks before it reads one.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_operand_record_in_blob(u32 index)
+{
+    bool result = index < BUSTER_X86_GENERATED_OPERAND_COUNT &&
+                  buster_x86_generated_blob_range_valid(buster_x86_generated_operands_blob_BYTE_COUNT,
+                                                        (u64)index * BUSTER_X86_METADATA_OPERAND_RECORD_SIZE, BUSTER_X86_METADATA_OPERAND_RECORD_SIZE);
+    return result;
+}
+
+// Assembles one operand from its BUSTER_X86_METADATA_OPERAND_RECORD_SIZE decoded bytes.
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedOperand buster_x86_metadata_flat_operand_record(const u8* record)
+{
+    BusterX86GeneratedOperand result = {0};
+    result.atom_offset = buster_x86_metadata_blob_u32(record);
+    result.width_offset = buster_x86_metadata_blob_u32(record + 4);
+    result.slot = record[8];
+    result.visible = record[9];
+    result.kind = record[10];
+    result.access = record[11];
+    result.field_source = record[12];
+    result.reserved[0] = record[13];
+    result.reserved[1] = record[14];
+    result.reserved[2] = record[15];
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedOperand buster_x86_metadata_flat_operand(const u8* blob, u32 index)
 {
     BusterX86GeneratedOperand result = {0};
-    if (index < BUSTER_X86_GENERATED_OPERAND_COUNT &&
-        buster_x86_generated_blob_range_valid(buster_x86_generated_operands_blob_BYTE_COUNT, (u64)index * BUSTER_X86_METADATA_OPERAND_RECORD_SIZE,
-                                              BUSTER_X86_METADATA_OPERAND_RECORD_SIZE))
+    if (buster_x86_metadata_operand_record_in_blob(index))
     {
-        const u8* record = blob + (u64)index * BUSTER_X86_METADATA_OPERAND_RECORD_SIZE;
-        result.atom_offset = buster_x86_metadata_blob_u32(record);
-        result.width_offset = buster_x86_metadata_blob_u32(record + 4);
-        result.slot = record[8];
-        result.visible = record[9];
-        result.kind = record[10];
-        result.access = record[11];
-        result.field_source = record[12];
-        result.reserved[0] = record[13];
-        result.reserved[1] = record[14];
-        result.reserved[2] = record[15];
+        result = buster_x86_metadata_flat_operand_record(blob + (u64)index * BUSTER_X86_METADATA_OPERAND_RECORD_SIZE);
     }
+    return result;
+}
+
+// Decodes and assembles operand `index` from the groups that hold it,
+// exactly the record the whole-blob decode assembles.
+BUSTER_GLOBAL_LOCAL BUSTER_COLD void buster_x86_metadata_decode_operand_record(u32 index)
+{
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
+    BusterX86GeneratedOperand operand = {0};
+    if (buster_x86_metadata_operand_record_in_blob(index))
+    {
+        u8 record[BUSTER_X86_METADATA_OPERAND_RECORD_SIZE];
+        buster_x86_metadata_decode_blob_range(record, BUSTER_X86_METADATA_BLOB(operands), (u64)index * BUSTER_X86_METADATA_OPERAND_RECORD_SIZE,
+                                              BUSTER_X86_METADATA_OPERAND_RECORD_SIZE);
+        operand = buster_x86_metadata_flat_operand_record(record);
+    }
+    buster_x86_metadata_operand_records[index] = operand;
+    WORK_LEDGER_RECORD(TARGET_X86_RECORDS_ASSEMBLED, 1);
+    buster_x86_metadata_operand_records_decoded[index] = 1;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_ALWAYS_INLINE BusterX86GeneratedOperand const* buster_x86_metadata_decoded_operand_record(u32 index)
+{
+    if (BUSTER_UNLIKELY(!buster_x86_metadata_operand_records_decoded[index]))
+    {
+        buster_x86_metadata_decode_operand_record(index);
+    }
+    return buster_x86_metadata_operand_records + index;
+}
+
+// Every operand at once, from one whole-blob decode: what the first read of
+// each would store.
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_all_operand_records(void)
+{
+    if (!buster_x86_metadata_operand_records_complete)
+    {
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
+        buster_x86_metadata_decode_blob(buster_x86_metadata_blob_scratch, BUSTER_X86_METADATA_BLOB(operands));
+        for (u32 index = 0; index < BUSTER_X86_GENERATED_OPERAND_COUNT; index += 1)
+        {
+            if (!buster_x86_metadata_operand_records_decoded[index])
+            {
+                buster_x86_metadata_operand_records[index] = buster_x86_metadata_flat_operand(buster_x86_metadata_blob_scratch, index);
+                WORK_LEDGER_RECORD(TARGET_X86_RECORDS_ASSEMBLED, 1);
+                buster_x86_metadata_operand_records_decoded[index] = 1;
+            }
+        }
+        buster_x86_metadata_operand_records_complete = true;
+    }
+}
+
+// Whether form `index` lies inside the forms blob, as the generated reader
+// asks before it reads one.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_record_in_blob(u32 index)
+{
+    bool result = index < BUSTER_X86_GENERATED_FORM_COUNT &&
+                  buster_x86_generated_blob_range_valid(buster_x86_generated_forms_blob_BYTE_COUNT,
+                                                        (u64)index * BUSTER_X86_METADATA_FORM_RECORD_SIZE, BUSTER_X86_METADATA_FORM_RECORD_SIZE);
+    return result;
+}
+
+// Assembles one form from its BUSTER_X86_METADATA_FORM_RECORD_SIZE decoded bytes.
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedForm buster_x86_metadata_flat_form_record(const u8* record)
+{
+    BusterX86GeneratedForm result = {0};
+    result.stable_hash = buster_x86_metadata_blob_u64(record);
+    result.source_offset = buster_x86_metadata_blob_u32(record + 8);
+    result.iclass_offset = buster_x86_metadata_blob_u32(record + 12);
+    result.iform_offset = buster_x86_metadata_blob_u32(record + 16);
+    result.isa_set_offset = buster_x86_metadata_blob_u32(record + 20);
+    result.category_offset = buster_x86_metadata_blob_u32(record + 24);
+    result.extension_offset = buster_x86_metadata_blob_u32(record + 28);
+    result.attributes_offset = buster_x86_metadata_blob_u32(record + 32);
+    result.cpl_offset = buster_x86_metadata_blob_u32(record + 36);
+    result.exceptions_offset = buster_x86_metadata_blob_u32(record + 40);
+    result.flags_offset = buster_x86_metadata_blob_u32(record + 44);
+    result.disasm_offset = buster_x86_metadata_blob_u32(record + 48);
+    result.disasm_intel_offset = buster_x86_metadata_blob_u32(record + 52);
+    result.disasm_attsv_offset = buster_x86_metadata_blob_u32(record + 56);
+    result.real_opcode_offset = buster_x86_metadata_blob_u32(record + 60);
+    result.uname_offset = buster_x86_metadata_blob_u32(record + 64);
+    result.comment_offset = buster_x86_metadata_blob_u32(record + 68);
+    result.version_offset = buster_x86_metadata_blob_u32(record + 72);
+    result.pattern_offset = buster_x86_metadata_blob_u32(record + 76);
+    result.operands_offset = buster_x86_metadata_blob_u32(record + 80);
+    result.operand_annotation_offset = buster_x86_metadata_blob_u32(record + 84);
+    result.operand_first = buster_x86_metadata_blob_u32(record + BUSTER_X86_METADATA_FORM_OPERAND_RANGE_OFFSET);
+    result.operand_count = buster_x86_metadata_blob_u16(record + BUSTER_X86_METADATA_FORM_OPERAND_RANGE_OFFSET + 4);
+    result.coverage_class = record[94];
+    result.encoder_family = record[95];
+    result.test_class = record[96];
+    result.prefix_kind = record[97];
+    result.map = record[98];
+    result.fixed_byte_count = record[99];
+    memcpy(result.fixed_bytes, record + 100, sizeof(result.fixed_bytes));
+    result.mandatory_prefix = record[116];
+    result.field_flags = buster_x86_metadata_blob_u16(record + 117);
+    result.decorator_flags = buster_x86_metadata_blob_u16(record + 119);
+    result.apx_flags = buster_x86_metadata_blob_u16(record + 121);
+    result.amx_flags = buster_x86_metadata_blob_u16(record + 123);
+    result.mode_flags = buster_x86_metadata_blob_u16(record + 125);
+    result.displacement_width = record[127];
+    result.displacement_scale = record[128];
+    result.immediate_width = record[129];
+    result.immediate_signed = record[130];
+    result.relocation_base = record[131];
+    result.reserved[0] = record[132];
+    result.reserved[1] = record[133];
+    result.reserved[2] = record[134];
+    result.tuple_kind = record[135];
+    result.tuple_offset = buster_x86_metadata_blob_u32(record + 136);
+    result.element_size_offset = buster_x86_metadata_blob_u32(record + 140);
+    result.token_count = buster_x86_metadata_blob_u32(record + 144);
+    result.reason_id = buster_x86_metadata_blob_u16(record + 148);
+    result.reason_offset = buster_x86_metadata_blob_u32(record + 150);
+    result.reserved2 = buster_x86_metadata_blob_u16(record + 154);
     return result;
 }
 
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedForm buster_x86_metadata_flat_form(const u8* blob, u32 index)
 {
     BusterX86GeneratedForm result = {0};
-    if (index < BUSTER_X86_GENERATED_FORM_COUNT &&
-        buster_x86_generated_blob_range_valid(buster_x86_generated_forms_blob_BYTE_COUNT, (u64)index * BUSTER_X86_METADATA_FORM_RECORD_SIZE,
-                                              BUSTER_X86_METADATA_FORM_RECORD_SIZE))
+    if (buster_x86_metadata_form_record_in_blob(index))
     {
-        const u8* record = blob + (u64)index * BUSTER_X86_METADATA_FORM_RECORD_SIZE;
-        result.stable_hash = buster_x86_metadata_blob_u64(record);
-        result.source_offset = buster_x86_metadata_blob_u32(record + 8);
-        result.iclass_offset = buster_x86_metadata_blob_u32(record + 12);
-        result.iform_offset = buster_x86_metadata_blob_u32(record + 16);
-        result.isa_set_offset = buster_x86_metadata_blob_u32(record + 20);
-        result.category_offset = buster_x86_metadata_blob_u32(record + 24);
-        result.extension_offset = buster_x86_metadata_blob_u32(record + 28);
-        result.attributes_offset = buster_x86_metadata_blob_u32(record + 32);
-        result.cpl_offset = buster_x86_metadata_blob_u32(record + 36);
-        result.exceptions_offset = buster_x86_metadata_blob_u32(record + 40);
-        result.flags_offset = buster_x86_metadata_blob_u32(record + 44);
-        result.disasm_offset = buster_x86_metadata_blob_u32(record + 48);
-        result.disasm_intel_offset = buster_x86_metadata_blob_u32(record + 52);
-        result.disasm_attsv_offset = buster_x86_metadata_blob_u32(record + 56);
-        result.real_opcode_offset = buster_x86_metadata_blob_u32(record + 60);
-        result.uname_offset = buster_x86_metadata_blob_u32(record + 64);
-        result.comment_offset = buster_x86_metadata_blob_u32(record + 68);
-        result.version_offset = buster_x86_metadata_blob_u32(record + 72);
-        result.pattern_offset = buster_x86_metadata_blob_u32(record + 76);
-        result.operands_offset = buster_x86_metadata_blob_u32(record + 80);
-        result.operand_annotation_offset = buster_x86_metadata_blob_u32(record + 84);
-        result.operand_first = buster_x86_metadata_blob_u32(record + 88);
-        result.operand_count = buster_x86_metadata_blob_u16(record + 92);
-        result.coverage_class = record[94];
-        result.encoder_family = record[95];
-        result.test_class = record[96];
-        result.prefix_kind = record[97];
-        result.map = record[98];
-        result.fixed_byte_count = record[99];
-        memcpy(result.fixed_bytes, record + 100, sizeof(result.fixed_bytes));
-        result.mandatory_prefix = record[116];
-        result.field_flags = buster_x86_metadata_blob_u16(record + 117);
-        result.decorator_flags = buster_x86_metadata_blob_u16(record + 119);
-        result.apx_flags = buster_x86_metadata_blob_u16(record + 121);
-        result.amx_flags = buster_x86_metadata_blob_u16(record + 123);
-        result.mode_flags = buster_x86_metadata_blob_u16(record + 125);
-        result.displacement_width = record[127];
-        result.displacement_scale = record[128];
-        result.immediate_width = record[129];
-        result.immediate_signed = record[130];
-        result.relocation_base = record[131];
-        result.reserved[0] = record[132];
-        result.reserved[1] = record[133];
-        result.reserved[2] = record[134];
-        result.tuple_kind = record[135];
-        result.tuple_offset = buster_x86_metadata_blob_u32(record + 136);
-        result.element_size_offset = buster_x86_metadata_blob_u32(record + 140);
-        result.token_count = buster_x86_metadata_blob_u32(record + 144);
-        result.reason_id = buster_x86_metadata_blob_u16(record + 148);
-        result.reason_offset = buster_x86_metadata_blob_u32(record + 150);
-        result.reserved2 = buster_x86_metadata_blob_u16(record + 154);
+        result = buster_x86_metadata_flat_form_record(blob + (u64)index * BUSTER_X86_METADATA_FORM_RECORD_SIZE);
     }
     return result;
+}
+
+// Decodes and assembles form `index` from the groups that hold it, exactly
+// the record the whole-blob decode assembles.
+BUSTER_GLOBAL_LOCAL BUSTER_COLD void buster_x86_metadata_decode_form_record(u32 index)
+{
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
+    BusterX86GeneratedForm form = {0};
+    if (buster_x86_metadata_form_record_in_blob(index))
+    {
+        u8 record[BUSTER_X86_METADATA_FORM_RECORD_SIZE];
+        buster_x86_metadata_decode_blob_range(record, BUSTER_X86_METADATA_BLOB(forms), (u64)index * BUSTER_X86_METADATA_FORM_RECORD_SIZE,
+                                              BUSTER_X86_METADATA_FORM_RECORD_SIZE);
+        form = buster_x86_metadata_flat_form_record(record);
+    }
+    buster_x86_metadata_form_records[index] = form;
+    WORK_LEDGER_RECORD(TARGET_X86_RECORDS_ASSEMBLED, 1);
+    buster_x86_metadata_form_records_decoded[index] = 1;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_ALWAYS_INLINE BusterX86GeneratedForm const* buster_x86_metadata_decoded_form_record(u32 index)
+{
+    if (BUSTER_UNLIKELY(!buster_x86_metadata_form_records_decoded[index]))
+    {
+        buster_x86_metadata_decode_form_record(index);
+    }
+    return buster_x86_metadata_form_records + index;
+}
+
+// Every record at once, from one whole-blob decode: what the first read of
+// each would store.
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_all_form_records(void)
+{
+    if (!buster_x86_metadata_form_records_complete)
+    {
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
+        buster_x86_metadata_decode_blob(buster_x86_metadata_blob_scratch, BUSTER_X86_METADATA_BLOB(forms));
+        for (u32 index = 0; index < BUSTER_X86_GENERATED_FORM_COUNT; index += 1)
+        {
+            if (!buster_x86_metadata_form_records_decoded[index])
+            {
+                buster_x86_metadata_form_records[index] = buster_x86_metadata_flat_form(buster_x86_metadata_blob_scratch, index);
+                WORK_LEDGER_RECORD(TARGET_X86_RECORDS_ASSEMBLED, 1);
+                buster_x86_metadata_form_records_decoded[index] = 1;
+            }
+        }
+        buster_x86_metadata_form_records_complete = true;
+    }
 }
 
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedTextRange buster_x86_metadata_flat_text_range(const u8* blob, u64 byte_count, u32 count, u32 index)
@@ -832,21 +1013,22 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables_once(void)
     buster_x86_metadata_decode_string_pool();
     WORK_LEDGER_RECORD(TARGET_X86_POOL_BYTES_COPIED, BUSTER_X86_GENERATED_STRING_POOL_SIZE);
     WORK_LEDGER_RECORD(TARGET_X86_RECORDS_ASSEMBLED,
-                       (u64)BUSTER_X86_GENERATED_OPERAND_COUNT + BUSTER_X86_GENERATED_MNEMONIC_RANGE_COUNT + BUSTER_X86_GENERATED_MNEMONIC_CANDIDATE_COUNT +
+                       (u64)BUSTER_X86_GENERATED_MNEMONIC_RANGE_COUNT + BUSTER_X86_GENERATED_MNEMONIC_CANDIDATE_COUNT +
                            BUSTER_X86_GENERATED_ICLASS_RANGE_COUNT + BUSTER_X86_GENERATED_ICLASS_CANDIDATE_COUNT + BUSTER_X86_GENERATED_IFORM_RANGE_COUNT +
                            BUSTER_X86_GENERATED_IFORM_CANDIDATE_COUNT + BUSTER_X86_GENERATED_FORM_HASH_RANGE_COUNT +
-                           BUSTER_X86_GENERATED_FORM_HASH_CANDIDATE_COUNT + BUSTER_X86_GENERATED_FORM_COUNT);
-    // Each blob is decoded whole into the scratch array, copied out into its
-    // typed cache, and three of its records are then re-read through the
+                           BUSTER_X86_GENERATED_FORM_HASH_CANDIDATE_COUNT);
+    // Each index blob is decoded whole into the scratch array, copied out into
+    // its typed cache, and three of its records are then re-read through the
     // generated reader as the layout check described at the flat readers.
     buster_x86_metadata_fill_base64_values();
-    buster_x86_metadata_decode_blob(buster_x86_metadata_blob_scratch, BUSTER_X86_METADATA_BLOB(operands));
-    for (u32 index = 0; index < BUSTER_X86_GENERATED_OPERAND_COUNT; index += 1)
+    // Operand and form records decode on their first read; the layout check
+    // decodes its three samples of each here.
+    for (u32 sample = 0; sample < 3; sample += 1)
     {
-        buster_x86_metadata_operand_records[index] = buster_x86_metadata_flat_operand(buster_x86_metadata_blob_scratch, index);
+        u32 sample_index = buster_x86_metadata_flat_check_index(sample, BUSTER_X86_GENERATED_OPERAND_COUNT);
+        buster_x86_metadata_flat_check(buster_x86_metadata_operands_equal(*buster_x86_metadata_decoded_operand_record(sample_index),
+                                                                          buster_x86_generated_operand_at(sample_index)));
     }
-    BUSTER_X86_METADATA_FLAT_CHECK(buster_x86_metadata_operand_records, BUSTER_X86_GENERATED_OPERAND_COUNT, buster_x86_generated_operand_at,
-                                   buster_x86_metadata_operands_equal);
     buster_x86_metadata_decode_text_ranges(buster_x86_metadata_mnemonic_ranges, BUSTER_X86_GENERATED_MNEMONIC_RANGE_COUNT,
                                            BUSTER_X86_METADATA_BLOB(mnemonic_ranges));
     BUSTER_X86_METADATA_FLAT_CHECK(buster_x86_metadata_mnemonic_ranges, BUSTER_X86_GENERATED_MNEMONIC_RANGE_COUNT, buster_x86_generated_mnemonic_range_at,
@@ -877,16 +1059,12 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables_once(void)
                                           BUSTER_X86_METADATA_BLOB(form_hash_candidates));
     BUSTER_X86_METADATA_FLAT_CHECK(buster_x86_metadata_form_hash_candidates, BUSTER_X86_GENERATED_FORM_HASH_CANDIDATE_COUNT,
                                    buster_x86_generated_form_hash_candidate_at, buster_x86_metadata_candidates_equal);
-    // Records must be readable before they are validated: validation resolves
-    // string offsets through the pool and operand ranges through the operand
-    // table, both filled above.
-    buster_x86_metadata_decode_blob(buster_x86_metadata_blob_scratch, BUSTER_X86_METADATA_BLOB(forms));
-    for (u32 index = 0; index < BUSTER_X86_GENERATED_FORM_COUNT; index += 1)
+    for (u32 sample = 0; sample < 3; sample += 1)
     {
-        buster_x86_metadata_form_records[index] = buster_x86_metadata_flat_form(buster_x86_metadata_blob_scratch, index);
+        u32 sample_index = buster_x86_metadata_flat_check_index(sample, BUSTER_X86_GENERATED_FORM_COUNT);
+        buster_x86_metadata_flat_check(
+            buster_x86_metadata_forms_equal(*buster_x86_metadata_decoded_form_record(sample_index), buster_x86_generated_form_at(sample_index)));
     }
-    BUSTER_X86_METADATA_FLAT_CHECK(buster_x86_metadata_form_records, BUSTER_X86_GENERATED_FORM_COUNT, buster_x86_generated_form_at,
-                                   buster_x86_metadata_forms_equal);
     // Validation moved to the per-record accessors, which run after this
     // publishes: it reads records and strings back through the accessors, and
     // once `decoded` is set those reads no longer re-enter the decode at all.
@@ -1315,7 +1493,7 @@ BUSTER_GLOBAL_LOCAL BusterX86GeneratedForm buster_x86_metadata_form_record(u32 i
 {
     buster_x86_metadata_decode_tables();
     BusterX86GeneratedForm empty = {0};
-    return index < BUSTER_X86_GENERATED_FORM_COUNT ? buster_x86_metadata_form_records[index] : empty;
+    return index < BUSTER_X86_GENERATED_FORM_COUNT ? *buster_x86_metadata_decoded_form_record(index) : empty;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_record_valid(u32 index)
@@ -1328,7 +1506,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_record_valid(u32 index)
         if (cached == BUSTER_X86_METADATA_RECORD_UNKNOWN)
         {
             BUSTER_CHECK_SERIAL_INITIALIZATION();
-            cached = buster_x86_metadata_validate_form_record(&buster_x86_metadata_form_records[index], index, 0)
+            cached = buster_x86_metadata_validate_form_record(buster_x86_metadata_decoded_form_record(index), index, 0)
                          ? (u8)BUSTER_X86_METADATA_RECORD_VALID
                          : (u8)BUSTER_X86_METADATA_RECORD_INVALID;
             buster_x86_metadata_form_record_validity[index] = cached;
@@ -1342,7 +1520,7 @@ BUSTER_GLOBAL_LOCAL BusterX86GeneratedOperand buster_x86_metadata_operand_record
 {
     buster_x86_metadata_decode_tables();
     BusterX86GeneratedOperand empty = {0};
-    return index < BUSTER_X86_GENERATED_OPERAND_COUNT ? buster_x86_metadata_operand_records[index] : empty;
+    return index < BUSTER_X86_GENERATED_OPERAND_COUNT ? *buster_x86_metadata_decoded_operand_record(index) : empty;
 }
 
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedCoverage buster_x86_metadata_coverage_record(u32 index)
@@ -2487,8 +2665,17 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_operand_ranges_partition(void)
     bool partitions = true;
     for (u32 form_id = 0; partitions && form_id < BUSTER_X86_GENERATED_FORM_COUNT; form_id += 1)
     {
-        u32 operand_first = buster_x86_metadata_form_records[form_id].operand_first;
-        u16 operand_count = buster_x86_metadata_form_records[form_id].operand_count;
+        // Only the six bytes of the two fields, decoded from their own
+        // groups; a form outside the blob reads as the zero record.
+        u8 fields[6] = {0};
+        if (buster_x86_metadata_form_record_in_blob(form_id))
+        {
+            buster_x86_metadata_decode_blob_range(fields, BUSTER_X86_METADATA_BLOB(forms),
+                                                  (u64)form_id * BUSTER_X86_METADATA_FORM_RECORD_SIZE + BUSTER_X86_METADATA_FORM_OPERAND_RANGE_OFFSET,
+                                                  sizeof(fields));
+        }
+        u32 operand_first = buster_x86_metadata_blob_u32(fields);
+        u16 operand_count = buster_x86_metadata_blob_u16(fields + 4);
         partitions = operand_first == expected_first && operand_count <= BUSTER_X86_METADATA_FORM_OPERAND_LIMIT &&
                      operand_count <= BUSTER_X86_GENERATED_OPERAND_COUNT - expected_first;
         expected_first += operand_count;
@@ -13400,6 +13587,8 @@ void buster_x86_metadata_prewarm_all_forms(void)
     if (!buster_x86_metadata_all_forms_prepared)
     {
         BUSTER_CHECK_SERIAL_INITIALIZATION();
+        buster_x86_metadata_decode_all_form_records();
+        buster_x86_metadata_decode_all_operand_records();
         // Every NUL distance at once, which is what a first read of each
         // offset would store, so no lane ever fills one.
         buster_x86_metadata_fill_nul_distances(buster_x86_metadata_pool_bytes, buster_x86_metadata_pool_nul_distances,
@@ -13444,6 +13633,7 @@ u64 buster_x86_metadata_test_unprepared_after_prewarm_all(void)
     unprepared += (u64)!buster_x86_metadata_nop_prepared;
     for (u32 form_id = 0; form_id < BUSTER_X86_GENERATED_FORM_COUNT; form_id += 1)
     {
+        unprepared += (u64)!buster_x86_metadata_form_records_decoded[form_id];
         if (buster_x86_metadata_form_record_validity[form_id] == BUSTER_X86_METADATA_RECORD_UNKNOWN)
         {
             unprepared += 1;
@@ -13463,6 +13653,10 @@ u64 buster_x86_metadata_test_unprepared_after_prewarm_all(void)
         }
     }
     unprepared += (u64)!buster_x86_metadata_coverage_decoded;
+    for (u32 operand_id = 0; operand_id < BUSTER_X86_GENERATED_OPERAND_COUNT; operand_id += 1)
+    {
+        unprepared += (u64)!buster_x86_metadata_operand_records_decoded[operand_id];
+    }
     for (u32 word = 0; word < BUSTER_X86_METADATA_NUL_KNOWN_WORDS; word += 1)
     {
         unprepared += (u64)(buster_x86_metadata_pool_nul_known[word] != UINT64_MAX);
