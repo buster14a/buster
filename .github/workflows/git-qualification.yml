@@ -1,10 +1,7 @@
-name: Git qualification
-# Opt-in cloud correctness census; no PR/main/queue/push trigger.
+name: Git depfile candidate census
+# Isolated historical diagnostic; manual execution only, no automatic workload.
 on:
   workflow_dispatch:
-  push:
-    branches: [codex/3180-git-depfile-candidate]
-    paths: ['.github/workflows/git-qualification.yml']
 permissions:
   contents: read
 concurrency:
