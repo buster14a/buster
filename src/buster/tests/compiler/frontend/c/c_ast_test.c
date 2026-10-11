@@ -3607,6 +3607,15 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
      7, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
     {S8_INITIALIZER("struct S { struct { long inner; }; }; long f(struct S* p) { return p->inner + p->inner; }"), S8_INITIALIZER("p"), 1, 7,
      C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    // A pass remembers the usual arithmetic conversions (c_ast_types_arithmetic)
+    // by both operand rows and both bit-field widths: the same typedef row
+    // gives unsigned int without a width and int with a narrow one, and the
+    // right operand's row is part of the key.
+    {S8_INITIALIZER("typedef unsigned U; struct S { U bits : 3; U whole; }; int f(struct S* p) { return (p->whole + p->whole) + (p->bits + p->bits); }"),
+     S8_INITIALIZER("p"), 3, 7, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("typedef unsigned U; struct S { U bits : 3; U whole; }; U f(struct S* p) { return (p->bits + p->bits) + (p->whole + p->whole); }"),
+     S8_INITIALIZER("p"), 3, 7, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
+    {S8_INITIALIZER("long f(int a, long b) { return (a + a) + (a + b); }"), S8_INITIALIZER("a"), 3, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
     {S8_INITIALIZER("int f(int* items) { return items[2]; }"), S8_INITIALIZER("items"), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("unsigned char table[4]; unsigned char f(int i) { return table[i]; }"), S8_INITIALIZER("table"), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
      C_TYPE_UNSIGNED_CHAR},
