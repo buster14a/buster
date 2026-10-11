@@ -90,8 +90,11 @@ AST_PILOT_ACCEPTANCE_TIMEOUT_SECONDS = 2 * 60 * 60
 # Measured: the whole leg (42 passes over its six cells) took 508 s on a hosted
 # 2.8 GHz Xeon; this bound keeps it inside the unchanged compare-pull budget.
 REAL_SOURCE_TIMEOUT_SECONDS = 1800
-# PRODUCTION_PROFILE_BUILD_MEASURED
-PRODUCTION_PROFILE_BUILD_TIMEOUT_SECONDS = 45 * 60
+# Measured: the whole --no-benchmark build (seven trees, two trainings,
+# inspection and test_all) took 1200 s with three lanes on a hosted 4-vCPU
+# 2.8 GHz Xeon. Twice that keeps the leg, its corpus run and the ordinary
+# comparison inside the unchanged 90-minute compare-pull job.
+PRODUCTION_PROFILE_BUILD_TIMEOUT_SECONDS = 40 * 60
 ANALYZER_DRIVER_BUILD_TIMEOUT_SECONDS = 600
 ANALYZER_GENERATE_TIMEOUT_SECONDS = 900
 ANALYZER_HELPER_TIMEOUT_SECONDS = 76 * 60

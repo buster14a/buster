@@ -3810,7 +3810,8 @@ class ProductionProfileTest(unittest.TestCase):
         self.assertEqual(profile["compilers"], {"baseline": "release", "candidate": "pgo-lto"})
         self.assertIn("--no-benchmark", profile["build_arguments"])
         # The build leg's bound plus the corpus stays inside the unchanged 90-minute compare-pull job.
-        self.assertLessEqual(compiler_compare.PRODUCTION_PROFILE_BUILD_TIMEOUT_SECONDS, 45 * 60)
+        self.assertLessEqual(compiler_compare.PRODUCTION_PROFILE_BUILD_TIMEOUT_SECONDS
+                             + compiler_compare.THROUGHPUT_TIMEOUT_SECONDS, 75 * 60)
         source = (Path(__file__).resolve().parents[2] / "tools/production_profile.c").read_text(encoding="utf-8")
         self.assertIn(f'LEDGER_VERSION "{compiler_receipt.PRODUCTION_PROFILE_LEDGER}"', source)
 
