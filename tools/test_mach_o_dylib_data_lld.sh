@@ -19,6 +19,60 @@ done
 clang --version | tee "$output/clang-version.txt"
 ld64.lld --version | tee "$output/lld-version.txt"
 
+# The sources live here rather than under tests/, whose tracked files are each
+# frozen by the native-retirement support contract (docs/native-retirement-census.md).
+sources="$output/sources"
+mkdir -p "$sources"
+cat >"$sources/library.c" <<'SOURCE'
+// The dylib side of this script: data and a function
+// that only a dynamic library defines (#1454).
+int mach_dylib_data = 42;
+
+int mach_dylib_function(int value)
+{
+    return value + 1;
+}
+SOURCE
+cat >"$sources/system.c" <<'SOURCE'
+// A stand-in libSystem for this script: ld64.lld
+// requires dyld_stub_binder from libSystem whenever it emits lazy stubs.
+void mach_dylib_data_stub_binder(void) __asm__("dyld_stub_binder");
+
+void mach_dylib_data_stub_binder(void)
+{
+}
+SOURCE
+cat >"$sources/subject.c" <<'SOURCE'
+// A Buster-compiled object whose references to dylib data a platform linker
+// must bind through the GOT (#1454): loads, address-taking and calls of
+// symbols a dynamic library defines, beside local and global definitions.
+extern int mach_dylib_data;
+extern int mach_dylib_function(int value);
+
+static int mach_local_data = 5;
+int mach_global_data = 7;
+
+int mach_dylib_data_sum(void)
+{
+    return mach_dylib_data + mach_local_data + mach_global_data + mach_dylib_function(3);
+}
+
+int* mach_dylib_data_address(void)
+{
+    return &mach_dylib_data;
+}
+
+int (*mach_dylib_function_address(void))(int)
+{
+    return mach_dylib_function;
+}
+
+int main(void)
+{
+    return mach_dylib_data_sum() == 58 && *mach_dylib_data_address() == 42 && mach_dylib_function_address()(1) == 2 ? 0 : 1;
+}
+SOURCE
+
 # The (symbol, relocation type) pairs of an object's __text section.
 text_relocations()
 {
@@ -42,14 +96,14 @@ while IFS='|' read -r name buster_target clang_target lld_arch; do
     directory="$output/$name"
     mkdir -p "$directory"
     link=(ld64.lld -arch "$lld_arch" -platform_version macos 13.0.0 13.0.0)
-    clang --target="$clang_target" -g0 -c tests/basic_c_mach_dylib_data_library.c -o "$directory/library.o"
-    clang --target="$clang_target" -g0 -c tests/basic_c_mach_dylib_data_system.c -o "$directory/system.o"
+    clang --target="$clang_target" -g0 -c "$sources/library.c" -o "$directory/library.o"
+    clang --target="$clang_target" -g0 -c "$sources/system.c" -o "$directory/system.o"
     "${link[@]}" -dylib -install_name @rpath/libmachdata.dylib -o "$directory/libmachdata.dylib" "$directory/library.o"
     "${link[@]}" -dylib -install_name /usr/lib/libSystem.B.dylib -o "$directory/libSystem.dylib" "$directory/system.o"
     for optimization in O0 O2; do
-        "$ide" cc -target "$buster_target" -g0 "-$optimization" -c tests/basic_c_mach_dylib_data_subject.c \
+        "$ide" cc -target "$buster_target" -g0 "-$optimization" -c "$sources/subject.c" \
             -o "$directory/buster-$optimization.o"
-        clang --target="$clang_target" -g0 "-$optimization" -c tests/basic_c_mach_dylib_data_subject.c \
+        clang --target="$clang_target" -g0 "-$optimization" -c "$sources/subject.c" \
             -o "$directory/clang-$optimization.o"
         for compiler in buster clang; do
             stem="$directory/$compiler-$optimization"

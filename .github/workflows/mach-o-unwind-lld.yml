@@ -10,9 +10,6 @@ on:
       - src/buster/tests/compiler/object/object_test.c
       - tests/basic_c_mach_unwind_host.c
       - tests/basic_c_mach_unwind_subject.c
-      - tests/basic_c_mach_dylib_data_library.c
-      - tests/basic_c_mach_dylib_data_subject.c
-      - tests/basic_c_mach_dylib_data_system.c
       - tools/test_mach_o_unwind_lld.sh
       - tools/test_mach_o_dylib_data_lld.sh
       - docs/mach-o-unwind-linker-compatibility.md

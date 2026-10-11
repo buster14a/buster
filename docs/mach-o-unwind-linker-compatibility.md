@@ -37,9 +37,10 @@ headers, sections, relocations and symbols. A successful object parse is not
 a passing result; both final links must succeed.
 
 `tools/test_mach_o_dylib_data_lld.sh` covers the data side of the
-relocation contract (#1454) for both architectures. It compiles
-`tests/basic_c_mach_dylib_data_subject.c` with Buster and with Clang at `-O0`
-and `-O2`, then links each object with `ld64.lld` against a Clang-built dylib
+relocation contract (#1454) for both architectures. It writes its own subject,
+dylib and libSystem stand-in sources, because every tracked file under `tests/`
+is frozen by the native-retirement support contract. It compiles the subject
+with Buster and with Clang at `-O0` and `-O2`, then links each object with `ld64.lld` against a Clang-built dylib
 that defines the data. The check fails unless all three hold:
 
 - At `-O0`, every symbol's `__text` relocation types match Clang's.
