@@ -251,11 +251,29 @@ class MonitorWorkflowTests(unittest.TestCase):
         self.assertIn('"pid": process.pid', runner)
         self.assertLess(runner.index('os.killpg(group["pid"], signal.SIGKILL)'),
                         runner.index('group["process"].wait('))
-        self.assertEqual(source.count("if: ${{ !cancelled() && steps.lifecycle.outcome == 'success' }}"), 2)
+        self.assertEqual(source.count("if: ${{ !cancelled() && steps.lifecycle.outcome == 'success' }}"), 3)
+        self.assertIn(
+            "      - name: Exercise mobile driver-fixture asset graphs\n"
+            "        id: driver_fixture_assets\n"
+            "        if: ${{ !cancelled() && steps.lifecycle.outcome == 'success' }}\n"
+            "        shell: bash\n",
+            source)
+        asset_script = workflow_script("Exercise mobile driver-fixture asset graphs")
+        self.assertIn("set -euo pipefail", asset_script)
+        self.assertIn(
+            'python3 tools/mobile_driver_fixture_assets_test.py -v 2>&1 | tee "$RUNNER_TEMP/mobile-driver-fixture-assets.log"',
+            asset_script)
         self.assertIn("python3 ios/gnu_timeout_test.py -v", source)
         self.assertIn("python3 ios/monitor_workflow_test.py -v", source)
+        self.assertIn("DRIVER_FIXTURE_ASSETS_RESULT: ${{ steps.driver_fixture_assets.outcome }}", source)
+        self.assertIn("Driver-fixture asset graphs: **%s**.", source)
+        self.assertIn("python3 tools/mobile_driver_fixture_assets_test.py -v", source)
+        for path in ("cmake/IOSBundleAssets.cmake", "tools/mobile_driver_fixture_assets_test.py",
+                     "src/buster/tests/compiler/driver/fixtures/**"):
+            self.assertEqual(source.count("- '" + path + "'"), 2)
         for log in ("mobile-lifecycle", "ios-signing-budget", "ios-install-lifecycle", "ios-launch-diagnostics",
-                    "ios-gnu-timeout", "ios-monitor-workflow", "ios-lifecycle-groups", "android-status", "android-summary"):
+                    "ios-gnu-timeout", "ios-monitor-workflow", "ios-lifecycle-groups",
+                    "mobile-driver-fixture-assets", "android-status", "android-summary"):
             self.assertIn("${{ runner.temp }}/" + log + ".log", source)
 
     def test_frozen_shared_fixture_bytes_are_preserved(self):

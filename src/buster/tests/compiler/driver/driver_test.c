@@ -23,6 +23,8 @@
 // compiler_driver_test_elf_symbolic_immediates checks imm32 types and host overflow.
 // compiler_driver_test_sysv_indirect_variadic checks AL against a foreign probe.
 // compiler_driver_test_variadic_workspace checks successive calls against host va_arg.
+// compiler_driver_test_aarch64_platform_large_va_arg checks classified large
+// pointer-list aggregate reads and copied cursors against native host callers.
 // compiler_driver_test_pragma_pack_alignment cross-links explicit member ceilings.
 // compiler_driver_test_wasm_index_signedness checks canonical signed/narrow indices.
 // compiler_driver_test_wasm_stack_alignment checks opaque observed stack addresses.
@@ -261,6 +263,226 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_test_store(u8* bytes, u64 offset, u64 v
     {
         bytes[offset + index] = (u8)(value >> (index * 8));
     }
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_test_store_be(u8* bytes, u64 offset, u64 value, u32 size)
+{
+    for (u32 index = 0; index < size; index += 1)
+    {
+        bytes[offset + index] = (u8)(value >> ((size - index - 1) * 8));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL u32 compiler_driver_test_mach_read_u32(ByteSlice bytes, u64 offset)
+{
+    u32 result = 0;
+    if (bytes.pointer && offset <= bytes.length && sizeof(u32) <= bytes.length - offset)
+    {
+        result = (u32)bytes.pointer[offset] | ((u32)bytes.pointer[offset + 1] << 8) | ((u32)bytes.pointer[offset + 2] << 16) |
+                 ((u32)bytes.pointer[offset + 3] << 24);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_mach_dylib_with_platforms(Arena* arena, u32 cputype, u32 filetype,
+                                                                             String8 install_name, u32 current_version,
+                                                                             u32 compatibility_version, u32 const* platforms,
+                                                                             u32 platform_count, u32 version_min_command)
+{
+    u32 identity_command_size = (u32)align_forward(24 + install_name.length + 1, 8);
+    u32 command_bytes = identity_command_size + platform_count * 24 + (version_min_command ? 16 : 0);
+    u32 command_count = 1 + platform_count + (version_min_command ? 1 : 0);
+    u64 length = 32 + command_bytes;
+    u8* bytes = arena_allocate(arena, u8, length);
+    memset(bytes, 0, length);
+    compiler_driver_test_store(bytes, 0, 0xfeedfacf, 4);
+    compiler_driver_test_store(bytes, 4, cputype, 4);
+    compiler_driver_test_store(bytes, 12, filetype, 4);
+    compiler_driver_test_store(bytes, 16, command_count, 4);
+    compiler_driver_test_store(bytes, 20, command_bytes, 4);
+    compiler_driver_test_store(bytes, 32, 0xd, 4);
+    compiler_driver_test_store(bytes, 36, identity_command_size, 4);
+    compiler_driver_test_store(bytes, 40, 24, 4);
+    compiler_driver_test_store(bytes, 48, current_version, 4);
+    compiler_driver_test_store(bytes, 52, compatibility_version, 4);
+    memcpy(bytes + 56, install_name.pointer, install_name.length);
+    u64 cursor = 32 + identity_command_size;
+    for (u32 index = 0; index < platform_count; index += 1)
+    {
+        compiler_driver_test_store(bytes, cursor, 0x32, 4);
+        compiler_driver_test_store(bytes, cursor + 4, 24, 4);
+        compiler_driver_test_store(bytes, cursor + 8, platforms[index], 4);
+        cursor += 24;
+    }
+    if (version_min_command)
+    {
+        compiler_driver_test_store(bytes, cursor, version_min_command, 4);
+        compiler_driver_test_store(bytes, cursor + 4, 16, 4);
+    }
+    return (ByteSlice){.pointer = bytes, .length = length};
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_mach_dylib_with_platform(Arena* arena, u32 cputype, u32 filetype,
+                                                                             String8 install_name, u32 current_version,
+                                                                             u32 compatibility_version, u32 platform)
+{
+    ByteSlice result;
+    if (platform)
+    {
+        result = compiler_driver_test_mach_dylib_with_platforms(arena, cputype, filetype, install_name, current_version,
+                                                                 compatibility_version, &platform, 1, 0);
+    }
+    else
+    {
+        result = compiler_driver_test_mach_dylib_with_platforms(arena, cputype, filetype, install_name, current_version,
+                                                                 compatibility_version, 0, 0, 0);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_mach_dylib(Arena* arena, u32 cputype, u32 filetype, String8 install_name,
+                                                               u32 current_version, u32 compatibility_version)
+{
+    return compiler_driver_test_mach_dylib_with_platform(arena, cputype, filetype, install_name, current_version, compatibility_version, 0);
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_mach_fat(Arena* arena, ByteSlice const* slices, u32 const* cputypes, u32 slice_count,
+                                                              bool wide)
+{
+    u64 entry_size = wide ? 32 : 20;
+    u64 slice_offset = align_forward(8 + (u64)slice_count * entry_size, 8);
+    u64 length = slice_offset;
+    for (u32 index = 0; index < slice_count; index += 1)
+    {
+        length = align_forward(length, 8) + slices[index].length;
+    }
+    u8* bytes = arena_allocate(arena, u8, length);
+    memset(bytes, 0, length);
+    compiler_driver_test_store_be(bytes, 0, wide ? 0xcafebabf : 0xcafebabe, 4);
+    compiler_driver_test_store_be(bytes, 4, slice_count, 4);
+    u64 next_slice = slice_offset;
+    for (u32 index = 0; index < slice_count; index += 1)
+    {
+        u64 entry = 8 + (u64)index * entry_size;
+        next_slice = align_forward(next_slice, 8);
+        compiler_driver_test_store_be(bytes, entry, cputypes[index], 4);
+        if (wide)
+        {
+            compiler_driver_test_store_be(bytes, entry + 8, next_slice, 8);
+            compiler_driver_test_store_be(bytes, entry + 16, slices[index].length, 8);
+            compiler_driver_test_store_be(bytes, entry + 24, 3, 4);
+        }
+        else
+        {
+            compiler_driver_test_store_be(bytes, entry + 8, next_slice, 4);
+            compiler_driver_test_store_be(bytes, entry + 12, slices[index].length, 4);
+            compiler_driver_test_store_be(bytes, entry + 16, 3, 4);
+        }
+        memcpy(bytes + next_slice, slices[index].pointer, slices[index].length);
+        next_slice += slices[index].length;
+    }
+    return (ByteSlice){.pointer = bytes, .length = length};
+}
+
+typedef struct CompilerDriverTestMachLoadCommand
+{
+    String8 name;
+    u32 current_version;
+    u32 compatibility_version;
+} CompilerDriverTestMachLoadCommand;
+
+typedef struct CompilerDriverTestMachLoadCommands
+{
+    CompilerDriverTestMachLoadCommand commands[32];
+    u32 count;
+    bool valid;
+} CompilerDriverTestMachLoadCommands;
+
+BUSTER_GLOBAL_LOCAL CompilerDriverTestMachLoadCommands compiler_driver_test_mach_load_commands(ByteSlice image)
+{
+    CompilerDriverTestMachLoadCommands result = {0};
+    if (image.pointer && image.length >= 32)
+    {
+        u32 command_count = compiler_driver_test_mach_read_u32(image, 16);
+        u32 command_bytes = compiler_driver_test_mach_read_u32(image, 20);
+        u64 cursor = 32;
+        u64 end = cursor + command_bytes;
+        bool valid = end <= image.length;
+        for (u32 index = 0; index < command_count && valid; index += 1)
+        {
+            u32 command = compiler_driver_test_mach_read_u32(image, cursor);
+            u32 command_size = compiler_driver_test_mach_read_u32(image, cursor + 4);
+            valid = cursor <= end && end - cursor >= 8 && command_size >= 8 && command_size <= end - cursor;
+            if (valid && command == 0xc)
+            {
+                u32 name_offset = compiler_driver_test_mach_read_u32(image, cursor + 8);
+                valid = command_size >= 24 && name_offset >= 24 && name_offset < command_size && result.count < BUSTER_ARRAY_LENGTH(result.commands);
+                if (valid)
+                {
+                    u8 const* name = image.pointer + cursor + name_offset;
+                    u8 const* terminator = (u8 const*)memchr(name, 0, command_size - name_offset);
+                    valid = terminator != 0;
+                    if (valid)
+                    {
+                        result.commands[result.count++] = (CompilerDriverTestMachLoadCommand){
+                            .name = {.pointer = (char8*)name, .length = (u64)(terminator - name)},
+                            .current_version = compiler_driver_test_mach_read_u32(image, cursor + 16),
+                            .compatibility_version = compiler_driver_test_mach_read_u32(image, cursor + 20),
+                        };
+                    }
+                }
+            }
+            cursor += command_size;
+        }
+        result.valid = valid && cursor == end;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_test_mach_link(Arena* arena, String8 target, String8 source, String8 output,
+                                                                         String8 const* options, u32 option_count)
+{
+    String8 command[32];
+    u32 count = 0;
+    command[count++] = S8("-target");
+    command[count++] = target;
+    command[count++] = S8("-g0");
+    command[count++] = S8("-o");
+    command[count++] = output;
+    command[count++] = source;
+    for (u32 index = 0; index < option_count; index += 1)
+    {
+        command[count++] = options[index];
+    }
+    CompilerDriverInvocation invocation =
+        compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command, .length = count});
+    return compiler_driver_execute_invocation(arena, invocation);
+}
+
+BUSTER_GLOBAL_LOCAL u32 compiler_driver_test_mach_extra_library_count(CompilerDriverTestMachLoadCommands commands)
+{
+    u32 result = 0;
+    for (u32 index = 0; index < commands.count; index += 1)
+    {
+        if (!string_equal(commands.commands[index].name, S8("/usr/lib/libSystem.B.dylib")))
+        {
+            result += 1;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_mach_has_library(CompilerDriverTestMachLoadCommands commands, String8 name, u32 current_version,
+                                                               u32 compatibility_version)
+{
+    bool result = false;
+    for (u32 index = 0; index < commands.count && !result; index += 1)
+    {
+        CompilerDriverTestMachLoadCommand command = commands.commands[index];
+        result = string_equal(command.name, name) && command.current_version == current_version &&
+                 command.compatibility_version == compatibility_version;
+    }
+    return result;
 }
 
 // A minimal ELF shared object for `machine` whose .dynsym defines each name in
@@ -5363,8 +5585,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_gro
 // A single redundant group after a typedef or tag name (GitHub #3368). The
 // declaration scans read it as that name's parameter list, so `T (x);` and
 // `struct S (s2);` declared nothing and `T (tg(int a)) { ... }` declared a
-// function `T`: each program failed with an undeclared name. The pilot
-// publishes them all.
+// function `T`: each program failed with an undeclared name. A decoration
+// among the words before the typedef name, `__attribute__((unused)) T (x);`,
+// still left the group as `T`'s parameter list. The pilot publishes them all.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_name_declarator_groups(UnitTestArguments* arguments)
 {
     CompilerDriverDeclaratorGroupCase const cases[] = {
@@ -5374,6 +5597,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_name_declarator_gro
         {S8("struct P { int a; };\nstruct P (pg(void)) { struct P r = {0}; return r; }\nint main(void) { return pg().a; }\n"), true},
         {S8("typedef int T;\nstatic const T (y) = 2, (z)[2];\ntypedef T (U);\nU (u), (uf(U a));\nU uf(U a) { return a - y; }\n"
             "union W { int a; } (w);\nenum E { E0 } (e);\nint main(void) { return uf(2) + z[1] + u + w.a + (int)e + (int)sizeof(z) - 8; }\n"),
+         true},
+        {S8("typedef int T;\n__attribute__((unused)) T (x);\nint main(void) { return x; }\n"), true},
+        {S8("typedef int T;\nstatic __attribute__((unused)) const T (y), (z)[2];\n__attribute__((unused)) T (tg(int a)) { return a; }\n"
+            "__extension__ T (w);\n[[maybe_unused]] static T (v);\nint main(void) { return y + z[1] + tg(0) + w + v + (int)sizeof(z) - 8; }\n"),
          true},
     };
     return compiler_driver_declarator_group_cases(arguments, cases, BUSTER_ARRAY_LENGTH(cases));
@@ -10492,6 +10719,115 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_contract_carry
     return result;
 }
 
+// A free pick for a reload prefers the register its value was first bound to
+// (`MachineFastState.preferred_registers`). Each function keeps a pointer
+// parameter live through a loop that reloads it. Before the rule the reload
+// took the first free register (RAX on x86-64), and the loop's address
+// arithmetic then shuffled it through extra copies; now it returns to its
+// argument register. Every target
+// must select without fallback and the host runs the program under both
+// allocators and frontend forms (expected values cross-checked with host GCC
+// and Clang). FAST on x86-64 Linux made 61 register copies before the rule
+// and 51 with it under both frontend forms.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preferred_reload_registers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static volatile int opaque = 3;\n"
+        "static __attribute__((noinline)) unsigned long text_length(const char* text)\n"
+        "{\n"
+        "    unsigned long length = 0;\n"
+        "    while (text[length])\n"
+        "    {\n"
+        "        length += 1;\n"
+        "    }\n"
+        "    return length;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long weighted(const long long* values, long long count, long long scale)\n"
+        "{\n"
+        "    long long total = 0;\n"
+        "    for (long long i = 0; i < count; i += 1)\n"
+        "    {\n"
+        "        total += values[i] * scale + (values[i] >> 2);\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n"
+        "static __attribute__((noinline)) int matches(const char* left, const char* right, int limit)\n"
+        "{\n"
+        "    int same = 0;\n"
+        "    for (int i = 0; i < limit && left[i] && right[i]; i += 1)\n"
+        "    {\n"
+        "        same += left[i] == right[i];\n"
+        "    }\n"
+        "    return same;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    long long values[6] = {opaque, 5, 7, 11, 13, 17};\n"
+        "    int bad = text_length(\"preferred registers\") != 19;\n"
+        "    bad |= weighted(values, 6, opaque + 1) != 235;\n"
+        "    bad |= matches(\"register\", \"regional\", 8) != 4;\n"
+        "    return bad;\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-preferred-reload-registers"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
+        String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-preferred-reload-registers-object"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[target], frontends[frontend],
+                                         allocators[allocator], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), object, input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 description = string_format(temporary.arena, S8("preferred reload registers object {S8} {S8} {S8}: {S8} copies {u64}"),
+                        targets[target], allocators[allocator], frontends[frontend], compiled.diagnostic,
+                        compiled.codegen_statistics.allocator_copy_count);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == 0, description);
+                    if (target == 0 && allocator == 0)
+                    {
+                        BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.allocator_copy_count <= 51, description);
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-preferred-reload-registers-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), allocators[allocator], frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), executable, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("preferred reload registers native {S8} {S8}: {S8}"),
+                    allocators[allocator], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description);
+                }
+                scratch_end(temporary);
+            }
+        }
+#endif
+    }
+    return result;
+}
+
 // A general-only edge with several parameter assignments publishes as a
 // register parallel move (`machine_fast_publish_edge_parallel`) instead of
 // staging every resident source through the edge-copy tile. The program
@@ -10505,6 +10841,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_contract_carry
 // read every memory source (into its target, or through the tile) before it
 // writes the first home. Every AArch64 target takes both read forms under
 // FAST and QUALITY; x86-64 FAST loads targets directly and QUALITY takes both.
+// Those three functions never put a home store before a reload of the same
+// home on x86-64, so `swap_spilled` covers it there: twelve values swap in
+// pairs across a call that ends the body, and the loop counter's next value
+// is computed before the call, so every source is in memory, a register
+// stays free for the parallel move, and parameters left in homes swap with
+// each other. Under FAST and QUALITY and both frontend forms, x86-64 then exits
+// with its check (10) if the publication stores a home before reading it.
 // Every target must select without fallback, and the host runs the program
 // under both allocators and frontend forms; the expected values were
 // cross-checked with host GCC and Clang.
@@ -10641,13 +10984,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parallel_edge_moves(Unit
         "    }\n"
         "    return v0 * 1 + v1 * 3 + v2 * 5 + v3 * 7;\n"
         "}\n"
+        "static __attribute__((noinline)) long long swap_spilled(int n)\n"
+        "{\n"
+        "    long long a = opaque, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8, k = 9, l = 10, m = 11, o = 12;\n"
+        "    for (int i = 0; i < n;)\n"
+        "    {\n"
+        "        int next = i + 1;\n"
+        "        long long t;\n"
+        "        t = a; a = b; b = t ^ i;\n"
+        "        t = c; c = d; d = t;\n"
+        "        t = e; e = f * 3 % 1009; f = t;\n"
+        "        t = g; g = h; h = t;\n"
+        "        t = k; k = l; l = t;\n"
+        "        t = m; m = o; o = t + 1;\n"
+        "        bump(i);\n"
+        "        i = next;\n"
+        "    }\n"
+        "    return a + b * 2 + c * 3 + d * 5 + e * 7 + f * 11 + g * 13 + h * 17 + k * 19 + l * 23 + m * 29 + o * 31;\n"
+        "}\n"
         "int main(void)\n"
         "{\n"
         "    long long swapped = swap_loop(37), rotated3 = rotate3(41), rotated4 = rotate4_fanout(43), mixed = mixed_sources(47), wider = wide(53);\n"
         "    double classes = mixed_class(29);\n"
-        "    long long homes = rotate_homes(57), swaps = swap_homes(31), calls = rotate_calls(59);\n"
+        "    long long homes = rotate_homes(57), swaps = swap_homes(31), calls = rotate_calls(59), spilled = swap_spilled(61);\n"
         "    return swapped != 1819ll ? 1 : rotated3 != 60318ll ? 2 : rotated4 != 122175ll ? 3 : mixed != 34865ll ? 4 : wider != 38176ll ? 5 :\n"
-        "           classes != 0x1.1a12e82p+11 ? 6 : homes != 45328ll ? 7 : swaps != 6724610ll ? 8 : calls != 6346ll ? 9 : sink != 6550 ? 10 : 0;\n"
+        "           classes != 0x1.1a12e82p+11 ? 6 : homes != 45328ll ? 7 : swaps != 6724610ll ? 8 : calls != 6346ll ? 9 :\n"
+        "           spilled != 13569ll ? 10 : sink != 8380 ? 11 : 0;\n"
         "}\n");
     String8 source = string_format(arguments->arena, S8("{S8}{S8}"), loops, homed);
     String8 input = buster_test_temporary_path(arguments->arena, S8("buster-parallel-edge-moves"), S8(".c"));
@@ -14657,6 +15019,503 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_elf_helper_version(Arena* are
     return (ByteSlice){.pointer = bytes, .length = length};
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    Target aarch64 = target_parse_triple(S8("aarch64-apple-macos")).target;
+    Target x86_64 = target_parse_triple(S8("x86_64-apple-macos")).target;
+    Target ios = target_parse_triple(S8("aarch64-apple-ios")).target;
+    ByteSlice arm_dylib = compiler_driver_test_mach_dylib(arena, 0x0100000c, 6, S8("@rpath/libarm.dylib"), 0x10203, 0x10000);
+    ByteSlice x86_dylib = compiler_driver_test_mach_dylib(arena, 0x01000007, 6, S8("@rpath/libx86.dylib"), 0x20304, 0x10000);
+    CompilerDriverMachDylibIdentity identity = {0};
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(arm_dylib, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("@rpath/libarm.dylib"));
+    BUSTER_TEST(arguments, identity.current_version == 0x10203 && identity.compatibility_version == 0x10000);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(x86_dylib, x86_64, &identity) == COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("@rpath/libx86.dylib"));
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(arm_dylib, x86_64, &identity) == COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    ByteSlice ios_dylib = compiler_driver_test_mach_dylib_with_platform(arena, 0x0100000c, 6, S8("@rpath/libios.dylib"), 0x10000,
+                                                                        0x10000, 2);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(ios_dylib, aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(ios_dylib, ios, &identity) == COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    ByteSlice macos_dylib = compiler_driver_test_mach_dylib_with_platform(arena, 0x0100000c, 6, S8("@rpath/libmacos.dylib"),
+                                                                           0x10000, 0x10000, 1);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(macos_dylib, aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    u32 zippered_platforms[] = {1, 6};
+    ByteSlice zippered_dylib = compiler_driver_test_mach_dylib_with_platforms(arena, 0x0100000c, 6,
+                                                                               S8("@rpath/libzippered.dylib"), 0x10000, 0x10000,
+                                                                               zippered_platforms, BUSTER_ARRAY_LENGTH(zippered_platforms), 0);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(zippered_dylib, aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    ByteSlice min_ios_dylib = compiler_driver_test_mach_dylib_with_platforms(arena, 0x0100000c, 6,
+                                                                              S8("@rpath/libmin-ios.dylib"), 0x10000, 0x10000, 0, 0,
+                                                                              0x25);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(min_ios_dylib, aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    u8 bytes32[4] = {0xce, 0xfa, 0xed, 0xfe};
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity((ByteSlice){.pointer = bytes32, .length = sizeof(bytes32)}, aarch64,
+                                                               &identity) == COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    ByteSlice executable_dylib = compiler_driver_test_mach_dylib(arena, 0x0100000c, 2, S8("@rpath/not-a-dylib"), 0, 0);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(executable_dylib, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity((ByteSlice){.pointer = arm_dylib.pointer, .length = 31}, aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    ByteSlice malformed = {.pointer = arena_allocate(arena, u8, arm_dylib.length), .length = arm_dylib.length};
+    memcpy(malformed.pointer, arm_dylib.pointer, arm_dylib.length);
+    compiler_driver_test_store(malformed.pointer, 20, 8, 4);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(malformed, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    memcpy(malformed.pointer, arm_dylib.pointer, arm_dylib.length);
+    compiler_driver_test_store(malformed.pointer, 36, 4, 4);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(malformed, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    memcpy(malformed.pointer, arm_dylib.pointer, arm_dylib.length);
+    compiler_driver_test_store(malformed.pointer, 40, compiler_driver_test_mach_read_u32(arm_dylib, 36), 4);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(malformed, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    memcpy(malformed.pointer, arm_dylib.pointer, arm_dylib.length);
+    for (u64 index = 56; index < malformed.length; index += 1)
+    {
+        malformed.pointer[index] = 'x';
+    }
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(malformed, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    memcpy(malformed.pointer, arm_dylib.pointer, arm_dylib.length);
+    compiler_driver_test_store(malformed.pointer, 32, 2, 4);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(malformed, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+
+    ByteSlice fat_slices[] = {arm_dylib, x86_dylib};
+    u32 fat_cputypes[] = {0x0100000c, 0x01000007};
+    ByteSlice fat = compiler_driver_test_mach_fat(arena, fat_slices, fat_cputypes, BUSTER_ARRAY_LENGTH(fat_slices), false);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(fat, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("@rpath/libarm.dylib"));
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(fat, x86_64, &identity) == COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("@rpath/libx86.dylib"));
+    ByteSlice fat_x86_slices[] = {x86_dylib};
+    ByteSlice fat_x86 = compiler_driver_test_mach_fat(arena, fat_x86_slices, fat_cputypes + 1, 1, false);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(fat_x86, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    ByteSlice bad_fat = {.pointer = arena_allocate(arena, u8, fat.length), .length = fat.length};
+    memcpy(bad_fat.pointer, fat.pointer, fat.length);
+    compiler_driver_test_store_be(bad_fat.pointer, 16, fat.length - 1, 4);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(bad_fat, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    ByteSlice fat64 = compiler_driver_test_mach_fat(arena, fat_slices, fat_cputypes, 2, true);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(fat64, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("@rpath/libarm.dylib"));
+
+    String8 tbd_v4 = S8("--- !tapi-tbd-v4\n"
+                        "tbd-version: 4\n"
+                        "targets: [\n"
+                        "  arm64-macos,\n"
+                        "  x86_64-ios-simulator\n"
+                        "]\n"
+                        "install-name: \"@rpath/libquoted.dylib\"  \r\n"
+                        "current-version: \"1.2.12\"\n"
+                        "compatibility-version: '1'\n"
+                        "...\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_v4), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("@rpath/libquoted.dylib"));
+    BUSTER_TEST(arguments, identity.current_version == 0x1020c && identity.compatibility_version == 0x10000);
+    String8 tbd_ios_target = S8("--- !tapi-tbd-v4\n"
+                                "targets: [ arm64-ios ]\n"
+                                "install-name: @rpath/libios-target.dylib\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_ios_target), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_ios_target), ios, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    String8 tbd_catalyst = S8("--- !tapi-tbd-v4\n"
+                              "targets: [ arm64-maccatalyst ]\n"
+                              "install-name: @rpath/libcatalyst.dylib\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_catalyst), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_catalyst), ios, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    String8 tbd_ios_simulator = S8("--- !tapi-tbd-v4\n"
+                                   "targets: [ arm64-ios-simulator ]\n"
+                                   "install-name: @rpath/libsimulator.dylib\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_ios_simulator), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_ios_simulator), ios, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    String8 tbd_arm64e = S8("--- !tapi-tbd-v4\n"
+                            "targets: [ arm64e-macos ]\n"
+                            "install-name: /usr/lib/libarm64e.dylib\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_arm64e), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    String8 tbd_v3 = S8("--- !tapi-tbd-v3\n"
+                        "archs: [ x86_64 ]\n"
+                        "install-name: /usr/lib/libplain.dylib\n"
+                        "current-version: 1.2.12\n"
+                        "compatibility-version: 1\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_v3), x86_64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("/usr/lib/libplain.dylib"));
+    BUSTER_TEST(arguments, identity.current_version == 0x1020c && identity.compatibility_version == 0x10000);
+    String8 tbd_v3_ios_platform = S8("--- !tapi-tbd-v3\n"
+                                     "archs: [ arm64 ]\n"
+                                     "platform: 'ios'\n"
+                                     "install-name: /usr/lib/libios-platform.dylib\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_v3_ios_platform), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    String8 tbd_v3_zippered_platform = S8("--- !tapi-tbd-v3\n"
+                                          "archs: [ arm64 ]\n"
+                                          "platform: zippered\n"
+                                          "install-name: /usr/lib/libzippered-platform.dylib\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_v3_zippered_platform), aarch64,
+                                                              &identity) == COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    String8 tbd_default_versions = S8("--- !tapi-tbd-v3\ninstall-name: /usr/lib/libdefaults.dylib\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_default_versions), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_TEST(arguments, identity.current_version == 0x10000 && identity.compatibility_version == 0x10000);
+    String8 tbd_missing_name = S8("--- !tapi-tbd-v4\ntargets: [ arm64-macos ]\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_missing_name), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    String8 tbd_second_document = S8("--- !tapi-tbd-v4\ntargets: [ arm64-macos ]\n"
+                                     "--- !tapi-tbd-v4\ninstall-name: /usr/lib/libsecond.dylib\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_second_document), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    String8 tbd_v5_json = S8("{\"tbd-version\":5,\"install-name\":\"/usr/lib/libv5.dylib\"}");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_v5_json), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity((ByteSlice){0}, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    String8 tbd_bad_version = S8("--- !tapi-tbd-v3\ninstall-name: /usr/lib/libversion.dylib\ncurrent-version: 1.999\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_bad_version), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    String8 tbd_zero_version = S8("--- !tapi-tbd-v3\ninstall-name: /usr/lib/libzero.dylib\ncurrent-version: 0\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_zero_version), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_TEST(arguments, identity.current_version == 0 && identity.compatibility_version == 0x10000);
+
+    static String8 const target_names[] = {
+        S8_INITIALIZER("aarch64-apple-macos"),
+        S8_INITIALIZER("x86_64-apple-macos"),
+        S8_INITIALIZER("aarch64-apple-ios"),
+    };
+    static u32 const target_cputypes[] = {0x0100000c, 0x01000007, 0x0100000c};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_names); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        arena = temporary.arena;
+        String8 base = buster_test_temporary_path(arena, string_format(arena, S8("buster-mach-library-search-{u32}"), target_index), S8(""));
+        String8 source = string_format_z(arena, S8("{S8}/main.c"), base);
+        BUSTER_TEST(arguments, os_make_directory_attempt(base));
+        BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int bar(void); int main(void) { return bar(); }\n"))));
+        u32 output_index = 0;
+        for (u32 scenario = 0; scenario < 20; scenario += 1)
+        {
+            String8 directory = string_format_z(arena, S8("{S8}/scenario-{u32}"), base, scenario);
+            String8 first = string_format_z(arena, S8("{S8}/first"), directory);
+            String8 second = string_format_z(arena, S8("{S8}/second"), directory);
+            String8 sysroot = string_format_z(arena, S8("{S8}/sdk"), directory);
+            String8 sysroot_usr = string_format_z(arena, S8("{S8}/usr"), sysroot);
+            String8 sysroot_lib = string_format_z(arena, S8("{S8}/lib"), sysroot_usr);
+            BUSTER_TEST(arguments, os_make_directory_attempt(directory));
+            String8 options[8];
+            u32 option_count = 0;
+            String8 expected_name = {0};
+            u32 expected_current_version = 0x10000;
+            u32 expected_compatibility_version = 0x10000;
+            bool expected_success = scenario != 0 && scenario != 4 && scenario != 12 && scenario != 15 && scenario != 18;
+            switch (scenario)
+            {
+                case 0:
+                    options[option_count++] = S8("-lnosuchlib");
+                    break;
+                case 1:
+                case 2:
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), directory),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index], 6, S8("@rpath/libbar_custom.dylib"),
+                                                        0x30405, 0x10200)));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = directory;
+                    options[option_count++] = S8("-lbar");
+                    if (scenario == 2)
+                    {
+                        options[option_count++] = S8("-lbar");
+                    }
+                    expected_name = S8("@rpath/libbar_custom.dylib");
+                    expected_current_version = 0x30405;
+                    expected_compatibility_version = 0x10200;
+                    break;
+                case 3:
+                    BUSTER_TEST(arguments, os_make_directory_attempt(first));
+                    BUSTER_TEST(arguments, os_make_directory_attempt(second));
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), first),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index] == 0x0100000c ? 0x01000007 : 0x0100000c,
+                                                        6, S8("@rpath/libbar_wrong.dylib"), 0x10000, 0x10000)));
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), second),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index], 6, S8("@rpath/libbar_later.dylib"),
+                                                        0x20200, 0x10000)));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = first;
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = second;
+                    options[option_count++] = S8("-lbar");
+                    expected_name = S8("@rpath/libbar_later.dylib");
+                    expected_current_version = 0x20200;
+                    break;
+                case 4:
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), directory),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index] == 0x0100000c ? 0x01000007 : 0x0100000c,
+                                                        6, S8("@rpath/libbar_wrong.dylib"), 0x10000, 0x10000)));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = directory;
+                    options[option_count++] = S8("-lbar");
+                    break;
+                case 5:
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), directory),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index], 6, S8("@rpath/libbar_dylib.dylib"),
+                                                        0x10000, 0x10000)));
+                    String8 target_platform = target_index == 2 ? S8("arm64-ios")
+                                            : target_index == 1 ? S8("x86_64-macos")
+                                                                : S8("arm64-macos");
+                    String8 target_tbd = string_format(
+                        arena,
+                        S8("--- !tapi-tbd-v4\ntargets: [ {S8} ]\ninstall-name: \"@rpath/libbar_tbd.dylib\"\n"
+                           "current-version: 4.5.6\ncompatibility-version: 2.3\n"),
+                        target_platform);
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.tbd"), directory),
+                                                     BUSTER_SLICE_TO_BYTE_SLICE(target_tbd)));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = directory;
+                    options[option_count++] = S8("-lbar");
+                    expected_name = S8("@rpath/libbar_tbd.dylib");
+                    expected_current_version = 0x40506;
+                    expected_compatibility_version = 0x20300;
+                    break;
+                case 6:
+                    BUSTER_TEST(arguments, os_make_directory_attempt(first));
+                    BUSTER_TEST(arguments, os_make_directory_attempt(second));
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), first),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index], 6, S8("@rpath/libbar_first.dylib"),
+                                                        0x10000, 0x10000)));
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.tbd"), second),
+                        BUSTER_SLICE_TO_BYTE_SLICE(S8("--- !tapi-tbd-v4\ninstall-name: @rpath/libbar_second.dylib\n"))));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = first;
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = second;
+                    options[option_count++] = S8("-lbar");
+                    expected_name = S8("@rpath/libbar_first.dylib");
+                    break;
+                case 7:
+                case 8:
+                    BUSTER_TEST(arguments, os_make_directory_attempt(sysroot));
+                    BUSTER_TEST(arguments, os_make_directory_attempt(sysroot_usr));
+                    BUSTER_TEST(arguments, os_make_directory_attempt(sysroot_lib));
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libsys.tbd"), sysroot_lib),
+                        BUSTER_SLICE_TO_BYTE_SLICE(S8("--- !tapi-tbd-v3\narchs: [ arm64, x86_64 ]\n"
+                                                      "install-name: @rpath/libsysroot.tbd\n"
+                                                      "current-version: 1.2.12\ncompatibility-version: 1\n"))));
+                    options[option_count++] = S8("--sysroot");
+                    options[option_count++] = sysroot;
+                    if (scenario == 8)
+                    {
+                        BUSTER_TEST(arguments, os_make_directory_attempt(first));
+                        BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libsys.dylib"), first),
+                            compiler_driver_test_mach_dylib(arena, target_cputypes[target_index], 6, S8("@rpath/libsys_explicit.dylib"),
+                                                            0x20100, 0x10000)));
+                        options[option_count++] = S8("-L");
+                        options[option_count++] = first;
+                        expected_name = S8("@rpath/libsys_explicit.dylib");
+                        expected_current_version = 0x20100;
+                    }
+                    else
+                    {
+                        expected_name = S8("@rpath/libsysroot.tbd");
+                        expected_current_version = 0x1020c;
+                    }
+                    options[option_count++] = S8("-lsys");
+                    break;
+                case 9:
+                    options[option_count++] = S8("-lz");
+                    expected_name = S8("/usr/lib/libz.dylib");
+                    break;
+                case 10:
+                    options[option_count++] = S8("-lm");
+                    expected_success = true;
+                    break;
+                case 11:
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libexact.dylib"), directory),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index], 6, S8("@rpath/libexact-custom.dylib"),
+                                                        0x20304, 0x10000)));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = directory;
+                    options[option_count++] = S8("-l:libexact.dylib");
+                    expected_name = S8("@rpath/libexact-custom.dylib");
+                    expected_current_version = 0x20304;
+                    break;
+                case 12:
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = directory;
+                    options[option_count++] = S8("-l:libmissing.dylib");
+                    break;
+                case 13:
+                    {
+                        ByteSlice slices[] = {
+                            compiler_driver_test_mach_dylib(arena, 0x0100000c, 6, S8("@rpath/libfat_arm.dylib"), 0x30001, 0x10000),
+                            compiler_driver_test_mach_dylib(arena, 0x01000007, 6, S8("@rpath/libfat_target.dylib"), 0x30002, 0x10000),
+                        };
+                        u32 cputypes[] = {0x0100000c, 0x01000007};
+                        ByteSlice fat_library = compiler_driver_test_mach_fat(arena, slices, cputypes, 2, false);
+                        BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), directory), fat_library));
+                        expected_name = target_cputypes[target_index] == 0x0100000c ? S8("@rpath/libfat_arm.dylib")
+                                                                                    : S8("@rpath/libfat_target.dylib");
+                        expected_current_version = target_cputypes[target_index] == 0x0100000c ? 0x30001 : 0x30002;
+                        options[option_count++] = S8("-L");
+                        options[option_count++] = directory;
+                        options[option_count++] = S8("-lbar");
+                    }
+                    break;
+                case 14:
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libq.dylib"), directory),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index], 6, S8("@rpath/libq.dylib"),
+                                                        0x10203, 0x10000)));
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libq.a"), directory),
+                        BUSTER_SLICE_TO_BYTE_SLICE(S8("not an archive"))));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = directory;
+                    options[option_count++] = S8("-lq");
+                    expected_name = S8("@rpath/libq.dylib");
+                    expected_current_version = 0x10203;
+                    break;
+                case 15:
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libq.dylib"), directory),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index] == 0x0100000c ? 0x01000007 : 0x0100000c,
+                                                        6, S8("@rpath/libq_wrong.dylib"), 0x10000, 0x10000)));
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libq.a"), directory),
+                        BUSTER_SLICE_TO_BYTE_SLICE(S8("not an archive"))));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = directory;
+                    options[option_count++] = S8("-lq");
+                    break;
+                case 16:
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), directory),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index], 6, S8("@rpath/libbar-zero.dylib"), 0, 0)));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = directory;
+                    options[option_count++] = S8("-lbar");
+                    expected_name = S8("@rpath/libbar-zero.dylib");
+                    expected_current_version = 0;
+                    expected_compatibility_version = 0;
+                    break;
+                case 17:
+                case 18:
+                case 19:
+                {
+                    String8 wrong_platform_target = target_index == 2       ? S8("arm64-macos")
+                                                    : target_cputypes[target_index] == 0x0100000c ? S8("arm64-ios")
+                                                                                                 : S8("x86_64-ios");
+                    String8 wrong_platform_tbd =
+                        string_format(arena, S8("--- !tapi-tbd-v4\ntargets: [ {S8} ]\ninstall-name: @rpath/libbar-wrong-platform.dylib\n"),
+                                      wrong_platform_target);
+                    if (scenario == 17)
+                    {
+                        BUSTER_TEST(arguments, os_make_directory_attempt(first));
+                        BUSTER_TEST(arguments, os_make_directory_attempt(second));
+                        BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.tbd"), first),
+                                                         BUSTER_SLICE_TO_BYTE_SLICE(wrong_platform_tbd)));
+                        BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), second),
+                            compiler_driver_test_mach_dylib_with_platform(
+                                arena, target_cputypes[target_index], 6, S8("@rpath/libbar-platform-later.dylib"), 0x20100,
+                                0x10000, target_index == 2 ? 2 : 1)));
+                        options[option_count++] = S8("-L");
+                        options[option_count++] = first;
+                        options[option_count++] = S8("-L");
+                        options[option_count++] = second;
+                        options[option_count++] = S8("-lbar");
+                        expected_name = S8("@rpath/libbar-platform-later.dylib");
+                        expected_current_version = 0x20100;
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.tbd"), directory),
+                                                         BUSTER_SLICE_TO_BYTE_SLICE(wrong_platform_tbd)));
+                        if (scenario == 18)
+                        {
+                            options[option_count++] = S8("-L");
+                            options[option_count++] = directory;
+                            options[option_count++] = S8("-lbar");
+                        }
+                        else
+                        {
+                            String8 member_source = string_format_z(arena, S8("{S8}/bar-member.c"), directory);
+                            String8 member_object = string_format_z(arena, S8("{S8}/bar-member.o"), directory);
+                            BUSTER_TEST(arguments, file_write(member_source,
+                                                             BUSTER_SLICE_TO_BYTE_SLICE(S8("int bar(void) { return 0; }\n"))));
+                            String8 compile_command[] = {
+                                S8("-target"), target_names[target_index], S8("-g0"), S8("-c"), S8("-o"), member_object, member_source,
+                            };
+                            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_command)));
+                            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                            FileMapRead member_map = file_map_read(arena, member_object, (FileReadOptions){0});
+                            if (member_map.bytes.pointer)
+                            {
+                                ByteSlice members[] = {member_map.bytes};
+                                String8 member_names[] = {S8("bar.o")};
+                                ByteSlice archive = compiler_driver_test_archive(arena, members, member_names, BUSTER_ARRAY_LENGTH(members));
+                                BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.a"), directory), archive));
+                            }
+                            file_map_unmap(member_map);
+                            options[option_count++] = S8("-L");
+                            options[option_count++] = directory;
+                            options[option_count++] = S8("-lbar");
+                        }
+                    }
+                }
+                    break;
+            }
+            String8 output = string_format_z(arena, S8("{S8}/output-{u32}.macho"), directory, output_index++);
+            String8 sentinel = S8("preserve Mach-O output");
+            if (!expected_success)
+            {
+                BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+            }
+            CompilerDriverResult linked = compiler_driver_test_mach_link(arena, target_names[target_index], source, output, options, option_count);
+            CompilerDriverError expected_error = expected_success ? COMPILER_DRIVER_ERROR_NONE
+                                               : scenario == 15  ? COMPILER_DRIVER_ERROR_OBJECT
+                                                                 : COMPILER_DRIVER_ERROR_LINK;
+            BUSTER_TEST_RAW(arguments, linked.error == expected_error,
+                            string_format(arena, S8("Mach-O target={S8} scenario={u32}: {S8}"), target_names[target_index], scenario,
+                                          linked.diagnostic));
+            if (!expected_success)
+            {
+                if (scenario == 15)
+                {
+                    BUSTER_TEST(arguments, string_first_sequence(linked.diagnostic, S8("could not read archive")) != BUSTER_STRING_NO_MATCH);
+                }
+                else
+                {
+                    String8 expected_diagnostic = scenario == 0 ? S8("cannot find -lnosuchlib")
+                                                  : scenario == 12 ? S8("cannot find -l:libmissing.dylib")
+                                                                   : S8("cannot find -lbar");
+                    BUSTER_STRING_TEST(arguments, linked.diagnostic, expected_diagnostic);
+                }
+                ByteSlice preserved = file_read(arena, output, (FileReadOptions){0});
+                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, preserved), sentinel);
+            }
+            else
+            {
+                ByteSlice image = file_read(arena, output, (FileReadOptions){0});
+                CompilerDriverTestMachLoadCommands commands = compiler_driver_test_mach_load_commands(image);
+                BUSTER_TEST(arguments, commands.valid);
+                BUSTER_TEST(arguments,
+                            compiler_driver_test_mach_extra_library_count(commands) == (scenario == 10 || scenario == 19 ? 0u : 1u));
+                if (expected_name.length)
+                {
+                    BUSTER_TEST_RAW(arguments,
+                                    compiler_driver_test_mach_has_library(commands, expected_name, expected_current_version,
+                                                                           expected_compatibility_version),
+                                    string_format(arena, S8("Mach-O target={S8} scenario={u32} expected={S8} versions={u32}/{u32}"),
+                                                  target_names[target_index], scenario, expected_name, expected_current_version,
+                                                  expected_compatibility_version));
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // These literal GNU script spellings come from the documented command grammar,
 // not a Buster-produced object roundtrip. Located scripts are refused explicitly.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_linker_scripts(UnitTestArguments* arguments)
@@ -16712,6 +17571,92 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_variadi
 #endif
                     scratch_end(temporary);
                 }
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_large_va_arg(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("aarch64-macos"), S8("aarch64-windows"), S8("aarch64-linux")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 source = S8("src/buster/tests/compiler/driver/fixtures/aarch64_platform_large_va_arg.c");
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && (BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_IOS && !BUSTER_HOST_C_COMPILER_MSVC
+    String8 host_object = buster_test_temporary_path(arguments->arena, S8("buster-platform-large-va-host"), S8(".o"));
+    String8 host_command[16];
+    u32 host_count = 0;
+    host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER);
+    if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+    host_command[host_count++] = S8("-O2");
+    host_command[host_count++] = S8("-ffreestanding");
+    host_command[host_count++] = S8("-fno-stack-protector");
+    host_command[host_count++] = S8("-fno-unwind-tables");
+    host_command[host_count++] = S8("-fno-asynchronous-unwind-tables");
+    host_command[host_count++] = S8("-DLARGE_VA_HOST=1");
+    host_command[host_count++] = S8("-c");
+    host_command[host_count++] = source;
+    host_command[host_count++] = S8("-o");
+    host_command[host_count++] = host_object;
+    ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
+        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+    bool host_compiled = host_spawn.handle && os_process_wait_sync(arguments->arena, host_spawn).result == PROCESS_RESULT_SUCCESS;
+    BUSTER_TEST(arguments, host_compiled);
+#endif
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                u32 iteration = (target * (u32)BUSTER_ARRAY_LENGTH(modes) + mode) * (u32)BUSTER_ARRAY_LENGTH(frontends) + frontend;
+                String8 object_suffix = string_format(temporary.arena, S8("-{u32}.o"), iteration);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("buster-platform-large-va"), object_suffix);
+                String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
+                    S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                String8 description = string_format(temporary.arena, S8("platform large va_arg {S8} {S8} {S8}: {S8}"),
+                    targets[target], modes[mode], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 3 &&
+                    compiled.codegen_statistics.fallback_function_count == 0, description);
+#if BUSTER_CPU_ARCH_AARCH64 && (BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_IOS
+                bool native_target = target == (BUSTER_WINDOWS ? 1u : 0u);
+                if (native_target && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 executable_suffix = string_format(temporary.arena, S8("-{u32}.exe"), iteration);
+                    String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-platform-large-va-run"), executable_suffix);
+                    String8 native_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                        S8("-o"), executable, source};
+                    CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command)));
+                    BUSTER_TEST_RAW(arguments, native.error == COMPILER_DRIVER_ERROR_NONE, native.diagnostic);
+                    if (native.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+                    }
+#if defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC
+                    if (host_compiled)
+                    {
+                        String8 mixed = buster_test_temporary_path(temporary.arena, S8("buster-platform-large-va-mixed"), executable_suffix);
+                        String8 mixed_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                            S8("-DLARGE_VA_MIXED=1"), S8("-o"), mixed, source, host_object};
+                        CompilerDriverResult mixed_result = compiler_driver_execute_invocation(temporary.arena,
+                            compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(mixed_command)));
+                        BUSTER_TEST_RAW(arguments, mixed_result.error == COMPILER_DRIVER_ERROR_NONE, mixed_result.diagnostic);
+                        if (mixed_result.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, mixed));
+                        }
+                    }
+#endif
+                }
+#endif
+                scratch_end(temporary);
             }
         }
     }
@@ -22146,6 +23091,158 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_image_host_compile(Arena* arena, S
     return spawn.handle && os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS;
 }
 
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+// One host-toolchain run with complete stdout/stderr capture in environment.
+BUSTER_GLOBAL_LOCAL TestProcessObservation compiler_driver_test_host_observe(Arena* arena, String8 const* argv, u64 argc,
+                                                                             const TestProcessEnvironment* environment, String8 case_name)
+{
+    String8* command = arena_allocate(arena, String8, argc);
+    memcpy(command, argv, argc * sizeof(*command));
+    SliceString8 command_slice = {.pointer = command, .length = argc};
+    ProcessSpawnResult spawn = os_process_spawn(command_slice, environment->keys, environment->values,
+        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .new_process_group = true, .search_path = false,
+            .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_KB(64), [STANDARD_STREAM_ERROR] = BUSTER_KB(64)},
+                               .total = BUSTER_KB(128)},
+            .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
+    TestProcessObservation observation = {
+        .suite = S8("compiler-driver"),
+        .fixture = S8("imported-function-addresses"),
+        .case_name = case_name,
+        .stage = S8("reference provider qualification"),
+        .tool_role = S8("host C compiler and linker"),
+        .resolved_executable = argv[0],
+        .expectation = S8("complete process evidence"),
+        .argv = command_slice,
+        .environment_keys = environment->keys,
+        .environment_values = environment->values,
+        .deadline_us = 30000000,
+        .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+        .use_process_environment = false,
+        .new_process_group = true,
+        .search_path = false,
+        .spawn = spawn,
+        .spawn_attempted = true,
+        .process_observed = true,
+    };
+    if (spawn.handle)
+    {
+        u64 started = os_now_microseconds();
+        observation.wait = os_process_wait_deadline(arena, spawn, 30000000);
+        observation.wait_observed = true;
+        observation.elapsed_us = os_now_microseconds() - started;
+        observation.elapsed_observed = true;
+    }
+    return observation;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_host_observe_silent_success(TestProcessObservation const* observation)
+{
+    return buster_test_process_observation_matches(observation, PROCESS_RESULT_SUCCESS) &&
+           observation->wait.observed_bytes[STANDARD_STREAM_ERROR] == 0;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_first_line(String8 text)
+{
+    u64 newline = string_first_sequence(text, S8("\n"));
+    return newline == BUSTER_STRING_NO_MATCH ? text : string_slice(text, 0, newline);
+}
+#endif
+
+// GNU ld 2.38 (Ubuntu 22.04) refuses a protected function's address in a
+// shared object; binutils 2.39 accepts it. A Clang host driver whose provider
+// object compiles silently, whose `-Wl,--version` names GNU ld 2.38, and whose
+// separate link reproduces exactly that refusal makes the provider-dependent
+// rows NOT_RUN (#2579). Every other outcome leaves providers_built a failure.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_protected_provider_not_run(UnitTestArguments* arguments, Arena* arena, String8 directory,
+                                                                        String8 provider_source, String8 provider_path, bool control_built)
+{
+    bool result = false;
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    String8 compiler = S8(BUSTER_HOST_C_COMPILER);
+    TestProcessEnvironment environment = buster_test_process_environment_with_override(arena, S8("LC_ALL"), S8("C"));
+    if (control_built && !S8(BUSTER_HOST_C_COMPILER_ARG1).length && environment.keys.pointer)
+    {
+        String8 provider_object = string_format_z(arena, S8("{S8}/provider-qualification.o"), directory);
+        String8 version_out = string_format_z(arena, S8("{S8}/linker-version.so"), directory);
+        String8 version_argv[] = {compiler, S8("--version")};
+        String8 linker_argv[] = {compiler, S8("-print-prog-name=ld")};
+        String8 object_argv[] = {compiler, S8("-c"), S8("-fPIC"), S8("-O2"), S8("-o"), provider_object, provider_source};
+        String8 linker_version_argv[] = {compiler, S8("-shared"), S8("-Wl,--version"), S8("-o"), version_out, provider_object};
+        String8 link_argv[] = {compiler, S8("-shared"), S8("-o"), provider_path, provider_object};
+        TestProcessObservation version = compiler_driver_test_host_observe(arena, version_argv, BUSTER_ARRAY_LENGTH(version_argv),
+                                                                           &environment, S8("host/version"));
+        TestProcessObservation linker = compiler_driver_test_host_observe(arena, linker_argv, BUSTER_ARRAY_LENGTH(linker_argv),
+                                                                          &environment, S8("host/linker"));
+        TestProcessObservation object = compiler_driver_test_host_observe(arena, object_argv, BUSTER_ARRAY_LENGTH(object_argv),
+                                                                          &environment, S8("provider/object"));
+        bool object_built = compiler_driver_test_host_observe_silent_success(&object) &&
+                            object.wait.observed_bytes[STANDARD_STREAM_OUTPUT] == 0;
+        TestProcessObservation linker_version = object_built
+            ? compiler_driver_test_host_observe(arena, linker_version_argv, BUSTER_ARRAY_LENGTH(linker_version_argv), &environment,
+                                                S8("host/linker-version"))
+            : (TestProcessObservation){0};
+        String8 version_line = compiler_driver_test_first_line(BYTE_SLICE_TO_STRING(8, version.wait.streams[STANDARD_STREAM_OUTPUT]));
+        String8 linker_path = compiler_driver_test_first_line(BYTE_SLICE_TO_STRING(8, linker.wait.streams[STANDARD_STREAM_OUTPUT]));
+        String8 linker_line = compiler_driver_test_first_line(BYTE_SLICE_TO_STRING(8, linker_version.wait.streams[STANDARD_STREAM_OUTPUT]));
+        String8 linker_release = S8(" 2.38");
+        bool clang_driver = compiler_driver_test_host_observe_silent_success(&version) &&
+                            string_first_sequence(version_line, S8("clang version ")) != BUSTER_STRING_NO_MATCH;
+        bool ld_238 = object_built && compiler_driver_test_host_observe_silent_success(&linker) && linker_path.length &&
+                      compiler_driver_test_host_observe_silent_success(&linker_version) &&
+                      string_first_sequence(linker_line, S8("GNU ld ")) == 0 && linker_line.length > linker_release.length &&
+                      string_equal(string_slice(linker_line, linker_line.length - linker_release.length, linker_line.length), linker_release);
+        if (object_built)
+        {
+            TestProcessObservation link = compiler_driver_test_host_observe(arena, link_argv, BUSTER_ARRAY_LENGTH(link_argv),
+                                                                            &environment, S8("provider/link"));
+            u64 name_offset = 0;
+            for (u64 index = 0; index < compiler.length; index += 1)
+            {
+                name_offset = compiler.pointer[index] == '/' ? index + 1 : name_offset;
+            }
+            String8 expected = string_format(arena,
+                S8("{S8}: {S8}: relocation R_X86_64_PC32 against protected symbol `identity_protected' can not be used when making a shared object\n"
+                   "{S8}: final link failed: bad value\n"
+                   "{S8}: error: linker command failed with exit code 1 (use -v to see invocation)\n"),
+                linker_path, provider_object, linker_path, string_slice(compiler, name_offset, compiler.length));
+            FileStats provider_stats = os_file_replacement_target_stats(provider_path);
+            bool provider_absent = provider_stats.valid && provider_stats.kind == OS_FILE_KIND_MISSING;
+            TestOracleProbeContract contract = {
+                .argv = (SliceString8)BUSTER_ARRAY_TO_SLICE(link_argv),
+                .environment = environment,
+                .unsupported_stderr = expected,
+                .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                .unsupported_exit_code = 1,
+                .use_process_environment = false,
+                .new_process_group = true,
+                .search_path = false,
+            };
+            result = buster_test_oracle_probe_disposition(&link, clang_driver && ld_238, true, false, provider_absent, &contract, false) ==
+                TEST_ORACLE_PROBE_NOT_RUN;
+            arguments->show(arguments, S8("TEST_ORACLE_V1 suite=compiler-driver fixture=imported-function-addresses case=protected-provider "
+                "status={S8} required=0 tool={S8} version={S8} linker={S8} linker_version={S8} "
+                "reason=GNU ld 2.38 refuses a protected function address in a shared object\n"),
+                result ? S8("NOT_RUN") : S8("UNQUALIFIED"), compiler, version_line, linker_path, linker_line);
+            if (!result)
+            {
+                buster_test_process_failure_show(arguments, &link);
+            }
+        }
+        os_file_delete(provider_object);
+        os_file_delete(version_out);
+    }
+#else
+    BUSTER_UNUSED(arguments);
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(directory);
+    BUSTER_UNUSED(provider_source);
+    BUSTER_UNUSED(provider_path);
+    BUSTER_UNUSED(control_built);
+#endif
+    return result;
+}
+
 // The ELF type (ET_EXEC 2, ET_DYN 3) and entry point a produced file states.
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_image_header(Arena* arena, String8 path, u16* type, u64* entry)
 {
@@ -22255,9 +23352,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_imported_function_addres
     BUSTER_TEST(arguments, written);
     String8 provider_command[] = {S8("-shared"), S8("-fPIC"), S8("-O2"), S8("-o"), provider_path, provider_source};
     String8 preload_command[] = {S8("-shared"), S8("-fPIC"), S8("-O2"), S8("-o"), preload_path, preload_source};
-    bool providers_built = written && compiler_driver_test_image_host_compile(arena, provider_command, BUSTER_ARRAY_LENGTH(provider_command)) &&
-                           compiler_driver_test_image_host_compile(arena, preload_command, BUSTER_ARRAY_LENGTH(preload_command));
-    BUSTER_TEST(arguments, providers_built);
+    bool provider_built = written && compiler_driver_test_image_host_compile(arena, provider_command, BUSTER_ARRAY_LENGTH(provider_command));
+    bool preload_built = written && compiler_driver_test_image_host_compile(arena, preload_command, BUSTER_ARRAY_LENGTH(preload_command));
+    bool providers_built = provider_built && preload_built;
+    // The preload library is the provider's known-valid shared-object control.
+    if (provider_built || !compiler_driver_test_protected_provider_not_run(arguments, arena, directory, provider_source, provider_path,
+                                                                          preload_built))
+    {
+        BUSTER_TEST(arguments, providers_built);
+    }
     String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     // In the default code model, weak undefined function addresses need a
@@ -26716,6 +27819,146 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_guard(Uni
     return result;
 }
 
+#if BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_oracle_object_valid(Arena* arena, String8 path)
+{
+    bool result = false;
+    FileMapRead mapping = file_map_read(arena, path, (FileReadOptions){0});
+    if (mapping.bytes.length && mapping.bytes.pointer)
+    {
+        ObjectFile object = object_read(arena, mapping.bytes, target_native);
+        result = object.error == OBJECT_ERROR_NONE;
+        file_map_unmap(mapping);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL TestProcessObservation compiler_driver_test_type_specifier_probe(Arena* arena, String8 compiler, String8 dialect,
+                                                                                     String8 input, String8 output, String8 case_name,
+                                                                                     const TestProcessEnvironment* environment, bool gcc_driver,
+                                                                                     bool* succeeded)
+{
+    String8 diagnostic_color_option = gcc_driver ? S8("-fno-diagnostics-color") : S8("-fno-color-diagnostics");
+    String8 diagnostic_caret_option = gcc_driver ? S8("-fno-diagnostics-show-caret") : S8("-fno-caret-diagnostics");
+    String8 command_values[] = {compiler, dialect, S8("-nostdinc"), diagnostic_color_option,
+        diagnostic_caret_option, S8("-fmessage-length=0"), S8("-c"), S8("-o"), output, input};
+    String8* command = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(command_values));
+    memcpy(command, command_values, sizeof(command_values));
+    SliceString8 command_slice = {.pointer = command, .length = BUSTER_ARRAY_LENGTH(command_values)};
+    ProcessSpawnResult spawn = os_process_spawn(command_slice, environment->keys, environment->values,
+        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .new_process_group = true, .search_path = false,
+            .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_KB(64),
+                                              [STANDARD_STREAM_ERROR] = BUSTER_KB(64)},
+                               .total = BUSTER_KB(128)},
+            .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
+    TestProcessObservation observation = {
+        .suite = S8("compiler-driver"),
+        .fixture = S8("type-specifiers"),
+        .case_name = case_name,
+        .stage = S8("reference capability compile"),
+        .tool_role = S8("independent compiler oracle"),
+        .resolved_executable = compiler,
+        .expectation = S8("known-valid control compile has complete silent process evidence and a valid object"),
+        .argv = command_slice,
+        .environment_keys = environment->keys,
+        .environment_values = environment->values,
+        .deadline_us = 30000000,
+        .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+        .use_process_environment = false,
+        .new_process_group = true,
+        .search_path = false,
+        .spawn = spawn,
+        .spawn_attempted = true,
+        .process_observed = true,
+    };
+    bool result = false;
+    if (spawn.handle)
+    {
+        u64 started = os_now_microseconds();
+        ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, 30000000);
+        observation.wait = waited;
+        observation.wait_observed = true;
+        observation.elapsed_us = os_now_microseconds() - started;
+        observation.elapsed_observed = true;
+        result = buster_test_process_observation_matches(&observation, PROCESS_RESULT_SUCCESS);
+    }
+    if (succeeded)
+    {
+        *succeeded = result;
+    }
+    return observation;
+}
+
+#endif
+
+#if BUSTER_LINUX && !BUSTER_ANDROID && !BUSTER_IOS
+// GCC 12 added x86-64 _Float16. For an identified native GCC 11 whose
+// known-valid integer control compiles, its exact `_Float16` refusal makes the
+// GCC rows of a _Float16 fixture NOT_RUN (#2579). Any other GCC, and every
+// other outcome, leaves the rows to run and fail on their own.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_gcc11_float16_not_run(UnitTestArguments* arguments, Arena* arena, String8 gcc,
+                                                                    String8 dialect, String8 fixture)
+{
+    bool result = false;
+#if BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
+    TestProcessEnvironment environment = buster_test_process_environment_with_override(arena, S8("LC_ALL"), S8("C"));
+    TestReferenceIdentity identity = gcc.length && environment.keys.pointer
+        ? buster_test_reference_identity(arena, gcc, &environment) : (TestReferenceIdentity){0};
+    if (identity.gcc_major == 11)
+    {
+        String8 control_input = buster_test_temporary_path(arena, S8("float16-qualification-integer-control"), S8(".c"));
+        String8 control_output = buster_test_temporary_unique_path(arena, S8("float16-qualification-integer-control"), S8(".o"));
+        String8 probe_input = buster_test_temporary_path(arena, S8("float16-qualification-probe"), S8(".c"));
+        String8 probe_output = buster_test_temporary_unique_path(arena, S8("float16-qualification-probe"), S8(".o"));
+        String8 control_source = S8("int v;\n");
+        String8 probe_source = S8("_Float16 v;\n");
+        if (file_write(control_input, BUSTER_SLICE_TO_BYTE_SLICE(control_source)) &&
+            file_write(probe_input, BUSTER_SLICE_TO_BYTE_SLICE(probe_source)))
+        {
+            bool control_success = false;
+            TestProcessObservation control = compiler_driver_test_type_specifier_probe(arena, gcc, dialect, control_input, control_output,
+                S8("gcc/float16-qualification/integer-control"), &environment, true, &control_success);
+            bool healthy_control = control_success && compiler_driver_test_oracle_object_valid(arena, control_output) &&
+                control.wait.observed_bytes[STANDARD_STREAM_OUTPUT] == 0 && control.wait.observed_bytes[STANDARD_STREAM_ERROR] == 0;
+            bool probe_success = false;
+            TestProcessObservation probe = compiler_driver_test_type_specifier_probe(arena, gcc, dialect, probe_input, probe_output,
+                S8("gcc/float16-qualification/probe"), &environment, true, &probe_success);
+            bool probe_object_valid = probe_success && compiler_driver_test_oracle_object_valid(arena, probe_output);
+            FileStats probe_output_stats = os_file_replacement_target_stats(probe_output);
+            bool probe_output_absent = probe_output_stats.valid && probe_output_stats.kind == OS_FILE_KIND_MISSING;
+            TestOracleProbeContract contract = {
+                .argv = probe.argv,
+                .environment = environment,
+                .unsupported_stderr = string_format(arena, S8("{S8}:1:1: error: '_Float16' is not supported on this target\n"), probe_input),
+                .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                .unsupported_exit_code = 1,
+                .use_process_environment = false,
+                .new_process_group = true,
+                .search_path = false,
+            };
+            result = buster_test_oracle_probe_disposition(&probe, true, healthy_control, probe_object_valid, probe_output_absent,
+                &contract, false) == TEST_ORACLE_PROBE_NOT_RUN;
+            arguments->show(arguments, S8("TEST_ORACLE_V1 suite=compiler-driver fixture={S8} case=gcc/{S8}/float16-capability "
+                "status={S8} required=0 tool={S8} version={S8} target={S8} normalization=LC_ALL:C,no_color=1,no_caret=1,wrap=0\n"),
+                fixture, dialect, result ? S8("NOT_RUN") : S8("UNQUALIFIED"), gcc, identity.version, identity.target);
+        }
+        os_file_delete(control_output);
+        os_file_delete(probe_output);
+        os_file_delete(control_input);
+        os_file_delete(probe_input);
+    }
+#else
+    BUSTER_UNUSED(arguments);
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(gcc);
+    BUSTER_UNUSED(dialect);
+    BUSTER_UNUSED(fixture);
+#endif
+    return result;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identity(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -26761,13 +28004,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identit
             .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = 65536, [STANDARD_STREAM_ERROR] = 65536}, .total = 131072},
             .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL};
         bool process_admission = true;
+        bool gcc_float16_not_run = false;
 #if BUSTER_LINUX
         process_admission = BUSTER_REQUIRE(arguments, compilers[2].length != 0);
+        gcc_float16_not_run = compiler_driver_test_gcc11_float16_not_run(arguments, arena, compilers[1], S8("-std=c17"),
+                                                                         S8("function-literal-identity"));
 #endif
         for (u32 producer = 0; process_admission && producer < BUSTER_ARRAY_LENGTH(compilers); producer += 1)
         {
             if (producer && !BUSTER_REQUIRE(arguments, compilers[producer].length != 0))
             {
+                continue;
+            }
+            if (producer == 1 && gcc_float16_not_run)
+            {
+                arguments->show(arguments, S8("TEST_ORACLE_V1 suite=compiler-driver fixture=function-literal-identity "
+                    "case=gcc/-std=c17/producer status=NOT_RUN required=0 reason=reference did not qualify _Float16\n"));
                 continue;
             }
             u32 form_count = producer ? 1 : BUSTER_ARRAY_LENGTH(forms);
@@ -27105,76 +28357,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_pointer_addresses
 }
 
 #if BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
-BUSTER_GLOBAL_LOCAL bool compiler_driver_test_oracle_object_valid(Arena* arena, String8 path)
-{
-    bool result = false;
-    FileMapRead mapping = file_map_read(arena, path, (FileReadOptions){0});
-    if (mapping.bytes.length && mapping.bytes.pointer)
-    {
-        ObjectFile object = object_read(arena, mapping.bytes, target_native);
-        result = object.error == OBJECT_ERROR_NONE;
-        file_map_unmap(mapping);
-    }
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL TestProcessObservation compiler_driver_test_type_specifier_probe(Arena* arena, String8 compiler, String8 dialect,
-                                                                                     String8 input, String8 output, String8 case_name,
-                                                                                     const TestProcessEnvironment* environment, bool gcc_driver,
-                                                                                     bool* succeeded)
-{
-    String8 diagnostic_color_option = gcc_driver ? S8("-fno-diagnostics-color") : S8("-fno-color-diagnostics");
-    String8 diagnostic_caret_option = gcc_driver ? S8("-fno-diagnostics-show-caret") : S8("-fno-caret-diagnostics");
-    String8 command_values[] = {compiler, dialect, S8("-nostdinc"), diagnostic_color_option,
-        diagnostic_caret_option, S8("-fmessage-length=0"), S8("-c"), S8("-o"), output, input};
-    String8* command = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(command_values));
-    memcpy(command, command_values, sizeof(command_values));
-    SliceString8 command_slice = {.pointer = command, .length = BUSTER_ARRAY_LENGTH(command_values)};
-    ProcessSpawnResult spawn = os_process_spawn(command_slice, environment->keys, environment->values,
-        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-            .new_process_group = true, .search_path = false,
-            .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_KB(64),
-                                              [STANDARD_STREAM_ERROR] = BUSTER_KB(64)},
-                               .total = BUSTER_KB(128)},
-            .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
-    TestProcessObservation observation = {
-        .suite = S8("compiler-driver"),
-        .fixture = S8("type-specifiers"),
-        .case_name = case_name,
-        .stage = S8("reference capability compile"),
-        .tool_role = S8("independent compiler oracle"),
-        .resolved_executable = compiler,
-        .expectation = S8("known-valid control compile has complete silent process evidence and a valid object"),
-        .argv = command_slice,
-        .environment_keys = environment->keys,
-        .environment_values = environment->values,
-        .deadline_us = 30000000,
-        .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-        .use_process_environment = false,
-        .new_process_group = true,
-        .search_path = false,
-        .spawn = spawn,
-        .spawn_attempted = true,
-        .process_observed = true,
-    };
-    bool result = false;
-    if (spawn.handle)
-    {
-        u64 started = os_now_microseconds();
-        ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, 30000000);
-        observation.wait = waited;
-        observation.wait_observed = true;
-        observation.elapsed_us = os_now_microseconds() - started;
-        observation.elapsed_observed = true;
-        result = buster_test_process_observation_matches(&observation, PROCESS_RESULT_SUCCESS);
-    }
-    if (succeeded)
-    {
-        *succeeded = result;
-    }
-    return observation;
-}
-
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_identity_query(Arena* arena, String8 compiler, SliceString8 options,
     String8 case_name, const TestProcessEnvironment* environment, String8* output, TestProcessObservation* observation)
 {
@@ -27529,16 +28711,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                     string_slice(target_output, 0, target_newline);
                 compiler_versions[compiler] = string_format(arguments->arena, S8("{S8}"), version_line);
                 compiler_targets[compiler] = string_format(arguments->arena, S8("{S8}"), target_line);
-                bool native_target = target_line.length && string_first_sequence(target_line, S8("x86_64")) == 0 &&
-                    string_first_sequence(target_line, S8("linux")) != BUSTER_STRING_NO_MATCH;
-                bool gcc11_macro = string_first_sequence(profile_output, S8("#define __GNUC__ 11\n")) != BUSTER_STRING_NO_MATCH;
-                bool non_clang_macro = string_first_sequence(profile_output, S8("#define __clang__")) == BUSTER_STRING_NO_MATCH;
-                bool linux_macro = string_first_sequence(profile_output, S8("#define __linux__ 1\n")) != BUSTER_STRING_NO_MATCH;
-                bool x86_64_macro = string_first_sequence(profile_output, S8("#define __x86_64__ 1\n")) != BUSTER_STRING_NO_MATCH;
-                bool macro_profile = profile_ok && gcc11_macro && non_clang_macro && linux_macro && x86_64_macro;
-                gcc11_native_profiles[compiler] = compiler == 1 && version_ok && target_ok && version_line.length &&
-                    string_first_sequence(version_line, S8("gcc ")) == 0 &&
-                    string_first_sequence(version_line, S8(" 11.")) != BUSTER_STRING_NO_MATCH && native_target && macro_profile;
+                gcc11_native_profiles[compiler] = compiler == 1 && version_ok && target_ok && profile_ok &&
+                    buster_test_reference_gcc_major(temporary.arena, version_line, target_line, profile_output) == 11;
                 arguments->show(arguments, S8("TEST_ORACLE_IDENTITY suite=compiler-driver fixture=type-specifiers "
                     "tool={S8} version={S8} target={S8} predefined_macros_observed={u32} gcc11_non_clang_x86_64_profile={u32} "
                     "normalization=LC_ALL:C,no_color=1,no_caret=1,wrap=0\n"),
@@ -27624,19 +28798,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                             .search_path = false,
                         };
                         bool profile_authenticated = compiler == 1 && gcc11_native_profiles[compiler];
+                        // GCC 12 added x86-64 _Float16. GCC 11's exact refusal is a reference-version
+                        // limit, so it stays NOT_RUN under --ci=1 too (#2579); other outcomes fail.
                         TestOracleProbeDisposition disposition = buster_test_oracle_probe_disposition(&probe_observation,
                             profile_authenticated, healthy_control, probe_object_valid, probe_output_absent,
-                            &probe_contract, program_flag_get(PROGRAM_FLAG_CI));
+                            &probe_contract, false);
                         float16_probe[compiler][dialect] = disposition;
                         SliceString8 logged_argv = probe_observation.argv;
                         String8 status = disposition == TEST_ORACLE_PROBE_CAPABLE ? S8("CAPABLE") :
-                            disposition == TEST_ORACLE_PROBE_NOT_RUN ? S8("NOT_RUN") :
-                            disposition == TEST_ORACLE_PROBE_INCOMPLETE ? S8("INCOMPLETE") : S8("FAILURE");
+                            disposition == TEST_ORACLE_PROBE_NOT_RUN ? S8("NOT_RUN") : S8("FAILURE");
                         arguments->show(arguments, S8("TEST_ORACLE_V1 suite=compiler-driver fixture=type-specifiers case={S8} "
-                            "status={S8} required={u32} tool={S8} version={S8} target={S8} probe=known-valid _Float16 object "
+                            "status={S8} required=0 tool={S8} version={S8} target={S8} probe=known-valid _Float16 object "
                             "environment=captured+LC_ALL:C normalization=no_color,no_caret,wrap_0\n"),
-                            probe_case, status, (u32)(disposition == TEST_ORACLE_PROBE_INCOMPLETE),
-                            compilers[compiler], compiler_versions[compiler], compiler_targets[compiler]);
+                            probe_case, status, compilers[compiler], compiler_versions[compiler], compiler_targets[compiler]);
                         for (u64 argument_index = 0; argument_index < logged_argv.length; argument_index += 1)
                         {
                             arguments->show(arguments, S8("oracle_probe_argv[{u64}]={S8}\n"), argument_index,
@@ -27650,10 +28824,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                         if (disposition == TEST_ORACLE_PROBE_CAPABLE)
                         {
                             BUSTER_TEST(arguments, true);
-                        }
-                        else if (disposition == TEST_ORACLE_PROBE_INCOMPLETE)
-                        {
-                            BUSTER_TEST(arguments, false);
                         }
                         else if (disposition == TEST_ORACLE_PROBE_FAILURE)
                         {
@@ -27688,15 +28858,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                     for (u32 specifier = 0; specifier < BUSTER_ARRAY_LENGTH(oracle_refused); specifier += 1)
                     {
                         bool float16_row = string_first_sequence(oracle_refused[specifier], S8("_Float16")) != BUSTER_STRING_NO_MATCH;
-                        bool unavailable = float16_probe[compiler][dialect] == TEST_ORACLE_PROBE_NOT_RUN ||
-                            float16_probe[compiler][dialect] == TEST_ORACLE_PROBE_INCOMPLETE;
-                        if (float16_row && unavailable)
+                        if (float16_row && float16_probe[compiler][dialect] == TEST_ORACLE_PROBE_NOT_RUN)
                         {
-                            bool required_reference = float16_probe[compiler][dialect] == TEST_ORACLE_PROBE_INCOMPLETE;
                             arguments->show(arguments, S8("TEST_ORACLE_V1 suite=compiler-driver fixture=type-specifiers "
-                                "case={S8}/{S8}/refused/{S8} status={S8} required={u32} reason=reference did not qualify _Float16\n"),
-                                compilers[compiler], dialects[dialect], oracle_refused[specifier],
-                                required_reference ? S8("INCOMPLETE") : S8("NOT_RUN"), (u32)required_reference);
+                                "case={S8}/{S8}/refused/{S8} status=NOT_RUN required=0 reason=reference did not qualify _Float16\n"),
+                                compilers[compiler], dialects[dialect], oracle_refused[specifier]);
                             continue;
                         }
                         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -27736,15 +28902,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                         String8 accepted = specifier < BUSTER_ARRAY_LENGTH(oracle_extension)
                             ? oracle_extension[specifier] : oracle_valid[specifier - BUSTER_ARRAY_LENGTH(oracle_extension)];
                         bool float16_row = string_first_sequence(accepted, S8("_Float16")) != BUSTER_STRING_NO_MATCH;
-                        bool unavailable = float16_probe[compiler][dialect] == TEST_ORACLE_PROBE_NOT_RUN ||
-                            float16_probe[compiler][dialect] == TEST_ORACLE_PROBE_INCOMPLETE;
-                        if (float16_row && unavailable)
+                        if (float16_row && float16_probe[compiler][dialect] == TEST_ORACLE_PROBE_NOT_RUN)
                         {
-                            bool required_reference = float16_probe[compiler][dialect] == TEST_ORACLE_PROBE_INCOMPLETE;
                             arguments->show(arguments, S8("TEST_ORACLE_V1 suite=compiler-driver fixture=type-specifiers "
-                                "case={S8}/{S8}/accepted/{S8} status={S8} required={u32} reason=reference did not qualify _Float16\n"),
-                                compilers[compiler], dialects[dialect], accepted,
-                                required_reference ? S8("INCOMPLETE") : S8("NOT_RUN"), (u32)required_reference);
+                                "case={S8}/{S8}/accepted/{S8} status=NOT_RUN required=0 reason=reference did not qualify _Float16\n"),
+                                compilers[compiler], dialects[dialect], accepted);
                             continue;
                         }
                         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -31017,6 +32179,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_linker_scripts);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_library_search);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocessed_c_input);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_source_cache_replay);
@@ -31129,6 +32292,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_scalar_argument_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_dynamic_calls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_platform_variadic);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_platform_large_va_arg);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_frame_vectors);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_float16_codegen);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_count_signatures);
@@ -31141,6 +32305,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_liveness_dead_stores);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_deferred_edge_stores);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_parameter_contract_carry_lanes);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preferred_reload_registers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_parallel_edge_moves);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_recreated_edge_sources);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_return_address);
@@ -34864,9 +36029,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // A GNU statement expression in a file-scope initializer (#3364) is
     // rejected by the frontend at its `(`, as GCC and Clang do, so
     // -fsyntax-only and -c report the same located diagnostic instead of -c
-    // failing first in the static-initializer folder. Statement expressions
-    // in function bodies still compile. The sources are temporary files, so
-    // the native-retirement inventory stays unchanged.
+    // failing first in the static-initializer folder. The same holds anywhere
+    // else in a file-scope declaration (#3437): a typeof operand was accepted
+    // silently, and an array bound was reported as a variably modified type.
+    // Statement expressions in function bodies, local declarations included,
+    // still compile. The sources are temporary files, so the native-retirement
+    // inventory stays unchanged.
     {
         TemporalArena statement_temporary = arena_begin_temporal(arguments->arena);
         Arena* statement_arena = statement_temporary.arena;
@@ -34881,8 +36049,23 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                "int main(void) { return sx - 4; }\n"),
             S8("int f(void) { return ({ int a = 2; a; }); }\n"
                "int main(void) { int v = ({ typedef int T; T t = 1; t; }); return v - 1 + f() - 2; }\n"),
+            S8("static __typeof__(({ 1; })) x;\n"
+               "int main(void) { return x; }\n"),
+            S8("int a[({ 2; })];\n"
+               "int main(void) { return 0; }\n"),
+            S8("int g __attribute__((aligned(({ 8; }))));\n"
+               "int main(void) { return g; }\n"),
+            S8("struct S { int m[({ 2; })]; };\n"
+               "int main(void) { return 0; }\n"),
+            S8("int main(void)\n"
+               "{\n"
+               "    __typeof__(({ 1; })) v = ({ 2; });\n"
+               "    int a[({ 2; })];\n"
+               "    a[0] = v;\n"
+               "    return a[0] - sizeof(({ 3; })) / sizeof(int) - 1;\n"
+               "}\n"),
         };
-        String8 statement_locations[] = {S8(":1:17: "), S8(":1:17: "), S8(":1:24: "), S8("")};
+        String8 statement_locations[] = {S8(":1:17: "), S8(":1:17: "), S8(":1:24: "), S8(""), S8(":1:19: "), S8(":1:7: "), S8(":1:30: "), S8(":1:18: "), S8("")};
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(statement_texts); index += 1)
         {
             if (BUSTER_REQUIRE(arguments, file_write(statement_source, BUSTER_SLICE_TO_BYTE_SLICE(statement_texts[index]))))
