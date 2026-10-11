@@ -151,7 +151,8 @@ typedef enum TestOracleProbeDisposition
     TEST_ORACLE_PROBE_FAILURE,
     TEST_ORACLE_PROBE_CAPABLE,
     // A complete, specifically recognized unavailable probe. This is not a
-    // passing assertion; required CI maps it to INCOMPLETE and fails.
+    // passing assertion; a caller that marks the reference required maps it
+    // to INCOMPLETE and fails.
     TEST_ORACLE_PROBE_NOT_RUN,
     TEST_ORACLE_PROBE_INCOMPLETE,
 } TestOracleProbeDisposition;

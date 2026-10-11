@@ -445,6 +445,7 @@ void bootstrap_trace_ir(BootstrapTrace* trace, IrProgram* program, IrModule* mod
     {
         bootstrap_trace_u64(trace, module->aliases[i].symbol.value);
         bootstrap_trace_u64(trace, module->aliases[i].target.value);
+        bootstrap_trace_u64(trace, module->aliases[i].is_indirect);
     }
     bootstrap_trace_u64(trace, module->initializer_count);
     for (u32 i = 0; i < module->initializer_count; i += 1)

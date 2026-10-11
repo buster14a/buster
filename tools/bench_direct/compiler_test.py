@@ -31,6 +31,17 @@ import inline_acceptance  # noqa: E402
 A256, B256 = "1" * 64, "2" * 64
 
 
+def fixture_git(repository: Path, *arguments: str) -> str:
+    """Run Git in a disposable fixture repository and return its stripped stdout (#3361).
+
+    These repositories have no housekeeping work worth detaching. A completed
+    commit must leave no automatic gc/maintenance worker writing under .git
+    while TemporaryDirectory cleanup strictly removes it.
+    """
+    return subprocess.run(["git", "-c", "maintenance.auto=false", "-c", "gc.auto=0", "-C", str(repository),
+                           *arguments], check=True, capture_output=True, text=True).stdout.strip()
+
+
 def summary(outcome: str = "slower") -> dict:
     return {
         "schema": compiler_receipt.LAB_SCHEMA,
@@ -1306,16 +1317,46 @@ class AnalyzerReceiptTest(unittest.TestCase):
         changed_root_context["rows"][root_index]["search_inventory"] = []
         self.assertTrue(compiler_receipt.analyzer_candidate_plan_problems(changed_root_context))
 
+    def test_fixture_git_commit_leaves_no_housekeeping_writer_for_strict_cleanup(self) -> None:
+        # #3361: force housekeeping even for this tiny repository. Git's trace
+        # records child launches before detachment, so this needs no scheduling race.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        repo = root / "repo"
+        repo.mkdir()
+        fixture_git(repo, "init", "-q")
+        fixture_git(repo, "config", "user.name", "Analyzer Test")
+        fixture_git(repo, "config", "user.email", "analyzer@example.invalid")
+        for key, value in (("maintenance.auto", "true"), ("maintenance.loose-objects.enabled", "true"),
+                           ("maintenance.loose-objects.auto", "1"), ("gc.auto", "1")):
+            fixture_git(repo, "config", key, value)
+        for index in range(40):
+            (repo / f"unit{index}.c").write_text(f"int value{index};\n", encoding="utf-8")
+        fixture_git(repo, "add", ".")
+        trace = root / "git-trace.jsonl"
+        with mock.patch.dict(os.environ, {"GIT_TRACE2_EVENT": str(trace)}):
+            fixture_git(repo, "commit", "-qm", "seed")
+        events = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(any(event.get("event") == "start" for event in events))
+        housekeeping = [event for event in events if event.get("event") == "child_start" and
+                        ("maintenance" in event.get("argv", []) or "gc" in event.get("argv", []))]
+        self.assertEqual(housekeeping, [])
+        self.assertEqual(fixture_git(repo, "show", "HEAD:unit0.c"), "int value0;")
+        # Strict teardown: cleanup errors are not ignored.
+        directory.cleanup()
+        self.assertFalse(root.exists())
+
     def test_source_immutability_detects_nonignored_untracked_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repo = Path(temporary)
-            subprocess.run(["git", "init", "-q", str(repo)], check=True)
-            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Analyzer Test"], check=True)
-            subprocess.run(["git", "-C", str(repo), "config", "user.email", "analyzer@example.invalid"], check=True)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Analyzer Test")
+            fixture_git(repo, "config", "user.email", "analyzer@example.invalid")
             source = repo / "tracked.c"
             source.write_text("int value;\n", encoding="utf-8")
-            subprocess.run(["git", "-C", str(repo), "add", "tracked.c"], check=True)
-            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
+            fixture_git(repo, "add", "tracked.c")
+            fixture_git(repo, "commit", "-qm", "seed")
             self.assertEqual(compiler_compare.analyzer_source_immutability_problem(repo), "")
             (repo / "injected.h").write_text("#define VALUE 1\n", encoding="utf-8")
             self.assertIn("untracked", compiler_compare.analyzer_source_immutability_problem(repo))
@@ -1327,8 +1368,7 @@ class AnalyzerReceiptTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             repo = Path(temporary)
             def git(*args: str) -> str:
-                return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
-                                      text=True).stdout.strip()
+                return fixture_git(repo, *args)
             git("init", "-q")
             git("config", "user.name", "Analyzer Test")
             git("config", "user.email", "analyzer@example.invalid")
@@ -1389,8 +1429,7 @@ class AnalyzerReceiptTest(unittest.TestCase):
                 self.assertIsNone(compiler_compare.request_selector_count(
                     repo, duplicate_request, compiler_receipt.ANALYZER_REQUEST_LINE))
 
-            tree_listing = real_run(["git", "-C", str(repo), "ls-tree", "-z", duplicate_request, "--",
-                                     compiler_receipt.ANALYZER_REQUEST_PATH], check=True, capture_output=True).stdout
+            tree_listing = git("ls-tree", "-z", duplicate_request, "--", compiler_receipt.ANALYZER_REQUEST_PATH)
             self.assertTrue(tree_listing)
             def fail_blob_read(command, *args, **kwargs):
                 if len(command) > 3 and command[3] == "show":
@@ -1404,8 +1443,7 @@ class AnalyzerReceiptTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             repo = Path(temporary)
             def git(*args: str) -> str:
-                return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
-                                      text=True).stdout.strip()
+                return fixture_git(repo, *args)
             git("init", "-q")
             git("config", "user.name", "Analyzer Test")
             git("config", "user.email", "analyzer@example.invalid")
@@ -2533,8 +2571,7 @@ class HarnessTest(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         root = Path(self.directory.name)
         self.repo = root / "candidate"
-        git = lambda *arguments: subprocess.run(["git", "-C", str(self.repo), *arguments], check=True,  # noqa: E731
-                                                capture_output=True, text=True).stdout.strip()
+        git = lambda *arguments: fixture_git(self.repo, *arguments)  # noqa: E731
         self.repo.mkdir()
         git("init", "-q", "-b", "main")
         git("config", "user.name", "fixture")
@@ -2602,8 +2639,7 @@ class HarnessTest(unittest.TestCase):
 
     def test_range_baseline_on_the_first_parent_chain(self) -> None:
         # A burst left head unmeasured: the next main commit is compared with base, two first-parent commits back.
-        git = lambda *arguments: subprocess.run(["git", "-C", str(self.repo), *arguments], check=True,  # noqa: E731
-                                                capture_output=True, text=True).stdout.strip()
+        git = lambda *arguments: fixture_git(self.repo, *arguments)  # noqa: E731
         (self.repo / "compiler.txt").write_text("later compiler\n")
         git("commit", "-qam", "later")
         later, later_tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
@@ -2622,9 +2658,8 @@ class HarnessTest(unittest.TestCase):
 
     def test_pull_mode_compares_head_with_its_merge_base(self) -> None:
         # The pull request head (second parent) against the base it branched from.
-        pull_tree = subprocess.run(["git", "-C", str(self.repo), "rev-parse", self.pull_head + "^{tree}"], check=True,
-                                   capture_output=True, text=True).stdout.strip()
-        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.pull_head], check=True)
+        pull_tree = fixture_git(self.repo, "rev-parse", self.pull_head + "^{tree}")
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.pull_head)
         code, result, evidence = self.run_harness(self.pull_head, mode="pull", ref="refs/pull/7/head", head=self.pull_head,
                                                   **{"head-tree": pull_tree})
         self.assertEqual((code, result["state"], result["mode"]), (0, "measured", "pull"), result["reasons"])
@@ -2637,8 +2672,7 @@ class HarnessTest(unittest.TestCase):
 
     def scaling_head(self) -> tuple[str, str]:
         """A pull request head that adds the scaling request on top of the candidate; (commit, tree)."""
-        git = lambda *arguments: subprocess.run(["git", "-C", str(self.repo), *arguments], check=True,  # noqa: E731
-                                                capture_output=True, text=True).stdout.strip()
+        git = lambda *arguments: fixture_git(self.repo, *arguments)  # noqa: E731
         git("checkout", "-q", "--detach", self.pull_head)
         request = self.repo / compiler_receipt.SCALING_REQUEST
         request.parent.mkdir(parents=True)
@@ -2679,9 +2713,8 @@ class HarnessTest(unittest.TestCase):
 
     def test_scaling_needs_the_request_in_this_pull_request(self) -> None:
         # Pull mode without the request, and main mode with it, never run the scaling leg.
-        pull_tree = subprocess.run(["git", "-C", str(self.repo), "rev-parse", self.pull_head + "^{tree}"], check=True,
-                                   capture_output=True, text=True).stdout.strip()
-        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.pull_head], check=True)
+        pull_tree = fixture_git(self.repo, "rev-parse", self.pull_head + "^{tree}")
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.pull_head)
         code, result, _ = self.run_harness(self.pull_head, mode="pull", ref="refs/pull/7/head", head=self.pull_head,
                                            **{"head-tree": pull_tree})
         self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
@@ -2716,7 +2749,7 @@ class HarnessTest(unittest.TestCase):
                                    ("badexit", "no counted confirmed corpus regression")):
             with self.subTest(behavior=behavior):
                 # Each run leaves the frozen base checked out.
-                subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)
+                fixture_git(self.repo, "checkout", "-q", "--detach", self.head)
                 code, result, _ = self.run_harness(self.head, corpus_behavior=behavior)
                 self.assertEqual((code, result["state"]), (1, "failed"))
                 self.assertIn(expected, " ".join(result["reasons"]))
@@ -2733,17 +2766,15 @@ class HarnessTest(unittest.TestCase):
 
     def test_direct_push_is_its_own_pull_head(self) -> None:
         # pull_head's only parent is base: a single-parent commit on main.
-        pull_tree = subprocess.run(["git", "-C", str(self.repo), "rev-parse", self.pull_head + "^{tree}"], check=True,
-                                   capture_output=True, text=True).stdout.strip()
-        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.pull_head], check=True)
+        pull_tree = fixture_git(self.repo, "rev-parse", self.pull_head + "^{tree}")
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.pull_head)
         code, result, _ = self.run_harness(self.pull_head, head=self.pull_head, pull="0", **{"head-tree": pull_tree})
         self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
         self.assertEqual(result["identity"]["pull_head"], self.pull_head)
 
     def test_moved_pull_request_is_superseded_without_building(self) -> None:
-        pull_tree = subprocess.run(["git", "-C", str(self.repo), "rev-parse", self.pull_head + "^{tree}"], check=True,
-                                   capture_output=True, text=True).stdout.strip()
-        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.pull_head], check=True)
+        pull_tree = fixture_git(self.repo, "rev-parse", self.pull_head + "^{tree}")
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.pull_head)
         code, result, _ = self.run_harness("", mode="pull", ref="refs/pull/7/head", head=self.pull_head,
                                            **{"head-tree": pull_tree})
         self.assertEqual((code, result["state"]), (0, "superseded"))
@@ -2753,7 +2784,7 @@ class HarnessTest(unittest.TestCase):
         # #2927: an error after a completed phase must not erase timings, identity or the failing stage.
         for target, phase in (("shutil.copyfile", "build-baseline"), ("compiler_compare.collect_evidence", "lab-evidence"),
                               ("compiler_compare.sha256", "build-baseline")):
-            subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)
+            fixture_git(self.repo, "checkout", "-q", "--detach", self.head)
             with self.subTest(target=target), mock.patch(target, side_effect=OSError("injected")):
                 code, result, _ = self.run_harness(self.head)
                 self.assertEqual((code, result["state"]), (1, "failed"))
@@ -2821,12 +2852,12 @@ class HarnessTest(unittest.TestCase):
                  ("empty", empty_member, "exported evidence throughput/summary.json unreadable"))
         for label, action, expected in cases:
             with self.subTest(label=label):
-                subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)
+                fixture_git(self.repo, "checkout", "-q", "--detach", self.head)
                 code, result, _ = self.run_with_tampered_export({"throughput": action})
                 self.assertEqual((code, result["state"]), (1, "failed"), result["reasons"])
                 self.assertIn(expected, " ".join(result["reasons"]))
         # The untampered export still classifies clean.
-        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.head)
         code, result, _ = self.run_with_tampered_export({})
         self.assertEqual((code, result["state"], result["reasons"]), (0, "measured", []))
 
@@ -2843,7 +2874,7 @@ class HarnessTest(unittest.TestCase):
         for label, action, expected in (("altered", alter, "candidate has failed or missing timed runs"),
                                         ("removed", remove, "lab summary unreadable")):
             with self.subTest(label=label):
-                subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)
+                fixture_git(self.repo, "checkout", "-q", "--detach", self.head)
                 code, result, _ = self.run_with_tampered_export({"lab": action})
                 self.assertEqual((code, result["state"]), (1, "failed"), result["reasons"])
                 self.assertIn(expected, " ".join(result["reasons"]))
@@ -2877,7 +2908,7 @@ class HarnessTest(unittest.TestCase):
                 return outcome
 
             with self.subTest(label=label), mock.patch.object(compiler_compare, "export_tree", export):
-                subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", head], check=True)
+                fixture_git(self.repo, "checkout", "-q", "--detach", head)
                 code, result, _ = self.run_harness(head, mode="pull", ref="refs/pull/7/head", head=head,
                                                    **{"pull-head": head, "head-tree": tree})
                 self.assertEqual((code, result["state"]), (1, "failed"), result["reasons"])
@@ -2906,7 +2937,7 @@ class HarnessTest(unittest.TestCase):
 
     def test_missing_cmake_cache_is_a_build_failure_not_a_crash(self) -> None:
         (self.repo / "build.sh").write_text("#!/usr/bin/env bash\nmkdir -p build/Release\ncp compiler.txt build/Release/ide\n")
-        subprocess.run(["git", "-C", str(self.repo), "update-index", "--assume-unchanged", "build.sh"], check=True)
+        fixture_git(self.repo, "update-index", "--assume-unchanged", "build.sh")
         code, result, _ = self.run_harness(self.head)
         self.assertEqual((code, result["state"]), (1, "failed"))
         self.assertIn("not tests-off", " ".join(result["reasons"]))
@@ -2948,7 +2979,7 @@ class HarnessTest(unittest.TestCase):
         code, result, _ = self.run_harness(self.head, base="8" * 40)
         self.assertEqual((code, result["state"]), (1, "failed"))
         (self.repo / "build.sh").write_text("#!/usr/bin/env bash\nexit 3\n")
-        subprocess.run(["git", "-C", str(self.repo), "update-index", "--assume-unchanged", "build.sh"], check=True)
+        fixture_git(self.repo, "update-index", "--assume-unchanged", "build.sh")
         code, result, _ = self.run_harness(self.head)
         self.assertEqual((code, result["state"]), (1, "failed"))
         self.assertIn("failed with exit 3", " ".join(result["reasons"]))
