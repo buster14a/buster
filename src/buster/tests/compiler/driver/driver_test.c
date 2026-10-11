@@ -10141,13 +10141,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_contract_carry
 // to several parameters, edges mixing constants, computed values and homes,
 // eighteen loop-carried values (more than the register file holds), and an
 // edge mixing general and vector parameters, which keeps the staged form.
+// `rotate_homes`, `swap_homes` and `rotate_calls` keep parameters in their
+// homes across calls while the back edge rotates or swaps them, so one
+// parameter's home is another copy's memory source: the publication must
+// read every memory source (into its target, or through the tile) before it
+// writes the first home. Every AArch64 target takes both read forms under
+// FAST and QUALITY; x86-64 FAST loads targets directly and QUALITY takes both.
 // Every target must select without fallback, and the host runs the program
 // under both allocators and frontend forms; the expected values were
 // cross-checked with host GCC and Clang.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parallel_edge_moves(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 source = S8(
+    // Two literals keep each under the portable string-literal length.
+    String8 loops = S8(
         "static volatile int opaque = 3;\n"
         "static int sink;\n"
         "static __attribute__((noinline)) int bump(int x) { sink += x; return x + 1; }\n"
@@ -10227,19 +10234,64 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parallel_edge_moves(Unit
         "        q = u + i;\n"
         "    }\n"
         "    return x * 3.0 + y + (double)(p * 7 + q);\n"
+        "}\n");
+    String8 homed = S8(
+        "static __attribute__((noinline)) long long rotate_homes(int n)\n"
+        "{\n"
+        "    long long v0 = opaque, v1 = 1, v2 = 2, v3 = 3, v4 = 4, v5 = 5, v6 = 6, v7 = 7, v8 = 8, v9 = 9, v10 = 10, v11 = 11;\n"
+        "    long long v12 = 12, v13 = 13, v14 = 14, v15 = 15, v16 = 16, v17 = 17, v18 = 18, v19 = 19;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long x = bump(i);\n"
+        "        long long t = v0;\n"
+        "        v0 = v1; v1 = v2; v2 = v3 + x; v3 = v4; v4 = v5; v5 = v6; v6 = v7; v7 = v8; v8 = v9; v9 = v10;\n"
+        "        v10 = v11; v11 = v12; v12 = v13; v13 = v14 ^ x; v14 = v15; v15 = v16; v16 = v17; v17 = v18; v18 = v19; v19 = t;\n"
+        "    }\n"
+        "    return v0 + v1 * 2 + v2 * 3 + v3 * 5 + v4 * 7 + v5 * 11 + v6 * 13 + v7 * 17 + v8 * 19 + v9 * 23 + v10 * 29 + v11 * 31 +\n"
+        "           v12 * 37 + v13 * 41 + v14 * 43 + v15 * 47 + v16 * 53 + v17 * 59 + v18 * 61 + v19 * 67;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long swap_homes(int n)\n"
+        "{\n"
+        "    long long a = opaque, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8, k = 9, l = 10, m = 11, o = 12, p = 13, q = 14, r = 15, s = 16;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long x = bump(i);\n"
+        "        long long t;\n"
+        "        t = a; a = s; s = t + x;\n"
+        "        t = b; b = r; r = t;\n"
+        "        t = c; c = q; q = t;\n"
+        "        t = d; d = p; p = t ^ x;\n"
+        "        t = e; e = o; o = t;\n"
+        "        t = f; f = m; m = t;\n"
+        "        t = g; g = l; l = t;\n"
+        "        t = h; h = k; k = t;\n"
+        "        if (x % 3 == 0) { t = a; a = h; h = t; }\n"
+        "    }\n"
+        "    return ((((((((a * 3 + b) * 3 + c) * 3 + d) * 3 + e) * 3 + f) * 3 + g) * 3 + h) * 3 + k) * 7 + l * 11 + m * 13 + o * 17 + p * 19 + q * 23 +\n"
+        "           r * 29 + s * 31;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long rotate_calls(int n)\n"
+        "{\n"
+        "    long long v0 = 1, v1 = 2, v2 = 3, v3 = 4;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long x = bump(i);\n"
+        "        long long t = v0;\n"
+        "        v0 = v1; v1 = v2 + x; v2 = v3; v3 = t;\n"
+        "        if (x % 3 == 0) { long long u = v1; v1 = v2; v2 = u; }\n"
+        "        if (x % 5 == 0) { v2 += bump(i); }\n"
+        "    }\n"
+        "    return v0 * 1 + v1 * 3 + v2 * 5 + v3 * 7;\n"
         "}\n"
         "int main(void)\n"
         "{\n"
-        "    int bad = 0;\n"
-        "    bad |= (swap_loop(37) != 1819ll) << 0;\n"
-        "    bad |= (rotate3(41) != 60318ll) << 1;\n"
-        "    bad |= (rotate4_fanout(43) != 122175ll) << 2;\n"
-        "    bad |= (mixed_sources(47) != 34865ll) << 3;\n"
-        "    bad |= (wide(53) != 38176ll) << 4;\n"
-        "    bad |= (mixed_class(29) != 0x1.1a12e82p+11) << 5;\n"
-        "    bad |= (sink != 2459) << 6;\n"
-        "    return bad;\n"
+        "    long long swapped = swap_loop(37), rotated3 = rotate3(41), rotated4 = rotate4_fanout(43), mixed = mixed_sources(47), wider = wide(53);\n"
+        "    double classes = mixed_class(29);\n"
+        "    long long homes = rotate_homes(57), swaps = swap_homes(31), calls = rotate_calls(59);\n"
+        "    return swapped != 1819ll ? 1 : rotated3 != 60318ll ? 2 : rotated4 != 122175ll ? 3 : mixed != 34865ll ? 4 : wider != 38176ll ? 5 :\n"
+        "           classes != 0x1.1a12e82p+11 ? 6 : homes != 45328ll ? 7 : swaps != 6724610ll ? 8 : calls != 6346ll ? 9 : sink != 6550 ? 10 : 0;\n"
         "}\n");
+    String8 source = string_format(arguments->arena, S8("{S8}{S8}"), loops, homed);
     String8 input = buster_test_temporary_path(arguments->arena, S8("buster-parallel-edge-moves"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
@@ -10284,8 +10336,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parallel_edge_moves(Unit
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
                 {
-                    // Each subcase owns one exit-status bit, so a failure names
-                    // the function whose result was wrong.
+                    // The exit status is the 1-based number of the first wrong
+                    // result, so a failure names its function.
                     String8 run_arguments[] = {executable};
                     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0},
                         (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
