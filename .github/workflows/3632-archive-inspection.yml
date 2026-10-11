@@ -1,0 +1,24 @@
+name: Issue 3632 retained archive inspection
+on:
+  push:
+    branches:
+      - codex/3632-version-script-witness
+    paths:
+      - '.github/workflows/3632-archive-inspection.yml'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  inspect:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Inspect retained archive without rebuilding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl --fail --location --silent --show-error -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/buster14a/buster/actions/artifacts/11714337379/zip" -o "$RUNNER_TEMP/sdl-evidence.zip"
+          echo "6a36244bc3a0cf61ff4b1d5c34eecbdbde0aa61c53d20b6de777f8ca983c1da0  $RUNNER_TEMP/sdl-evidence.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/sdl-evidence.zip" -d "$RUNNER_TEMP/sdl-inspection"
+          cat "$RUNNER_TEMP/sdl-inspection/sdl3-evidence/qualification.txt"
+          grep -n -A65 -B8 -E "LINKER_SUPPORTS_VERSION_SCRIPT|XOpenDisplay|X11_X11_LIB|X11_Xext_LIB|Could NOT find X11|unsupported|error:" "$RUNNER_TEMP/sdl-inspection/sdl3-evidence/candidate/CMakeFiles/CMakeConfigureLog.yaml" | head -1100
