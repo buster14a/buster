@@ -3103,15 +3103,17 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                                        runtime_omission_option);
     }
     compiler_driver_validate_spirv_invocation(&invocation);
-    // Only the x86-64 Linux writer places a position-independent image. The
-    // request is a link option, so a compile-only invocation carrying it in
-    // shared flags is not refused for it, as GCC ignores it there.
+    // Linux image writers are x86-64 only; Android x86-64 and AArch64 place
+    // executables as PIEs but have no shared-object writer. The request is a
+    // link option, so a compile-only invocation carrying it in shared flags
+    // is not refused for it, as GCC ignores it there.
     // Bionic loads only position-independent executables, so an Android
-    // x86-64 link is a PIE whether or not -pie was given, and -no-pie cannot
-    // select another image there; its C inputs are compiled for one as the
-    // NDK's are, -fno-pic included. Android has no shared-object writer.
+    // x86-64 or AArch64 link is a PIE whether or not -pie was given, and
+    // -no-pie cannot select another image there; its C inputs are compiled
+    // for one as the NDK's are, -fno-pic included. Android has no shared-object writer.
     bool android_executable_target = !invocation.has_gpu_target && invocation.action == COMPILER_DRIVER_ACTION_LINK &&
-                                     invocation.target.os == OPERATING_SYSTEM_ANDROID && invocation.target.cpu_arch == CPU_ARCH_X86_64;
+                                     invocation.target.os == OPERATING_SYSTEM_ANDROID &&
+                                     (invocation.target.cpu_arch == CPU_ARCH_X86_64 || invocation.target.cpu_arch == CPU_ARCH_AARCH64);
     if (android_executable_target && invocation.image_kind == NATIVE_IMAGE_EXECUTABLE)
     {
         invocation.image_kind = NATIVE_IMAGE_PIE;
@@ -6997,6 +6999,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         syntax.ast_statement_statistics = &result.c_ast.statements;
         syntax.type_interning = true;
     }
+    // Nothing lowers a -fsyntax-only unit, so its string literals are counted,
+    // not decoded (CParserResult.string_literal_lengths_only).
+    syntax.string_literal_lengths_only = invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY;
     result.parser_diagnostic_count = syntax.diagnostic_count;
     if (syntax.diagnostic_count)
     {

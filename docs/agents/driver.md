@@ -827,8 +827,9 @@ remains open for unrelated encoding defects and further proof.
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
 suffixes (so `.init_array.00101` keeps its priority; `.preinit_array` takes
-none, as `ld` runs only that exact name), exact `.init`/`.fini`,
-and the existing DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`,
+none, as `ld` runs only that exact name), exact `.init`/`.fini`, exact
+`.tls$` (PE thread-local data, which Windows assembly output prints for both
+TLS kinds), and the existing DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`,
 `.debug_str`, `.debug_loc`, `.debug_ranges`, `.debug_addr`,
 `.debug_str_offsets`, `.debug_line_str`, `.debug_rnglists`,
 `.debug_loclists`). DWARF sections retain nonallocated object identities
@@ -1412,8 +1413,9 @@ model; `-fno-pic` clears it, while `-fno-pie` cancels only a PIE spelling.
 On x86-64 and AArch64 ELF the positive spellings select the implemented PIC
 reference model (see the position-independent code bullets in
 [machine.md](machine.md)). On AArch64 ELF the model makes `-fPIC` objects
-acceptable to `ld.lld -shared -z text`; Buster's own `-shared` and `-pie`
-writers still exist only for x86-64 Linux. Thread-local access under AArch64
+acceptable to `ld.lld -shared -z text`; Buster's Linux `-shared` and `-pie`
+writers still exist only for x86-64. Android AArch64 executable links use the
+AArch64 PIC model automatically. Thread-local access under AArch64
 ELF PIC is refused by a named code-generation diagnostic (emitting TLSDESC is
 not implemented; foreign TLSDESC objects are relaxed at link time, see the
 AArch64 TLS paragraph below) and publishes no output. Cancellation, preprocessing,
@@ -1421,14 +1423,14 @@ syntax-only and assembly/prebuilt-only input routes retain their behavior.
 Mach-O and COFF keep their existing target models; Wasm/eBPF compatibility
 behavior is unchanged. LLVM-bitcode and direct backend model requests remain
 an audit residual of issue #1289.
-On x86-64 Android every executable link is a PIE, with or without `-pie`
-(`-no-pie` cannot select another image there): the kernel places bionic's
-executable at a load bias, so a fixed-address image marked `ET_DYN` would run
-its preinit entries, IFUNC runner and every data pointer unrelocated. The same
-writer names `/system/bin/linker64` and `libc.so`, and its entry stub does not
-register RDX as a loader finalizer, because bionic's `linker64` leaves RDX
-unspecified at the entry point. `-shared` stays refused for Android, and
-Android AArch64 still stages a fixed-address image. `android/runtime_order.sh`
+On x86-64 and AArch64 Android every executable link is a PIE, with or without
+`-pie` (`-no-pie` cannot select another image there): the kernel places
+bionic's executable at a load bias, so a fixed-address image marked `ET_DYN`
+would run its preinit entries, IFUNC runner and every data pointer
+unrelocated. The writers name `/system/bin/linker64` and `libc.so`; their
+entry stubs do not register a loader finalizer, because bionic's `linker64`
+does not provide the glibc x86-64 RDX finalizer contract or an AArch64 X0
+finalizer. `-shared` stays refused for Android. `android/runtime_order.sh`
 executes an x86-64 image on the CI emulator (see the Android CI notes in
 [testing.md](testing.md)).
 On any other target a link that asks for either image is refused as an
@@ -1505,9 +1507,17 @@ are tracked on GitHub #1418.
 | `-xc++` and other unknown joined `-x<lang>` | `unsupported language: c++` | Same language names as `-x <lang>`; C is the only source frontend. |
 | bare `-x` | `missing argument after -x` | As GCC and Clang. |
 
-`link_native_image_elf64_x86_64_position_independent` writes both kinds as an
-ET_DYN at base zero. Its orientation comment is the contract; in short:
+`link_native_image_elf64_position_independent` writes the supported
+position-independent images as an ET_DYN at base zero. Its orientation comment
+is the contract; in short:
 
+- An Android AArch64 PIE shares the address-zero ELF layout and uses
+  `EM_AARCH64`, `/system/bin/linker64`, and `libc.so`. Its `R_AARCH64_RELATIVE`,
+  `GLOB_DAT`, and `JUMP_SLOT` relocations use ABI types 1027, 1025, and 1026.
+  The hosted stub omits the X0 loader-finalizer registration; imported calls
+  use PLT thunks, direct page/PREL references bind locally or through copy
+  slots, and imported function-address references without GOT indirection are
+  refused. Linux AArch64 PIE/shared output remains unsupported.
 - Every absolute address becomes a dynamic relocation: `R_X86_64_RELATIVE` for
   a definition bound in the image, `R_X86_64_64`/`GLOB_DAT` for an import and,
   in a shared object, for an exported definition, because an executable may
@@ -1561,7 +1571,7 @@ headers exist, and the `-fPIC` refusal.
 `compiler_driver_test_local_dynamic_tls` links GCC and Clang `-O2 -fPIC`
 local-dynamic objects (plain, `-fno-plt`, and `-g`) into each image kind and
 runs them, the shared object under both a Buster PIE and the host toolchain.
-AArch64 ELF, PE DLLs and Mach-O dylibs have no writer yet.
+AArch64 ELF shared objects, PE DLLs and Mach-O dylibs have no writer yet.
 
 `compiler_driver_test_initial_exec_tls` serializes independent MOV-form ELF
 fixtures using rax and r8, then links and executes them as fixed-address and
