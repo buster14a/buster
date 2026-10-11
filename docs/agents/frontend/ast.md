@@ -1329,4 +1329,35 @@ The base is main `a6705764`, which the candidate branches from. The budgets:
 - **Acceptance.** Hosted counts are diagnostic. Zen 5 validation (#2761)
   stays incomplete, and the hook stays opt-in.
 
+The census, taken on a tests-off build of the base under Callgrind, counted
+254 such checked casts. It fails the 1 M gate for them:
+- 141 members of a qualified aggregate, each appending 1 to 3 rows;
+- 28 string runs and 23 `&` over a member, which append rows;
+- 31 builtin calls, 30 of them appending nothing;
+- 31 others, 26 of them appending nothing.
+
+The 56 shapes that append nothing cost 0.71 M machine Ir together. No
+candidate is built for them. The same census showed that the member rule
+declines 3,650 other queries whose node is itself a member of a const
+aggregate. Their base is accepted, and their machine run appends exactly one
+row, the member's qualified copy, at 7.8 M machine Ir. For that shape, these
+budgets were declared before the candidate's measured runs, on the same arms
+and base:
+- **The replay.** A declined query whose node is `.` or `->` over an accepted
+  base (safe, with constraint checks) and a const or volatile struct or union
+  is answered from the decline branch. The answer makes the machine's two calls
+  on the query's tokens: `c_parse_member_type` on the qualified aggregate, then
+  `c_parse_add_qualified_type`. The row it appends is the answer. Nothing
+  changes on the path that ordinary answers take, and the node flags stay
+  `u8`.
+- **Correctness.** No verify mismatch over the corpus, with the replayed row
+  held to the machine's. Identical diagnostics and type-table sizes with and
+  without the tree, and byte-identical `-c` objects (`-g0` and `-g`) across
+  the four arms. New `CAstTypeCase` probes cover the replay.
+- **The gain that ships it (C against B).** At least 1 M fewer instructions
+  in the whole compile, and fewer machine runs from queries. Otherwise the
+  negative result is recorded, and the code does not ship.
+- **Default path (D against A).** Within ±0.05% Ir on `-fsyntax-only` and on
+  `-c` (`-g0`).
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
