@@ -102,6 +102,7 @@ def run_and_log(command, log_path, environment=None):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        errors="replace",
         env=environment,
     )
     sys.stdout.write(process.stdout)
