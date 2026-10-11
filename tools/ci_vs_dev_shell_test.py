@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Regressions for the Windows CI Visual Studio shell helper and its wiring."""
+"""Regressions for the Windows CI Visual Studio shell helper and its wiring.
+
+VS_PROBE_TRACE retains PowerShell UTC-millisecond stages and CMD local %TIME%
+stages separately. Launch-to-script-entry attributes interpreter startup;
+helper and fixture stage order attributes work after that startup. Stage clocks
+are diagnostic only and never replace the monotonic launch-relative deadline.
+"""
 import json
 import os
 from pathlib import Path
@@ -215,11 +221,11 @@ class HelperBehaviorTests(unittest.TestCase):
         cls.llvm_bin = cls.root / "llvm/bin"
         cls.llvm_bin.mkdir(parents=True)
         (cls.llvm_bin / "clang.cmd").write_text(
-            '@echo off\r\necho stage=clang-entry time=%TIME% >> "%FAKE_STAGE_LOG%"\r\n'
+            '@echo off\r\necho stage=clang-entry local_time=%TIME% >> "%FAKE_STAGE_LOG%"\r\n'
             "echo clang version fixture\r\necho Target: %FAKE_CLANG_TARGET%\r\n")
         vswhere = cls.root / "vswhere.cmd"
         vswhere.write_text(
-            '@echo off\r\necho stage=vswhere-entry time=%TIME% >> "%FAKE_STAGE_LOG%"\r\n'
+            '@echo off\r\necho stage=vswhere-entry local_time=%TIME% >> "%FAKE_STAGE_LOG%"\r\n'
             "if defined FAKE_VS_PATH echo %FAKE_VS_PATH%\r\nexit /b %FAKE_VSWHERE_STATUS%\r\n")
         environment = dict(
             os.environ,
