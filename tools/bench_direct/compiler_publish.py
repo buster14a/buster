@@ -1489,7 +1489,9 @@ def sampling_read_artifact(api: Api, authority: dict, *, retain_archive_identity
     # Construct the authenticated repository endpoint; never accept a download
     # host or executable path supplied by an artifact or request.
     payload = api.download(api.prefix + f"/actions/artifacts/{row['id']}/zip")
-    files = sampling_archive(payload)
+    # A packet retains about 3500 bounded data members (corpus logs and per-pair
+    # records); compiled outputs are pruned on the host and refused here.
+    files = sampling_archive(payload, member_limit=MAIN_ARCHIVE_FILE_LIMIT, require_nonexecutable=True)
     return files, campaign_artifact_identity(payload, row, files, retain_archive_identity)
 
 
@@ -2848,7 +2850,8 @@ def campaign_ingest_terminal(phase: str, packet: int, authority: dict, archive: 
         limit = ARTIFACT_LIMIT if sampling else PREPARATION_ARCHIVE_LIMIT
         if selected.get("expired") is not False or not isinstance(raw_zip, bytes) or not 0 < len(raw_zip) <= limit:
             raise ValueError("campaign terminal partial ZIP is expired, unavailable or oversized")
-        files = sampling_archive(raw_zip) if sampling else preparation_archive(raw_zip)
+        files = sampling_archive(raw_zip, member_limit=MAIN_ARCHIVE_FILE_LIMIT, require_nonexecutable=True) \
+            if sampling else preparation_archive(raw_zip)
         artifact = campaign_artifact_identity(raw_zip, selected, files, True)
     row, replay, manifest = campaign_terminal_data(phase, packet, authority, artifact)
     return {"schema": "buster-compiler-campaign-terminal-ingestion-v1", "phase": phase, "packet": packet,

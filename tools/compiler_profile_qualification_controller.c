@@ -862,6 +862,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_controller_execute(Arena* ar
             SliceString8 corpus_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(corpus);
             compiler_sampling_controller_phase(&controller, S8("full-default-corpus"), corpus_arguments,
                 admitted.reservation_seconds * 1000000ull);
+            controller.success = controller.success &&
+                compiler_sampling_prune_compiled(arena, path_join(arena, evidence, S8("throughput/artifacts")), false);
             CompilerSamplingVerification after = controller.success ? compiler_sampling_closure_verify(arena, controller.packet, evidence, 99, true, controller.deadline) : (CompilerSamplingVerification){0};
             controller.success = controller.success && after.valid && compiler_sampling_controller_prepared(&controller, freeze);
             controller.cleanup_failed = controller.cleanup_failed || after.cleanup_failed;
