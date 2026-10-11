@@ -2,19 +2,18 @@
 # Verify closed lifecycle receipts without launching a process for every field.
 # The launcher owns the files; these helpers only observe retained evidence.
 lifecycle_receipt_read() {
-    local path=$1 extra= status=1
+    local path=$1 status=1
     lifecycle_receipt_line=
     if [[ -s $path ]]; then
-        {
-            if IFS= read -r lifecycle_receipt_line; then
-                # Require one newline-terminated row and reject trailing bytes.
-                if IFS= read -r extra || [[ -n $extra ]]; then
-                    :
-                else
-                    status=0
-                fi
-            fi
-        } <"$path"
+        # Empty delimiter means NUL on Bash 3.2 as well as modern Bash.
+        # A successful read found binary corruption; never normalize it away.
+        if IFS= read -r -d '' lifecycle_receipt_line <"$path"; then
+            :
+        elif [[ $lifecycle_receipt_line == *$'\n' \
+            && ${lifecycle_receipt_line%$'\n'} != *$'\n'* ]]; then
+            lifecycle_receipt_line=${lifecycle_receipt_line%$'\n'}
+            status=0
+        fi
     fi
     return "$status"
 }

@@ -37,4 +37,13 @@ for content in 'unterminated' $'one\ntwo\n' $'one\ntwo' $'one\n\n'; do
         exit 1
     fi
 done
-printf 'lifecycle receipt missing/duplicate/value/row controls passed\n'
+# Bash's ordinary read discards NULs; the reader must refuse rather than
+# reconstruct a valid key/value or ignore a trailing binary suffix.
+for content in 'ver\0sion=1 status=0\n' 'version=1 status=\0000\n' 'version=1 status=0\n\0suffix'; do
+    printf '%b' "$content" >"$root/receipt"
+    if lifecycle_receipt_read "$root/receipt"; then
+        printf 'incorrectly admitted binary receipt\n' >&2
+        exit 1
+    fi
+done
+printf 'lifecycle receipt missing/duplicate/value/row/binary controls passed\n'
