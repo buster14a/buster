@@ -5418,9 +5418,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_designator_static_assert(UnitTe
         {
             c_test_append_source(bytes, 4096, &length, S8(" : 99)"));
         }
-        c_test_append_source(bytes, 4096, &length, S8(" == 23, \"conditional\");\n"
-                                                   "int main(void){return sizeof a / sizeof a[0] != 3 || "
-                                                   "a[2].x.x != 17 || a[2].x.y != 19 || a[2].y || a[0].x.x || a[1].x.y;}\n"));
+        c_test_append_source(bytes, 4096, &length, S8(" == 23, \"conditional\");\n"));
         String8 source = buster_test_temporary_path(temporary.arena, S8("nested-designator-assert"), S8(".c"));
         String8 source_text = {.pointer = bytes, .length = length};
         if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
@@ -5439,6 +5437,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_designator_static_assert(UnitTe
 #if BUSTER_LINUX && !BUSTER_ANDROID
             if (depths[depth_index] == 16)
             {
+                c_test_append_source(bytes, 4096, &length, S8("int main(void){return sizeof a / sizeof a[0] != 3 || "
+                    "a[2].x.x != 17 || a[2].x.y != 19 || a[2].y || a[0].x.x || a[1].x.y;}\n"));
+                String8 oracle_source = buster_test_temporary_path(temporary.arena, S8("nested-designator-oracle"), S8(".c"));
+                source_text.length = length;
+                BUSTER_TEST(arguments, file_write(oracle_source, BUSTER_SLICE_TO_BYTE_SLICE(source_text)));
                 String8 references[] = {S8("gcc"), S8("clang")};
                 for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
                 {
@@ -5446,7 +5449,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_designator_static_assert(UnitTe
                     String8 output = buster_test_temporary_unique_path(temporary.arena, S8("nested-designator-oracle"), S8(".exe"));
                     if (BUSTER_REQUIRE(arguments, compiler.length != 0))
                     {
-                        String8 command[] = {compiler, S8("-std=gnu17"), S8("-nostdinc"), S8("-O0"), S8("-o"), output, source};
+                        String8 command[] = {compiler, S8("-std=gnu17"), S8("-nostdinc"), S8("-O0"), S8("-o"), output, oracle_source};
                         ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
                             (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
                         if (BUSTER_REQUIRE(arguments, child.handle != 0))
