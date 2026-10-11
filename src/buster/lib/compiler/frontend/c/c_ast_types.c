@@ -1937,10 +1937,11 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_agree(CAstTypeBody const* body, CPr
 // qualified copy, and that row is its answer. c_parse_expression_tree_query
 // makes the same two calls. A checked query needs a safe base, as the member
 // rule does. The answer is C_AST_TYPE_STRING's replay with this node's kind.
-// Called only from c_ast_types_answer's decline branch, off the path that
-// ordinary answers take.
-BUSTER_GLOBAL_LOCAL C_AST_TYPES_NOINLINE bool c_ast_types_qualified_member(CAstTypeBody const* body, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
-                                                      u32 node, bool checked, CAstTypeAnswer* answer)
+// Every other node the answer path does not vouch for declines here. Out of
+// line and returning its own answer, so the path that ordinary answers take
+// keeps its code (#3381, #3384).
+BUSTER_GLOBAL_LOCAL C_AST_TYPES_NOINLINE CAstTypeAnswer c_ast_types_decline(CAstTypeBody const* body, CPreprocessResult const* preprocess, CParseResult* result,
+                                                                    CScopeId scope, u32 node, bool checked)
 {
     CAst const* ast = body->ast;
     u32 kind = ast->kinds[node];
@@ -1962,17 +1963,27 @@ BUSTER_GLOBAL_LOCAL C_AST_TYPES_NOINLINE bool c_ast_types_qualified_member(CAstT
                          !value->is_restrict && !value->is_atomic;
         aggregate = qualified ? aggregate : C_TYPE_ID_INVALID;
     }
-    bool answered = aggregate.value != C_ID_UNDERLYING_INVALID && !c_parse_pending_enum_possible(result) &&
+    bool replayed = aggregate.value != C_ID_UNDERLYING_INVALID && !c_parse_pending_enum_possible(result) &&
                     c_parse_type_identity_sites_absent(result, body->first[relative], body->end[relative]) &&
                     (!(base_flags & C_AST_TYPE_FLAG_LOOKUP_BELOW) || c_ast_types_lookups_agree(body, preprocess, result, scope, node - 1));
-    if (answered)
+    CAstTypeAnswer answer = {
+        .type = replayed ? aggregate : C_TYPE_ID_INVALID,
+        .status = replayed ? C_AST_TYPE_STRING : C_AST_TYPE_DECLINE,
+        .node_kind = kind,
+        .replay_start = replayed ? body->first[relative] : 0,
+        .replay_end = replayed ? body->end[relative] : 0,
+    };
+    if (replayed)
     {
-        answer->status = C_AST_TYPE_STRING;
-        answer->type = aggregate;
-        answer->replay_start = body->first[relative];
-        answer->replay_end = body->end[relative];
+        body->statistics->answers += 1;
+        WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_ANSWERS, 1);
     }
-    return answered;
+    else
+    {
+        body->statistics->declines += 1;
+        WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_DECLINES, 1);
+    }
+    return answer;
 }
 
 BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
@@ -2039,16 +2050,9 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
                 answer.replay_end = body->ast->tokens[node] + 1;
                 WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_ANSWERS, 1);
             }
-            else if (c_ast_types_qualified_member(body, preprocess, result, scope, node, checked, &answer))
-            {
-                body->statistics->answers += 1;
-                WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_ANSWERS, 1);
-            }
             else
             {
-                body->statistics->declines += 1;
-                answer.status = C_AST_TYPE_DECLINE;
-                WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_DECLINES, 1);
+                answer = c_ast_types_decline(body, preprocess, result, scope, node, checked);
             }
         }
     }
