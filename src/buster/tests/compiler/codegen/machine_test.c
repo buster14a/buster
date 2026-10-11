@@ -52,7 +52,7 @@ BUSTER_CT_CHECK(sizeof(MachineVirtualRegister) == 16);
 BUSTER_CT_CHECK(sizeof(MachineBlock) == 32);
 BUSTER_CT_CHECK(sizeof(MachineEdge) == 16);
 BUSTER_CT_CHECK(sizeof(MachineEdit) == 16);
-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(MachineEncodeResult) == 88);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(MachineEncodeResult) == 96);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrInstruction) == 64);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrValue) == 16);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlock) == 64);
@@ -4575,7 +4575,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_dynamic_stack(UnitTestArgume
                 {
                     BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
                     BUSTER_TEST(arguments, selected.function.outgoing_bytes == 0);
-                    BUSTER_TEST(arguments, encoded.frame_pointer_offset != 0);
+                    BUSTER_TEST(arguments, encoded.frame_pointer_after_allocation && encoded.frame_event_count >= 2);
+                    if (encoded.frame_pointer_after_allocation && encoded.frame_event_count >= 2)
+                    {
+                        // RBP is established last, after the allocation, and
+                        // its event closes the prologue.
+                        CodegenUnwindAction* frame_pointer = encoded.frame_events + encoded.frame_event_count - 1;
+                        BUSTER_TEST(arguments, frame_pointer->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER &&
+                                                   frame_pointer->code_offset == encoded.prologue_size &&
+                                                   frame_pointer[-1].kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK);
+                    }
                     u32 allocations = 0;
                     u32 stack_stores = 0;
                     for (u32 index = 0; index < selected.function.instruction_count; index += 1)
@@ -8118,13 +8127,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_f80(UnitTestArguments* arguments
                             // Resolve only bounded local PC32 calls/addresses before
                             // copying into executable storage; external/data references
                             // fail the test without executing an unpatched module.
+                            // Mach-O spells a direct call PLT32 (BRANCH), whose
+                            // arithmetic is the same.
                             bool patched = true;
                             for (u32 relocation_index = 0; patched && relocation_index < generated.relocation_count; relocation_index += 1)
                             {
                                 CodegenModuleRelocation* relocation = generated.relocations + relocation_index;
                                 bool found = false;
                                 if (codegen_module_relocation_valid(relocation) && relocation->source == CODEGEN_MODULE_RELOCATION_CODE &&
-                                    relocation->kind == CODEGEN_MODULE_RELOCATION_X86_64_PC32 && !relocation->addend &&
+                                    (relocation->kind == CODEGEN_MODULE_RELOCATION_X86_64_PC32 ||
+                                     relocation->kind == CODEGEN_MODULE_RELOCATION_X86_64_PLT32) && !relocation->addend &&
                                     relocation->offset <= generated.code.length && generated.code.length - relocation->offset >= 4)
                                 {
                                     for (u32 entry = 0; !found && entry < generated.entry_count; entry += 1)
@@ -10257,8 +10269,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_encode_into_caller_buffer(UnitTe
                                 (!encoded[0].epilog_count ||
                                  memcmp(candidate->epilog_offsets, encoded[0].epilog_offsets, sizeof(u32) * encoded[0].epilog_count) == 0) &&
                                 candidate->inline_assembly_relocation_count == encoded[0].inline_assembly_relocation_count &&
-                                candidate->frame_allocation_offset == encoded[0].frame_allocation_offset &&
-                                candidate->frame_pointer_offset == encoded[0].frame_pointer_offset;
+                                candidate->prologue_size == encoded[0].prologue_size &&
+                                candidate->frame_pointer_after_allocation == encoded[0].frame_pointer_after_allocation &&
+                                candidate->frame_event_count == encoded[0].frame_event_count &&
+                                (!encoded[0].frame_event_count ||
+                                 memcmp(candidate->frame_events, encoded[0].frame_events,
+                                        sizeof(CodegenUnwindAction) * encoded[0].frame_event_count) == 0);
                     String8 description = string_format(temporary.arena, S8("{S8} allocator={u32} variant={u32}"), function->name, allocator, variant);
                     BUSTER_TEST_RAW(arguments, same, description);
                 }
@@ -11547,10 +11563,16 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, exact_map.expansion_rows == MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT);
     BUSTER_TEST(arguments, exact_map.expansion_nonexact_rows == exact_map.expansion_rows);
     BUSTER_TEST(arguments, exact_map.dense_encoding_tables == 64);
+    BUSTER_TEST(arguments, exact_map.dense_encoding_ready_tables == 64);
+    BUSTER_TEST(arguments, exact_map.dense_encoding_failed_tables == 0);
     BUSTER_TEST(arguments, exact_map.immediate_patch_tables == 9);
     BUSTER_TEST(arguments, exact_map.memory_base_tables == 8);
     BUSTER_TEST(arguments, exact_map.displacement_patch_tables == 8);
     BUSTER_TEST(arguments, exact_map.variable_memory_encoding_tables == 9);
+    // Prewarm encodes cells on first read; the complete form must leave
+    // every cell of every table encoded, and the authority must refuse none.
+    BUSTER_TEST(arguments, exact_map.variable_memory_encoded_cells == 9u * 3u * 256u);
+    BUSTER_TEST(arguments, exact_map.variable_memory_failed_cells == 0);
     // Every fixed-shape template row prewarm allots must be one the
     // metadata authority accepted; a refused row would silently keep the
     // slower metadata lane for its shape. The vpermt2d variant of the
@@ -11558,6 +11580,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // MULH64's mul rcx adds one static row.
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_rows == 1503,
                     string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1503 (rows: {u32})"), exact_map.fixed_template_rows));
+    BUSTER_TEST(arguments, exact_map.fixed_template_pending_rows == 0);
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
     BUSTER_TEST_FIXTURE(arguments, machine_test_gpr_preparation);

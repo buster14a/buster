@@ -437,6 +437,13 @@ struct CPhaseBoundaryMetrics
 // Null for hand-built results (the token-space literals the integer-constant
 // evaluator takes); `c_preprocess_detail` reads those as the all-zero block
 // their inline members used to be.
+typedef struct CPreprocessDependency CPreprocessDependency;
+struct CPreprocessDependency
+{
+    String8 path;
+    bool system;
+};
+
 typedef struct CPreprocessDetail CPreprocessDetail;
 enum
 {
@@ -456,6 +463,10 @@ struct CPreprocessDetail
     CSourceMetrics source_lexed;
     CSourceMetrics source_unique;
     CSourceFileMetrics* lexed_files;
+    // Resolved source and include identities in first-inclusion order. These
+    // paths are sealed into the result arena and remain valid after release.
+    CPreprocessDependency* dependencies;
+    u32 dependency_count;
     CPreprocessedMetrics preprocessed;
     CPhaseBoundaryMetrics boundary;
     // Optional text-output boundaries, indexed by final token: 0 uses source
@@ -584,6 +595,15 @@ BUSTER_F_DECL void c_source_cache_clear(CSourceCache* cache);
 BUSTER_F_DECL void c_source_cache_destroy(CSourceCache* cache);
 BUSTER_F_DECL CSourceCacheStats c_source_cache_stats(CSourceCache const* cache);
 
+// Phase-one trigraph replacement: the dialect's default, or an explicit
+// -ftrigraphs/-fno-trigraphs override.
+typedef enum CTrigraphMode
+{
+    C_TRIGRAPH_MODE_DIALECT,
+    C_TRIGRAPH_MODE_ENABLED,
+    C_TRIGRAPH_MODE_DISABLED,
+} CTrigraphMode;
+
 typedef struct CPreprocessOptions CPreprocessOptions;
 struct CPreprocessOptions
 {
@@ -601,6 +621,8 @@ struct CPreprocessOptions
     // shifting the primary source's lines or __FILE__.
     String8* forced_includes;
     String8 source_path;
+    // Record resolved source/include paths and whether they are system headers.
+    bool record_dependencies;
     // Identity of the descriptor that supplied source, when available.
     // In-memory callers retain the path namespace by leaving this invalid.
     FileIdentity source_identity;
@@ -615,6 +637,7 @@ struct CPreprocessOptions
     u32 expansion_limit;
     u32 include_depth_limit;
     CPreprocessDialect dialect;
+    CTrigraphMode trigraph_mode;
     bool disable_external_includes;
     // GNU-as sources use `#` for line comments, so a `.S` run treats a `#`
     // line whose word is no known directive as a comment instead of an
@@ -1479,9 +1502,36 @@ struct CAstStatementStatistics
     u64 declaration_hints;
     u64 loop_hints;
     u64 declines;
+    // Block declarations: declarators whose `,` or `;` and `=` the plan
+    // states, initializers among them bound without the per-token tests,
+    // declarations whose auto-inference scans were skipped, and declarator
+    // hints a token next to them refused (the rest of that declaration is
+    // then split from tokens).
+    u64 declarator_hints;
+    u64 initializer_hints;
+    u64 auto_skips;
+    u64 declarator_declines;
     // The last fallback: its reason, and the `{` of the body.
     CAstStatementFallback reason;
     u32 fallback_token;
+};
+
+// What lowering read from the tree (GitHub #3102) over one lowering: the
+// top-level function bodies whose conditional nodes it indexed, the nodes, and
+// how each root-conditional query inside an indexed body ended. An answer is
+// a root `?:` the tree reported; a negative is a range holding no `?`; a
+// fallback went to the token scan. Steps are the nodes and parentheses the
+// index build's walks and widening visited, a work count that must stay linear
+// in the input; it leaves out the memo's binary-search comparisons.
+typedef struct CAstLowerStatistics CAstLowerStatistics;
+struct CAstLowerStatistics
+{
+    u64 bodies;
+    u64 conditionals;
+    u64 steps;
+    u64 answers;
+    u64 negatives;
+    u64 fallbacks;
 };
 
 typedef struct CParserResult CParserResult;
@@ -1928,6 +1978,14 @@ struct CIRLowerOptions
     // in its frame slot unless its one write is the entry initializer and an
     // instruction result names it (see IrProgram pin_debug_locals).
     bool pin_debug_locals;
+    // The unit's syntax tree when the caller built one (the driver's
+    // -fc-ast-pilot, GitHub #3102): lowering answers root-conditional splits
+    // from its nodes and runs the token scans for everything else. Null
+    // lowers exactly as before. Read only during the call; the tree and the
+    // preprocessing result must outlive it.
+    CAst const* syntax_tree;
+    // Optional: receives the counts, added to what it already holds.
+    CAstLowerStatistics* ast_lower_statistics;
 };
 
 typedef struct CIRDirectSsaStatistics CIRDirectSsaStatistics;
