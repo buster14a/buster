@@ -4235,6 +4235,114 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_alignment_and_w
     return result;
 }
 
+// __attribute__((ifunc("resolver"))) (issue 1243): an ELF target defines the
+// name as an STT_GNU_IFUNC symbol at its resolver's address, and every
+// ill-formed resolver, and every output without an indirect symbol, is a
+// named diagnostic that -fsyntax-only and -c agree on. The run-time
+// behaviour is compiler_driver_elf_ifunc_tests'.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_ifunc_attribute(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 resolver = S8("static int impl(int x) { return x; }\nstatic int (*resolve(void))(int) { return impl; }\n");
+    struct
+    {
+        String8 target;
+        String8 source;
+        String8 expected_diagnostic;
+    } cases[] = {
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((ifunc(\"resolve\")));\n")},
+        {S8("aarch64-unknown-linux-gnu"), S8("int f(int) __attribute__((__ifunc__(\"resolve\")));\nint g(int x) { return f(x); }\n")},
+        {S8("x86_64-unknown-linux-gnu"), S8("static int f(int) __attribute__((ifunc(\"resolve\")));\nint (*g(void))(int) { return f; }\n")},
+        {S8("x86_64-unknown-linux-gnu"), S8("static void *resolve_any(void) { return 0; }\nint f(int) __attribute__((ifunc(\"resolve_any\")));\n")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((ifunc(\"absent\")));\n"),
+         S8("ifunc resolver 'absent' is not declared in this translation unit")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int (*declared(void))(int);\nint f(int) __attribute__((ifunc(\"declared\")));\n"),
+         S8("ifunc 'f' names 'declared', which is not defined in this translation unit")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int (*object)(int);\nint f(int) __attribute__((ifunc(\"object\")));\n"),
+         S8("ifunc resolver 'object' for 'f' is not a function")},
+        {S8("x86_64-unknown-linux-gnu"), S8("static int scalar(void) { return 0; }\nint f(int) __attribute__((ifunc(\"scalar\")));\n"),
+         S8("ifunc resolver 'scalar' must return 'void *' or a pointer to a function compatible with 'f'")},
+        {S8("x86_64-unknown-linux-gnu"), S8("long f(long) __attribute__((ifunc(\"resolve\")));\n"),
+         S8("ifunc resolver 'resolve' must return 'void *' or a pointer to a function compatible with 'f'")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((ifunc));\n"), S8("ifunc attribute on 'f' must name a resolver")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int (*v)(int) __attribute__((ifunc(\"resolve\")));\n"),
+         S8("ifunc attribute on 'v' requires a function declaration")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((ifunc(\"resolve\")));\nint f(int x) { return x; }\n"),
+         S8("'f' is both defined here and an ifunc resolved by 'resolve'")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((ifunc(\"resolve\"), alias(\"impl\")));\n"),
+         S8("'f' cannot be both an ifunc and an alias")},
+        // The entity as a whole is checked, whichever declaration says it
+        // and in either order: the last alias target or resolver would
+        // otherwise win and keep the indirect bit.
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((ifunc(\"resolve\")));\nint f(int) __attribute__((alias(\"impl\")));\n"),
+         S8("'f' cannot be both an ifunc and an alias")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((alias(\"impl\")));\nint f(int) __attribute__((ifunc(\"resolve\")));\n"),
+         S8("'f' cannot be both an ifunc and an alias")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((weak, ifunc(\"resolve\")));\n"), S8("'f' cannot be both an ifunc and weak")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((weak));\nint f(int) __attribute__((ifunc(\"resolve\")));\n"),
+         S8("'f' cannot be both an ifunc and weak")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((ifunc(\"resolve\")));\nint f(int) __attribute__((weak));\n"),
+         S8("'f' cannot be both an ifunc and weak")},
+        {S8("x86_64-unknown-linux-gnu"),
+         S8("static int (*other(void))(int) { return impl; }\nint f(int) __attribute__((ifunc(\"resolve\")));\nint f(int) __attribute__((ifunc(\"other\")));\n"),
+         S8("ifunc 'f' names both 'resolve' and 'other' as its resolver")},
+        // Redeclaring an ifunc plainly, or with the same resolver, keeps it.
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int);\nint f(int) __attribute__((ifunc(\"resolve\")));\nint f(int) __attribute__((ifunc(\"resolve\")));\nint f(int);\n")},
+        // COFF and Mach-O have no indirect-function symbol to carry it.
+        {S8("x86_64-pc-windows"), S8("int f(int) __attribute__((ifunc(\"resolve\")));\n"),
+         S8("ifunc attribute on 'f' is not supported: COFF output has no indirect function symbol")},
+        {S8("aarch64-apple-macos"), S8("int f(int) __attribute__((ifunc(\"resolve\")));\n"),
+         S8("ifunc attribute on 'f' is not supported: Mach-O output has no indirect function symbol")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-ifunc-attribute"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-ifunc-attribute"), S8(".o"));
+        String8 source = string_format(arena, S8("{S8}{S8}"), resolver, cases[index].source);
+        bool valid = cases[index].expected_diagnostic.length == 0;
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 syntax_command[] = {S8("-target"), cases[index].target, S8("-nostdinc"), S8("-g0"), S8("-std=gnu17"), S8("-fsyntax-only"), input};
+            String8 object_command[] = {S8("-target"), cases[index].target, S8("-nostdinc"), S8("-g0"), S8("-std=gnu17"), S8("-c"), S8("-o"), output, input};
+            CompilerDriverResult syntax = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+            CompilerDriverResult object = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+            BUSTER_TEST_RAW(arguments, (syntax.error == COMPILER_DRIVER_ERROR_NONE) == valid,
+                            string_format(arena, S8("source={S8}\nsyntax={S8}"), source, syntax.diagnostic));
+            BUSTER_TEST_RAW(arguments, (object.error == COMPILER_DRIVER_ERROR_NONE) == valid,
+                            string_format(arena, S8("source={S8}\nobject={S8}"), source, object.diagnostic));
+            BUSTER_STRING_TEST(arguments, syntax.diagnostic, object.diagnostic);
+            if (!valid)
+            {
+                BUSTER_TEST_RAW(arguments, string_first_sequence(syntax.diagnostic, cases[index].expected_diagnostic) != BUSTER_STRING_NO_MATCH,
+                                string_format(arena, S8("source={S8}\ndiagnostic={S8}\nexpected={S8}"), source, syntax.diagnostic,
+                                              cases[index].expected_diagnostic));
+                BUSTER_TEST(arguments, !object.has_object);
+            }
+            else if (BUSTER_REQUIRE(arguments, object.has_object))
+            {
+                // The name is an STT_GNU_IFUNC at the resolver's address, with
+                // its own binding; the resolver keeps its own symbol.
+                String8 resolver_name = string_first_sequence(source, S8("resolve_any")) != BUSTER_STRING_NO_MATCH ? S8("resolve_any") : S8("resolve");
+                ObjectSymbol* indirect = compiler_driver_test_symbol_by_name(&object.object, S8("f"));
+                ObjectSymbol* resolved_by = compiler_driver_test_symbol_by_name(&object.object, resolver_name);
+                if (BUSTER_REQUIRE(arguments, indirect && resolved_by))
+                {
+                    bool is_static = string_first_sequence(cases[index].source, S8("static int f")) != BUSTER_STRING_NO_MATCH;
+                    BUSTER_TEST(arguments, indirect->indirect && !resolved_by->indirect);
+                    BUSTER_TEST(arguments, indirect->section == resolved_by->section && indirect->value == resolved_by->value);
+                    BUSTER_TEST(arguments, indirect->kind == OBJECT_SYMBOL_FUNCTION && indirect->global == !is_static);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equivalence(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4298,15 +4406,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("_Alignas(32) int f(void);\n"), false, true, S8("alignment specifier cannot be applied to a function")},
         {S8("_Alignas(32) __attribute__((aligned(64))) int f(void);\n"), false, true, S8("alignment specifier cannot be applied to a function")},
         {S8("int f(void) __attribute__((aligned(3)));\nint g(void) { return f(); }\n"), false, true, S8("not a power of two")},
-        // `weakref` makes a local name for a weak reference; `ifunc` has no
-        // lowering and says so rather than leaving an undefined symbol (#3042).
+        // `weakref` makes a local name for a weak reference (#3042); `ifunc`
+        // depends on the target, so compiler_driver_test_ifunc_attribute
+        // names one.
         {S8("static int wr(void) __attribute__((weakref(\"af\")));\nint g(void) { return wr(); }\n"), true, true},
         {S8("static int wr(void) __attribute__((weakref, alias(\"af\")));\nint g(void) { return wr(); }\n"), true, true},
         {S8("static int wo __attribute__((weakref(\"ao\")));\nint g(void) { return wo; }\n"), true, true},
         {S8("static int wr(void) __attribute__((weakref));\nint g(void) { return wr(); }\n"), false, true, S8("weakref attribute must name a target")},
-        {S8("int f(int) __attribute__((ifunc(\"resolve\")));\n"), false, true, S8("ifunc attribute is not supported")},
-        {S8("static int impl(int x) { return x; }\nstatic int (*resolve(void))(int) { return impl; }\nint f(int) __attribute__((ifunc(\"resolve\")));\n"), false, true,
-         S8("ifunc attribute is not supported")},
         {S8("int g(void) { int x; x = \"t\"; return x; }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int f(int); int g(void) { return f(\"u\"); }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int g(int n) { char *p = n; return p != 0; }\n"), false, false, S8("cannot convert from 'int' to 'char *'")},
@@ -30402,6 +30508,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_affinity_worker_clamp);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_ownership);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_ifunc_attribute);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_c_ast_pilot);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_redundant_declarator_groups);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_void_function_pointer_roundtrip);

@@ -10007,41 +10007,37 @@ ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebu
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool link_pe_aarch64_tls_index_symbol(ObjectFile* object, u32 symbol_index)
+// An undefined global DATA _tls_index whose every reference is a loader TLS
+// index load (x86-64 REL32, or ARM64 ADRP/LDR pairs) names this image's
+// synthesized index slot rather than an import.
+BUSTER_GLOBAL_LOCAL bool link_pe_tls_index_symbol(ObjectFile* object, u32 symbol_index)
 {
-    if (!object || symbol_index >= object->symbol_count)
+    bool result = false;
+    if (object && symbol_index < object->symbol_count)
     {
-        return false;
+        ObjectSymbol* symbol = object->symbols + symbol_index;
+        bool valid = symbol->section == OBJECT_SECTION_UNDEFINED && symbol->global && symbol->kind == OBJECT_SYMBOL_DATA &&
+                     string_equal(symbol->name, OBJECT_COFF_TLS_INDEX_NAME);
+        bool aarch64 = object->target.cpu_arch == CPU_ARCH_AARCH64;
+        u32 pc32_count = 0;
+        u32 page_count = 0;
+        u32 low_count = 0;
+        for (u32 index = 0; valid && index < object->relocation_count; index += 1)
+        {
+            ObjectRelocation* relocation = object->relocations + index;
+            if (relocation->symbol == symbol_index)
+            {
+                pc32_count += relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32;
+                page_count += relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP;
+                low_count += relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12;
+                valid = aarch64 ? relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
+                                      relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12
+                                : relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32;
+            }
+        }
+        result = valid && (aarch64 ? page_count && page_count == low_count : pc32_count != 0);
     }
-    ObjectSymbol* symbol = object->symbols + symbol_index;
-    if (symbol->section != OBJECT_SECTION_UNDEFINED || !symbol->global || symbol->kind != OBJECT_SYMBOL_DATA ||
-        !string_equal(symbol->name, S8("__tls_index")))
-    {
-        return false;
-    }
-    u32 page_count = 0;
-    u32 low_count = 0;
-    for (u32 index = 0; index < object->relocation_count; index += 1)
-    {
-        ObjectRelocation* relocation = object->relocations + index;
-        if (relocation->symbol != symbol_index)
-        {
-            continue;
-        }
-        if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP)
-        {
-            page_count += 1;
-        }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12)
-        {
-            low_count += 1;
-        }
-        else
-        {
-            return false;
-        }
-    }
-    return page_count && page_count == low_count;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
@@ -10224,7 +10220,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             {
                 continue;
             }
-            if (aarch64 && link_pe_aarch64_tls_index_symbol(object, symbol_index))
+            if (link_pe_tls_index_symbol(object, symbol_index))
             {
                 continue;
             }
@@ -11315,10 +11311,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                 data_import = false;
                 if (symbol->section == OBJECT_SECTION_UNDEFINED)
                 {
-                    if (aarch64 && link_pe_aarch64_tls_index_symbol(object, relocation->symbol))
+                    if (link_pe_tls_index_symbol(object, relocation->symbol))
                     {
-                        // __tls_index is owned by the PE loader rather than an
-                        // import library.  The two relocation handlers below
+                        // _tls_index is owned by the PE loader rather than an
+                        // import library.  The index relocation handlers below
                         // resolve it to this image's synthesized index slot.
                         symbol_rva = 0;
                     }

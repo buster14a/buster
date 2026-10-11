@@ -4565,7 +4565,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_x64_tls_index_addends(UnitTe
         INPUT_SIZE = 112,
     };
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS};
-    String8 names[] = {S8("__tls_index"), S8("__tls_plain")};
+    String8 names[] = {S8("_tls_index"), S8("_tls_plain"), S8("_tls_index")};
+    // Only the undefined loader symbol is the TLS index; a defined _tls_index
+    // (the CRT's own tlssup) is an ordinary PC32 target (GitHub #1323).
+    u16 section_numbers[] = {0, 0, 1};
     s32 stored_addends[] = {0, -8, 8, 4, INT32_MIN, INT32_MAX};
     for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
     {
@@ -4595,11 +4598,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_x64_tls_index_addends(UnitTe
             object_test_coff_write_u32(input, RELOCATION_OFFSET, 2);
             object_test_coff_write_u16(input, RELOCATION_OFFSET + 8, 4);
             object_test_coff_write_u32(input, SYMBOL_OFFSET + 4, 4);
+            object_test_coff_write_u16(input, SYMBOL_OFFSET + 12, section_numbers[name_index]);
             input[SYMBOL_OFFSET + 16] = 2;
             object_test_coff_write_u32(input, STRING_OFFSET, 16);
             object_test_coff_write_name(input, STRING_OFFSET + 4, names[name_index]);
             u8 original[INPUT_SIZE];
             memcpy(original, input, sizeof(input));
+            if (name_index == 0)
+            {
+                // REL32_1..5 cannot express the loader's index load.
+                object_test_coff_write_u16(input, RELOCATION_OFFSET + 8, 5);
+                ObjectFile shifted = object_read(arguments->arena, (ByteSlice){.pointer = input, .length = sizeof(input)}, target);
+                BUSTER_TEST(arguments, shifted.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+                memcpy(input, original, sizeof(input));
+            }
             ObjectFile object = object_read(arguments->arena, (ByteSlice){.pointer = input, .length = sizeof(input)}, target);
             s64 expected_addend = (s64)stored_addends[addend_index] - 4;
             for (u32 cycle = 0; cycle < 3; cycle += 1)
@@ -5989,7 +6001,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                                        stored_load_reread.relocation_count == 2 &&
                                        stored_load_reread.relocations[1].kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L &&
                                        stored_load_reread.relocations[1].addend == 56);
-            load.symbols[load.relocations[1].symbol].name = S8("__tls_index");
+            load.symbols[load.relocations[1].symbol].name = S8("_tls_index");
             ObjectArtifact reserved_load = object_write(arguments->arena, &load, OBJECT_FORMAT_COFF);
             BUSTER_TEST(arguments, reserved_load.error == OBJECT_ERROR_UNSUPPORTED_TARGET && !reserved_load.bytes.length);
         }
@@ -6057,7 +6069,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                     !object_aarch64_pe_page_relocate(OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L, UINT32_C(0xfd400100), 0, UINT64_MAX, 8,
                                                       &pageoffset_patched));
 
-        ByteSlice tls_bytes = object_test_coff_arm64_page_object(arguments->arena, S8("__tls_index"), UINT32_C(0x90000008),
+        ByteSlice tls_bytes = object_test_coff_arm64_page_object(arguments->arena, S8("_tls_index"), UINT32_C(0x90000008),
                                                                   UINT32_C(0xb9400120), 0x0007);
         object_test_coff_write_u16(tls_bytes.pointer, OBJECT_TEST_ARM64_COFF_SYMBOL_OFFSET + 12, 0);
         ObjectFile tls = object_read(arguments->arena, tls_bytes, arm64_coff_target);
@@ -6086,34 +6098,34 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             // Codegen associates the pair with the TLS variable. The COFF
             // writer must synthesize the loader-owned symbol without mutating
             // that in-memory object and only redirect the serialized pair.
-            tls.symbols[0].name = S8("__tls_indexx");
+            tls.symbols[0].name = S8("_tls_indexx");
             tls.symbols[0].section = OBJECT_SECTION_DATA;
             ObjectArtifact tls_written = object_write(arguments->arena, &tls, OBJECT_FORMAT_COFF);
             BUSTER_TEST(arguments, tls_written.error == OBJECT_ERROR_NONE && tls.symbol_count == 1 &&
-                                       string_equal(tls.symbols[0].name, S8("__tls_indexx")));
+                                       string_equal(tls.symbols[0].name, S8("_tls_indexx")));
             ObjectFile tls_reread = object_read(arguments->arena, tls_written.bytes, arm64_coff_target);
             BUSTER_TEST(arguments, tls_reread.error == OBJECT_ERROR_NONE && tls_reread.relocation_count == 2 &&
-                                       string_equal(tls_reread.symbols[tls_reread.relocations[0].symbol].name, S8("__tls_index")) &&
-                                       string_equal(tls_reread.symbols[tls_reread.relocations[1].symbol].name, S8("__tls_index")));
+                                       string_equal(tls_reread.symbols[tls_reread.relocations[0].symbol].name, S8("_tls_index")) &&
+                                       string_equal(tls_reread.symbols[tls_reread.relocations[1].symbol].name, S8("_tls_index")));
         }
-        ByteSlice tls_addend = object_test_coff_arm64_page_object(arguments->arena, S8("__tls_index"), UINT32_C(0xf0000028),
+        ByteSlice tls_addend = object_test_coff_arm64_page_object(arguments->arena, S8("_tls_index"), UINT32_C(0xf0000028),
                                                                   UINT32_C(0xb9400120), 0x0007);
         object_test_coff_write_u16(tls_addend.pointer, OBJECT_TEST_ARM64_COFF_SYMBOL_OFFSET + 12, 0);
         BUSTER_TEST(arguments, object_read(arguments->arena, tls_addend, arm64_coff_target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
-        ByteSlice defined_tls_index = object_test_coff_arm64_page_object(arguments->arena, S8("__tls_index"), UINT32_C(0x90000008),
+        ByteSlice defined_tls_index = object_test_coff_arm64_page_object(arguments->arena, S8("_tls_index"), UINT32_C(0x90000008),
                                                                           UINT32_C(0xb9400120), 0x0007);
         BUSTER_TEST(arguments, object_read(arguments->arena, defined_tls_index, arm64_coff_target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
-        ByteSlice function_tls_index = object_test_coff_arm64_page_object(arguments->arena, S8("__tls_index"), UINT32_C(0x90000008),
+        ByteSlice function_tls_index = object_test_coff_arm64_page_object(arguments->arena, S8("_tls_index"), UINT32_C(0x90000008),
                                                                            UINT32_C(0xb9400120), 0x0007);
         object_test_coff_write_u16(function_tls_index.pointer, OBJECT_TEST_ARM64_COFF_SYMBOL_OFFSET + 12, 0);
         object_test_coff_write_u16(function_tls_index.pointer, OBJECT_TEST_ARM64_COFF_SYMBOL_OFFSET + 14, 0x20);
         BUSTER_TEST(arguments, object_read(arguments->arena, function_tls_index, arm64_coff_target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
-        ByteSlice local_tls_index = object_test_coff_arm64_page_object(arguments->arena, S8("__tls_index"), UINT32_C(0x90000008),
+        ByteSlice local_tls_index = object_test_coff_arm64_page_object(arguments->arena, S8("_tls_index"), UINT32_C(0x90000008),
                                                                         UINT32_C(0xb9400120), 0x0007);
         object_test_coff_write_u16(local_tls_index.pointer, OBJECT_TEST_ARM64_COFF_SYMBOL_OFFSET + 12, 0);
         local_tls_index.pointer[OBJECT_TEST_ARM64_COFF_SYMBOL_OFFSET + 16] = 3;
         BUSTER_TEST(arguments, object_read(arguments->arena, local_tls_index, arm64_coff_target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
-        ByteSlice near_name_tls_index = object_test_coff_arm64_page_object(arguments->arena, S8("__tls_indexx"), UINT32_C(0x90000008),
+        ByteSlice near_name_tls_index = object_test_coff_arm64_page_object(arguments->arena, S8("_tls_indexx"), UINT32_C(0x90000008),
                                                                             UINT32_C(0xb9400120), 0x0007);
         object_test_coff_write_u16(near_name_tls_index.pointer, OBJECT_TEST_ARM64_COFF_SYMBOL_OFFSET + 12, 0);
         ObjectFile near_name = object_read(arguments->arena, near_name_tls_index, arm64_coff_target);
