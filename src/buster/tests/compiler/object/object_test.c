@@ -4257,6 +4257,60 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer(UnitTestArgume
     return result;
 }
 
+// With no priority group the ELF writer reads every relocation as it is and
+// places none (#990). Both no-group shapes -- no priority arrays, and arrays
+// in which every entry names none, which is what the codegen converter
+// produces -- must write the same bytes. That image must still read back each
+// relocation at its own section and offset, including the ones inside
+// .init_array and .fini_array, with the ledger at three visits per relocation.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_ungrouped_placement(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    for (u32 machine = 0; machine < 2; machine += 1)
+    {
+        TemporalArena scope = arena_begin_temporal(temporary.arena);
+        ObjectTestElfShape shape = {
+            .payload_limit = 64,
+            .extra_sections = 4,
+            .symbol_count = 512,
+            .relocation_count = 100000,
+            .name_limit = 24,
+            .initializer_entries = 96,
+            .aarch64 = machine != 0,
+            .shuffle_relocations = true,
+        };
+        ObjectFile bare = object_test_elf_shape_object(temporary.arena, 0x5eed2000u + machine, shape);
+        ObjectFile stated = bare;
+        for (u32 slot = 0; slot < 2; slot += 1)
+        {
+            ObjectSectionKind kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+            u32 entries = (u32)(bare.sections[kind].data.length / OBJECT_INITIALIZER_ENTRY_SIZE);
+            u32* priorities = arena_allocate(temporary.arena, u32, entries);
+            for (u32 entry = 0; entry < entries; entry += 1)
+            {
+                priorities[entry] = IR_INITIALIZER_PRIORITY_NONE;
+            }
+            stated.initializer_priorities[slot] = priorities;
+            BUSTER_TEST(arguments, entries != 0);
+        }
+        BUSTER_TEST(arguments, !object_test_priority_groups(&bare) && !object_test_priority_groups(&stated));
+        ObjectWriteStatistics planned = {0};
+        BUSTER_TEST(arguments, object_test_elf_writer_readback(temporary.arena, &bare, &planned));
+        BUSTER_TEST(arguments, planned.output_bytes && planned.relocation_visits == (u64)bare.relocation_count * 3);
+        BUSTER_TEST(arguments, object_test_elf_writer_readback(temporary.arena, &stated, &planned));
+        BUSTER_TEST(arguments, planned.output_bytes && planned.relocation_visits == (u64)stated.relocation_count * 3);
+        ObjectArtifact bare_image = object_write(temporary.arena, &bare, OBJECT_FORMAT_ELF64);
+        ObjectArtifact stated_image = object_write(temporary.arena, &stated, OBJECT_FORMAT_ELF64);
+        BUSTER_TEST(arguments, bare_image.error == OBJECT_ERROR_NONE && stated_image.error == OBJECT_ERROR_NONE &&
+                                   bare_image.bytes.length == stated_image.bytes.length &&
+                                   memcmp(bare_image.bytes.pointer, stated_image.bytes.pointer, bare_image.bytes.length) == 0);
+        arena_set_position(temporary.arena, scope.position);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // Exercise append-writer format boundaries without allocating huge payloads.
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_32_writer_limits(UnitTestArguments* arguments)
 {
@@ -5624,6 +5678,9 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     UnitTestResult planned_writer = object_test_elf_planned_writer(arguments);
     result.test_count += planned_writer.test_count;
     result.succeeded_test_count += planned_writer.succeeded_test_count;
+    UnitTestResult ungrouped_placement = object_test_elf_ungrouped_placement(arguments);
+    result.test_count += ungrouped_placement.test_count;
+    result.succeeded_test_count += ungrouped_placement.succeeded_test_count;
     UnitTestResult writer_32_limits = object_test_32_writer_limits(arguments);
     result.test_count += writer_32_limits.test_count;
     result.succeeded_test_count += writer_32_limits.succeeded_test_count;
