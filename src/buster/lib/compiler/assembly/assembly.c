@@ -43,6 +43,7 @@
 //   assembly_source_parse                          the parse phase driver
 //   assembly_relocation_append,                    the emit phase and the
 //   assembly_instructions_emit, assembly_encode    public entry point
+//   assembly_x86_relocation_is_branch              Mach-O BRANCH identity of a PC32
 
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
@@ -8984,6 +8985,7 @@ BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, Strin
         TARGET_CPU_FEATURE_AARCH64_SSBS,
         TARGET_CPU_FEATURE_AARCH64_TRACEV8_4,
         TARGET_CPU_FEATURE_AARCH64_SME,
+        TARGET_CPU_FEATURE_AARCH64_SVE,
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(x86_feature_bits) + BUSTER_ARRAY_LENGTH(aarch64_feature_bits) ==
                     (u32)TARGET_CPU_FEATURE_COUNT - 2);
@@ -9609,6 +9611,27 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_alias(Target target, Assem
     return true;
 }
 
+// GNU as accepts (and objdump prints) the memory-looking `(%dx)` for the
+// IN/OUT port. It names the DX register itself, so only the bare 16-bit DX
+// inside one parenthesis pair qualifies; `(%rdx)`, `0(%dx)` and segment or
+// index spellings stay memory syntax and are rejected like GNU as does.
+BUSTER_GLOBAL_LOCAL bool assembly_x86_att_port_dx_parse(String8 text, AssemblySyntax syntax, AssemblyRegister* result)
+{
+    bool parsed = false;
+    if (syntax == ASSEMBLY_SYNTAX_ATT && text.length >= 2 && text.pointer[0] == '(' && text.pointer[text.length - 1] == ')')
+    {
+        AssemblyRegister reg = {0};
+        String8 inner = assembly_trim(string_slice(text, 1, text.length - 1));
+        parsed = assembly_register_parse(inner, syntax, &reg) && reg.class == ASSEMBLY_REGISTER_GPR && reg.width == 16 &&
+                 reg.index == 2;
+        if (parsed)
+        {
+            *result = reg;
+        }
+    }
+    return parsed;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_applies(AssemblyOpcode opcode, u32 operand_index, u32 operand_count)
 {
     if (opcode == ASSEMBLY_OPCODE_X86_LEA || assembly_x86_opcode_is_rotate(opcode) ||
@@ -10188,6 +10211,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     u32 symbol_count_before_dfv = builder->result.symbol_count;
     bool has_dfv = false;
     u8 dfv = 0;
+    bool port_io_mnemonic = assembly_word_equal(mnemonic, S8("in")) || assembly_word_equal(mnemonic, S8("out"));
     while (operand_start < operands_text.length)
     {
         if (operand_count >= BUSTER_ARRAY_LENGTH(operands))
@@ -10249,6 +10273,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             text = assembly_trim(string_slice(text, 1, text.length));
         }
         if (!att_immediate && assembly_register_parse(text, syntax, &operand->reg))
+        {
+            operand->kind = ASSEMBLY_OPERAND_REGISTER;
+        }
+        else if (port_io_mnemonic && assembly_x86_att_port_dx_parse(text, syntax, &operand->reg))
         {
             operand->kind = ASSEMBLY_OPERAND_REGISTER;
         }
@@ -10805,9 +10833,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                              (assembly_word_equal(mnemonic, S8("rstorssp")) || assembly_word_equal(mnemonic, S8("clrssbsy")));
     bool implicit_att_memory = syntax == ASSEMBLY_SYNTAX_ATT;
     if (implicit_att_memory && assembly_word_equal(mnemonic, S8("cldemote"))) implicit_memory_width = 8;
-    else if (implicit_att_memory && (assembly_word_equal(mnemonic, S8("stmxcsr")) || assembly_word_equal(mnemonic, S8("ldmxcsr"))))
-        // MXCSR is one 32-bit control word and AT&T carries no size suffix on
-        // the spelling a libc's <fenv.h> uses.
+    else if (assembly_word_equal(mnemonic, S8("stmxcsr")) || assembly_word_equal(mnemonic, S8("ldmxcsr")))
+        // MXCSR is one 32-bit control word: AT&T carries no size suffix on
+        // the spelling a libc's <fenv.h> uses, and GNU as also infers m32 for
+        // an unsized Intel `[mem]`. An explicit ptr width is kept and checked.
         implicit_memory_width = 32;
     else if (implicit_att_memory &&
              (assembly_word_equal(mnemonic, S8("wrssd")) || assembly_word_equal(mnemonic, S8("wrussd"))))
@@ -12760,6 +12789,8 @@ BUSTER_GLOBAL_LOCAL void assembly_aarch64_base_instruction_parse(AssemblyBuilder
                             : status == A64_BASE_ASSEMBLY_REQUIRES_FULLFP16 ? S8("instruction requires the fullfp16 target feature")
                             : status == A64_BASE_ASSEMBLY_REQUIRES_NEON ? S8("instruction requires the neon target feature")
                             : status == A64_BASE_ASSEMBLY_REQUIRES_LSE ? S8("instruction requires the lse target feature")
+                            : status == A64_BASE_ASSEMBLY_REQUIRES_SVE_OR_SME
+                                  ? S8("instruction requires the sve or sme target feature")
                             : lane_result == ASSEMBLY_AARCH64_COMPLEX_SIMD_LANE_FEATURE_TARGET_UNSUPPORTED
                                   ? S8("instruction is unsupported by the selected target features")
                                                                        : (String8){0};
@@ -14745,6 +14776,17 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
     {
         builder->result.bytes.length = builder->output_count;
     }
+}
+
+bool assembly_x86_relocation_is_branch(ByteSlice bytes, AssemblyRelocation relocation)
+{
+    bool pc32 = relocation.kind == ASSEMBLY_RELOCATION_X86_PC32 && relocation.offset <= bytes.length &&
+                sizeof(u32) <= bytes.length - relocation.offset;
+    bool direct = pc32 && relocation.offset >= 1u &&
+                  (bytes.pointer[relocation.offset - 1u] == 0xe8u || bytes.pointer[relocation.offset - 1u] == 0xe9u);
+    bool conditional = pc32 && relocation.offset >= 2u && bytes.pointer[relocation.offset - 2u] == 0x0fu &&
+                       (bytes.pointer[relocation.offset - 1u] & 0xf0u) == 0x80u;
+    return direct || conditional;
 }
 
 AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncodeOptions options)

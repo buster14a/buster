@@ -67,6 +67,56 @@ explicitly; the existing portable write-failure tests still run. This is
 controlled failure-path coverage, not a real disk-failure or crash-durability
 claim. Run `ide test --module=compiler_diagnostic_tests --verbose=1 --ci=1`.
 
+## In-memory execution (`ide run`)
+
+Use `ide run <C compiler options and inputs> [-- <program arguments>]`.
+Arguments before the first literal `--` are compiler options and inputs;
+everything after it is passed to the program, and omitting the separator means
+there are no program arguments. The first input path becomes `argv[0]` exactly
+as spelled, including `-` for source read from standard input. The program is
+called as `int main(int, char **, char **)`, with the current process
+environment as `envp`; a returned `int` becomes the `ide` process exit status.
+Calling `exit()` instead terminates the `ide` process directly.
+
+The command runs the ordinary C frontend, canonical-IR lowering, native
+code-generation and `link_objects` merge, then passes the merged object to
+`jit_link_object`. It creates neither an intermediate object file nor an
+executable image. Included headers are still read from the filesystem. When
+the source input is `-`, `ide` consumes standard input to EOF before calling
+the program, so the program sees its standard input at EOF.
+
+Failures exit with status 1, print `run: error:` to stderr, and execute no
+program code. Execution requires an x86-64 Linux host and an x86-64 Linux
+target; other hosts report
+`run: error: ide run supports only x86-64 Linux hosts`, and a foreign target
+is named in its refusal. Queries, non-link actions (`-c`, `-S`, `-E`,
+`-fsyntax-only`), explicit `-o`, `-shared`, `-pie`, LLVM bitcode, GPU targets,
+and linker/library/framework options including `-l` are refused. `ide run`
+binds only its documented host imports and loads no libraries.
+
+With `BUSTER_LINK_LIBC` on the supported host, the only imported functions
+bound by the command are:
+
+```text
+puts, putchar, printf, sprintf, snprintf, vprintf, vsnprintf, getchar,
+strlen, strcmp, strncmp, strcpy, strncpy, strcat, strchr, strrchr, strstr,
+memcpy, memmove, memset, memcmp, malloc, calloc, realloc, free, atoi, atol,
+strtol, strtoul, strtod, abs, labs, qsort, rand, srand, exit, abort, write,
+read, __errno_location
+```
+
+Without `BUSTER_LINK_LIBC`, the binding table is empty. Data imports such as
+`stdout`, `stderr` and `environ` are unsupported, as are TLS references;
+nonempty initializer/finalizer arrays are refused. The underlying JIT's Apple
+Silicon implementation remains subject to its one-`MAP_JIT`-region
+restriction, although `ide run` itself is supported only on x86-64 Linux.
+This is in-process execution, not a sandbox: the program has the `ide`
+process's privileges and can affect it. After a returned `main`, the JIT
+program is released and its arena is destroyed; when the program calls
+`exit()`, the operating system reclaims them as the process terminates.
+Executed test coverage is x86-64 Linux only; shebang execution is not
+implemented.
+
 ## Opt-in native translation-unit lanes
 
 `-fcompile-jobs=N` accepts a positive 32-bit worker request. Omission (or
@@ -309,7 +359,8 @@ no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
 `-mpclmul`) are `-mattr=+feature` and `-mattr=-feature` in the same ordered
 override list, so the last option naming a feature wins and they refine a
 `-march` level wherever they sit. The feature names are the ones `-mattr`
-takes, dotted spellings included. On x86-64 they also follow GCC's implied
+takes, dotted spellings included. On AArch64, `sve` is a feature name and is
+not included in CPU-model defaults. On x86-64 they also follow GCC's implied
 features: `-mavx2` adds AVX, and `-mno-avx2` / `-mno-avx` also drop every
 enabled feature that requires it (AVX-512, FMA, VNNI, ...). The dependency pairs
 are `target_x86_feature_requirements` in `target.c`: the rules
@@ -402,7 +453,12 @@ metadata validates the exact accumulator, port register and immediate range.
 Source selection consumes both operands even though the imported XED rows mark
 the accumulator and DX as implicit. The hidden `OeAX()` accumulator selects
 AX or EAX and has no ModRM field; its width determines the word prefix rather
-than DX's fixed 16-bit width.
+than DX's fixed 16-bit width. The memory-looking `(%dx)` port spelling that
+GNU objdump prints and GNU as accepts names DX itself
+(`assembly_x86_att_port_dx_parse`), so only a bare parenthesized `%dx` on
+`in`/`out` qualifies; `(%rdx)`, `(%edx)`, displacement, segment and index forms
+remain invalid. Unsized Intel `ldmxcsr`/`stmxcsr [mem]` infers MXCSR's only m32
+width, as AT&T's unsuffixed spelling already does.
 `assembly_test_att_port_suffixes` checks exact bytes against matching Intel
 spellings, including immediate boundaries, word prefixes and invalid register,
 memory, suffix-width and 64-bit neighbours. It never executes port I/O.
@@ -1531,9 +1587,31 @@ switches, runtime paths, version scripts, and other `-z` modes are refused.
 
 `-Wp,` and `-Wa,` are unsupported and are never warning options. This includes
 preprocessor macro/include operations and dependency requests. Direct `-D`,
-`-U`, and `-I` remain available; dependency generation (`-M`, `-MM`, `-MD`,
-`-MMD`, `-MF`, `-MT`, `-MP`) is refused in every spelling. A failed request
-preserves any existing artifact instead of reporting a successful stale build.
+`-U`, and `-I` remain available; `-Wp,-M*` stays refused. The driver supports
+the bounded `-MD`/`-MMD` dependency-file contract described below; standalone
+`-M`, `-MM`, and `-MG` remain unsupported.
+
+## Dependency files
+
+`-MD` and `-MMD` write a Make-compatible depfile for C `-c` output. The default
+depfile path comes from the object path by removing only the basename's last
+extension and appending `.d`; `-MF` overrides it. `-MT` adds a raw target,
+`-MQ` adds an escaped target, and the default target is the escaped object path.
+Multiple target options retain command-line order. `-MP` adds phony rules for
+header prerequisites. `-MF`, `-MT`, `-MQ`, and `-MP` require `-MD` or `-MMD`;
+explicit `-MF`/target options cannot be used with multiple inputs.
+
+Prerequisites come from resolved preprocessor include identities, in
+first-inclusion order; the main source comes first unless compiling stdin.
+Repeated identities appear once, builtin headers and `<command-line>` do not
+appear, and forced includes follow the main source. `-MMD` excludes headers
+found in system include paths and all headers included from a system header.
+Makefile-special spaces, tabs, dollar signs, and `#` characters are escaped.
+Paths containing a newline or carriage return cannot be represented and fail
+with a file-write diagnostic.
+The depfile is atomically published only after successful compilation and
+object publication, so a failed compile preserves existing object and depfile
+contents.
 
 ## Warning options
 
@@ -1602,6 +1680,12 @@ ordinary compilation focused on time to an artifact: it avoids constructing
 source debug models and their larger object payloads unless requested.
 `-g` selects DWARF 4 for native ELF/Mach-O targets and CodeView for Windows
 objects. Unwind information remains independent of source debug information.
+
+A linked Windows image's PDB (`pdb_build`) gives its TPI stream a hash stream:
+one `hashTypeRecord` bucket per record modulo `0x3ffff` (`pdb_type_record_hash`)
+and a sparse type-index offset entry per 8 KiB of records. DbgHelp (cdb,
+WinDbg, `symchk`, `dbh`) faults with `0xc0000005` loading a PDB whose TPI
+stream names no hash stream (#3411). The regression is `pdb_test_tpi_hashes`.
 
 With `-g`, named scalar locals that need more than one defining instruction to
 describe stay in distinct frame slots, so their location lists follow stores
@@ -1774,9 +1858,19 @@ suffix to classify, so it needs `-x c` or `-x cpp-output`, or `-E`, which reads
 it as C source; without either, or under another language, the parser refuses
 it, and it may appear only once. The source text travels in
 `CompilerDriverInvocation.standard_input`: the `cc` command reads standard
-input to EOF into it after parsing, and embedding callers fill it themselves. A
-null pointer there fails the input as a read error. Diagnostics and `__FILE__`
-name the input `-`, and `-c` without `-o` writes `-.o`, as Clang does.
+input to EOF into it after parsing, and API callers fill it themselves. A null
+pointer there fails the input as a read error. Diagnostics and `__FILE__` name
+the input `-`, and `-c` without `-o` writes `-.o`, as Clang does.
+
+The embedding facade instead sets the API-only
+`CompilerDriverInvocation.input_source` for one C input. A non-null pointer
+means the bytes are used directly and `input_paths[0]` supplies only the
+virtual filename for diagnostics, `__FILE__`, and quoted-include lookup; the
+driver does not open that path and assigns no filesystem identity. An empty
+source is valid when its pointer is non-null. `retain_object` is another
+API-only field: for a single `-c` input it keeps `result.object` in the caller's
+arena and suppresses file output. The public embedding module owns the arena
+through object serialization or JIT release.
 `compiler_driver_test_probe_spellings` covers the admission rules, both routes
 and the `-static`/`-mtune` spellings (GitHub #2851).
 
