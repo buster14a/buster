@@ -251,7 +251,7 @@ direct matrix schedules the command beside `clang_analyze` too). A production
 header that defines functions must be included before the test region, as
 `simd.h` is.
 
-Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `bench_throughput`, `bench_throughput_ci`, `generate`, `build` (default), `clang_analyze`, `optnone_audit`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`, `test_cpython`, `test_raddebugger`,
+Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `bench_throughput`, `bench_throughput_ci`, `compiler_profile_qualification`, `generate`, `build` (default), `clang_analyze`, `optnone_audit`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`, `test_cpython`, `test_raddebugger`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
 `test_timing_summary_self_test`, `musl_directory_self_test`, `generate_guard_self_test`,
@@ -263,6 +263,15 @@ Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `benc
 `test_all_combinations`,
 `test_all_combinations_ci`, `test_uefi`, `source_size`; `self_host_from_existing` is an internal
 build-driver worker command used only by the pooled artifact-fanout target.
+
+The native `compiler_profile_qualification` command owns disabled, explicitly
+admitted sampling research packets (#3212). `--plan` prints the immutable
+acquisition/pilot/confirmation ledger and `--self-test` exercises hosted
+parser, identity, budget and process-containment fixtures. Its trusted workflow
+`--execute` path validates bounded API records before claiming or preparing
+anything; it is not an ad-hoc host runner. Native execution preserves every
+attempt and never infers qualification from a child exit. See
+[sampling qualification](../compiler-main-sampling.md).
 
 `source_size` reports the tracked bytes of a revision by category and enforces
 the per-change ratchet on hand-maintained production and build code; see

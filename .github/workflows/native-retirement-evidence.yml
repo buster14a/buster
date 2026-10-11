@@ -46,18 +46,35 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - name: Check out evidence validation scripts
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ env.BUSTER_RETIREMENT_CANDIDATE }}
           path: validation
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: validation
+          source-repository: ${{ github.repository }}
       - name: Check out candidate implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ env.BUSTER_RETIREMENT_CANDIDATE }}
           path: candidate
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate
+          source-repository: ${{ github.repository }}
       - name: Check out pinned cJSON closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -66,6 +83,12 @@ jobs:
           path: candidate/external/cjson
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity 3
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate/external/cjson
+          source-repository: DaveGamble/cJSON
       - name: Check out pinned DoomGeneric closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -74,6 +97,12 @@ jobs:
           path: candidate/external/doom
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity 4
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate/external/doom
+          source-repository: ozkl/doomgeneric
       - name: Check out pinned LZ4 closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -82,6 +111,12 @@ jobs:
           path: candidate/external/lz4
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity 5
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate/external/lz4
+          source-repository: lz4/lz4
       - name: Check out pinned yyjson closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -90,6 +125,12 @@ jobs:
           path: candidate/external/yyjson
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity 6
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate/external/yyjson
+          source-repository: ibireme/yyjson
       - name: Check out pinned stb closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -98,6 +139,12 @@ jobs:
           path: candidate/external/stb
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity 7
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate/external/stb
+          source-repository: nothings/stb
       - name: Check out pinned zlib closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -106,6 +153,12 @@ jobs:
           path: candidate/external/zlib
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity 8
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate/external/zlib
+          source-repository: madler/zlib
       - name: Check out pinned musl closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -114,6 +167,12 @@ jobs:
           path: candidate/external/musl
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity 9
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate/external/musl
+          source-repository: ifduyue/musl
       - name: Bootstrap candidate build driver
         working-directory: candidate
         run: |
@@ -248,6 +307,12 @@ jobs:
             --reference-supplements \
             --require-clean-candidate \
             --require-clean-acceptance
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: candidate/evidence
       - name: Retain raw evidence and build recipes
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -316,11 +381,23 @@ jobs:
             sanitizer: not-run
             sanitizer_reason: runner-llvm-package-omits-aarch64-asan-runtime
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ${{ matrix.runner }}
+          matrix-index: ${{ strategy.job-index }}
       - name: Check out exact implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ env.BUSTER_RETIREMENT_CANDIDATE }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Build and freeze hosted Clang compiler
         id: strict_build_unix
         if: ${{ matrix.platform == 'unix' }}
@@ -446,6 +523,12 @@ jobs:
         run: |
           cp "$RUNNER_TEMP/buster-ci/result.json" "$RUNNER_TEMP/buster-ci/summary.md" evidence/
           "${{ matrix.python }}" tools/ci_pack_evidence.py --source evidence --output "$RUNNER_TEMP/strict-upload"
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() && steps.strict_bundle.outcome == 'success' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/strict-upload
       - name: Retain strict evidence
         if: ${{ !cancelled() && steps.strict_bundle.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -454,6 +537,12 @@ jobs:
           path: ${{ runner.temp }}/strict-upload/
           retention-days: 7
           if-no-files-found: error
+      - name: Retain machine records in existing evidence 2
+        if: ${{ !cancelled() && steps.strict_bundle.outcome != 'success' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: evidence
       - name: Retain raw strict evidence after packaging failure
         if: ${{ !cancelled() && steps.strict_bundle.outcome != 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -472,6 +561,11 @@ jobs:
       CENSUS_RESULT: ${{ needs.census.result }}
       STRICT_RESULT: ${{ needs.strict_differential.result }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - name: Require census and every native strict result
         shell: bash
         run: |

@@ -31,10 +31,21 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: 6fc08ec475694aeb3b1062c1d390483a69668508
           persist-credentials: false
+      - name: Record actual baseline checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Reproduce the inspected baseline fixed point
         shell: bash
         run: |
@@ -50,11 +61,22 @@ jobs:
     env:
       BUSTER_TEST_JOBS: '2'
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Bootstrap the native build driver
         id: bootstrap
         shell: bash
@@ -90,14 +112,66 @@ jobs:
           set -euo pipefail
           build/Release/ide cc -target x86_64-linux -march=baseline -nostdinc -g0 -fregister-allocator=fast -fno-machine-fallback -fverify-codegen -finvestigation=build/native-investigation.bcap -finvestigation-function=cast_unsigned -c src/buster/tests/compiler/driver/fixtures/investigation.c -o build/native-investigation.o 2>&1 | tee "$RUNNER_TEMP/native-investigation-logs/capture.log"
           build/Release/ide investigate build/native-investigation.bcap build/native-investigation.o --expect-revision="$GITHUB_SHA" 2>&1 | tee build/native-investigation.txt
-      - name: Report the source-size ratchet
+      - name: Resolve the source-size comparison base
+        id: source-size-base
         if: ${{ !cancelled() && steps.bootstrap.outcome == 'success' }}
         shell: bash
         env:
-          SOURCE_SIZE_BASE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
+          SOURCE_SIZE_EVENT: ${{ github.event_name }}
+          SOURCE_SIZE_PR_HEAD_REVISION: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/buster-investigation-build" source_size --base "$SOURCE_SIZE_BASE_REVISION" 2>&1 | tee "$RUNNER_TEMP/native-investigation-logs/source-size.log"
+          checked_out_revision="$(git rev-parse --verify "HEAD^{commit}")"
+          if [[ "$checked_out_revision" != "$GITHUB_SHA" ]]; then
+            printf 'error: checkout revision %s does not match event revision %s\n' "$checked_out_revision" "$GITHUB_SHA" >&2
+            exit 1
+          fi
+
+          if [[ "$SOURCE_SIZE_EVENT" == "pull_request" ]]; then
+            if [[ -z "$SOURCE_SIZE_PR_HEAD_REVISION" ]]; then
+              printf 'error: pull request event has no head revision for source-size base verification\n' >&2
+              exit 1
+            fi
+            parent_line="$(git rev-list --parents -n 1 "$GITHUB_SHA")"
+            read -r -a parents <<< "$parent_line"
+            if [[ "${#parents[@]}" -ne 3 || "${parents[0]}" != "$GITHUB_SHA" || "${parents[2]}" != "$SOURCE_SIZE_PR_HEAD_REVISION" ]]; then
+              printf 'error: PR revision is not the expected two-parent merge (revision=%s parents="%s" event_head=%s)\n' "$GITHUB_SHA" "$parent_line" "$SOURCE_SIZE_PR_HEAD_REVISION" >&2
+              exit 1
+            fi
+            source_size_base="${parents[1]}"
+            mode=pull-request-first-parent
+          elif [[ "$SOURCE_SIZE_EVENT" == "workflow_dispatch" ]]; then
+            # A manual smoke has no PR base; preserve its exact-revision comparison.
+            source_size_base="$GITHUB_SHA"
+            mode=workflow-dispatch-exact-head
+          else
+            printf 'error: unsupported source-size event %s\n' "$SOURCE_SIZE_EVENT" >&2
+            exit 1
+          fi
+
+          printf 'mode=%s\nbase_revision=%s\n' "$mode" "$source_size_base" >> "$GITHUB_OUTPUT"
+          printf 'NATIVE_INVESTIGATION_SOURCE_SIZE_BASE mode=%s revision=%s\n' "$mode" "$source_size_base"
+      - name: Report the source-size ratchet
+        if: ${{ !cancelled() && steps.bootstrap.outcome == 'success' && steps.source-size-base.outcome == 'success' }}
+        shell: bash
+        env:
+          SOURCE_SIZE_BASE_MODE: ${{ steps.source-size-base.outputs.mode }}
+          SOURCE_SIZE_BASE_REVISION: ${{ steps.source-size-base.outputs.base_revision }}
+        run: |
+          set -euo pipefail
+          case "$SOURCE_SIZE_BASE_MODE" in
+            pull-request-first-parent)
+              [[ "$SOURCE_SIZE_BASE_REVISION" != "$GITHUB_SHA" ]] || { printf 'error: pull-request source-size base must precede the merge revision\n' >&2; exit 1; }
+              ;;
+            workflow-dispatch-exact-head)
+              [[ "$SOURCE_SIZE_BASE_REVISION" == "$GITHUB_SHA" ]] || { printf 'error: manual source-size base must equal the selected revision\n' >&2; exit 1; }
+              ;;
+            *)
+              printf 'error: unsupported source-size base mode %s\n' "$SOURCE_SIZE_BASE_MODE" >&2
+              exit 1
+              ;;
+          esac
+          "$RUNNER_TEMP/buster-investigation-build" source_size --rev "$GITHUB_SHA" --base "$SOURCE_SIZE_BASE_REVISION" 2>&1 | tee "$RUNNER_TEMP/native-investigation-logs/source-size.log"
       - name: Retain the native generated acknowledgment candidate
         # Generate after capture; this changes metadata in the working tree.
         # A failed ratchet remains failed. Maintainers review before publication.
@@ -110,6 +184,12 @@ jobs:
           printf 'SOURCE_SIZE_BASELINE_GENERATED_BEGIN revision=%s\n' "$GITHUB_SHA"
           cat "$RUNNER_TEMP/native-investigation-logs/source-size-baseline.txt"
           printf 'SOURCE_SIZE_BASELINE_GENERATED_END\n'
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/native-investigation-logs
       - name: Retain investigation evidence even on failure
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

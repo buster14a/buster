@@ -286,6 +286,24 @@ The psABI's LAHF-SAHF has no target feature and is implied by long mode.
 `-mtune=<model>` is accepted with any nonempty value, `native` included, and
 ignored: it selects only a scheduling model, and instruction selection here has
 no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
+`-m<feature>` and `-mno-<feature>` (`-mavx2`, `-msse4.1`, `-mno-avx2`,
+`-mpclmul`) are `-mattr=+feature` and `-mattr=-feature` in the same ordered
+override list, so the last option naming a feature wins and they refine a
+`-march` level wherever they sit. The feature names are the ones `-mattr`
+takes, dotted spellings included. On x86-64 they also follow GCC's implied
+features: `-mavx2` adds AVX, and `-mno-avx2` / `-mno-avx` also drop every
+enabled feature that requires it (AVX-512, FMA, VNNI, ...). The dependency pairs
+are `target_x86_feature_requirements` in `target.c`: the rules
+`target_cpu_features_are_valid` enforces plus GCC's SSE chain, XSAVE for AVX and
+AMX-TILE, and the FMA4/XOP/AVX512VP2INTERSECT edges. Where the validator is
+stricter than GCC 13 the table follows the validator (VAES needs AVX2,
+VPCLMULQDQ needs AVX, AVX512VBMI2 and AVX512BITALG need AVX512BW), so a closed
+set is always accepted. `-mattr` deliberately stays exact: it
+applies only the named features and the combination check refuses the rest
+(`-mattr=-avx2` on an AVX-512 set is `invalid target feature combination`).
+`-mno-sse2` is refused by name because SSE2 is part of the x86-64 baseline here.
+Rejected spellings are listed in the table below (GitHub #1418).
+`-march=`, `-mcpu=`, `-mtune=`, `-mattr=` and `-masm=` keep their own meanings.
 `-v` reports the selected CPU, the sorted effective feature set,
 and maximum native vector width. `-target`/`--target` strings are
 `arch[-vendor][-os][-environment]`: the vendor and environment components stay
@@ -392,13 +410,22 @@ counters beside `IR_LOCAL_PROMOTION`; see the
 `-fc-ast-pilot[=implicit|hybrid|explicit]` (default off; the bare flag is
 `implicit`) builds the [implicit postorder syntax
 tree](frontend/ast.md#driver-pilot-hook) of each C input after a successful
-`c_preprocess` and before `c_parse_ast`, inside the parse phase, so its time
-lands in `parse_ns`. The tree feeds no later stage: with the flag the object is
-byte-identical, and a tree the builder rejects fails the unit with the parse
-error class and a located diagnostic published like `c_parse_ast`'s. It does
-nothing for `-E`, assembly inputs or the other languages. Any other layout
-value is an argument error (`unsupported -fc-ast-pilot layout: <value>`).
-Verbose compilation prints `C_AST` and `C_AST_WALK` rows beside
+`c_preprocess`, inside the parse phase, so its time lands in `parse_ns`. The
+unit's declaration records then come from the tree
+([`c_parse_ast_from_tree`](frontend/ast.md#declaration-split-from-the-tree)),
+which hands any unit that `c_parse_ast` would diagnose or read differently
+back to `c_parse_ast`. Semantic analysis answers function-body
+expression-type queries from the tree where it can (the
+[tree expression typer](frontend/ast.md#tree-expression-typer)); no other
+stage reads it. Only under the flag does analysis share the primitive and
+pointer type rows those queries mint
+([interned rows](frontend/ast.md#interned-rows)). With the flag the object
+and every diagnostic are byte-identical, and a tree the builder rejects fails
+the unit with the parse error class and a located diagnostic published like
+`c_parse_ast`'s. It does nothing for `-E`, assembly inputs or the other
+languages. Any other layout value is an argument error
+(`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints
+`C_AST`, `C_AST_WALK`, `C_AST_TYPES` and `C_AST_SPLIT` rows beside
 `C_TYPE_LAYOUT`.
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
@@ -681,7 +708,8 @@ remains open for unrelated encoding defects and further proof.
 
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
-suffixes (so `.init_array.00101` keeps its priority), exact `.init`/`.fini`,
+suffixes (so `.init_array.00101` keeps its priority; `.preinit_array` takes
+none, as `ld` runs only that exact name), exact `.init`/`.fini`,
 and the existing DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`,
 `.debug_str`, `.debug_loc`, `.debug_ranges`, `.debug_addr`,
 `.debug_str_offsets`, `.debug_line_str`, `.debug_rnglists`,
@@ -1033,7 +1061,10 @@ linked object. An unindexed ELF member counts every global with a non-zero secti
 index, reserved `SHN_ABS`, `SHN_COMMON` and `SHN_XINDEX` included, as a definition,
 exactly as a ranlib index does. The member is selected in archive order and the full
 reader refuses it with member and symbol attribution; the link does not report an
-unattributed unresolved symbol or fall through to a later member.
+unattributed unresolved symbol or fall through to a later member. Unindexed Mach-O
+and COFF members count their forms of the same definitions -- external `N_ABS`,
+`N_INDR` and `IMAGE_SYM_ABSOLUTE` symbols, and commons (an undefined external with a
+non-zero value) -- the same way (#1243).
 
 `compiler_driver_archive_test_lazy` exercises all three object formats, 32/64-bit
 GNU and BSD indexes, BSD extended names, unindexed input, transitive dependencies,
@@ -1196,17 +1227,28 @@ order and `-no-pie` undoes only `-pie`. Linking either kind compiles the C
 inputs of that invocation with the position-independent code model.
 The last of `-fPIC`, `-fpic`, `-fPIE` and `-fpie` selects the requested
 model; `-fno-pic` clears it, while `-fno-pie` cancels only a PIE spelling.
-On x86-64 ELF the positive spellings select the implemented PIC reference
-model. Native AArch64 ELF C generation rejects a surviving positive request
-by its spelling before source mapping or output publication; direct invocation
-API requests name the unavailable model. Cancellation, preprocessing,
+On x86-64 and AArch64 ELF the positive spellings select the implemented PIC
+reference model (see the position-independent code bullets in
+[machine.md](machine.md)). On AArch64 ELF the model makes `-fPIC` objects
+acceptable to `ld.lld -shared -z text`; Buster's own `-shared` and `-pie`
+writers still exist only for x86-64 Linux. Thread-local access under AArch64
+ELF PIC is refused by a named code-generation diagnostic (emitting TLSDESC is
+not implemented; foreign TLSDESC objects are relaxed at link time, see the
+AArch64 TLS paragraph below) and publishes no output. Cancellation, preprocessing,
 syntax-only and assembly/prebuilt-only input routes retain their behavior.
 Mach-O and COFF keep their existing target models; Wasm/eBPF compatibility
 behavior is unchanged. LLVM-bitcode and direct backend model requests remain
-an audit residual, so this bounded refusal is only partial issue #1289 support.
+an audit residual of issue #1289.
 On any other target a link that asks for either image is refused as an
 unsupported option, while a compile-only invocation ignores the link option,
 as GCC does.
+
+`-fvisibility=default|hidden|internal` (the last wins) sets the visibility of
+definitions that carry neither a `visibility` attribute nor an active
+`#pragma GCC visibility`; it never changes a plain `extern` declaration, as in
+GCC. `internal` is emitted as hidden. `-fvisibility=protected` and any other
+value are argument errors, and a GPU target ignores the option. The bit
+reaches `st_other` on ELF only; Mach-O and COFF objects do not record it.
 
 The default fixed-address dynamic executable
 (`link_native_executable_elf64_x86_64_dynamic`, which the AArch64 and Android
@@ -1231,6 +1273,46 @@ static executable; hosted ELF links import `libc.so.6` dynamically. A
 configure probe that links with `-static` therefore learns the truth instead of
 receiving a dynamic executable (GitHub #2851).
 
+`-nostdlib`, `-nostartfiles` and `-nodefaultlibs` follow the same split: `-c`,
+`-S`, `-E` and `-fsyntax-only` accept and ignore them, as GCC does when nothing
+is linked, and a link refuses the first one named as
+`unsupported option: -nostdlib (...)`. Buster implements none of their link
+semantics (a link without the C runtime start-up files or default libraries), so
+they are never silently ignored where they would matter (GitHub #1418).
+
+`-include FILE` and `-includeFILE` (GitHub #1418) process each file as
+`#include "FILE"` before the first line of every C and assembly translation
+unit, in command-line order, after `-D`/`-U` have been applied. The names become
+`#include` lines of a synthetic `<command-line>` frame stacked above the
+primary file's frame (`forced_includes` in `CPreprocessOptions`), so the
+primary file's `__LINE__`, `__FILE__` and diagnostic lines never shift. Lookup
+approximates GCC: the working directory first (the synthetic file's directory
+is `.`), then the `-I` chain, then builtin headers; the primary file's
+directory is not searched. An absolute name is opened directly. A missing file
+is the ordinary `included file was not found: FILE` diagnostic located in
+`<command-line>`, and the compilation fails. A name with a double quote or line
+break is refused, as is a joined spelling that begins with `-`
+(`-include-pch` and `-iprefix` stay unsupported options), and `-include` with a
+GPU target is refused because the external GPU pipeline does not forward it.
+
+### Deliberately rejected GCC/Clang spellings
+
+Each row is covered by a driver test. A spelling is refused, never ignored
+silently, when ignoring it would change what the user asked for. Open requests
+are tracked on GitHub #1418.
+
+| Spelling | Result | Reason |
+|---|---|---|
+| `-nostdlib`, `-nostartfiles`, `-nodefaultlibs` when linking | `unsupported option: -nostdlib (...)` (first one named) | Link semantics (no C runtime start-up files or default libraries) are not implemented. With `-c`, `-S`, `-E` or `-fsyntax-only` they are accepted and ignored, as GCC and Clang do. |
+| `-nostdlib++`, `-nostdlibs`, `-nolibc` | `unsupported option` | Not spellings of the above. |
+| `-mfoo`, `-mno-foo` (no architecture has the feature) | `unsupported option: -mfoo` | `-m<feature>` takes only the names `-mattr` takes. |
+| `-mavx2` for a non-x86 target or a GPU target | `unsupported option: -mavx2` | The feature belongs to another architecture, or the GPU pipeline has no feature overrides. |
+| `-m32`, `-mred-zone`, `-mno-red-zone` | `unsupported option` | They name no target feature and have no implementation. |
+| `-mAVX2`, `-mavx2=1`, `-m`, `-mno-` | `unsupported option` | Feature names are exact lower case; `=` forms belong to `-march=`, `-mcpu=`, `-mtune=`, `-mattr=`, `-masm=`. |
+| `-mno-sse2` | `unsupported option: -mno-sse2 (SSE2 is part of the x86-64 baseline)` | Every x86-64 target here requires SSE2. |
+| `-xc++` and other unknown joined `-x<lang>` | `unsupported language: c++` | Same language names as `-x <lang>`; C is the only source frontend. |
+| bare `-x` | `missing argument after -x` | As GCC and Clang. |
+
 `link_native_image_elf64_x86_64_position_independent` writes both kinds as an
 ET_DYN at base zero. Its orientation comment is the contract; in short:
 
@@ -1247,7 +1329,10 @@ ET_DYN at base zero. Its orientation comment is the contract; in short:
   symbol binds to the slot. The slot planning (`link_elf_copy_plan_build`,
   including the library's alias names such as `environ`/`__environ`) is shared
   with the fixed-address writer.
-- A shared object exports every defined default-visibility symbol, leaves
+- A shared object exports every defined default-visibility symbol (hidden ones,
+  from `__attribute__((visibility("hidden")))`, `#pragma GCC visibility` or
+  `-fvisibility=hidden`, stay out of `.dynsym`; see "Symbol visibility" in
+  [linkage](frontend/linkage.md)), leaves
   undefined ones for the loader (`-Wl,--no-undefined`/`-z,defs` restore the
   executable's rule), keeps `.init_array`/`.fini_array` for the loader, takes
   `DT_SONAME` from `-Wl,-soname,NAME`, and records symbol versions like the
@@ -1294,6 +1379,85 @@ initialized/zero TLS reads before and after mutation. Malformed MOV sites
 fail without replacing output. The driver emits its `-fPIC` hint only when
 the ELF planner identifies a refused fixed-address relocation; generic
 relocation failures, including malformed TLS sites, do not imply that cause.
+
+AArch64 Linux writes only fixed-address executables (`-shared` and `-pie` are
+refused), so its thread-local access is always resolved at link time, and
+foreign initial-exec and TLS descriptor objects are relaxed to local-exec as
+GNU ld and lld do for static executables (issue 2582). Initial-exec
+(`R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21` 541 and
+`R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC` 542) `adrp xN` / `ldr xN, [xN]`
+becomes `movz xN, #tprel[31:16], lsl #16` / `movk xN, #tprel[15:0]`. The
+general-dynamic descriptor sequence (`R_AARCH64_TLSDESC_ADR_PAGE21` 562,
+`_LD64_LO12` 563, `_ADD_LO12` 564 and `_CALL` 569) `adrp x0` / `ldr Xt, [x0]`
+/ `add x0, x0` / `blr Xt`, which Clang and GCC emit as one adjacent run,
+becomes `movz x0` / `movk x0` with the same halves, then two `nop`s. Both use
+the variant-I offset local-exec uses (`link_aarch64_elf_tprel_offset`; the
+words come from `object_aarch64_elf_tls_ie_relax` and
+`object_aarch64_elf_tls_desc_relax`). The reader accepts RELA entries whose
+words are exactly those instructions (the immediates are canonicalized to
+zero, x0 where the ABI fixes it, a scratch `Xt` of x1..x30) and refuses any
+other word by relocation name. `link_aarch64_tls_relax` heap-sorts the sites
+by section and offset, then scans them once. A descriptor sequence is consumed
+whole: each step must sit four bytes after the previous one, in order, with one
+symbol and addend and one scratch register for its LDR and BLR. An initial-exec
+pair may be non-adjacent, since Clang 18 at `-O2` schedules loads between the
+halves: each section keeps a table of pending ADRPs keyed by destination
+register, and an LDR (base register equal to its destination, 64-bit) pairs
+with the nearest preceding ADRP of that register in the same section, which
+must name the same symbol and addend. Each ADRP is consumed by exactly one
+LDR; a second ADRP for a register that is still pending, an LDR without a
+partner, two LDRs sharing one ADRP, a register, symbol or addend mismatch, or
+an ADRP left unpaired at the end of its section refuses the link. The sort is
+O(n log n). The halves may enclose at most `LINK_AARCH64_TLS_IE_GAP_MAX` (64)
+words, and every one of them must be proven harmless for `xN` or the link is
+refused: it must match a row of `link_aarch64_inert_forms` (load/store
+register in its unsigned-immediate, unscaled, pre/post-index and
+register-offset forms, GPR and FP/SIMD; load/store pair; ADD/SUB immediate,
+shifted and extended register; logical shifted register and immediate, the
+latter with an allocated bitmask; MOVN/MOVZ/MOVK; ADR/ADRP; SBFM/BFM/UBFM;
+UDIV/SDIV and variable shifts; MADD/MSUB and the long and high multiplies;
+CSEL/CSINC/CSINV/CSNEG; `mrs Xt, TPIDR_EL0`; NOP), each narrowed to its
+allocated size/opc/option combinations, and none of the general-register
+fields that row names (Rt/Rd, Rn, Rt2/Ra, Rm; FP/SIMD data registers are not
+general registers, a writeback base is) may equal N. Field value 31 is SP or
+XZR and never N, since the reader limits N to x0..x30. Branches of every
+kind, exception, barrier and other system instructions, any other MRS or MSR,
+and any unlisted or unallocated word refuse the link
+(`link_aarch64_tls_ie_gap_inert`). The pairing scan is therefore O(n + total
+gap). All of it runs against a defined thread-local symbol with a 32-bit
+offset and fails the link before the image is written, as `link.relocation` naming the symbol and the relocation that
+could not start or complete its sequence. The enforced contract is that,
+along the straight-line words from the ADRP to its LDR, nothing observes the
+GOT page the ADRP produced or replaces it before the LDR consumes it, so the
+`movz`/`movk` pair computes the offset the original pair loaded. A branch
+from elsewhere into those words is outside what the linker can see; it is
+safe whenever the incoming path, as the original LDR requires, carries the
+page from a GOTTPREL ADRP of the same symbol and addend, because every such
+ADRP becomes the same `movz Xn, #hi` and every matching LDR the same
+`movk Xn, #lo`. The register-overlap forms the architecture calls CONSTRAINED
+UNPREDICTABLE (for example a writeback base equal to its transfer register)
+are accepted only when none of their registers is N; their permitted
+behaviors change only the named registers or raise UNDEFINED at that word.
+TLS descriptors stay strictly adjacent. The other descriptor forms (560/561
+and the 565-568 `OFF_G1`/`OFF_G0_NC`/`LDR`/`ADD` sequence), the dynamic
+`R_AARCH64_TLSDESC` 1031, and TLS owned by a loader or shared library are
+still refused by name. The tests (the "initial-exec TLS (#2582)" and "TLS
+descriptors (#2582)" blocks of `object_tests`,
+`link_test_aarch64_tls_initial_exec_relaxation` and
+`link_test_aarch64_tls_descriptor_relaxation`) check encodings, including
+adversarial reads, writes, base uses, branches, unrecognized words and
+oversized gaps between non-adjacent halves.
+`compiler_driver_test_aarch64_elf_tls_initial_exec` runs only on Linux
+AArch64 hosts: it compiles `fixtures/aarch64_elf_tls_initial_exec.c` with the
+host compiler at `-O2 -ftls-model=initial-exec`, requires a non-adjacent
+541/542 pair in the object, links it with Buster, checks the relaxed
+`movz`/`movk` words and compares the output with a host-linked control.
+`compiler_driver_test_aarch64_elf_tlsdesc` runs on Linux AArch64 hosts: the
+configured host compiler builds `fixtures/aarch64_elf_tlsdesc.c` with `-fPIC
+-ftls-model=global-dynamic` at `-O0` and `-O2`, Buster links it with a
+Buster-compiled main defining the other thread-local, and the test checks
+every descriptor appears relaxed and the image prints the same values as a
+host-linked control.
 
 ## Pass-through options
 
@@ -1393,21 +1557,37 @@ source debug models and their larger object payloads unless requested.
 `-g` selects DWARF 4 for native ELF/Mach-O targets and CodeView for Windows
 objects. Unwind information remains independent of source debug information.
 
-Plain `-g` keeps code identical to `-g0`, so a named scalar local survives only
-where its value is described by one defining instruction. Locals that are
-reassigned, copied from a parameter or another local, or conditionally
-initialized get an empty location list and show as `<optimized out>` (#2717
-stays partly open for this default path; the proper fix is per-definition
-ranges plus an alias table).
-
-`-fpinned-debug-locals` (with `-g`; `-fno-pinned-debug-locals` is the default
-and the last one wins) makes every named scalar readable. A local stays SSA only
-when its sole write is its entry initializer and that initializer is an
-instruction result no other local already names; every other named local keeps a
-frame slot that its location list covers for the whole function. The cost is
-code: the target does not promote the remaining memory locals into registers
-and FAST/QUALITY frame layout does not coalesce frame objects over disjoint
-lifetimes. The regression is `compiler_driver_test_debug_scalar_local_locations`.
+With `-g`, named scalar locals that need more than one defining instruction to
+describe stay in distinct frame slots, so their location lists follow stores
+through reassignment and control-flow joins. A frame location starts after its
+first entry-block store. A local first stored on a later control-flow path
+gets per-block ranges from a forward must-initialized pass over the published
+CFG (`machine_debug_initialized_build`): the whole of each reachable block
+that every incoming path has written, else the rest of a block after its own
+first write. A write on only some paths therefore never reaches the join, and
+uninitialized frame bytes are never exposed. Ranges are produced in machine
+layout order, and `codegen_canonical_location_append` merges a seed into the
+previous one when it continues the same local with the same whole location,
+so back-to-back blocks become one location-list entry or CodeView
+`S_DEFRANGE_*` record. Past `MACHINE_DEBUG_INITIALIZED_CELL_LIMIT` block-local
+cells, or once a function's deferred ranges would exceed
+`MACHINE_DEBUG_INITIALIZED_RANGE_LIMIT`, the remaining locals stay
+unavailable. The CodeView symbol reserve counts every location range
+(`CODEVIEW_DEFRANGE_RECORD_BYTES`), and a range longer than the 16-bit
+`S_DEFRANGE_*` length is emitted as consecutive records of at most
+`CODEVIEW_DEFRANGE_MAX_LENGTH` bytes rather than clamped. Regressions:
+`codegen_test_debug_local_seed_coverage`,
+`machine_test_debug_value_initialized_blocks`,
+`machine_test_debug_value_initialized_budget`,
+`codeview_test_many_location_ranges` and
+`codeview_test_long_location_range`. A
+local stays SSA only when its sole write is its entry initializer and that
+initializer is an instruction result no other local already names. This costs
+code in debug builds: the target keeps the remaining memory locals in frame
+slots and FAST/QUALITY frame layout does not coalesce these frame objects over
+disjoint lifetimes. `-fno-pinned-debug-locals` is an explicit opt-out;
+`-fpinned-debug-locals` requests the default behavior explicitly. The regression
+is `compiler_driver_test_debug_scalar_local_locations`.
 
 This default also applies when compiler-driver arguments are parsed for an
 embedding caller. The typed invocation API uses its `debug_info` field

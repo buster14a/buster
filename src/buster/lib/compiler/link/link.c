@@ -65,7 +65,13 @@
 // that array comes off the object instead (link_mach_initializer_prepare)
 // and a registrar prepended to the initializer array registers a runner over
 // it with `atexit`. The UEFI writer has neither a stub nor such a loader and
-// refuses the link; link_initializer_plan_empty is that refusal.
+// refuses the link; link_initializer_plan_empty is that refusal. A dynamic
+// ELF executable first moves its `.preinit_array` entries into writable data
+// for DT_PREINIT_ARRAY (link_elf_preinit_array_split), because only the loader
+// can run them before its shared libraries' constructors. A GNU IFUNC is
+// rebound before writer dispatch into a thunk and a slot, filled by a resolver
+// runner that is an executable's first initializer or by a shared object's
+// R_X86_64_IRELATIVE (link_elf_indirect_functions_rebind).
 //
 // A second rule crosses the dynamic ELF writers: imported data reaches an
 // executable through a copy relocation (every imported object in a
@@ -107,6 +113,14 @@
 // it without -rdynamic (link_elf_symbol_referenced_by_library). ELF executable
 // TLS exports reuse link_elf_thread_local_offset and packed loaded section indices;
 // their dynamic symbols carry STT_TLS offsets rather than image addresses.
+//
+// AArch64 fixed-address TLS relaxation (link_aarch64_tls_relax): sites are
+// heap-sorted by section and offset; an initial-exec ADRP/LDR pair may have
+// unrelated instructions between the halves and is matched by register
+// (link_aarch64_tls_pending_drain reports an unpaired ADRP), while a TLS
+// descriptor sequence must still be four adjacent words. Each enclosed word
+// must match a link_aarch64_inert_forms row that names no field equal to the
+// pair's register (link_aarch64_tls_ie_gap_inert).
 //
 // Linux x86-64 fixed-address imported function pointers use loader-filled
 // GOT address slots and R_X86_64_64 literals. A direct PC32/PC64/ABS32 address
@@ -788,6 +802,96 @@ BUSTER_GLOBAL_LOCAL bool link_initializer_plan_build(Arena* arena, ObjectFile* o
     }
 
     return result;
+}
+
+// A dynamic executable's `.preinit_array` entries belong to the loader, not to
+// the entry stub: glibc's ld.so and bionic's linker run DT_PREINIT_ARRAY
+// before the constructors of every shared-object dependency, and the stub only
+// runs after all of those (issue 1243).  The merged constructor array carries
+// them first (IR_INITIALIZER_PRIORITY_PREINIT sorts ahead of every priority),
+// so this hands back the same object with that leading run moved onto the end
+// of the writable data, its relocations and any symbol naming one of its slots
+// moved with it, and the rest of the array, its priorities and relocations
+// shifted down.  The plan built afterwards then holds only the constructors,
+// every writer already relocates a data pointer, and the writer publishes the
+// moved range through DT_PREINIT_ARRAY/DT_PREINIT_ARRAYSZ.  It is a pure
+// function of the object, so the AArch64 writer and the x86-64 staging writer
+// it overlays derive the same layout from the same input.  A static image has
+// no loader and no dependencies, and keeps calling the entries from its stub.
+BUSTER_GLOBAL_LOCAL void link_elf_preinit_array_split(Arena* arena, ObjectFile* object, ObjectFile* split, u64* preinit_offset, u64* preinit_size)
+{
+    *split = *object;
+    *preinit_offset = 0;
+    *preinit_size = 0;
+    u32* priorities = object->initializer_priorities[0];
+    ObjectSection* array = object->sections + OBJECT_SECTION_INIT_ARRAY;
+    u64 entries = priorities ? array->data.length / OBJECT_INITIALIZER_ENTRY_SIZE : 0;
+    u64 leading = 0;
+    while (leading < entries && priorities[leading] == IR_INITIALIZER_PRIORITY_PREINIT)
+    {
+        leading += 1;
+    }
+    if (leading)
+    {
+        u64 moved = leading * OBJECT_INITIALIZER_ENTRY_SIZE;
+        ObjectSection* sections = arena_allocate(arena, ObjectSection, object->section_count);
+        memcpy(sections, object->sections, (u64)object->section_count * sizeof(*sections));
+        ObjectSection* data_section = sections + OBJECT_SECTION_DATA;
+        u64 base = align_forward(BUSTER_MAX(data_section->data.length, data_section->virtual_size), OBJECT_INITIALIZER_ENTRY_SIZE);
+        u8* data = arena_allocate_zeroed(arena, u8, base + moved);
+        if (data_section->data.length)
+        {
+            memcpy(data, data_section->data.pointer, data_section->data.length);
+        }
+        memcpy(data + base, array->data.pointer, moved);
+        data_section->data = (ByteSlice){.pointer = data, .length = base + moved};
+        if (data_section->virtual_size)
+        {
+            data_section->virtual_size = base + moved;
+        }
+        data_section->alignment = BUSTER_MAX(data_section->alignment, OBJECT_INITIALIZER_ENTRY_SIZE);
+        sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice){.pointer = array->data.pointer + moved, .length = array->data.length - moved};
+        if (sections[OBJECT_SECTION_INIT_ARRAY].virtual_size)
+        {
+            sections[OBJECT_SECTION_INIT_ARRAY].virtual_size = array->data.length - moved;
+        }
+        split->sections = sections;
+        split->initializer_priorities[0] = leading < entries ? priorities + leading : 0;
+        ObjectSymbol* symbols = arena_allocate(arena, ObjectSymbol, object->symbol_count ? object->symbol_count : 1);
+        for (u32 index = 0; index < object->symbol_count; index += 1)
+        {
+            ObjectSymbol symbol = object->symbols[index];
+            if (symbol.section == OBJECT_SECTION_INIT_ARRAY && symbol.value < moved)
+            {
+                symbol.section = OBJECT_SECTION_DATA;
+                symbol.value += base;
+            }
+            else if (symbol.section == OBJECT_SECTION_INIT_ARRAY)
+            {
+                symbol.value -= moved;
+            }
+            symbols[index] = symbol;
+        }
+        split->symbols = symbols;
+        ObjectRelocation* relocations = arena_allocate(arena, ObjectRelocation, object->relocation_count ? object->relocation_count : 1);
+        for (u32 index = 0; index < object->relocation_count; index += 1)
+        {
+            ObjectRelocation relocation = object->relocations[index];
+            if (relocation.section == OBJECT_SECTION_INIT_ARRAY && relocation.offset < moved)
+            {
+                relocation.section = OBJECT_SECTION_DATA;
+                relocation.offset += base;
+            }
+            else if (relocation.section == OBJECT_SECTION_INIT_ARRAY)
+            {
+                relocation.offset -= moved;
+            }
+            relocations[index] = relocation;
+        }
+        split->relocations = relocations;
+        *preinit_offset = base;
+        *preinit_size = moved;
+    }
 }
 
 // Whether the destructors of this plan are registered with the C runtime
@@ -2141,10 +2245,14 @@ BUSTER_GLOBAL_LOCAL u8 link_symbol_thread_local_state(ObjectFile* object, Object
 // GNU runs every prioritized initializer before every unprioritized one,
 // ascending, across the *whole program* rather than within one translation
 // unit, and `ld` gets that off the section name: every `.init_array.NNNNN`
-// ahead of the unsuffixed `.init_array`.  A merge that concatenates each
-// input's array in link order is that order only while no input names a
-// priority, so this puts the merged arrays back in it -- a stable sort of the
-// 8-byte entries by ObjectFile.initializer_priorities, which is where the
+// ahead of the unsuffixed `.init_array`.  The `.preinit_array` entries come
+// ahead of all of them (IR_INITIALIZER_PRIORITY_PREINIT), whichever input they
+// arrive in and whether or not a dependency's `constructor(0)` is first
+// (issue 1243); every comparison below goes through
+// IR_INITIALIZER_PRIORITY_ORDER_KEY for that reason.  A merge that
+// concatenates each input's array in link order is that order only while no
+// input names a priority, so this puts the merged arrays back in it -- a
+// stable sort of the 8-byte entries by ObjectFile.initializer_priorities, which is where the
 // name went (see object_read_elf64 and object_from_canonical_codegen_module).
 //
 // The sort moves an entry's relocation and any symbol that names it with the
@@ -2166,7 +2274,7 @@ BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile*
         bool ordered = true;
         for (u64 entry = 1; entry < entries; entry += 1)
         {
-            ordered = ordered && priorities[entry - 1] <= priorities[entry];
+            ordered = ordered && IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[entry - 1]) <= IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[entry]);
         }
         // A program whose initializers all named no priority, and one whose
         // inputs happen to have arrived in GNU's order already, are the
@@ -2194,7 +2302,7 @@ BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile*
             u32 shift = byte_index * INITIALIZER_RADIX_BITS;
             for (u64 entry = 0; entry < entries; entry += 1)
             {
-                u32 bucket = (priorities[order[entry]] >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
+                u32 bucket = (IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[order[entry]]) >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
                 offsets[bucket] += 1;
             }
             u64 offset = 0;
@@ -2206,7 +2314,7 @@ BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile*
             }
             for (u64 entry = 0; entry < entries; entry += 1)
             {
-                u32 bucket = (priorities[order[entry]] >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
+                u32 bucket = (IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[order[entry]]) >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
                 destination[offsets[bucket]++] = order[entry];
             }
             u32* swap = order;
@@ -2662,7 +2770,7 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_impl(Arena* arena, Arena* set_
             u64 entries = priorities && section ? section->data.length / OBJECT_INITIALIZER_ENTRY_SIZE : 0;
             for (u64 entry = 1; alias_section_data[kind] && entry < entries; entry += 1)
             {
-                if (priorities[entry - 1] > priorities[entry])
+                if (IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[entry - 1]) > IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[entry]))
                 {
                     alias_section_data[kind] = false;
                 }
@@ -2771,9 +2879,12 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_impl(Arena* arena, Arena* set_
                               : 0;
             bool kind_section = section_index < OBJECT_SECTION_COUNT;
             u32* priorities = merged && kind_section ? object->initializer_priorities[slot] : 0;
-            u32 named_priority = merged && !kind_section ? object_elf_initializer_section_priority(source->name, source->kind)
-                                                         : IR_INITIALIZER_PRIORITY_NONE;
-            if (merged && (priorities || !kind_section) && !(offsets[section_index] % OBJECT_INITIALIZER_ENTRY_SIZE))
+            // An object that states no priorities -- the in-memory result of
+            // assembling a `.s` input, whose named sections can sit below
+            // OBJECT_SECTION_COUNT -- is read by section name too (issue 1243).
+            u32 named_priority = merged && !priorities ? object_elf_initializer_section_priority(source->name, source->kind)
+                                                       : IR_INITIALIZER_PRIORITY_NONE;
+            if (merged && (priorities || !kind_section || named_priority != IR_INITIALIZER_PRIORITY_NONE) && !(offsets[section_index] % OBJECT_INITIALIZER_ENTRY_SIZE))
             {
                 u64 first = offsets[section_index] / OBJECT_INITIALIZER_ENTRY_SIZE;
                 for (u64 entry = 0; entry < source->data.length / OBJECT_INITIALIZER_ENTRY_SIZE; entry += 1)
@@ -4741,6 +4852,8 @@ enum
     ELF_DYNAMIC_PROGRAM_HEADER_INDEX = 5,
     ELF_DYNAMIC_TAG_TEXTREL = 22,
     ELF_DYNAMIC_TAG_FLAGS = 30,
+    ELF_DYNAMIC_TAG_PREINIT_ARRAY = 32,
+    ELF_DYNAMIC_TAG_PREINIT_ARRAYSZ = 33,
     ELF_DYNAMIC_TAG_FLAGS_1 = 0x6ffffffb,
     ELF_DYNAMIC_FLAG_BIND_NOW = 0x8,
     ELF_DYNAMIC_FLAG_1_NOW = 0x1,
@@ -4785,6 +4898,7 @@ enum
     ELF_RELOCATION_TYPE_X86_64_DTPMOD64 = 16,
     ELF_RELOCATION_TYPE_X86_64_DTPOFF64 = 17,
     ELF_RELOCATION_TYPE_X86_64_TPOFF64 = 18,
+    ELF_RELOCATION_TYPE_X86_64_IRELATIVE = 37,
     ELF_RELOCATION_TYPE_AARCH64_COPY = 1024,
     ELF_RELOCATION_TYPE_AARCH64_JUMP_SLOT = 1026,
 };
@@ -6033,6 +6147,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         return result;
     }
     object = &hosted_object;
+    ObjectFile preinit_split_object = {0};
+    u64 preinit_offset = 0;
+    u64 preinit_size = 0;
+    link_elf_preinit_array_split(arena, object, &preinit_split_object, &preinit_offset, &preinit_size);
+    object = &preinit_split_object;
     ObjectFile stripped_object = {0};
     LinkInitializerPlan plan = {0};
     LinkElfTlsIndex tls_index = {0};
@@ -6364,7 +6483,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     // 12 fixed tags: DT_HASH, STRTAB, SYMTAB, STRSZ, SYMENT, PLTGOT, PLTRELSZ,
     // PLTREL, JMPREL, RELAENT, DT_DEBUG and the DT_NULL terminator, plus
     // DT_FLAGS and DT_FLAGS_1 (the trailing 2).
-    u32 dynamic_count = needed_library_count + 12 + (dynamic_data_relocation_count ? 2 : 0) + (version_count ? 3 : 0) + (u32)text_relocations + 2;
+    u32 dynamic_count = needed_library_count + 12 + (dynamic_data_relocation_count ? 2 : 0) + (version_count ? 3 : 0) + (u32)text_relocations +
+                        (preinit_size ? 2 : 0) + 2;
     u64 dynamic_size = (u64)dynamic_count * ELF_DYNAMIC_SIZE;
     // The relocation boundary is a page boundary: the loader seals whole pages.
     if (!link_elf_virtual_align(dynamic_offset + dynamic_size, BUSTER_MAX((u32)ELF_PAGE_SIZE, object->sections[OBJECT_SECTION_DATA].alignment),
@@ -7004,6 +7124,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_NEED_COUNT, version_need_count);
     }
     if (text_relocations) BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_TEXTREL, 0);
+    if (preinit_size)
+    {
+        BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_PREINIT_ARRAY, image_base + section_offsets[OBJECT_SECTION_DATA] + preinit_offset);
+        BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_PREINIT_ARRAYSZ, preinit_size);
+    }
     // Eager binding, which is what lets PT_GNU_RELRO cover the PLT slots.
     BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_FLAGS, ELF_DYNAMIC_FLAG_BIND_NOW);
     BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_FLAGS_1, ELF_DYNAMIC_FLAG_1_NOW);
@@ -7455,7 +7580,13 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
                 }
                 else
                 {
-                    valid = !(symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) && !is_thread_local &&
+                    // A call to a weak function nothing here defines and that
+                    // cannot be imported (a hidden one) resolves to address
+                    // zero, as ld does; code guards such a call by testing the
+                    // address, which takes the GOT slot above.
+                    bool absent_weak_call = (symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) && relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 &&
+                                            symbol->weak && symbol->kind == OBJECT_SYMBOL_FUNCTION;
+                    valid = (!(symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) || absent_weak_call) && !is_thread_local &&
                             !((symbol_class & LINK_ELF_PIC_SYMBOL_PREEMPTIBLE) && symbol->kind == OBJECT_SYMBOL_DATA &&
                               (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PC64));
                 }
@@ -7771,7 +7902,10 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_relocate(LinkElfPicImage* image, u8* bytes
                 }
                 else if (!zero)
                 {
-                    link_elf_write_relocation(bytes, relocation_cursor, place, 0, ELF_RELOCATION_TYPE_X86_64_RELATIVE, value);
+                    // An indirect function's resolver (a shared object's
+                    // IFUNC slot): the loader calls it and stores the result.
+                    link_elf_write_relocation(bytes, relocation_cursor, place, 0,
+                                              symbol->indirect ? ELF_RELOCATION_TYPE_X86_64_IRELATIVE : ELF_RELOCATION_TYPE_X86_64_RELATIVE, value);
                 }
             }
         }
@@ -7891,11 +8025,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     u8* entry_stub = 0;
     u32* initializer_displacement_offsets = 0;
     u32* copy_import_indices = 0;
+    u64 preinit_offset = 0;
+    u64 preinit_size = 0;
     if (result.error == LINK_ERROR_NONE && !shared)
     {
+        ObjectFile preinit_split_object = {0};
         ObjectFile stripped_object = {0};
-        if (!link_elf_hosted_exit_symbol(arena, object, &hosted_object, &exit_symbol_index, &atexit_symbol_index) ||
-            !link_initializer_plan_build(arena, &hosted_object, &stripped_object, &plan))
+        bool hosted = link_elf_hosted_exit_symbol(arena, object, &hosted_object, &exit_symbol_index, &atexit_symbol_index);
+        if (hosted)
+        {
+            link_elf_preinit_array_split(arena, &hosted_object, &preinit_split_object, &preinit_offset, &preinit_size);
+        }
+        if (!hosted || !link_initializer_plan_build(arena, &preinit_split_object, &stripped_object, &plan))
         {
             result.error = LINK_ERROR_INVALID_INPUT;
         }
@@ -8082,7 +8223,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     u32 dynamic_count = needed_library_count + (soname.length ? 1u : 0u) + 5 + (image.plt_count ? 4u : 0u) + (image.dynamic_relocation_count ? 3u : 0u) +
                         (object->sections[OBJECT_SECTION_INIT_ARRAY].data.length ? 2u : 0u) +
                         (object->sections[OBJECT_SECTION_FINI_ARRAY].data.length ? 2u : 0u) + (versions.version_count ? 3u : 0u) +
-                        (image.static_tls ? 1u : 0u) + (shared ? 0u : 2u) + 1;
+                        (image.static_tls ? 1u : 0u) + (shared ? 0u : 2u) + (preinit_size ? 2u : 0u) + 1;
     u64 dynamic_offset = align_forward(cursor, 8);
     u64 dynamic_size = (u64)dynamic_count * ELF_DYNAMIC_SIZE;
     u64 got_offset = dynamic_offset + dynamic_size;
@@ -8286,6 +8427,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
         {
             BUSTER_LINK_DYNAMIC(26, section_offsets[OBJECT_SECTION_FINI_ARRAY]);
             BUSTER_LINK_DYNAMIC(28, fini_array_size);
+        }
+        if (preinit_size)
+        {
+            BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_PREINIT_ARRAY, section_offsets[OBJECT_SECTION_DATA] + preinit_offset);
+            BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_PREINIT_ARRAYSZ, preinit_size);
         }
         if (versions.version_count)
         {
@@ -8752,6 +8898,504 @@ BUSTER_GLOBAL_LOCAL u32 link_aarch64_adrp(u32 destination, u64 instruction_addre
     return word;
 }
 
+// The thread-pointer offset of a defined TLS symbol plus addend for a
+// fixed-address AArch64 executable (TLS variant I). The executable's block
+// follows the 16-byte TCB, rounded to PT_TLS alignment, before module-relative
+// offsets are added. Refuses a symbol outside the TLS sections, a negative
+// addend and anything above `limit`. Local-exec ADD pairs hold 24 bits;
+// relaxed initial-exec MOVZ/MOVK pairs hold 32.
+BUSTER_GLOBAL_LOCAL bool link_aarch64_elf_tprel_offset(ObjectFile* object, ObjectSymbol const* symbol, s64 addend, u64 limit, u64* offset)
+{
+    u64 thread_pointer_offset = 0;
+    bool valid = (symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA || symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO) && addend >= 0;
+    if (valid)
+    {
+        u64 thread_local_alignment =
+            BUSTER_MAX(BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment), 1u);
+        u64 thread_local_start = align_forward(16, thread_local_alignment);
+        valid = link_u64_add(thread_local_start, link_elf_thread_local_offset(object, symbol), &thread_pointer_offset) &&
+                link_address_addend(thread_pointer_offset, addend, &thread_pointer_offset) && thread_pointer_offset <= limit;
+    }
+    if (valid)
+    {
+        *offset = thread_pointer_offset;
+    }
+    return valid;
+}
+
+// One relaxable TLS relocation site, keyed by section and byte offset.
+typedef struct LinkTlsSite LinkTlsSite;
+struct LinkTlsSite
+{
+    u64 key;
+    u32 relocation;
+    u32 reserved;
+};
+
+enum
+{
+    LINK_TLS_SITE_OFFSET_BITS = 48,
+    LINK_AARCH64_TLS_SEQUENCE_MAX = 4,
+    LINK_AARCH64_TLS_REGISTER_COUNT = 32,
+};
+
+// The AArch64 sequences a fixed-address executable relaxes to local-exec,
+// each a relocation run in this order: initial-exec ADRP/LDR, and the
+// general-dynamic descriptor ADRP/LDR/ADD/BLR. Only the descriptor run must
+// sit on consecutive words; the initial-exec pair is matched by register in
+// link_aarch64_tls_relax. The names are the AAELF64 spellings a refused link
+// reports.
+typedef struct LinkAarch64TlsSequence LinkAarch64TlsSequence;
+struct LinkAarch64TlsSequence
+{
+    ObjectRelocationKind kinds[LINK_AARCH64_TLS_SEQUENCE_MAX];
+    String8 names[LINK_AARCH64_TLS_SEQUENCE_MAX];
+    u32 length;
+};
+
+static LinkAarch64TlsSequence const link_aarch64_tls_sequences[] = {
+    {
+        {OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21, OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12},
+        {S8_INITIALIZER("R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21"), S8_INITIALIZER("R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC")},
+        2,
+    },
+    {
+        {OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21, OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12,
+         OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12, OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL},
+        {S8_INITIALIZER("R_AARCH64_TLSDESC_ADR_PAGE21"), S8_INITIALIZER("R_AARCH64_TLSDESC_LD64_LO12"),
+         S8_INITIALIZER("R_AARCH64_TLSDESC_ADD_LO12"), S8_INITIALIZER("R_AARCH64_TLSDESC_CALL")},
+        4,
+    },
+};
+
+BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_relaxable(ObjectRelocationKind kind)
+{
+    return object_relocation_kind_is_aarch64_elf_tls_ie(kind) || object_relocation_kind_is_aarch64_elf_tls_desc(kind);
+}
+
+// The AAELF64 name of a relaxable kind, for the refused-link diagnostic.
+BUSTER_GLOBAL_LOCAL String8 link_aarch64_tls_relocation_name(ObjectRelocationKind kind)
+{
+    String8 name = S8("AArch64 TLS relocation");
+    for (u32 sequence = 0; sequence < BUSTER_ARRAY_LENGTH(link_aarch64_tls_sequences); sequence += 1)
+    {
+        for (u32 step = 0; step < link_aarch64_tls_sequences[sequence].length; step += 1)
+        {
+            if (link_aarch64_tls_sequences[sequence].kinds[step] == kind)
+            {
+                name = link_aarch64_tls_sequences[sequence].names[step];
+            }
+        }
+    }
+    return name;
+}
+
+BUSTER_GLOBAL_LOCAL void link_tls_site_sift(LinkTlsSite* sites, u32 count, u32 root)
+{
+    while (root < count / 2)
+    {
+        u32 child = 2 * root + 1;
+        if (child + 1 < count && sites[child + 1].key > sites[child].key)
+        {
+            child += 1;
+        }
+        if (sites[child].key <= sites[root].key)
+        {
+            break;
+        }
+        LinkTlsSite swapped = sites[root];
+        sites[root] = sites[child];
+        sites[child] = swapped;
+        root = child;
+    }
+}
+
+// Fail if an initial-exec ADRP is still waiting for its LDR: *failed names
+// that ADRP. Empties the table either way, so the next section starts clean.
+BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_pending_drain(u32* pending, LinkTlsSite const* sites, u32* failed)
+{
+    bool clear = true;
+    for (u32 reg = 0; reg < LINK_AARCH64_TLS_REGISTER_COUNT; reg += 1)
+    {
+        if (pending[reg] != UINT32_MAX)
+        {
+            *failed = clear ? sites[pending[reg]].relocation : *failed;
+            clear = false;
+            pending[reg] = UINT32_MAX;
+        }
+    }
+    return clear;
+}
+
+// The words a non-adjacent initial-exec pair may enclose. The rewrite turns
+// `adrp xN` into `movz xN` and leaves the later `ldr xN, [xN]` to complete the
+// value with `movk`, so every word between the halves must neither read nor
+// write xN and must fall through to the next word. A word is accepted only if
+// it matches one of these rows and none of the general-register fields the
+// row names equals N; anything else (branches, system and exception
+// instructions, unlisted or unallocated encodings) refuses the link. The
+// rows are the Arm ARM A64 encoding classes Clang and GCC schedule between
+// the halves, narrowed to their allocated size/opc/option combinations. A
+// field holding 31 is SP or XZR, never xN: the reader limits N to x0..x30.
+// FP/SIMD loads and stores name only their base (and index) as general
+// registers; their Rt/Rt2 are vector registers. Writeback forms write Rn,
+// which the same field check covers.
+enum
+{
+    LINK_AARCH64_FIELD_RT = 1 << 0,  // Rd/Rt, bits 4:0
+    LINK_AARCH64_FIELD_RN = 1 << 1,  // Rn, bits 9:5
+    LINK_AARCH64_FIELD_RT2 = 1 << 2, // Rt2/Ra, bits 14:10
+    LINK_AARCH64_FIELD_RM = 1 << 3,  // Rm, bits 20:16
+    LINK_AARCH64_FIELD_COUNT = 4,
+    // Logical immediate: N:immr:imms must be an allocated bitmask.
+    LINK_AARCH64_FORM_BITMASK = 1 << 4,
+    // The most words a pair may enclose; the scan is O(gap) per pair.
+    LINK_AARCH64_TLS_IE_GAP_MAX = 64,
+};
+
+typedef struct LinkAarch64InertForm LinkAarch64InertForm;
+struct LinkAarch64InertForm
+{
+    u32 mask;
+    u32 value;
+    u32 fields;
+};
+
+#define LINK_AARCH64_GPR_TWO (LINK_AARCH64_FIELD_RT | LINK_AARCH64_FIELD_RN)
+#define LINK_AARCH64_GPR_THREE (LINK_AARCH64_FIELD_RT | LINK_AARCH64_FIELD_RN | LINK_AARCH64_FIELD_RM)
+#define LINK_AARCH64_GPR_PAIR (LINK_AARCH64_FIELD_RT | LINK_AARCH64_FIELD_RN | LINK_AARCH64_FIELD_RT2)
+#define LINK_AARCH64_GPR_FOUR (LINK_AARCH64_GPR_THREE | LINK_AARCH64_FIELD_RT2)
+#define LINK_AARCH64_FP_INDEX (LINK_AARCH64_FIELD_RN | LINK_AARCH64_FIELD_RM)
+
+static u8 const link_aarch64_field_shifts[LINK_AARCH64_FIELD_COUNT] = {0, 5, 10, 16};
+
+static LinkAarch64InertForm const link_aarch64_inert_forms[] = {
+    // Load/store register, GPR (V=0), per addressing mode: opc 0x (STR*/LDR*
+    // of every size), size 0x opc 1x (LDRSB/LDRSH), size 10 opc 10 (LDRSW).
+    // Unsigned immediate.
+    {0x3F800000, 0x39000000, LINK_AARCH64_GPR_TWO},
+    {0xBF800000, 0x39800000, LINK_AARCH64_GPR_TWO},
+    {0xFFC00000, 0xB9800000, LINK_AARCH64_GPR_TWO},
+    // Unscaled immediate (LDUR/STUR): bit 21 and bits 11:10 clear.
+    {0x3FA00C00, 0x38000000, LINK_AARCH64_GPR_TWO},
+    {0xBFA00C00, 0x38800000, LINK_AARCH64_GPR_TWO},
+    {0xFFE00C00, 0xB8800000, LINK_AARCH64_GPR_TWO},
+    // Post-index (bits 11:10 = 01).
+    {0x3FA00C00, 0x38000400, LINK_AARCH64_GPR_TWO},
+    {0xBFA00C00, 0x38800400, LINK_AARCH64_GPR_TWO},
+    {0xFFE00C00, 0xB8800400, LINK_AARCH64_GPR_TWO},
+    // Pre-index (bits 11:10 = 11).
+    {0x3FA00C00, 0x38000C00, LINK_AARCH64_GPR_TWO},
+    {0xBFA00C00, 0x38800C00, LINK_AARCH64_GPR_TWO},
+    {0xFFE00C00, 0xB8800C00, LINK_AARCH64_GPR_TWO},
+    // Register offset (bit 21 set, bits 11:10 = 10, option<1> set).
+    {0x3FA04C00, 0x38204800, LINK_AARCH64_GPR_THREE},
+    {0xBFA04C00, 0x38A04800, LINK_AARCH64_GPR_THREE},
+    {0xFFE04C00, 0xB8A04800, LINK_AARCH64_GPR_THREE},
+    // Load/store register, FP/SIMD (V=1): opc 0x (B/H/S/D) and size 00 opc 1x
+    // (Q), in the same five modes.
+    {0x3F800000, 0x3D000000, LINK_AARCH64_FIELD_RN},
+    {0xFF800000, 0x3D800000, LINK_AARCH64_FIELD_RN},
+    {0x3FA00C00, 0x3C000000, LINK_AARCH64_FIELD_RN},
+    {0xFFA00C00, 0x3C800000, LINK_AARCH64_FIELD_RN},
+    {0x3FA00C00, 0x3C000400, LINK_AARCH64_FIELD_RN},
+    {0xFFA00C00, 0x3C800400, LINK_AARCH64_FIELD_RN},
+    {0x3FA00C00, 0x3C000C00, LINK_AARCH64_FIELD_RN},
+    {0xFFA00C00, 0x3C800C00, LINK_AARCH64_FIELD_RN},
+    {0x3FA04C00, 0x3C204800, LINK_AARCH64_FP_INDEX},
+    {0xFFA04C00, 0x3CA04800, LINK_AARCH64_FP_INDEX},
+    // Load/store pair, GPR: opc x0 (32/64-bit LDP/STP/LDNP/STNP) in the
+    // no-allocate, post-index, offset and pre-index modes (bits 25:23), and
+    // LDPSW (opc 01, L=1) in the last three.
+    {0x7F800000, 0x28000000, LINK_AARCH64_GPR_PAIR},
+    {0x7F800000, 0x28800000, LINK_AARCH64_GPR_PAIR},
+    {0x7F800000, 0x29000000, LINK_AARCH64_GPR_PAIR},
+    {0x7F800000, 0x29800000, LINK_AARCH64_GPR_PAIR},
+    {0xFFC00000, 0x68C00000, LINK_AARCH64_GPR_PAIR},
+    {0xFFC00000, 0x69400000, LINK_AARCH64_GPR_PAIR},
+    {0xFFC00000, 0x69C00000, LINK_AARCH64_GPR_PAIR},
+    // Load/store pair, FP/SIMD: opc 0x (S/D) and 10 (Q), the same four modes.
+    {0xBF800000, 0x2C000000, LINK_AARCH64_FIELD_RN},
+    {0xBF800000, 0x2C800000, LINK_AARCH64_FIELD_RN},
+    {0xBF800000, 0x2D000000, LINK_AARCH64_FIELD_RN},
+    {0xBF800000, 0x2D800000, LINK_AARCH64_FIELD_RN},
+    {0xFF800000, 0xAC000000, LINK_AARCH64_FIELD_RN},
+    {0xFF800000, 0xAC800000, LINK_AARCH64_FIELD_RN},
+    {0xFF800000, 0xAD000000, LINK_AARCH64_FIELD_RN},
+    {0xFF800000, 0xAD800000, LINK_AARCH64_FIELD_RN},
+    // ADD/ADDS/SUB/SUBS (immediate), with the CMP/CMN/MOV-to-SP aliases.
+    {0x1F800000, 0x11000000, LINK_AARCH64_GPR_TWO},
+    // ADD/SUB (shifted register): shift != 11, and imm6<5> clear for W.
+    {0x9FA00000, 0x8B000000, LINK_AARCH64_GPR_THREE},
+    {0x9FE00000, 0x8B800000, LINK_AARCH64_GPR_THREE},
+    {0x9FA08000, 0x0B000000, LINK_AARCH64_GPR_THREE},
+    {0x9FE08000, 0x0B800000, LINK_AARCH64_GPR_THREE},
+    // ADD/SUB (extended register): opt 00, imm3 0..4.
+    {0x1FE01000, 0x0B200000, LINK_AARCH64_GPR_THREE},
+    {0x1FE01C00, 0x0B201000, LINK_AARCH64_GPR_THREE},
+    // AND/BIC/ORR/ORN/EOR/EON/ANDS/BICS (shifted register), with the MOV,
+    // MVN and TST aliases: imm6<5> clear for W.
+    {0x9F000000, 0x8A000000, LINK_AARCH64_GPR_THREE},
+    {0x9F008000, 0x0A000000, LINK_AARCH64_GPR_THREE},
+    // AND/ORR/EOR/ANDS (immediate): N clear for W, and an allocated bitmask.
+    {0x9F800000, 0x92000000, LINK_AARCH64_GPR_TWO | LINK_AARCH64_FORM_BITMASK},
+    {0x9FC00000, 0x12000000, LINK_AARCH64_GPR_TWO | LINK_AARCH64_FORM_BITMASK},
+    // MOVN/MOVZ/MOVK: opc != 01, and hw<1> clear for W.
+    {0xFF800000, 0x92800000, LINK_AARCH64_FIELD_RT},
+    {0xDF800000, 0xD2800000, LINK_AARCH64_FIELD_RT},
+    {0xFFC00000, 0x12800000, LINK_AARCH64_FIELD_RT},
+    {0xDFC00000, 0x52800000, LINK_AARCH64_FIELD_RT},
+    // ADR/ADRP.
+    {0x1F000000, 0x10000000, LINK_AARCH64_FIELD_RT},
+    // SBFM/BFM/UBFM, with the LSL/LSR/ASR/SXT*/UXT*/BFI/UBFX aliases:
+    // opc != 11, N equal to sf, and immr<5>/imms<5> clear for W.
+    {0xDFC00000, 0x93400000, LINK_AARCH64_GPR_TWO},
+    {0xFFC00000, 0xD3400000, LINK_AARCH64_GPR_TWO},
+    {0xDFE08000, 0x13000000, LINK_AARCH64_GPR_TWO},
+    {0xFFE08000, 0x53000000, LINK_AARCH64_GPR_TWO},
+    // UDIV/SDIV, then LSLV/LSRV/ASRV/RORV (data-processing, two source).
+    {0x7FE0F800, 0x1AC00800, LINK_AARCH64_GPR_THREE},
+    {0x7FE0F000, 0x1AC02000, LINK_AARCH64_GPR_THREE},
+    // MADD/MSUB (MUL/MNEG), SMADDL/SMSUBL/UMADDL/UMSUBL, then SMULH/UMULH.
+    {0x7FE00000, 0x1B000000, LINK_AARCH64_GPR_FOUR},
+    {0xFF600000, 0x9B200000, LINK_AARCH64_GPR_FOUR},
+    {0xFF608000, 0x9B400000, LINK_AARCH64_GPR_FOUR},
+    // CSEL/CSINC/CSINV/CSNEG, with the CSET/CINC/CNEG aliases: S clear and
+    // op2<1> clear.
+    {0x3FE00800, 0x1A800000, LINK_AARCH64_GPR_THREE},
+    // MRS Xt, TPIDR_EL0 only.
+    {0xFFFFFFE0, 0xD53BD040, LINK_AARCH64_FIELD_RT},
+    // NOP.
+    {0xFFFFFFFF, 0xD503201F, 0},
+};
+
+// DecodeBitMasks: N:NOT(imms) needs a set bit above bit 0, and imms must not
+// select every bit of the element; anything else is UNDEFINED.
+BUSTER_GLOBAL_LOCAL bool link_aarch64_bitmask_allocated(u32 word)
+{
+    u32 imms = (word >> 10) & 63;
+    u32 pattern = (((word >> 22) & 1) << 6) | (~imms & 63);
+    u32 length = 0;
+    for (u32 bit = 1; bit < 7; bit += 1)
+    {
+        length = ((pattern >> bit) & 1) ? bit : length;
+    }
+    u32 levels = (UINT32_C(1) << length) - 1;
+    return length != 0 && (imms & levels) != levels;
+}
+
+// Whether `word` provably falls through without reading or writing xN
+// (N in 0..30), per link_aarch64_inert_forms. A word several rows match must
+// leave the register alone under every one of them.
+BUSTER_GLOBAL_LOCAL bool link_aarch64_word_leaves_register(u32 word, u32 reg)
+{
+    bool matched = false;
+    bool touches = false;
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(link_aarch64_inert_forms); row += 1)
+    {
+        LinkAarch64InertForm const* form = &link_aarch64_inert_forms[row];
+        if ((word & form->mask) == form->value)
+        {
+            matched = true;
+            touches = touches || ((form->fields & LINK_AARCH64_FORM_BITMASK) && !link_aarch64_bitmask_allocated(word));
+            for (u32 field = 0; field < LINK_AARCH64_FIELD_COUNT; field += 1)
+            {
+                touches = touches || (((form->fields >> field) & 1) && ((word >> link_aarch64_field_shifts[field]) & 31) == reg);
+            }
+        }
+    }
+    return matched && !touches;
+}
+
+// Every word strictly between an initial-exec ADRP at byte offset `first` and
+// its LDR at `last` in one section must leave xN alone and fall through, and
+// there may be at most LINK_AARCH64_TLS_IE_GAP_MAX of them.
+BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_ie_gap_inert(u8 const* data, u64 first, u64 last, u32 reg)
+{
+    bool inert = last > first && (last - first) / 4 - 1 <= LINK_AARCH64_TLS_IE_GAP_MAX;
+    for (u64 offset = first + 4; inert && offset < last; offset += 4)
+    {
+        inert = link_aarch64_word_leaves_register(link_read_u32(data, offset), reg);
+    }
+    return inert;
+}
+
+// Rewrite every AArch64 initial-exec pair and descriptor sequence into
+// local-exec form. Sites are sorted by section and offset (an in-place heap
+// sort, so no recursion and O(n log n)), then scanned once in that order.
+// A descriptor sequence stays strictly adjacent: the site that starts it picks
+// the sequence, and each later step must sit exactly four bytes after the
+// previous one in the same section, have the next kind, and name the same
+// symbol and addend; the LDR and BLR share the scratch register.
+// An initial-exec pair may be scheduled apart (Clang 18 -O2 slides loads
+// between the halves). Each section keeps a table of 32 pending ADRPs keyed
+// by destination register. A GOTTPREL ADRP fills its register's slot (a slot
+// already full means the older ADRP can never be paired, so the link fails);
+// a GOTTPREL LDR takes the slot of its base register, which is also its
+// destination, and must find an ADRP there naming the same symbol and
+// addend. That ADRP is the nearest preceding one for the register, and each
+// is consumed once. An ADRP left over at the end of its section, or an LDR
+// with no partner, fails the whole link. Every word between the halves must
+// be one link_aarch64_tls_ie_gap_inert proves leaves the register alone and
+// falls through, at most LINK_AARCH64_TLS_IE_GAP_MAX of them, so the scan is
+// O(n + total gap) for n sites.
+// Every site is consumed exactly once and all words are computed before any
+// is written, so a repeated, missing, misplaced or mismatched step fails the
+// whole link with the output untouched; *failed names the relocation that
+// could not start or complete a sequence.
+BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_relax(Arena* arena, ObjectFile* object, u8* bytes, u64 const* section_offsets, u32* failed)
+{
+    u32 count = 0;
+    for (u32 index = 0; index < object->relocation_count; index += 1)
+    {
+        count += link_aarch64_tls_relaxable(object->relocations[index].kind);
+    }
+    bool valid = true;
+    LinkTlsSite* sites = count ? arena_allocate(arena, LinkTlsSite, count) : 0;
+    u32* words = count ? arena_allocate(arena, u32, count) : 0;
+    u32 site_count = 0;
+    *failed = UINT32_MAX;
+    for (u32 index = 0; valid && index < object->relocation_count; index += 1)
+    {
+        ObjectRelocation* relocation = &object->relocations[index];
+        if (link_aarch64_tls_relaxable(relocation->kind))
+        {
+            valid = sites && site_count < count && relocation->section < OBJECT_SECTION_COUNT && relocation->symbol < object->symbol_count &&
+                    !(relocation->offset & 3) &&
+                    relocation->offset < ((u64)1 << LINK_TLS_SITE_OFFSET_BITS) && relocation->offset <= object->sections[relocation->section].data.length &&
+                    4 <= object->sections[relocation->section].data.length - relocation->offset &&
+                    object->sections[relocation->section].alignment >= 4;
+            if (valid)
+            {
+                sites[site_count++] = (LinkTlsSite){.key = ((u64)relocation->section << LINK_TLS_SITE_OFFSET_BITS) | relocation->offset, .relocation = index};
+            }
+            else
+            {
+                *failed = index;
+            }
+        }
+    }
+    for (u32 root = site_count / 2; root > 0; root -= 1)
+    {
+        link_tls_site_sift(sites, site_count, root - 1);
+    }
+    for (u32 remaining = site_count; remaining > 1; remaining -= 1)
+    {
+        LinkTlsSite swapped = sites[0];
+        sites[0] = sites[remaining - 1];
+        sites[remaining - 1] = swapped;
+        link_tls_site_sift(sites, remaining - 1, 0);
+    }
+    // Validate and compute every replacement word first; write only once the
+    // whole object relaxes.
+    u32 pending[LINK_AARCH64_TLS_REGISTER_COUNT];
+    for (u32 reg = 0; reg < LINK_AARCH64_TLS_REGISTER_COUNT; reg += 1)
+    {
+        pending[reg] = UINT32_MAX;
+    }
+    u64 pending_section = UINT64_MAX;
+    u32 cursor = 0;
+    while (valid && cursor < site_count)
+    {
+        ObjectRelocation* first = &object->relocations[sites[cursor].relocation];
+        u64 section = sites[cursor].key >> LINK_TLS_SITE_OFFSET_BITS;
+        if (section != pending_section)
+        {
+            valid = link_aarch64_tls_pending_drain(pending, sites, failed);
+            pending_section = section;
+        }
+        if (!valid)
+        {
+            cursor = site_count;
+        }
+        else if (first->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21)
+        {
+            // Keep the original word until the LDR supplies the offset; a
+            // zero offset here only proves it is the ADRP the reader accepts.
+            u32 original = link_read_u32(object->sections[first->section].data.pointer, first->offset);
+            u32 checked = 0;
+            valid = object_aarch64_elf_tls_ie_relax(first->kind, original, 0, &checked) && pending[original & 31] == UINT32_MAX;
+            if (valid)
+            {
+                words[cursor] = original;
+                pending[original & 31] = cursor;
+                cursor += 1;
+            }
+            else
+            {
+                *failed = sites[cursor].relocation;
+            }
+        }
+        else if (first->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12)
+        {
+            u32 original = link_read_u32(object->sections[first->section].data.pointer, first->offset);
+            u32 checked = 0;
+            u32 partner = UINT32_MAX;
+            u64 tprel = 0;
+            valid = object_aarch64_elf_tls_ie_relax(first->kind, original, 0, &checked);
+            partner = valid ? pending[(original >> 5) & 31] : UINT32_MAX;
+            valid = valid && partner != UINT32_MAX && object->relocations[sites[partner].relocation].symbol == first->symbol &&
+                    object->relocations[sites[partner].relocation].addend == first->addend &&
+                    link_aarch64_tls_ie_gap_inert(object->sections[first->section].data.pointer, object->relocations[sites[partner].relocation].offset,
+                                                  first->offset, original & 31) &&
+                    link_aarch64_elf_tprel_offset(object, &object->symbols[first->symbol], first->addend, UINT32_MAX, &tprel) &&
+                    object_aarch64_elf_tls_ie_relax(OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21, words[partner], tprel, &words[partner]) &&
+                    object_aarch64_elf_tls_ie_relax(first->kind, original, tprel, &words[cursor]);
+            if (valid)
+            {
+                pending[(original >> 5) & 31] = UINT32_MAX;
+                cursor += 1;
+            }
+            else
+            {
+                *failed = sites[cursor].relocation;
+            }
+        }
+        else
+        {
+            // Both initial-exec kinds took the branches above, so only a
+            // descriptor sequence can start here.
+            LinkAarch64TlsSequence const* sequence = 0;
+            for (u32 candidate = 0; candidate < BUSTER_ARRAY_LENGTH(link_aarch64_tls_sequences); candidate += 1)
+            {
+                sequence = link_aarch64_tls_sequences[candidate].kinds[0] == first->kind ? &link_aarch64_tls_sequences[candidate] : sequence;
+            }
+            u32 length = sequence ? sequence->length : 0;
+            u64 tprel = 0;
+            valid = length && length <= site_count - cursor &&
+                    link_aarch64_elf_tprel_offset(object, &object->symbols[first->symbol], first->addend, UINT32_MAX, &tprel);
+            u32 original[LINK_AARCH64_TLS_SEQUENCE_MAX] = {0};
+            for (u32 step = 0; valid && step < length; step += 1)
+            {
+                ObjectRelocation* relocation = &object->relocations[sites[cursor + step].relocation];
+                original[step] = link_read_u32(object->sections[relocation->section].data.pointer, relocation->offset);
+                valid = relocation->kind == sequence->kinds[step] && sites[cursor + step].key == sites[cursor].key + (u64)step * 4 &&
+                        relocation->symbol == first->symbol && relocation->addend == first->addend &&
+                        object_aarch64_elf_tls_desc_relax(relocation->kind, original[step], tprel, &words[cursor + step]);
+            }
+            valid = valid && (original[1] & 31) == ((original[3] >> 5) & 31);
+            if (valid)
+            {
+                cursor += length;
+            }
+            else
+            {
+                *failed = sites[cursor].relocation;
+            }
+        }
+    }
+    if (valid)
+    {
+        valid = link_aarch64_tls_pending_drain(pending, sites, failed);
+    }
+    for (u32 index = 0; valid && index < site_count; index += 1)
+    {
+        ObjectRelocation* relocation = &object->relocations[sites[index].relocation];
+        link_write_u32(bytes, section_offsets[relocation->section] + relocation->offset, words[index]);
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarch64_dynamic(Arena* arena, ObjectFile* object,
                                                                                             NativeExecutableLinkOptions options, LinkElfIndex* exports, bool export_thread_local)
 {
@@ -8771,9 +9415,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         return result;
     }
     object = &hosted_object;
+    // The staging writer below splits the `.preinit_array` entries off the
+    // same object the same way, publishes them as DT_PREINIT_ARRAY, and so
+    // reserves the stub slot of a plan without them.
+    ObjectFile preinit_split_object = {0};
+    u64 preinit_offset = 0;
+    u64 preinit_size = 0;
+    link_elf_preinit_array_split(arena, object, &preinit_split_object, &preinit_offset, &preinit_size);
     ObjectFile stripped_object = {0};
     LinkInitializerPlan plan = {0};
-    if (!link_initializer_plan_build(arena, object, &stripped_object, &plan))
+    if (!link_initializer_plan_build(arena, &preinit_split_object, &stripped_object, &plan))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
         return result;
@@ -8805,7 +9456,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation relocation = object->relocations[index];
-        if (object_relocation_kind_is_aarch64_elf_page(relocation.kind))
+        if (object_relocation_kind_is_aarch64_elf_page(relocation.kind) || link_aarch64_tls_relaxable(relocation.kind))
         {
             // The layout staging writer cannot patch an A64 page field. Do
             // not impose an unrelated x86 rel32/absolute32 range on it; the
@@ -9052,21 +9703,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
         if (relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 || relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12)
         {
-            if ((symbol->section != OBJECT_SECTION_THREAD_LOCAL_DATA && symbol->section != OBJECT_SECTION_THREAD_LOCAL_ZERO) || relocation->addend < 0)
-            {
-                result.error = LINK_ERROR_RELOCATION;
-                result.symbol = symbol->name;
-                return result;
-            }
-            // Variant I places the executable's block after the 16-byte TCB,
-            // rounded to PT_TLS alignment before adding module-relative offsets.
-            u64 thread_local_alignment =
-                BUSTER_MAX(BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment), 1u);
-            u64 thread_local_start = align_forward(16, thread_local_alignment);
-            u64 symbol_offset = link_elf_thread_local_offset(object, symbol);
             u64 thread_pointer_offset = 0;
-            if (!link_u64_add(thread_local_start, symbol_offset, &thread_pointer_offset) ||
-                !link_address_addend(thread_pointer_offset, relocation->addend, &thread_pointer_offset) || thread_pointer_offset > 0xffffff)
+            if (!link_aarch64_elf_tprel_offset(object, symbol, relocation->addend, 0xffffff, &thread_pointer_offset))
             {
                 result.error = LINK_ERROR_RELOCATION;
                 result.symbol = symbol->name;
@@ -9150,6 +9788,19 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             return result;
         }
         link_write_u32(bytes, output_offset, patched);
+    }
+    u32 tls_failed = UINT32_MAX;
+    if (!link_aarch64_tls_relax(arena, object, bytes, section_offsets, &tls_failed))
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        if (tls_failed < object->relocation_count)
+        {
+            ObjectRelocation* relocation = &object->relocations[tls_failed];
+            String8 symbol = relocation->symbol < object->symbol_count ? object->symbols[relocation->symbol].name : S8("?");
+            result.symbol = string_format(arena, S8("{S8} ({S8} sequence cannot be relaxed to local-exec)"), symbol,
+                                          link_aarch64_tls_relocation_name(relocation->kind));
+        }
+        return result;
     }
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
     {
@@ -14635,9 +15286,275 @@ bool link_validate_linker_arguments(Target target, NativeExecutableLinkOptions o
     return valid;
 }
 
+// GNU IFUNC (issue 1243). An indirect definition's value is a resolver that
+// returns the function every reference wants, and `ld` and `lld` never let a
+// reference reach the resolver: they give the name a PLT entry whose GOT slot
+// an R_*_IRELATIVE fills at startup, and that entry is the name's canonical
+// address. This hands back the same object with every indirect definition
+// rebound to that shape in ordinary code and data, so each writer needs nothing
+// new:
+//   - the name now defines a thunk appended to .text that jumps through an
+//     8-byte slot appended to .data, and every relocation that named the
+//     IFUNC -- call, address taken, GOT load -- therefore reaches the thunk,
+//     one canonical address;
+//   - the resolver keeps its address under a new local name;
+//   - in an executable, a runner appended to .text calls each resolver once
+//     and stores what it returns in its slot, and a `.preinit_array` entry
+//     prepended to the constructor array runs it first: a dynamic image
+//     publishes it through DT_PREINIT_ARRAY, so ld.so runs it after relocation
+//     and before every constructor, as it applies IRELATIVE, and a static
+//     image calls it first from its stub;
+//   - a shared object's slot instead takes an absolute reference to its
+//     resolver, which stays indirect, and the position-independent writer
+//     publishes that as R_X86_64_IRELATIVE. The loader then fills the slot
+//     while it relocates the library, before any initializer anywhere runs --
+//     an executable's DT_PREINIT_ARRAY included, which runs before its
+//     dependencies' DT_INIT_ARRAY. These references are the object's last, so
+//     they are the last dynamic relocations and every other one is applied
+//     before a resolver runs.
+// The AArch64 runner passes hwcap 0 (and no __ifunc_arg_t), the convention of
+// a loader that predates hwcap arguments, so a resolver that dispatches on
+// hwcap selects its baseline implementation.
+enum
+{
+    LINK_IFUNC_X86_THUNK_SIZE = 8,
+    LINK_IFUNC_X86_RUNNER_STEP = 12,
+    LINK_IFUNC_X86_RUNNER_FRAME = 9,
+    LINK_IFUNC_AARCH64_THUNK_SIZE = 16,
+    LINK_IFUNC_AARCH64_RUNNER_STEP = 20,
+    LINK_IFUNC_AARCH64_RUNNER_FRAME = 16,
+};
+
+BUSTER_GLOBAL_LOCAL bool link_elf_indirect_functions_rebind(Arena* arena, ObjectFile* object, bool shared, ObjectFile* rebound, String8* message)
+{
+    *rebound = *object;
+    bool result = true;
+    u32 count = 0;
+    u32 first = UINT32_MAX;
+    for (u32 index = 0; index < object->symbol_count; index += 1)
+    {
+        if (object->symbols[index].indirect && object->symbols[index].section != OBJECT_SECTION_UNDEFINED)
+        {
+            first = count ? first : index;
+            count += 1;
+        }
+    }
+    bool elf = (object->target.os == OPERATING_SYSTEM_LINUX || object->target.os == OPERATING_SYSTEM_ANDROID) &&
+               (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64);
+    if (count && (!elf || object->symbol_count > UINT32_MAX - count - 2 || object->relocation_count > UINT32_MAX - 5 * count - 1 || count > UINT32_MAX / 32))
+    {
+        result = false;
+        *message = string_format(arena, S8("GNU IFUNC symbol {S8} is unsupported for this target"), object->symbols[first].name);
+    }
+    else if (count)
+    {
+        bool x86 = object->target.cpu_arch == CPU_ARCH_X86_64;
+        u64 thunk_size = x86 ? LINK_IFUNC_X86_THUNK_SIZE : LINK_IFUNC_AARCH64_THUNK_SIZE;
+        u64 runner_size = shared ? 0
+                          : x86  ? LINK_IFUNC_X86_RUNNER_FRAME + (u64)count * LINK_IFUNC_X86_RUNNER_STEP
+                                 : LINK_IFUNC_AARCH64_RUNNER_FRAME + (u64)count * LINK_IFUNC_AARCH64_RUNNER_STEP;
+        ObjectSection* sections = arena_allocate(arena, ObjectSection, object->section_count);
+        memcpy(sections, object->sections, (u64)object->section_count * sizeof(*sections));
+        // .text: thunks, then the runner, each at a 16-byte boundary.
+        ObjectSection* text = sections + OBJECT_SECTION_TEXT;
+        u64 thunk_base = align_forward(BUSTER_MAX(text->data.length, text->virtual_size), 16);
+        u64 runner_base = thunk_base + (u64)count * thunk_size;
+        u8* code = arena_allocate_zeroed(arena, u8, runner_base + runner_size);
+        if (text->data.length) memcpy(code, text->data.pointer, text->data.length);
+        text->data = (ByteSlice){.pointer = code, .length = runner_base + runner_size};
+        if (text->virtual_size) text->virtual_size = text->data.length;
+        text->alignment = BUSTER_MAX(text->alignment, 16u);
+        // .data: one zeroed slot per indirect function.
+        ObjectSection* data_section = sections + OBJECT_SECTION_DATA;
+        u64 slot_base = align_forward(BUSTER_MAX(data_section->data.length, data_section->virtual_size), 8);
+        u8* data = arena_allocate_zeroed(arena, u8, slot_base + (u64)count * 8);
+        if (data_section->data.length) memcpy(data, data_section->data.pointer, data_section->data.length);
+        data_section->data = (ByteSlice){.pointer = data, .length = slot_base + (u64)count * 8};
+        if (data_section->virtual_size) data_section->virtual_size = data_section->data.length;
+        data_section->alignment = BUSTER_MAX(data_section->alignment, 8u);
+        // An executable's constructor array gains the runner's preinit entry
+        // in front.
+        u64 runner_entry = shared ? 0 : OBJECT_INITIALIZER_ENTRY_SIZE;
+        if (!shared)
+        {
+            ObjectSection* array = sections + OBJECT_SECTION_INIT_ARRAY;
+            u64 entries = array->data.length / OBJECT_INITIALIZER_ENTRY_SIZE;
+            u8* array_bytes = arena_allocate_zeroed(arena, u8, array->data.length + OBJECT_INITIALIZER_ENTRY_SIZE);
+            if (array->data.length) memcpy(array_bytes + OBJECT_INITIALIZER_ENTRY_SIZE, array->data.pointer, array->data.length);
+            array->data = (ByteSlice){.pointer = array_bytes, .length = array->data.length + OBJECT_INITIALIZER_ENTRY_SIZE};
+            if (array->virtual_size) array->virtual_size = array->data.length;
+            array->alignment = BUSTER_MAX(array->alignment, (u32)OBJECT_INITIALIZER_ENTRY_SIZE);
+            u32* priorities = arena_allocate(arena, u32, entries + 1);
+            priorities[0] = IR_INITIALIZER_PRIORITY_PREINIT;
+            for (u64 entry = 0; entry < entries; entry += 1)
+            {
+                priorities[entry + 1] = object->initializer_priorities[0] ? object->initializer_priorities[0][entry] : IR_INITIALIZER_PRIORITY_NONE;
+            }
+            rebound->initializer_priorities[0] = priorities;
+        }
+        rebound->sections = sections;
+        // Symbols: the inputs, one resolver per indirect function, the runner
+        // and the slot base.
+        u32 runner_symbol = object->symbol_count + count;
+        u32 slot_symbol = runner_symbol + 1;
+        ObjectSymbol* symbols = arena_allocate(arena, ObjectSymbol, (u64)slot_symbol + 1);
+        if (object->symbol_count) memcpy(symbols, object->symbols, (u64)object->symbol_count * sizeof(*symbols));
+        symbols[runner_symbol] = (ObjectSymbol){.name = S8(".Lbuster.ifunc.runner"), .value = runner_base, .size = runner_size,
+                                                .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION,
+                                                .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO};
+        symbols[slot_symbol] = (ObjectSymbol){.name = S8(".Lbuster.ifunc.slots"), .value = slot_base, .size = (u64)count * 8,
+                                              .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA,
+                                              .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO};
+        for (u32 index = 0; index < object->symbol_count; index += 1)
+        {
+            if (symbols[index].section == OBJECT_SECTION_INIT_ARRAY) symbols[index].value += runner_entry;
+        }
+        ObjectRelocation* relocations = arena_allocate(arena, ObjectRelocation, (u64)object->relocation_count + 5 * (u64)count + 1);
+        u32 relocation_count = 0;
+        for (u32 index = 0; index < object->relocation_count; index += 1)
+        {
+            ObjectRelocation relocation = object->relocations[index];
+            if (relocation.section == OBJECT_SECTION_INIT_ARRAY) relocation.offset += runner_entry;
+            relocations[relocation_count++] = relocation;
+        }
+        if (!shared)
+        {
+            relocations[relocation_count++] = (ObjectRelocation){.offset = 0, .section = OBJECT_SECTION_INIT_ARRAY, .symbol = runner_symbol,
+                                                                 .kind = OBJECT_RELOCATION_ABSOLUTE64};
+        }
+        u64 cursor = runner_base;
+        if (!shared && x86)
+        {
+            // sub rsp, 8: the runner is entered with rsp 8 below a 16-byte
+            // boundary, and each resolver call needs the boundary.
+            u8 prologue[] = {0x48, 0x83, 0xec, 0x08};
+            memcpy(code + cursor, prologue, sizeof(prologue));
+            cursor += sizeof(prologue);
+        }
+        else if (!shared)
+        {
+            link_write_u32(code, cursor, 0xa9bf7bfd); // stp x29, x30, [sp, #-16]!
+            link_write_u32(code, cursor + 4, 0x910003fd); // mov x29, sp
+            cursor += 8;
+        }
+        u32 slot = 0;
+        for (u32 index = 0; index < object->symbol_count; index += 1)
+        {
+            ObjectSymbol* symbol = symbols + index;
+            if (!symbol->indirect || symbol->section == OBJECT_SECTION_UNDEFINED)
+            {
+                continue;
+            }
+            u32 resolver = object->symbol_count + slot;
+            symbols[resolver] = *symbol;
+            symbols[resolver].name = string_format(arena, S8("{S8}.ifunc.resolver"), symbol->name);
+            symbols[resolver].global = false;
+            symbols[resolver].weak = false;
+            symbols[resolver].hidden = false;
+            // A shared object's resolver stays indirect: its slot's absolute
+            // reference becomes R_X86_64_IRELATIVE.
+            symbols[resolver].indirect = shared;
+            u64 thunk = thunk_base + (u64)slot * thunk_size;
+            s64 slot_offset = (s64)slot * 8;
+            symbol->section = OBJECT_SECTION_TEXT;
+            symbol->value = thunk;
+            symbol->size = thunk_size;
+            symbol->kind = OBJECT_SYMBOL_FUNCTION;
+            symbol->indirect = false;
+            symbol->comdat = 0;
+            if (shared)
+            {
+                relocations[relocation_count++] = (ObjectRelocation){.offset = slot_base + (u64)slot_offset, .section = OBJECT_SECTION_DATA,
+                                                                     .symbol = resolver, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+            }
+            if (x86)
+            {
+                // jmp [rip + slot]; int3 padding.
+                u8 jump[] = {0xff, 0x25, 0, 0, 0, 0, 0xcc, 0xcc};
+                memcpy(code + thunk, jump, sizeof(jump));
+                relocations[relocation_count++] = (ObjectRelocation){.addend = slot_offset - 4, .offset = thunk + 2, .section = OBJECT_SECTION_TEXT,
+                                                                     .symbol = slot_symbol, .kind = OBJECT_RELOCATION_X86_64_PC32};
+            }
+            else
+            {
+                link_write_u32(code, thunk, 0x90000010); // adrp x16, slot
+                link_write_u32(code, thunk + 4, 0xf9400210); // ldr x16, [x16, :lo12:slot]
+                link_write_u32(code, thunk + 8, 0xd61f0200); // br x16
+                link_write_u32(code, thunk + 12, 0xd4200000); // brk #0
+                relocations[relocation_count++] = (ObjectRelocation){.addend = slot_offset, .offset = thunk, .section = OBJECT_SECTION_TEXT,
+                                                                     .symbol = slot_symbol, .kind = OBJECT_RELOCATION_AARCH64_ELF_PAGE21};
+                relocations[relocation_count++] = (ObjectRelocation){.addend = slot_offset, .offset = thunk + 4, .section = OBJECT_SECTION_TEXT,
+                                                                     .symbol = slot_symbol, .kind = OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12};
+            }
+            if (!shared && x86)
+            {
+                // call resolver; mov [rip + slot], rax
+                u8 step[] = {0xe8, 0, 0, 0, 0, 0x48, 0x89, 0x05, 0, 0, 0, 0};
+                memcpy(code + cursor, step, sizeof(step));
+                relocations[relocation_count++] = (ObjectRelocation){.addend = -4, .offset = cursor + 1, .section = OBJECT_SECTION_TEXT,
+                                                                     .symbol = resolver, .kind = OBJECT_RELOCATION_X86_64_PLT32};
+                relocations[relocation_count++] = (ObjectRelocation){.addend = slot_offset - 4, .offset = cursor + 8, .section = OBJECT_SECTION_TEXT,
+                                                                     .symbol = slot_symbol, .kind = OBJECT_RELOCATION_X86_64_PC32};
+                cursor += LINK_IFUNC_X86_RUNNER_STEP;
+            }
+            else if (!shared)
+            {
+                link_write_u32(code, cursor, 0xd2800000); // mov x0, #0 (hwcap)
+                link_write_u32(code, cursor + 4, 0xd2800001); // mov x1, #0
+                link_write_u32(code, cursor + 8, 0x94000000); // bl resolver
+                link_write_u32(code, cursor + 12, 0x90000010); // adrp x16, slot
+                link_write_u32(code, cursor + 16, 0xf9000200); // str x0, [x16, :lo12:slot]
+                relocations[relocation_count++] = (ObjectRelocation){.offset = cursor + 8, .section = OBJECT_SECTION_TEXT,
+                                                                     .symbol = resolver, .kind = OBJECT_RELOCATION_AARCH64_CALL26};
+                relocations[relocation_count++] = (ObjectRelocation){.addend = slot_offset, .offset = cursor + 12, .section = OBJECT_SECTION_TEXT,
+                                                                     .symbol = slot_symbol, .kind = OBJECT_RELOCATION_AARCH64_ELF_PAGE21};
+                relocations[relocation_count++] = (ObjectRelocation){.addend = slot_offset, .offset = cursor + 16, .section = OBJECT_SECTION_TEXT,
+                                                                     .symbol = slot_symbol, .kind = OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12};
+                cursor += LINK_IFUNC_AARCH64_RUNNER_STEP;
+            }
+            slot += 1;
+        }
+        if (!shared && x86)
+        {
+            u8 epilogue[] = {0x48, 0x83, 0xc4, 0x08, 0xc3}; // add rsp, 8; ret
+            memcpy(code + cursor, epilogue, sizeof(epilogue));
+        }
+        else if (!shared)
+        {
+            link_write_u32(code, cursor, 0xa8c17bfd); // ldp x29, x30, [sp], #16
+            link_write_u32(code, cursor + 4, 0xd65f03c0); // ret
+        }
+        rebound->symbols = symbols;
+        rebound->symbol_count = slot_symbol + 1;
+        rebound->relocations = relocations;
+        rebound->relocation_count = relocation_count;
+    }
+
+    return result;
+}
+
+// Whether the merged constructor array holds a `.preinit_array` entry
+// (IR_INITIALIZER_PRIORITY_PREINIT).  The ELF gABI runs DT_PREINIT_ARRAY only
+// in an executable and `ld` refuses it in a shared object, where this linker
+// would otherwise fold the entry into DT_INIT_ARRAY and run it as a plain
+// constructor.
+BUSTER_GLOBAL_LOCAL bool link_object_has_preinit_entry(ObjectFile* object)
+{
+    u32* priorities = object->initializer_priorities[0];
+    u64 entries = priorities ? object->sections[OBJECT_SECTION_INIT_ARRAY].data.length / OBJECT_INITIALIZER_ENTRY_SIZE : 0;
+    u64 first = 0;
+    while (first < entries && priorities[first] != IR_INITIALIZER_PRIORITY_PREINIT)
+    {
+        first += 1;
+    }
+
+    return first < entries;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scratch(Arena* arena, Arena* temporary, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
+    ObjectFile rebound = {0};
     LinkElfIndex elf_index = {0};
     LinkElfIndex* exports = &elf_index;
     if (!arena || !object || object->error != OBJECT_ERROR_NONE || object->section_count != OBJECT_SECTION_COUNT || !object->sections ||
@@ -14658,6 +15575,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
         result.symbol = string_format(arena, S8("{S8}: executable-stack request (.note.GNU-stack) is unsupported"),
                                       object->executable_stack_source.length ? object->executable_stack_source : S8("input object"));
     }
+    else if (options.image_kind == NATIVE_IMAGE_SHARED && link_object_has_preinit_entry(object))
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+        result.symbol = S8(".preinit_array entry is not valid in a shared object (DT_PREINIT_ARRAY runs only in an executable)");
+    }
+    else if (!link_elf_indirect_functions_rebind(arena, object, options.image_kind == NATIVE_IMAGE_SHARED, &rebound, &result.symbol))
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+    }
     else if ((object->target.os == OPERATING_SYSTEM_LINUX || object->target.os == OPERATING_SYSTEM_ANDROID) &&
              !link_elf_index_initialize(temporary, options, exports))
     {
@@ -14666,6 +15592,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
     else if (object->target.os == OPERATING_SYSTEM_LINUX &&
              (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
+        object = &rebound;
         LinkObjectResult normalized = {.object = *object};
         if (object->target.cpu_arch == CPU_ARCH_X86_64)
         {
@@ -14727,7 +15654,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
     }
     else if (object->target.os == OPERATING_SYSTEM_ANDROID && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
-        result = link_native_executable_android_elf64(arena, object, options, exports);
+        result = link_native_executable_android_elf64(arena, &rebound, options, exports);
     }
     else
     {

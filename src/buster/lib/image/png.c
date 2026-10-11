@@ -10,9 +10,17 @@
 //   PngState, png_parse_*               chunk grammar, color and APNG metadata
 //   PngCompressedInput                  split-IDAT byte stream
 //   PngBitReader, PngHuffman            bounded DEFLATE machinery
+//   png_work_take, png_inflate_reserve  exact-charge bulk fast paths
+//   png_huffman_decode                  first-level table, bit-serial fallback
+//   png_crc_update, png_adler32         slice-by-8 CRC, deferred Adler-32
 //   png_inflate_zlib                    zlib header/body/Adler-32
 //   png_filtered_size                   exact scanline allocation census
 //   png_unfilter_row, png_expand_pixels filters, samples and Adam7 scatter
+//   png_expand_row                      byte-aligned row expansion
+//
+// Every fast path charges exactly the work its byte-serial definition charges
+// and defers to that definition whenever a chunk boundary, malformed code or
+// limit could fail, so statuses, offsets and limit values are unchanged.
 //   image_png_process                   public codec seam
 
 #include <buster/lib/image/internal.h>
@@ -28,6 +36,13 @@
 #define PNG_DEFLATE_CODE_LENGTH_SYMBOL_COUNT 19u
 #define PNG_DEFLATE_DYNAMIC_LENGTH_COUNT 320u
 #define PNG_ADLER_MODULUS 65521u
+// Largest n such that 255 * n * (n + 1) / 2 + (n + 1) * (PNG_ADLER_MODULUS - 1)
+// fits in 32 bits: Adler-32 sums may defer their modulo for this many bytes.
+#define PNG_ADLER_NMAX 5552u
+#define PNG_CRC_SLICE_THRESHOLD 4096u
+// First-level Huffman lookup width. Codes up to this length decode with one
+// table probe; longer or invalid codes take the canonical bit-serial path.
+#define PNG_HUFFMAN_FAST_BITS 9u
 
 #define PNG_CHUNK_TYPE(a, b, c, d)                                                                                                                            \
     (((u32)(u8)(a) << 24u) | ((u32)(u8)(b) << 16u) | ((u32)(u8)(c) << 8u) | (u32)(u8)(d))
@@ -115,6 +130,9 @@ struct PngHuffman
     u16 count[PNG_DEFLATE_MAX_BITS + 1u];
     u16 symbols[PNG_DEFLATE_LITERAL_SYMBOL_COUNT];
     u16 symbol_count;
+    // Indexed by the next PNG_HUFFMAN_FAST_BITS stream bits: symbol << 4 |
+    // code length, or 0 when those bits start no code of at most that length.
+    u16 fast[1u << PNG_HUFFMAN_FAST_BITS];
 };
 
 typedef enum PngHuffmanKind
@@ -132,8 +150,6 @@ struct PngInflateOutput
     u64 capacity;
     u64 count;
     u32 maximum_distance;
-    u32 adler_s1;
-    u32 adler_s2;
     u64 error_offset;
 };
 
@@ -161,16 +177,50 @@ BUSTER_GLOBAL_LOCAL bool png_type_is_critical(u32 type)
     return result;
 }
 
+// Reflected CRC-32 (polynomial 0xedb88320). Short inputs use a constant
+// 16-entry nibble table. Inputs of at least PNG_CRC_SLICE_THRESHOLD bytes
+// first derive slice-by-8 tables on the stack (no shared mutable state, so no
+// serial initialization), which pays for itself after a few KiB of chunk data.
 BUSTER_GLOBAL_LOCAL u32 png_crc_update(u32 crc, u8 const* bytes, u64 size)
 {
-    for (u64 index = 0; index < size; index += 1)
+    static u32 const nibble[16] = {
+        UINT32_C(0x00000000), UINT32_C(0x1db71064), UINT32_C(0x3b6e20c8), UINT32_C(0x26d930ac),
+        UINT32_C(0x76dc4190), UINT32_C(0x6b6b51f4), UINT32_C(0x4db26158), UINT32_C(0x5005713c),
+        UINT32_C(0xedb88320), UINT32_C(0xf00f9344), UINT32_C(0xd6d6a3e8), UINT32_C(0xcb61b38c),
+        UINT32_C(0x9b64c2b0), UINT32_C(0x86d3d2d4), UINT32_C(0xa00ae278), UINT32_C(0xbdbdf21c),
+    };
+    u64 index = 0;
+    if (size >= PNG_CRC_SLICE_THRESHOLD)
+    {
+        u32 table[8][256];
+        for (u32 value = 0; value < 256; value += 1)
+        {
+            u32 entry = (value >> 4u) ^ nibble[value & 15u];
+            table[0][value] = (entry >> 4u) ^ nibble[entry & 15u];
+        }
+        for (u32 slice = 1; slice < 8; slice += 1)
+        {
+            for (u32 value = 0; value < 256; value += 1)
+            {
+                u32 previous = table[slice - 1u][value];
+                table[slice][value] = (previous >> 8u) ^ table[0][previous & 255u];
+            }
+        }
+        u64 sliced_end = size & ~(u64)7u;
+        for (; index < sliced_end; index += 8)
+        {
+            u8 const* p = bytes + index;
+            u32 low = crc ^ ((u32)p[0] | (u32)p[1] << 8u | (u32)p[2] << 16u | (u32)p[3] << 24u);
+            u32 high = (u32)p[4] | (u32)p[5] << 8u | (u32)p[6] << 16u | (u32)p[7] << 24u;
+            crc = table[7][low & 255u] ^ table[6][(low >> 8u) & 255u] ^ table[5][(low >> 16u) & 255u] ^ table[4][low >> 24u] ^
+                  table[3][high & 255u] ^ table[2][(high >> 8u) & 255u] ^ table[1][(high >> 16u) & 255u] ^ table[0][high >> 24u];
+        }
+    }
+    for (; index < size; index += 1)
     {
         crc ^= bytes[index];
-        for (u32 bit = 0; bit < 8; bit += 1)
-        {
-            u32 mask = 0u - (crc & 1u);
-            crc = (crc >> 1u) ^ (UINT32_C(0xedb88320) & mask);
-        }
+        crc = (crc >> 4u) ^ nibble[crc & 15u];
+        crc = (crc >> 4u) ^ nibble[crc & 15u];
     }
     return crc;
 }
@@ -925,6 +975,22 @@ BUSTER_GLOBAL_LOCAL PngCompressedInput png_compressed_input_make(ImageDecodeCont
     return result;
 }
 
+// Fast-path work charge: the admission test of image_decode_add_work without
+// its failure report. Bulk paths call this only for an amount the byte-serial
+// path would charge on the same input; when it declines, they fall back to the
+// byte-serial path, which reproduces the exact failing offset and observed
+// value. A decode that succeeds therefore charges identical totals.
+BUSTER_GLOBAL_LOCAL bool png_work_take(ImageDecodeContext* context, u64 amount)
+{
+    bool result = context->status == IMAGE_DECODE_SUCCESS && context->work <= context->options.max_work &&
+                  amount <= context->options.max_work - context->work;
+    if (result)
+    {
+        context->work += amount;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool png_compressed_u8(PngCompressedInput* input, u8* value)
 {
     bool result = input->context->status == IMAGE_DECODE_SUCCESS && value != 0;
@@ -964,6 +1030,28 @@ BUSTER_GLOBAL_LOCAL u64 png_compressed_offset(PngCompressedInput const* input)
 BUSTER_GLOBAL_LOCAL bool png_bits_read(PngBitReader* reader, u32 count, u32* value)
 {
     bool result = reader && value && count <= 16 && reader->input->context->status == IMAGE_DECODE_SUCCESS;
+    if (result && reader->bit_count < count)
+    {
+        // Pull every byte this read needs at once when the current IDAT holds
+        // them and the budget admits them. These are the same bytes, charges
+        // and last_byte_offset the loop below produces one byte at a time;
+        // that loop still owns chunk boundaries, truncation and limits.
+        PngCompressedInput* input = reader->input;
+        u32 needed = (count - reader->bit_count + 7u) / 8u;
+        if (input->data_remaining >= needed && png_work_take(input->context, needed))
+        {
+            u8 const* bytes = input->context->encoded.pointer + input->data_offset;
+            for (u32 index = 0; index < needed; index += 1)
+            {
+                reader->bits |= (u32)bytes[index] << reader->bit_count;
+                reader->bit_count += 8;
+            }
+            input->data_offset += needed;
+            input->data_remaining -= needed;
+            input->consumed += needed;
+            reader->last_byte_offset = input->data_offset - 1u;
+        }
+    }
     while (result && reader->bit_count < count)
     {
         u8 byte = 0;
@@ -1051,6 +1139,32 @@ BUSTER_GLOBAL_LOCAL bool png_huffman_build(ImageDecodeContext* context, PngHuffm
                 offsets[length] += 1;
             }
         }
+        // Canonical codes of each length are consecutive from first, in
+        // symbols[] order, and are read most-significant bit first, so the
+        // table index is the bit-reversed code. Unassigned entries stay 0 and
+        // send incomplete or long codes to the bit-serial path.
+        u32 first = 0;
+        u32 index = 0;
+        for (u32 length = 1; length <= PNG_HUFFMAN_FAST_BITS; length += 1)
+        {
+            u32 count = huffman->count[length];
+            for (u32 ordinal = 0; ordinal < count; ordinal += 1)
+            {
+                u32 code = first + ordinal;
+                u32 reversed = 0;
+                for (u32 bit = 0; bit < length; bit += 1)
+                {
+                    reversed |= ((code >> bit) & 1u) << (length - 1u - bit);
+                }
+                u16 entry = (u16)((u32)huffman->symbols[index + ordinal] << 4u | length);
+                for (u32 slot = reversed; slot < (1u << PNG_HUFFMAN_FAST_BITS); slot += 1u << length)
+                {
+                    huffman->fast[slot] = entry;
+                }
+            }
+            index += count;
+            first = (first + count) << 1u;
+        }
     }
     return result;
 }
@@ -1062,10 +1176,36 @@ BUSTER_GLOBAL_LOCAL bool png_huffman_decode(PngBitReader* reader, PngHuffman con
     {
         image_decode_error(reader->input->context, IMAGE_DECODE_MALFORMED, png_compressed_offset(reader->input));
     }
+    bool found = false;
+    if (result)
+    {
+        // Peek without consuming: buffered bits plus up to two bytes of the
+        // current IDAT. A hit consumes exactly its code length through
+        // png_bits_read, which pulls the same bytes the bit-serial loop would.
+        PngCompressedInput const* input = reader->input;
+        u32 window = reader->bits;
+        u32 available = reader->bit_count;
+        u8 const* bytes = input->context->encoded.pointer + input->data_offset;
+        for (u32 index = 0; index < 2u && available < PNG_HUFFMAN_FAST_BITS && index < input->data_remaining; index += 1)
+        {
+            window |= (u32)bytes[index] << available;
+            available += 8;
+        }
+        u16 entry = available >= PNG_HUFFMAN_FAST_BITS ? huffman->fast[window & ((1u << PNG_HUFFMAN_FAST_BITS) - 1u)] : 0;
+        if (entry)
+        {
+            u32 consumed = 0;
+            result = png_bits_read(reader, entry & 15u, &consumed);
+            if (result)
+            {
+                *symbol = (u32)entry >> 4u;
+                found = true;
+            }
+        }
+    }
     s32 code = 0;
     s32 first = 0;
     u32 index = 0;
-    bool found = false;
     for (u32 length = 1; length <= PNG_DEFLATE_MAX_BITS && result && !found; length += 1)
     {
         u32 bit = 0;
@@ -1117,17 +1257,47 @@ BUSTER_GLOBAL_LOCAL bool png_inflate_emit(PngInflateOutput* output, u8 byte)
     {
         output->bytes[output->count] = byte;
         output->count += 1;
-        output->adler_s1 += byte;
-        if (output->adler_s1 >= PNG_ADLER_MODULUS)
-        {
-            output->adler_s1 -= PNG_ADLER_MODULUS;
-        }
-        output->adler_s2 += output->adler_s1;
-        if (output->adler_s2 >= PNG_ADLER_MODULUS)
-        {
-            output->adler_s2 -= PNG_ADLER_MODULUS;
-        }
     }
+    return result;
+}
+
+// Admits a run of count output bytes at once, charging one unit per byte.
+// False leaves all state untouched so the caller can replay the run through
+// png_inflate_emit, which reports the exact failing byte.
+BUSTER_GLOBAL_LOCAL bool png_inflate_reserve(PngInflateOutput* output, u64 count)
+{
+    bool result = count <= output->capacity - output->count && png_work_take(output->context, count);
+    return result;
+}
+
+// Adler-32 of the complete inflated stream, computed once after inflation with
+// the modulo deferred for PNG_ADLER_NMAX bytes at a time.
+BUSTER_GLOBAL_LOCAL u32 png_adler32(u8 const* bytes, u64 size)
+{
+    u32 s1 = 1;
+    u32 s2 = 0;
+    u64 index = 0;
+    while (index < size)
+    {
+        u64 end = index + BUSTER_MIN((u64)PNG_ADLER_NMAX, size - index);
+        // Eight bytes advance s1 by their sum and s2 by 8 * s1 plus their
+        // position-weighted sum: the per-byte recurrence, without its serial
+        // dependency. Both sums end each step exactly where it would.
+        for (; end - index >= 8u; index += 8)
+        {
+            u8 const* p = bytes + index;
+            s2 += 8u * s1 + 8u * p[0] + 7u * p[1] + 6u * p[2] + 5u * p[3] + 4u * p[4] + 3u * p[5] + 2u * p[6] + p[7];
+            s1 += (u32)p[0] + p[1] + p[2] + p[3] + p[4] + p[5] + p[6] + p[7];
+        }
+        for (; index < end; index += 1)
+        {
+            s1 += bytes[index];
+            s2 += s1;
+        }
+        s1 %= PNG_ADLER_MODULUS;
+        s2 %= PNG_ADLER_MODULUS;
+    }
+    u32 result = s2 << 16u | s1;
     return result;
 }
 
@@ -1149,14 +1319,35 @@ BUSTER_GLOBAL_LOCAL bool png_inflate_stored(PngBitReader* reader, PngInflateOutp
             image_decode_error(output->context, IMAGE_DECODE_MALFORMED, png_compressed_offset(reader->input));
             result = false;
         }
-        for (u32 index = 0; index < length && result; index += 1)
+        u32 remaining = result ? length : 0;
+        while (remaining && result)
         {
-            u8 byte = 0;
-            result = png_compressed_u8(reader->input, &byte);
-            if (result)
+            // Copy the part of the block inside the current IDAT in one step
+            // when its read and emit charges (one unit each per byte) fit;
+            // otherwise move one byte through the byte-serial path, which also
+            // crosses IDAT boundaries and reports truncation and limits.
+            PngCompressedInput* input = reader->input;
+            ImageDecodeContext* context = output->context;
+            u64 run = BUSTER_MIN((u64)remaining, input->data_remaining);
+            if (run && run <= output->capacity - output->count && png_work_take(context, run * 2u))
             {
-                output->error_offset = png_compressed_offset(reader->input);
-                result = png_inflate_emit(output, byte);
+                memcpy(output->bytes + output->count, context->encoded.pointer + input->data_offset, run);
+                input->data_offset += run;
+                input->data_remaining -= run;
+                input->consumed += run;
+                output->count += run;
+                remaining -= (u32)run;
+            }
+            else
+            {
+                u8 byte = 0;
+                result = png_compressed_u8(input, &byte);
+                if (result)
+                {
+                    output->error_offset = png_compressed_offset(input);
+                    result = png_inflate_emit(output, byte);
+                }
+                remaining -= 1;
             }
         }
     }
@@ -1301,8 +1492,16 @@ BUSTER_GLOBAL_LOCAL bool png_inflate_compressed(PngBitReader* reader, PngInflate
         result = png_huffman_decode(reader, &literals, &symbol);
         if (result && symbol < 256)
         {
-            output->error_offset = png_compressed_offset(reader->input);
-            result = png_inflate_emit(output, (u8)symbol);
+            if (png_inflate_reserve(output, 1))
+            {
+                output->bytes[output->count] = (u8)symbol;
+                output->count += 1;
+            }
+            else
+            {
+                output->error_offset = png_compressed_offset(reader->input);
+                result = png_inflate_emit(output, (u8)symbol);
+            }
         }
         else if (result && symbol == 256)
         {
@@ -1335,11 +1534,47 @@ BUSTER_GLOBAL_LOCAL bool png_inflate_compressed(PngBitReader* reader, PngInflate
                 image_decode_error(output->context, IMAGE_DECODE_MALFORMED, png_compressed_offset(reader->input));
                 result = false;
             }
-            for (u32 copied = 0; copied < length && result; copied += 1)
+            if (result && png_inflate_reserve(output, length))
             {
-                u8 byte = output->bytes[output->count - distance];
-                output->error_offset = png_compressed_offset(reader->input);
-                result = png_inflate_emit(output, byte);
+                // Overlapping copies (distance < length) must replicate the
+                // bytes they produce. Distance 1 is a run of one byte; from
+                // distance 8 every 8-byte step reads bytes already written.
+                u8* destination = output->bytes + output->count;
+                u8 const* source = destination - distance;
+                u32 copied = 0;
+                if (distance >= length)
+                {
+                    memcpy(destination, source, length);
+                    copied = length;
+                }
+                else if (distance == 1)
+                {
+                    memset(destination, source[0], length);
+                    copied = length;
+                }
+                else if (distance >= 8)
+                {
+                    for (; copied + 8u <= length; copied += 8)
+                    {
+                        u64 word;
+                        memcpy(&word, source + copied, sizeof(word));
+                        memcpy(destination + copied, &word, sizeof(word));
+                    }
+                }
+                for (; copied < length; copied += 1)
+                {
+                    destination[copied] = source[copied];
+                }
+                output->count += length;
+            }
+            else
+            {
+                for (u32 copied = 0; copied < length && result; copied += 1)
+                {
+                    u8 byte = output->bytes[output->count - distance];
+                    output->error_offset = png_compressed_offset(reader->input);
+                    result = png_inflate_emit(output, byte);
+                }
             }
         }
         else if (result)
@@ -1419,7 +1654,6 @@ BUSTER_GLOBAL_LOCAL bool png_inflate_zlib(ImageDecodeContext* context, PngState 
         .bytes = output_bytes,
         .capacity = output_size,
         .maximum_distance = maximum_distance,
-        .adler_s1 = 1,
         .error_offset = png->first_idat_header_offset,
     };
     if (result)
@@ -1437,7 +1671,7 @@ BUSTER_GLOBAL_LOCAL bool png_inflate_zlib(ImageDecodeContext* context, PngState 
     if (result)
     {
         u32 expected = image_decode_u32_be(adler_bytes);
-        u32 actual = output.adler_s2 << 16u | output.adler_s1;
+        u32 actual = png_adler32(output.bytes, output.count);
         if (expected != actual)
         {
             image_decode_error(context, IMAGE_DECODE_CHECKSUM_MISMATCH, adler_offset);
@@ -1551,33 +1785,67 @@ BUSTER_GLOBAL_LOCAL bool png_unfilter_row(ImageDecodeContext* context, u8* row, 
     {
         image_decode_error(context, IMAGE_DECODE_MALFORMED, error_offset);
     }
-    for (u64 index = 0; index < row_bytes && result; index += 1)
+    // One specialized loop per filter type. The first bytes_per_pixel bytes
+    // have no left neighbour (left and upper-left are zero there), and a first
+    // row has no previous row (above and upper-left are zero), which reduces
+    // Average to half of one neighbour and Paeth to its single nonzero input.
+    u64 head = BUSTER_MIN((u64)bytes_per_pixel, row_bytes);
+    if (result && filter == 1)
     {
-        u8 left = index >= bytes_per_pixel ? row[index - bytes_per_pixel] : 0;
-        u8 above = previous ? previous[index] : 0;
-        u8 upper_left = previous && index >= bytes_per_pixel ? previous[index - bytes_per_pixel] : 0;
-        u8 predictor = 0;
-        switch (filter)
+        for (u64 index = bytes_per_pixel; index < row_bytes; index += 1)
         {
-        case 0:
-            predictor = 0;
-            break;
-        case 1:
-            predictor = left;
-            break;
-        case 2:
-            predictor = above;
-            break;
-        case 3:
-            predictor = (u8)(((u32)left + above) / 2u);
-            break;
-        case 4:
-            predictor = png_paeth(left, above, upper_left);
-            break;
-        default:
-            break;
+            row[index] = (u8)(row[index] + row[index - bytes_per_pixel]);
         }
-        row[index] = (u8)(row[index] + predictor);
+    }
+    else if (result && filter == 2 && previous)
+    {
+        for (u64 index = 0; index < row_bytes; index += 1)
+        {
+            row[index] = (u8)(row[index] + previous[index]);
+        }
+    }
+    else if (result && filter == 3)
+    {
+        if (previous)
+        {
+            for (u64 index = 0; index < head; index += 1)
+            {
+                row[index] = (u8)(row[index] + (previous[index] >> 1u));
+            }
+            for (u64 index = bytes_per_pixel; index < row_bytes; index += 1)
+            {
+                row[index] = (u8)(row[index] + (((u32)row[index - bytes_per_pixel] + previous[index]) >> 1u));
+            }
+        }
+        else
+        {
+            for (u64 index = bytes_per_pixel; index < row_bytes; index += 1)
+            {
+                row[index] = (u8)(row[index] + (row[index - bytes_per_pixel] >> 1u));
+            }
+        }
+    }
+    else if (result && filter == 4)
+    {
+        if (previous)
+        {
+            for (u64 index = 0; index < head; index += 1)
+            {
+                row[index] = (u8)(row[index] + previous[index]);
+            }
+            for (u64 index = bytes_per_pixel; index < row_bytes; index += 1)
+            {
+                u8 predictor = png_paeth(row[index - bytes_per_pixel], previous[index], previous[index - bytes_per_pixel]);
+                row[index] = (u8)(row[index] + predictor);
+            }
+        }
+        else
+        {
+            for (u64 index = bytes_per_pixel; index < row_bytes; index += 1)
+            {
+                row[index] = (u8)(row[index] + row[index - bytes_per_pixel]);
+            }
+        }
     }
     return result;
 }
@@ -1698,6 +1966,59 @@ BUSTER_GLOBAL_LOCAL bool png_write_pixel(ImageDecodeContext* context, PngState c
     return result;
 }
 
+// Row-level expansion of byte-aligned samples (8- and 16-bit depths): the
+// color-type dispatch runs once per row instead of once per pixel. Output
+// matches png_write_pixel: 16-bit samples keep their high byte, tRNS compares
+// full source samples, and an out-of-range palette index is opaque black.
+// Returns false, writing nothing, for sub-byte depths left to png_write_pixel.
+BUSTER_GLOBAL_LOCAL bool png_expand_row(PngState const* png, u8 const* row, u32 width, u8* destination, u64 step)
+{
+    bool result = png->bit_depth == 8 || png->bit_depth == 16;
+    u32 sample_bytes = png->bit_depth / 8u;
+    u32 pixel_bytes = (u32)png->channel_count * sample_bytes;
+    if (result && png->color_type == 6 && sample_bytes == 1 && step == 4)
+    {
+        memcpy(destination, row, (u64)width * 4u);
+    }
+    else if (result)
+    {
+        u32 green_index = png->color_type == 2 || png->color_type == 6 ? sample_bytes : 0;
+        u32 blue_index = png->color_type == 2 || png->color_type == 6 ? 2u * sample_bytes : 0;
+        u32 alpha_index = png->color_type == 4 ? sample_bytes : png->color_type == 6 ? 3u * sample_bytes : 0;
+        bool has_alpha = png->color_type == 4 || png->color_type == 6;
+        bool keyed = png->seen_trns && (png->color_type == 0 || png->color_type == 2);
+        for (u32 x = 0; x < width; x += 1)
+        {
+            u8 const* source = row + (u64)x * pixel_bytes;
+            u8* pixel = destination + (u64)x * step;
+            if (png->color_type == 3)
+            {
+                u8 index = source[0];
+                u8 const black[4] = {0, 0, 0, 255};
+                memcpy(pixel, index < png->palette_count ? png->palette[index] : black, 4);
+            }
+            else
+            {
+                pixel[0] = source[0];
+                pixel[1] = source[green_index];
+                pixel[2] = source[blue_index];
+                pixel[3] = has_alpha ? source[alpha_index] : 255;
+                if (keyed)
+                {
+                    bool transparent = png_sample(source, png->bit_depth, 0) == (png->color_type == 0 ? png->transparent_gray : png->transparent_red);
+                    if (png->color_type == 2)
+                    {
+                        transparent = transparent && png_sample(source, png->bit_depth, 1) == png->transparent_green &&
+                                      png_sample(source, png->bit_depth, 2) == png->transparent_blue;
+                    }
+                    pixel[3] = transparent ? 0 : 255;
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool png_expand_pixels(ImageDecodeContext* context, PngState const* png, u8* filtered, u64 filtered_size)
 {
     bool result = true;
@@ -1727,7 +2048,10 @@ BUSTER_GLOBAL_LOCAL bool png_expand_pixels(ImageDecodeContext* context, PngState
                     u64 pixel_work = (u64)pass.width * png->channel_count;
                     result = image_decode_add_work(context, pixel_work, png->first_idat_header_offset);
                 }
-                for (u32 source_x = 0; source_x < pass.width && result; source_x += 1)
+                u64 row_y = (u64)pass.y_start + (u64)row_index * pass.y_step;
+                u8* destination = context->image.pixels.pointer + row_y * context->image.stride + (u64)pass.x_start * 4u;
+                bool expanded = result && png_expand_row(png, row, pass.width, destination, (u64)pass.x_step * 4u);
+                for (u32 source_x = 0; source_x < pass.width && result && !expanded; source_x += 1)
                 {
                     u32 destination_x = pass.x_start + source_x * pass.x_step;
                     u32 destination_y = pass.y_start + row_index * pass.y_step;

@@ -83,6 +83,10 @@ bool codegen_module_relocation_kind_is_aarch64(u8 kind)
     case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
     case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21:
     case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_PAGE21:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_ADD_LO12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_PAGE21:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_LD64_LO12:
         return true;
     default:
         return false;
@@ -201,9 +205,11 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     // are exactly what a C-level constraint and clobber list already state.
     // It is what a libc's system-call layer is written against.
     S8_INITIALIZER("syscall"),
-    // Byte port I/O names its AL/DX operands through fixed constraints. The
-    // shared assembler validates those architectural registers and owns bytes.
-    S8_INITIALIZER("inb"), S8_INITIALIZER("outb"),
+    // Port I/O names its AL/AX/EAX and DX operands through fixed constraints
+    // (a, d); the data width is the mnemonic suffix. The shared assembler
+    // validates those architectural registers and owns the bytes.
+    S8_INITIALIZER("in"), S8_INITIALIZER("inb"), S8_INITIALIZER("inw"), S8_INITIALIZER("inl"),
+    S8_INITIALIZER("out"), S8_INITIALIZER("outb"), S8_INITIALIZER("outw"), S8_INITIALIZER("outl"),
     // Timestamp outputs and architectural clobbers are explicit GNU asm
     // operands/clobbers; the shared assembler owns these zero-operand bytes.
     S8_INITIALIZER("rdtsc"), S8_INITIALIZER("rdtscp"),
@@ -266,6 +272,13 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     // the FSTCW spelling is the wait form the assembler already folds onto
     // FNSTCW.
     S8_INITIALIZER("fnstcw"), S8_INITIALIZER("fstcw"), S8_INITIALIZER("fldcw"),
+    // The rest of the floating-point environment: the exception flags, the
+    // whole x87 environment image, and the SSE control/status word. Each
+    // touches only its one memory operand (or none) plus FPU or MXCSR state;
+    // the shared assembler owns the wait prefix FNCLEX/FNINIT omit.
+    S8_INITIALIZER("fnclex"), S8_INITIALIZER("fwait"), S8_INITIALIZER("fninit"),
+    S8_INITIALIZER("fnstenv"), S8_INITIALIZER("fldenv"),
+    S8_INITIALIZER("ldmxcsr"), S8_INITIALIZER("stmxcsr"),
 };
 
 // The registers a template may name literally. The rule the ban exists for is
@@ -2686,10 +2699,31 @@ BUSTER_GLOBAL_LOCAL bool codegen_debug_locations_reserve(CodegenModule* result, 
     return reserved;
 }
 
+// A range that continues the previous seed of the same local with the same
+// whole (non-piecewise) location extends that seed. Per-block ranges of one
+// frame home are mostly back-to-back, so this keeps them from multiplying
+// DWARF location-list entries and CodeView S_DEFRANGE_* records (#2717).
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_location_extend(CodegenModule* result, IrSymbolId symbol, IrLocalId local, u32 start, u32 end,
+                                                            DebugLocation location)
+{
+    DebugLocationSeed* last = result->debug_location_count ? result->debug_locations + result->debug_location_count - 1u : 0;
+    bool extended = last && last->function_symbol.value == symbol.value && last->local.value == local.value && last->end == start &&
+                    end > start && last->location.kind == location.kind && location.kind != DEBUG_LOCATION_PIECEWISE &&
+                    last->location.reg == location.reg && last->location.frame_offset == location.frame_offset &&
+                    last->location.constant == location.constant && !last->location.piece_count && !location.piece_count;
+    if (extended)
+    {
+        last->end = end;
+    }
+    return extended;
+}
+
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_location_append(CodegenModule* result, CodegenDebugLocationSink* sink, IrSymbolId symbol,
                                                             IrLocalId local, u32 start, u32 end, DebugLocation location)
 {
     bool appended = result && end > start;
+    bool extended = appended && codegen_canonical_location_extend(result, symbol, local, start, end, location);
+    appended = appended && !extended;
     if (appended && result->debug_location_count >= sink->capacity)
     {
         appended = codegen_debug_locations_reserve(result, sink, 1);
@@ -2705,7 +2739,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_location_append(CodegenModule* result
             .location = location,
         };
     }
-    return appended;
+    return appended || extended;
 }
 
 // Block IDs are graph identities, not an execution order. Keep the entry
@@ -3803,6 +3837,23 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_relocation_kind(AssemblyRelocat
     return result;
 }
 
+// The relocation of one half of an AArch64 page-pair address. The selector
+// chose the pair's form per symbol and the encoder only says which half a site
+// is: Darwin has one pair, and ELF has the plain page pair and the GOT slot.
+BUSTER_GLOBAL_LOCAL CodegenModuleRelocationKind codegen_aarch64_page_relocation_kind(u8 reference, bool low)
+{
+    CodegenModuleRelocationKind result = low ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12 : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21;
+    if (reference == MACHINE_SYMBOL_REFERENCE_GOT)
+    {
+        result = low ? CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_LD64_LO12 : CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_PAGE21;
+    }
+    else if (reference == MACHINE_SYMBOL_REFERENCE_ELF_PAGE)
+    {
+        result = low ? CODEGEN_MODULE_RELOCATION_AARCH64_ELF_ADD_LO12 : CODEGEN_MODULE_RELOCATION_AARCH64_ELF_PAGE21;
+    }
+    return result;
+}
+
 // Publishes the encoded function's call and inline-assembly references as one
 // transaction. Refused inline rows cannot expose the already appended calls
 // or valid inline prefix; the caller refuses the complete MIR-only module.
@@ -3841,9 +3892,10 @@ bool codegen_publish_machine_relocations(IrProgram* program, CodegenModule* resu
                                             ? CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12
                                             : CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12)
                                      : encoded->call_sites[site_index].page_relative
-                                         ? (encoded->call_sites[site_index].page_low
-                                                ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12
-                                                : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21)
+                                         ? codegen_aarch64_page_relocation_kind(
+                                               function->call_target_references ? function->call_target_references[encoded->call_sites[site_index].target]
+                                                                                : (u8)MACHINE_SYMBOL_REFERENCE_DIRECT,
+                                               encoded->call_sites[site_index].page_low != 0)
                                      : encoded->call_sites[site_index].absolute ? CODEGEN_MODULE_RELOCATION_ABSOLUTE64
                                                                                : CODEGEN_MODULE_RELOCATION_AARCH64_CALL26),
                 };
@@ -4380,11 +4432,53 @@ typedef struct CodegenMachineDebugReference CodegenMachineDebugReference;
 struct CodegenMachineDebugReference
 {
     s32 physical_register;
+    // A register a copy edit left holding the same value as
+    // physical_register, or -1. Copies fan a value out to a second register
+    // (often to feed a destructive operand); when the tracked register is
+    // overwritten, the value is still readable from here (#3338).
+    s32 alternate_register;
     u32 epoch;
     bool frame_valid;
     bool prefer_frame;
     u8 reserved[2];
 };
+
+// The register no longer holds the value it held. If it was the tracked one,
+// a copy that still holds the value takes over.
+BUSTER_GLOBAL_LOCAL void codegen_machine_debug_reference_overwrite(CodegenMachineDebugReference* state, s32 physical_register)
+{
+    if (state->alternate_register == physical_register)
+    {
+        state->alternate_register = -1;
+    }
+    if (state->physical_register == physical_register)
+    {
+        state->physical_register = state->alternate_register;
+        state->alternate_register = -1;
+    }
+}
+
+// The value was (re)defined into this register; earlier copies are stale.
+BUSTER_GLOBAL_LOCAL void codegen_machine_debug_reference_define(CodegenMachineDebugReference* state, s32 physical_register)
+{
+    state->physical_register = physical_register;
+    state->alternate_register = -1;
+    state->prefer_frame = false;
+    state->epoch += 1;
+}
+
+// Registers whose contents do not survive the row go the same way.
+BUSTER_GLOBAL_LOCAL void codegen_machine_debug_reference_clobber(CodegenMachineDebugReference* state, u64 row_clobbers)
+{
+    if (state->alternate_register >= 0 && state->alternate_register < 64 && (row_clobbers & (UINT64_C(1) << state->alternate_register)))
+    {
+        state->alternate_register = -1;
+    }
+    if (state->physical_register >= 0 && state->physical_register < 64 && (row_clobbers & (UINT64_C(1) << state->physical_register)))
+    {
+        codegen_machine_debug_reference_overwrite(state, state->physical_register);
+    }
+}
 
 BUSTER_GLOBAL_LOCAL DebugRegister codegen_machine_debug_register(MachineFunction const* function, u32 virtual_register, u32 physical_register,
                                                                   u32 value_size, Target target)
@@ -4490,18 +4584,19 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_edit_state(MachineFunction const*
         {
             *selected_invalid = true;
         }
-        if (state->physical_register == (s32)edit->location && !writes_own)
+        if (!writes_own)
         {
-            state->physical_register = -1;
+            codegen_machine_debug_reference_overwrite(state, (s32)edit->location);
         }
         if (writes_own)
         {
-            state->physical_register = (s32)edit->location;
-            state->prefer_frame = false;
-            state->epoch += 1;
+            codegen_machine_debug_reference_define(state, (s32)edit->location);
         }
         else if (edit->kind == MACHINE_EDIT_COPY && state->physical_register == (s32)edit->subject)
         {
+            // A copy leaves the source holding the value as well: follow the
+            // destination, and keep the source as the fallback.
+            state->alternate_register = (s32)edit->subject;
             state->physical_register = (s32)edit->location;
             state->prefer_frame = false;
             state->epoch += 1;
@@ -5288,9 +5383,11 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
         // stop unrelated suffix replay once no certified register can remain.
         u32 home_end = shared_home ? (subject_cursor < subject_end ? index->subject_rows[subject_end - 1u] + 1u : 0u)
                                    : function->instruction_count;
-        CodegenMachineDebugReference state = {.physical_register = -1};
+        CodegenMachineDebugReference state = {.physical_register = -1, .alternate_register = -1};
         u32 physical_bucket = UINT32_MAX;
         u32 physical_cursor = 0;
+        u32 alternate_bucket = UINT32_MAX;
+        u32 alternate_cursor = 0;
         u32 unmapped_cursor = index->physical_offsets[CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT];
         u32 block_cursor = 0;
         u32 row = 0;
@@ -5325,6 +5422,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                 next = BUSTER_MIN(next, codegen_machine_debug_group_next(&index->homes, home_group, &home_cursor, row));
             }
             next = BUSTER_MIN(next, codegen_machine_debug_physical_next(index, state.physical_register, row, &physical_bucket, &physical_cursor));
+            // A copy's source can be overwritten while the copy stays tracked.
+            next = BUSTER_MIN(next, codegen_machine_debug_physical_next(index, state.alternate_register, row, &alternate_bucket, &alternate_cursor));
             if (unmapped_cursor < index->physical_offsets[CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT + 1u])
             {
                 // Identities outside the architectural file share one bucket,
@@ -5388,6 +5487,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                             // a shared home at a later layout row. Layout-order
                             // replay cannot certify those bytes at this entry.
                             state.physical_register = -1;
+                            state.alternate_register = -1;
                             if (shared_home)
                             {
                                 state.frame_valid = false;
@@ -5413,11 +5513,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                     {
                         selected_invalid = true;
                     }
-                    if (state.physical_register >= 0 && state.physical_register < 64 &&
-                        (row_clobbers & (UINT64_C(1) << state.physical_register)))
-                    {
-                        state.physical_register = -1;
-                    }
+                    codegen_machine_debug_reference_clobber(&state, row_clobbers);
                     MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
                     u32 destructive_source = codegen_machine_debug_destructive_source(info);
                     for (u32 operand_index = 0; info && operand_index < info->operand_count; operand_index += 1)
@@ -5434,9 +5530,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                             // definition row. Their first allocated use is
                             // nevertheless a certified read of the incoming
                             // value; publish it only after that row.
-                            state.physical_register = (s32)physical;
-                            state.prefer_frame = false;
-                            state.epoch += 1;
+                            codegen_machine_debug_reference_define(&state, (s32)physical);
                         }
                         if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
                         {
@@ -5444,15 +5538,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                             {
                                 selected_invalid = true;
                             }
-                            if (state.physical_register == (s32)physical)
-                            {
-                                state.physical_register = -1;
-                            }
+                            codegen_machine_debug_reference_overwrite(&state, (s32)physical);
                             if (own)
                             {
-                                state.physical_register = (s32)physical;
-                                state.prefer_frame = false;
-                                state.epoch += 1;
+                                codegen_machine_debug_reference_define(&state, (s32)physical);
                             }
                         }
                     }
@@ -5905,7 +5994,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
         }
     }
     home_end = shared_home ? BUSTER_MIN(home_end, function->instruction_count) : function->instruction_count;
-    CodegenMachineDebugReference state = {.physical_register = -1};
+    CodegenMachineDebugReference state = {.physical_register = -1, .alternate_register = -1};
     u32 edit_cursor = 0;
     u32 block_cursor = 0;
     for (u32 row = 0; row < function->instruction_count; row += 1)
@@ -5925,6 +6014,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
                 // register held it does not enter the selection, and every
                 // transition back to holding one rewrites it.
                 state.physical_register = -1;
+                state.alternate_register = -1;
                 if (shared_home)
                 {
                     state.frame_valid = false;
@@ -5949,11 +6039,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
         {
             selected_invalid = true;
         }
-        if (state.physical_register >= 0 && state.physical_register < 64 &&
-            (row_clobbers & (UINT64_C(1) << state.physical_register)))
-        {
-            state.physical_register = -1;
-        }
+        codegen_machine_debug_reference_clobber(&state, row_clobbers);
         MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
         u32 destructive_source = codegen_machine_debug_destructive_source(info);
         for (u32 operand_index = 0; info && operand_index < info->operand_count; operand_index += 1)
@@ -5969,9 +6055,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
                 // Entry/CFG parameters intentionally have no definition row.
                 // Their first allocated use is nevertheless a certified read
                 // of the incoming value; publish it only after that row.
-                state.physical_register = (s32)physical;
-                state.prefer_frame = false;
-                state.epoch += 1;
+                codegen_machine_debug_reference_define(&state, (s32)physical);
             }
             if (role != MACHINE_OPERAND_ROLE_DEFINE && role != MACHINE_OPERAND_ROLE_USE_DEFINE)
             {
@@ -5981,15 +6065,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
             {
                 selected_invalid = true;
             }
-            if (state.physical_register == (s32)physical)
-            {
-                state.physical_register = -1;
-            }
+            codegen_machine_debug_reference_overwrite(&state, (s32)physical);
             if (own)
             {
-                state.physical_register = (s32)physical;
-                state.prefer_frame = false;
-                state.epoch += 1;
+                codegen_machine_debug_reference_define(&state, (s32)physical);
             }
         }
         MachinePoint after = machine_point_make(row, MACHINE_POINT_AFTER);
@@ -6740,11 +6819,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     };
     // The one place -fPIC is turned into a fact about this module. It is a
     // statement about which references `ld` will place in a shared object, so
-    // it is scoped to the format and architecture whose relocations say that:
-    // x86-64 ELF. Windows images relocate as a whole and Mach-O's model is
+    // it is scoped to the format and architectures whose relocations say that:
+    // x86-64 and AArch64 ELF. Windows images relocate as a whole and Mach-O's model is
     // its own; neither reads this flag.
     bool position_independent =
-        options.position_independent && target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(target) == OBJECT_FORMAT_ELF64;
+        options.position_independent && (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64) &&
+        object_format_for_target(target) == OBJECT_FORMAT_ELF64;
     result.position_independent = position_independent;
     result.error = codegen_layout_globals(arena, program, module, &result);
     if (result.error != CODEGEN_ERROR_NONE)

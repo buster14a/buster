@@ -31,6 +31,11 @@ jobs:
       contents: read
       issues: write
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - name: Assign the failed main audit to its response owner
         shell: bash
         env:

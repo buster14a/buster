@@ -3105,6 +3105,79 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_att_port_suffixes(UnitTestArgum
     return result;
 }
 
+// Byte oracles from GNU as 2.47 (`as` then `objdump -d`) for the breakpoint
+// spelling and the floating-point environment instructions inline assembly
+// admits. `int $3` is the one-byte breakpoint and every other constant keeps
+// the imm8 form; a symbolic operand never folds and keeps its relocation.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_x64_breakpoint_and_fp_environment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct AssemblyEnvironmentCase
+    {
+        String8 source[2];
+        u8 byte_count;
+        u8 bytes[6];
+    } const cases[] = {
+        {{S8("int 3\n"), S8("int $3\n")}, 1, {0xcc}},
+        {{S8("int 0x3\n"), S8("int $0x3\n")}, 1, {0xcc}},
+        {{S8("int 1+2\n"), S8("int $1+2\n")}, 1, {0xcc}},
+        {{S8("int3\n"), S8("int3\n")}, 1, {0xcc}},
+        {{S8("int 4\n"), S8("int $4\n")}, 2, {0xcd, 0x04}},
+        {{S8("int 128\n"), S8("int $0x80\n")}, 2, {0xcd, 0x80}},
+        {{S8("int 255\n"), S8("int $255\n")}, 2, {0xcd, 0xff}},
+        {{S8("int 0\n"), S8("int $0\n")}, 2, {0xcd, 0x00}},
+        {{S8("fnclex\n"), S8("fnclex\n")}, 2, {0xdb, 0xe2}},
+        {{S8("fwait\n"), S8("fwait\n")}, 1, {0x9b}},
+        {{S8("fninit\n"), S8("fninit\n")}, 2, {0xdb, 0xe3}},
+        {{S8("fnstenv [rax]\n"), S8("fnstenv (%rax)\n")}, 2, {0xd9, 0x30}},
+        {{S8("fldenv [rax]\n"), S8("fldenv (%rax)\n")}, 2, {0xd9, 0x20}},
+        {{S8("fnstenv [rbx+8]\n"), S8("fnstenv 8(%rbx)\n")}, 3, {0xd9, 0x73, 0x08}},
+        {{S8("fldenv [rsp+16]\n"), S8("fldenv 16(%rsp)\n")}, 4, {0xd9, 0x64, 0x24, 0x10}},
+        {{S8("fnstenv [r9]\n"), S8("fnstenv (%r9)\n")}, 3, {0x41, 0xd9, 0x31}},
+        {{S8("ldmxcsr dword ptr [rax]\n"), S8("ldmxcsr (%rax)\n")}, 3, {0x0f, 0xae, 0x10}},
+        {{S8("stmxcsr dword ptr [rax]\n"), S8("stmxcsr (%rax)\n")}, 3, {0x0f, 0xae, 0x18}},
+        {{S8("ldmxcsr dword ptr [rdi+4]\n"), S8("ldmxcsr 4(%rdi)\n")}, 4, {0x0f, 0xae, 0x57, 0x04}},
+        {{S8("stmxcsr dword ptr [rbp-4]\n"), S8("stmxcsr -4(%rbp)\n")}, 4, {0x0f, 0xae, 0x5d, 0xfc}},
+        {{S8("ldmxcsr dword ptr [r10+rax*4+12]\n"), S8("ldmxcsr 12(%r10,%rax,4)\n")}, 6, {0x41, 0x0f, 0xae, 0x54, 0x82, 0x0c}},
+    };
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX, .cpu_model = CPU_MODEL_BASELINE};
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+    {
+        for (u32 syntax = 0; syntax < 2; syntax += 1)
+        {
+            AssemblyEncodeResult encoded = assembly_encode(arguments->arena, cases[row].source[syntax],
+                (AssemblyEncodeOptions){.target = target, .syntax = syntax ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL});
+            BUSTER_TEST_RAW(arguments, encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                assembly_test_bytes_equal(encoded.bytes, cases[row].bytes, cases[row].byte_count), cases[row].source[syntax]);
+        }
+    }
+    // WAIT then FNINIT is one stream, and a symbolic operand stays imm8 with
+    // its relocation rather than being read as the constant it might equal.
+    u8 wait_init[] = {0x9b, 0xdb, 0xe3};
+    AssemblyEncodeResult sequence = assembly_encode(arguments->arena, S8("fwait\nfninit\n"),
+        (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, sequence.diagnostic_count == 0 && assembly_test_bytes_equal(sequence.bytes, wait_init, sizeof(wait_init)));
+    AssemblyEncodeResult symbolic = assembly_encode(arguments->arena, S8("int $handler\n"),
+        (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, symbolic.diagnostic_count == 0 && symbolic.relocation_count == 1 && symbolic.bytes.length == 2 &&
+                           symbolic.bytes.pointer[0] == 0xcd);
+    // GNU as refuses an out-of-range or operand-carrying form; so does this.
+    String8 invalid_sources[] = {
+        S8("int $256\n"), S8("int $-253\n"), S8("int $259\n"), S8("int $3+0x100\n"), S8("int3 $3\n"), S8("int\n"),
+        S8("int %al\n"), S8("int (%rax)\n"),
+        S8("fnclex %eax\n"), S8("fninit $1\n"), S8("fwait (%rax)\n"),
+        S8("fnstenv %eax\n"), S8("fldenv\n"), S8("fnstenv $1\n"),
+        S8("ldmxcsr %eax\n"), S8("stmxcsr\n"), S8("ldmxcsr $0\n"), S8("stmxcsr %xmm0\n"),
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(invalid_sources); row += 1)
+    {
+        AssemblyEncodeResult rejected = assembly_encode(arguments->arena, invalid_sources[row],
+            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST_RAW(arguments, rejected.diagnostic_count != 0 && !rejected.bytes.length, invalid_sources[row]);
+    }
+    return result;
+}
+
 // GNU as 2.47 byte/rejection oracles. Unsized bit-test operands may be
 // diagnosed, but an accepted BTS/BTR/BTC must never become another operation.
 BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_att_suffix_aliases(UnitTestArguments* arguments)
@@ -5257,6 +5330,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_private_labels);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_section_start_names);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_att_port_suffixes);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_x64_breakpoint_and_fp_environment);
     UnitTestResult suffix_aliases = assembly_test_att_suffix_aliases(arguments);
     result.succeeded_test_count += suffix_aliases.succeeded_test_count;
     result.test_count += suffix_aliases.test_count;

@@ -135,6 +135,19 @@ class FakeAPI:
         raise AssertionError((path, field, query))
 
 
+def add_compiler_benchmark_metadata(api, mode, status, conclusion):
+    # Share the exact hosted check/run/job payload used by the ordinary gate tests.
+    from github_ci_time_test import CompilerBenchmarkInventoryTests
+    fixture = CompilerBenchmarkInventoryTests()
+    fixture.HEAD = SHA
+    fixture.setUp()
+    fixture.benchmark(mode, status, conclusion)
+    api.jobs.append(dict(fixture.jobs[-1], run_id=SOURCE_ID))
+    api.main_jobs.append(dict(fixture.jobs[-1], run_id=CURRENT_ID))
+    api.checks.append(fixture.checks[-1])
+    api.benchmark_reads = fixture.benchmark_reads
+
+
 DRAFT_PREDICATE = ("github.event_name == 'pull_request' && github.event.pull_request.draft && "
                    "github.run_attempt == '1'")
 
@@ -167,17 +180,8 @@ class MainCIReuseTests(unittest.TestCase):
                                     main_evidence["current_reconciled_checks"]))
 
     def add_compiler_benchmark(self, mode, status, conclusion):
-        # Reuse the hosted-shape fixture; these controls exercise both real
-        # reuse callers with independent run and step reads, not a mocked gate.
-        from github_ci_time_test import CompilerBenchmarkInventoryTests
-        fixture = CompilerBenchmarkInventoryTests()
-        fixture.HEAD = SHA
-        fixture.setUp()
-        fixture.benchmark(mode, status, conclusion)
-        self.api.jobs.append(dict(fixture.jobs[-1], run_id=SOURCE_ID))
-        self.api.main_jobs.append(dict(fixture.jobs[-1], run_id=CURRENT_ID))
-        self.api.checks.append(fixture.checks[-1])
-        self.api.benchmark_reads = fixture.benchmark_reads
+        # Exercise both real reuse callers with the same hosted-shape evidence.
+        add_compiler_benchmark_metadata(self.api, mode, status, conclusion)
 
     def test_compiler_benchmark_display_does_not_change_reuse_receipts(self):
         baseline = self.admit()
@@ -622,6 +626,32 @@ class MainCIReuseFinishTests(unittest.TestCase):
         self.assertEqual(report["status"], "verified")
         self.assertEqual(handoff["reuse"], "true")
         return handoff
+
+    def test_finish_reuses_while_benchmark_check_is_queued_without_terminal_publisher(self):
+        for mode in ("main", "pull"):
+            with self.subTest(mode=mode):
+                self.api = FakeAPI()
+                add_compiler_benchmark_metadata(self.api, mode, "queued", None)
+                handoff = self.decide()
+                result = self.invoke("finish", handoff)
+                code, report, _, text = result
+                self.assertEqual(code, 0, text)
+                self.assertEqual(report["status"], "verified")
+                self.assertEqual(report["diagnostics"]["stage"], "complete")
+                self.assertEqual(len(report["receipt"]["source_jobs"]), 23)
+                self.assertEqual(len(report["receipt"]["main_jobs"]), 17)
+                check = self.api.checks[-1]
+                self.assertEqual((check["status"], check["conclusion"]), ("queued", None))
+                publisher = self.api.benchmark_reads["actions/runs/600/attempts/1"]
+                self.assertEqual((publisher["status"], publisher["conclusion"]), ("in_progress", None))
+                jobs = self.api.benchmark_reads["actions/runs/600/attempts/1/jobs?per_page=100"]["jobs"]
+                self.assertEqual(len(jobs), 1)
+                self.assertEqual(jobs[0]["name"], inventory.COMPILER_BENCHMARK_DISPLAY_JOBS[
+                    "main" if mode == "main" else "pull"][1])
+                self.assertEqual(jobs[0]["steps"][1]["name"],
+                                 inventory.COMPILER_BENCHMARK_CURRENT_DISPLAY_STEP)
+                self.assertFalse(any("Publish" in row["name"] for row in jobs))
+                self.sleeps.assert_not_called()
 
     def assert_refused(self, result, stage=None):
         code, report, outputs, text = result

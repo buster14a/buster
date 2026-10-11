@@ -1,0 +1,50 @@
+Source size of 4a5e2e5aa55624eec920244eb0e8ada86aa7d073
+  base 8ea54465a2309f95bcb160143ce4804e05a8dbc8
+  baseline 7a75db7c21ce7623c27d4f6ea2826ccc83c8bc8f (docs/source-size-baseline.txt)
+
+category    ratchet   files       bytes  change vs base  since baseline
+production  yes         224    18267504           +4992          +11758
+build       yes         334     8413005         +256070            +780
+tests       no          850    22730953          +11469          +49697
+generated   no           48    51984056               0               0
+docs        no         3105    91794202        +9450282           +9415
+dormant     no           65       88893               0               0
+total                  4626   193278613        +9722813          +71650
+
+Largest ratcheted files:
+  production     3106415  src/buster/lib/compiler/frontend/c/c_gen.c
+  build          2021644  build.c
+  production     1782250  src/buster/lib/compiler/frontend/c/c_parse.c
+  production     1048277  src/buster/lib/compiler/codegen/machine_x86_64.c
+  production      864784  src/buster/lib/compiler/assembly/x86_64_metadata.c
+  production      727562  src/buster/lib/compiler/link/link.c
+  production      714910  src/buster/lib/compiler/assembly/assembly.c
+  production      711408  src/buster/lib/compiler/object/object.c
+  production      678158  src/buster/lib/compiler/frontend/c/c_source.c
+  production      617631  src/buster/lib/compiler/codegen/machine_aarch64.c
+
+Ratcheted files changed from base: 11
+  build          +251612  tools/clang_analyze.c
+  build            +4458  tools/analyzer_worker_budget.py
+  production       +2544  src/buster/lib/compiler/frontend/c/c_source.c
+  production       +1107  src/buster/lib/compiler/wasm/wasm.c
+  production        +643  src/buster/lib/compiler/ir/ir.c
+  production        +238  src/buster/lib/compiler/ir/ir_internal.h
+  production        +158  src/buster/lib/compiler/frontend/c/c_source_internal.h
+  production        +102  src/buster/lib/compiler/wasm/wasm_internal.h
+  production         +99  src/buster/lib/compiler/frontend/c/c_gen.c
+  production         +84  src/buster/lib/compiler/ebpf/ebpf.c
+  production         +17  src/buster/lib/compiler/frontend/c/c_parse.c
+
+production: +4992 bytes from base, within the 32768-byte change limit
+build: +256070 bytes from base exceeds the 32768-byte change limit; acknowledged by this change's baseline row
+
+SOURCE_SIZE_V1 revision=4a5e2e5aa55624eec920244eb0e8ada86aa7d073 category=production ratcheted=1 files=224 bytes=18267504 base_files=224 base_bytes=18262512 baseline_files=224 baseline_bytes=18255746
+SOURCE_SIZE_V1 revision=4a5e2e5aa55624eec920244eb0e8ada86aa7d073 category=build ratcheted=1 files=334 bytes=8413005 base_files=334 base_bytes=8156935 baseline_files=334 baseline_bytes=8412225
+SOURCE_SIZE_V1 revision=4a5e2e5aa55624eec920244eb0e8ada86aa7d073 category=tests ratcheted=0 files=850 bytes=22730953 base_files=850 base_bytes=22719484 baseline_files=850 baseline_bytes=22681256
+SOURCE_SIZE_V1 revision=4a5e2e5aa55624eec920244eb0e8ada86aa7d073 category=generated ratcheted=0 files=48 bytes=51984056 base_files=48 base_bytes=51984056 baseline_files=48 baseline_bytes=51984056
+SOURCE_SIZE_V1 revision=4a5e2e5aa55624eec920244eb0e8ada86aa7d073 category=docs ratcheted=0 files=3105 bytes=91794202 base_files=3084 base_bytes=82343920 baseline_files=3104 baseline_bytes=91784787
+SOURCE_SIZE_V1 revision=4a5e2e5aa55624eec920244eb0e8ada86aa7d073 category=dormant ratcheted=0 files=65 bytes=88893 base_files=65 base_bytes=88893 baseline_files=65 baseline_bytes=88893
+SOURCE_SIZE_RATCHET_V1 category=production growth=+4992 limit=32768 verdict=within-limit
+SOURCE_SIZE_RATCHET_V1 category=build growth=+256070 limit=32768 verdict=acknowledged
+SOURCE_SIZE_RESULT_V1 revision=4a5e2e5aa55624eec920244eb0e8ada86aa7d073 base=8ea54465a2309f95bcb160143ce4804e05a8dbc8 baseline_commit=7a75db7c21ce7623c27d4f6ea2826ccc83c8bc8f status=pass

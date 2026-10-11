@@ -34,6 +34,11 @@ jobs:
       contents: read
       actions: read
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-latest
       - name: Require CI admission to be enabled
         shell: bash
         env:
@@ -53,6 +58,12 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Prove stateless validation survives merge bursts
         run: python3 -B tools/bench_direct/workflow_concurrency_test.py -v
       - name: Test benchmark policy reuse
@@ -66,14 +77,19 @@ jobs:
         shell: bash
         if: ${{ steps.reuse.outputs.reused != 'true' }}
         run: |
-          # Retain the native producer's failure through tee.
+          # Native producer failure must propagate through tee.
           set -o pipefail
           clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/lifecycle.c -lm -o "$RUNNER_TEMP/9700x-lifecycle"
           "$RUNNER_TEMP/9700x-lifecycle" --self-test | tee "$RUNNER_TEMP/9700x-lifecycle-fixtures.jsonl"
           python3 -B tools/bench_direct/workflow_policy_test.py
           python3 -B tools/bench_direct/run_workloads_test.py
           python3 -B tools/bench_direct/authorize_test.py
+          python3 -B tools/bench_direct/compiler_github_clock_test.py
           python3 -B tools/bench_direct/authorize_compiler_test.py
+          python3 -B tools/bench_direct/sampling_qualification_test.py
+          python3 -B tools/bench_direct/sampling_publish_test.py
+          PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_sampling_publication_test.py -v
+          PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_closure_utility_publication_test.py -v
           python3 -B tools/bench_direct/compiler_test.py
           python3 -B tools/bench_direct/compiler_visibility_test.py
           python3 -B tools/bench_direct/performance_inventory_test.py

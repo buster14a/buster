@@ -317,15 +317,19 @@ struct MachineX64Selector
 // the PLT and any interposable address uses the GOT. Linux undefined
 // default-visible weak function addresses also use the GOT in the default
 // model so an absent provider stays zero; direct calls retain their PLT form.
+// An undefined weak symbol keeps that indirection under -fPIC even when it is
+// hidden, function or data: a PC-relative reference to the absent symbol is a
+// relocation a shared object cannot carry, while a GOT slot is simply zero.
 BUSTER_GLOBAL_LOCAL u8 machine_x64_symbol_reference(MachineX64Selector* selector, IrSymbolId symbol, bool call_site)
 {
     IrSymbol* record = ir_symbol_from_id(&selector->program->symbols, symbol);
     bool elf_external_call = call_site && record && !record->is_definition &&
                              object_format_for_target(selector->target) == OBJECT_FORMAT_ELF64;
     bool weak_function_address = !call_site && selector->target.os == OPERATING_SYSTEM_LINUX && record &&
-                                 record->kind == IR_SYMBOL_FUNCTION && !record->is_definition && record->is_weak && !record->is_hidden;
+                                 record->kind == IR_SYMBOL_FUNCTION && !record->is_definition && record->is_weak;
+    bool weak_undefined = record && !record->is_definition && record->is_weak && record->linkage != IR_LINKAGE_INTERNAL;
     bool indirect = elf_external_call || weak_function_address ||
-                    (selector->position_independent && ir_symbol_is_interposable(record));
+                    (selector->position_independent && (ir_symbol_is_interposable(record) || weak_undefined));
     return (u8)(!indirect ? MACHINE_SYMBOL_REFERENCE_DIRECT : call_site ? MACHINE_SYMBOL_REFERENCE_PLT : MACHINE_SYMBOL_REFERENCE_GOT);
 }
 
@@ -5459,9 +5463,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
         IrType* type = operand.value < function->value_count
                            ? ir_type_from_id(&selector->program->types, function->values[operand.value].canonical_type)
                            : 0;
-        selected = type && type->layout.resolved && type->layout.size && type->layout.size <= 16 &&
+        selected = type && type->layout.resolved && type->layout.size &&
                    constraint_class < IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
         bool memory = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint_class);
+        // Only the operand's address is passed to a memory-class operand, so
+        // its size is unbounded; every other class travels in at most 16 bytes.
+        selected = selected && (memory || type->layout.size <= 16);
         bool vector = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(constraint_class);
         bool x87 = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_X87(constraint_class);
         if (selected && (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH))

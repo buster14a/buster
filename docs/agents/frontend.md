@@ -11,7 +11,7 @@ substitute for inspecting the current implementation and fixtures.
 |---|---|
 | Pipeline, ownership, diagnostics, canonical IR, expression places and qualifiers | [Foundations](frontend/foundations.md) |
 | Semantic-only validation, lowering constraint inventory, diagnostic and allocation regression contract | [Semantic validation](frontend/semantic-validation.md) |
-| Implicit postorder syntax tree (pilot): node contract, forward construction, layouts, consumer map | [Syntax tree](frontend/ast.md) |
+| Implicit postorder syntax tree (pilot): node contract, forward construction, layouts, tree expression typer, consumer map | [Syntax tree](frontend/ast.md) |
 | Phase arenas, the preprocessing seal and semantic layout queries | [Compiler phase lifetimes](../compiler-lifetime.md) |
 | Relocations, weak/alias symbols, constructors/destructors, object formats and linker | [Linkage](frontend/linkage.md) |
 | Packed/aligned types, bit-fields, layout engines | [Layout](frontend/layout.md) |
@@ -222,6 +222,38 @@ clz/ctz runtime oracles on nonzero inputs.
 `__builtin_clrsb`/`l`/`ll` share that policy with signed int/long/long long
 operands; lowering counts leading zeros of `((x ^ (x >> (w - 1))) << 1) | 1`,
 which is never zero.
+`__builtin_abs`/`labs`/`llabs` (#1394; `c_semantic_absolute_value_kind`) convert
+their one argument to signed int/long/long long and return that same type, unlike
+the int-returning count family. Lowering is `(x ^ s) - s` with `s = x >> (w - 1)`
+(`c_ir_emit_absolute_value`), so the most negative value wraps under `-fwrapv`.
+Constant folding shares the integer-builtin fold and leaves the most negative
+value unfolded. Wrong arity or a non-arithmetic argument is a diagnostic.
+
+`__builtin_dynamic_object_size` (#1394) is a conservative alias of
+`__builtin_object_size`: `c_symbol_predefined` maps both spellings to
+`C_SYMBOL_BUILTIN_OBJECT_SIZE`, so they share operand admission, diagnostics
+and lowering, and `__has_builtin` answers 1 for both. The answer is always the
+compile-time `object_size` value (a known size, or `(size_t)-1`/`0` for an
+unknown object), which GCC documents as a valid result. There is no runtime
+allocation tracking: the extra precision GCC and Clang can give a size known
+only at run time (a `malloc` argument, a variable-length array) is not
+provided. `c_test_dynamic_object_size` compares both spellings' lowered IR.
+
+`__builtin_classify_type(expression)` (#1394) answers Clang's type class as an
+`int` integer constant expression, usable in `_Static_assert`, static
+initializers, array bounds and `case` labels. The operand is only typed, never
+evaluated: prepared-call discovery skips it, so no call, increment or other
+side effect inside it is emitted, including inside `?:`, `&&` and comma
+operands. It undergoes lvalue conversion and array/function decay
+(`c_parse_classify_type_builtin`, recorded as a type-identity answer like
+`__builtin_types_compatible_p`). The classes are `void` 0; every integer type,
+`char` and enum 1; `_Bool` 4; pointer, decayed array or function and string
+literal 5; real floating 8; complex 9; struct 12; union 13; GNU vector 19
+(`c_parse_classify_type_value`). Three types are refused with a diagnostic
+rather than given a guessed class: `nullptr_t` (Clang answers -1), `va_list`
+(its class depends on the target ABI), and `_BitInt` (Clang's 18), which the
+frontend does not model. `c_test_builtin_classify_type` covers every class,
+the static contexts, arity and unevaluated operands at run time.
 
 `__builtin_parity`/`l`/`ll` share the popcount operand policy and lower to
 `popcount(x) & 1`. `__builtin_bswap16/32/64` take and return `unsigned short`,
@@ -240,8 +272,19 @@ The typed `__builtin_{s,u}{add,sub,mul}{,l,ll}_overflow` checks
 the wrapped result through the third argument and answer `_Bool`. Lowering
 computes in the unsigned counterpart: sign tests for add/sub, and for multiply
 a divide-back check of the magnitudes' product, so no wider type, trap or
-runtime helper is needed. The generic `__builtin_*_overflow` forms (#1394) and
-`__builtin_return_address` are not implemented and answer `__has_builtin` 0.
+runtime helper is needed. The generic `__builtin_{add,sub,mul}_overflow`
+(#1394) take any two integer operands and a pointer to any non-const integer
+(`_Bool` and enums included); `c_ir_emit_generic_overflow_builtin` computes the
+exact result in signed 64- or 128-bit arithmetic, stores its low bits (bit 0
+for `_Bool`) and answers whether it left the result type's range. Same-signedness
+operands no wider than the result use the typed lowering at the result type
+(add/sub only at 128 bits). Refused with a structured diagnostic: multiply with
+a 128-bit operand or result, an exact result needing more than 128 signed bits
+(a 128-bit operand that also narrows or changes signedness, an unsigned 64-bit
+product into 128 bits), and anything needing 128-bit arithmetic on targets other
+than x86-64 and AArch64 (WebAssembly). The parser rejects wrong arity, non-integer
+operands and a result that is not a pointer to a non-const integer.
+`__builtin_return_address` is not implemented and answers `__has_builtin` 0.
 `__builtin_fabsl` clears the stored sign bit, `__builtin_fmax`/`fmin` and their
 `f`/`l` forms read NaN-ness from the stored bits and select the other operand,
 and `__builtin_powi`/`powif`/`powil` run an inline square-and-multiply loop;
@@ -252,6 +295,31 @@ translation-unit declaration and otherwise import the standard prototype from
 `c_ir_memory_builtin_signatures`, so no `<string.h>` is needed.
 `c_test_gnu_library_builtins_runtime` checks all of these against exact oracles
 in every native allocator mode and both frontend forms.
+
+The libm-backed rounding, fused-multiply-add and scaling builtins (#1394) are
+`__builtin_{trunc,rint,nearbyint,fma,ldexp,lround,llround}` with `f`, plain and
+`l` spellings (21 names). They are runtime calls: `c_ir_emit_math_call` converts
+each argument once and imports the libm symbol of the same name without the
+`__builtin_` prefix (`trunc`, `lroundl`, ...), and nothing is constant folded,
+including in static initializers. `c_math_libm_shapes` in `c_source.c` is the one
+table of arity, floating type, result type and `int` exponent (`ldexp`) that
+lowering, the sizeof/expression typing in `c_gen.c`/`c_parse.c` and the arity
+check share via `c_semantic_math_libm_shape`; `lround`/`llround` answer the
+target's `long`/`long long` (32-bit `long` on Windows) and the `l` forms use the
+target's long double (x87 on x86-64 Linux/macOS, binary64 on Windows and Apple
+AArch64, binary128 on Linux/Android AArch64). Availability, also the
+`__has_builtin` answer (`c_conditional_builtin_supported`):
+
+| Target | float and double spellings | `l` spellings |
+|---|---|---|
+| x86-64 and AArch64, every OS | supported | supported |
+| Wasm64 | supported (unresolved libm import) | refused: "lowers no long double" diagnostic, `__has_builtin` 0 |
+| eBPF | refused: "no floating point or libm" diagnostic, `__has_builtin` 0 | refused, `__has_builtin` 0 |
+
+`c_test_libm_rounding_builtins_lowering` proves this per target without running:
+certified, validated canonical IR, the expected import symbols with the target's
+long double and `long` types, successful object writing, and the two refusals.
+`c_test_generic_float_builtins_runtime` runs the values on x86-64 Linux only.
 
 ## Target ABI predefined macros
 
@@ -520,6 +588,19 @@ does not grant `__has_builtin` or permit a reachable unsupported operation.
 The all-context semantic pass checks arguments and source integer constants,
 including unused inline bodies, globals and unevaluated operands.
 
+Clang 23.1.2's F16C wrappers use bare `__fp16` as a bit-cast destination and
+as the element type of local four- and eight-lane GNU vector typedefs. The
+frontend keeps its two-byte storage identity distinct from `_Float16` and
+admits those vector sizes and alignments, type identity and `typeof` queries,
+and eager equal-lane `__builtin_convertvector` validation in unused wrappers.
+Ordinary storage-half objects, members, parameters and function results receive
+a named semantic refusal; reached scalar casts, bit-casts and vector
+conversions receive a named canonical-lowering refusal. The lowering budget
+skips known `sizeof`, `_Alignof` and `typeof` operands; its `_Generic`
+evaluation-context handling is not complete. No scalar arithmetic, promotion,
+or ABI support is implied. `c_test_vendor_storage_half_admission` covers this bounded
+slice in both frontend forms.
+
 Generic operators have their own explicit type-machine stages: bit-cast and
 vector conversion parse their type-name slots, elementwise operators preserve
 narrow integer operands, reductions return a lane, and shuffles retain logical
@@ -570,6 +651,53 @@ SSA parameters at their joins for ambient named locals and function
 parameters. Generic lane conversions reserve the existing software floating
 conversion paths. Every sum/product is checked against the canonical row
 limits; unused wrapper bodies receive no expansion reservation.
+
+Scalar `__builtin_ia32_lzcnt_u16/u32/u64` use canonical CLZ with defined
+zero-input handling. The operand converts once to its prototype's unsigned
+width; a zero bit makes the CLZ operand nonzero, then restores the zero result
+to 16/32/64. The 16-bit form widens to the native 32-bit count width and removes
+its sixteen padding bits. These public Clang intrinsics intentionally permit
+baseline x86 targets, so the lowering needs no LZCNT target feature or library
+call. Results retain unsigned short/int/long long rank on LP64 and LLP64.
+`c_test_vendor_lzcnt` checks all 16-bit inputs, 32/64-bit powers and sampled
+patterns, truncation, arithmetic conversions, argument effects, both frontend
+forms and FAST/QUALITY; invalid calls retain all-context diagnostics and
+non-x86 capability queries remain false. The external Clang suite's LZCNT
+family lane separately checks all five public stock-header spellings against
+the pinned Clang 23.1.2 contract; neither lane completes the Zen 5 census.
+
+The pinned Clang 23 `__builtin_ia32_pmulhuw128` header contract admits exactly two matching
+16-byte vectors of signed or unsigned 16-bit lanes on x86-64. The result type
+follows the first operand, preserving both wrapper contracts while the frozen
+LLVM 21 signature remains signed. This is signature admission only: `__has_builtin`
+stays false and reached calls retain the existing unsupported-lowering refusal.
+`compiler_driver_test_pmulhuw_header_contracts` checks both result types,
+valid and invalid shapes, unevaluated/unused calls, target refusal, and all
+three frontend forms.
+
+Clang 23.1.2 changed the parameter types of 65 other pinned x86 builtins and
+added new ones that its `<immintrin.h>` spells. `c_vendor_builtin.c.in` keeps
+a hand-written LLVM 23.1.2 supplement beside the generated LLVM 21.1.8 tables,
+whose metadata and provenance stay untouched. For a changed name (PAVGB/W,
+PMULHUW256/512, PSADBW, the immediate byte shifts and the VNNI dot products)
+`c_parse_validate_vendor_builtin_calls` tries the pinned contract first and
+then the LLVM 23 one. A call must match one whole contract; mixing the two is
+rejected, and the contract that matched more arguments reports the diagnostic.
+The call keeps its pinned result type, which those headers always cast. When
+lowering a supported changed builtin, an operand of the other contract is a
+same-size vector of another lane shape. It is reinterpreted bitwise, as a C
+vector cast would be, through `c_ir_vendor_argument_value`. The
+`__builtin_ia32_bmac*16x16x16_*` names exist only in the supplement and take
+their type from it. The LLVM 23 generic
+`__builtin_elementwise_{fma,sqrt,fshl,fshr,clzg,bitreverse}` contracts accept
+scalars or vectors with the floating/integer category and same-type operands
+of Clang's SemaChecking. Apart from the already lowered byte shifts, all of
+this is signature admission only: `__has_builtin` stays false and reached
+calls receive the unsupported-builtin refusal.
+`compiler_driver_test_llvm23_header_contracts` covers both contracts, mixed
+and invalid calls in unused and unevaluated contexts, reached refusals and
+off-target unavailability in all three frontend forms.
+`c_test_vendor_immediate_byte_shifts` runs LLVM 23 `char`-lane byte shifts.
 
 The five preexisting SSE2 scalar-count shift spellings accept ordinary `int`
 arguments. Both operands are evaluated once, including count copy conversion;

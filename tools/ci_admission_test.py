@@ -26,6 +26,37 @@ class CIAdmissionTests(unittest.TestCase):
         self.assertIsNotNone(bash, "Bash is a CI prerequisite")
         return bash
 
+    def test_tcc_bootstrap_uses_exact_tested_revision(self):
+        workflow = (ROOT / ".github/workflows/tcc-bootstrap.yml").read_text()
+        checkout = workflow.split(
+            "      - name: Check out exact tested source\n", 1)[1].split(
+                "\n      - name:", 1)[0]
+        self.assertIn("ref: ${{ github.sha }}", checkout)
+        self.assertNotIn("pull_request.head.sha", checkout)
+
+        identity = workflow.split(
+            "      - name: Record exact tested source identity\n", 1)[1].split(
+                "\n      - name:", 1)[0]
+        for entry in (
+                'test "$tested_sha" = "$GITHUB_SHA"',
+                "tested_sha=$(git rev-parse HEAD)",
+                "tested_tree=$(git rev-parse 'HEAD^{tree}')",
+                "build_c_blob=$(git rev-parse HEAD:build.c)",
+                "tested_checkout_sha=%s",
+                "tested_tree_sha=%s",
+                "build_c_blob_sha=%s"):
+            with self.subTest(entry=entry):
+                self.assertIn(entry, identity)
+
+        for artifact in ("buster-hosted-preparation-native-proof",
+                         "buster-hosted-sampling-packet-proof"):
+            names = [line for line in workflow.splitlines()
+                     if line.strip().startswith("name: " + artifact)]
+            with self.subTest(artifact=artifact):
+                self.assertEqual(len(names), 1, workflow)
+                self.assertIn("${{ github.sha }}", names[0])
+                self.assertNotIn("pull_request.head.sha", names[0])
+
     def test_required_checks_fail_when_ci_is_disabled(self):
         aggregate = (ROOT / ".github/workflows/ci.yml").read_text().split("\n  complete:", 1)[1]
         self.assertIn("if: ${{ always() && github.server_url == 'https://github.com' }}", aggregate)

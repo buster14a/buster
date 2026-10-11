@@ -21,6 +21,10 @@
 // Everything else is an explicit unsupported result, never a
 // silent misselection.
 // machine_a64_select_inline_hint selects the fixed NOP/YIELD literal rows.
+// Symbol addresses: machine_a64_symbol_reference picks the inline literal, the
+// Darwin page pair, or under ELF -fPIC the GOT or page pair that the
+// MACHINE_A64_LEA_SYMBOL encoder case emits (thread-locals are refused there in
+// machine_a64_select_global_address).
 //
 // Register conventions: values live zero-extended in X registers exactly
 // like the x86-64 register model. X28 is the frame base (the canonical
@@ -239,8 +243,14 @@ struct MachineA64Selector
     MachineBlock open_block;
     u32 virtual_register_count;
     IrOpcode failed_opcode;
+    // The rule-specific refusal beside failed_opcode, or empty.
+    String8 failure_detail;
     bool supported;
     bool returns_value;
+    // -fPIC resolved for this module (AArch64 ELF only): global addresses are
+    // materialized through a page pair or a GOT slot rather than an inline
+    // absolute literal, and thread-local access is refused.
+    bool position_independent;
     // Recorded by the canonical row walk before selection. Calls in these
     // functions reserve their arguments below the current SP, not in the
     // fixed frame whose base a dynamic allocation has already left behind.
@@ -2929,12 +2939,35 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_field(MachineA64Selector* selector, 
     return selected;
 }
 
+// The reference form of a symbol address. Darwin always pairs a page with a
+// page offset. Under AArch64 ELF -fPIC an address another object could
+// interpose is read out of its GOT slot, and one this object binds itself is a
+// page pair; without -fPIC the canonical inline literal stays. A direct call
+// never needs a form of its own: BL names the symbol and the linker adds the
+// veneer.
+BUSTER_GLOBAL_LOCAL u8 machine_a64_symbol_reference(MachineA64Selector* selector, IrSymbolId symbol, bool address)
+{
+    u8 result = (u8)MACHINE_SYMBOL_REFERENCE_DIRECT;
+    if (address)
+    {
+        if (selector->target.os == OPERATING_SYSTEM_MACOS || selector->target.os == OPERATING_SYSTEM_IOS)
+        {
+            result = (u8)MACHINE_SYMBOL_REFERENCE_MACH_PAGE;
+        }
+        else if (selector->position_independent)
+        {
+            result = (u8)(ir_symbol_is_interposable(ir_symbol_from_id(&selector->program->symbols, symbol)) ? MACHINE_SYMBOL_REFERENCE_GOT
+                                                                                                            : MACHINE_SYMBOL_REFERENCE_ELF_PAGE);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL u32 machine_a64_call_target_append(MachineA64Selector* selector, IrSymbolId symbol, bool address)
 {
     u32 target_index = selector->call_targets.total_count;
-    bool page = address && (selector->target.os == OPERATING_SYSTEM_MACOS || selector->target.os == OPERATING_SYSTEM_IOS);
     MachineA64CallTarget* row = (MachineA64CallTarget*)machine_stream_append(selector->arena, &selector->call_targets);
-    *row = (MachineA64CallTarget){.symbol = symbol, .reference = (u8)(page ? MACHINE_SYMBOL_REFERENCE_MACH_PAGE : MACHINE_SYMBOL_REFERENCE_DIRECT)};
+    *row = (MachineA64CallTarget){.symbol = symbol, .reference = machine_a64_symbol_reference(selector, symbol, address)};
     return target_index;
 }
 
@@ -2949,7 +2982,14 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_global_address(MachineA64Selector* s
     bool windows = selector->target.os == OPERATING_SYSTEM_WINDOWS;
     bool thread_local_supported = darwin || windows ||
         selector->target.os == OPERATING_SYSTEM_LINUX || selector->target.os == OPERATING_SYSTEM_ANDROID;
-    if (result_register != UINT32_MAX && symbol && thread_local_global && thread_local_supported)
+    if (result_register != UINT32_MAX && symbol && thread_local_global && thread_local_supported && selector->position_independent)
+    {
+        // The only ELF model the selector emits is local-exec, which a shared
+        // object cannot hold; the position-independent models are TLSDESC.
+        selector->failure_detail = S8("thread-local access under AArch64 ELF position-independent code (TLSDESC) is not implemented");
+        machine_a64_reject(selector, instruction->opcode);
+    }
+    else if (result_register != UINT32_MAX && symbol && thread_local_global && thread_local_supported)
     {
         u32 target_index = machine_a64_call_target_append(selector, instruction->symbol, false);
         u32 row;
@@ -6005,7 +6045,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_a64_canonical_layout_block(u32 const* layout, u3
 }
 
 MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                               bool assume_validated, bool preserve_debug_values)
+                                                               bool position_independent, bool assume_validated, bool preserve_debug_values)
 {
     MachineSelectResult result = {
         .failed_opcode = IR_OPCODE_COUNT,
@@ -6075,6 +6115,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         MachineSelectionValueFacts value_facts = machine_selection_value_facts_allocate(arena, function->value_count);
         selector.target = target;
+        selector.position_independent = position_independent && object_format_for_target(target) == OBJECT_FORMAT_ELF64;
         selector.pointer_va_list = target.os == OPERATING_SYSTEM_WINDOWS || darwin;
         selector.direct_call_uses = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
         memset(selector.direct_call_uses, 0, function->value_count);
@@ -7258,6 +7299,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         if (!selector.supported)
         {
             result.failed_opcode = selector.failed_opcode;
+            result.failure_detail = selector.failure_detail;
             return result;
         }
         u32 canonical_edge_offset = selector.builder.edges.total_count;
@@ -10509,8 +10551,10 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
                 break;
             case MACHINE_A64_LEA_SYMBOL:
             {
-                bool page = function->call_target_references &&
-                            function->call_target_references[instruction->payload] == MACHINE_SYMBOL_REFERENCE_MACH_PAGE;
+                u8 reference = function->call_target_references ? function->call_target_references[instruction->payload]
+                                                                : (u8)MACHINE_SYMBOL_REFERENCE_DIRECT;
+                bool got = reference == MACHINE_SYMBOL_REFERENCE_GOT;
+                bool page = got || reference == MACHINE_SYMBOL_REFERENCE_MACH_PAGE || reference == MACHINE_SYMBOL_REFERENCE_ELF_PAGE;
                 if (page)
                 {
                     MachineCallSite* high = (MachineCallSite*)machine_stream_append(arena, &call_sites);
@@ -10523,8 +10567,17 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
                     });
                     MachineCallSite* low = (MachineCallSite*)machine_stream_append(arena, &call_sites);
                     *low = (MachineCallSite){.code_offset = encoder.count, .target = instruction->payload, .page_relative = 1, .page_low = 1};
-                    u32 fields[] = {operand_registers[0], operand_registers[0], 0};
-                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
+                    if (got)
+                    {
+                        // The slot holds the symbol's address; the GOT low-12
+                        // field is the 64-bit load's scaled immediate.
+                        machine_a64_emit_generated_unsigned_memory(&encoder, operand_registers[0], operand_registers[0], 0, 8, false);
+                    }
+                    else
+                    {
+                        u32 fields[] = {operand_registers[0], operand_registers[0], 0};
+                        machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
+                    }
                 }
                 else
                 {

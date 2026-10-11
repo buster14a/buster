@@ -547,6 +547,10 @@ BUSTER_F_DECL TargetCpuFeatures target_cpu_features_empty(void);
 BUSTER_F_DECL TargetCpuFeatures target_cpu_features_singleton(TargetCpuFeature feature);
 BUSTER_F_DECL TargetCpuFeatures target_cpu_features_add(TargetCpuFeatures features, TargetCpuFeature feature);
 BUSTER_F_DECL TargetCpuFeatures target_cpu_features_remove(TargetCpuFeatures features, TargetCpuFeature feature);
+// x86-64 only: adds `feature` plus everything it requires, or removes it plus
+// everything that requires it (GCC -m<feature> / -mno-<feature> semantics).
+// Plain add/remove stay exact, as -mattr needs.
+BUSTER_F_DECL TargetCpuFeatures target_cpu_features_x86_apply_with_closure(TargetCpuFeatures features, TargetCpuFeature feature, bool enable);
 BUSTER_F_DECL bool target_cpu_features_contains(TargetCpuFeatures features, TargetCpuFeature feature);
 BUSTER_F_DECL TargetCpuFeatures target_cpu_features_union(TargetCpuFeatures left, TargetCpuFeatures right);
 BUSTER_F_DECL TargetCpuFeatures target_cpu_features_intersection(TargetCpuFeatures left, TargetCpuFeatures right);

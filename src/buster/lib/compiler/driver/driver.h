@@ -194,6 +194,9 @@ struct CompilerDriverInvocation
     CompilerDriverLinkOperation* link_operations;
     String8* include_paths;
     String8* system_include_paths;
+    // -include FILE names in command-line order; every C translation unit
+    // processes them as #include "FILE" before its first line.
+    String8* forced_includes;
     // Parsed command lines populate only this ordered stream. The separate
     // arrays remain an execution compatibility path for API-built invocations
     // and are used only when macro_operation_count is zero.
@@ -265,6 +268,7 @@ struct CompilerDriverInvocation
     bool enable_source_cache;
     u32 include_path_count;
     u32 system_include_path_count;
+    u32 forced_include_count;
     u32 macro_operation_count;
     u32 definition_count;
     u32 undefinition_count;
@@ -292,10 +296,13 @@ struct CompilerDriverInvocation
     bool disable_direct_ssa;
     bool disable_local_promotion;
     bool disable_target_local_promotion;
-    // -fpinned-debug-locals: with -g, keep named scalar locals readable by pinning
-    // them in frame slots (see ir.h pin_debug_locals). Off by default so -g code
-    // stays identical to -g0 code.
+    // -fpinned-debug-locals / -fno-pinned-debug-locals override the default.
+    // With -g, named scalar locals are pinned by default for readable locations.
     bool enable_pinned_debug_locals;
+    // -fvisibility=: a CSymbolVisibility, UNSPECIFIED (0) when not given. It is
+    // the visibility of definitions that carry no attribute or pragma.
+    u8 default_visibility;
+    bool pinned_debug_locals_explicit;
     // Effective optional pass mask: no-flag/positive -O use IR_FAST_ALL,
     // explicit -O/-O0 use zero, and explicit pass controls override either.
     u32 fast_passes;
@@ -484,7 +491,7 @@ struct CompilerDriverCAstPilotResult
     u64 build_nanoseconds;
     u64 retained_bytes;
     u64 transient_high_water;
-    u64 sealed_copy_bytes;
+    u64 column_copy_bytes;
     u64 finalize_child_entries;
     u64 walk_nanoseconds;
     u64 walk_steps;
@@ -492,6 +499,12 @@ struct CompilerDriverCAstPilotResult
     u64 scan_calls;
     u64 children_nanoseconds;
     u64 child_entries;
+    // What the tree expression typer did during semantic analysis; see
+    // CAstTypeStatistics. Zero when the analysis had no tree to use.
+    CAstTypeStatistics types;
+    // The declaration split read from the tree (c_parse_ast_from_tree):
+    // records published, and units handed to the token walker and why.
+    CParserTreeStatistics split;
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;

@@ -1323,6 +1323,70 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
                             BUSTER_TEST(arguments, globals.length == 16 && publics.length == 44);
                         }
                     }
+
+                    // S_LPROC32 shares S_GPROC32's layout and needs the same
+                    // module-local procedure type rewrite (#3032 lesson): a static
+                    // function must not keep an unmapped type index in a merged PDB.
+                    DebugFunction procedure_functions[] = {
+                        {.name = S8("hidden"), .symbol = {.value = 20}, .type = 1, .scope = 0, .code_size = 0x10, .is_internal = true},
+                        {.name = S8("api"), .symbol = {.value = 21}, .type = 1, .scope = 1, .code_offset = 0x10, .code_size = 0x10},
+                    };
+                    DebugScope procedure_scopes[] = {
+                        {.parent = DEBUG_ID_INVALID, .kind = DEBUG_SCOPE_FUNCTION},
+                        {.parent = DEBUG_ID_INVALID, .kind = DEBUG_SCOPE_FUNCTION},
+                    };
+                    DwarfFunction procedure_seeds[] = {
+                        {.name = S8("hidden"), .code_size = 0x10, .line = 1},
+                        {.name = S8("api"), .code_offset = 0x10, .code_size = 0x10, .line = 2},
+                    };
+                    DebugModel procedure_model = {.types = data_types, .type_count = BUSTER_ARRAY_LENGTH(data_types), .functions = procedure_functions,
+                                                  .function_count = BUSTER_ARRAY_LENGTH(procedure_functions), .scopes = procedure_scopes,
+                                                  .scope_count = BUSTER_ARRAY_LENGTH(procedure_scopes), .valid = true};
+                    CodeviewResult procedure_codeview = codeview_build(arguments->arena, (CodeviewInput){.model = &procedure_model,
+                        .file_paths = files, .file_count = BUSTER_ARRAY_LENGTH(files), .functions = procedure_seeds,
+                        .function_count = BUSTER_ARRAY_LENGTH(procedure_seeds), .machine = CODEVIEW_MACHINE_X64});
+                    BUSTER_TEST(arguments, procedure_codeview.valid);
+                    if (procedure_codeview.valid)
+                    {
+                        PdbModule procedure_modules[] = {merge_modules[0], merge_modules[1]};
+                        procedure_modules[0].codeview_symbols = procedure_codeview.symbols;
+                        procedure_modules[1].codeview_symbols = procedure_codeview.symbols;
+                        PdbInput procedure_input = merge_input;
+                        procedure_input.modules = procedure_modules;
+                        PdbResult procedure_merged = pdb_build(arguments->arena, procedure_input);
+                        BUSTER_TEST(arguments, procedure_merged.valid);
+                        if (procedure_merged.valid)
+                        {
+                            for (u32 module_index = 0; module_index < BUSTER_ARRAY_LENGTH(procedure_modules); module_index += 1)
+                            {
+                                u32 stream_index = module_index ? PDB_TEST_STREAM_COUNT + module_index - 1 : PDB_TEST_STREAM_MODULE;
+                                ByteSlice symbols = pdb_test_stream_bytes(arguments->arena, procedure_merged.bytes, stream_index);
+                                u32 expected_type = module_index ? pointer_to_const_float : pointer_to_const_int;
+                                u32 local_count = 0;
+                                u32 public_count = 0;
+                                u64 symbol_offset = 4;
+                                while (symbol_offset + 4 <= symbols.length)
+                                {
+                                    u16 length = 0;
+                                    u16 kind = 0;
+                                    memcpy(&length, symbols.pointer + symbol_offset, sizeof(length));
+                                    memcpy(&kind, symbols.pointer + symbol_offset + 2, sizeof(kind));
+                                    if (length < 2 || (u64)length + 2 > symbols.length - symbol_offset)
+                                    {
+                                        break;
+                                    }
+                                    if ((kind == PDB_TEST_S_LPROC32 || kind == PDB_TEST_S_GPROC32) && symbol_offset + 32 <= symbols.length)
+                                    {
+                                        u32 mapped_type = pdb_read_u32(symbols, symbol_offset + 28);
+                                        local_count += kind == PDB_TEST_S_LPROC32 && mapped_type == expected_type;
+                                        public_count += kind == PDB_TEST_S_GPROC32 && mapped_type == expected_type;
+                                    }
+                                    symbol_offset += (UINT64_C(2) + length + UINT64_C(3)) & ~UINT64_C(3);
+                                }
+                                BUSTER_TEST(arguments, local_count == 1 && public_count == 1);
+                            }
+                        }
+                    }
                 }
 #if !BUSTER_IOS
                 if (merged.valid)

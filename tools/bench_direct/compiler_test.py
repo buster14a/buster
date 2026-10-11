@@ -49,25 +49,38 @@ BINARIES = {"baseline": {"sha256": A256}, "candidate": {"sha256": B256}}
 MODES_ALL = ("fast", "quality")
 
 
-# One test per gate metric and round, as tools/throughput writes them.
-TESTS = [{"metric": metric, "round": number, "median_ratio": 1.0, "regression": False}
+# Full normal producer fields for synthetic, data-only report contracts.
+TESTS = [{"metric": metric, "round": number, "median_ratio": 1.0, "ci_low": 0.999, "ci_high": 1.001,
+          "baseline_relative_mad": 0.0, "candidate_relative_mad": 0.0, "margin_exceedances": 0,
+          "pairs": 20, "p_value": 1.0, "regression": False}
          for metric in ("wall_seconds", "peak_rss_bytes") for number in range(2)]
 
 
 def corpus(decision: str = "no substantial regression detected", **summary_change) -> dict:
-    """A complete current throughput-corpus-v2 run on BINARIES, as {summary, metadata}."""
+    """A complete synthetic normal throughput-corpus-v2 document on BINARIES."""
     profile = compiler_receipt.THROUGHPUT_PROFILE
-    cases = [{"name": f"{name}/{mode}", "medians": {}, "tests": copy.deepcopy(TESTS), "decision": decision}
+    tests = copy.deepcopy(TESTS)
+    for test in tests:
+        if test["metric"] == "wall_seconds" and (decision == "regression" or decision == "inconclusive" and test["round"] == 0):
+            test.update(median_ratio=1.3, ci_low=1.299, ci_high=1.301, regression=True,
+                        margin_exceedances=20, p_value=0.000001)
+    cases = [{"name": f"{name}/{mode}", "medians": {"wall_seconds": [1.0, 1.3],
+              "peak_rss_bytes": [1048576, 1048576]}, "tests": copy.deepcopy(tests), "decision": decision}
              for name in profile["workloads"] for mode in MODES_ALL]
-    regressions = len(cases) if decision == "regression" else 0
-    result = {"schema": 2, "guard_enabled": True, "comparisons": cases, "confirmed_regressions": regressions,
-              "inconclusive_cases": 0, "valid": True}
+    result = {"schema": 2, "guard_enabled": True, "family_alpha": 0.01, "per_test_alpha": 0.01 / 24,
+              "comparisons": cases, "confirmed_regressions": len(cases) if decision == "regression" else 0,
+              "inconclusive_cases": len(cases) if decision == "inconclusive" else 0, "valid": True}
     result.update(summary_change)
-    metadata = {"schema": 2, "profile": "ci", "pairs_per_round": profile["pairs_per_round"],
+    jobs = [{"job": index, "name": name, "mode": mode, "artifact": "object", "source": f"/diagnostic/{name}.b",
+             "sha256": "7" * 64, "bytes": 32, "physical_lines": 2, "defined_functions": 1}
+            for index, (name, mode) in enumerate((name, mode) for name in profile["workloads"] for mode in MODES_ALL)]
+    metadata = {"schema": 2, "seed": 20260907, "profile": "ci", "pairs_per_round": profile["pairs_per_round"],
                 "rounds": profile["rounds"], "warmups": profile["warmups"], "cpu": profile["cpu"],
-                "workloads": list(profile["workloads"]),
-                "compiler_provenance": [{"sha256": A256}, {"sha256": B256}]}
+                "scale": 1, "input_schema": 1, "cache_policy": "warm-filesystem-new-process", "clock": "monotonic",
+                "workloads": list(profile["workloads"]), "jobs": jobs,
+                "compiler_provenance": [{"sha256": A256, "bytes": 1}, {"sha256": B256, "bytes": 1}]}
     return {"summary": result, "metadata": metadata}
+
 def scaling(status: str = "valid", compiler: str = B256) -> dict:
     """A complete scaling-v1 run on the candidate of BINARIES, as {series: {summary, metadata}}."""
     point = {"workers": 2, "placement": "core", "observed_workers": 2, "wall_median": 0.5, "speedup": 1.6,
@@ -109,6 +122,37 @@ def analyzer_receipt(state: str = "measured", request_line: str = compiler_recei
 
 
 class ReceiptTest(unittest.TestCase):
+    def test_report_only_policy_requires_original_complete_normal_fields(self) -> None:
+        for decision, status in (("regression", 1), ("inconclusive", 0), ("no substantial regression detected", 0)):
+            data = corpus(decision)
+            self.assertEqual(compiler_receipt.classify_throughput_exit(status, data["summary"], data["metadata"], BINARIES), [])
+        def check(change):
+            data = corpus("regression")
+            change(data)
+            self.assertTrue(compiler_receipt.classify_throughput_exit(1, data["summary"], data["metadata"], BINARIES))
+        for change in (
+                lambda data: data["summary"]["comparisons"][0].update(medians={}),
+                lambda data: data["summary"]["comparisons"][0]["tests"][0].pop("ci_low"),
+                lambda data: data["summary"]["comparisons"][0]["tests"][0].update(pairs=19),
+                lambda data: data["summary"]["comparisons"][0]["tests"][0].update(p_value=1.01),
+                lambda data: data["summary"]["comparisons"][0]["tests"][0].update(p_value=1.0),
+                lambda data: data["summary"]["comparisons"][0]["tests"][0].update(baseline_relative_mad=-1),
+                lambda data: data["summary"]["comparisons"][0]["tests"][0].update(regression=1),
+                lambda data: data["summary"]["comparisons"][0]["tests"][0].update(ci_high=float("inf")),
+                lambda data: data["summary"]["comparisons"][0]["tests"][0].update(median_ratio=10 ** 1000),
+                lambda data: data["summary"]["comparisons"][0].update(tests=[
+                    dict(test, regression=False) for test in data["summary"]["comparisons"][0]["tests"]]),
+                lambda data: data["summary"].update(family_alpha=True),
+                lambda data: data["metadata"].update(seed=True),
+                lambda data: data["metadata"]["compiler_provenance"][0].pop("bytes"),
+                lambda data: data["metadata"]["jobs"][0].update(job=False),
+                lambda data: data["metadata"]["jobs"][0].pop("sha256")):
+            check(change)
+        # Historical interpretation remains separate from this new process exit policy.
+        data = corpus("regression")
+        data["summary"]["comparisons"][0]["medians"] = {}
+        self.assertEqual(compiler_receipt.classify_throughput(data["summary"], data["metadata"], BINARIES), [])
+
     def test_every_complete_direction_is_a_valid_measurement(self) -> None:
         for outcome in compiler_receipt.MEASURED_OUTCOMES:
             with self.subTest(outcome=outcome):
@@ -1607,6 +1651,116 @@ class AnalyzerReceiptTest(unittest.TestCase):
             run.assert_not_called()
 
 
+
+class FrozenClosureTest(unittest.TestCase):
+    def fixture(self):
+        current = receipt()
+        base, tree = current["identity"]["base"], current["identity"]["base_tree"]
+        rows = []
+        def row(scope, path, digest=A256):
+            rows.append(f"{scope}\tF\t493\t123\t0\t1\t{digest}\t{path}")
+        for path in ("build.c", "build.sh", "tools/bootstrap_driver.sh"):
+            row("source", path)
+        for path in ("CMakeCache.txt", "Release/ide", "throughput-tools/throughput"):
+            row("build", path)
+        configuration = "c" * 64
+        artifact = f"posix/{configuration}/driver"
+        row("bootstrap", artifact)
+        row("bootstrap", artifact + ".complete")
+        bindings = [f"binding\tbootstrap_config\t{configuration}", f"binding\tbootstrap_artifact\t{artifact}",
+                    f"binding\tbootstrap_marker\t{artifact}.complete"]
+        for key in ("CMAKE_C_COMPILER", "CMAKE_LINKER", "CMAKE_MAKE_PROGRAM", "clang", "cmake", "ninja", "tcc"):
+            row("tool", key)
+            bindings.append(f"binding\t{key}\t/usr/bin/{key}")
+        bindings.append("binding\tresource\t/usr/lib/clang/include")
+        row("resource", "stddef.h")
+        manifest = ("\n".join(["BUSTER_COMPILER_CLOSURE_V1", "root\t/checkout", f"base\t{base}", f"tree\t{tree}",
+                               *rows, *bindings, f"END\t{len(rows)}\t{len(rows)}"]) + "\n").encode()
+        record = {"schema": "buster-compiler-closure-v1", "policy": "snapshot-v1", "state": "complete",
+                  "base": base, "base_tree": tree, "root_sha256": hashlib.sha256(b"/checkout").hexdigest(),
+                  "manifest_sha256": hashlib.sha256(manifest).hexdigest(), "duration_us": 123, "harness_preparation_us": 23, "harness_sha256": A256,
+                  "bootstrap_artifact_sha256": A256, "bootstrap_marker_sha256": A256,
+                  "ownership_schema": "buster-native-qualification-supervisor-v1", "cleanup_proven": True,
+                  "cleanup_us": 12, "cleanup_waves": 1, "cleanup_signalled": 0, "cleanup_reaped": 0}
+        current["closure"] = {"policy": "snapshot-v1", "fallback": None,
+                              "snapshot": dict(record, operation="snapshot"), "restore": dict(record, operation="restore"),
+                              "verify": dict(record, operation="verify")}
+        return current, {"snapshot": manifest, "restore": manifest, "verify": manifest}
+
+    def test_unproven_native_cleanup_retains_work_and_aborts_bridge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = root / "evidence"
+            evidence.mkdir()
+            work = root / "work"
+            work.mkdir()
+            arguments = argparse.Namespace(base=EXPECTED["base"], base_tree=EXPECTED["base_tree"])
+            record = {"state": "failed", "cleanup_proven": False, "harness_preparation_us": 0}
+            receipt = {"closure": {"policy": "snapshot-v1"}, "timings": {}}
+            with mock.patch.object(compiler_compare, "run", return_value=1), \
+                    mock.patch.object(compiler_compare, "read_exported_json", return_value=(record, "")):
+                with self.assertRaises(compiler_compare.ClosureCleanupUncertain):
+                    compiler_compare.closure_phase(arguments, root / "candidate", work, evidence, receipt, "snapshot")
+            self.assertIs(receipt["cleanup_proven"], False)
+            self.assertEqual(receipt["work_retained"], str(work))
+            self.assertTrue((evidence / "cleanup-uncertain").is_file())
+            self.assertTrue(work.is_dir())
+
+
+    def test_snapshot_policy_cannot_be_stripped_to_legacy(self):
+        current, bundle = self.fixture()
+        current["preparation_policy"] = "legacy-rebuild"
+        self.assertTrue(compiler_receipt.validate_closure(current, bundle))
+        current["preparation_policy"] = "snapshot-v1"
+        current.pop("closure")
+        self.assertTrue(compiler_receipt.validate_closure(current, bundle))
+        current.pop("preparation_policy")
+        self.assertTrue(compiler_receipt.validate_closure(current, bundle, expected_policy="snapshot-v1"))
+        self.assertEqual(compiler_receipt.validate_closure(current, {}, expected_policy="legacy-rebuild"), [])
+
+    def test_native_producer_and_consumer_manifest_identity_is_replayed(self):
+        current, bundle = self.fixture()
+        self.assertEqual(compiler_receipt.validate_closure(current, bundle), [])
+        complete_corpus = corpus()
+        complete_corpus["closure"] = bundle
+        conclusion, _, reasons = compiler_publish.decide(dict(EXPECTED), True, "success", current, summary(), "",
+                                                         complete_corpus, True)
+        self.assertEqual((conclusion, reasons), ("success", []))
+
+    def test_missing_tampered_source_root_toolchain_configuration_and_fallback_fail(self):
+        current, bundle = self.fixture()
+        cases = []
+        for operation in ("snapshot", "restore", "verify"):
+            for key, value in (("base", "0" * 40), ("base_tree", "0" * 40), ("root_sha256", B256),
+                               ("state", "failed"), ("manifest_sha256", B256), ("duration_us", -1),
+                               ("harness_sha256", B256), ("bootstrap_marker_sha256", B256),
+                               ("bootstrap_artifact_sha256", B256), ("harness_preparation_us", None),
+                               ("harness_preparation_us", -1), ("harness_preparation_us", True), ("cleanup_proven", False), ("cleanup_signalled", 1),
+                               ("cleanup_reaped", 1), ("cleanup_us", None)):
+                altered = copy.deepcopy(current)
+                altered["closure"][operation][key] = value
+                cases.append((altered, bundle))
+        changed = dict(bundle, restore=bundle["restore"] + b"candidate-generated-header")
+        cases.extend(((current, {}), (current, changed)))
+        fallback = copy.deepcopy(current)
+        fallback["closure"]["fallback"] = "silent candidate repair"
+        cases.append((fallback, bundle))
+        invalid = bundle["snapshot"].replace(b"CMAKE_LINKER", b"missing_linker")
+        adjusted = copy.deepcopy(current)
+        for operation in ("snapshot", "restore", "verify"):
+            adjusted["closure"][operation]["manifest_sha256"] = hashlib.sha256(invalid).hexdigest()
+        cases.append((adjusted, dict(snapshot=invalid, restore=invalid, verify=invalid)))
+        binary = copy.deepcopy(current)
+        binary["binaries"]["baseline"]["sha256"] = B256
+        cases.append((binary, bundle))
+        for index, (record, raw) in enumerate(cases):
+            with self.subTest(case=index):
+                self.assertTrue(compiler_receipt.validate_closure(record, raw))
+
+    def test_legacy_receipts_do_not_synthesize_a_snapshot(self):
+        self.assertEqual(compiler_receipt.validate_closure(receipt(), None), [])
+
+
 class DecideTest(unittest.TestCase):
     def decide(self, **change) -> tuple[str, str, list[str]]:
         values = {"expected": dict(EXPECTED), "authorized": True, "compare_result": "success",
@@ -2037,18 +2191,34 @@ behavior = os.environ.get("FAKE_THROUGHPUT", "")
 workloads = ["tiny_startup", "large_function", "many_functions", "symbol_table", "control_flow", "backend_pressure"]
 output = value("--output")
 os.makedirs(output)
-covered = workloads[:1] if behavior == "partial" else workloads
-tests = [{"metric": metric, "round": number} for metric in ("wall_seconds", "peak_rss_bytes") for number in range(2)]
-cases = [{"name": name + "/" + mode, "medians": {}, "tests": tests, "decision": "no substantial regression detected"}
+covered = workloads[:1] if behavior in ("partial", "partial-exit1") else workloads
+regression = behavior in ("regression", "partial-exit1")
+tests = [{"metric": metric, "round": number, "median_ratio": 1.3 if regression and metric == "wall_seconds" else 1.0,
+          "ci_low": 1.299 if regression and metric == "wall_seconds" else 0.999,
+          "ci_high": 1.301 if regression and metric == "wall_seconds" else 1.001,
+          "baseline_relative_mad": 0.0, "candidate_relative_mad": 0.0, "pairs": 20,
+          "margin_exceedances": 20 if regression and metric == "wall_seconds" else 0,
+          "p_value": 0.000001 if regression and metric == "wall_seconds" else 1.0,
+          "regression": regression and metric == "wall_seconds"}
+         for metric in ("wall_seconds", "peak_rss_bytes") for number in range(2)]
+cases = [{"name": name + "/" + mode, "medians": {"wall_seconds": [1.0, 1.3], "peak_rss_bytes": [4096, 4096]},
+          "tests": tests, "decision": "regression" if regression else "no substantial regression detected"}
          for name in covered for mode in ("fast", "quality")]
-summary = {"schema": 2, "guard_enabled": True, "comparisons": cases, "confirmed_regressions": 0,
+summary = {"schema": 2, "guard_enabled": True, "family_alpha": 0.01, "per_test_alpha": 0.01 / 24,
+           "comparisons": cases, "confirmed_regressions": len(cases) if regression else 0,
            "inconclusive_cases": 0, "valid": True}
-metadata = {"schema": 2, "profile": value("--profile"), "pairs_per_round": int(value("--pairs")), "rounds": 2,
+metadata = {"schema": 2, "seed": 20260907, "profile": value("--profile"), "pairs_per_round": int(value("--pairs")), "rounds": 2,
             "warmups": int(value("--warmups")), "cpu": int(value("--cpu")), "workloads": workloads,
-            "compiler_provenance": [{"sha256": digest(value("--baseline"))}, {"sha256": digest(value("--candidate"))}]}
+            "scale": 1, "input_schema": 1, "cache_policy": "warm-filesystem-new-process", "clock": "monotonic",
+            "jobs": [{"job": job, "name": name, "mode": mode, "artifact": "object", "source": "/diagnostic/" + name + ".b",
+                      "sha256": "7" * 64, "bytes": 32, "physical_lines": 2, "defined_functions": 1}
+                     for job, (name, mode) in enumerate((name, mode) for name in workloads for mode in ("fast", "quality"))],
+            "compiler_provenance": [{"sha256": digest(value("--baseline")), "bytes": os.path.getsize(value("--baseline"))},
+                                    {"sha256": digest(value("--candidate")), "bytes": os.path.getsize(value("--candidate"))}]}
 open(os.path.join(output, "summary.json"), "w").write(json.dumps(summary))
 open(os.path.join(output, "metadata.json"), "w").write(json.dumps(metadata))
-sys.exit(3 if behavior == "fail" else 0)
+if behavior == "missing-exit1": os.unlink(os.path.join(output, "metadata.json"))
+sys.exit(3 if behavior == "fail" else 1 if behavior in ("regression", "partial-exit1", "missing-exit1", "badexit") else 0)
 """
 # Stands in for `./build.sh bench_throughput scale`; FAKE_SCALING=fail makes
 # the bundle invalid and the command exit 2.
@@ -2533,8 +2703,17 @@ class HarnessTest(unittest.TestCase):
                          [result["binaries"][role]["sha256"] for role in ("baseline", "candidate")])
         self.assertIn("throughput_seconds", result["timings"])
 
+    def test_complete_corpus_exit_one_regression_is_report_only(self) -> None:
+        code, result, evidence = self.run_harness(self.head, corpus_behavior="regression")
+        self.assertEqual((code, result["state"], result["throughput"]["exit"]), (0, "measured", 1), result["reasons"])
+        self.assertEqual(result["throughput"]["confirmed_regressions"], 12)
+        raw = retained(evidence)
+        self.assertEqual(compiler_receipt.classify_throughput_exit(1, raw["summary"], raw["metadata"], result["binaries"]), [])
+
     def test_failed_or_partial_corpus_fails_the_receipt(self) -> None:
-        for behavior, expected in (("fail", "bench_throughput run exited 3"), ("partial", "workload/mode cells")):
+        for behavior, expected in (("fail", "bench_throughput run exited 3"), ("partial", "workload/mode cells"),
+                                   ("partial-exit1", "workload/mode cells"), ("missing-exit1", "metadata.json"),
+                                   ("badexit", "no counted confirmed corpus regression")):
             with self.subTest(behavior=behavior):
                 # Each run leaves the frozen base checked out.
                 subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)

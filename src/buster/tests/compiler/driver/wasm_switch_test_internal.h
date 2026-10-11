@@ -301,7 +301,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_switch_images(UnitT
                     bool unchanged = emitted.length == first.bytes.length && emitted.pointer &&
                                      memory_compare(emitted.pointer, first.bytes.pointer, emitted.length);
                     BUSTER_TEST(arguments, unchanged);
-                    String8 node = executable_resolve_in_path(arena, S8("node"));
+                    String8 node = compiler_driver_test_wasm_node_resolve(arguments, arena);
                     if (written && unchanged && node.length)
                     {
                         Sha256 hash;

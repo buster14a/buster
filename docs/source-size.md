@@ -83,6 +83,28 @@ arms by concrete object across ranged writes and aggregate clears, with
 static-image and runtime regressions for same-arm retention, arm switches,
 range coverage and deeply promoted anonymous members.
 
+PR #2766 adds machine-source identity and reporting instrumentation with its
+supporting workflow and test changes. Its source-size baseline was generated
+for composed source snapshot `139f1aa49a6f96a662d452603edc629182bf5ccd` by hosted
+Native investigation run `37926206636` (artifact `11614336915`, SHA-256
+`14d741ed914935e5f196f11daa1a3acdc6d697893ab2e2aab338d24659d4914b`).
+
+Compared with prior baseline commit
+`7739052c221878c3ac41d20c6182b5cd9120b131`, production grew from 18,640,460
+to 18,732,141 bytes (+91,681), and build grew from 8,185,608 to 8,395,433
+bytes (+209,825). These are cumulative changes since that baseline, combining
+PR #2766's instrumentation with source and build drift already inherited from
+main. They are not PR-only deltas under the 32 KiB per-change ratchet, which
+compares category totals at the exact base and head. The full baseline records
+these cumulative totals. Tests (+205,895 bytes) and docs (+68,090 bytes) also
+grew but are unratcheted.
+
+The hosted report compared the candidate with itself, so its pass verifies
+artifact generation rather than PR admission. The exact whole baseline is
+retained for the later current-main integration. This acknowledgment adds no
+9700X benchmark request or performance claim;
+`benchmarks/9700x/compiler-compare.request` remains unchanged from main.
+
 Categories are independent. Deleting tests, fixtures, generated tables or
 documentation never earns room for production or build code, and only the
 ratcheted totals are limited, so moving code between files or splitting a file
@@ -128,5 +150,8 @@ the base branch tip, so the deltas are exactly what the merge adds; for a
 merge group it is the group commit over its base, and for a push to `main` the
 new tip over the previous one. The report is printed in the log and in the job
 summary, and an unacknowledged increase fails the job. The repository is
-public, so the fetch needs no credentials. The job's own PR-head checkout and
-bootstrap policy are unchanged.
+public, so the fetch needs no credentials. The workflow checks out `GITHUB_SHA`
+for the TCC driver and every bootstrap/component check; it is the PR merge
+revision, exact merge-group commit or pushed main commit. Before running, the
+job asserts and records the checkout SHA, tree SHA and `build.c` blob SHA so
+the driver source is identifiable alongside the source-size subject.

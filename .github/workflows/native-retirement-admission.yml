@@ -39,6 +39,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-latest
       - name: Require CI admission to be enabled
         shell: bash
         env:
@@ -62,6 +67,12 @@ jobs:
           path: candidate
           fetch-depth: 0
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate
+          source-repository: ${{ github.repository }}
       - name: Check out the independently trusted admission policy
         if: ${{ github.event_name == 'pull_request' }}
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -71,6 +82,13 @@ jobs:
           path: trusted
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: trusted
+          source-repository: ${{ github.repository }}
       - name: Check out exact combined validation tree
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -81,6 +99,12 @@ jobs:
           path: validation
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity 3
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: validation
+          source-repository: ${{ github.repository }}
       - name: Test native-retirement merge admission
         shell: bash
         working-directory: validation

@@ -24,6 +24,11 @@
 #define LC_PREPARATION_NAME "9700X compiler preparation research"
 #define LC_PREPARATION_MARKER "buster-compiler-preparation-v1:"
 #define LC_PREPARATION_NATIVE "Lifecycle protocol: preparation-terminal-native-v1."
+#define LC_UTILITY_NAME "9700X compiler closure utility research"
+#define LC_UTILITY_MARKER "buster-compiler-closure-utility-v1:"
+#define LC_UTILITY_NATIVE "Lifecycle protocol: closure-utility-terminal-native-v1."
+#define LC_UTILITY_CHECK_QUERY "commits/%s/check-runs?filter=all&app_id=15368&check_name=9700X%%20compiler%%20closure%%20utility%%20research&per_page=100&page=%u"
+#define LC_RESEARCH_UTILITY 3
 #define LC_RESEARCH_SAMPLING 1
 #define LC_RESEARCH_PREPARATION 2
 
@@ -44,18 +49,21 @@ BUSTER_GLOBAL_LOCAL const char *lc_name(int pull)
 }
 BUSTER_GLOBAL_LOCAL const char *lc_check_name(const LcIdentity *id)
 {
-    const char *result = id->research == LC_RESEARCH_PREPARATION ? LC_PREPARATION_NAME :
+    const char *result = id->research == LC_RESEARCH_UTILITY ? LC_UTILITY_NAME :
+        id->research == LC_RESEARCH_PREPARATION ? LC_PREPARATION_NAME :
         id->research == LC_RESEARCH_SAMPLING ? LC_SAMPLING_NAME : lc_name(id->pull);
     return result;
 }
 BUSTER_GLOBAL_LOCAL const char *lc_research_protocol(const LcIdentity *id)
 {
-    const char *result = id->research == LC_RESEARCH_PREPARATION ? LC_PREPARATION_NATIVE : LC_SAMPLING_NATIVE;
+    const char *result = id->research == LC_RESEARCH_UTILITY ? LC_UTILITY_NATIVE :
+        id->research == LC_RESEARCH_PREPARATION ? LC_PREPARATION_NATIVE : LC_SAMPLING_NATIVE;
     return result;
 }
 BUSTER_GLOBAL_LOCAL const char *lc_research_title(const LcIdentity *id)
 {
-    const char *result = id->research == LC_RESEARCH_PREPARATION ? "Incomplete unqualified preparation research" : "Incomplete unqualified sampling packet";
+    const char *result = id->research == LC_RESEARCH_UTILITY ? "Incomplete unqualified closure utility research" :
+        id->research == LC_RESEARCH_PREPARATION ? "Incomplete unqualified preparation research" : "Incomplete unqualified sampling packet";
     return result;
 }
 BUSTER_GLOBAL_LOCAL int lc_repository(const CmJson *j, unsigned node)
@@ -158,12 +166,14 @@ BUSTER_GLOBAL_LOCAL int lc_owned(const CmJson *j, unsigned row, const LcIdentity
 }
 BUSTER_GLOBAL_LOCAL int lc_research_identity(const CmJson *j, unsigned row, const LcIdentity *id, LcIdentity *research)
 {
-    // Two exact publisher contracts grant recovery authority for an existing
+    // Exact publisher contracts grant recovery authority for an existing
     // admitted row. No selector admission or missing-row creation occurs here.
     const char *name = cm_get(j, row, "name"), *marker = cm_get(j, row, "external_id");
-    int kind = cm_equal(name, LC_SAMPLING_NAME) ? LC_RESEARCH_SAMPLING :
+    int kind = cm_equal(name, LC_UTILITY_NAME) ? LC_RESEARCH_UTILITY :
+        cm_equal(name, LC_SAMPLING_NAME) ? LC_RESEARCH_SAMPLING :
         cm_equal(name, LC_PREPARATION_NAME) ? LC_RESEARCH_PREPARATION : 0;
-    const char *prefix = kind == LC_RESEARCH_PREPARATION ? LC_PREPARATION_MARKER : LC_SAMPLING_MARKER;
+    const char *prefix = kind == LC_RESEARCH_UTILITY ? LC_UTILITY_MARKER :
+        kind == LC_RESEARCH_PREPARATION ? LC_PREPARATION_MARKER : LC_SAMPLING_MARKER;
     size_t width = strlen(prefix);
     const char *tail = kind && strncmp(marker, prefix, width) == 0 ? marker + width : NULL;
     char campaign[65], phase[8], packet[32], request[32], executor[32], attempt[32], canonical[192];
@@ -175,7 +185,8 @@ BUSTER_GLOBAL_LOCAL int lc_research_identity(const CmJson *j, unsigned row, cons
     valid = valid && strlen(campaign) == 64 && cm_unsigned(packet, &number) &&
         cm_unsigned(request, &requested) && requested == id->request &&
         cm_unsigned(executor, &executed) && executed == id->executor && cm_unsigned(attempt, &tried) && tried == 1 &&
-        (kind == LC_RESEARCH_PREPARATION ? cm_equal(phase, "qualify") && number == 0 :
+        (kind == LC_RESEARCH_UTILITY ? cm_equal(phase, "utility") && number == 0 :
+         kind == LC_RESEARCH_PREPARATION ? cm_equal(phase, "qualify") && number == 0 :
          (cm_equal(phase, "acquire") && number == 0) || (cm_equal(phase, "pilot") && number <= 2) ||
          (cm_equal(phase, "confirm") && number <= 39));
     if (valid)
@@ -307,6 +318,41 @@ BUSTER_GLOBAL_LOCAL char *lc_body(const LcIdentity *id, const char *prior, int c
     if (file) fclose(file);
     return result;
 }
+
+BUSTER_GLOBAL_LOCAL int lc_utility_unique(CmTransport *t, const LcIdentity *id, uint64_t check)
+{
+    // A single admitted Utility attempt has one existing check, even if two
+    // plan markers were accidentally posted. Inventory before any Utility
+    // PATCH, bound to the selected check ID and plan marker. Foreign
+    // executors and other research families stay untouched.
+    int valid = id->research == LC_RESEARCH_UTILITY, more = 1;
+    unsigned matched = 0, listed = 0, selected = 0;
+    for (unsigned page = 1; valid && more && page <= LC_PAGES; ++page)
+    {
+        char path[512]; snprintf(path, sizeof(path), LC_UTILITY_CHECK_QUERY, id->head, page);
+        CmJson rows = cm_api_json(t, path, "GET", NULL, NULL);
+        unsigned array = cm_member(&rows, 1, "check_runs"), count = 0;
+        valid = rows.valid && array && rows.tokens[array].kind == 'a';
+        for (unsigned row = valid ? rows.tokens[array].child : 0; valid && row; row = rows.tokens[row].next)
+        {
+            LcIdentity candidate = {0};
+            ++count;
+            if (lc_research_identity(&rows, row, id, &candidate) && candidate.research == LC_RESEARCH_UTILITY)
+            {
+                ++matched;
+                selected += cm_number(&rows, row, "id") == check && cm_equal(candidate.marker, id->marker);
+            }
+        }
+        listed += count;
+        more = count == 100;
+        valid = valid && count <= 100 && listed <= cm_number(&rows, 1, "total_count") &&
+            (more || listed == cm_number(&rows, 1, "total_count")) && !(page == LC_PAGES && more);
+        cm_json_free(&rows);
+    }
+    valid = valid && matched == 1 && selected == 1;
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL int lc_finish(CmTransport *t, const LcIdentity *id, LcResult *result)
 {
     int valid = 1, more = 1;
@@ -331,6 +377,10 @@ BUSTER_GLOBAL_LOCAL int lc_finish(CmTransport *t, const LcIdentity *id, LcResult
                 ++matched;
                 uint64_t check = cm_number(&rows, row, "id");
                 if (cm_equal(cm_get(&rows, row, "status"), "completed")) ++result->terminal;
+                else if (owned.research == LC_RESEARCH_UTILITY && !lc_utility_unique(t, &owned, check))
+                {
+                    valid = 0;
+                }
                 else
                 {
                     // Fresh read prevents stale listing snapshots from reopening
@@ -388,7 +438,8 @@ BUSTER_GLOBAL_LOCAL int lc_physical_job(const char *name)
 {
     int result = cm_equal(name, "Compare the main commit compiler") ||
         cm_equal(name, "Compare the pull request compiler") || cm_equal(name, "bench") ||
-        cm_equal(name, "Sampling qualification packet") || cm_equal(name, "Compiler preparation qualification");
+        cm_equal(name, "Sampling qualification packet") || cm_equal(name, "Compiler preparation qualification") ||
+        cm_equal(name, "Compiler closure utility");
     return result;
 }
 BUSTER_GLOBAL_LOCAL int lc_observe(CmTransport *t, const LcIdentity *id)

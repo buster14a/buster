@@ -468,15 +468,24 @@ struct IrSymbol
     // __attribute__((weak)).  The object layer carries it as
     // ObjectSymbol.weak; see that field for what each format spells it as.
     bool is_weak;
-    // Not exported from the final image (ELF STV_HIDDEN). Only a `.hidden`
-    // directive in module-level assembly sets it today; the object layer
-    // carries it as ObjectSymbol.hidden.
+    // Not exported from the final image (ELF STV_HIDDEN). Set by a `.hidden`
+    // directive in module-level assembly and, in C, by
+    // __attribute__((visibility("hidden"|"internal"))), #pragma GCC visibility
+    // and -fvisibility= (c_entity_symbol_hidden); internal has no separate
+    // spelling here. The object layer carries it as ObjectSymbol.hidden.
     bool is_hidden;
     // __attribute__((returns_twice)) on a function declaration: a direct call
     // to it may return a second time, as setjmp does. Read by
     // ir_call_returns_twice beside its name list. A call through a function
     // pointer carries no symbol, so the attribute is not tracked there.
     bool is_returns_twice;
+    // A function-scope `static` object: the function whose body declares it.
+    // Debug info nests the variable in that function's subprogram instead of
+    // the compilation unit, so same-named statics of two functions do not
+    // collide in a debugger's name lookup (#2719). Valid only when
+    // has_owner_function is set; the link name does not depend on it.
+    bool has_owner_function;
+    IrSymbolId owner_function;
 };
 
 // One symbol that is a second name for another: __attribute__((alias("t"))).

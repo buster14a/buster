@@ -46,6 +46,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ github.event_name == 'merge_group' && 310 || 20 }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-latest
       # Push maintenance executes its exact event revision. Every other route
       # retains the independently trusted current-main checkout. The exclusive
       # steps implement: github.event_name == 'push' && github.sha || github.event.repository.default_branch
@@ -56,6 +61,13 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Record actual checkout identity
+        if: ${{ github.event_name == 'push' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Check out trusted current main
         if: ${{ github.event_name != 'push' }}
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -63,6 +75,13 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        if: ${{ github.event_name != 'push' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Refresh default-branch pull-request snapshot after main push
         if: ${{ github.event_name == 'push' }}
         env:

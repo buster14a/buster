@@ -275,7 +275,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_section_kind_for_name(String8 name, Assem
         {S8_INITIALIZER(".bss"), ASSEMBLY_UNIT_SECTION_ZERO, true},
         // GNU as's name table: these carry their type and flags by name.
         {S8_INITIALIZER(".init_array"), ASSEMBLY_UNIT_SECTION_INIT_ARRAY, true},
-        {S8_INITIALIZER(".preinit_array"), ASSEMBLY_UNIT_SECTION_INIT_ARRAY, true},
+        // No suffix: `ld` runs exactly `.preinit_array`, so a `.preinit_array.5`
+        // is no preinit array and takes no meaning by name.
+        {S8_INITIALIZER(".preinit_array"), ASSEMBLY_UNIT_SECTION_INIT_ARRAY, false},
         {S8_INITIALIZER(".fini_array"), ASSEMBLY_UNIT_SECTION_FINI_ARRAY, true},
         {S8_INITIALIZER(".tdata"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA, true},
         {S8_INITIALIZER(".tbss"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO, true},
@@ -672,8 +674,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section_regular(AssemblyUnitBui
                                      string_format(builder->arena, S8("this flag and type combination of the '{S8}' directive has no object representation"),
                                                    directive));
         }
-        // The object writer names a `.preinit_array` by its section name.
-        if (flags_valid && preinit_array && !string_starts_with_sequence(name, S8(".preinit_array")))
+        // The object writer names a `.preinit_array` by its section name, and
+        // `ld` runs only the section of exactly that name.
+        if (flags_valid && preinit_array && !string_equal(name, S8(".preinit_array")))
         {
             flags_valid = false;
             assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,

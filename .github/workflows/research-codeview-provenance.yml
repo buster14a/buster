@@ -20,10 +20,21 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Verify pin and run isolated correctness experiment
         shell: bash
         env:
@@ -88,6 +99,12 @@ jobs:
           sha256sum "$evidence"/probe.c "$evidence"/reference*.inc "$evidence"/probe-clang "$evidence"/probe-gcc "$evidence"/probe-sanitized "$evidence"/*.csv > "$evidence/sha256.txt"
           cat "$evidence/identity.txt"
           cat "$evidence/sha256.txt"
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/codeview-provenance-evidence
       - name: Retain exact-source correctness and count evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

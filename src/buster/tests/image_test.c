@@ -1109,10 +1109,205 @@ BUSTER_GLOBAL_LOCAL UnitTestResult image_test_png_work_budget(UnitTestArguments*
     return result;
 }
 
+#define IMAGE_TEST_PNG_PATHS_WIDTH 37u
+#define IMAGE_TEST_PNG_PATHS_HEIGHT 19u
+#define IMAGE_TEST_PNG_PATHS_ROW_BYTES (IMAGE_TEST_PNG_PATHS_WIDTH * 4u)
+#define IMAGE_TEST_PNG_PATHS_FILTERED_SIZE (IMAGE_TEST_PNG_PATHS_HEIGHT * (IMAGE_TEST_PNG_PATHS_ROW_BYTES + 1u))
+
+// Greedy fixed-Huffman encoder over a fixed distance menu. It emits 7-, 8- and
+// 9-bit literal/length codes, overlapping matches (distance below length) at
+// every copy width the decoder distinguishes, and whole-row matches.
+BUSTER_GLOBAL_LOCAL void image_test_png_fixed_encode(ImageTestBitWriter* bits, u8 const* data, u32 size)
+{
+    static u16 const length_base[29] = {
+        3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258,
+    };
+    static u8 const length_extra[29] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0};
+    static u16 const distance_base[16] = {1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193};
+    static u8 const distance_extra[16] = {0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6};
+    static u32 const distances[] = {1, 2, 3, 5, 8, 11, IMAGE_TEST_PNG_PATHS_ROW_BYTES + 1u};
+    image_test_bits_write(bits, 1u, 1);
+    image_test_bits_write(bits, 1u, 2);
+    u32 position = 0;
+    while (position < size)
+    {
+        u32 best_length = 0;
+        u32 best_distance = 0;
+        for (u32 choice = 0; choice < BUSTER_ARRAY_LENGTH(distances); choice += 1)
+        {
+            u32 distance = distances[choice];
+            u32 length = 0;
+            while (distance <= position && position + length < size && length < 258u &&
+                   data[position + length] == data[position + length - distance])
+            {
+                length += 1;
+            }
+            if (length > best_length)
+            {
+                best_length = length;
+                best_distance = distance;
+            }
+        }
+        if (best_length >= 3u)
+        {
+            u32 length_index = BUSTER_ARRAY_LENGTH(length_base) - 1u;
+            while (length_base[length_index] > best_length)
+            {
+                length_index -= 1u;
+            }
+            u32 symbol = 257u + length_index;
+            if (symbol <= 279u)
+            {
+                image_test_bits_write_code(bits, symbol - 256u, 7);
+            }
+            else
+            {
+                image_test_bits_write_code(bits, 0xc0u + symbol - 280u, 8);
+            }
+            image_test_bits_write(bits, best_length - length_base[length_index], length_extra[length_index]);
+            u32 distance_index = BUSTER_ARRAY_LENGTH(distance_base) - 1u;
+            while (distance_base[distance_index] > best_distance)
+            {
+                distance_index -= 1u;
+            }
+            image_test_bits_write_code(bits, distance_index, 5);
+            image_test_bits_write(bits, best_distance - distance_base[distance_index], distance_extra[distance_index]);
+            position += best_length;
+        }
+        else
+        {
+            u8 literal = data[position];
+            if (literal < 144u)
+            {
+                image_test_bits_write_code(bits, 0x30u + literal, 8);
+            }
+            else
+            {
+                image_test_bits_write_code(bits, 0x190u + literal - 144u, 9);
+            }
+            position += 1;
+        }
+    }
+    image_test_bits_write_code(bits, 0u, 7);
+    image_test_bits_write(bits, 0u, (8u - bits->bit_count) % 8u);
+}
+
+// Bulk inflate paths: table-driven Huffman decode, bulk literal and match
+// emission, stored-block copies and deferred Adler-32. Each stream is also
+// split into tiny IDAT chunks so that every refill and table peek meets a
+// chunk boundary and falls back to the byte-serial reader.
+BUSTER_GLOBAL_LOCAL UnitTestResult image_test_png_inflate_paths(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(4), .flags = {.no_pool = true}});
+    if (BUSTER_REQUIRE(arguments, arena != 0))
+    {
+        u8 filtered[IMAGE_TEST_PNG_PATHS_FILTERED_SIZE] = {0};
+        u8 expected[IMAGE_TEST_PNG_PATHS_HEIGHT * IMAGE_TEST_PNG_PATHS_ROW_BYTES];
+        u32 random = 7;
+        for (u32 row = 0; row < IMAGE_TEST_PNG_PATHS_HEIGHT; row += 1)
+        {
+            u8* line = filtered + row * (IMAGE_TEST_PNG_PATHS_ROW_BYTES + 1u) + 1u;
+            // Row 0 has no row above; forming a pointer before filtered would be undefined.
+            u8 const* above = row ? line - (IMAGE_TEST_PNG_PATHS_ROW_BYTES + 1u) : line;
+            for (u32 index = 0; index < IMAGE_TEST_PNG_PATHS_ROW_BYTES; index += 1)
+            {
+                random = random * UINT32_C(1664525) + UINT32_C(1013904223);
+                u8 noise = (u8)(random >> 24u);
+                u32 period = row % 5u == 0 ? 1u : row % 5u == 1 ? 3u : row % 5u == 2 ? 11u : 0;
+                u8 value = period ? (u8)(150u + (index % period) * 9u) : noise;
+                // Every fifth row repeats the row above, a distance of one
+                // filtered row that is longer than the match.
+                line[index] = row % 5u == 4u ? above[index] : value;
+            }
+            memcpy(expected + row * IMAGE_TEST_PNG_PATHS_ROW_BYTES, line, IMAGE_TEST_PNG_PATHS_ROW_BYTES);
+        }
+        u32 adler = image_test_adler32(filtered, sizeof(filtered));
+
+        for (u32 stored = 0; stored < 2u; stored += 1)
+        {
+            u8 zlib[IMAGE_TEST_PNG_PATHS_FILTERED_SIZE * 2u] = {0};
+            ImageTestBitWriter bits = {.bytes = zlib};
+            image_test_bits_write(&bits, 0x78u, 8);
+            image_test_bits_write(&bits, 0x01u, 8);
+            if (stored)
+            {
+                image_test_bits_write(&bits, 1u, 8);
+                image_test_bits_write(&bits, (u32)sizeof(filtered), 16);
+                image_test_bits_write(&bits, (u32)sizeof(filtered) ^ 0xffffu, 16);
+                memcpy(zlib + bits.position, filtered, sizeof(filtered));
+                bits.position += sizeof(filtered);
+            }
+            else
+            {
+                image_test_png_fixed_encode(&bits, filtered, (u32)sizeof(filtered));
+            }
+            image_test_u32_be(zlib + bits.position, adler);
+            u64 zlib_size = bits.position + 4u;
+
+            // Splits of 1, 3 and 7 bytes put chunk boundaries inside codes,
+            // matches and stored runs; UINT32_MAX keeps one IDAT. The second
+            // pass flips an Adler-32 bit, which the deferred checksum must
+            // still report at the trailer.
+            static u32 const splits[] = {1, 3, 7, UINT32_MAX};
+            for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(splits) * 2u; variant += 1)
+            {
+                u32 split = splits[variant % BUSTER_ARRAY_LENGTH(splits)];
+                bool corrupt = variant >= BUSTER_ARRAY_LENGTH(splits);
+                zlib[zlib_size - 1u] = (u8)(adler ^ (corrupt ? 1u : 0u));
+                u64 chunk_count = split == UINT32_MAX ? 1u : (zlib_size + split - 1u) / split;
+                u64 capacity = 8u + 25u + zlib_size + chunk_count * 12u + 12u;
+                u64 position = arena->position;
+                u8* png = arena_allocate_zeroed(arena, u8, capacity);
+                if (BUSTER_REQUIRE(arguments, png != 0))
+                {
+                    u8 ihdr[13] = {0};
+                    image_test_u32_be(ihdr, IMAGE_TEST_PNG_PATHS_WIDTH);
+                    image_test_u32_be(ihdr + 4, IMAGE_TEST_PNG_PATHS_HEIGHT);
+                    ihdr[8] = 8;
+                    ihdr[9] = 6;
+                    static u8 const signature[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+                    memcpy(png, signature, sizeof(signature));
+                    ImageTestPngBuilder builder = {.bytes = png, .capacity = capacity, .position = sizeof(signature), .valid = true};
+                    image_test_png_append_chunk(&builder, IMAGE_TEST_PNG_CHUNK_TYPE('I', 'H', 'D', 'R'), ihdr, sizeof(ihdr));
+                    for (u64 offset = 0; offset < zlib_size; offset += BUSTER_MIN((u64)split, zlib_size - offset))
+                    {
+                        u32 length = (u32)BUSTER_MIN((u64)split, zlib_size - offset);
+                        image_test_png_append_chunk(&builder, IMAGE_TEST_PNG_CHUNK_TYPE('I', 'D', 'A', 'T'), zlib + offset, length);
+                    }
+                    image_test_png_append_chunk(&builder, IMAGE_TEST_PNG_CHUNK_TYPE('I', 'E', 'N', 'D'), 0, 0);
+                    if (BUSTER_REQUIRE(arguments, builder.valid))
+                    {
+                        ByteSlice encoded = {.pointer = png, .length = builder.position};
+                        ImageDecodeResult decoded = image_decode(arena, encoded, (ImageDecodeOptions){.format_hint = IMAGE_FORMAT_PNG});
+                        if (corrupt)
+                        {
+                            BUSTER_TEST(arguments, decoded.status == IMAGE_DECODE_CHECKSUM_MISMATCH &&
+                                                       image_test_image_empty(decoded.image));
+                        }
+                        else
+                        {
+                            BUSTER_TEST(arguments, decoded.status == IMAGE_DECODE_SUCCESS &&
+                                                       decoded.image.width == IMAGE_TEST_PNG_PATHS_WIDTH &&
+                                                       decoded.image.height == IMAGE_TEST_PNG_PATHS_HEIGHT &&
+                                                       decoded.image.pixels.length == sizeof(expected) &&
+                                                       !memcmp(decoded.image.pixels.pointer, expected, sizeof(expected)));
+                        }
+                    }
+                }
+                arena_set_position(arena, position);
+            }
+        }
+        BUSTER_TEST(arguments, arena_destroy(arena, 1));
+    }
+    return result;
+}
+
 UnitTestResult image_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, image_test_png_work_budget);
+    BUSTER_TEST_FIXTURE(arguments, image_test_png_inflate_paths);
     u8 png[] = {137, 80, 78, 71, 13, 10, 26, 10};
     u8 jpeg[] = {0xff, 0xd8, 0xff};
     u8 gif[] = {'G', 'I', 'F', '8', '9', 'a'};

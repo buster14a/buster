@@ -42,9 +42,21 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ${{ matrix.os }}
+          matrix-index: ${{ strategy.job-index }}
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Check startup shim syntax
         run: node --check tools/wasm_integer_execution_startup.js
       - name: Exercise frozen oracle and shutdown controls

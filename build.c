@@ -104,12 +104,14 @@ typedef enum BuildCommand
     BUILD_COMMAND_NONE,
     BUILD_COMMAND_BENCH_THROUGHPUT,
     BUILD_COMMAND_BENCH_THROUGHPUT_CI,
+    BUILD_COMMAND_COMPILER_CLOSURE,
     BUILD_COMMAND_PRODUCTION_PROFILE,
     BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST,
     BUILD_COMMAND_GENERATE,
     BUILD_COMMAND_BUILD,
     BUILD_COMMAND_CLANG_ANALYZE,
     BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK,
+    BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION,
     BUILD_COMMAND_OPTNONE_AUDIT,
     BUILD_COMMAND_CMAKE_PROFILE_SUMMARY,
     BUILD_COMMAND_NINJA_LOG_SUMMARY,
@@ -25380,10 +25382,12 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
     {
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
         case BUILD_COMMAND_TEST_UNITS_PARTITIONED:
+        case BUILD_COMMAND_COMPILER_CLOSURE:
         case BUILD_COMMAND_PRODUCTION_PROFILE:
         case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
         case BUILD_COMMAND_CLANG_ANALYZE:
         case BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK:
+        case BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION:
         case BUILD_COMMAND_OPTNONE_AUDIT:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
@@ -25418,6 +25422,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
         {.command = BUILD_COMMAND_TEST_UEFI, .owns_arguments = true},
         {.command = BUILD_COMMAND_CLANG_ANALYZE, .owns_arguments = true},
         {.command = BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK, .owns_arguments = true},
+        {.command = BUILD_COMMAND_COMPILER_CLOSURE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION, .owns_arguments = true},
         {.command = BUILD_COMMAND_TEST_CLANG_SUITE, .owns_arguments = true},
         {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
         {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
@@ -39335,10 +39341,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 }
 
 #include "tools/production_profile.c"
+#include "tools/compiler_experiment_supervisor.c"
+#include "tools/compiler_closure_phase.c"
+#include "tools/compiler_closure.c"
 #include "tools/source_size.c"
 #include "tools/ci_no_code.c"
 #include "tools/ci_unit_tests.c"
 #include "tools/clang_suite.c"
+#include "tools/compiler_profile_qualification.c"
 
 ProcessResult process_arguments(void)
 {
@@ -39355,12 +39365,14 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_NONE] = S8_INITIALIZER("none"),
         [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
         [BUILD_COMMAND_BENCH_THROUGHPUT_CI] = S8_INITIALIZER("bench_throughput_ci"),
+        [BUILD_COMMAND_COMPILER_CLOSURE] = S8_INITIALIZER("compiler_closure"),
         [BUILD_COMMAND_PRODUCTION_PROFILE] = S8_INITIALIZER("production_profile"),
         [BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST] = S8_INITIALIZER("production_profile_self_test"),
         [BUILD_COMMAND_GENERATE] = S8_INITIALIZER("generate"),
         [BUILD_COMMAND_BUILD] = S8_INITIALIZER("build"),
         [BUILD_COMMAND_CLANG_ANALYZE] = S8_INITIALIZER("clang_analyze"),
         [BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK] = S8_INITIALIZER("clang_analyze_benchmark"),
+        [BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION] = S8_INITIALIZER("compiler_profile_qualification"),
         [BUILD_COMMAND_OPTNONE_AUDIT] = S8_INITIALIZER("optnone_audit"),
         [BUILD_COMMAND_CMAKE_PROFILE_SUMMARY] = S8_INITIALIZER("cmake_profile_summary"),
         [BUILD_COMMAND_NINJA_LOG_SUMMARY] = S8_INITIALIZER("ninja_log_summary"),
@@ -39497,10 +39509,12 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         {
             case BUILD_COMMAND_MATRIX_PHASE_RUN: result = matrix_phase_run(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UNITS_PARTITIONED: result = ci_unit_tests_main(arena, owned_arguments, arguments.pointer[0]); break;
+            case BUILD_COMMAND_COMPILER_CLOSURE: result = compiler_closure_main(arena, owned_arguments); break;
             case BUILD_COMMAND_PRODUCTION_PROFILE: result = production_profile_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST: result = production_profile_self_test(arena); break;
             case BUILD_COMMAND_CLANG_ANALYZE: result = clang_analyze_main(arena, owned_arguments); break;
             case BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK: result = clang_analyze_benchmark_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION: result = compiler_profile_qualification_main(arena, owned_arguments); break;
             case BUILD_COMMAND_OPTNONE_AUDIT: result = optnone_audit_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_DIFFERENTIAL: result = differential_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_CLANG_SUITE: result = clang_suite_main(arena, owned_arguments); break;
@@ -40502,6 +40516,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             build_add(arena, build_directory, string8_list_to_slice(arena, build_targets), string8_list_to_slice(arena, native_arguments), options);
         }
         break;
+        case BUILD_COMMAND_COMPILER_CLOSURE:
         case BUILD_COMMAND_PRODUCTION_PROFILE:
         case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
         {
@@ -40510,6 +40525,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         break;
         case BUILD_COMMAND_CLANG_ANALYZE:
         case BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK:
+        case BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION:
         case BUILD_COMMAND_OPTNONE_AUDIT:
         {
             // Already executed by the command-specific argument parser.
