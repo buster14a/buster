@@ -1796,6 +1796,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_bfloat16_representation(UnitTestArgum
     return result;
 }
 
+// Four canonical rows per statement: each spread caller's doubled table stays
+// under 16 MiB while the pair exceeds it (asserted from the row layout).
+#define IR_TEST_INLINE_SPREAD_STATEMENTS 16384u
+
 BUSTER_GLOBAL_LOCAL IrFunction* ir_test_inline_find_function(IrModule* module, String8 name)
 {
     IrFunction* result = 0;
@@ -2447,6 +2451,93 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             }
         }
         scratch_end(capacity_temporary);
+    }
+
+    // Optional tiny sites bound retained storage per caller, as FAST does.
+    // Splicing into a caller copies its exactly sized tables, so two large
+    // callers together exceed the 16 MiB that once capped the whole module;
+    // the later caller's site must not be starved by the earlier one.
+    {
+        TemporalArena spread_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* spread_arena = spread_temporary.arena;
+        String8 statement = S8("    value = value * 3 + 1;\n");
+        String8 heads[] = {S8("int spread_first(int value)\n{\n"), S8("int spread_second(int value)\n{\n")};
+        String8 leaf = S8("static int spread_leaf(int value) { return value + 1; }\n");
+        String8 tail = S8("    return spread_leaf(value);\n}\n");
+        u64 statement_count = IR_TEST_INLINE_SPREAD_STATEMENTS;
+        u64 source_length = leaf.length;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(heads); index += 1)
+        {
+            source_length += heads[index].length + statement.length * statement_count + tail.length;
+        }
+        u8* source_bytes = arena_allocate(spread_arena, u8, source_length);
+        u64 cursor = 0;
+        memcpy(source_bytes + cursor, leaf.pointer, leaf.length);
+        cursor += leaf.length;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(heads); index += 1)
+        {
+            memcpy(source_bytes + cursor, heads[index].pointer, heads[index].length);
+            cursor += heads[index].length;
+            for (u64 row = 0; row < statement_count; row += 1)
+            {
+                memcpy(source_bytes + cursor, statement.pointer, statement.length);
+                cursor += statement.length;
+            }
+            memcpy(source_bytes + cursor, tail.pointer, tail.length);
+            cursor += tail.length;
+        }
+        String8 spread_source = {.pointer = (char8*)source_bytes, .length = cursor};
+        CPreprocessResult spread_preprocess = c_preprocess(spread_arena, spread_source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult spread_analysis = c_parse(spread_arena, spread_preprocess);
+        CIRLowerResult spread_lowered = {0};
+        if (!spread_preprocess.error_count && !spread_analysis.diagnostic_count)
+        {
+            spread_lowered = c_lower_to_ir(spread_arena, S8("canonical-inline-spread.c"),
+                spread_preprocess, spread_analysis, target_native);
+        }
+        BUSTER_TEST(arguments, spread_preprocess.error_count == 0 && spread_analysis.diagnostic_count == 0);
+        BUSTER_TEST(arguments, spread_lowered.diagnostic_count == 0 && spread_lowered.program != 0);
+        if (BUSTER_REQUIRE(arguments, spread_lowered.program && spread_lowered.program->module_count == 1))
+        {
+            IrProgram* spread_program = spread_lowered.program;
+            IrModule* spread_module = spread_program->modules;
+            spread_program->fast_passes = 0;
+            IrFunction* callers[] = {
+                ir_test_inline_find_function(spread_module, S8("spread_first")),
+                ir_test_inline_find_function(spread_module, S8("spread_second")),
+            };
+            u64 row_bytes = (u64)sizeof(IrInstruction) + sizeof(IrSourceRange);
+            u64 old_module_limit = (u64)16 * 1024 * 1024;
+            u64 doubled_total = 0;
+            bool found = true;
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(callers); index += 1)
+            {
+                found &= callers[index] != 0;
+                if (callers[index])
+                {
+                    // The first append doubles a full table; each caller alone
+                    // stays within the per-caller storage guard.
+                    u64 doubled = 2 * (u64)callers[index]->instruction_capacity * row_bytes;
+                    BUSTER_TEST(arguments, doubled < old_module_limit);
+                    doubled_total += doubled;
+                    BUSTER_TEST(arguments, ir_test_direct_call_count(spread_program, callers[index], S8("spread_leaf")) == 1);
+                }
+            }
+            BUSTER_TEST(arguments, found && doubled_total > old_module_limit);
+            spread_program->inline_options = (IrInlineOptions){.tiny = true};
+            IrValidationResult spread_prepared = ir_prepare_canonical_module(spread_program, spread_module, false);
+            BUSTER_TEST(arguments, spread_prepared.error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, spread_module->inline_complete);
+            BUSTER_TEST(arguments, spread_module->inlining.inlined == BUSTER_ARRAY_LENGTH(callers));
+            BUSTER_TEST(arguments, spread_module->inlining.budget_skips == 0);
+            for (u32 index = 0; found && index < BUSTER_ARRAY_LENGTH(callers); index += 1)
+            {
+                BUSTER_TEST(arguments, ir_test_direct_call_count(spread_program, callers[index], S8("spread_leaf")) == 0);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(spread_program, spread_module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(spread_temporary);
     }
 
     return result;

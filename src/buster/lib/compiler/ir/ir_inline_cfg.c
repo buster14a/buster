@@ -1,4 +1,37 @@
 // Multi-block direct-call splice. Included by ir_inline.c.
+
+// One caller's splice reservation. The first splice that needs a wider local,
+// debug-local or debug-scope universe widens the caller's arrays once to the
+// planned final count, so later splices into the same caller write in place
+// instead of reallocating every block snapshot. Snapshot slots past the
+// current local count stay IR_VALUE_ID_INVALID until a splice assigns them.
+// Predecessor lists are rebuilt once by the pass after the caller's last splice.
+typedef struct IrInlineCfgReserve IrInlineCfgReserve;
+struct IrInlineCfgReserve
+{
+    u32 local_target;
+    u32 debug_local_target;
+    u32 debug_scope_target;
+    u32 snapshot_capacity;
+    u32 place_capacity;
+    u32 debug_local_capacity;
+    u32 debug_scope_capacity;
+};
+
+BUSTER_GLOBAL_LOCAL IrInlineCfgReserve ir_inline_cfg_reserve(IrFunction const* caller, u64 added_locals,
+                                                             u64 added_debug_locals, u64 added_debug_scopes)
+{
+    IrInlineCfgReserve result = {
+        .local_target = (u32)BUSTER_MIN((u64)caller->local_count + added_locals, (u64)UINT32_MAX),
+        .debug_local_target = (u32)BUSTER_MIN((u64)caller->debug_local_count + added_debug_locals, (u64)UINT32_MAX),
+        .debug_scope_target = (u32)BUSTER_MIN((u64)caller->debug_scope_count + added_debug_scopes, (u64)UINT32_MAX),
+        .snapshot_capacity = caller->local_count,
+        .place_capacity = caller->local_places && caller->local_uses_memory ? caller->local_count : 0,
+        .debug_local_capacity = caller->debug_local_count,
+        .debug_scope_capacity = caller->debug_scope_count,
+    };
+    return result;
+}
 BUSTER_GLOBAL_LOCAL IrLocalId ir_inline_cfg_local(IrLocalId id, u32 base)
 {
     return id.value == IR_ID_UNDERLYING_INVALID ? id : (IrLocalId){.value = base + id.value};
@@ -21,6 +54,9 @@ BUSTER_GLOBAL_LOCAL IrTypeId ir_inline_cfg_void_type(IrProgram* program)
     return result;
 }
 
+// Retained payload one splice clones from the callee. Caller-proportional
+// widening and the predecessor rebuild belong to the caller's reservation
+// (ir_inline_reserve_bytes); growing tables are charged from live capacities.
 BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_storage_site_bytes(IrFunction const* caller, IrFunction const* callee)
 {
     bool valid = caller && callee && (!caller->block_count || (caller->blocks && caller->instructions)) &&
@@ -30,13 +66,6 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_storage_site_bytes(IrFunction const* calle
                  (!caller->debug_scope_count || caller->debug_scopes) &&
                  (!callee->debug_scope_count || callee->debug_scopes);
     u64 cost = 0;
-    u64 local_slots = valid ? (u64)caller->local_count + callee->local_count + 1 : 0;
-    u64 block_rows = valid ? (u64)caller->block_count + callee->block_count + 1 : 0;
-    u64 debug_rows = valid ? (u64)caller->debug_local_count + callee->debug_local_count : 0;
-    u64 debug_scope_rows = valid && (callee->debug_local_count || callee->debug_scope_count)
-                               ? (u64)caller->debug_scope_count + callee->debug_scope_count + 1 : 0;
-    if (debug_scope_rows > UINT32_MAX) valid = false;
-    u64 edge_rows = 0;
     u64 parameter_rows = 0;
     u64 incoming_rows = 0;
     u64 operand_rows = 0;
@@ -44,25 +73,9 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_storage_site_bytes(IrFunction const* calle
     u64 immediate_rows = 0;
     if (valid)
     {
-        for (u32 i = 0; i < caller->block_count; i += 1)
-        {
-            IrBlock const* block = caller->blocks + i;
-            if (block->last_instruction.value < caller->instruction_count)
-            {
-                u64 count = caller->instructions[block->last_instruction.value].target_count;
-                if (count > UINT64_MAX - edge_rows) valid = false;
-                else edge_rows += count;
-            }
-        }
         for (u32 i = 0; i < callee->block_count; i += 1)
         {
             IrBlock const* block = callee->blocks + i;
-            if (block->last_instruction.value < callee->instruction_count)
-            {
-                u64 count = callee->instructions[block->last_instruction.value].target_count;
-                if (count > UINT64_MAX - edge_rows) valid = false;
-                else edge_rows += count;
-            }
             for (IrBlockParameter const* parameter = block->first_parameter; parameter; parameter = parameter->next)
             {
                 parameter_rows += 1;
@@ -84,8 +97,6 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_storage_site_bytes(IrFunction const* calle
             }
         }
     }
-    // Per-splice retained payloads. Growing tables are charged separately from
-    // the live caller capacities through projected appends.
 #define IR_INLINE_CFG_COST(count, element_size) \
     do \
     { \
@@ -94,25 +105,11 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_storage_site_bytes(IrFunction const* calle
         if (count_ && size_ > (UINT64_MAX - cost) / count_) valid = false; \
         else if (valid) cost += count_ * size_; \
     } while (0)
-    IR_INLINE_CFG_COST(local_slots * 2, sizeof(IrValueId) + sizeof(bool));
-    IR_INLINE_CFG_COST(debug_rows, sizeof(IrDebugLocal));
-    IR_INLINE_CFG_COST(debug_scope_rows, sizeof(IrDebugScope));
-    IR_INLINE_CFG_COST(valid ? edge_rows + callee->block_count + 1 : 0, sizeof(IrPredecessor));
     IR_INLINE_CFG_COST(parameter_rows + 1, sizeof(IrBlockParameter));
     IR_INLINE_CFG_COST(valid ? incoming_rows + callee->instruction_count : 0, sizeof(IrIncoming));
     IR_INLINE_CFG_COST(valid ? operand_rows + (u64)callee->block_count * 2 + callee->value_count + 2 : 0, sizeof(IrValueId));
     IR_INLINE_CFG_COST(valid ? target_rows + callee->instruction_count + 1 : 0, sizeof(IrBlockId));
     IR_INLINE_CFG_COST(immediate_rows, sizeof(u64));
-#define IR_INLINE_CFG_PRODUCT(left, right, element_size) \
-    do \
-    { \
-        u64 left_ = (u64)(left); \
-        u64 right_ = (u64)(right); \
-        if (left_ && right_ > UINT64_MAX / left_) valid = false; \
-        else IR_INLINE_CFG_COST(left_ * right_, element_size); \
-    } while (0)
-    IR_INLINE_CFG_PRODUCT(block_rows, local_slots, sizeof(IrValueId));
-#undef IR_INLINE_CFG_PRODUCT
 #undef IR_INLINE_CFG_COST
     if (!valid) cost = UINT64_MAX;
     return cost;
@@ -531,13 +528,13 @@ BUSTER_GLOBAL_LOCAL void ir_inline_cfg_copy_parameters(Arena* arena, IrFunction*
 
 BUSTER_GLOBAL_LOCAL IrValueId* ir_inline_cfg_local_values(Arena* arena, IrFunction const* callee,
                                              IrBlock const* source, IrBlock const* call_site,
-                                             IrValueId const* value_map, u32 old_locals, u32 new_locals)
+                                             IrValueId const* value_map, u32 old_locals, u32 capacity)
 {
     IrValueId* result = 0;
     if (source->local_values || call_site->local_values)
     {
-        result = arena_allocate(arena, IrValueId, new_locals);
-        for (u32 i = 0; i < new_locals; i += 1) result[i] = IR_VALUE_ID_INVALID;
+        result = arena_allocate(arena, IrValueId, capacity);
+        for (u32 i = 0; i < capacity; i += 1) result[i] = IR_VALUE_ID_INVALID;
         if (call_site->local_values)
         {
             for (u32 i = 0; i < old_locals; i += 1) result[i] = call_site->local_values[i];
@@ -555,11 +552,12 @@ BUSTER_GLOBAL_LOCAL IrValueId* ir_inline_cfg_local_values(Arena* arena, IrFuncti
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, IrFunction* caller, IrBlockId call_block,
-                               IrInstructionId call_id, IrFunction const* callee, u32* copied_rows_out)
+                               IrInstructionId call_id, IrFunction const* callee, IrInlineCfgReserve* reserve,
+                               u32* copied_rows_out)
 {
     u32 copied = 0;
     u32 growth = 0;
-    bool valid = arena && ir_inline_cfg_supported(program, caller, call_block, call_id, callee, &copied, &growth);
+    bool valid = arena && reserve && ir_inline_cfg_supported(program, caller, call_block, call_id, callee, &copied, &growth);
     if (valid)
     {
     IrInstruction call = caller->instructions[call_id.value];
@@ -584,38 +582,58 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, Ir
     u32 new_local_count = old_local_count + callee->local_count + (aggregate_slot ? 1u : 0u);
     u32 new_debug_count = old_debug_count + callee->debug_local_count;
 
-    // Widen local snapshots before publishing the larger local-id universe.
-    for (u32 b = 0; b < old_block_count; b += 1)
+    // Widen local snapshots before publishing the larger local-id universe:
+    // once per caller, to the reserved capacity, with unassigned slots invalid.
+    if (new_local_count > reserve->snapshot_capacity)
     {
-        IrBlock* block = caller->blocks + b;
-        if (block->local_values)
+        u32 capacity = BUSTER_MAX(new_local_count, reserve->local_target);
+        for (u32 b = 0; b < old_block_count; b += 1)
         {
-            IrValueId* values = arena_allocate(arena, IrValueId, new_local_count);
-            memcpy(values, block->local_values, sizeof(*values) * old_local_count);
-            for (u32 i = old_local_count; i < new_local_count; i += 1) values[i] = IR_VALUE_ID_INVALID;
-            block->local_values = values;
+            IrBlock* block = caller->blocks + b;
+            if (block->local_values)
+            {
+                IrValueId* values = arena_allocate(arena, IrValueId, capacity);
+                memcpy(values, block->local_values, sizeof(*values) * old_local_count);
+                for (u32 i = old_local_count; i < capacity; i += 1) values[i] = IR_VALUE_ID_INVALID;
+                block->local_values = values;
+            }
         }
+        reserve->snapshot_capacity = capacity;
     }
-    IrValueId* places = arena_allocate(arena, IrValueId, new_local_count);
-    bool* memory = arena_allocate_zeroed(arena, bool, new_local_count);
-    for (u32 i = 0; i < old_local_count; i += 1)
+    if (new_local_count > reserve->place_capacity)
     {
-        places[i] = caller->local_places ? caller->local_places[i] : IR_VALUE_ID_INVALID;
-        memory[i] = caller->local_uses_memory ? caller->local_uses_memory[i] : false;
+        u32 capacity = BUSTER_MAX(new_local_count, reserve->local_target);
+        IrValueId* places = arena_allocate(arena, IrValueId, capacity);
+        bool* memory = arena_allocate_zeroed(arena, bool, capacity);
+        for (u32 i = 0; i < old_local_count; i += 1)
+        {
+            places[i] = caller->local_places ? caller->local_places[i] : IR_VALUE_ID_INVALID;
+            memory[i] = caller->local_uses_memory ? caller->local_uses_memory[i] : false;
+        }
+        caller->local_places = places;
+        caller->local_uses_memory = memory;
+        reserve->place_capacity = capacity;
     }
-    caller->local_places = places;
-    caller->local_uses_memory = memory;
 
-    if (new_debug_count)
+    if (new_debug_count > reserve->debug_local_capacity)
     {
-        IrDebugLocal* debug = arena_allocate(arena, IrDebugLocal, new_debug_count);
+        u32 capacity = BUSTER_MAX(new_debug_count, reserve->debug_local_target);
+        IrDebugLocal* debug = arena_allocate(arena, IrDebugLocal, capacity);
         if (old_debug_count) memcpy(debug, caller->debug_locals, sizeof(*debug) * old_debug_count);
         caller->debug_locals = debug;
+        reserve->debug_local_capacity = capacity;
     }
     if (has_callee_debug)
     {
-        IrDebugScope* scopes = arena_allocate(arena, IrDebugScope, new_debug_scope_count);
-        if (old_debug_scope_count) memcpy(scopes, caller->debug_scopes, sizeof(*scopes) * old_debug_scope_count);
+        if (new_debug_scope_count > reserve->debug_scope_capacity)
+        {
+            u32 capacity = BUSTER_MAX(new_debug_scope_count, reserve->debug_scope_target);
+            IrDebugScope* widened = arena_allocate(arena, IrDebugScope, capacity);
+            if (old_debug_scope_count) memcpy(widened, caller->debug_scopes, sizeof(*widened) * old_debug_scope_count);
+            caller->debug_scopes = widened;
+            reserve->debug_scope_capacity = capacity;
+        }
+        IrDebugScope* scopes = caller->debug_scopes;
         // Give the inlined body a separate lexical parent; the IR debug model
         // has no inline call-stack record to represent the callee function.
         scopes[old_debug_scope_count] = (IrDebugScope){.extent = callee->source, .parent = old_debug_scope_count};
@@ -684,7 +702,7 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, Ir
         block.last_instruction = IR_INSTRUCTION_ID_INVALID;
         block.local_values = ir_inline_cfg_local_values(arena, callee, callee->blocks + b,
                                                         caller->blocks + call_block.value, value_map,
-                                                        old_local_count, new_local_count);
+                                                        old_local_count, BUSTER_MAX(new_local_count, reserve->snapshot_capacity));
         ir_function_add_block(arena, caller, block);
     }
     IrBlockId continuation_id = {.value = caller->block_count};
@@ -700,7 +718,8 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, Ir
     continuation.last_instruction = original_last;
     continuation.local_values = ir_inline_cfg_local_values(arena, callee,
                                                            &(IrBlock){0}, caller->blocks + call_block.value,
-                                                           value_map, old_local_count, new_local_count);
+                                                           value_map, old_local_count,
+                                                           BUSTER_MAX(new_local_count, reserve->snapshot_capacity));
     ir_function_add_block(arena, caller, continuation);
 
     // Clone every non-formal row, then rewire row and block chains by ID.
@@ -955,7 +974,6 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, Ir
         local.is_parameter = false;
         caller->debug_locals[old_debug_count + i] = local;
     }
-    ir_inline_cfg_rebuild_predecessors(arena, caller);
     if (copied_rows_out) *copied_rows_out = copied;
     (void)old_instruction_count;
     (void)growth;

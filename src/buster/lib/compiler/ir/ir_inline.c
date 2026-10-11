@@ -43,6 +43,66 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_storage_multiply(u64 left, u64 right)
     return left && right > UINT64_MAX / left ? UINT64_MAX : left * right;
 }
 
+// Retained bytes of a caller's splice reservation (IrInlineCfgReserve) once
+// its planned sites add `added_blocks` blocks and the other counts: snapshots
+// widened once to the final local count, the place/memory arrays, debug rows
+// when sites add any, and the single predecessor rebuild over `edges`. A
+// planned site is charged the increase over the previous planned total, so a
+// caller pays for widening once instead of once per site.
+BUSTER_GLOBAL_LOCAL u64 ir_inline_reserve_bytes(IrFunction const* caller, u64 added_blocks, u64 added_locals,
+                                                u64 added_debug_locals, u64 added_debug_scopes, u64 edges)
+{
+    u64 result = 0;
+    if (added_blocks)
+    {
+        u64 locals = ir_inline_storage_add(caller->local_count, added_locals);
+        u64 snapshot_blocks = added_locals ? ir_inline_storage_add(caller->block_count, added_blocks) : added_blocks;
+        u64 snapshot_bytes = ir_inline_storage_add(ir_inline_storage_multiply(locals, sizeof(IrValueId)),
+                                                   BUSTER_ALIGN_OF(IrValueId) - 1u);
+        result = ir_inline_storage_multiply(snapshot_blocks, snapshot_bytes);
+        if (added_locals || !caller->local_places || !caller->local_uses_memory)
+        {
+            result = ir_inline_storage_add(result, ir_inline_storage_multiply(locals, sizeof(IrValueId) + sizeof(bool)));
+            result = ir_inline_storage_add(result, (BUSTER_ALIGN_OF(IrValueId) - 1u) + (BUSTER_ALIGN_OF(bool) - 1u));
+        }
+        if (added_debug_locals)
+        {
+            u64 rows = ir_inline_storage_add(caller->debug_local_count, added_debug_locals);
+            result = ir_inline_storage_add(result, ir_inline_storage_multiply(rows, sizeof(IrDebugLocal)));
+            result = ir_inline_storage_add(result, BUSTER_ALIGN_OF(IrDebugLocal) - 1u);
+        }
+        if (added_debug_scopes)
+        {
+            u64 rows = ir_inline_storage_add(caller->debug_scope_count, added_debug_scopes);
+            result = ir_inline_storage_add(result, ir_inline_storage_multiply(rows, sizeof(IrDebugScope)));
+            result = ir_inline_storage_add(result, BUSTER_ALIGN_OF(IrDebugScope) - 1u);
+        }
+        result = ir_inline_storage_add(result, ir_inline_storage_multiply(edges, sizeof(IrPredecessor)));
+        result = ir_inline_storage_add(result, BUSTER_ALIGN_OF(IrPredecessor) - 1u);
+    }
+    return result;
+}
+
+// Work of the same reservation: filling every widened snapshot, copying the
+// place/debug arrays and one predecessor rebuild.
+BUSTER_GLOBAL_LOCAL u64 ir_inline_reserve_work(IrFunction const* caller, u64 added_blocks, u64 added_locals,
+                                               u64 added_debug_locals, u64 added_debug_scopes, u64 edges)
+{
+    u64 result = 0;
+    if (added_blocks)
+    {
+        u64 blocks = ir_inline_storage_add(caller->block_count, added_blocks);
+        u64 locals = ir_inline_storage_add(caller->local_count, added_locals);
+        u64 snapshot_blocks = added_locals ? blocks : added_blocks;
+        result = ir_inline_storage_multiply(snapshot_blocks, ir_inline_storage_add(locals, 1u));
+        result = ir_inline_storage_add(result, ir_inline_storage_multiply(locals, 2u));
+        if (added_debug_locals) result = ir_inline_storage_add(result, ir_inline_storage_add(caller->debug_local_count, added_debug_locals));
+        if (added_debug_scopes) result = ir_inline_storage_add(result, ir_inline_storage_add(caller->debug_scope_count, added_debug_scopes));
+        result = ir_inline_storage_add(result, ir_inline_storage_add(blocks, ir_inline_storage_multiply(edges, 5u)));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void ir_inline_record_budget_refusal(IrModule* module, bool required,
                                                                   IrInlineBudgetReason reason, u64 demand, u64 limit)
 {
@@ -556,9 +616,17 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     IrFunction* caller = module->functions + caller_index;
                     if (caller->state != IR_FUNCTION_LOWERED) continue;
                     if (phase == 0 && (!plan.required_callers || !plan.required_callers[caller_index])) continue;
+                    if (phase == 1 && module_growth >= options.max_module_growth)
+                    {
+                        // No optional site can fit once module growth is spent.
+                        module->inlining.budget_skips += 1;
+                        continue;
+                    }
                     if (phase == 1)
                     {
-                        total_work = ir_inline_storage_add(total_work, caller->block_count);
+                        // Optional selection bounds work per caller, as FAST
+                        // does; mandatory planning above stays module-wide.
+                        total_work = caller->block_count;
                         module->inlining.visits = ir_inline_storage_add(module->inlining.visits, caller->block_count);
                         bool possible_tiny_call = false;
                         u64 recursive_sites = 0;
@@ -726,6 +794,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     u64 function_projected_extras = 0;
                     u64 function_projected_debug = 0;
                     u64 function_projected_edges = 0;
+                    u64 function_projected_scopes = 0;
                     u32 function_sites = function_sites_used[caller_index];
                     u64 caller_main_scan = ir_inline_storage_add(original_instructions, original_blocks);
                     if (caller_main_scan > IR_FAST_WORK_BUDGET -
@@ -935,12 +1004,20 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             projected_edges = ir_inline_storage_add(projected_edges, callee_target_units);
                             projected_edges = ir_inline_storage_add(projected_edges,
                                                                    ir_inline_storage_add(callee_return_units, 1u));
+                            bool callee_has_debug = callee->debug_local_count != 0 || callee->debug_scope_count != 0;
+                            u64 projected_scopes_after = ir_inline_storage_add(function_projected_scopes,
+                                                                                callee_has_debug ? (u64)callee->debug_scope_count + 1u : 0u);
+                            u64 projected_debug_after = ir_inline_storage_add(function_projected_debug, callee->debug_local_count);
+                            u64 reserve_edges_before = ir_inline_storage_add(caller_edge_units, function_projected_edges);
+                            u64 reserve_work_before = ir_inline_reserve_work(caller, function_projected_blocks, function_projected_locals,
+                                                                             function_projected_debug, function_projected_scopes,
+                                                                             reserve_edges_before);
+                            u64 reserve_work_after = ir_inline_reserve_work(caller, projected_blocks_after - caller->block_count,
+                                                                            projected_locals_after - caller->local_count,
+                                                                            projected_debug_after, projected_scopes_after, projected_edges);
                             caller_work = ir_inline_storage_add(caller_work,
-                                                                ir_inline_storage_multiply(projected_edges, 5u));
-                            caller_work = ir_inline_storage_add(caller_work,
-                                                                ir_inline_storage_multiply(projected_blocks_after,
-                                                                                           projected_locals_after));
-                            caller_work = ir_inline_storage_add(caller_work, projected_blocks_after);
+                                                                reserve_work_after == UINT64_MAX ? UINT64_MAX
+                                                                                                 : reserve_work_after - BUSTER_MIN(reserve_work_before, reserve_work_after));
                             u64 callee_work = ir_inline_storage_multiply(callee->instruction_count, 8u);
                             callee_work = ir_inline_storage_add(callee_work,
                                                                ir_inline_storage_multiply(callee->value_count, 3u));
@@ -1034,19 +1111,15 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                                                                 table_values_before, table_values_after,
                                                                                 table_extras_before, table_extras_after);
                             storage = ir_inline_storage_add(storage, table_growth);
-                            u64 projected_local_slots = (u64)caller->local_count + function_projected_locals + callee->local_count +
-                                                        (aggregate_result ? 1u : 0u);
-                            u64 projected_snapshot_cells = ir_inline_storage_multiply(function_projected_blocks, projected_local_slots);
-                            u64 projected_base_blocks = (u64)caller->block_count + callee->block_count + 1u;
-                            u64 projected_old_local_cells =
-                                ir_inline_storage_multiply(projected_base_blocks, function_projected_locals);
-                            projected_snapshot_cells = ir_inline_storage_add(projected_snapshot_cells, projected_old_local_cells);
-                            u64 projected_snapshots = ir_inline_storage_multiply(projected_snapshot_cells, sizeof(IrValueId));
-                            u64 projected_local_arrays =
-                                ir_inline_storage_multiply(function_projected_locals, sizeof(IrValueId) + sizeof(bool));
-                            u64 projected_debug_rows = ir_inline_storage_multiply(function_projected_debug, sizeof(IrDebugLocal));
-                            u64 projected_predecessors =
-                                ir_inline_storage_multiply(function_projected_edges, sizeof(IrPredecessor));
+                            u64 reserve_bytes_before = ir_inline_reserve_bytes(caller, function_projected_blocks, function_projected_locals,
+                                                                               function_projected_debug, function_projected_scopes,
+                                                                               reserve_edges_before);
+                            u64 reserve_bytes_after = ir_inline_reserve_bytes(caller, projected_blocks_after - caller->block_count,
+                                                                              projected_locals_after - caller->local_count,
+                                                                              projected_debug_after, projected_scopes_after, projected_edges);
+                            u64 reserve_growth = reserve_bytes_after == UINT64_MAX
+                                                     ? UINT64_MAX
+                                                     : reserve_bytes_after - BUSTER_MIN(reserve_bytes_before, reserve_bytes_after);
                             u64 clone_maps = ir_inline_storage_multiply(callee->value_count, sizeof(IrValueId));
                             clone_maps = ir_inline_storage_add(clone_maps,
                                                                ir_inline_storage_multiply(callee->block_count, sizeof(IrBlockId)));
@@ -1078,13 +1151,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 allocation_alignment = BUSTER_ALIGN_OF(IrInstructionExtra);
                             u64 allocation_count = ir_inline_storage_add(16u,
                                 ir_inline_storage_add(ir_inline_storage_multiply(callee->instruction_count, 3u),
-                                    ir_inline_storage_add(projected_blocks_before,
-                                        ir_inline_storage_add((u64)callee->block_count + 1u, callee_payload_units))));
+                                    ir_inline_storage_add((u64)callee->block_count + 1u, callee_payload_units)));
                             u64 alignment_bytes = ir_inline_storage_multiply(allocation_count, allocation_alignment - 1u);
-                            storage = ir_inline_storage_add(storage, projected_snapshots);
-                            storage = ir_inline_storage_add(storage, projected_local_arrays);
-                            storage = ir_inline_storage_add(storage, projected_debug_rows);
-                            storage = ir_inline_storage_add(storage, projected_predecessors);
+                            storage = ir_inline_storage_add(storage, reserve_growth);
                             storage = ir_inline_storage_add(storage, clone_maps);
                             storage = ir_inline_storage_add(storage, alignment_bytes);
                             u64 projected_units = copied;
@@ -1101,12 +1170,18 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             projected_scratch = ir_inline_storage_add(projected_scratch,
                                                                      ir_inline_storage_multiply(projected_blocks_after, sizeof(u32)));
                             projected_scratch = ir_inline_storage_add(projected_scratch, support_scratch);
+                            // Optional sites bound retained storage per caller, as
+                            // FAST does; module-wide expansion stays bounded by
+                            // max_module_growth rows. Splicing into a caller copies
+                            // its exactly sized tables, so a module-wide byte cap
+                            // would let a few large callers starve the rest.
                             bool scratch_within = projected_scratch <= IR_FAST_SCRATCH_BUDGET -
                                                                         BUSTER_MIN(active_scratch, (u64)IR_FAST_SCRATCH_BUDGET);
                             bool within = scratch_within && total_work <= IR_FAST_WORK_BUDGET &&
                                           function_sites < options.max_call_sites && storage != UINT64_MAX &&
                                           storage <= IR_FAST_SCRATCH_BUDGET - BUSTER_MIN(function_storage, (u64)IR_FAST_SCRATCH_BUDGET) &&
-                                          storage <= IR_FAST_SCRATCH_BUDGET - BUSTER_MIN(module_storage, (u64)IR_FAST_SCRATCH_BUDGET) &&
+                                          (!required ||
+                                           storage <= IR_FAST_SCRATCH_BUDGET - BUSTER_MIN(module_storage, (u64)IR_FAST_SCRATCH_BUDGET)) &&
                                           growth <= options.max_function_growth -
                                                         BUSTER_MIN(function_growth, options.max_function_growth) &&
                                           growth <= options.max_module_growth -
@@ -1185,6 +1260,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 ir_inline_storage_add(function_projected_extras, callee->extra_count);
                             function_projected_debug =
                                 ir_inline_storage_add(function_projected_debug, callee->debug_local_count);
+                            function_projected_scopes = projected_scopes_after;
                             u64 cloned_edge_delta = ir_inline_storage_add(callee_target_units,
                                                                                  ir_inline_storage_add(callee_return_units, 1u));
                             function_projected_edges =
@@ -1195,6 +1271,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         }
                     }
                     bool changed = false;
+                    IrInlineCfgReserve reserve = ir_inline_cfg_reserve(caller, function_projected_locals, function_projected_debug,
+                                                                       function_projected_scopes);
                     for (u32 block = 0; block < original_blocks && result.error == IR_VALIDATION_NONE; block += 1)
                     {
                         for (u32 row = planned_heads[block]; row != IR_INLINE_NONE && result.error == IR_VALIDATION_NONE; row = planned_next[row])
@@ -1206,7 +1284,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         u32 copied = 0;
                         u32 rows_before = caller->instruction_count;
                         if (!callee || !ir_inline_cfg_call(program->arena, program, caller, (IrBlockId){.value = block},
-                                                           (IrInstructionId){.value = row}, callee, &copied))
+                                                           (IrInstructionId){.value = row}, callee, &reserve, &copied))
                         {
                             result = ir_inline_callsite_error(caller, block, row);
                         }
@@ -1223,9 +1301,11 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     if (changed && result.error == IR_VALIDATION_NONE)
                     {
                         // The splice appends rows and values, preserves all existing IDs, rebuilds affected block chains and
-                        // predecessor lists, and assigns every cloned or synthetic result definition. The stale operand
+                        // assigns every cloned or synthetic result definition; predecessor lists are rebuilt once per caller
+                        // here, after its last splice. The stale operand
                         // population is ignored while operand_total_rows differs from instruction_count; opcode_summary only
                         // over-approximates, so no full-function remap or compaction is needed here.
+                        ir_inline_cfg_rebuild_predecessors(program->arena, caller);
                         ir_function_invalidate_cfg(caller);
                         module->local_promotion_complete = false;
                         module->local_promotion = (IrLocalPromotionStatistics){0};

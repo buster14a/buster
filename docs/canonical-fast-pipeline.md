@@ -189,21 +189,31 @@ Positive decimal limits are configurable through
 The caller default is twice the 64-site times 16-row tiny-body budget. This leaves
 headroom for larger mandatory checked-arithmetic expansions; the module, work
 and storage guards still independently bound expansion.
-The module, work and storage guards still independently bound expansion.
 Zero numeric fields in embedding options normalize to those defaults.
 Mandatory calls are processed before optional tiny candidates across the module;
-both phases share the same caller and module limits. The mandatory graph captures
+both phases share the same row-growth, call-site and per-caller limits. Mandatory
+planning and splicing share one module-wide work and retained-storage budget.
+Optional selection, like FAST, bounds work and retained storage per caller:
+splicing into a caller copies its exactly sized tables, so module-wide byte or
+work totals let the first few large callers starve every later one. Optional
+expansion across the module stays bounded by the module row-growth limit, which
+is the binding limit for the production unity source at default budgets.
+The mandatory graph captures
 call sites in one bounded scan rather than
 rescanning every instruction to build reverse edges. Planning storage includes
 function metadata, captured edge chunks and reverse-edge arrays. Caller planning counts block tails and phi metadata, with instruction prefixes
 recorded during the candidate scan. Splices preserve existing IDs and repair block
-chains directly, so no full caller compaction is required. Repeated splice work
-stays charged per site. Predecessor work uses original and projected target
+chains directly, so no full caller compaction is required. Each caller has one
+splice reservation: the first splice that adds locals, debug locals or debug scopes
+widens every block snapshot and the caller's place/debug arrays once to the
+planned final counts, later splices write in place, and predecessor lists are
+rebuilt once after the caller's last splice. Planning charges a site the increase
+in that reservation's bytes and work, plus the callee payload, instead of the
+caller-wide widening per site. Other repeated splice work stays charged per site. Predecessor work uses original and projected target
 counts rather than unrelated instruction/value payload counts; call membership
 checks stop when they reach the call. Growing table storage is charged from the caller's actual
 capacities through projected appends, including geometric growth floors and
-alignment. Per-splice snapshots, debug records, predecessors, payloads and clone
-maps remain charged independently.
+alignment. Callee payloads and clone maps remain charged per splice.
 Tiny bodies are screened before payload scans. Mandatory expansion is still
 subject to resource guards,
 including bounded planning work and retained cloning storage. A mandatory call in a legacy
