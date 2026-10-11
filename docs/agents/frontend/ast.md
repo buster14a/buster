@@ -412,8 +412,10 @@ unchanged.
   the operator precedence and the scalar conversion check.
   - Stage 1: identifiers bound to an object, function, parameter, local or
     enumerator; number and character literals; `.` and `->` on an unqualified
-    struct or union; `[]` and unary `*` on an array or pointer; and a call
-    whose callee is a bound function or function pointer that is not a builtin.
+    struct or union (and on a const or volatile one once its member's
+    [qualified copy](#qualified-member-copies) is shared); `[]` and unary `*`
+    on an array or pointer; and a call whose callee is a bound function or
+    function pointer that is not a builtin.
   - Stage 2:
     - the binary arithmetic, shift, comparison, bitwise and logical operators;
     - unary `+ - ~ !`;
@@ -437,7 +439,9 @@ unchanged.
       the published `void` row (`c_ast_types_builtin_call`).
 - **What it declines.** Every shape whose machine answer appends a row stays
   with the machine:
-  - a qualified member or array element;
+  - a qualified array element, and a member of a const or volatile struct or
+    union whose qualified copy is not shared yet or may not be
+    ([qualified member copies](#qualified-member-copies));
   - an array operand of `+` or `-`, which decays;
   - a pointer or `nullptr` conditional;
   - a qualified operand whose unqualified row was never recorded;
@@ -625,9 +629,13 @@ the Zen 5 route ([measurement plan](#measurement-plan)).
 
 ### Qualified member copies
 
-**Status: design only. Nothing here is implemented; it waits for the
-owner's decision on
-[#3102](https://github.com/buster14a/buster/issues/3102).**
+**Status: implemented under `-fc-ast-pilot` as option (b) below, at the
+owner's request on [#3102](https://github.com/buster14a/buster/issues/3102).**
+The machine side is `c_parse_intern_qualified_type`, the typer's lookup is
+`c_parse_interned_qualified_type`, and the rules are in CTypeInterning's
+comment (`c_internal.h`). The design and its prototype evidence follow as
+they were accepted; the implementation's measurements are in the
+[measurement plan](#measurement-plan).
 
 `.` and `->` on a const or volatile struct or union, such as
 `preprocess->tokens` with `preprocess` a pointer to const, is the largest
