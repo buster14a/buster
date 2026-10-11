@@ -697,7 +697,7 @@ BUSTER_GLOBAL_LOCAL CiUnitObservation ci_unit_observe(String8 output, bool sched
 {
     CiUnitObservation observation = {.valid = true};
     bool plan_seen = false, terminal_seen = false;
-    u64 cursor = 0, terminal_modules = 0, terminal_assertions = 0;
+    u64 cursor = 0, plan_modules = 0, terminal_modules = 0, terminal_assertions = 0, terminal_external = 0;
     while (observation.valid && cursor < output.length)
     {
         u64 begin = cursor;
@@ -743,14 +743,14 @@ BUSTER_GLOBAL_LOCAL CiUnitObservation ci_unit_observe(String8 output, bool sched
         }
         else if (string_starts_with_sequence(line, scheduled ? S8("CI_UNIT_SCHEDULE_PLAN_V1 ") : S8("CI_UNIT_PLAN_V1 ")))
         {
-            u64 slots = 0, slot_workers = 0, modules = 0;
+            u64 slots = 0, slot_workers = 0;
             String8 primary = {0};
             observation.valid = !plan_seen && !terminal_seen &&
                 ci_unit_word(&text, scheduled ? S8("CI_UNIT_SCHEDULE_PLAN_V1 source_revision=") : S8("CI_UNIT_PLAN_V1 source_revision="), &observation.revision) &&
                 ci_unit_word(&text, S8(" binary_sha256="), &observation.digest) && ci_unit_number(&text, S8(" workers="), &observation.workers) &&
                 ci_unit_number(&text, scheduled ? S8(" slots=") : S8(" groups="), &slots) &&
                 ci_unit_number(&text, scheduled ? S8(" slot_workers=") : S8(" group_workers="), &slot_workers);
-            if (scheduled) { observation.valid = observation.valid && ci_unit_number(&text, S8(" modules="), &modules); }
+            if (scheduled) { observation.valid = observation.valid && ci_unit_number(&text, S8(" modules="), &plan_modules); }
             else { observation.valid = observation.valid && ci_unit_word(&text, S8(" primary_module="), &primary); }
             observation.valid = observation.valid && !text.length && slots == 2 && slot_workers >= 2 &&
                 slot_workers == observation.workers / 2 && ci_unit_hex(observation.revision, 40) && ci_unit_hex(observation.digest, 64);
@@ -758,7 +758,7 @@ BUSTER_GLOBAL_LOCAL CiUnitObservation ci_unit_observe(String8 output, bool sched
         }
         else if (string_starts_with_sequence(line, scheduled ? S8("CI_UNIT_SCHEDULE_V1 ") : S8("CI_UNIT_PARTITION_V1 ")))
         {
-            u64 slots = 0, workers = 0, passed = 0, failed = 0, external = 0, captured = 0;
+            u64 slots = 0, workers = 0, passed = 0, failed = 0, captured = 0;
             String8 status = {0};
             observation.valid = plan_seen && !terminal_seen &&
                 ci_unit_number(&text, scheduled ? S8("CI_UNIT_SCHEDULE_V1 slots=") : S8("CI_UNIT_PARTITION_V1 groups="), &slots) &&
@@ -767,7 +767,7 @@ BUSTER_GLOBAL_LOCAL CiUnitObservation ci_unit_observe(String8 output, bool sched
                 ci_unit_number(&text, S8(" passed="), &passed) && ci_unit_number(&text, S8(" failed="), &failed);
             if (scheduled)
             {
-                observation.valid = observation.valid && ci_unit_number(&text, S8(" external="), &external) &&
+                observation.valid = observation.valid && ci_unit_number(&text, S8(" external="), &terminal_external) &&
                     ci_unit_number(&text, S8(" captured_bytes="), &captured) && captured <= 2 * CI_UNIT_CAPTURE_LIMIT;
             }
             observation.valid = observation.valid && ci_unit_word(&text, S8(" status="), &status) && !text.length &&
@@ -777,7 +777,8 @@ BUSTER_GLOBAL_LOCAL CiUnitObservation ci_unit_observe(String8 output, bool sched
         }
     }
     observation.valid = observation.valid && plan_seen && terminal_seen && observation.proof.count &&
-        terminal_modules == observation.proof.count && terminal_assertions == observation.proof.assertions;
+        terminal_modules == observation.proof.count && terminal_assertions == observation.proof.assertions &&
+        (!scheduled || (plan_modules == terminal_modules && terminal_external == observation.external));
     return observation;
 }
 
@@ -963,6 +964,17 @@ BUSTER_GLOBAL_LOCAL bool ci_unit_schedule_self_test(Arena* arena, String8 execut
     CiUnitObservation pair_observed = ci_unit_observe(pair_log, false);
     CiUnitObservation scheduled_observed = ci_unit_observe(scheduled_log, true);
     result = result && ci_unit_observations_equal(&pair_observed, &scheduled_observed);
+    String8 wrong_plan = string_format(arena, S8("{S8}"), scheduled_log);
+    String8 wrong_external = string_format(arena, S8("{S8}"), scheduled_log);
+    u64 plan_count = string_first_sequence(wrong_plan, S8(" modules=1\n"));
+    u64 external_count = string_first_sequence(wrong_external, S8(" external=0"));
+    result = result && plan_count != BUSTER_STRING_NO_MATCH && external_count != BUSTER_STRING_NO_MATCH;
+    if (plan_count != BUSTER_STRING_NO_MATCH && external_count != BUSTER_STRING_NO_MATCH)
+    {
+        wrong_plan.pointer[plan_count + S8(" modules=").length] = '2';
+        wrong_external.pointer[external_count + S8(" external=").length] = '1';
+        result = result && !ci_unit_observe(wrong_plan, true).valid && !ci_unit_observe(wrong_external, true).valid;
+    }
     scheduled_observed.proof.modules[1].assertions += 1;
     result = result && !ci_unit_observations_equal(&pair_observed, &scheduled_observed);
     scheduled_observed.proof.modules[1].assertions -= 1;

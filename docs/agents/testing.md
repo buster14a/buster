@@ -1296,7 +1296,10 @@ The `codex/3620-schedule-unit-modules` qualification branch runs three paired
 sanitized Release invocations per Linux x86-64, Linux AArch64 and Windows x64
 hosted runner, using one immutable binary and four test workers in both arms.
 The three-core macOS hosted runner keeps its ordinary serial fallback and
-normal sanitized CI validation. The `pair` control runs before each `modules` candidate. Raw
+normal sanitized CI validation. Windows first exercises three cold isolated
+OS processes. Its capture-sink fixture calibrates the native process runtime
+before the exact handle census and verifies the calibration child's owned
+handles are closed; registered fixture and assertion counts stay unchanged. The `pair` control runs before each `modules` candidate. Raw
 logs and machine records remain in the unit-partition artifact, including failed
 attempts. `test_units_partitioned --compare <pair-log> <module-log>` requires
 identical source and binary identities, per-module indices/names/assertion

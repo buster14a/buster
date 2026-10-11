@@ -214,14 +214,12 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $env:BUSTER_OS_CAPTURE_RESOURCE_DIAGNOSTICS = '1'
           $env:BUSTER_TEST_MODULE_GROUP = 'module:os_tests'
           $env:BUSTER_TEST_JOBS = '2'
           for ($Repeat = 1; $Repeat -le 3; $Repeat++) {
             & $env:BUSTER_UNIT_BINARY test --verbose=1 --ci=1 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP "unit-partitions/isolated-os-$Repeat.log")
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-          Remove-Item Env:BUSTER_OS_CAPTURE_RESOURCE_DIAGNOSTICS
 
       - name: Serial baseline 1
         if: ${{ matrix.platform != 'windows' }}
