@@ -206,6 +206,27 @@
   with the same dependency-only support identity. It is historical input,
   not executed bridge coverage; see `docs/ci-github-hosted-runners.md`.
 
+### Just-run executable cleanup
+
+Driver runtime fixtures use `buster_test_executable_delete` after waiting for
+their executable. On Windows it retries only `ERROR_SHARING_VIOLATION` and
+`ERROR_ACCESS_DENIED`, under a 500 ms retry deadline and a 51-attempt ceiling. Native syscall and
+scheduling time can extend elapsed time past that deadline. It does not
+retry compilation, linking or execution; a persistent denial still fails.
+Other platforms make one checked delete attempt. An initial failure logs the
+path, first and final native error codes, attempt count and elapsed time, even
+if cleanup later succeeds.
+
+`compiler_driver_test_executable_cleanup` checks unchanged bytes and one
+attempt for an unrelated error; Windows additionally exercises two injected
+transient errors, a real handle opened without delete sharing, and a real
+read-only file. A two-lane Windows control releases a real held handle while
+cleanup runs and requires eventual deletion when the test quota permits two
+lanes; serial builds and one-lane quotas retain the persistent
+lock controls. Both persistent native errors remain failures until the
+fixture releases its lock or restores the attribute. Missing paths are
+idempotent success, matching `os_file_delete_checked`.
+
 ### Native investigation source-size comparison
 
 The optional `.github/workflows/native-investigation.yml` report uses the checked-out PR merge revision's first parent only after verifying `HEAD == GITHUB_SHA`, exactly two parents, and the event PR head as parent 2. It never reads `pull_request.base.sha`. Manual dispatch deliberately compares its exact selected revision with itself; that is a same-revision zero-delta report, not a branch-delta gate. `CurrentWorkflowPolicyTests` in `tools/ci_workflow_tools_test.py` executes the selector on a synthetic merge with an advanced first parent and rejects a changed checkout, a wrong head or parent shape, and unsupported events; `tools/ci_workflow_policy_test.py` loads that class.
@@ -401,7 +422,17 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   actual native statuses versus launch errors, binary retention, held and
   escaped writers, cancellation and keeper failure, startup clock expiry,
   ignored/blocked signals, final protocol EOF, actual shim exit, generation
-  isolation and malformed receipt refusal. The signing fixture also requires
+  isolation and malformed receipt refusal. Named lifecycle fields use
+  `ios/lifecycle_receipt.sh` Bash builtins to verify one terminated text row,
+  unique fields and exact value patterns without per-field grep/wc processes.
+  `/bin/bash ios/lifecycle_receipt_test.sh` checks missing, duplicate, invalid,
+  multiple, unterminated and NUL-corrupted rows on system Bash. Extracted phase
+  controls still refuse malformed ownership/caller proof. Cleanup records
+  INT/TERM that arrive during an already-started shutdown, waits the existing
+  bounded invocation-owned phase, and retains 130/143 alongside its actual
+  shutdown result. Deterministic controls signal that real cleanup path during
+  successful and failed shutdowns after either an initial success or failure.
+  The signing fixture also requires
   empty or malformed capture receipts to prevent install/launch, including
   native-success cases. The Python lifecycle and caller-clock controls use
   owned handles or finite fixture release markers; they do not claim

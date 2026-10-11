@@ -3385,6 +3385,35 @@ String8 buster_test_temporary_unique_path(Arena* arena, String8 name, String8 su
     return result;
 }
 
+#if BUSTER_INCLUDE_TESTS
+OsError buster_test_executable_delete(UnitTestArguments* arguments, String8 path)
+{
+    // DeleteFileW refuses a mapped image or an open handle without
+    // FILE_SHARE_DELETE. Retry only cleanup, never compilation or execution.
+    u64 start = os_now_microseconds();
+    OsError error = os_file_delete_checked(path);
+    OsError first_error = error;
+    u32 attempts = 1;
+#if BUSTER_WINDOWS
+    enum { RETRY_MICROSECONDS = 500000, RETRY_MILLISECONDS = 10, MAX_ATTEMPTS = 51 };
+    while ((error.v == ERROR_SHARING_VIOLATION || error.v == ERROR_ACCESS_DENIED) &&
+           attempts < MAX_ATTEMPTS && os_now_microseconds() - start < RETRY_MICROSECONDS)
+    {
+        Sleep(RETRY_MILLISECONDS);
+        error = os_file_delete_checked(path);
+        attempts += 1;
+    }
+#endif
+    if (first_error.v)
+    {
+        arguments->show(arguments, S8("TEST_EXECUTABLE_CLEANUP path={S8} first_error={u32} final_error={u32} attempts={u32} elapsed_us={u64} status={S8} error={EOs}\n"),
+                        path, first_error.v, error.v, attempts, os_now_microseconds() - start,
+                        error.v ? S8("failed") : S8("recovered"), error);
+    }
+    return error;
+}
+#endif
+
 void default_show(UnitTestArguments* arguments, String8 format, ...)
 {
     BUSTER_UNUSED(arguments);

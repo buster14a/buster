@@ -11,7 +11,7 @@ reported separately and are never ratcheted.
 ./build.sh source_size                                  # HEAD: totals and drift since the baseline
 ./build.sh source_size --base "$(git merge-base origin/main HEAD)"   # this branch's change, with the ratchet
 ./build.sh source_size --rev <revision> --base <revision>
-./build.sh source_size --write-baseline                 # acknowledge: refresh the committed baseline from HEAD
+./build.sh source_size --write-baseline                 # refresh the drift baseline from HEAD (optional)
 ./build.sh source_size --self-test
 ```
 
@@ -27,19 +27,21 @@ conversion; gitlinks carry no bytes. `--rev` defaults to `HEAD`.
 One invocation prints both forms. The human part is a category table (files,
 bytes, change against `--base`, drift since the baseline), the ten largest
 ratcheted files, the ratcheted files that changed against `--base` (the forty
-largest changes, renames as a removal plus an addition), and one verdict line
-per ratcheted category. The machine-readable part follows as space-separated
+largest changes, renames as a removal plus an addition), the acknowledgement
+files the change adds, and one verdict line per ratcheted category. The machine-readable part follows as space-separated
 `key=value` records whose values never contain spaces:
 
 ```text
 SOURCE_SIZE_V1 revision=<sha> category=<name> ratcheted=<0|1> files=<n> bytes=<n> base_files=<n|-> base_bytes=<n|-> baseline_files=<n> baseline_bytes=<n>
-SOURCE_SIZE_RATCHET_V1 category=<name> growth=<+n|-n|0> limit=<n> verdict=<within-limit|acknowledged|unacknowledged>
+SOURCE_SIZE_ACK_V1 path=<path>
+SOURCE_SIZE_RATCHET_V1 category=<name> growth=<+n|-n|0> limit=<n> acknowledged=<n> verdict=<within-limit|acknowledged|unacknowledged>
 SOURCE_SIZE_RESULT_V1 revision=<sha> base=<sha|-> baseline_commit=<sha> status=<pass|fail>
 ```
 
-`SOURCE_SIZE_RATCHET_V1` appears only with `--base`. The command exits nonzero
-when a revision, listing or the head baseline is missing or malformed, or when
-a ratcheted category fails.
+`SOURCE_SIZE_ACK_V1` (one per added acknowledgement) and
+`SOURCE_SIZE_RATCHET_V1` appear only with `--base`. The command exits nonzero
+when a revision, listing, the head baseline or an added acknowledgement is
+missing or malformed, or when a ratcheted category fails.
 
 ## Categories
 
@@ -65,14 +67,70 @@ tests.
 
 For each ratcheted category a change may grow the total by at most
 `SOURCE_SIZE_CHANGE_LIMIT_BYTES` (32 KiB) relative to its base. Beyond that the
-same change must also change that category's row in
-`docs/source-size-baseline.txt`, normally by running
-`./build.sh source_size --write-baseline` after committing the growth, and its
-description should explain the growth. That diff is the acknowledgement a
-reviewer sees. The check compares the rows at the base and the head, not exact
-totals, so the acknowledgement survives a rebase or a merge-queue merge. A base
-without a baseline, or with a malformed one that the change repairs, predates
-the ratchet and acknowledges.
+change must add its own acknowledgement file, and its description should
+explain the growth. The added file is the acknowledgement a reviewer sees.
+
+Each acknowledgement is a separate file, so two independent changes that both
+exceed the limit never edit the same file and land in either order without a
+textual conflict. Before #3516 the acknowledgement was a change to the shared
+whole-tree rows of `docs/source-size-baseline.txt`; every pair of queued
+changes that acknowledged growth conflicted on those rows, whatever their
+order, and #3516 was ejected from the merge queue four times on 2026-10-11 for
+that alone. Editing the baseline no longer acknowledges anything.
+
+### Acknowledging growth
+
+Add `docs/source-size/acks/<id>.txt`, where `<id>` is unique and uses only
+lowercase letters, digits, `-`, `_` and `.`; use the issue or PR number and a
+short description, such as `3516-c-gen-union-ledger.txt`:
+
+```text
+# Source-size acknowledgement; see docs/source-size.md.
+schema buster-source-size-ack-v1
+production 44584
+reason Per-concrete-union state ledger in c_gen.c (#3154).
+```
+
+- `schema` is exactly `buster-source-size-ack-v1`.
+- One `<category> <bytes>` row for each ratcheted category (`production`,
+  `build`) the change acknowledges, with the growth the report measured for
+  it (`change vs base`). A category appears at most once and its bytes are
+  nonzero. Unratcheted categories are rejected.
+- One `reason <text>` line, on one line, saying why the growth is needed.
+- Blank lines and lines starting with `#` are ignored. The file ends with a
+  newline.
+
+A category passes when its growth is at most the limit plus the bytes that the
+acknowledgements the change adds name for it. The limit stays as slack, so
+small later revisions of the change, or unacknowledged small changes that land
+in the same merge-queue group, still pass. Record the measured growth, not a
+padded allowance; a reviewer compares it with the report.
+
+Only files the measured change adds count, found by comparing the file lists
+of the base and head revisions; a file already present at the base
+acknowledges nothing. When several acknowledged changes are measured together,
+such as a branch against its merge base, their acknowledgements add up per
+category. A malformed added acknowledgement fails the check instead of being
+ignored. Acknowledgement files are documentation and are never ratcheted.
+
+Records are append-only, and the check enforces it so that a landed allowance
+cannot be recycled. It fails a change that removes an acknowledgement present
+at the base, changes its blob, or adds one whose blob is identical to an
+existing record. A rename is a removal plus an identical addition, so moving a
+landed record to a new name fails too. Reverting a change that added an
+acknowledgement reverts its code and keeps the file. To acknowledge new
+growth, add a new file with its own measured bytes and reason.
+
+The check still compares the PR merge revision with its first parent, so the
+measured growth is exactly what the change adds and is unaffected by other
+changes landing first. A base without a baseline, or with a malformed one,
+predates the ratchet and acknowledges.
+
+### Earlier acknowledgements
+
+These were recorded in this document and in baseline refreshes before the
+acknowledgement files existed. New acknowledgements go only in
+`docs/source-size/acks/`, never here.
 
 PR #3154 acknowledges the per-concrete-union state ledger in
 `src/buster/lib/compiler/frontend/c/c_gen.c`, which adds 44,584 production
@@ -105,12 +163,13 @@ retained for the later current-main integration. This acknowledgment adds no
 9700X benchmark request or performance claim;
 `benchmarks/9700x/compiler-compare.request` remains unchanged from main.
 
+### Scope
+
 Categories are independent. Deleting tests, fixtures, generated tables or
 documentation never earns room for production or build code, and only the
 ratcheted totals are limited, so moving code between files or splitting a file
-is neither a reduction nor an increase. Small changes pass without touching the
-baseline; their cumulative drift is the `since baseline` column. Refreshing
-the baseline is also how anyone records accumulated drift or a reduction.
+is neither a reduction nor an increase. Small changes pass without an
+acknowledgement; their cumulative drift is the `since baseline` column.
 
 Calibration: over the 69 first-parent merges to main from `f7bd9f2` through
 `1edfe98` (2026-09-23 to 2026-09-27), production grew 180,372 bytes and build
@@ -124,7 +183,13 @@ bytes per line of `build.c`, 32 KiB is several hundred lines.
 
 `docs/source-size-baseline.txt` is generated; do not edit it by hand. It
 records the schema, the full commit it measured, and one
-`<category> <files> <bytes>` row per category. The initial baseline records
+`<category> <files> <bytes>` row per category. It is informational: it feeds
+the `since baseline` drift column and must exist and parse at the measured
+revision, but it is no longer an acknowledgement and the ratchet never reads
+its rows. A pull request therefore does not refresh it. Refresh it on its
+own, from a commit of `main`, with `./build.sh source_size --write-baseline`
+when the drift column has grown large enough to be unhelpful; no workflow
+refreshes it automatically. The initial baseline records
 the audited commit `ade6ac4b6ecb21f30b61b656439bac476c145e2f` named in #1581:
 
 | Category | Files | Bytes |

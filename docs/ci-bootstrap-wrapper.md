@@ -113,8 +113,20 @@ fixture removal.
 
 The scheduler adds a cancellation registry. Registration and cancellation share
 a lock, and each child's cleanup is serialized against normal collection. Windows
-uses the original system `taskkill /T /F`; Unix uses isolated process groups.
-Direct children retain the ten-second cleanup deadline. Workers finish before
+captures native descendant process handles before the original system
+`taskkill /T /F`, then waits for those processes to signal termination before
+fixture removal. A successful termination request alone is insufficient: a
+descendant can still hold its inherited current-directory handle while exiting
+(#2985). All descendant waits share the original ten-second cleanup deadline;
+expired/failed waits and snapshot failures remain errors, and later cleanup
+cannot relabel that owner as clean. Snapshot capture adds no PID signal targets. Native creation times must fall
+between the retained parent's creation and the pre-snapshot UTC cutoff; a PID
+replacement acquired after snapshot admission or a stale parent ID fails capture
+without waiting on that handle. These are stable, readiness-published fixture
+trees; they do not admit new descendant spawning during cleanup. Clock/identity
+ambiguity fails the owner instead of authorizing a numeric-PID wait.
+Unix uses isolated process groups. Direct children retain the ten-second cleanup
+deadline. Workers finish before
 module state is restored; the registry releases native handles between runs.
 These are controlled fixture trees, not containment for detached programs.
 
