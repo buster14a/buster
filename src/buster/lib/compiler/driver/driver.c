@@ -5433,8 +5433,12 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         result.diagnostic = S8("the C frontend currently requires exactly one C input");
         goto end;
     }
-    // The `-` input arrives already read; it has no file identity.
-    if (string_equal(invocation.input_paths[0], S8("-")))
+    // The in-memory API input and `-` have no file identity.
+    if (invocation.input_source.pointer)
+    {
+        source_file.bytes = (ByteSlice){.pointer = (u8*)invocation.input_source.pointer, .length = invocation.input_source.length};
+    }
+    else if (string_equal(invocation.input_paths[0], S8("-")))
     {
         source_file.bytes = (ByteSlice){.pointer = (u8*)invocation.standard_input.pointer, .length = invocation.standard_input.length};
     }
@@ -6930,7 +6934,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             watch = compiler_driver_arena_watch_begin(arena);
         }
-        result = compiler_driver_execute_unit(arena, invocation, false, &warnings, inputs && measure ? &single_metrics : 0);
+        result = compiler_driver_execute_unit(arena, invocation, invocation.retain_object, &warnings, inputs && measure ? &single_metrics : 0);
         if (inputs)
         {
             if (measure)

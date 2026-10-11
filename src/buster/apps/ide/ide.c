@@ -58,6 +58,7 @@
 #include <buster/lib/compiler/llvm/bitcode.h>
 #include <buster/lib/compiler/ebpf/ebpf.h>
 #include <buster/lib/compiler/driver/driver.h>
+#include <buster/lib/compiler/embed/embed.h>
 #include <buster/lib/integer.h>
 #include <buster/lib/string.h>
 #include <buster/lib/target.h>
@@ -148,6 +149,7 @@
 #include <buster/lib/compiler/ebpf/ebpf.c>
 #include <buster/lib/compiler/spirv/spirv.c>
 #include <buster/lib/compiler/driver/driver.c>
+#include <buster/lib/compiler/embed/embed.c>
 #include <buster/lib/hash.c>
 #endif
 
