@@ -1249,3 +1249,43 @@ unclassified, and instruction execution, machine edges, MC/DC and functional
 assertions each stay unmeasured. No percentages or approved tracing capability
 are inferred from a successful preflight. See
 [the exact-artifact pilot command and gaps](build.md#exact-artifact-binary-coverage-pilot).
+
+## Work-conserving sanitized unit processes (#3620)
+
+The native `test_units_partitioned <ide-path>` runner uses two process slots
+when `BUSTER_TEST_JOBS >= 4`. Each slot receives half the quota, retaining
+the multi-lane OS assertions. It first queries the complete inventory, starts
+`c_frontend_tests` and `compiler_driver_tests`, then dynamically claims
+`c_ast_tests` and the remaining enabled descriptors. A module never shares
+its process with another module. Serial bootstraps and smaller quotas retain
+the ordinary streaming invocation.
+
+`BUSTER_TEST_MODULE_GROUP=module:<name>` is the private CI selector. It
+preserves table-audit flags and canonical indices, unlike explicit
+`--module=` selection, which intentionally takes ownership of named audits.
+Each child must supply the full independent inventory, exactly its selected
+timing row and matching successful terminal counts. The parent compares all
+inventory identities and accepts only the exact enabled union. Failed spawn,
+capture, cleanup, replay, timeout or incomplete coverage fails the invocation.
+
+The persistent parent lanes claim stable module slots through an atomic index;
+captured output replays in canonical descriptor order after both lanes finish.
+The complete schedule shares the existing 5400-second deadline. Each process
+keeps the existing 64 MiB capture cap; retained captures share a 128 MiB cap.
+At most two in-flight captures can temporarily exceed that retained cap before
+admission stops and the run fails. No fixture deadline or test-worker quota
+increases.
+
+`CI_UNIT_SCHEDULE_PLAN_V1` binds source revision, executable SHA-256 and quota.
+The per-module `CI_UNIT_PROCESS_V1 group=module` rows retain native intervals,
+and `CI_UNIT_SCHEDULE_V1` reports aggregate coverage, captured bytes and wall
+time, including inventory and replay. These rows describe scheduled modules;
+they must not be fed to the historical two-group observer as accepted evidence.
+
+`BUSTER_TEST_UNIT_SCHEDULE=pair` retains the earlier primary/rest runner;
+the existing unit-partition experiment explicitly selects it. Empty or
+`modules` selects the new scheduler, and unknown values fail. The native
+`test_units_partitioned --self-test` covers both paths, including actual
+synthetic module processes; the selector's harness controls add no registered
+modules, fixtures or assertions. Hosted wall-time improvements still require
+same-binary, same-runner comparisons and complete lane evidence.

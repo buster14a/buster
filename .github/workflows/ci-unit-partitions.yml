@@ -56,6 +56,7 @@ jobs:
             binary: build/ci-unit-tree/Debug/ide
     env:
       BUSTER_TEST_JOBS: '2'
+      BUSTER_TEST_UNIT_SCHEDULE: 'pair'
       BUSTER_TEST_TABLE_AUDITS: '0'
       BUSTER_UNIT_PAIRS: ${{ github.event_name == 'workflow_dispatch' && inputs.pairs || '1' }}
       BUSTER_UNIT_BASELINE_JOBS: ${{ github.event_name == 'workflow_dispatch' && inputs.baseline_jobs || '2' }}

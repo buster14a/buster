@@ -1,7 +1,10 @@
 // Isolated CI unit-module processes, included only by the native build driver.
 // ci_unit_tests_main owns child admission, quotas, bounded capture and cleanup.
-// ci_unit_parse validates canonical inventories, exact selected timing rows and
-// terminal counts before ci_unit_pair merges stable primary/rest results. A
+// ci_unit_schedule_run queries an independent inventory and dynamically assigns
+// modules to two persistent process slots; output replays in canonical order.
+// ci_unit_parse_selection binds each process to one enabled inventory module.
+// BUSTER_TEST_UNIT_SCHEDULE=pair retains the old controlled experiment; its
+// ci_unit_pair merges stable primary/rest results. A
 // serial bootstrap or a quota below four retains the ordinary full invocation.
 // Each group needs at least two workers to retain OS multi-lane assertions.
 // ci_unit_source_revision uses a bounded Git HEAD query when the caller omits
@@ -111,7 +114,7 @@ BUSTER_GLOBAL_LOCAL bool ci_unit_clean(ProcessSpawnResult spawn, ProcessWaitResu
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL CiUnitProof ci_unit_parse(String8 output, bool primary, bool audits)
+BUSTER_GLOBAL_LOCAL CiUnitProof ci_unit_parse_selection(String8 output, bool primary, bool audits, String8 module_name, bool inventory)
 {
     CiUnitProof proof = {.valid = true};
     bool batch_seen = false;
@@ -139,7 +142,8 @@ BUSTER_GLOBAL_LOCAL CiUnitProof ci_unit_parse(String8 output, bool primary, bool
                 ci_unit_word(&text, S8(" group="), &owner) && !text.length && index == proof.count && audit <= 1 && enabled <= 1 && selected <= 1 && ci_unit_token(name);
             bool owned = string_equal(name, ci_unit_primary_module());
             proof.valid = proof.valid && string_equal(owner, owned ? S8("primary") : S8("rest")) &&
-                enabled == (u64)(!audit || audits) && selected == (u64)(enabled && owned == primary) && (!owned || !audit);
+                enabled == (u64)(!audit || audits) && selected == (u64)(enabled && !inventory &&
+                    (module_name.length ? string_equal(name, module_name) : owned == primary)) && (!owned || !audit);
             for (u64 previous = 0; proof.valid && previous < proof.count; previous += 1)
             {
                 proof.valid = !string_equal(proof.modules[previous].name, name);
@@ -177,10 +181,12 @@ BUSTER_GLOBAL_LOCAL CiUnitProof ci_unit_parse(String8 output, bool primary, bool
                 ci_unit_number(&text, S8(" assertions="), &batch_assertions) && ci_unit_number(&text, S8(" passed="), &passed) &&
                 ci_unit_number(&text, S8(" failed="), &failed) && ci_unit_number(&text, S8(" external="), &batch_external) &&
                 ci_unit_number(&text, S8(" external_passed="), &external_passed) && ci_unit_word(&text, S8(" status="), &status) && !text.length &&
-                string_equal(group, primary ? S8("primary") : S8("rest")) && string_equal(status, S8("pass")) && !failed &&
+                string_equal(group, inventory ? S8("inventory") : module_name.length ? S8("module") : primary ? S8("primary") : S8("rest")) &&
+                string_equal(status, inventory ? S8("inventory") : S8("pass")) && !failed &&
                 modules_passed == batch_modules && passed == batch_assertions && external_passed == batch_external;
             batch_seen = true;
         }
+        else if (inventory && string_starts_with_sequence(line, S8("CI_UNIT_HOST_V1 "))) {}
         else if (string_starts_with_sequence(line, S8("CI_UNIT_"))) { proof.valid = false; }
         else if (line.length && line.pointer[0] == '[')
         {
@@ -212,11 +218,17 @@ BUSTER_GLOBAL_LOCAL CiUnitProof ci_unit_parse(String8 output, bool primary, bool
     {
         proof.valid = proof.modules[index].selected == proof.modules[index].timed;
     }
-    proof.valid = proof.valid && proof.count > 1 && primary_count == 1 && proof.selected && batch_seen &&
+    proof.valid = proof.valid && proof.count > 1 && primary_count == 1 && (inventory ? !proof.selected : module_name.length ? proof.selected == 1 : proof.selected != 0) && batch_seen &&
         terminal_seen[0] && terminal_seen[1] && terminal_seen[2] && batch_modules == proof.selected &&
         batch_assertions == proof.assertions && terminal_count[0] == proof.assertions && terminal_count[1] == proof.selected && terminal_count[2] == batch_external;
     proof.external = batch_external;
     return proof;
+}
+
+BUSTER_GLOBAL_LOCAL CiUnitProof ci_unit_parse(String8 output, bool primary, bool audits)
+{
+    CiUnitProof result = ci_unit_parse_selection(output, primary, audits, (String8){0}, false);
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool ci_unit_pair(CiUnitProof* primary, CiUnitProof* rest)
@@ -362,6 +374,177 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_serial_run(Arena* arena, SliceString8 
     return result;
 }
 
+// Two persistent parent lanes own independent module processes. The atomic
+// index assigns one stable result slot per module; completion order never owns
+// an output row. Retained captures share the old pair's 128 MiB budget.
+typedef struct CiUnitSchedule CiUnitSchedule;
+struct CiUnitSchedule
+{
+    CiUnitProof inventory;
+    CiUnitChild* children;
+    u64 order[CI_UNIT_MAX_MODULES];
+    u64 count, workers, epoch;
+    String8 executable;
+    AtomicU64 next, captured, failed;
+    bool audits, self_test;
+};
+
+BUSTER_GLOBAL_LOCAL bool ci_unit_inventory_equal(CiUnitProof* a, CiUnitProof* b)
+{
+    bool result = a->valid && b->valid && a->count == b->count;
+    for (u64 index = 0; result && index < a->count; index += 1)
+    {
+        CiUnitModule* left = a->modules + index;
+        CiUnitModule* right = b->modules + index;
+        result = string_equal(left->name, right->name) && left->audit == right->audit &&
+            left->enabled == right->enabled && left->primary == right->primary;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void ci_unit_schedule_order(CiUnitSchedule* work)
+{
+    String8 priority[] = {S8("c_frontend_tests"), S8("compiler_driver_tests"), S8("c_ast_tests")};
+    bool included[CI_UNIT_MAX_MODULES] = {0};
+    work->count = 0;
+    for (u64 priority_index = 0; priority_index < BUSTER_ARRAY_LENGTH(priority); priority_index += 1)
+    {
+        for (u64 index = 0; index < work->inventory.count; index += 1)
+        {
+            if (work->inventory.modules[index].enabled && string_equal(work->inventory.modules[index].name, priority[priority_index]))
+            {
+                included[index] = true;
+                work->order[work->count++] = index;
+            }
+        }
+    }
+    for (u64 index = 0; index < work->inventory.count; index += 1)
+    {
+        if (work->inventory.modules[index].enabled && !included[index]) { work->order[work->count++] = index; }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ci_unit_schedule_lane(void* argument)
+{
+    CiUnitSchedule* work = argument;
+    bool running = true;
+    while (running && !atomic_u64_add(&work->failed, 0))
+    {
+        if (os_now_microseconds() - work->epoch >= CI_UNIT_TIMEOUT_US) { atomic_u64_increment(&work->failed); }
+        u64 ticket = atomic_u64_increment(&work->next);
+        running = ticket < work->count && !atomic_u64_add(&work->failed, 0);
+        if (running)
+        {
+            u64 index = work->order[ticket];
+            String8 name = work->inventory.modules[index].name;
+            CiUnitChild* child = work->children + index;
+            child->arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256), .flags = {.no_pool = 1}});
+            child->start = os_now_microseconds();
+            if (child->arena)
+            {
+                SliceString8 keys = {0}, values = {0};
+                ci_unit_environment(child->arena, string_format(child->arena, S8("module:{S8}"), name),
+                    string_format(child->arena, S8("{u64}"), work->workers), &keys, &values);
+                String8 command[] = {work->executable, work->self_test ? S8("test_units_partitioned") : S8("test"),
+                    work->self_test ? S8("--self-test-module-child") : S8("--verbose=1"), S8("--ci=1")};
+                SliceString8 arguments = {command, work->self_test ? 3 : 4};
+                child->spawn = os_process_spawn(arguments, keys, values, ci_unit_spawn_options());
+                if (child->spawn.handle)
+                {
+                    u64 elapsed = os_now_microseconds() - work->epoch;
+                    u64 remaining = elapsed < CI_UNIT_TIMEOUT_US ? CI_UNIT_TIMEOUT_US - elapsed : 1;
+                    child->wait = os_process_wait_deadline(child->arena, child->spawn, remaining);
+                }
+                child->clean = ci_unit_clean(child->spawn, child->wait);
+                if (child->clean)
+                {
+                    child->proof = ci_unit_parse_selection(BYTE_SLICE_TO_STRING(8, child->wait.streams[STANDARD_STREAM_OUTPUT]),
+                        false, work->audits, name, false);
+                    child->clean = ci_unit_inventory_equal(&work->inventory, &child->proof);
+                }
+                u64 captured = child->wait.streams[STANDARD_STREAM_OUTPUT].length + child->wait.streams[STANDARD_STREAM_ERROR].length;
+                u64 retained = atomic_u64_add(&work->captured, captured);
+                child->clean = child->clean && retained + captured <= 2 * CI_UNIT_CAPTURE_LIMIT;
+            }
+            child->finish = os_now_microseconds();
+            if (!child->clean) { atomic_u64_increment(&work->failed); }
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_schedule_run(Arena* arena, String8 path, u64 jobs, String8 revision, String8 digest, bool self_test)
+{
+    u64 epoch = os_now_microseconds();
+    bool audits = !string_equal(os_get_environment_variable(S8("BUSTER_TEST_TABLE_AUDITS")), S8("0"));
+    SliceString8 keys = {0}, values = {0};
+    ci_unit_environment(arena, S8("inventory"), S8("1"), &keys, &values);
+    String8 command[] = {path, self_test ? S8("test_units_partitioned") : S8("test"),
+        self_test ? S8("--self-test-module-child") : S8("--verbose=1"), S8("--ci=1")};
+    ProcessSpawnResult spawn = os_process_spawn((SliceString8){command, self_test ? 3 : 4}, keys, values, ci_unit_spawn_options());
+    ProcessWaitResult wait = {0};
+    if (spawn.handle) { wait = os_process_wait_deadline(arena, spawn, CI_UNIT_TIMEOUT_US); }
+    CiUnitSchedule* work = arena_allocate(arena, CiUnitSchedule, 1);
+    memset(work, 0, sizeof(*work));
+    bool valid = ci_unit_clean(spawn, wait);
+    if (valid)
+    {
+        work->inventory = ci_unit_parse_selection(BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]), false, audits, (String8){0}, true);
+        valid = work->inventory.valid;
+    }
+    if (valid)
+    {
+        work->workers = jobs / 2;
+        work->epoch = epoch;
+        work->executable = path;
+        work->audits = audits;
+        work->self_test = self_test;
+        work->children = arena_allocate(arena, CiUnitChild, work->inventory.count);
+        memset(work->children, 0, sizeof(*work->children) * work->inventory.count);
+        ci_unit_schedule_order(work);
+        string_print(S8("CI_UNIT_SCHEDULE_PLAN_V1 source_revision={S8} binary_sha256={S8} workers={u64} slots=2 slot_workers={u64} modules={u64}\n"),
+            revision, digest, jobs, work->workers, work->count);
+        lane_run(2, &ci_unit_schedule_lane, work);
+        valid = !atomic_u64_add(&work->failed, 0);
+    }
+    else
+    {
+        ci_unit_replay(wait);
+        string_print(S8("error: unit-module inventory query did not complete cleanly\n"));
+    }
+    u64 modules = 0, assertions = 0, external = 0;
+    for (u64 index = 0; work->children && index < work->inventory.count; index += 1)
+    {
+        if (work->inventory.modules[index].enabled)
+        {
+            CiUnitChild* child = work->children + index;
+            bool clean = child->clean;
+            if (child->arena)
+            {
+                clean = ci_unit_replay(child->wait) && clean;
+                clean = arena_destroy(child->arena, 1) && clean;
+            }
+            else { clean = false; }
+            valid = valid && clean && UINT64_MAX - assertions >= child->proof.assertions &&
+                UINT64_MAX - external >= child->proof.external;
+            modules += clean;
+            assertions += child->proof.assertions;
+            external += child->proof.external;
+            string_print(S8("CI_UNIT_PROCESS_V1 group=module module={S8} index={u64} workers={u64} start_us={u64} end_us={u64} elapsed_us={u64} exit={u32} native_status={u32} timed_out={u32} capture_failed={u32} cleanup_failed={u32} status={S8}\n"),
+                work->inventory.modules[index].name, index, work->workers, child->start ? child->start - epoch : 0,
+                child->finish ? child->finish - epoch : 0, child->finish - child->start, clean ? 0u : 1u, child->wait.platform_status,
+                (u32)child->wait.timed_out, (u32)(child->wait.capture_failed || child->wait.output_truncated || child->wait.capture_limit_exceeded),
+                (u32)(child->wait.process_tree_cleanup_failed || child->wait.process_group_reservation_retained || child->wait.process_group_ownership_lost),
+                clean ? S8("pass") : S8("fail"));
+        }
+    }
+    valid = valid && modules == work->count && modules != 0;
+    string_print(S8("CI_UNIT_SCHEDULE_V1 slots=2 workers={u64} elapsed_us={u64} modules={u64} assertions={u64} passed={u64} failed={u64} external={u64} captured_bytes={u64} status={S8}\n"),
+        jobs, os_now_microseconds() - epoch, modules, assertions, valid ? assertions : 0, valid ? 0ull : 1ull, external,
+        atomic_u64_add(&work->captured, 0), valid ? S8("pass") : S8("fail"));
+    ProcessResult result = valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    return result;
+}
+
 // Private process fixtures exercise the real native wait/capture path. They
 // are never part of a compiler test inventory or an accepted measurement.
 BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_self_test_child(String8 mode)
@@ -504,6 +687,72 @@ BUSTER_GLOBAL_LOCAL bool ci_unit_review_self_test(Arena* arena, String8 executab
     return result;
 }
 
+// Synthetic scheduled children exercise actual spawn, capture, quota and
+// independent-inventory validation without changing registered test counts.
+BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_schedule_test_child(void)
+{
+    String8 group = os_get_environment_variable(S8("BUSTER_TEST_MODULE_GROUP"));
+    bool inventory = string_equal(group, S8("inventory"));
+    bool audits = !string_equal(os_get_environment_variable(S8("BUSTER_TEST_TABLE_AUDITS")), S8("0"));
+    String8 name = string_starts_with_sequence(group, S8("module:")) ? (String8){group.pointer + 7, group.length - 7} : (String8){0};
+    String8 names[] = {ci_unit_primary_module(), S8("other_tests"), S8("audit_tests")};
+    u64 selected = 0;
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+    {
+        bool enabled = index != 2 || audits;
+        bool runs = !inventory && enabled && string_equal(name, names[index]);
+        selected += runs;
+        string_print(S8("CI_UNIT_MODULE_V1 index={u64} module={S8} table_audit={u32} enabled={u32} selected={u32} group={S8}\n"),
+            index, names[index], (u32)(index == 2), (u32)enabled, (u32)runs, index ? S8("rest") : S8("primary"));
+        // Inventory rows must all precede timing rows.
+    }
+    if (selected == 1)
+    {
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+        {
+            if (string_equal(name, names[index]))
+            {
+                string_print(S8("TEST_MODULE_TIMING index={u64} module={S8} duration_ns=1 passed=2 failed=0 assertions=2 status=pass\n"), index, name);
+            }
+        }
+    }
+    string_print(S8("CI_UNIT_BATCH_V1 group={S8} modules={u64} modules_passed={u64} assertions={u64} passed={u64} failed=0 external=0 external_passed=0 status={S8}\n"
+        "[{u64}/{u64}] Unit tests ({u64} of 3 modules selected)\n[{u64}/{u64}] Module tests\n[0/0] External tests\n"),
+        inventory ? S8("inventory") : S8("module"), selected, selected, 2 * selected, 2 * selected,
+        inventory ? S8("inventory") : S8("pass"), 2 * selected, 2 * selected, selected, selected, selected);
+    bool valid = (inventory || selected == 1) && string_equal(os_get_environment_variable(S8("BUSTER_TEST_JOBS")), inventory ? S8("1") : S8("2"));
+    ProcessResult result = valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ci_unit_schedule_self_test(Arena* arena, String8 executable)
+{
+    String8 rows = string_format(arena, S8("CI_UNIT_MODULE_V1 index=0 module={S8} table_audit=0 enabled=1 selected=0 group=primary\n"
+        "CI_UNIT_MODULE_V1 index=1 module=other_tests table_audit=0 enabled=1 selected=1 group=rest\n"), ci_unit_primary_module());
+    String8 execution = S8("TEST_MODULE_TIMING index=1 module=other_tests duration_ns=1 passed=2 failed=0 assertions=2 status=pass\n"
+        "CI_UNIT_BATCH_V1 group=module modules=1 modules_passed=1 assertions=2 passed=2 failed=0 external=0 external_passed=0 status=pass\n"
+        "[2/2] Unit tests (1 of 2 modules selected)\n[1/1] Module tests\n[0/0] External tests\n");
+    String8 full = string_format(arena, S8("{S8}{S8}"), rows, execution);
+    CiUnitProof proof = ci_unit_parse_selection(full, false, false, S8("other_tests"), false);
+    bool result = proof.valid && proof.selected == 1 && proof.assertions == 2 &&
+        !ci_unit_parse_selection(full, false, false, ci_unit_primary_module(), false).valid &&
+        !ci_unit_parse_selection(rows, false, false, S8("other_tests"), false).valid &&
+        !ci_unit_parse_selection(string_format(arena, S8("{S8}{S8}"), full, execution), false, false, S8("other_tests"), false).valid;
+    String8 inventory = string_format(arena, S8("CI_UNIT_MODULE_V1 index=0 module={S8} table_audit=0 enabled=1 selected=0 group=primary\n"
+        "CI_UNIT_MODULE_V1 index=1 module=other_tests table_audit=0 enabled=1 selected=0 group=rest\n"
+        "CI_UNIT_BATCH_V1 group=inventory modules=0 modules_passed=0 assertions=0 passed=0 failed=0 external=0 external_passed=0 status=inventory\n"
+        "[0/0] Unit tests (0 of 2 modules selected)\n[0/0] Module tests\n[0/0] External tests\n"), ci_unit_primary_module());
+    CiUnitProof queried = ci_unit_parse_selection(inventory, false, false, (String8){0}, true);
+    result = result && ci_unit_inventory_equal(&queried, &proof);
+    proof.modules[1].name = S8("changed_tests");
+    result = result && !ci_unit_inventory_equal(&queried, &proof);
+    proof.modules[1].name = S8("other_tests");
+    proof.modules[1].enabled = false;
+    result = result && !ci_unit_inventory_equal(&queried, &proof);
+    result = ci_unit_schedule_run(arena, executable, 4, S8("self-test"), S8("self-test"), true) == PROCESS_RESULT_SUCCESS && result;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool ci_unit_self_test(void)
 {
     TemporalArena scratch = scratch_begin(0, 0);
@@ -560,7 +809,11 @@ BUSTER_GLOBAL_LOCAL bool ci_unit_self_test(void)
 BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_tests_main(Arena* arena, SliceString8 arguments, String8 executable)
 {
     ProcessResult result = PROCESS_RESULT_FAILED;
-    if (arguments.length == 2 && string_equal(arguments.pointer[0], S8("--self-test-child")))
+    if (arguments.length == 1 && string_equal(arguments.pointer[0], S8("--self-test-module-child")))
+    {
+        result = ci_unit_schedule_test_child();
+    }
+    else if (arguments.length == 2 && string_equal(arguments.pointer[0], S8("--self-test-child")))
     {
         result = ci_unit_self_test_child(arguments.pointer[1]);
     }
@@ -574,6 +827,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_tests_main(Arena* arena, SliceString8 
         bool valid = ci_unit_self_test();
         valid = ci_unit_process_self_test(arena, executable) && valid;
         valid = ci_unit_review_self_test(arena, executable) && valid;
+        valid = ci_unit_schedule_self_test(arena, executable) && valid;
         string_print(S8("CI_UNIT_SELF_TEST_V1 status={S8}\n"), valid ? S8("pass") : S8("fail"));
         result = valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
     }
@@ -584,6 +838,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_tests_main(Arena* arena, SliceString8 
         String8 jobs_text = os_get_environment_variable(S8("BUSTER_TEST_JOBS"));
         IntegerParsingU64 jobs = string8_parse_u64_decimal(jobs_text);
         bool valid_jobs = !jobs_text.length || (jobs.status == INTEGER_PARSING_SUCCESS && jobs.length == jobs_text.length && jobs.value > 0);
+        String8 schedule = os_get_environment_variable(S8("BUSTER_TEST_UNIT_SCHEDULE"));
+        bool valid_schedule = !schedule.length || string_equal(schedule, S8("modules")) || string_equal(schedule, S8("pair"));
+        valid_jobs = valid_jobs && valid_schedule;
         bool grouped = valid_jobs && jobs_text.length && jobs.value >= 4 && !BUSTER_SINGLE_THREADED;
         if (path.length && valid_jobs && !grouped)
         {
@@ -596,45 +853,52 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_tests_main(Arena* arena, SliceString8 
             bool valid = ci_unit_source_revision(arena, supplied_revision, &revision) && stage_object_sha256_file(arena, path, &digest);
             if (valid)
             {
-                u64 epoch = os_now_microseconds();
-                u64 group_workers = jobs.value / 2;
-                string_print(S8("CI_UNIT_PLAN_V1 source_revision={S8} binary_sha256={S8} workers={u64} groups=2 group_workers={u64} primary_module={S8}\n"), revision, digest, jobs.value, group_workers, ci_unit_primary_module());
-                CiUnitWork work = {.timeout = CI_UNIT_TIMEOUT_US,
-                    .audits = !string_equal(os_get_environment_variable(S8("BUSTER_TEST_TABLE_AUDITS")), S8("0"))};
-                bool admitted = true;
-                for (u64 i = 0; i < 2; i += 1)
+                if (!string_equal(schedule, S8("pair")))
                 {
-                    CiUnitChild* child = work.children + i;
-                    child->arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256), .flags = {.no_pool = 1}});
-                    SliceString8 keys = {0}, values = {0};
-                    ci_unit_environment(arena, i ? S8("rest") : S8("primary"), string_format(arena, S8("{u64}"), group_workers), &keys, &values);
-                    child->start = os_now_microseconds();
-                    if (child->arena && admitted) { child->spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), keys, values, ci_unit_spawn_options()); }
-                    admitted = admitted && child->spawn.handle != 0;
+                    result = ci_unit_schedule_run(arena, path, jobs.value, revision, digest, false);
                 }
-                if (!admitted) { work.timeout = 1; }
-                // Both pipes must be drained concurrently: waiting for one
-                // child first can block the other on its bounded OS pipe.
-                lane_run(2, &ci_unit_wait_lane, &work);
-                valid = ci_unit_pair(&work.children[0].proof, &work.children[1].proof);
-                u64 assertions = 0, modules = 0;
-                for (u64 i = 0; i < 2; i += 1)
+                else
                 {
-                    CiUnitChild* child = work.children + i;
-                    bool replayed = ci_unit_replay(child->wait);
-                    bool destroyed = child->arena && arena_destroy(child->arena, 1);
-                    bool clean = child->clean && replayed && destroyed;
-                    string_print(S8("CI_UNIT_PROCESS_V1 group={S8} workers={u64} start_us={u64} end_us={u64} elapsed_us={u64} exit={u32} native_status={u32} timed_out={u32} capture_failed={u32} cleanup_failed={u32} status={S8}\n"),
-                        i ? S8("rest") : S8("primary"), group_workers, child->start - epoch, child->finish - epoch, child->finish - child->start,
-                        clean ? 0u : 1u, child->wait.platform_status, (u32)child->wait.timed_out,
-                        (u32)(child->wait.capture_failed || child->wait.output_truncated || child->wait.capture_limit_exceeded),
-                        (u32)(child->wait.process_tree_cleanup_failed || child->wait.process_group_reservation_retained || child->wait.process_group_ownership_lost || !destroyed), clean ? S8("pass") : S8("fail"));
-                    valid = valid && clean;
-                    assertions += child->proof.assertions; modules += child->proof.selected;
+                    u64 epoch = os_now_microseconds();
+                    u64 group_workers = jobs.value / 2;
+                    string_print(S8("CI_UNIT_PLAN_V1 source_revision={S8} binary_sha256={S8} workers={u64} groups=2 group_workers={u64} primary_module={S8}\n"), revision, digest, jobs.value, group_workers, ci_unit_primary_module());
+                    CiUnitWork work = {.timeout = CI_UNIT_TIMEOUT_US,
+                        .audits = !string_equal(os_get_environment_variable(S8("BUSTER_TEST_TABLE_AUDITS")), S8("0"))};
+                    bool admitted = true;
+                    for (u64 i = 0; i < 2; i += 1)
+                    {
+                        CiUnitChild* child = work.children + i;
+                        child->arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256), .flags = {.no_pool = 1}});
+                        SliceString8 keys = {0}, values = {0};
+                        ci_unit_environment(arena, i ? S8("rest") : S8("primary"), string_format(arena, S8("{u64}"), group_workers), &keys, &values);
+                        child->start = os_now_microseconds();
+                        if (child->arena && admitted) { child->spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), keys, values, ci_unit_spawn_options()); }
+                        admitted = admitted && child->spawn.handle != 0;
+                    }
+                    if (!admitted) { work.timeout = 1; }
+                    // Both pipes must be drained concurrently: waiting for one
+                    // child first can block the other on its bounded OS pipe.
+                    lane_run(2, &ci_unit_wait_lane, &work);
+                    valid = ci_unit_pair(&work.children[0].proof, &work.children[1].proof);
+                    u64 assertions = 0, modules = 0;
+                    for (u64 i = 0; i < 2; i += 1)
+                    {
+                        CiUnitChild* child = work.children + i;
+                        bool replayed = ci_unit_replay(child->wait);
+                        bool destroyed = child->arena && arena_destroy(child->arena, 1);
+                        bool clean = child->clean && replayed && destroyed;
+                        string_print(S8("CI_UNIT_PROCESS_V1 group={S8} workers={u64} start_us={u64} end_us={u64} elapsed_us={u64} exit={u32} native_status={u32} timed_out={u32} capture_failed={u32} cleanup_failed={u32} status={S8}\n"),
+                            i ? S8("rest") : S8("primary"), group_workers, child->start - epoch, child->finish - epoch, child->finish - child->start,
+                            clean ? 0u : 1u, child->wait.platform_status, (u32)child->wait.timed_out,
+                            (u32)(child->wait.capture_failed || child->wait.output_truncated || child->wait.capture_limit_exceeded),
+                            (u32)(child->wait.process_tree_cleanup_failed || child->wait.process_group_reservation_retained || child->wait.process_group_ownership_lost || !destroyed), clean ? S8("pass") : S8("fail"));
+                        valid = valid && clean;
+                        assertions += child->proof.assertions; modules += child->proof.selected;
+                    }
+                    string_print(S8("CI_UNIT_PARTITION_V1 groups=2 workers={u64} elapsed_us={u64} modules={u64} assertions={u64} passed={u64} failed={u64} status={S8}\n"),
+                        jobs.value, os_now_microseconds() - epoch, modules, assertions, valid ? assertions : 0, valid ? 0ull : 1ull, valid ? S8("pass") : S8("fail"));
+                    result = valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
                 }
-                string_print(S8("CI_UNIT_PARTITION_V1 groups=2 workers={u64} elapsed_us={u64} modules={u64} assertions={u64} passed={u64} failed={u64} status={S8}\n"),
-                    jobs.value, os_now_microseconds() - epoch, modules, assertions, valid ? assertions : 0, valid ? 0ull : 1ull, valid ? S8("pass") : S8("fail"));
-                result = valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
             }
             else { string_print(S8("error: invalid BUSTER_TEST_SOURCE_REVISION or unreadable test binary\n")); }
         }
