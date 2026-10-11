@@ -4425,6 +4425,15 @@ static bool wasm64_validate_inputs(Wasm64Context* context)
                         block, instruction, IR_SYMBOL_ID_INVALID);
             return false;
         }
+        // A finished module has no second name for a function or a data
+        // address, and leaving the alias out turns each use of it into an
+        // unresolved import (#1338), so the module is refused instead.
+        if (module->alias_count)
+        {
+            wasm64_fail(context, WASM64_ERROR_UNRESOLVED_SYMBOL, wasm64_s8("WebAssembly output does not represent symbol aliases"), 0, 0, 0,
+                        module->aliases[0].symbol);
+            return false;
+        }
     }
     return true;
 }

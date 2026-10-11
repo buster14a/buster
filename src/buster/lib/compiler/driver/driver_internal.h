@@ -47,4 +47,22 @@ BUSTER_F_DECL void compiler_driver_test_setup_order_begin(void);
 BUSTER_F_DECL void compiler_driver_test_setup_order_event(CompilerDriverTestSetupEvent event);
 BUSTER_F_DECL CompilerDriverTestSetupOrder compiler_driver_test_setup_order_end(void);
 #endif
+typedef enum CompilerDriverMachDylibStatus
+{
+    COMPILER_DRIVER_MACH_DYLIB_UNUSABLE,
+    COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE,
+    COMPILER_DRIVER_MACH_DYLIB_USABLE,
+} CompilerDriverMachDylibStatus;
+
+typedef struct CompilerDriverMachDylibIdentity
+{
+    String8 install_name;
+    u32 current_version;
+    u32 compatibility_version;
+} CompilerDriverMachDylibIdentity;
+
 BUSTER_F_DECL bool compiler_driver_elf_linker_script(ByteSlice bytes);
+BUSTER_F_DECL CompilerDriverMachDylibStatus compiler_driver_mach_dylib_identity(ByteSlice bytes, Target target,
+                                                                                 CompilerDriverMachDylibIdentity* identity);
+BUSTER_F_DECL CompilerDriverMachDylibStatus compiler_driver_mach_tbd_identity(ByteSlice bytes, Target target,
+                                                                                CompilerDriverMachDylibIdentity* identity);
