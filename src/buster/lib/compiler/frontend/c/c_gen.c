@@ -20,6 +20,8 @@
 // are answered by token-indexed tables, not scans of their list:
 // c_ir_prepared_control_expression_find, _contains and _contains_range, kept
 // current by _begin, _end and _rollback (a typeof replay).
+// c_ir_root_conditional refuses a body range without a `?` through the
+// per-body prefix count c_ir_question_prefix_build, before its scan.
 // c_ir_parameter_value_type and c_ir_emit_parameter keep callable values
 // separate from the declared qualification of parameter objects.
 // c_ir_windows_va_start_cursor_place bridges an addressed Windows CRT cursor
@@ -3506,6 +3508,12 @@ struct CIntegerIrBuilder
     CIrGroupFactsEntry* group_facts_stack;
     bool group_facts_exact;
     bool group_facts_built;
+    // question_prefix[o]: how many body tokens before offset o spell `?`
+    // (body_token_count + 1 entries), filled by c_ir_question_prefix_build
+    // the first time c_ir_range_may_hold_question asks. A null pointer (any
+    // builder without a body) answers every range by the scan.
+    u32* question_prefix;
+    bool question_prefix_built;
     // One past each body `if` statement's whole else-chain, plus one, indexed
     // by the offset of its `if` token; 0 is unmeasured. c_ir_statement_end
     // owns it, files every `if` its chain walk completes, and clears the array
@@ -39157,8 +39165,10 @@ BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
     c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
 }
 
-BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
-                                               u32* expression_end)
+// The scan behind c_ir_root_conditional: find the root `?:` of [start, end)
+// after peeling redundant parentheses.
+BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question,
+                                                    u32* colon, u32* expression_end)
 {
     while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
            !c_ir_group_is_statement_expression(builder, start, end))
@@ -39236,6 +39246,62 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 sta
         }
     }
     return false;
+}
+
+// Count the body's `?` tokens once, as a prefix over body offsets. The test
+// is the scan's own (the punctuator field alone), so a range the count calls
+// empty is one the scan would find no `?` in.
+BUSTER_C_INTERNAL void c_ir_question_prefix_build(CIntegerIrBuilder* builder)
+{
+    u32* prefix = builder->question_prefix;
+    CToken const* tokens = builder->preprocess.tokens + builder->body_token_start;
+    u32 count = 0;
+    for (u32 offset = 0; offset < builder->body_token_count; offset += 1)
+    {
+        prefix[offset] = count;
+        count += tokens[offset].punctuator == C_PUNCTUATOR_QUESTION;
+    }
+    prefix[builder->body_token_count] = count;
+    builder->question_prefix_built = true;
+}
+
+// Whether [start, end) may hold a `?`. Only a range inside the body is
+// answered by the prefix count; any other range may.
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_range_may_hold_question(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool result = true;
+    u32 body_start = builder->body_token_start;
+    if (builder->question_prefix && start >= body_start && end >= start && end - body_start <= builder->body_token_count)
+    {
+        if (!builder->question_prefix_built)
+        {
+            c_ir_question_prefix_build(builder);
+        }
+        result = builder->question_prefix[end - body_start] != builder->question_prefix[start - body_start];
+    }
+    return result;
+}
+
+// The root `?:` of [start, end), if it has one. The scan can only answer true
+// at a `?` inside the range, so a range without one is refused in O(1): 93%
+// of the self-host's calls hold none (#3102). Inlined, so the refusal costs
+// no call frame and the scan stays out of line.
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question,
+                                                             u32* colon, u32* expression_end)
+{
+    bool result = false;
+    if (c_ir_range_may_hold_question(builder, start, end))
+    {
+        result = c_ir_root_conditional_scan(builder, start, end, expression_start, question, colon, expression_end);
+    }
+#if BUSTER_REFERENCE_CHECKS
+    else
+    {
+        u32 reference[4];
+        BUSTER_CHECK(!c_ir_root_conditional_scan(builder, start, end, &reference[0], &reference[1], &reference[2], &reference[3]));
+    }
+#endif
+    return result;
 }
 
 BUSTER_C_INTERNAL void c_ir_expression_core_range(CIntegerIrBuilder* builder, u32* start_in_out, u32* end_in_out)
@@ -63449,6 +63515,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                  prepared_control_expression_capacity ? prepared_control_expression_capacity : 1);
         builder.group_facts = arena_allocate(lowering_temporary.arena, u8, body_array_capacity);
         builder.group_facts_stack = arena_allocate(lowering_temporary.arena, CIrGroupFactsEntry, prepared_control_expression_capacity + 1);
+        builder.question_prefix = arena_allocate(lowering_temporary.arena, u32, body_array_capacity + 1);
         builder.statement_ends_plus_one = arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
         memset(builder.prepared_control_open_slots, 0, sizeof(u32) * control_token_array_capacity);
         memset(builder.prepared_control_emitted_marks, 0, sizeof(u32) * control_token_array_capacity);
