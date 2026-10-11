@@ -585,14 +585,16 @@ suite as the cwd and Apple architecture regressions.
 ## Incremental Android test assets
 
 The Android `apk` graph in `cmake/AndroidApk.cmake` treats the active files under
-`tests/` as package inputs, not compiler sources. After configuring the normal
-Android tree, `cmake --build build/android-ci-x86_64 --config Debug --target apk`
-repackages fixture edits, additions, renames and deletions without requiring a
-C source rebuild or another destructive `generate`. Release uses the same
-contract. An unchanged build does not repackage. A content-stable inventory
-handles removals and newly added files whose timestamps predate the APK;
-`CONFIGURE_DEPENDS` refreshes that inventory with the supported Ninja generators.
-The preserved `.bbb` corpus is excluded before Android asset packaging.
+`tests/` and the SPIR-V, codegen and driver fixture directories under
+`src/buster/tests/compiler/` as package inputs, not compiler sources. After
+configuring the normal Android tree, `cmake --build build/android-ci-x86_64
+--config Debug --target apk` repackages fixture edits, additions, renames and
+deletions without requiring a C source rebuild or another destructive
+`generate`. Release uses the same contract. An unchanged build does not
+repackage. A content-stable inventory handles removals and newly added files
+whose timestamps predate the APK; `CONFIGURE_DEPENDS` refreshes that inventory
+with the supported Ninja generators. The preserved `.bbb` corpus is excluded
+before Android asset packaging.
 
 `python3 tests/android_apk_assets_test.py` exercises that same production graph
 through real CMake and Ninja Multi-Config, in Debug and Release, with isolated
@@ -608,10 +610,11 @@ the existing APK and staging paths are shared.
 
 ## Incremental iOS test assets
 
-The iOS `ide` target stages active files under `tests/` through
+The iOS `ide` target stages active files under `tests/` and the SPIR-V, codegen
+and driver fixture directories under `src/buster/tests/compiler/` through
 `cmake/IOSBundleAssets.cmake`. Its filtered, content-stable inventory makes
 fixture edits, additions, renames and removals update the configuration's app
-bundle without relinking the native executable. The owned `tests` subtree is
+bundle without relinking the native executable. The owned fixture subtrees are
 rebuilt on a real input change, so deleted files cannot survive; preserved
 `.bbb` inputs are excluded and do not invalidate the graph. Debug and Release
 use separate stamps and bundles, and an unchanged build does not rewrite either.

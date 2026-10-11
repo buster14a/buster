@@ -29,12 +29,24 @@ file(GLOB_RECURSE BUSTER_ANDROID_CODEGEN_FIXTURES
     LIST_DIRECTORIES FALSE CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/src/buster/tests/compiler/codegen/fixtures/*")
 list(APPEND BUSTER_ANDROID_TEST_FIXTURES ${BUSTER_ANDROID_CODEGEN_FIXTURES})
+# Registered driver sources also live outside the frozen root test inventory.
+file(GLOB_RECURSE BUSTER_ANDROID_DRIVER_FIXTURES
+    LIST_DIRECTORIES FALSE CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/src/buster/tests/compiler/driver/fixtures/*")
+list(APPEND BUSTER_ANDROID_TEST_FIXTURES ${BUSTER_ANDROID_DRIVER_FIXTURES})
 set(BUSTER_ANDROID_CODEGEN_ASSET_COMMANDS)
 if (BUSTER_ANDROID_CODEGEN_FIXTURES)
     list(APPEND BUSTER_ANDROID_CODEGEN_ASSET_COMMANDS
         COMMAND "${CMAKE_COMMAND}" -E copy_directory
             "${CMAKE_SOURCE_DIR}/src/buster/tests/compiler/codegen/fixtures"
             "${CMAKE_BINARY_DIR}/assets/src/buster/tests/compiler/codegen/fixtures")
+endif()
+set(BUSTER_ANDROID_DRIVER_ASSET_COMMANDS)
+if (BUSTER_ANDROID_DRIVER_FIXTURES)
+    list(APPEND BUSTER_ANDROID_DRIVER_ASSET_COMMANDS
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory
+            "${CMAKE_SOURCE_DIR}/src/buster/tests/compiler/driver/fixtures"
+            "${CMAKE_BINARY_DIR}/assets/src/buster/tests/compiler/driver/fixtures")
 endif()
 set(BUSTER_ANDROID_SPIRV_ASSET_COMMANDS)
 if (BUSTER_ANDROID_SPIRV_FIXTURES)
@@ -64,6 +76,7 @@ add_custom_command(
     ${BUSTER_ANDROID_TEST_FILTER_COMMANDS}
     ${BUSTER_ANDROID_SPIRV_ASSET_COMMANDS}
     ${BUSTER_ANDROID_CODEGEN_ASSET_COMMANDS}
+    ${BUSTER_ANDROID_DRIVER_ASSET_COMMANDS}
     ${BUSTER_ANDROID_SHADER_ASSET_COMMANDS}
     # 1. Compile the manifest + assets into a base APK (binary manifest + resources.arsc).
     COMMAND "${BUSTER_AAPT2}" link
