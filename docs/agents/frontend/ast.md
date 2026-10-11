@@ -318,8 +318,8 @@ evidence.
 bodies and in file-scope initializers from the tree, in place of the
 speculative type machine (`CTypeParseMachine` in `c_parse.c`). Stage 1 covers
 names, literals and postfix chains; stage 2 adds the operators; stage 3 adds
-file-scope initializers, and, in bodies, `&` and casts to primitive and
-pointer type names over rows the machine interns under the pilot. It runs
+file-scope initializers, and `&` and casts to primitive and pointer type
+names over rows the machine interns under the pilot. It runs
 only when the caller supplies a tree in `CParserResult.ast`, which today only
 the [driver hook](#driver-pilot-hook) does; without one, analysis is
 unchanged.
@@ -412,8 +412,8 @@ unchanged.
   - a cast or compound literal to any other type name: a qualified typedef,
     a tag, a qualified or `restrict` pointer, or an array or function
     declarator. Their readers append rows that are not interned.
-  - `&` or a type name whose interned rows do not exist yet when the body is
-    typed;
+  - `&` or a type name whose interned rows do not exist yet when the body or
+    initializer is typed;
   - a string literal as an operand. Its array row is not interned, because
     lowering gives each array row its own IR array type and `-g` describes
     every IR type. A query of one string-literal token alone is answered by
@@ -494,13 +494,16 @@ a fresh row for every type name or address they read, and a cast's type name
 is read once per operator-scan level and again by its leaf. On the unity
 self-host 93.8% of the 96,717 pointer rows and nearly all of the 37,000
 primitive rows were copies. Under the pilot, inside
-`c_parse_validate_lowering_constraints`' loop over function bodies, where the
-per-body queries mint them, those builders go through `c_parse_intern_type`.
-It returns the live row equal to the one it would append (`CTypeInterning` in
-`c_internal.h`). The tree's answers for casts and `&` read those rows.
-File-scope initializers are validated before the window opens, where the
-machine appends, so an initializer's answers read no interned row
-(`c_ast_types_interned`) and those shapes decline there.
+`c_parse_validate_lowering_constraints` from the file-scope initializer walk
+(`c_parse_validate_static_initializers`) through the loop over function
+bodies, where the queries mint them, those builders go through
+`c_parse_intern_type`. It returns the live row equal to the one it would
+append (`CTypeInterning` in `c_internal.h`). The tree's answers for casts and
+`&` read those rows, in initializers as in bodies (`c_ast_types_interned`), so
+`S8()`'s `(char8*)("text")` at file scope answers with the replay. Until
+[#3102](https://github.com/buster14a/buster/issues/3102)'s initializer slice,
+the window opened only for the bodies, after the initializer walk, and every
+such initializer shape declined.
 
 Interning is part of the pilot, not the default path. Semantic analysis keeps
 the interning header only when the caller asks for it
@@ -518,8 +521,9 @@ A row interned there is observable only as table size:
   Lowering keys its per-type tables on array rows.
 - Lowering maps it to a scalar, qualified-scalar or pointer IR type, and
   lowering interns those itself.
-- The window opens after every declaration has its rows, so an interned row
-  only ever replaces a later copy of itself. That copy resolves in the same
+- The window opens after every declaration has its rows, and the initializer
+  walk and the bodies rewrite no declaration's row, so an interned row only
+  ever replaces a later copy of itself. That copy resolves in the same
   lowering pass, and the IR types, and so the `-g` type entries, keep their
   order.
 
@@ -529,20 +533,23 @@ A member's interned `char *` row moved ahead of its struct, the struct resolved
 a pass earlier, and the `-g` type entries of the unity self-host came out in a
 different order.
 
-The same holds for an aggregate a body query defines. The machine reads most
-aggregate definitions written in expressions back from rows the declaration
-pass made. One whose type name puts a qualifier before the tag
-(`(const struct { char *p; })`) it defines itself, inside the window, with its
-row ahead of its members'. CTypeInterning's `suspended` counts the member
-segments the machine is reading (`c_type_parse_aggregate_range_step`), and
-nothing is interned while any is in flight. The machine's failure path takes
-back the segments it discards. Without that, a source of this shape kept its
-`-g0` object but its `-g` object changed. The unity self-host defines no
-aggregate inside the window. The c_ast corpus and the frontend fixtures define
-a few, but in none of them did interning move a member's row ahead of its
-aggregate, which is why the self-host checks missed it.
-`c_test_type_interning_objects` compiles
-both shapes with the window shut (`c_test_set_type_interning_off`) and open,
+The same holds for an aggregate a type name defines. The declaration pass
+registers every aggregate that a body or file-scope initializer type name
+defines, qualified ones such as `(const struct { char *p; })` included, before
+the window opens, and the machine reads its row back, so no member segment is
+read inside the window ([#3380](https://github.com/buster14a/buster/pull/3380)).
+A trap in `c_parse_type_interning_suspend` while the window is open never
+fires on `c_test_type_interning_objects`' sources or on the unity self-host at
+`-g0` and `-g`. CTypeInterning's `suspended` stays as a guard should a later
+change define an aggregate inside the window: it counts the member segments
+the machine is reading (`c_type_parse_aggregate_range_step`), nothing is
+interned while any is in flight, and the machine's failure path takes back the
+segments it discards. The history of this guard is in audit
+[`2026-10-10T014058Z`](../../performance-audits/2026-10-10T014058Z.md).
+`c_test_type_interning_objects` compiles three sources: body casts and `&`,
+aggregates defined in body type names, and the same in file-scope
+initializers (`S8()`-style casts, `&` of objects, aggregates defined in
+initializer type names). It compiles each with the window shut (`c_test_set_type_interning_off`) and open,
 at `-g0` and `-g`, with and without the tree, and requires identical objects
 and diagnostics.
 
@@ -1197,5 +1204,47 @@ diagnostic only:
 - **History.** The first two versions lost instructions: tests on the path
   every answer takes cost more than the replay saves. The shipped version
   keeps the string case off that path.
+
+For the initializer slice of stage 3, which opens the interning window at the
+file-scope initializer walk instead of after it, these budgets were declared
+before its measured runs. The input and flags are stage 2's, and the four
+Callgrind arms are counted on tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `f38a7716`, which the candidate branches from. The budgets:
+- correctness:
+  - no verify mismatch over the corpus, with every run of the gate interning;
+  - identical diagnostics and type-table sizes with and without the tree;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms;
+  - byte-identical objects between the default, the pilot, and the pilot with
+    the window shut, including the file-scope source
+    (`c_test_type_interning_objects`).
+- the default path (D against A): no interning header exists there, so the
+  change adds no work. The difference stays within ±0.05% Ir on
+  `-fsyntax-only` and on `-c` (`-g0`).
+- the slice's own effect on the pilot (C against B):
+  - fewer instructions in the whole compile, with the interning lookups and
+    the larger accepted set charged;
+  - fewer machine runs from queries;
+  - fewer tree declines.
+- performance acceptance: the hosted counts are diagnostic and claim nothing
+  for production. Zen 5 validation stays incomplete (#2761), and the hook
+  stays opt-in.
+
+The initializer slice's hosted census is
+[`2026-10-10T190424Z`](../../performance-audits/2026-10-10T190424Z.md), taken
+the same way and diagnostic only:
+- Every budget passes. Objects are byte-identical across the four arms at
+  `-g0` and `-g`.
+- The default path is −0.00007% on `-fsyntax-only` and +0.0024% on `-c`.
+- On the pilot the slice removes 44.98 M instructions (−0.47%):
+  - machine runs from queries fall from 55,593 to 45,297, about the
+    `S8()` casts at file scope;
+  - tree declines fall from 52,535 to 42,239.
+- The hook is now 8.76% below the default in instructions on this input.
+  Zen 5 validation is incomplete (#2761), and the default stays off.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.

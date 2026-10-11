@@ -1277,13 +1277,12 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_conditional(CAstTypeBody* body, u32 node, u
 }
 
 // The interned row equal to `type` (c_parse_interned_type), which a machine
-// run inside the interning window reads instead of appending. Only a body's
-// queries run there (c_parse_validate_lowering_constraints' body loop); an
-// initializer's run before the window opens, where the machine appends, so an
-// initializer reads none.
+// run inside the interning window reads instead of appending. The window
+// spans every file-scope initializer's and body's queries
+// (c_parse_validate_lowering_constraints), so both read it.
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE CTypeId c_ast_types_interned(CAstTypeBody const* body, CType type)
 {
-    return body->entities ? C_TYPE_ID_INVALID : c_parse_interned_type(body->result, type);
+    return c_parse_interned_type(body->result, type);
 }
 
 // Whether a specifier word is one c_parse_primitive_type reads into a plain
@@ -1335,9 +1334,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_primitive_word(u32 word)
 // typedef name is the binder's in a body; in an initializer it is the bound
 // one or, without a use, the spelling's in the initializer's scope, kept on the
 // node at `relative`. *lookup_out says whether a typedef name was read, which
-// the query looks up again (c_ast_types_lookups_agree). An initializer reads
-// no interned row (c_ast_types_interned), so there a primitive word or a `*`
-// declines.
+// the query looks up again (c_ast_types_lookups_agree).
 BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node, u32 relative, bool* lookup_out)
 {
     CAst const* ast = body->ast;
