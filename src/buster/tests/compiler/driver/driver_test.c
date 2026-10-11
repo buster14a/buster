@@ -5570,7 +5570,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_declarator_group_cases(UnitTe
 // the declaration after it as one object, so both programs failed with an
 // undeclared name. The pilot publishes the split from the tree for all but
 // the shapes it still refuses (an attribute list opening a group, a variadic
-// list inside one).
+// list inside one, an `_Atomic(T)` or `typeof` specifier).
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_groups(UnitTestArguments* arguments)
 {
     CompilerDriverDeclaratorGroupCase const cases[] = {
@@ -5583,6 +5583,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_gro
             "int main(void) { tp = id; return a + b + c[1] + (d != 0) + e() + (g != 0) + t[1] + tp(0) + (int)sizeof(t) - 8; }\n"),
          true},
         {S8("int (gv(int a, ...)) { return a; }\nint main(void) { return gv(0, 1, 2); }\n"), false},
+        // The `(` of `_Atomic(int)` and `__typeof__(int)` opens the word's
+        // operand, not the `(f)(...)` function shape (#3368). Both fall back
+        // with reason `specifiers`.
+        {S8("_Atomic(int) (av), (*ap), (ar)[2];\n_Atomic(int) (*(af))(void);\n_Atomic(int) (fd(int a)) { return a; }\n"
+            "int main(void) { fd(0); return av + (ap != 0) + ar[1] + (af != 0); }\n"),
+         false},
+        {S8("__typeof__(int) (tv), (*tp);\n__typeof__(int) (td(int a)) { return a; }\nint main(void) { return tv + (tp != 0) + td(0); }\n"), false},
         // #3368: an old-style definition whose name sits in a redundant
         // group; the split refuses its declaration list.
         {S8("int (k(a)) int a; { return a; }\nint main(void) { return k(0); }\n"), false},
