@@ -43,11 +43,11 @@ CASE_NAMES = (*CASE_CHECKS, *STRICT_CASES)
 # name -> (Driver fixture, blob, ((Buster expectation, owning issue), ...) per RUN)
 DRIVER_CASES = {
     "preprocess-multiple": ("preprocess-multiple.c", "9f87d3d74fd3d1dc438d98c2a4db9f24bf1780df", (("pass", 0),)),
-    "std-trigraph-override": ("std-trigraph-override.c", "e4b83ffcf823d9444d59e11a7cd5646bba9eded0", (("refusal", 3420), ("refusal", 3420))),
+    "std-trigraph-override": ("std-trigraph-override.c", "e4b83ffcf823d9444d59e11a7cd5646bba9eded0", (("pass", 0), ("pass", 0))),
     "nostdlibinc": ("nostdlibinc.c", "5b6fab6a870b0be5c68bc1510c83053abea90292", (("refusal", 3421),)),
     "redundant-args": ("redundant-args.c", "7d00699c446dfb7e62148423f8c28dcd7d0f065e", (("refusal", 3421),)),
-    "working-directory-and-abs": ("working-directory-and-abs.c", "6738c776d40cf772a2bedd2fd0139238627b870b", (("refusal", 3420),)),
-    "print-target-triple": ("print-target-triple.c", "3b15f44d4d9c45107ee3719149e9558d08fcf59e", (("refusal", 3420),)),
+    "working-directory-and-abs": ("working-directory-and-abs.c", "6738c776d40cf772a2bedd2fd0139238627b870b", (("pass", 0),)),
+    "print-target-triple": ("print-target-triple.c", "3b15f44d4d9c45107ee3719149e9558d08fcf59e", (("pass", 0),)),
     "dumpmachine": ("dumpmachine.c", "41dda5590eb8297bbc40ac7f87f4ca6061e81a74", (("check-mismatch", 3421), ("refusal", 1418), ("refusal", 3421))),
     "mg": ("mg.c", "b7458a08698d311aa996d3229dc55e18975eef09", (("refusal", 2293),)),
 }
@@ -427,7 +427,7 @@ stringified_empty_pair: STRINGIFY(VARIADIC_PAIR(A,));
         output = self.evidence / "driver-success"
         result = self.invoke("--driver", self.checkout, output, self.ide, self.clang)
         self.assertEqual(result.returncode, 0, result.stdout.decode(errors="replace"))
-        self.assertIn(b"selected_cases=8 selected_runs=11 attempted_runs=11 clang_passed=11 buster_passed=1 buster_expected_fail=10 "
+        self.assertIn(b"selected_cases=8 selected_runs=11 attempted_runs=11 clang_passed=11 buster_passed=5 buster_expected_fail=6 "
                       b"buster_unexpected_pass=0 buster_failed=0 status=pass", (output / "driver-summary.txt").read_bytes())
         for case, (filename, blob, runs) in DRIVER_CASES.items():
             source = (self.checkout / "clang/test/Driver" / filename).read_bytes()
