@@ -1568,6 +1568,11 @@ struct CParserResult
     // tree (-fc-ast-pilot); without it every row is appended, as the default
     // path always has.
     bool type_interning;
+    // Nothing will lower this unit (the driver's -fsyntax-only), so no
+    // consumer reads the bytes of a string literal: the literal memo records
+    // a narrow fragment's length alone, counted, not decoded. Without it each
+    // first sight decodes and records the bytes lowering reuses.
+    bool string_literal_lengths_only;
 };
 
 // Definition token -> lowest type id ever given that definition_start.
@@ -1824,7 +1829,9 @@ struct CParseResult
     CNumberFacts const* number_facts;
     // The decoded bytes of narrow string-literal fragments, decoded once per
     // final-stream token: semantic analysis records them, lowering reads them
-    // (CStringLiteralMemo in c_internal.h). Null for hand-built results.
+    // (CStringLiteralMemo in c_internal.h). Only their lengths when the unit
+    // will not be lowered (CParserResult.string_literal_lengths_only). Null
+    // for hand-built results.
     CStringLiteralMemo* string_literals;
     // Outside the checkpointed body, like position_index, so a rollback or a
     // by-value operand copy keeps counting into the same record. Null for
