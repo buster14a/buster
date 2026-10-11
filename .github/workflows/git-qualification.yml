@@ -1,10 +1,7 @@
 name: Git source-only diagnostic
-# Separate explicitly requested source-only diagnostic; no PR/main/queue trigger.
+# Isolated historical diagnostic; manual execution only, no automatic workload.
 on:
   workflow_dispatch:
-  push:
-    branches: [codex/3180-git-source-only-diagnostic]
-    paths: ['.github/workflows/git-qualification.yml']
 permissions:
   contents: read
 concurrency:
