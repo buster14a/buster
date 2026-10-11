@@ -105,7 +105,7 @@ retained for the later current-main integration. This acknowledgment adds no
 9700X benchmark request or performance claim;
 `benchmarks/9700x/compiler-compare.request` remains unchanged from main.
 
-PR #3483 acknowledges +49,141 production bytes against `main` `d5420a74`.
+PR #3483 acknowledges +49,141 production bytes against `main` `990dba4e`.
 It reads plain declaration specifier runs from the syntax tree under
 `-fc-ast-pilot` (#3102): about 25,200 bytes in `c_parse.c`, `c.h`,
 `c_internal.h`, `c_parse_internal.h`, the driver and `ide.c`. It also
@@ -115,12 +115,11 @@ that the queue composes:
   8,471 bytes in `c_ast_types.c`, `c_parse.c` and the internal headers;
 - #3575 (queued head `6cd7102a`), shared qualified member copies under the
   pilot: about 15,200 bytes in `c_parse.c`, `c_ast_types.c` and the internal
-  headers;
-- #3452, which changes documentation only.
+  headers.
 
-Each production change is under 32 KiB alone. #3568 and #3138, merged here
-earlier, have since landed on main. The baseline is regenerated at
-`0339d8b8` over the combined source.
+Each production change is under 32 KiB alone. #3568, #3138 and #3452,
+merged here earlier, have since landed on main. The baseline is regenerated
+at `1a55066b` over the combined source.
 
 Categories are independent. Deleting tests, fixtures, generated tables or
 documentation never earns room for production or build code, and only the
