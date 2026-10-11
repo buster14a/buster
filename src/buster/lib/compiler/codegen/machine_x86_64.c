@@ -271,11 +271,6 @@ struct MachineX64Selector
     u32 outgoing_slot;
     u32 outgoing_bytes;
     bool dynamic_stack;
-    // The classification virtual registers' rows — the builder's first
-    // chunk, where machine_x64_define writes a definition point in place.
-    // The rows past that chunk's capacity are reached by the chunk walk,
-    // which nineteen functions in twenty never need.
-    MachineVirtualRegister* classification_registers;
     // Per block: the fusion its BRANCH_IF terminator selects, and the block
     // the main loop is selecting.
     MachineX64BranchFusion* branch_fusions;
@@ -1211,23 +1206,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_define(MachineX64Selector* selector, u32 vi
     // carry their definition point from creation.
     if (virtual_register < selector->virtual_register_count)
     {
-        u32 chunk_capacity = selector->builder.virtual_registers.chunk_capacity;
-        MachineVirtualRegister* row;
-        if (virtual_register < chunk_capacity)
-        {
-            row = selector->classification_registers + virtual_register;
-        }
-        else
-        {
-            MachineBuilderChunk* chunk = selector->builder.virtual_registers.first;
-            u32 remaining = virtual_register;
-            while (remaining >= chunk_capacity)
-            {
-                remaining -= chunk_capacity;
-                chunk = chunk->next;
-            }
-            row = (MachineVirtualRegister*)(chunk + 1) + remaining;
-        }
+        MachineVirtualRegister* row = machine_builder_virtual_register_at(&selector->builder, virtual_register);
         if (row->definition_point == MACHINE_POINT_INVALID)
         {
             row->definition_point = machine_point_make(machine_index, MACHINE_POINT_AFTER);
@@ -9038,8 +9017,6 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         }
     }
     selector.virtual_register_count = selector.builder.virtual_registers.total_count;
-    selector.classification_registers =
-        selector.virtual_register_count ? (MachineVirtualRegister*)(selector.builder.virtual_registers.first + 1) : 0;
     u32 typed_instruction_count = 0;
     u32 simd_operation_count = 0;
     for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
