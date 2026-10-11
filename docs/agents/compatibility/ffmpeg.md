@@ -22,7 +22,7 @@ declares LGPL-2.1-or-later for the default combination. It separately identifies
 MIT/X11/BSD-style components, IJG notices in JPEG-derived files, optional GPL
 parts and GPL-covered testing tools including `tests/checkasm/*`,
 `tests/tiny_ssim.c` and `libswresample/tests/swresample.c`.
-The portable configuration disables GPL, nonfree, version3 and external
+The pin\'s [libavutil/libm.h](https://github.com/FFmpeg/FFmpeg/blob/f46e514491172d15bd74b4abb1814cd2f05a763e/libavutil/libm.h) additionally retains a BSL-1.0 notice for its Boost-derived erf algorithm.\nGPL-covered external FATE helper tools keep their separate terms even when\nthe selected media libraries disable GPL components.\nThe portable configuration disables GPL, nonfree, version3 and external
 autodetection. This is license intake, not a complete enabled-file or test-tool
 license audit. External FATE samples have no qualified license/hash inventory
 yet and are not downloaded or executed by this action. No external source or
@@ -60,18 +60,18 @@ External Clang owns explicitly declared target/host linking and target dependenc
 preprocessing. Candidate host C utilities also use the recorded Buster wrapper.
 These are separate dependency stages; the result is not a native-Buster-linker
 qualification. Both configurations request
-Linux x86-64/generic, static libraries, assembly disabled, no hardware
+Linux x86-64/generic with explicit PIC on both sides, static libraries, assembly disabled, no hardware
 acceleration, no network and no external autodetection. Preserve the exact
 generated configuration and command records; requested components are not
 proof that configure enabled them.
 
 | Requested cell | Initial selection |
 |---|---|
-| Decode | H.264, HEVC, FLAC, MP3, AAC, signed 16-bit PCM, rawvideo |
+| Decode | H.264, HEVC, FLAC, MP3, AAC, signed 16-bit PCM, rawvideo, PGM-YUV test input |
 | Containers / input | Matroska, MOV/MP4, FLAC, MP3, AAC, WAV, image2, rawvideo, raw PCM |
 | Encode | FLAC, signed 16-bit PCM, rawvideo |
-| Output | Frame CRC/MD5, CRC, null, WAV, FLAC, Matroska, MP4, image2, rawvideo |
-| Filters | Format/scale and audio format/resampling/buffer plumbing |
+| Output | Frame CRC/MD5, CRC, null, WAV, FLAC, Matroska, MP4/ISMV, image2, rawvideo |
+| Filters | Format/scale and audio format/resampling/channel mapping/buffer plumbing |
 | Protocols | File and pipe |
 | Pending configurations | External assembly, intrinsic/optimized paths, shared libraries, hardware acceleration and third-party codecs |
 
@@ -91,7 +91,7 @@ It does not yet validate H.264/HEVC clips, seeking, frame extraction, lossy
 tolerances or cross-decoding reference/candidate outputs.
 
 The action retains upstream `fate-list`, runs `make fate` without external
-samples, and preserves test reports. This is the applicable no-sample subset of
+samples, plus the pin\'s `fate-hw` target, and preserves test reports. At this pin\n`fate-list` includes the hardware-context API test although default `fate` does\nnot depend on it; the explicit target keeps the list denominator intact.\nHardware acceleration stays disabled; this is no physical-GPU validation. This is the applicable no-sample subset of
 the declared configuration. The native count ledger joins every declared no-sample test to its report,
 records attempted/pass/fail/not-run/skip counts, and fails missing reports.
 The complete licensed/pinned sample subset is still required before acceptance. A reference failure remains a failure, not expected output to

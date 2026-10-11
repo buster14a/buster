@@ -145,7 +145,7 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_configure(Arena* arena, String8 checkout, String
 {
     String8 arguments[] = {
         S8("sh"), path_join(arena, checkout, S8("configure")),
-        S8("--arch=x86_64"), S8("--cpu=generic"), S8("--target-os=linux"),
+        S8("--arch=x86_64"), S8("--cpu=generic"), S8("--target-os=linux"), S8("--enable-pic"),
         S8("--disable-autodetect"), S8("--disable-asm"), S8("--disable-inline-asm"),
         S8("--disable-x86asm"), S8("--disable-hwaccels"), S8("--disable-network"),
         S8("--disable-doc"), S8("--disable-debug"), S8("--disable-stripping"),
@@ -153,12 +153,12 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_configure(Arena* arena, String8 checkout, String
         S8("--disable-everything"), S8("--disable-avdevice"), S8("--disable-postproc"),
         S8("--enable-ffmpeg"), S8("--enable-ffprobe"), S8("--enable-static"), S8("--disable-shared"),
         S8("--enable-protocol=file,pipe"),
-        S8("--enable-decoder=h264,hevc,flac,mp3,aac,pcm_s16le,rawvideo"),
+        S8("--enable-decoder=h264,hevc,flac,mp3,aac,pcm_s16le,rawvideo,pgmyuv"),
         S8("--enable-parser=h264,hevc,flac,mpegaudio,aac"),
         S8("--enable-demuxer=matroska,mov,flac,mp3,aac,wav,image2,rawvideo,pcm_s16le"),
         S8("--enable-encoder=flac,pcm_s16le,rawvideo"),
-        S8("--enable-muxer=framecrc,framemd5,crc,null,wav,flac,matroska,mp4,image2,rawvideo,pcm_s16le"),
-        S8("--enable-filter=aresample,aformat,format,scale,anull,null,abuffer,buffer,abuffersink,buffersink"),
+        S8("--enable-muxer=framecrc,framemd5,crc,null,wav,flac,matroska,mp4,ismv,image2,rawvideo,pcm_s16le"),
+        S8("--enable-filter=aresample,aformat,channelmap,format,scale,anull,null,abuffer,buffer,abuffersink,buffersink"),
         string_format(arena, S8("--cc={S8}"), cc),
         string_format(arena, S8("--ld={S8}"), clang),
         string_format(arena, S8("--host-cc={S8}"), cc),
@@ -171,8 +171,12 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_configure(Arena* arena, String8 checkout, String
 
 BUSTER_GLOBAL_LOCAL bool ffmpeg_make(Arena* arena, String8 directory, String8 target, String8 prefix)
 {
-    String8 arguments[] = {S8("make"), S8("-k"), S8("-j2"), S8("V=1"), S8("SAMPLES="), S8("IGNORE_TESTS="), S8("GEN=no"), S8("TARGET_EXEC="), S8("THREADS=1"), target};
-    FfmpegCommand command = ffmpeg_run(arena, directory, path_join(arena, directory, prefix), (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), BUSTER_FFMPEG_COMMAND_SECONDS);
+    String8 arguments[] = {S8("make"), S8("-k"), S8("-j2"), S8("V=1"), S8("SAMPLES="), S8("IGNORE_TESTS="), S8("GEN=no"), S8("TARGET_EXEC="), S8("THREADS=1"), target, S8("fate-hw")};
+    // This pin appends FATE_HW after the default fate dependencies, but includes
+    // it in fate-list. Run that upstream target too; never drop its denominator.
+    SliceString8 selected = BUSTER_ARRAY_TO_SLICE(arguments);
+    selected.length -= string_equal(target, S8("fate")) ? 0 : 1;
+    FfmpegCommand command = ffmpeg_run(arena, directory, path_join(arena, directory, prefix), selected, BUSTER_FFMPEG_COMMAND_SECONDS);
     return ffmpeg_ok(command);
 }
 

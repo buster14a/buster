@@ -85,7 +85,10 @@ jobs:
                   for report in (directory / "tests/data/fate").glob("*.rep"):
                       text = report.read_text()
                       if ":0:" not in text.splitlines()[0]:
-                          print("FATE_FAILURE_REPORT", report.name, text[:4096])
+                          print("FATE_FAILURE_REPORT", report.name, text.split(":")[:2])
+                          error = report.with_suffix(".err")
+                          if error.exists():
+                              print("FATE_FAILURE_STDERR", "\n".join(error.read_text().splitlines()[-15:]))
               config = directory / "ffbuild/config.log"
               if config.exists():
                   lines = config.read_text().splitlines()
@@ -125,6 +128,8 @@ jobs:
             build/ffmpeg-census/**/config.log
             build/ffmpeg-census/receipt.txt
             build/ffmpeg-census/**/tests/data/fate/*.rep
+            build/ffmpeg-census/**/tests/data/fate/*.err
+            build/ffmpeg-census/**/tests/data/fate/*.diff
             build/ffmpeg-evidence/machine-specifications
             docs/source-size-baseline.txt
           retention-days: 14
