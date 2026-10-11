@@ -6,6 +6,7 @@ permissions:
   contents: read
 jobs:
   baseline:
+    if: ${{ github.event.before == '866343905137af01330b9aad6468b891cc297944' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:

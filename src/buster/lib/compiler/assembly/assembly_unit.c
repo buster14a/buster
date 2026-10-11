@@ -101,6 +101,8 @@ struct AssemblyUnitInstruction
 {
     AssemblyEncodeResult encoded;
     String8 plt_symbol;
+    u64 offset;
+    u32 relocation_start;
 };
 
 typedef struct AssemblyUnitBuilder AssemblyUnitBuilder;
@@ -130,6 +132,8 @@ struct AssemblyUnitBuilder
     AssemblyUnitInstruction* instructions;
     AssemblyUnitBranchState* branch_states;
     u32* relocation_statements;
+    bool* relocation_locations;
+    bool layout_cached;
     // The source line each relocation came from, kept beside the public array
     // so a displacement that does not fit can name the line that wrote it.
     u32* relocation_lines;
@@ -1146,6 +1150,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_relocation_append(AssemblyUnitBuilder* bu
     if (builder->relocation_statements)
     {
         builder->relocation_statements[builder->result.relocation_count] = 0;
+        builder->relocation_locations[builder->result.relocation_count] = false;
     }
     builder->result.relocations[builder->result.relocation_count++] = (AssemblyUnitRelocation){
         .addend = addend,
@@ -1941,7 +1946,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
     String8 plt_symbol = {0};
     bool result = false;
     AssemblyUnitInstruction* cached = builder->instructions ? builder->instructions + builder->statement : 0;
-    bool ready = cached && cached->encoded.bytes.pointer;
+    bool ready = cached && builder->layout_cached && cached->encoded.bytes.pointer;
     if ((ready || assembly_unit_rewrite_line(builder, line, &rewritten, &plt_symbol)) && assembly_unit_section_current(builder))
     {
         if (assembly_unit_section_kind_is_zero_fill(builder->result.sections[builder->current_section].kind))
@@ -1974,29 +1979,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
                 if (ready)
                 {
                     plt_symbol = cached->plt_symbol;
-                }
-                else if (cached)
-                {
-                    // Keep the encoder's symbols separate from the unit's
-                    // mutable symbol table. No instruction parser or encoder runs during
-                    // subsequent layouts; each retained buffer is copied once.
-                    cached->encoded = encoded;
-                    cached->encoded.diagnostics = 0;
-                    cached->encoded.bytes.pointer = arena_allocate(builder->arena, u8, encoded.bytes.length);
-                    memcpy(cached->encoded.bytes.pointer, encoded.bytes.pointer, encoded.bytes.length);
-                    cached->encoded.relocations = arena_allocate(builder->arena, AssemblyRelocation, encoded.relocation_count);
-                    if (encoded.relocation_count)
-                    {
-                        memcpy(cached->encoded.relocations, encoded.relocations, encoded.relocation_count * sizeof(*encoded.relocations));
-                    }
-                    cached->encoded.symbols = arena_allocate(builder->arena, AssemblySymbol, encoded.symbol_count);
-                    for (u32 index = 0; index < encoded.symbol_count; index += 1)
-                    {
-                        cached->encoded.symbols[index] = encoded.symbols[index];
-                        cached->encoded.symbols[index].name = string_duplicate_arena(builder->arena, encoded.symbols[index].name, false);
-                    }
-                    cached->plt_symbol = string_duplicate_arena(builder->arena, plt_symbol, false);
-                    encoded = cached->encoded;
                 }
                 bool jump = builder->branch_states && !plt_symbol.length && encoded.relocation_count == 1 &&
                             encoded.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
@@ -2034,6 +2016,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
                         }
                         else
                         {
+                            if (cached && !ready)
+                            {
+                                builder->relocation_locations[builder->result.relocation_count - 1] = string_equal(relocation_name, S8("."));
+                            }
                             if (jump)
                             {
                                 builder->relocation_statements[builder->result.relocation_count - 1] = (u32)builder->statement;
@@ -2057,7 +2043,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
                     u8* bytes = 0;
                     if (encoded.bytes.length)
                     {
-                        if (cached && !short_jump)
+                        if (ready && !short_jump)
                         {
                             bytes = encoded.bytes.pointer;
                         }
@@ -2074,6 +2060,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
                         }
                     }
                     result = assembly_unit_append(builder, bytes, length);
+                    if (cached && !ready && result)
+                    {
+                        cached->encoded.bytes = (ByteSlice){.pointer = bytes, .length = length};
+                        cached->encoded.relocation_count = encoded.relocation_count;
+                        cached->plt_symbol = plt_symbol;
+                        cached->offset = base;
+                        cached->relocation_start = builder->result.relocation_count - encoded.relocation_count;
+                    }
                 }
                 else if (valid)
                 {
@@ -2340,6 +2334,38 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_parse(AssemblyUnitBuilder* builder, Strin
         assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT,
                                  S8("a repeat or lock prefix on its own line must be followed by an instruction"));
     }
+}
+
+// Capture the first layout only when a jump actually needs relaxation.
+// Ordinary branchless units retain exactly their previous per-instruction
+// bytes/names. Relocations and names survive the mutable unit-table reset;
+// the cached bytes are the first layout's already-retained pieces.
+BUSTER_GLOBAL_LOCAL void assembly_unit_cache_layout(AssemblyUnitBuilder* builder)
+{
+    for (u64 statement = 1; statement <= builder->statement; statement += 1)
+    {
+        AssemblyUnitInstruction* cached = builder->instructions + statement;
+        u32 count = cached->encoded.relocation_count;
+        if (count)
+        {
+            cached->encoded.relocations = arena_allocate(builder->arena, AssemblyRelocation, count);
+            cached->encoded.symbols = arena_allocate(builder->arena, AssemblySymbol, count);
+            cached->encoded.symbol_count = count;
+            for (u32 index = 0; index < count; index += 1)
+            {
+                AssemblyUnitRelocation relocation = builder->result.relocations[cached->relocation_start + index];
+                cached->encoded.relocations[index] = (AssemblyRelocation){
+                    .addend = relocation.addend, .offset = relocation.offset - cached->offset,
+                    .symbol = index, .kind = relocation.kind,
+                };
+                cached->encoded.symbols[index] = (AssemblySymbol){
+                    .name = builder->relocation_locations[cached->relocation_start + index] ? S8(".") :
+                            builder->result.symbols[relocation.symbol].name,
+                };
+            }
+        }
+    }
+    builder->layout_cached = true;
 }
 
 // Layout starts with every eligible jump short, then only grows. At least one
@@ -2771,6 +2797,7 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
         builder.instructions = arena_allocate_zeroed(arena, AssemblyUnitInstruction, (u64)statement_count + 1);
         builder.branch_states = arena_allocate_zeroed(arena, AssemblyUnitBranchState, (u64)statement_count + 1);
         builder.relocation_statements = arena_allocate(arena, u32, builder.relocation_capacity);
+        builder.relocation_locations = arena_allocate(arena, bool, builder.relocation_capacity);
     }
 
     assembly_unit_collect_numeric_labels(&builder, blanked);
@@ -2787,6 +2814,11 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     u64 layout_position = arena->position;
     while (valid && assembly_unit_relax_x86_branches(&builder))
     {
+        if (!builder.layout_cached)
+        {
+            assembly_unit_cache_layout(&builder);
+            layout_position = arena->position;
+        }
         arena_release_to_position(arena, layout_position);
         assembly_unit_reset_layout(&builder, initial_syntax);
         assembly_unit_parse(&builder, blanked);
