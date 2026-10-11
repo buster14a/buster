@@ -2122,6 +2122,12 @@ enum
     C_AST_CORPUS_STATEMENT_INITIALIZER_FLOOR = 2300,
     C_AST_CORPUS_HOSTED_STATEMENT_DECLARATOR_FLOOR = 15000,
     C_AST_CORPUS_HOSTED_STATEMENT_INITIALIZER_FLOOR = 14000,
+    // Statements planned around their initializer lists' braces (compound
+    // literals in an expression, a header, a return or a do-while tail): about
+    // 460 from the fixtures on Linux x86-64, and about 4,230 in all with the
+    // frontend's own sources.
+    C_AST_CORPUS_STATEMENT_BRACED_FLOOR = 380,
+    C_AST_CORPUS_HOSTED_STATEMENT_BRACED_FLOOR = 3500,
 };
 
 BUSTER_GLOBAL_LOCAL bool c_ast_corpus_in(String8 const* paths, u32 count, String8 path)
@@ -2183,6 +2189,7 @@ struct CAstCorpusTally
     u64 statement_declarators;
     u64 statement_initializers;
     u64 statement_declarator_declines;
+    u64 statement_braced;
     u64 statement_fallbacks;
     u64 statement_compared;
 };
@@ -2284,6 +2291,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
         tally->statement_declarators += statements.declarator_hints;
         tally->statement_initializers += statements.initializer_hints;
         tally->statement_declarator_declines += statements.declarator_declines;
+        tally->statement_braced += statements.braced;
         tally->statement_fallbacks += statements.fallbacks;
         tally->statement_compared += typed.identifier_use_count;
         arena_destroy(arena, 1);
@@ -2709,6 +2717,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_sources(UnitTestArguments* argum
     BUSTER_TEST(arguments, !hosted || (tally->statement_declarators >= C_AST_CORPUS_HOSTED_STATEMENT_DECLARATOR_FLOOR &&
                                        tally->statement_initializers >= C_AST_CORPUS_HOSTED_STATEMENT_INITIALIZER_FLOOR &&
                                        tally->statement_declarator_declines == 0));
+    BUSTER_TEST(arguments, !hosted || tally->statement_braced >= C_AST_CORPUS_HOSTED_STATEMENT_BRACED_FLOOR);
     return result;
 }
 #endif
@@ -2748,6 +2757,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
                                tally.statement_compared >= tally.statement_uses && tally.statement_hints);
     BUSTER_TEST(arguments, tally.statement_declarators >= C_AST_CORPUS_STATEMENT_DECLARATOR_FLOOR &&
                                tally.statement_initializers >= C_AST_CORPUS_STATEMENT_INITIALIZER_FLOOR && tally.statement_declarator_declines == 0);
+    BUSTER_TEST(arguments, tally.statement_braced >= C_AST_CORPUS_STATEMENT_BRACED_FLOOR);
 #if BUSTER_LINUX && !BUSTER_ANDROID
     c_ast_test_merge(&result, c_ast_corpus_sources(arguments, &tally));
 #endif
@@ -4067,6 +4077,9 @@ BUSTER_GLOBAL_LOCAL CAstSplitCase const c_ast_split_cases[] = {
      C_PARSER_TREE_FALLBACK_NONE, 0},
     {S8_INITIALIZER("_Alignas(8) int a;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_SPECIFIERS},
     {S8_INITIALIZER("__typeof__(1) t;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_SPECIFIERS},
+    // The walker read the `(int)` operand and `(av)` as the function shape
+    // `(f)(...)` named `int` (#3368).
+    {S8_INITIALIZER("_Atomic(int) (av); _Atomic(int) (fd(int a)) { return a; }"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_SPECIFIERS},
     {S8_INITIALIZER("enum E : int { A };"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_SPECIFIERS},
     // #3215: redundant groups, published since the walker walks out of them.
     {S8_INITIALIZER("int f(int x) { return x + 1; } int ((*pq))(int) = f;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 0},
@@ -4171,6 +4184,9 @@ typedef enum CAstStatementTamper
     // The second declarator's name moved onto the first's, so its `=` hint
     // lands before its own tokens and the split refuses it.
     C_AST_STATEMENT_TAMPER_DECLARATOR,
+    // The first initializer list's anchor moved off its `{`, so the plan
+    // leaves that statement to the loop.
+    C_AST_STATEMENT_TAMPER_LIST,
 } CAstStatementTamper;
 
 typedef struct CAstStatementCase CAstStatementCase;
@@ -4192,6 +4208,8 @@ struct CAstStatementCase
     u32 declarator_hints;
     u32 initializer_hints;
     u32 declarator_declines;
+    // The exact count of statements planned around initializer braces.
+    u32 braced;
 };
 
 #define C_AST_STATEMENT_CASE_EVERY                                                                                                             \
@@ -4226,6 +4244,32 @@ struct CAstStatementCase
     "    return a + *c + q.y + (int)o + u + t + s;\n"                                                                                         \
     "}\n"
 
+// Compound literals in every statement position the plan splits at their
+// braces: expression statements (with designators of each kind, a trailing
+// comma, nested and empty lists, a postfix after a `}` and a string run), an
+// if, while and switch header, a do-while tail and a return. One holds
+// __builtin_offsetof, which the loop reads, as its list's first token; one
+// holds more lists than the plan takes and is left to the loop.
+#define C_AST_STATEMENT_CASE_BRACED                                                                                                            \
+    "struct P { int x, y; };\n"                                                                                                               \
+    "struct Q { struct P p[2]; int n; };\n"                                                                                                   \
+    "int use(struct P);\n"                                                                                                                    \
+    "int m(int v, int w)\n"                                                                                                                   \
+    "{\n"                                                                                                                                     \
+    "    struct P p;\n"                                                                                                                       \
+    "    p = (struct P){.x = v, .y = w};\n"                                                                                                   \
+    "    use((struct P){v, });\n"                                                                                                             \
+    "    p.y = (struct Q){{[1] = {.y = v}}, .n = w,}.n;\n"                                                                                    \
+    "    p.x = ((int[]){1, 2, [3 ... 4] = v})[w & 1] + (struct P){}.y;\n"                                                                     \
+    "    p.x = (int){__builtin_offsetof(struct P, y)};\n"                                                                                     \
+    "    p.y = (int[][1]){{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}, {9}, {10}, {11}, {12}, {13}, {14}, {15}, {16}}[w][0];\n"                    \
+    "    if ((struct P){v, w}.x) p.x = 1;\n"                                                                                                  \
+    "    while ((int){v} > w) w++;\n"                                                                                                         \
+    "    switch ((int){w}) { default: break; }\n"                                                                                             \
+    "    do { v--; } while ((struct P){v}.x > 0);\n"                                                                                          \
+    "    return use((struct P){.x = p.x, .y = (int)sizeof(\"a\" \"b\")});\n"                                                                \
+    "}\n"
+
 BUSTER_GLOBAL_LOCAL CAstStatementCase const c_ast_statement_cases[] = {
     {S8_INITIALIZER(C_AST_STATEMENT_CASE_EVERY), C_AST_STATEMENT_TAMPER_NONE, C_AST_STATEMENT_FALLBACK_NONE, 10, 2, 3, 1, 0, 3, 3, 0},
     {S8_INITIALIZER(C_AST_STATEMENT_CASE_DECLARATORS), C_AST_STATEMENT_TAMPER_NONE, C_AST_STATEMENT_FALLBACK_NONE, 1, 5, 0, 1, 0, 8, 8, 0},
@@ -4245,6 +4289,8 @@ BUSTER_GLOBAL_LOCAL CAstStatementCase const c_ast_statement_cases[] = {
                     "    return p.x + local.q;\n"
                     "}\n"),
      C_AST_STATEMENT_TAMPER_NONE, C_AST_STATEMENT_FALLBACK_NONE, 1, 1, 0, 4, 1, 2, 1, 0},
+    {S8_INITIALIZER(C_AST_STATEMENT_CASE_BRACED), C_AST_STATEMENT_TAMPER_NONE, C_AST_STATEMENT_FALLBACK_NONE, 10, 1, 0, 1, 1, 0, 0, 0, 10},
+    {S8_INITIALIZER(C_AST_STATEMENT_CASE_BRACED), C_AST_STATEMENT_TAMPER_LIST, C_AST_STATEMENT_FALLBACK_NONE, 10, 1, 0, 2, 1, 0, 0, 0, 9},
     {S8_INITIALIZER(C_AST_STATEMENT_CASE_EVERY), C_AST_STATEMENT_TAMPER_BRACE, C_AST_STATEMENT_FALLBACK_INPUT},
     {S8_INITIALIZER(C_AST_STATEMENT_CASE_EVERY), C_AST_STATEMENT_TAMPER_SEMICOLON, C_AST_STATEMENT_FALLBACK_TOKENS},
 };
@@ -4273,6 +4319,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statements(UnitTestArguments* argu
                 if (statement_case->tamper == C_AST_STATEMENT_TAMPER_SEMICOLON && BUSTER_REQUIRE(arguments, statement != C_AST_NODE_INVALID))
                 {
                     tree.tokens[statement] -= 1;
+                }
+                u32 list = c_ast_test_find_kind(&tree, C_AST_INITIALIZER_LIST);
+                if (statement_case->tamper == C_AST_STATEMENT_TAMPER_LIST && BUSTER_REQUIRE(arguments, list != C_AST_NODE_INVALID))
+                {
+                    tree.tokens[list] += 1;
                 }
                 if (statement_case->tamper == C_AST_STATEMENT_TAMPER_DECLARATOR)
                 {
@@ -4313,7 +4364,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statements(UnitTestArguments* argu
                 BUSTER_TEST_RAW(arguments,
                                 !followed || (statistics.declarator_hints >= statement_case->declarator_hints &&
                                               statistics.initializer_hints >= statement_case->initializer_hints &&
-                                              statistics.declarator_declines == statement_case->declarator_declines),
+                                              statistics.declarator_declines == statement_case->declarator_declines &&
+                                              statistics.braced == statement_case->braced),
                                 label);
             }
             c_ast_release(&built.ast);

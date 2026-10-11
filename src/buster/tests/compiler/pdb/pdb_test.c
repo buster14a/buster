@@ -1303,7 +1303,7 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
                         }
                         found_procedure |= record_kind == PDB_TEST_S_GPROC32;
                         found_local |= record_kind == PDB_TEST_S_LOCAL;
-                        found_frame |= record_kind == PDB_TEST_S_DEFRANGE_FRAMEPOINTER_REL;
+                        found_frame |= record_kind == PDB_TEST_S_DEFRANGE_REGISTER_REL;
                         symbol_offset += (UINT64_C(2) + record_length + UINT64_C(3)) & ~UINT64_C(3);
                     }
                 }

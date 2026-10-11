@@ -400,6 +400,22 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_warning_policy_promoted(CompilerDriverW
     return promotion == COMPILER_DRIVER_WARNING_PROMOTION_DEFAULT ? policy->werror : promotion == COMPILER_DRIVER_WARNING_PROMOTION_ERROR;
 }
 
+BUSTER_V_IMPL bool compiler_driver_host_cpu_default = false;
+
+// Like Clang and GCC, an absent -march selects the portable baseline rather
+// than the build host; -march=native or -target native select the host (#1557).
+Target compiler_driver_default_target(bool host_cpu_default)
+{
+    Target target = target_native;
+    if (!host_cpu_default)
+    {
+        target.cpu_model = CPU_MODEL_BASELINE;
+        target.cpu_features_explicit = false;
+        target.cpu_features = target_cpu_features_empty();
+    }
+    return target;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_driver_set_cpu_model(Arena* arena, CompilerDriverInvocation* invocation, String8 model_string)
 {
     CpuModel model = cpu_model_from_string(model_string);
@@ -1843,7 +1859,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_dependency_render(Arena* arena, Comp
 CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments)
 {
     CompilerDriverInvocation invocation = {
-        .target = target_native,
+        .target = compiler_driver_default_target(compiler_driver_host_cpu_default),
         .language = COMPILER_DRIVER_LANGUAGE_AUTOMATIC,
         .action = COMPILER_DRIVER_ACTION_LINK,
         .c_dialect = COMPILER_DRIVER_C_DIALECT_GNU17,
@@ -8976,6 +8992,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.statements.initializer_hints += unit.c_ast.statements.initializer_hints;
         result.c_ast.statements.auto_skips += unit.c_ast.statements.auto_skips;
         result.c_ast.statements.declarator_declines += unit.c_ast.statements.declarator_declines;
+        result.c_ast.statements.braced += unit.c_ast.statements.braced;
         if (unit.c_ast.statements.fallbacks)
         {
             result.c_ast.statements.reason = unit.c_ast.statements.reason;
