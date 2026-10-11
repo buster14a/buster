@@ -110,7 +110,7 @@ jobs:
             ${{ runner.temp }}/git-qualification/licenses
             ${{ runner.temp }}/git-qualification/machine-specifications
             ${{ runner.temp }}/git-qualification/*-actions
-            ${{ runner.temp }}/git-qualification/*/.depend
+            ${{ runner.temp }}/git-qualification/*/**/.depend/**/*.d
             ${{ runner.temp }}/git-qualification/*/GIT-BUILD-OPTIONS
             ${{ runner.temp }}/git-qualification/*/GIT-CFLAGS
             ${{ runner.temp }}/git-qualification/*/t/test-results

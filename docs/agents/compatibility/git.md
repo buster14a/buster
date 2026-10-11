@@ -30,8 +30,9 @@ response to a compiler failure. Test scripts can still need host Perl.
 
 This is a first build/blocker census. It is not whole-project qualification.
 The [retained first census](../../compatibility-evidence/git-v2.51.0/README.md)
-records actual outcomes and explicit unrun gates. Latest revisions, runs and
-blocker ownership belong on #3180.
+records actual outcomes and explicit unrun gates. A separate depfile-candidate follow-up gets past the option gate and records
+333 successful C actions with 199 source refusals. Latest revisions, runs and
+blocker ownership belong on #3180; neither result qualifies the whole project.
 
 ## Licenses and external input boundary
 
