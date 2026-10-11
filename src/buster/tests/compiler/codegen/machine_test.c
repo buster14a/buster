@@ -3183,6 +3183,77 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_recreated_edge_sources(UnitTestA
     return result;
 }
 
+// Entry copies must be refused before their byte count expands into millions
+// of MIR rows. No witness below executes or allocates its native stack.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_incoming_aggregate_capacity(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("struct big { char bytes[0x800000]; }; int first(struct big value) { return value.bytes[0]; }"),
+        S8("struct big { char bytes[0x1000000]; }; int first(struct big value) { return value.bytes[0]; }"),
+        S8("struct big { char bytes[0x20000000]; }; int first(struct big value) { return value.bytes[0]; }"),
+        S8("struct big { char bytes[0x7ffffff0]; }; int first(struct big value) { return value.bytes[0]; }"),
+        S8("struct big { char bytes[0x80000000]; }; int first(struct big value) { return value.bytes[0]; }"),
+        // One byte past the rounded 512 KiB combined copy budget.
+        S8("struct big { char bytes[0x80001]; }; int first(struct big value) { return value.bytes[0]; }"),
+        // Each parameter fits on its own; together they exceed the budget.
+        S8("struct big { char bytes[0x40001]; }; int first(struct big a, struct big b) { return a.bytes[0] + b.bytes[0]; }"),
+        // An unused parameter still belongs to the signature.
+        S8("struct big { char bytes[0x800000]; }; int first(struct big value) { return 0; }"),
+    };
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_MACOS};
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+    {
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = systems[system]};
+        for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
+        {
+            for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("incoming-capacity.c"), sources[source], target,
+                    (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                if (BUSTER_REQUIRE(arguments, program && program->module_count == 1))
+                {
+                    IrFunction* function = machine_test_ir_function_find(program->modules, S8("first"));
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        u64 before = temporary.arena->position;
+                        MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                        BUSTER_TEST(arguments, !selected.supported && selected.signature_rejected && selected.failed_opcode == IR_OPCODE_COUNT);
+                        BUSTER_TEST(arguments, selected.function.instruction_count == 0);
+                        BUSTER_TEST(arguments, temporary.arena->position - before < BUSTER_MB(1));
+                        for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                        {
+                            CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, program->modules, target,
+                                (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                            BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_UNSUPPORTED_ABI);
+                            BUSTER_TEST(arguments, generated.failed_phase == CODEGEN_PHASE_MACHINE_SELECTION);
+                            BUSTER_TEST(arguments, generated.code.length == 0);
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+        // Keep ordinary large stack parameters supported.
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        IrProgram* program = machine_test_compile_c(temporary.arena, S8("incoming-supported.c"),
+            S8("struct big { char bytes[0x10000]; }; int first(struct big value) { return value.bytes[0]; }"), target);
+        if (BUSTER_REQUIRE(arguments, program && program->module_count == 1))
+        {
+            IrFunction* function = machine_test_ir_function_find(program->modules, S8("first"));
+            if (BUSTER_REQUIRE(arguments, function != 0))
+            {
+                MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                BUSTER_TEST(arguments, selected.supported && !selected.signature_rejected);
+                BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // Large virtual sizes exercise frame arithmetic without reserving or executing
 // a large native stack. Independent boundary values distinguish u32 storage,
 // x86-64 signed displacements and AArch64's unsigned frame/footer range.
@@ -10410,6 +10481,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_switch_cfg);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_backward_switch_cfg);
     BUSTER_TEST_FIXTURE(arguments, machine_test_disconnected_dominance);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_incoming_aggregate_capacity);
     BUSTER_TEST_FIXTURE(arguments, machine_test_frame_capacity);
     BUSTER_TEST_FIXTURE(arguments, machine_test_frame_storage_reuse);
     BUSTER_TEST_FIXTURE(arguments, machine_test_frame_address_rematerialization);
