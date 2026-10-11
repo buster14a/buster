@@ -45,7 +45,7 @@ VALIDATIONS = ("performance", "diagnostic", "policy")
 BUILD_COMMAND = re.compile(r"bench|throughput|^production_profile$|^compiler_profile_qualification$")
 TOOL = re.compile(r"bench|benchmark|scaling|survey|performance|^compiler_profile_qualification\.c$")
 HOST_CHECK = re.compile(r"\b(?:APPROVED_HOST|host_problem)\b")
-WORKFLOW = re.compile(r"bench|throughput|profile|lab\b|perf|708", re.IGNORECASE)
+WORKFLOW = re.compile(r"bench|throughput|profile|lab\b|perf|708|^external-projects\.yml$", re.IGNORECASE)
 RECEIPT = ROOT / "tools" / "bench_direct" / "compiler_receipt.py"
 # Inventory row -> the compiler_receipt profile constant its consumer must validate.
 PROFILE_ROWS = {

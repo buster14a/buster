@@ -366,10 +366,10 @@
       }
     },
     {
-      "id": "workflow:throughput-real-source.yml",
+      "id": "workflow:external-projects.yml",
       "kind": "workflow",
       "validation": "performance",
-      "measures": "real-source throughput qualification on hosted runners",
+      "measures": "post-merge external integration and real-source throughput qualification on hosted runners",
       "zen5": {
         "route": "none",
         "status": "NOT VALIDATED",
