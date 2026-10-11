@@ -1209,13 +1209,13 @@ jobs:
           mkdir -p "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/ebpf-kernel.log") 2>&1
           driver="$RUNNER_TEMP/buster-build"
-          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase ebpf_kernel_producer_check --sequence 90 -- "$driver" build --config Release -t ide
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase ebpf_kernel_producer_check --sequence 82 -- "$driver" build --config Release -t ide
           oracle_ide="$RUNNER_TEMP/ebpf-kernel-ide/ide"
           mkdir -p "${oracle_ide%/*}"
           cp build/Release/ide "$oracle_ide"
           sudo setcap cap_bpf,cap_perfmon+ep "$oracle_ide"
           getcap "$oracle_ide"
-          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase ebpf_kernel_oracle --sequence 100 -- "$BUSTER_CI_PYTHON" tools/ci_ebpf_kernel_oracle.py --ide "$oracle_ide" --log-directory "$RUNNER_TEMP/buster-ci" --metamorphic-output "$RUNNER_TEMP/ebpf-kernel-metamorphic"
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase ebpf_kernel_oracle --sequence 84 -- "$BUSTER_CI_PYTHON" tools/ci_ebpf_kernel_oracle.py --ide "$oracle_ide" --log-directory "$RUNNER_TEMP/buster-ci" --metamorphic-output "$RUNNER_TEMP/ebpf-kernel-metamorphic"
 
       - name: Native result and reproduction
         if: ${{ always() && steps.checkout.outcome == 'success' }}
