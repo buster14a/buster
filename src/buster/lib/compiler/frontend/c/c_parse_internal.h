@@ -127,6 +127,21 @@ BUSTER_F_DECL CTestAstTypeVerify c_test_ast_type_verify_take(void);
 // Turns the declaration specifier read from the tree (c_parse.c) off and back
 // on, per thread, so a test can analyse the same unit with and without it.
 BUSTER_F_DECL void c_test_ast_specifiers_set(bool enabled);
+// Verify mode for the type-name runs skipped as no type name
+// (c_parse_type_name_specifiers under -fc-ast-pilot): the machine's attempt
+// also runs on every skipped run, and the counts record the runs it checked
+// and those where it answered, kept a type row or reported a diagnostic. Per
+// thread; the take resets the counts.
+typedef struct CTestAstTypeNameVerify CTestAstTypeNameVerify;
+struct CTestAstTypeNameVerify
+{
+    u64 checked;
+    u64 answered;
+    u64 appended;
+    u64 diagnosed;
+};
+BUSTER_F_DECL void c_test_ast_type_names_verify_set(bool enabled);
+BUSTER_F_DECL CTestAstTypeNameVerify c_test_ast_type_names_verify_take(void);
 
 BUSTER_F_DECL CDiagnostic c_test_check_named_call_arities(Arena* arena, CAnalysisResult* analysis, CPreprocessResult preprocess,
                                                         u32 start, u32 end);

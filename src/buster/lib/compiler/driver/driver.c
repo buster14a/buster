@@ -8002,9 +8002,15 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.specifiers.primitive_answers += unit.c_ast.specifiers.primitive_answers;
         result.c_ast.specifiers.typedef_answers += unit.c_ast.specifiers.typedef_answers;
         result.c_ast.specifiers.fallbacks += unit.c_ast.specifiers.fallbacks;
+        result.c_ast.specifiers.type_name_skips += unit.c_ast.specifiers.type_name_skips;
+        result.c_ast.specifiers.type_name_retries += unit.c_ast.specifiers.type_name_retries;
+        result.c_ast.specifiers.type_name_primitive_answers += unit.c_ast.specifiers.type_name_primitive_answers;
+        result.c_ast.specifiers.type_name_typedef_answers += unit.c_ast.specifiers.type_name_typedef_answers;
+        result.c_ast.specifiers.type_name_fallbacks += unit.c_ast.specifiers.type_name_fallbacks;
         for (u32 reason = 0; reason < C_AST_SPECIFIER_FALLBACK_COUNT; reason += 1)
         {
             result.c_ast.specifiers.fallback_counts[reason] += unit.c_ast.specifiers.fallback_counts[reason];
+            result.c_ast.specifiers.type_name_fallback_counts[reason] += unit.c_ast.specifiers.type_name_fallback_counts[reason];
         }
         if (unit.c_ast.specifiers.fallbacks)
         {

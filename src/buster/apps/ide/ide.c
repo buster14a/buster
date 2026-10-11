@@ -2139,6 +2139,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_TYPEDEF],
                          c_ast_specifier_fallback_name(specifiers.fallbacks ? specifiers.reason : C_AST_SPECIFIER_FALLBACK_NONE),
                          specifiers.fallbacks ? specifiers.fallback_token : UINT32_MAX);
+            // Counts: the type-name runs skipped as no type name or read from the tree, and the runs left to the type machine, by reason.
+            string_print(S8("C_AST_TYPE_NAMES skips={u64} retries={u64} primitive_answers={u64} typedef_answers={u64} fallbacks={u64} input={u64} specifiers={u64} "
+                            "storage={u64} primitive={u64} typedef={u64}\n"),
+                         specifiers.type_name_skips, specifiers.type_name_retries, specifiers.type_name_primitive_answers, specifiers.type_name_typedef_answers,
+                         specifiers.type_name_fallbacks, specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_INPUT],
+                         specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_SPECIFIERS], specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_STORAGE],
+                         specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_PRIMITIVE], specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_TYPEDEF]);
         }
         if (invocation.fast_passes)
         {

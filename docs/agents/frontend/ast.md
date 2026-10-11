@@ -1035,9 +1035,55 @@ each case:
   `c_type_parse_root_finish` checks again.
 
 The machine remains the default path and the fallback for every run that is
-not read from the tree. Type names (casts, `sizeof`, compound literals),
-members, tag definitions and declarator derivations still go through the
-machine.
+not read from the tree. Members, tag definitions, declarator derivations and
+the type names typed inside machine frames (casts among them) still go through
+the machine.
+
+### Type names
+
+`c_parse_type_name_specifiers` reads the specifier run of a type name for
+the validators: every grouped `sizeof` and `_Alignof` operand
+(`c_parse_validate_sizeof_operands`), every `( ... )` written before a `{`
+(`c_parse_validate_compound_literals`), and the smaller callers'
+type names. Many of those runs are not type names at all: `sizeof (x)`,
+`if (c) {`, `switch (x) {`. The machine attempts each one, fails, rolls back
+and keeps no row. Under `-fc-ast-pilot`, when the machine has no frame open,
+the tree settles the run first (`c_parse_tree_type_name_type`):
+- **Skip.** No `DECL_SPECIFIERS` node of any kind begins at the run's first
+  token, so no type name begins there. The specifier index's pass sets one bit
+  per list's first token for this. The machine's attempt is not run; its
+  failure path is, in the order `c_parse_scalar_type_in_scope_context` runs
+  it. `c_parse_type_identity_prepare` settles the range's identity answers,
+  and `c_parse_define_typeof_aggregates` defines the bodies written in a
+  `typeof` operand there. If it defines one, the machine's retry
+  (`c_parse_scalar_type_in_scope_attempt`) reads the run, as there.
+- **Read.** A plain list begins there, and `c_parse_tree_specifiers_type`
+  reads it exactly as it reads a declaration's.
+
+Every other run goes to the machine. A run with a frame open, which includes
+the type names typed under a type-mode constant evaluation, is counted under
+`input`, and the other fallbacks keep their `CAstSpecifierFallback` reasons.
+A failed attempt keeps the diagnostics it reported and rolls everything else
+back. The member index's generation is the one exception: the next member
+lookup rebuilds that index, and no answer changes. So the skip is exact when
+the attempt reports nothing on such a run. Verify mode
+(`c_test_ast_type_names_verify_set`) runs the attempt on every skipped run and
+counts any that answered, kept a row or reported a diagnostic. The
+[corpus differential](#corpus-differential) requires none, over the fixtures
+and the frontend sources. No input tried has the failure path define a
+`typeof` body, because earlier passes have defined it; no input tried
+has its identity answers settled first by a skipped run either. Both calls
+stay, so that the skip is the machine's failure path, not a guess about it.
+
+`c_ast_test_type_names` runs, in every layout, these units:
+- one unit whose type names are all read;
+- one whose runs are skipped, including one that holds a `typeof` aggregate;
+- one shape per fallback reason, the `storage` and `primitive` shapes on
+  tampered trees;
+- a tree whose type name's list is moved off its first token. Verify mode must
+  catch the machine answering that skipped run. This is the mutation check.
+
+`-v` prints `C_AST_TYPE_NAMES`.
 
 `c_ast_test_specifiers` runs, in every layout, one unit whose block,
 file-scope and parameter runs are all read from the tree, and one shape per
@@ -1137,7 +1183,7 @@ differential tests pass.
 |---|---|---|---|
 | `c_parse_ast_run`, `c_parser_parse_function_body`, `c_parser_parse_declaration_expression` | declaration split, declarator name, body range, static-assert ranges | `DECLARATION`, `FUNCTION_DEFINITION`, `INIT_DECLARATOR`, `STATIC_ASSERT` | Retired under `-fc-ast-pilot` by the [declaration split](#declaration-split-from-the-tree). The walker stays the default path and the per-unit fallback. |
 | `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, plain segments bound in one pass, and each block declarator's `,`, `=` and plain initializer. The token loop stays the engine, the default path and the per-body fallback; the type machine still reads specifiers and declarators from tokens (next row), and the switch and control-statement validators keep `c_parse_statement_end`, whose calls cost about 1 M instructions on the self-host. |
-| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)). Tags, `typeof`, attributes, type names, members and every declarator derivation stay with the machine. |
+| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)), and so do the validators' plain type names; their runs where no type name begins are skipped ([type names](#type-names)). Tags, `typeof`, attributes, type names typed in machine frames, members and every declarator derivation stay with the machine. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Not migrated. |
 | `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | Not migrated. |
