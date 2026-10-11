@@ -496,6 +496,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_files(UnitTes
         {
             BUSTER_TEST(arguments, compiler_driver_dependency_test_path_equal(system_rule.prerequisites[0], S8("bbbb.c")));
         }
+        // Missing leaves must still have one destination identity. Exercise
+        // relative, absolute, dot and parent-segment aliases before creation.
+        for (u32 action = 0; action < 2; action += 1)
+        {
+            for (u32 alias = 0; alias < 4; alias += 1)
+            {
+                String8 output_name = string_format(arena, S8("fresh-{u32}-{u32}.o"), action, alias);
+                String8 absolute_output = string_format(arena, S8("{S8}/{S8}"), multi_directory_absolute, output_name);
+                String8 aliases[] = {
+                    string_format(arena, S8("./{S8}"), output_name),
+                    string_format(arena, S8("user/../{S8}"), output_name),
+                    absolute_output, output_name};
+                String8 output_path = alias == 3 ? absolute_output : output_name;
+                String8 refusal[] = {action ? S8("-S") : S8("-c"),
+                                     string_format(arena, S8("-Wp,-MMD,{S8}"), aliases[alias]),
+                                     S8("-o"), output_path, S8("aaaa.c")};
+                CompilerDriverResult refused = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(refusal)));
+                BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                BUSTER_TEST(arguments, compiler_driver_test_string_contains(refused.diagnostic, S8("aliases")));
+                ByteSlice absent_output = file_read(arena, output_path, (FileReadOptions){0});
+                BUSTER_TEST(arguments, !absent_output.pointer);
+            }
+        }
         BUSTER_TEST(arguments, compiler_driver_dependency_test_change_directory(original_directory));
     }
 #endif

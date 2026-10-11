@@ -8311,6 +8311,36 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_fail_input(CompilerDriverResult* result
     }
 }
 
+// Resolve the parent of a new destination: realpath requires the leaf to exist.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_dependency_destination(Arena* arena, String8 path)
+{
+    String8 absolute = os_path_absolute(arena, path, false);
+    if (!absolute.length)
+    {
+        u64 leaf = path.length;
+        while (leaf && !compiler_driver_path_separator(path.pointer[leaf - 1]))
+        {
+            leaf -= 1;
+        }
+        String8 parent = leaf ? (String8){.pointer = path.pointer, .length = leaf} : S8(".");
+        String8 resolved = os_path_absolute(arena, parent, false);
+        if (resolved.length)
+        {
+            String8 name = {.pointer = path.pointer + leaf, .length = path.length - leaf};
+            String8 separator = compiler_driver_path_separator(resolved.pointer[resolved.length - 1]) ? S8("") : S8("/");
+            absolute = string_format(arena, S8("{S8}{S8}{S8}"), resolved, separator, name);
+        }
+    }
+#if BUSTER_WINDOWS
+    for (u64 index = 0; index < absolute.length; index += 1)
+    {
+        char8 byte = absolute.pointer[index];
+        absolute.pointer[index] = byte == '\\' ? '/' : byte >= 'A' && byte <= 'Z' ? (char8)(byte + ('a' - 'A')) : byte;
+    }
+#endif
+    return absolute;
+}
+
 CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation)
 {
     CompilerDriverDiagnosticCollector warnings = {
@@ -8381,9 +8411,9 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     {
         String8 output = invocation.output_path.length ? invocation.output_path
                                                        : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
-        String8 dependency_absolute = os_path_absolute(arena, invocation.dependency_path, false);
-        String8 output_absolute = os_path_absolute(arena, output, false);
-        String8 input_absolute = os_path_absolute(arena, invocation.input_paths[0], false);
+        String8 dependency_absolute = compiler_driver_dependency_destination(arena, invocation.dependency_path);
+        String8 output_absolute = compiler_driver_dependency_destination(arena, output);
+        String8 input_absolute = compiler_driver_dependency_destination(arena, invocation.input_paths[0]);
         bool aliases = string_equal(invocation.dependency_path, output) ||
                        string_equal(invocation.dependency_path, invocation.input_paths[0]) ||
                        (dependency_absolute.length &&
