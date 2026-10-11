@@ -21,7 +21,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rg --files "$RUNNER_TEMP/evidence" | rg 'ios-boot-cancel-recovery-create/.*(run\.log|xcrun\.log|recovery-create.*log|shutdown.*log)$' | head -n 24 >"$RUNNER_TEMP/selected"
+          find "$RUNNER_TEMP/evidence" -type f -path '*ios-boot-cancel-recovery-create/*' \( -name 'run.log' -o -name 'xcrun.log' -o -name '*recovery-create*log' -o -name '*shutdown*log' \) >"$RUNNER_TEMP/selected"
           while IFS= read -r path; do
             printf '\nEvidence file: %s\n' "$path"
             head -c 65536 "$path"
