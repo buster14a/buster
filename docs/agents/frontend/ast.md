@@ -1856,6 +1856,43 @@ diagnostic only, and its result is negative. No candidate was built:
 - 92% of the machine Ir still left under the pilot is declines and misses
   inside typed bodies.
 
+The count cache's audit, below, leaves a second lead: under `-fsyntax-only`
+nothing reads the bytes a first sight records. The candidate counts a narrow
+fragment's first sight (`c_ir_count_quoted`) and records only its length, but
+only when the compile will not lower. The driver says so with a flag on `CParserResult`, set for
+`-fsyntax-only` alone, because `c_analyze_semantics_only` also runs before
+lowering. With the flag clear, which covers `-c` and every other caller, a
+first sight decodes and records bytes exactly as before. A length-only slot is
+a miss for `c_ir_decode_string_literal_range_for_target`, which then decodes
+without recording. These budgets were declared before the measured runs. The
+base is main `680e16d3`, with the count cache's input, flags and four
+Callgrind arms, below (`--cache-sim=no --branch-sim=no`):
+- **Correctness:**
+  - no verify mismatch over the corpus;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms;
+  - the same exit status and no diagnostics on `-fsyntax-only` in every arm;
+  - focused tests: the same element counts and types with and without the
+    flag, and the same bytes from a decode that meets a length-only slot;
+  - the literal-memo census expectations in `c_test.c` are unchanged.
+- **`-fsyntax-only` (D against A, and C against B).** The whole compile must
+  run fewer instructions, by more than the 0.05% rebuild noise. Each arm must
+  report its calls to `c_ir_decode_quoted` and `c_ir_count_quoted`. Any
+  decode that a length-only slot sends back is charged.
+- **`-c` (D against A, `-g0`).** It must not grow by more than the 0.05% noise.
+  `c_ir_decode_quoted` and `c_ir_count_quoted` must be called exactly as often
+  as in A, so no count pass is added.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761).
+
+The count-only first sight's hosted census is
+[`2026-10-11T142104Z`](../../performance-audits/2026-10-11T142104Z.md),
+diagnostic only. Every budget passes, and the change ships:
+- `-fsyntax-only` falls by 183.9 M Ir: −1.755% default and −1.990% under the
+  pilot. The 30,943 first-sight decodes (310.9 M) become counts (127.2 M), and
+  no length-only slot sends a decode back.
+- `-c` moves by +0.0001%, with the same decode calls and no count calls.
+  Objects are byte-identical at `-g0` and `-g`.
+
 For a per-token cache of string literals' element counts in the machine's
 leaf (`c_parse_string_literal_expression_type`), these budgets were declared
 before the measured runs. Exploratory Callgrind runs of the base came first;
