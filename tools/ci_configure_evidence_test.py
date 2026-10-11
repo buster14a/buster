@@ -53,6 +53,82 @@ class ConfigureEvidenceTests(unittest.TestCase):
         self.assertTrue(result["profile_requested"])
         self.assertEqual(json.loads((self.output / "manifest.json").read_text()), result)
 
+    def test_captures_ninja_log_and_writes_tree_summary(self):
+        data = b"# ninja log v5\n0\t10\t0\tobj.o\thash\n"
+        self.write(f"{self.tree}/.ninja_log", data)
+        result = self.collect()
+        record = next(item for item in result["files"] if item["path"].endswith("/.ninja_log"))
+        self.assertEqual(record["status"], "captured")
+        self.assertEqual(record["sha256"], hashlib.sha256(data).hexdigest())
+        self.assertEqual((self.output / record["path"]).read_bytes(), data)
+        summary = {"tree": self.tree, "version": 5, "edges": 1, "malformed_lines": 0,
+                   "wall_ms": 10, "sum_ms": 10,
+                   "top": [{"output": "obj.o", "start_ms": 0, "end_ms": 10, "duration_ms": 10}],
+                   "tail": [{"output": "obj.o", "start_ms": 0, "end_ms": 10, "duration_ms": 10}]}
+        self.assertEqual(result["ninja_logs_captured"], 1)
+        self.assertEqual(result["ninja_log_summaries"], [summary])
+        self.assertEqual(json.loads((self.output / self.tree / "ninja-log-summary.json").read_text()),
+                         {key: value for key, value in summary.items() if key != "tree"})
+        self.assertEqual(json.loads((self.output / "manifest.json").read_text()), result)
+
+    def test_summarize_ninja_log_deduplicates_and_orders_edges(self):
+        data = (
+            b"# ninja log v7\n"
+            b"0\t100\t0\tz.o\told\n"
+            b"20\t50\t0\ta.o\thash\n"
+            b"10\t40\t0\tb.o\thash\n"
+            b"70\t90\t0\tc.o\thash\n"
+            b"75\t80\t0\td.o\thash\n"
+            b"20\t35\t0\te.o\thash\n"
+            b"119\t120\t0\tf.o\thash\n"
+            b"0\t10\t0\tz.o\tnew\n"
+            b"not a ninja edge\n"
+        )
+        result = evidence.summarize_ninja_log(data)
+        self.assertEqual(result["version"], 7)
+        self.assertEqual(result["edges"], 7)
+        self.assertEqual(result["malformed_lines"], 1)
+        self.assertEqual(result["wall_ms"], 120)
+        self.assertEqual(result["sum_ms"], 111)
+        self.assertEqual([edge["output"] for edge in result["top"]],
+                         ["a.o", "b.o", "c.o", "e.o", "z.o", "d.o", "f.o"])
+        self.assertEqual([edge["output"] for edge in result["tail"]],
+                         ["f.o", "c.o", "d.o", "a.o", "b.o"])
+        self.assertEqual(next(edge for edge in result["top"] if edge["output"] == "z.o"),
+                         {"output": "z.o", "start_ms": 0, "end_ms": 10, "duration_ms": 10})
+
+    def test_summarize_empty_and_headers_only_ninja_logs(self):
+        for data in (b"", b"# ninja log v6\n\n"):
+            with self.subTest(data=data):
+                result = evidence.summarize_ninja_log(data)
+                self.assertEqual(result["edges"], 0)
+                self.assertEqual(result["wall_ms"], 0)
+        self.assertIsNone(evidence.summarize_ninja_log(b"")["version"])
+        self.assertEqual(evidence.summarize_ninja_log(b"# ninja log v6\n")["version"], 6)
+
+    def test_missing_ninja_log_is_not_an_error_or_summary(self):
+        self.write(f"{self.tree}/CMakeCache.txt")
+        result = self.collect()
+        record = next(item for item in result["files"] if item["path"].endswith("/.ninja_log"))
+        self.assertEqual(record["status"], "missing")
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["ninja_logs_captured"], 0)
+        self.assertEqual(result["ninja_log_summaries"], [])
+
+    def test_cli_prints_ninja_log_breakdown(self):
+        self.write(f"{self.tree}/.ninja_log", b"# ninja log v5\n0\t1500\t0\tcompile.obj\thash\n")
+        run = subprocess.run([sys.executable, evidence.__file__, "--build-root", str(self.build),
+                              "--output", str(self.output)],
+                             capture_output=True, text=True, check=False)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertTrue(run.stdout.startswith("CMake evidence: 1 trees, 0 configure logs, "))
+        self.assertIn(f"NINJA_LOG_SUMMARY tree={self.tree} edges=1 wall_seconds=1.500 "
+                      "sum_seconds=1.500 malformed=0", run.stdout)
+        self.assertIn(f"NINJA_LOG_EDGE tree={self.tree} rank=1 seconds=1.500 "
+                      "start_seconds=0.000 end_seconds=1.500 output=compile.obj", run.stdout)
+        self.assertIn(f"NINJA_LOG_TAIL tree={self.tree} rank=1 "
+                      "end_seconds=1.500 output=compile.obj", run.stdout)
+
     def test_does_not_capture_objects_unrelated_trees_or_environment(self):
         self.write(f"{self.tree}/subject.o")
         self.write("unrelated/CMakeCache.txt")
