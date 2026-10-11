@@ -4163,6 +4163,7 @@ struct LlvmBitcodeTestAlias
     u32 visibility;
 };
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
 // Inspect MODULE_CODE_ALIAS (14) records independently of the writer: each
 // version-1 record is [value type, address space, aliasee, linkage,
 // visibility, DLL storage, thread-local], and its aliasee must be an earlier
@@ -4245,6 +4246,7 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_aliases(ByteSlice bytes, LlvmBitcodeT
     }
     return !reader.failed && saw_module && !in_module && alias_count == expected_count;
 }
+#endif
 
 // __attribute__((alias)) used to leave LLVM bitcode as a declaration of the
 // alias name, so an independent link failed with an undefined reference
@@ -4253,6 +4255,8 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_aliases(ByteSlice bytes, LlvmBitcodeT
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_alias(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    // Mobile app bundles contain tests/ inputs, not additional source fixtures.
     String8 source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_alias.c");
     // Fixture order: other, used_early, counter_alias, table_alias,
     // weak_other (weak = 16), hidden_other (hidden = 1), local_other
@@ -4307,6 +4311,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_alias(UnitTestArguments* ar
 #endif
         scratch_end(temporary);
     }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
     return result;
 }
 
