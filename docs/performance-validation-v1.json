@@ -65,7 +65,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "Hosted timing is diagnostic. Use pull-compare for a 9700X result."
+        "resolution": "Hosted timing is diagnostic. Use pull-compare for a 9700X result.",
+        "claim_route": "pull-compare"
       }
     },
     {
@@ -77,7 +78,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "Profile training is not a measurement; admitting a PGO compiler on performance grounds needs a 9700X comparison."
+        "resolution": "Profile training is not a measurement; admitting a PGO compiler on performance grounds needs a 9700X comparison.",
+        "claim_route": "none"
       }
     },
     {
@@ -133,7 +135,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "native-retirement-performance-v1 remains blocked; no 9700X route exists for its cells."
+        "resolution": "native-retirement-performance-v1 remains blocked; no 9700X route exists for its cells.",
+        "claim_route": "none"
       }
     },
     {
@@ -156,7 +159,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "Runs inside uarch_lab's micro step only; a frontend claim needs pull-compare or a direct workload."
+        "resolution": "Runs inside uarch_lab's micro step only; it links the compiler, so it cannot be a standalone direct workload. A frontend claim needs pull-compare.",
+        "claim_route": "pull-compare"
       }
     },
     {
@@ -179,7 +183,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "Run locally or hosted it is diagnostic; a claim needs pull-compare evidence."
+        "resolution": "Run locally or hosted it is diagnostic; a claim needs pull-compare evidence.",
+        "claim_route": "pull-compare"
       }
     },
     {
@@ -191,7 +196,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "No 9700X route; a selector claim needs pull-compare evidence (end-to-end) until a targeted route exists."
+        "resolution": "No 9700X route; a selector claim needs pull-compare evidence (end-to-end) until a targeted route exists.",
+        "claim_route": "pull-compare"
       }
     },
     {
@@ -203,7 +209,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "Port the probe to a benchmarks/9700x workload (input data allowed) or use pull-compare."
+        "resolution": "The probe links compiler internals, and a direct workload is compiled alone against system headers, so it cannot be ported there. A FAST allocator claim needs pull-compare (its corpus runs FAST).",
+        "claim_route": "pull-compare"
       }
     },
     {
@@ -215,7 +222,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "Port the probe to a benchmarks/9700x workload or use pull-compare."
+        "resolution": "The probe links compiler internals, and a direct workload is compiled alone against system headers, so it cannot be ported there. A scheduler claim needs pull-compare.",
+        "claim_route": "pull-compare"
       }
     },
     {
@@ -227,7 +235,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "Linker timing on the 9700X has no route; results stay diagnostic."
+        "resolution": "Linker timing on the 9700X has no route; results stay diagnostic.",
+        "claim_route": "none"
       }
     },
     {
@@ -338,7 +347,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "Hosted timing is diagnostic and never validates performance; request pull-compare."
+        "resolution": "Hosted timing is diagnostic and never validates performance; request pull-compare.",
+        "claim_route": "pull-compare"
       }
     },
     {
@@ -350,7 +360,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "Hosted timing is diagnostic and never validates performance."
+        "resolution": "Hosted timing is diagnostic and never validates performance.",
+        "claim_route": "pull-compare"
       }
     },
     {
@@ -362,19 +373,21 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "Zen 5 measurements do not establish macOS performance; native macOS timing is out of this route."
+        "resolution": "Zen 5 measurements do not establish macOS performance; native macOS timing is out of this route.",
+        "claim_route": "none"
       }
     },
     {
-      "id": "workflow:throughput-real-source.yml",
+      "id": "workflow:external-projects.yml",
       "kind": "workflow",
       "validation": "performance",
-      "measures": "real-source throughput qualification on hosted runners",
+      "measures": "post-merge external integration and real-source throughput qualification on hosted runners",
       "zen5": {
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "Hosted timing is diagnostic; a qualification claim needs a 9700X profile."
+        "resolution": "Hosted timing is diagnostic; a qualification claim needs a 9700X profile.",
+        "claim_route": "none"
       }
     },
     {
@@ -386,7 +399,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "Profile production is not a measurement; see build:production_profile."
+        "resolution": "Profile production is not a measurement; see build:production_profile.",
+        "claim_route": "none"
       }
     },
     {
@@ -409,7 +423,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "Windows performance is not established by Zen 5 Linux measurements; no route."
+        "resolution": "Windows performance is not established by Zen 5 Linux measurements; no route.",
+        "claim_route": "none"
       }
     },
     {
@@ -421,7 +436,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "The separately versioned owner-fresh sampling route is staged disabled. Hosted parser, containment and receipt fixtures are diagnostic. Complete real 9700X acquisition, independent pilot/calibration and the frozen confirmatory campaign are required before a separate reviewed activation; failed pilot may conclude no shorter profile qualifies."
+        "resolution": "The separately versioned owner-fresh sampling route is staged disabled. Hosted parser, containment and receipt fixtures are diagnostic. Complete real 9700X acquisition, independent pilot/calibration and the frozen confirmatory campaign are required before a separate reviewed activation; failed pilot may conclude no shorter profile qualifies.",
+        "claim_route": "none"
       }
     },
     {
@@ -433,7 +449,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "The separately versioned owner-fresh sampling route is staged disabled. Hosted parser, containment and receipt fixtures are diagnostic. Complete real 9700X acquisition, independent pilot/calibration and the frozen confirmatory campaign are required before a separate reviewed activation; failed pilot may conclude no shorter profile qualifies."
+        "resolution": "The separately versioned owner-fresh sampling route is staged disabled. Hosted parser, containment and receipt fixtures are diagnostic. Complete real 9700X acquisition, independent pilot/calibration and the frozen confirmatory campaign are required before a separate reviewed activation; failed pilot may conclude no shorter profile qualifies.",
+        "claim_route": "none"
       }
     }
   ]

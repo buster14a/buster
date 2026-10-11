@@ -2,14 +2,14 @@
 
 `.github/apt-inputs.json` is the reviewed input lock for the existing
 [GPU profiles](gpu-toolchain-validation.md) and real-source qualification
-workflow. `tools/ci_apt.py` provisions packages and checks selection only;
+job. `tools/ci_apt.py` provisions packages and checks selection only;
 builds, GPU artifact acceptance and Lua/throughput admission remain in the
 existing native C harnesses. This is the same CI-provisioning-only Python
 boundary used by the CUDA and Zig installers, not a second benchmark runner.
 
 ## Scope and trust boundary
 
-The lock targets **Ubuntu 26.04 (resolute), amd64**, matching both workflows.
+The lock targets **Ubuntu 26.04 (resolute), amd64**, matching both consumer workflows.
 It uses the **2026-09-15 00:00:00 UTC** Ubuntu snapshot, never the unrelated
 noble suite from the UEFI lane. Initial named versions are LLVM
 `1:18.1.8-20ubuntu8`, SPIRV-Tools `2026.1-1`, readline `8.3-4`, and ncurses
@@ -67,7 +67,7 @@ Readline provisioning uses the hosted Clang to inspect actual `readline.h` and
 `history.h` selection, trace the `-lreadline` link input, inspect the linked
 probe's dynamic loader resolution for `libreadline.so.8` and `libtinfo.so.6`,
 and execute a noninteractive version-symbol probe. All named paths must resolve
-to the reinstalled package payload. The throughput workflow additionally checks
+to the reinstalled package payload. The post-merge external-project job additionally checks
 that its ldconfig-based runtime manifest selects those same system paths and
 binds the lock and input-identity records into its existing Lua dependency
 manifest. Its compiler/admission chain is gated on successful provisioning;
@@ -85,7 +85,6 @@ failure diagnostics. A pre-existing output directory is rejected, not reused.
 Run the offline failure controls with:
 
 ```sh
-python3 tests/ci_apt_test.py -v
 python3 tools/ci_apt_retry_test.py -v
 ```
 
@@ -96,23 +95,22 @@ consumer identities. The readline job also runs the real header/link/loader
 probe on each pass. This establishes repeatability within that runner; it does
 not claim the entire hosted environment is immutable across image updates.
 
-The existing GPU workflow must still pass all four Linux profiles. After both
-apt profile jobs pass, the path-filtered workflow calls the existing
-`Real-source throughput qualification` through a same-commit reusable workflow
-with `qualify_pinned_inputs: true`. This reuses its source staging, native
-oracles and admission checks rather than copying them into another harness.
-The new input defaults to false, preserving direct PR/dispatch opt-in behavior;
-only apt-related changes gain this additional automatic functional gate.
-Require the native Lua oracle and workload admission receipts, not just the
-provisioning probe. An explicit `workflow_dispatch` on the candidate branch
-remains available for reproduction. A skipped or queued workflow is not validation.
+The existing GPU workflow must still pass all four Linux profiles. Full external
+source execution and Lua/throughput admission now run only after a push to
+`main` in [External projects after merge](../.github/workflows/external-projects.yml),
+bound to that push's immutable commit. The apt workflow retains the independent
+GPU/readline repeatability controls; it does not call an external-project
+reusable workflow or launch full external projects from PR/manual events.
+Require the native Lua oracle and workload admission receipts from the
+post-merge job, not just the provisioning probe. A skipped, queued or incomplete
+project is not validation. See [the migration map](external-project-ci.md).
 
 For a security or correctness update, deliberately advance the UTC snapshot
 and exact package builds together in a reviewed PR. Check the Ubuntu binary
 package metadata and source-package dependency split, update the closed-set
 regression when the split changes, inspect apt's proposed operations and the
-new signed metadata, then run both repeatability jobs plus the real GPU/Lua
-gates above. Retain the old and new selected identities with the exact commit
+new signed metadata, then run both repeatability jobs plus the real GPU gate and post-merge Lua
+admission above. Retain the old and new selected identities with the exact commit
 and runner image. Do not relax validation to work around an unavailable pin;
 review an updated snapshot instead. Schedule such reviews with the repository's
 normal dependency/security maintenance; this lock is not a recommendation to
