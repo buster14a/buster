@@ -420,7 +420,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_global_indexes(UnitTestArguments* ar
             memcpy(&module_index, records.pointer + offset + 12, sizeof(module_index));
             u16 target_kind = 0;
             String8 name = pdb_test_record_name(records, offset);
-            bool target = module_index == 1 && (u64)module_offset + 40 + name.length <= module.length;
+            bool target = name.pointer && module_index == 1 && (u64)module_offset + 40 + name.length <= module.length;
             if (target)
             {
                 memcpy(&target_kind, module.pointer + module_offset + 2, sizeof(target_kind));
