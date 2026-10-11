@@ -40,6 +40,7 @@
 // compiler_driver_test_quoted_assembly_round_trip covers printed string/call symbols.
 // compiler_driver_test_compiler_listing_round_trip covers movabs and GCC/Clang listings.
 // compiler_driver_test_aarch64_assembly_round_trip reassembles AArch64 -S listings.
+// compiler_driver_test_macho_aarch64_listing_round_trip checks Darwin sections and TLVP sites.
 // compiler_driver_test_assembly_private_labels checks ELF .L drops and NOTYPE labels.
 // compiler_driver_test_assembly_section_start_round_trip checks -S/-c leaves no undefined `.text`.
 // compiler_driver_test_assembly_x86_64_object_semantics compares -c with -S then -c: weak, hidden, priority, PLT, section symbols, TLS-GD padding.
@@ -7578,6 +7579,113 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_object_text(ObjectFile const*
     return text;
 }
 
+// #3593: Darwin -S is an assembler input, including TLS and unwind sections.
+// Compare serialized text and each TLVP site's kind, offset, addend and symbol
+// with direct -c, under both allocators and with/without TLS.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_aarch64_listing_round_trip(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = buster_test_temporary_path(arena, S8("macho-a64-listing"), S8(".c"));
+    String8 listing = buster_test_temporary_path(arena, S8("macho-a64-listing"), S8(".s"));
+    String8 direct_path = buster_test_temporary_path(arena, S8("macho-a64-direct"), S8(".o"));
+    String8 round_path = buster_test_temporary_path(arena, S8("macho-a64-round"), S8(".o"));
+    String8 sources[] = {
+        S8("int f(void) { return 7; }\n"),
+        S8("__thread int tv = 7; __thread int zv; extern __thread int etv;\n"
+           "int f(void) { return tv + zv + etv; }\n"
+           "extern int ext; int g(void) { return ext; }\n"),
+    };
+    String8 modes[] = {S8("fast"), S8("quality")};
+    for (u32 cell = 0; cell < BUSTER_ARRAY_LENGTH(sources) * BUSTER_ARRAY_LENGTH(modes); cell += 1)
+    {
+        u32 source_index = cell / BUSTER_ARRAY_LENGTH(modes);
+        String8 allocator = string_format(arena, S8("-fregister-allocator={S8}"), modes[cell % BUSTER_ARRAY_LENGTH(modes)]);
+        bool written = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(sources[source_index]));
+        BUSTER_TEST(arguments, written);
+        if (written)
+        {
+            String8 print[] = {S8("--target=aarch64-apple-macos"), S8("-g0"), S8("-fPIC"), allocator, S8("-S"), source, S8("-o"), listing};
+            String8 compile[] = {S8("--target=aarch64-apple-macos"), S8("-g0"), S8("-fPIC"), allocator, S8("-c"), source, S8("-o"), direct_path};
+            CompilerDriverResult printed = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(print)));
+            CompilerDriverResult direct = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)));
+            BUSTER_TEST_RAW(arguments, printed.error == COMPILER_DRIVER_ERROR_NONE, printed.diagnostic);
+            BUSTER_TEST_RAW(arguments, direct.error == COMPILER_DRIVER_ERROR_NONE && direct.has_object, direct.diagnostic);
+            if (printed.error == COMPILER_DRIVER_ERROR_NONE && direct.error == COMPILER_DRIVER_ERROR_NONE && direct.has_object)
+            {
+                String8 text = BYTE_SLICE_TO_STRING(8, file_read(arena, listing, (FileReadOptions){0}));
+                BUSTER_TEST(arguments, compiler_driver_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(text),
+                    S8(".section __TEXT,__text,regular,pure_instructions")));
+                if (source_index)
+                {
+                    BUSTER_TEST(arguments, string_first_sequence(text, S8("_tv@TLVPPAGE")) != BUSTER_STRING_NO_MATCH);
+                    BUSTER_TEST(arguments, string_first_sequence(text, S8("_etv@TLVPPAGEOFF")) != BUSTER_STRING_NO_MATCH);
+                }
+                String8 assemble[] = {S8("--target=aarch64-apple-macos"), S8("-c"), listing, S8("-o"), round_path};
+                CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+                    compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble)));
+                BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object, assembled.diagnostic);
+                if (assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object)
+                {
+                    ObjectFile expected = object_read(arena, file_read(arena, direct_path, (FileReadOptions){0}), direct.object.target);
+                    ObjectFile actual = object_read(arena, file_read(arena, round_path, (FileReadOptions){0}), direct.object.target);
+                    BUSTER_TEST(arguments, expected.error == OBJECT_ERROR_NONE && actual.error == OBJECT_ERROR_NONE);
+                    if (expected.error == OBJECT_ERROR_NONE && actual.error == OBJECT_ERROR_NONE)
+                    {
+                        ByteSlice expected_text = compiler_driver_test_object_text(&expected);
+                        ByteSlice actual_text = compiler_driver_test_object_text(&actual);
+                        BUSTER_TEST_RAW(arguments, expected_text.length && expected_text.length == actual_text.length &&
+                            memcmp(expected_text.pointer, actual_text.pointer, expected_text.length) == 0, allocator);
+                        u32 expected_tlvp = 0;
+                        u32 actual_tlvp = 0;
+                        for (u32 index = 0; index < actual.relocation_count; index += 1)
+                        {
+                            ObjectRelocationKind kind = actual.relocations[index].kind;
+                            actual_tlvp += kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 ||
+                                           kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12;
+                        }
+                        for (u32 index = 0; index < expected.relocation_count; index += 1)
+                        {
+                            ObjectRelocation relocation = expected.relocations[index];
+                            if (relocation.kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 ||
+                                relocation.kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12)
+                            {
+                                expected_tlvp += 1;
+                                u32 matches = 0;
+                                for (u32 candidate = 0; candidate < actual.relocation_count; candidate += 1)
+                                {
+                                    ObjectRelocation other = actual.relocations[candidate];
+                                    matches += other.kind == relocation.kind && other.offset == relocation.offset &&
+                                        other.addend == relocation.addend &&
+                                        other.section < actual.section_count && relocation.section < expected.section_count &&
+                                        actual.sections[other.section].kind == expected.sections[relocation.section].kind &&
+                                        other.symbol < actual.symbol_count && relocation.symbol < expected.symbol_count &&
+                                        string_equal(actual.symbols[other.symbol].name, expected.symbols[relocation.symbol].name);
+                                }
+                                BUSTER_TEST(arguments, matches == 1);
+                            }
+                        }
+                        BUSTER_TEST(arguments, expected_tlvp == (source_index ? 6u : 0u) && actual_tlvp == expected_tlvp);
+                    }
+                }
+            }
+        }
+    }
+    os_file_delete(source);
+    os_file_delete(listing);
+    os_file_delete(direct_path);
+    os_file_delete(round_path);
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // An AArch64 `-S` listing reassembles to the text bytes direct `-c` writes
 // (#2673): frames (`stp`/`ldp` pre/post-index, `mov x29, sp`), calls, arrays,
 // loops, shifts, selects, wide immediates, floating point, division and
@@ -7728,8 +7836,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_assembly_symbol_na
         {
             // The listing already spells the final names, so assembling it
             // (now that assembly names pass through) yields exactly the
-            // direct object's table. Buster's assembler cannot yet read the
-            // listing's Mach-O `.section` operands, so compare the spelling.
+            // direct object's table. Check the printed spelling here; the
+            // AArch64 listing round-trip fixture also checks assembled bytes.
             String8 text = BYTE_SLICE_TO_STRING(8, file_read(arena, listing, (FileReadOptions){0}));
             String8 expected = BYTE_SLICE_TO_STRING(8, file_read(arena, direct_object, (FileReadOptions){0}));
             String8 names[] = {S8("_g"), S8("_external"), S8("_object")};
@@ -32298,6 +32406,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_quoted_assembly_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_compiler_listing_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_assembly_round_trip);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_macho_aarch64_listing_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_control_labels);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_private_labels);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_section_start_round_trip);

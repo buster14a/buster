@@ -799,6 +799,25 @@ source and encoder paths did for this snapshot; they do not supply an
 independent architectural oracle for every form. The broader #2931 issue
 remains open for unrelated encoding defects and further proof.
 
+On Mach-O, `.section SEGMENT,SECTION[,TYPE[,ATTRIBUTES]]` and
+`.pushsection` accept the pairs Buster's listing writer represents:
+`__TEXT,__text,regular,pure_instructions`, `__TEXT,__const`,
+`__DATA,__data`, `__DATA,__bss,zerofill`, `__DATA,__thread_data`,
+`__DATA,__thread_bss`, the `__mod_init_func`/`__mod_term_func` pairs with
+`mod_init_funcs`/`mod_term_funcs`, and
+`__TEXT,__eh_frame,coalesced,no_toc+strip_static_syms+live_support`.
+Known `__DWARF,__debug_*` sections retain their debug identities.
+The segment/section pairs normalize to the object's section names, so
+`.text` and `__TEXT,__text` reopen the same section. Unknown pairs, types,
+attributes and extra operands are structured directive diagnostics.
+AArch64 `adrp Xd, sym@TLVPPAGE` and
+`ldr Xt, [Xn, sym@TLVPPAGEOFF]` retain the Darwin TLVP page/load relocations,
+including signed addends. The low half must be a plain 64-bit unsigned-offset
+LDR; ADD, stores, other widths and writeback are refused. Both modifiers are
+Mach-O-only. `compiler_driver_test_macho_aarch64_listing_round_trip` compares
+serialized text and TLVP kinds, offsets, addends and symbols with direct
+`-c`, for plain functions and defined/undefined TLS in fast/quality modes.
+
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
 suffixes (so `.init_array.00101` keeps its priority; `.preinit_array` takes

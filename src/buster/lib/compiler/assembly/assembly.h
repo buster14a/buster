@@ -95,6 +95,9 @@ typedef enum AssemblyRelocationKind
     // symbol with an exactly zero addend and are never folded by a unit.
     ASSEMBLY_RELOCATION_AARCH64_GOT_PAGE21,
     ASSEMBLY_RELOCATION_AARCH64_GOT_LD64_LO12,
+    // Darwin thread-local descriptor page and 64-bit descriptor load (#3593).
+    ASSEMBLY_RELOCATION_AARCH64_MACH_TLVP_PAGE21,
+    ASSEMBLY_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12,
     ASSEMBLY_RELOCATION_COUNT,
 } AssemblyRelocationKind;
 

@@ -6315,6 +6315,7 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind compiler_driver_assembly_section_kind(Asse
     ObjectSectionKind object_kind;
     switch (kind)
     {
+    case ASSEMBLY_UNIT_SECTION_UNWIND: object_kind = OBJECT_SECTION_UNWIND; break;
     case ASSEMBLY_UNIT_SECTION_TEXT: object_kind = OBJECT_SECTION_TEXT; break;
     case ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA: object_kind = OBJECT_SECTION_READ_ONLY_DATA; break;
     case ASSEMBLY_UNIT_SECTION_DATA: object_kind = OBJECT_SECTION_DATA; break;
@@ -6383,6 +6384,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_relocation_kind(Target target,
                        : coff ? OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L
                               : (ObjectRelocationKind)(OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12 +
                                                        (kind - ASSEMBLY_RELOCATION_AARCH64_LDST8_LO12));
+        break;
+    case ASSEMBLY_RELOCATION_AARCH64_MACH_TLVP_PAGE21:
+        *object_kind = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21;
+        valid = macho;
+        break;
+    case ASSEMBLY_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
+        *object_kind = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12;
+        valid = macho;
         break;
     // GOT spellings exist on ELF only (#3192); Mach-O and COFF have no kind.
     case ASSEMBLY_RELOCATION_AARCH64_GOT_PAGE21:
