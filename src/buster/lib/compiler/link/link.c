@@ -15,7 +15,8 @@
 // ids — but each owns its image layout whole, because the formats agree
 // on almost nothing. A position-independent image (NativeImageKind SHARED
 // for -shared, PIE for -pie) has one writer,
-// link_native_image_elf64_x86_64_position_independent, for x86-64 Linux; the
+// link_native_image_elf64_x86_64_position_independent, for x86-64 Linux and
+// every x86-64 Android executable (bionic names, no RDX loader finalizer); the
 // dispatcher refuses the kind on every other target, and its own comment
 // states the relocation and preemption rules. link_elf_version_plan_build and
 // link_elf_copy_plan_build are the symbol-version and copy-slot construction
@@ -984,10 +985,13 @@ BUSTER_GLOBAL_LOCAL bool link_x86_register_loader_finalizer(LinkX86InstructionBu
 // left eight bytes short of a sixteen-byte boundary.
 //
 // Hosted startup also registers the loader's finalizer even when the program
-// has no initializer arrays of its own.
+// has no initializer arrays of its own, where `loader_finalizer` says the
+// loader supplies one. glibc's ld.so does; bionic's linker64 jumps to the
+// entry point with RDX unspecified (it runs its own finalizers from libc), so
+// an Android image must not register RDX at all.
 BUSTER_GLOBAL_LOCAL bool link_x86_build_elf_entry_stub(u8* bytes, u32 capacity, u32* byte_count, u32* call_displacement_offset, bool hosted,
-                                                       u32* exit_displacement_offset, u32* atexit_displacement_offset, u32* loader_atexit_offset, LinkInitializerPlan const* plan,
-                                                       u32* initializer_displacement_offsets)
+                                                       bool loader_finalizer, u32* exit_displacement_offset, u32* atexit_displacement_offset,
+                                                       u32* loader_atexit_offset, LinkInitializerPlan const* plan, u32* initializer_displacement_offsets)
 {
     LinkX86InstructionBuilder builder = {.bytes = bytes, .capacity = capacity};
     BusterX86MetadataPhysicalOperand operands[2] = {0};
@@ -1018,7 +1022,7 @@ BUSTER_GLOBAL_LOCAL bool link_x86_build_elf_entry_stub(u8* bytes, u32 capacity, 
     operands[0] = link_x86_register(4, 64);
     operands[1] = link_x86_immediate(-16, 8);
     if (!link_x86_emit(&builder, S8("AND"), operands, 2) ||
-        (hosted && !link_x86_register_loader_finalizer(&builder, loader_atexit_offset))) return false;
+        (hosted && loader_finalizer && !link_x86_register_loader_finalizer(&builder, loader_atexit_offset))) return false;
     if (deferred_destructors)
     {
         // __cxa_atexit(runner, 0, 0).  The rip-relative displacement is the
@@ -5350,7 +5354,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     // No libc in this image: every symbol is defined here, so the freestanding
     // syscall shape is the only way to terminate (see
     // link_x86_build_elf_entry_stub).
-    if (!link_x86_build_elf_entry_stub(entry_stub, link_x86_elf_entry_stub_capacity(&plan), &entry_stub_size, &entry_call_displacement_offset, false, 0, 0, 0,
+    if (!link_x86_build_elf_entry_stub(entry_stub, link_x86_elf_entry_stub_capacity(&plan), &entry_stub_size, &entry_call_displacement_offset, false, false, 0, 0, 0,
                                        &plan, initializer_displacement_offsets))
     {
         result.error = LINK_ERROR_RELOCATION;
@@ -6213,7 +6217,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u8* entry_stub = arena_allocate(arena, u8, link_x86_elf_entry_stub_capacity(&plan));
     u32* initializer_displacement_offsets =
         arena_allocate(arena, u32, plan.constructor_count + plan.destructor_count ? plan.constructor_count + plan.destructor_count : 1);
-    if (!link_x86_build_elf_entry_stub(entry_stub, link_x86_elf_entry_stub_capacity(&plan), &entry_stub_size, &entry_call_displacement_offset, true,
+    if (!link_x86_build_elf_entry_stub(entry_stub, link_x86_elf_entry_stub_capacity(&plan), &entry_stub_size, &entry_call_displacement_offset, true, true,
                                        &entry_exit_displacement_offset, &entry_atexit_displacement_offset, &loader_atexit_displacement_offset, &plan, initializer_displacement_offsets))
     {
         result.error = LINK_ERROR_RELOCATION;
@@ -8031,8 +8035,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
                                                                                                     LinkElfIndex* exports)
 {
     NativeExecutableLinkResult result = {0};
-    static char8 const interpreter[] = "/lib64/ld-linux-x86-64.so.2";
-    static char8 const runtime_library[] = "libc.so.6";
+    // An Android image is the same image for bionic: its loader and its C
+    // library, and no RDX finalizer (link_x86_build_elf_entry_stub).
+    bool bionic = object->target.os == OPERATING_SYSTEM_ANDROID;
+    String8 interpreter = bionic ? S8("/system/bin/linker64") : S8("/lib64/ld-linux-x86-64.so.2");
+    String8 runtime_library = bionic ? S8("libc.so") : S8("libc.so.6");
     static String8 const export_dynamic_spellings[] = {S8_INITIALIZER("-export-dynamic"), S8_INITIALIZER("--export-dynamic"), S8_INITIALIZER("-E")};
     static String8 const no_undefined_spellings[] = {S8_INITIALIZER("--no-undefined"), S8_INITIALIZER("-no-undefined")};
     bool no_undefined = link_elf_linker_argument_present(options, no_undefined_spellings, BUSTER_ARRAY_LENGTH(no_undefined_spellings));
@@ -8096,7 +8103,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
             u32 capacity = link_x86_elf_entry_stub_capacity(&plan);
             entry_stub = arena_allocate(arena, u8, capacity);
             initializer_displacement_offsets = arena_allocate(arena, u32, (u64)plan.constructor_count + plan.destructor_count + 1);
-            if (!link_x86_build_elf_entry_stub(entry_stub, capacity, &entry_stub_size, &entry_call_displacement_offset, true, &entry_exit_displacement_offset,
+            if (!link_x86_build_elf_entry_stub(entry_stub, capacity, &entry_stub_size, &entry_call_displacement_offset, true, !bionic, &entry_exit_displacement_offset,
                                                &entry_atexit_displacement_offset, &loader_atexit_displacement_offset, &plan,
                                                initializer_displacement_offsets))
             {
@@ -8162,7 +8169,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     String8 soname = shared ? link_elf_linker_argument_soname(options) : (String8){0};
     u32 needed_library_count = options.dynamic_library_count + 1;
     u32* library_name_offsets = arena_allocate(arena, u32, (u64)needed_library_count + 1);
-    u64 dynamic_string_size = 1 + sizeof(runtime_library);
+    u64 dynamic_string_size = 1 + runtime_library.length + 1;
     library_name_offsets[0] = 1;
     for (u32 library = 0; result.error == LINK_ERROR_NONE && library < options.dynamic_library_count; library += 1)
     {
@@ -8246,7 +8253,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     section_offsets[OBJECT_SECTION_UNWIND] =
         align_forward(eh_frame_header_offset + eh_frame_header_size, BUSTER_MAX(object->sections[OBJECT_SECTION_UNWIND].alignment, 1u));
     u64 interpreter_offset = section_offsets[OBJECT_SECTION_UNWIND] + object->sections[OBJECT_SECTION_UNWIND].data.length;
-    u64 interpreter_size = shared ? 0 : sizeof(interpreter);
+    u64 interpreter_size = shared ? 0 : interpreter.length + 1;
     u64 dynamic_string_offset = interpreter_offset + interpreter_size;
     u64 dynamic_symbol_offset = align_forward(dynamic_string_offset + dynamic_string_size, 8);
     u64 dynamic_symbol_size = (u64)dynamic_symbol_count * ELF_SYMBOL_SIZE;
@@ -8318,9 +8325,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
                 memcpy(bytes + section_offsets[section], data.pointer, data.length);
             }
         }
-        if (interpreter_size) memcpy(bytes + interpreter_offset, interpreter, interpreter_size);
+        if (interpreter_size) memcpy(bytes + interpreter_offset, interpreter.pointer, interpreter.length);
         // .dynstr: the libraries, the soname, the symbol names, the versions.
-        memcpy(bytes + dynamic_string_offset + library_name_offsets[0], runtime_library, sizeof(runtime_library));
+        memcpy(bytes + dynamic_string_offset + library_name_offsets[0], runtime_library.pointer, runtime_library.length);
         for (u32 library = 0; library < options.dynamic_library_count; library += 1)
         {
             String8 name = options.dynamic_libraries[library].name;
@@ -8396,13 +8403,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     if (result.error == LINK_ERROR_NONE && !shared)
     {
         // The entry stub's calls: `main`, the initializers, `exit` and the
-        // two `__cxa_atexit` registrations, each a rel32 from the stub.
+        // two `__cxa_atexit` registrations, each a rel32 from the stub. A
+        // bionic stub has no loader registration to patch.
         u32 targets[] = {entry_symbol_index, exit_symbol_index, atexit_symbol_index, atexit_symbol_index};
         u32 fields[] = {entry_call_displacement_offset, entry_exit_displacement_offset, loader_atexit_displacement_offset,
                         entry_atexit_displacement_offset};
         u32 call_count = plan.destructor_count ? 4u : 3u;
         for (u32 call = 0; result.error == LINK_ERROR_NONE && call < call_count; call += 1)
         {
+            if (bionic && call == 2) continue;
             u64 address = 0;
             u64 field = entry_stub_offset + fields[call];
             s64 displacement = 0;
@@ -9494,7 +9503,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     u8* x86_stub = arena_allocate(arena, u8, x86_stub_capacity);
     u32 x86_stub_size = 0;
     buster_x86_metadata_prewarm();
-    if (!entry_stub_words || !link_x86_build_elf_entry_stub(x86_stub, x86_stub_capacity, &x86_stub_size, 0, true, 0, 0, 0, &plan, 0))
+    if (!entry_stub_words || !link_x86_build_elf_entry_stub(x86_stub, x86_stub_capacity, &x86_stub_size, 0, true, true, 0, 0, 0, &plan, 0))
     {
         result.error = LINK_ERROR_RELOCATION;
         return result;
@@ -13606,7 +13615,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 }
                 continue;
             }
-            if (!symbol->global || symbol->kind != OBJECT_SYMBOL_FUNCTION || !symbol->name.length)
+            // Functions and data alike: each import has a bound GOT slot, which
+            // GOT loads read, and a stub beside it, which calls reach.
+            if (!symbol->global || !symbol->name.length)
             {
                 result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
                 result.symbol = symbol->name;
@@ -14489,6 +14500,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             {
                 symbol_address = 0;
             }
+            // A GOT load names the slot holding the symbol's address: an
+            // import's bound slot, or, for a definition in this image, the
+            // symbol itself once the load is relaxed to an address below.
+            bool got_load = object_relocation_kind_is_x86_got(relocation->kind) ||
+                            relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 ||
+                            relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12;
             bool thread_local_pointer = false;
             if (result.error == LINK_ERROR_NONE)
             {
@@ -14517,8 +14534,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 }
                 else if (symbol->section == OBJECT_SECTION_UNDEFINED)
                 {
-                    if ((relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12) &&
-                        symbol->kind == OBJECT_SYMBOL_DATA)
+                    // Only a call may reach an import through its stub; any
+                    // other direct reference to imported data would read the
+                    // stub's code.
+                    if (!got_load && symbol->kind == OBJECT_SYMBOL_DATA &&
+                        (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 ||
+                         relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_ABSOLUTE64))
                     {
                         result.error = LINK_ERROR_RELOCATION;
                         result.symbol = symbol->name;
@@ -14533,7 +14554,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                             result.symbol = symbol->name;
                         }
                     }
-                    if (result.error == LINK_ERROR_NONE)
+                    if (result.error == LINK_ERROR_NONE && got_load)
+                    {
+                        if (!link_u64_add(image_base, got_offset, &symbol_address) ||
+                            !link_u64_add(symbol_address, (u64)import_index * sizeof(u64), &symbol_address))
+                        {
+                            result.error = LINK_ERROR_RELOCATION;
+                            result.symbol = symbol->name;
+                        }
+                    }
+                    else if (result.error == LINK_ERROR_NONE)
                     {
                         if (!link_u64_add(text_vm_address, stub_offset, &symbol_address) || import_index > UINT64_MAX / stub_size ||
                             !link_u64_add(symbol_address, (u64)import_index * stub_size, &symbol_address))
@@ -14564,10 +14594,35 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 output_offset = section_offsets[relocation->section] + relocation->offset;
             }
             u64 place_address = 0;
+            if (result.error == LINK_ERROR_NONE && got_load && symbol->section != OBJECT_SECTION_UNDEFINED)
+            {
+                // This image defines the symbol, so no slot is needed: the
+                // x86 load becomes the rip-relative LEA of the symbol and the
+                // AArch64 slot load the ADD of its page offset.
+                if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12)
+                {
+                    u32 instruction = 0;
+                    memcpy(&instruction, bytes + output_offset, sizeof(instruction));
+                    if ((instruction & UINT32_C(0xffc00000)) != UINT32_C(0xf9400000) || (instruction & 31) == 31)
+                    {
+                        result.error = LINK_ERROR_RELOCATION;
+                        result.symbol = symbol->name;
+                    }
+                    link_write_u32(bytes, output_offset, UINT32_C(0x91000000) | (instruction & 0x3ff));
+                }
+                else if (relocation->kind != OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 &&
+                         link_x86_relax_got_reference(relocation->kind, relocation->addend, bytes, output_offset, section_offsets[relocation->section],
+                                                      section_offsets[relocation->section] + section->data.length) != BUSTER_X86_METADATA_GOT_PATCH_PC32)
+                {
+                    result.error = LINK_ERROR_RELOCATION;
+                    result.symbol = symbol->name;
+                }
+            }
             if (result.error == LINK_ERROR_NONE)
             {
                 place_address = image_base + output_offset;
                 if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32 ||
+                    relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 || object_relocation_kind_is_x86_got(relocation->kind) ||
                     relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
                 {
                     s64 value = 0;
@@ -14603,7 +14658,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                         link_write_u32(bytes, output_offset, patched);
                     }
                 }
-                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
+                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ||
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21)
                 {
                     u32 instruction = 0;
                     memcpy(&instruction, bytes + output_offset, sizeof(instruction));
@@ -14617,7 +14673,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                     if (result.error == LINK_ERROR_NONE)
                     {
                         target_address = symbol_address;
-                        if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && !link_address_addend(symbol_address, relocation->addend, &target_address))
+                        if ((relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21) &&
+                            !link_address_addend(symbol_address, relocation->addend, &target_address))
                         {
                             result.error = LINK_ERROR_RELOCATION;
                             result.symbol = symbol->name;
@@ -14679,7 +14736,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                         link_write_u32(bytes, output_offset, instruction);
                     }
                 }
-                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
+                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12)
                 {
                     if (place_address & 3)
                     {
@@ -15069,6 +15126,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     return result;
 }
 
+// Android AArch64 only: x86-64 takes the PIE writer (see the dispatcher).
+// This stages a fixed-address Linux image and marks it ET_DYN, so bionic runs
+// it at a load bias that no absolute address in it accounts for.
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_elf64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options, LinkElfIndex* exports)
 {
     static char8 const interpreter[] = "/system/bin/linker64";
@@ -15090,11 +15150,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
     if (!link_validate_linker_arguments(object->target, options, has_import, &result.symbol))
     {
         result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
-    }
-    else if (object->target.cpu_arch == CPU_ARCH_X86_64)
-    {
-        result = has_import ? link_native_executable_elf64_x86_64_dynamic(arena, &staging_object, staging_options, exports, 0, false, false)
-                            : link_native_executable_elf64_x86_64(arena, &staging_object, staging_options);
     }
     else if (object->target.cpu_arch == CPU_ARCH_AARCH64)
     {
@@ -15633,9 +15688,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
     {
         result.error = LINK_ERROR_INVALID_INPUT;
     }
-    else if (object->target.os == OPERATING_SYSTEM_LINUX &&
-             (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
+    else if ((object->target.os == OPERATING_SYSTEM_LINUX &&
+              (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64)) ||
+             (object->target.os == OPERATING_SYSTEM_ANDROID && object->target.cpu_arch == CPU_ARCH_X86_64))
     {
+        // Bionic's kernel-placed executable is position independent: an
+        // image of link-time addresses marked ET_DYN would run its preinit
+        // entries, IFUNC runner and every data pointer unrelocated. Android
+        // x86-64 therefore always takes the PIE writer.
+        if (object->target.os == OPERATING_SYSTEM_ANDROID && options.image_kind == NATIVE_IMAGE_EXECUTABLE)
+        {
+            options.image_kind = NATIVE_IMAGE_PIE;
+        }
         object = &rebound;
         LinkObjectResult normalized = {.object = *object};
         if (object->target.cpu_arch == CPU_ARCH_X86_64)
@@ -15696,7 +15760,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
     {
         result = link_native_executable_mach_o64(arena, object, options);
     }
-    else if (object->target.os == OPERATING_SYSTEM_ANDROID && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
+    else if (object->target.os == OPERATING_SYSTEM_ANDROID && object->target.cpu_arch == CPU_ARCH_AARCH64)
     {
         result = link_native_executable_android_elf64(arena, &rebound, options, exports);
     }

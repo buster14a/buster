@@ -8127,13 +8127,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_f80(UnitTestArguments* arguments
                             // Resolve only bounded local PC32 calls/addresses before
                             // copying into executable storage; external/data references
                             // fail the test without executing an unpatched module.
+                            // Mach-O spells a direct call PLT32 (BRANCH), whose
+                            // arithmetic is the same.
                             bool patched = true;
                             for (u32 relocation_index = 0; patched && relocation_index < generated.relocation_count; relocation_index += 1)
                             {
                                 CodegenModuleRelocation* relocation = generated.relocations + relocation_index;
                                 bool found = false;
                                 if (codegen_module_relocation_valid(relocation) && relocation->source == CODEGEN_MODULE_RELOCATION_CODE &&
-                                    relocation->kind == CODEGEN_MODULE_RELOCATION_X86_64_PC32 && !relocation->addend &&
+                                    (relocation->kind == CODEGEN_MODULE_RELOCATION_X86_64_PC32 ||
+                                     relocation->kind == CODEGEN_MODULE_RELOCATION_X86_64_PLT32) && !relocation->addend &&
                                     relocation->offset <= generated.code.length && generated.code.length - relocation->offset >= 4)
                                 {
                                     for (u32 entry = 0; !found && entry < generated.entry_count; entry += 1)

@@ -37,6 +37,9 @@ Map (searchable symbols):
     MEASURED_OUTCOMES, MIN_PAIRS, classify                 core validity
     THROUGHPUT_PROFILE, classify_throughput, throughput_digest   corpus (#2761)
     SCALING_REQUEST, SCALING_PROFILE, classify_scaling, scaling_digest   multi-TU scaling (#424)
+    INLINE_ACCEPTANCE_PROFILE, validate_inline_acceptance  issue #48 same-candidate inliner pair
+    AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_BUDGET, ast_pilot_budget_verdict,
+        validate_ast_pilot_acceptance                      issue #3397 -fc-ast-pilot pair
     REGRESSION_POLICIES, regression_policy                 report-only switch
     range_label                                            main baseline relation
     render                                                 readable report
@@ -137,6 +140,39 @@ INLINE_ACCEPTANCE_PROFILE = {
     "measurements": ["wall", "instructions:u", "peak RSS", "executable-section code bytes"],
     "correctness": "each mode's stage-2 output must byte-match its stage-1 compiler"
 }
+# Issue #3397: the -fc-ast-pilot adoption budget of docs/agents/frontend/ast.md
+# (Measurement plan, stage 1) on the pull-compare route. One fresh exact line
+# in ANALYZER_REQUEST_PATH selects it; the flag pair, cells, pair and warm-up
+# counts are frozen here and nothing in the request can change them. Changing
+# any value needs a new name.
+AST_PILOT_ACCEPTANCE_REQUEST_LINE = "profile: ast-pilot-acceptance-v1"
+AST_PILOT_ACCEPTANCE_SCHEMA = "buster-ast-pilot-acceptance-v1"
+AST_PILOT_FLAG = "-fc-ast-pilot"
+AST_PILOT_COMPILE = ["cc", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
+                     "-DBUSTER_INCLUDE_TESTS=0", "-g0", "src/buster/apps/ide/ide.c"]
+AST_PILOT_CELLS = {"syntax-only": "-fsyntax-only", "object": "-c"}
+AST_PILOT_ACCEPTANCE_PROFILE = {
+    "name": "ast-pilot-acceptance-v1",
+    "source": "candidate-HEAD src/buster/apps/ide/ide.c with that build's generated headers, -g0, no link",
+    "compiler": "the one frozen candidate-HEAD tests-off Clang Release ide for both variants",
+    "compiler_modes": {"a": "default; -fc-ast-pilot omitted", "b": "-fc-ast-pilot"},
+    "cells": {"syntax-only": "-fsyntax-only", "object": "-c"},
+    "pairs": 20,
+    "warmups": 1,
+    "pairing": "ABBA",
+    "fresh_copy": True,
+    "cpu": 2,
+    "measurements": ["wall", "instructions:u", "peak RSS", "c_ast.retained_bytes of an untimed -v syntax-only run of B"],
+    "correctness": "byte-identical -c objects, and identical stdout/stderr in every run of both cells",
+    "budget": "docs/agents/frontend/ast.md Measurement plan, stage-1 adoption",
+    "report_only": True,
+}
+# The ast.md adoption budget as numbers. syntax-only: B/A at most 1 - gain in
+# retired instructions and in the median paired wall ratio, whose 95% CI must
+# also exclude 1; object: wall not detectably slower (CI low bound at most 1);
+# every cell: B's median peak RSS above A's by at most retained bytes times
+# (1 + rss_slack).
+AST_PILOT_BUDGET = {"syntax_only_min_gain": 0.01, "rss_slack": 0.05}
 SCALING_SCHEMA = "buster-throughput-scaling-v1"
 SCALING_PROFILE = {
     "name": "scaling-v1",
@@ -302,6 +338,103 @@ def validate_inline_acceptance(summary: object, expected_revision: str, expected
         elif not all(is_number(instructions.get(key)) and math.isfinite(instructions[key]) and instructions[key] > 0
                      for key in ("a_median", "b_median")):
             problems.append(f"issue #48 {stage_name} retired-instruction counts are missing")
+    return problems
+
+
+def _positive(value: object) -> bool:
+    return is_number(value) and math.isfinite(value) and value > 0
+
+
+def ast_pilot_budget_verdict(cells: dict, retained_bytes: int, correctness: dict) -> dict:
+    """{outcome, checks} of the #3397 adoption budget, from per-cell lab metrics.
+
+    Each check is pass, fail, inconclusive (the CI cannot decide) or
+    unavailable (a counter is NA); the outcome fails on any failure, passes
+    only when every check passes, and is inconclusive otherwise."""
+    limit = 1.0 - AST_PILOT_BUDGET["syntax_only_min_gain"]
+    syntax, object_ = cells["syntax-only"], cells["object"]
+    checks = {}
+    ratio = syntax["instructions"].get("ratio")
+    checks["syntax_only_instructions"] = {
+        "ratio": ratio, "limit": limit,
+        "outcome": "unavailable" if ratio is None else "pass" if ratio <= limit else "fail"}
+    wall = syntax["wall"]
+    checks["syntax_only_wall"] = {
+        "ratio": wall["ratio"], "ci_low": wall.get("ci_low"), "ci_high": wall.get("ci_high"), "limit": limit,
+        "outcome": "fail" if wall["ratio"] > limit else
+                   "pass" if wall.get("ci_high") is not None and wall["ci_high"] < 1.0 else "inconclusive"}
+    wall = object_["wall"]
+    checks["object_wall"] = {
+        "ratio": wall["ratio"], "ci_low": wall.get("ci_low"), "ci_high": wall.get("ci_high"), "limit": 1.0,
+        "outcome": "inconclusive" if wall.get("ci_low") is None else "fail" if wall["ci_low"] > 1.0 else "pass"}
+    allowed = retained_bytes * (1.0 + AST_PILOT_BUDGET["rss_slack"])
+    for cell in AST_PILOT_CELLS:
+        rss = cells[cell]["peak_rss"]
+        growth = rss["b_median"] - rss["a_median"]
+        checks[f"{cell}_peak_rss"] = {"a_median": rss["a_median"], "b_median": rss["b_median"], "growth": growth,
+                                      "allowed": allowed, "outcome": "pass" if growth <= allowed else "fail"}
+    checks["correctness"] = {**correctness, "outcome": "pass" if all(value is True for value in correctness.values()) else "fail"}
+    outcomes = [check["outcome"] for check in checks.values()]
+    outcome = "fail" if "fail" in outcomes else "pass" if all(item == "pass" for item in outcomes) else "inconclusive"
+    return {"outcome": outcome, "checks": checks, "budget": dict(AST_PILOT_BUDGET), "report_only": True}
+
+
+def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expected_candidate_sha: str | None = None) -> list[str]:
+    """Validate opt-in #3397 evidence shape and re-derive its budget verdict."""
+    label = "issue #3397 ast-pilot receipt"
+    if not isinstance(summary, dict) or summary.get("schema") != AST_PILOT_ACCEPTANCE_SCHEMA or summary.get("status") != "complete":
+        return [f"{label} has an unexpected or incomplete schema"]
+    problems = []
+    if summary.get("source_revision") != expected_revision:
+        problems.append(f"{label} source revision does not match candidate HEAD")
+    profile = summary.get("profile")
+    if not isinstance(profile, dict) or set(profile) != set(AST_PILOT_ACCEPTANCE_PROFILE) | {"source_sha256"} or \
+            any(profile.get(key) != value for key, value in AST_PILOT_ACCEPTANCE_PROFILE.items()) or \
+            not SHA256.fullmatch(str(profile.get("source_sha256", ""))):
+        problems.append(f"{label} profile does not match the fixed acceptance profile")
+    candidate = summary.get("candidate_compiler")
+    if not isinstance(candidate, dict) or not SHA256.fullmatch(str(candidate.get("sha256", ""))):
+        problems.append(f"{label} candidate compiler identity is missing")
+    elif expected_candidate_sha and candidate.get("sha256") != expected_candidate_sha:
+        problems.append(f"{label} timed compiler differs from the frozen candidate-HEAD binary")
+    cells = summary.get("cells")
+    if not isinstance(cells, dict) or set(cells) != set(AST_PILOT_CELLS):
+        return [*problems, f"{label} does not hold exactly the syntax-only and object cells"]
+    metrics = {}
+    for cell in AST_PILOT_CELLS:
+        row = cells[cell] if isinstance(cells[cell], dict) else {}
+        values = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
+        rss = values.get("peak_rss") if isinstance(values.get("peak_rss"), dict) else {}
+        instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else None
+        if not all(_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio", "ci_low", "ci_high")):
+            problems.append(f"{label} {cell} wall-time measurements are missing")
+        if not all(_positive(rss.get(key)) for key in ("a_median", "b_median")):
+            problems.append(f"{label} {cell} peak-RSS measurements are missing")
+        if instructions is None:
+            problems.append(f"{label} {cell} retired-instruction metric is missing")
+        elif instructions.get("ratio") is None:
+            counters = values.get("counter_availability")
+            if not isinstance(counters, dict) or counters.get("perf_stat") is not False or not counters.get("reason"):
+                problems.append(f"{label} {cell} retired-instruction NA has no unavailable-counter reason")
+        elif not _positive(instructions.get("ratio")) or \
+                not all(_positive(instructions.get(key)) for key in ("a_median", "b_median")):
+            problems.append(f"{label} {cell} retired-instruction counts are invalid")
+        for key in ("outputs_identical", "diagnostics_identical"):
+            if type(row.get(key)) is not bool:
+                problems.append(f"{label} {cell} {key} is not recorded")
+        metrics[cell] = values
+    tree = summary.get("tree")
+    retained = tree.get("retained_bytes") if isinstance(tree, dict) else None
+    if type(retained) is not int or retained <= 0 or not isinstance(tree.get("nodes"), int) or tree["nodes"] <= 0 or \
+            tree.get("a_tree_lines") != 0:
+        problems.append(f"{label} tree retained bytes are missing, or variant A built a tree")
+    if problems:
+        return problems
+    correctness = {"object_outputs_identical": cells["object"]["outputs_identical"],
+                   "diagnostics_identical": all(cells[cell]["diagnostics_identical"] for cell in AST_PILOT_CELLS)}
+    if summary.get("verdict") != ast_pilot_budget_verdict(metrics, retained, correctness):
+        problems.append(f"{label} verdict differs from the budget recomputed from its metrics")
     return problems
 
 
@@ -2856,6 +2989,36 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
                 inline_summary.get("fixed_point", {}).get(fixed_key, "NA")))
         if inline.get("exit") not in (None, 0):
             lines.append(f"Issue #48 profile exit: {inline.get('exit')}.")
+    ast = receipt.get("ast_pilot_acceptance") if isinstance(receipt, dict) else None
+    if isinstance(ast, dict) and ast.get("requested"):
+        ast_summary = ast.get("summary") if isinstance(ast.get("summary"), dict) else {}
+        verdict = ast_summary.get("verdict") if isinstance(ast_summary.get("verdict"), dict) else {}
+        checks = verdict.get("checks") if isinstance(verdict.get("checks"), dict) else {}
+        tree = ast_summary.get("tree") if isinstance(ast_summary.get("tree"), dict) else {}
+        lines += ["", f"Issue #3397 -fc-ast-pilot adoption budget: {ast.get('status', 'NA')}, verdict "
+                  f"{verdict.get('outcome', 'NA')} ({AST_PILOT_ACCEPTANCE_PROFILE['pairs']} ABBA pairs per cell; "
+                  "report-only; budget in docs/agents/frontend/ast.md).",
+                  "One candidate binary: A = default, B passes -fc-ast-pilot. Ratios below 1 mean B is lower. "
+                  "Counters may be NA when the host cannot schedule them.",
+                  f"Tree retained bytes (B, -v): {number(tree.get('retained_bytes'), '%.0f')}.", "",
+                  "| Cell | Wall B/A [95% CI] | Retired instructions B/A | Peak RSS A / B | Outputs identical | Diagnostics identical |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        cells = ast_summary.get("cells") if isinstance(ast_summary.get("cells"), dict) else {}
+        for cell in AST_PILOT_CELLS:
+            row = cells.get(cell) if isinstance(cells.get(cell), dict) else {}
+            values = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+            wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
+            rss = values.get("peak_rss") if isinstance(values.get("peak_rss"), dict) else {}
+            lines.append("| %s | %s [%s, %s] | %s | %s / %s | %s | %s |" % (
+                cell, number(wall.get("ratio"), "%.4f"), number(wall.get("ci_low"), "%.4f"),
+                number(wall.get("ci_high"), "%.4f"), number((values.get("instructions") or {}).get("ratio"), "%.4f"),
+                number(rss.get("a_median"), "%.0f"), number(rss.get("b_median"), "%.0f"),
+                row.get("outputs_identical", "NA"), row.get("diagnostics_identical", "NA")))
+        lines += ["", "| Budget check | Outcome |", "| --- | --- |"]
+        lines += [f"| {name} | {check.get('outcome', 'NA') if isinstance(check, dict) else 'NA'} |"
+                  for name, check in checks.items()]
+        if ast.get("exit") not in (None, 0):
+            lines.append(f"Issue #3397 profile exit: {ast.get('exit')}.")
     reasons = receipt.get("reasons") if isinstance(receipt, dict) else None
     warnings = summary.get("warnings")
     for item in (*notes, *(reasons if isinstance(reasons, list) else ()),
