@@ -39,7 +39,11 @@ The driver verifies the exact Git pin and rejects tracked, untracked, ignored,
 sparse and hidden-index inputs through the existing compatibility controls.
 The output is an exclusively claimed fresh directory outside the canonical
 upstream source directory. Builds occur out of tree and source admission
-is repeated after the cells. The controls' isolated Git fixture covers
+is repeated after the cells. The pin's 11 optional test-integration gitlinks
+must match their declared paths/commits and remain absent or empty. Populated
+submodules are refused by this intake. Their upstream tests remain explicitly
+unsupported/skipped where upstream reports them; this is not an all-integration
+qualification. The controls' isolated Git fixture covers
 wrong pin, dirty tracked source, ignored/untracked inputs and hidden index flags.
 
 The bounded cells are `linux-x86_64 --debug shared`, first with `no-asm` and

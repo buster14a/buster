@@ -97,6 +97,90 @@ BUSTER_GLOBAL_LOCAL RaddebuggerCommandResult openssl_command(Arena* arena, Slice
     return result;
 }
 
+// The upstream pin declares optional test integrations as gitlinks. This
+// intake accepts their exact pinned entries only while their directories are
+// absent or empty; populated integrations require a separate input inventory.
+BUSTER_GLOBAL_LOCAL bool openssl_gitlink_admitted(Arena* arena, String8 root, String8 entry)
+{
+    String8 paths[] = {S8("cloudflare-quiche"), S8("fuzz/corpora"), S8("gost-engine"), S8("krb5"), S8("oqs-provider"), S8("pkcs11-provider"), S8("pyca-cryptography"), S8("python-ecdsa"), S8("tlsfuzzer"), S8("tlslite-ng"), S8("wycheproof")};
+    String8 commits[] = {S8("7ab6a55cfe471267d61e4d28ba43d41defcd87e0"), S8("ce771805c094d098c25a218bc8e9f7344eccbc5a"), S8("74b1f4fddbc2d6de969815b1992ddc1ae7c643fe"), S8("784c38f50e70a739400cdd3f2620bac2e2788e6c"), S8("7bc597c04b534ddea9b6654481deb31ded8e1bbc"), S8("64fc325ac0f91d03d76b3546df2998d3a38c525b"), S8("7e33b0e7739d633c77b8c478620167f693ed13f4"), S8("4096fa01715929e08b97e73f3173aee9d57f2a3f"), S8("61f45d9701294fd87ef92d2a7e3dfb076653a562"), S8("77ef321dde1a9e6bcf94d73c80f8789a770d8031"), S8("2196000605e45d91097147c9c71f26b72af58003")};
+    bool valid = false;
+    if (entry.length > 52 && entry.pointer[49] == ' ' && entry.pointer[50] == '0' && entry.pointer[51] == '\t')
+    {
+        String8 path = string_slice(entry, 52, entry.length);
+        String8 commit = string_slice(entry, 9, 49);
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(paths); i += 1)
+        {
+            if (string_equal(path, paths[i]) && string_equal(commit, commits[i]))
+            {
+                String8 directory = path_join(arena, root, path);
+                valid = !path_exists(arena, directory);
+                if (!valid)
+                {
+                    String8 canonical = os_path_absolute(arena, directory, true);
+                    MuslDirectoryEntry* entries = 0;
+                    u64 count = 0;
+                    valid = string_equal(canonical, directory) && musl_list_directory(arena, directory, &entries, &count) && count == 0;
+                }
+                break;
+            }
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool openssl_git_verify(Arena* arena, String8 git, String8 source_directory, String8 expected_commit, bool* stopped)
+{
+    String8 root_arguments[] = {git, S8("-c"), S8("core.fsmonitor=false"), S8("rev-parse"), S8("--show-toplevel")};
+    RaddebuggerCommandResult root = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(root_arguments), source_directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
+    String8 reported_root = os_path_absolute(arena, compat_trim_ascii_space(root.output), true);
+    bool valid = raddebugger_command_ok(root) && reported_root.length && string_equal(reported_root, source_directory);
+    String8 commit = {0};
+    if (valid)
+    {
+        String8 head_arguments[] = {git, S8("-c"), S8("core.fsmonitor=false"), S8("rev-parse"), S8("HEAD")};
+        RaddebuggerCommandResult head = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), source_directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
+        commit = compat_trim_ascii_space(head.output);
+        valid = raddebugger_command_ok(head) && string_equal(commit, expected_commit);
+    }
+    if (valid)
+    {
+        // Ignored local headers can override upstream includes. Index flags
+        // can conceal edited tracked files from status, so neither is accepted.
+        String8 status_arguments[] = {git, S8("-c"), S8("core.fsmonitor=false"), S8("status"), S8("--porcelain"), S8("--untracked-files=all"), S8("--ignored")};
+        RaddebuggerCommandResult status = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_arguments), source_directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
+        valid = raddebugger_command_ok(status) && !status.output.length;
+    }
+    if (valid)
+    {
+        String8 index_arguments[] = {git, S8("-c"), S8("core.fsmonitor=false"), S8("ls-files"), S8("-v"), S8("--stage"), S8("-z")};
+        RaddebuggerCommandResult index = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(index_arguments), source_directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
+        valid = raddebugger_command_ok(index) && index.output.length;
+        for (u64 offset = 0; valid && offset < index.output.length;)
+        {
+            u64 end = offset;
+            while (end < index.output.length && index.output.pointer[end])
+            {
+                end += 1;
+            }
+            String8 entry = string_slice(index.output, offset, end);
+            valid = end < index.output.length && entry.length > 9 && entry.pointer[0] == 'H' && entry.pointer[1] == ' ' &&
+                    (string_equal(string_slice(entry, 2, 8), S8("100644")) || string_equal(string_slice(entry, 2, 8), S8("100755")) ||
+                     (string_equal(string_slice(entry, 2, 8), S8("160000")) && string_equal(expected_commit, S8(BUSTER_OPENSSL_COMMIT)) &&
+                      openssl_gitlink_admitted(arena, source_directory, entry)));
+            offset = end + 1;
+        }
+    }
+    if (valid)
+    {
+        String8 sparse_arguments[] = {git, S8("config"), S8("--bool"), S8("--default=false"), S8("--get"), S8("core.sparseCheckout")};
+        RaddebuggerCommandResult sparse = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(sparse_arguments), source_directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
+        valid = raddebugger_command_ok(sparse) && string_equal(compat_trim_ascii_space(sparse.output), S8("false"));
+    }
+    string_print(S8("OPENSSL_SOURCE commit={S8} expected={S8} pristine={u32} path={S8}\n"), commit, expected_commit, (u32)valid, source_directory);
+    return valid;
+}
+
 typedef enum OpensslRoute
 {
     OPENSSL_ROUTE_C,
@@ -265,7 +349,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult openssl_main(Arena* arena, SliceString8 argume
         {
             output = path_join(arena, parent, quickjs_basename(output));
             valid = !string_equal(parent, source) && !string_starts_with_sequence(parent, string_format(arena, S8("{S8}/"), source)) &&
-                    raddebugger_git_verify(arena, git, source, S8(BUSTER_OPENSSL_COMMIT), &stopped);
+                    openssl_git_verify(arena, git, source, S8(BUSTER_OPENSSL_COMMIT), &stopped);
         }
         bool claimed = valid && summary_self_test_directory_claim(output) == SUMMARY_DIRECTORY_CLAIMED;
         valid = claimed && valid;
@@ -323,7 +407,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult openssl_main(Arena* arena, SliceString8 argume
                                   tested ? S8("pass") : built ? S8("fail") : S8("not-run")));
                 string_print(S8("OPENSSL_CELL name={S8} configure={u32} build={u32} tests={u32}\n"), name, (u32)configured, (u32)built, (u32)tested);
             }
-            bool pristine = raddebugger_git_verify(arena, git, source, S8(BUSTER_OPENSSL_COMMIT), &stopped);
+            bool pristine = openssl_git_verify(arena, git, source, S8(BUSTER_OPENSSL_COMMIT), &stopped);
             valid = pristine && valid;
             String8 receipt = string_format(arena, S8("BUSTER_OPENSSL_INTAKE_V1\nupstream={S8}\npristine={u32}\nbuild_test_cells={S8}\n"
                                                      "target=x86_64-linux\nconfiguration=debug-shared\nlinker=external-clang\n"
@@ -335,6 +419,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult openssl_main(Arena* arena, SliceString8 argume
             valid = clang_suite_write(arena, path_join(arena, output, S8("receipt.txt")), receipt) && valid;
         }
 #else
+        BUSTER_UNUSED(driver);
         string_print_error(S8("error: OpenSSL intake is supported only on Linux x86-64\n"));
 #endif
     }
