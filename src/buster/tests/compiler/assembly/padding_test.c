@@ -196,7 +196,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_unit_x86_relaxation_tests(UnitTestAr
         u8 bytes[16];
         u32 length;
     } const cases[] = {
-        {S8_INITIALIZER("jmp .L1\nret\n.L1:\nret\njmp .L1\n"), {0xeb, 1, 0xc3, 0xc3, 0xeb, 0xfb}, 6},
+        {S8_INITIALIZER("jmp .L1\nret\n.L1:\nret\njmp .L1\n"), {0xeb, 1, 0xc3, 0xc3, 0xeb, 0xfd}, 6},
         {S8_INITIALIZER("jmp .L1\n.set .L1, . - 1\n"), {0xeb, 0xff}, 2},
         {S8_INITIALIZER(".set .Lalias, .Lend\njmp .Lalias\n.Lend: ret\n"), {0xeb, 0, 0xc3}, 3},
         {S8_INITIALIZER("1: jmp 2f\nret\n2: jne 1b\n"), {0xeb, 1, 0xc3, 0x75, 0xfb}, 5},

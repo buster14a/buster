@@ -1568,6 +1568,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_label_case(UnitTestArgum
         String8 expected = {.pointer = expected_bytes, .length = (u64)(cursor - expected_bytes)};
         String8 assembly = object_print_assembly(arguments->arena, &object);
         BUSTER_STRING_TEST(arguments, assembly, expected);
+        if (BUSTER_REQUIRE(arguments, assembly.length != 0))
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, assembly, (AssemblyEncodeOptions){.target = object.target});
+            if (BUSTER_REQUIRE(arguments, !unit.diagnostic_count && unit.section_count != 0))
+            {
+                BUSTER_TEST(arguments, unit.relocation_count == 0);
+                BUSTER_TEST(arguments, unit.sections[0].data.length == length &&
+                                           memcmp(unit.sections[0].data.pointer, data, length) == 0);
+            }
+        }
     }
     scratch_end(temporary);
     return result;
@@ -5632,7 +5642,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_x86_short_branch_roundtrip(UnitTe
     {
         TemporalArena scope = arena_begin_temporal(arguments->arena);
         u8 opcode = condition == 16 ? 0xeb : (u8)(0x70 | condition);
-        u8 data[] = {opcode, 1, 0xc3, 0xc3, opcode, 0xfb};
+        u8 data[] = {opcode, 1, 0xc3, 0xc3, opcode, 0xfd};
         ObjectSection section = {.kind = OBJECT_SECTION_TEXT, .data = BUSTER_ARRAY_TO_SLICE(data)};
         ObjectFile object = {.target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX}, .sections = &section, .section_count = 1};
         String8 assembly = object_print_assembly(arguments->arena, &object);
