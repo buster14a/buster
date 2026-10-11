@@ -26,7 +26,7 @@ LIFECYCLE = WORKFLOWS / "9700x-lifecycle.yml"
 ACTIONLINT = ROOT / ".github" / "actionlint.yaml"
 BENCHMARKING = ROOT / "docs" / "agents" / "benchmarking.md"
 ADMISSION_GUIDE = ROOT / "benchmarks" / "9700x" / "ADMISSION.md"
-RADDEBUGGER = WORKFLOWS / "raddebugger-compatibility.yml"
+RADDEBUGGER = WORKFLOWS / "external-projects.yml"
 
 # Re-running failed or single jobs reuses earlier successful job outputs, so
 # the host job is bound to an authorization produced in this same attempt.
@@ -1061,15 +1061,15 @@ def check_utility_path(errors: list[str], direct: str | None = None) -> None:
             errors.append(f"utility lacks the exact admitted {key} binding")
 
 def check_postmerge_diagnostics(errors: list[str], text: str | None = None) -> None:
-    """RAD Debugger tests every triggering main SHA without a pre-merge path."""
+    """The shared external-project owner retains RAD on each exact main SHA."""
     text = RADDEBUGGER.read_text(encoding="utf-8") if text is None else text
     if trigger_block(text) != COMPILER_REQUEST_TRIGGER:
         errors.append("RAD Debugger must trigger only on unfiltered pushes to main")
-    for marker in ("ref: ${{ github.sha }}", "group: raddebugger-${{ github.run_id }}",
+    for marker in ("ref: ${{ github.sha }}", "group: external-projects-${{ github.run_id }}",
                    "cancel-in-progress: false", "contents: read", "persist-credentials: false",
-                   "ref: f6b4a38134652886239b91f940cd7a67fedf689d", "if: always()",
-                   "test_raddebugger --self-test", "test_raddebugger --config Release",
-                   "Retain exact-source diagnostics including failures"):
+                   "ref: f6b4a38134652886239b91f940cd7a67fedf689d", "always()",
+                   "test_raddebugger --self-test", "external_projects rad",
+                   "Retain rad evidence immediately", "build/rad-compiler", "timeout-minutes: 360"):
         if marker not in text:
             errors.append(f"RAD Debugger is missing post-merge evidence marker: {marker}")
     if "github.event.pull_request" in text or "contents: write" in text:
@@ -1083,9 +1083,11 @@ def check_premerge_checks(errors: list[str], rules: dict | None = None, admissio
     for rule in rules.get("rules", []):
         for check in rule.get("parameters", {}).get("required_status_checks", []):
             context = check.get("context", "")
-            if context.startswith("9700X ") or context in ("RAD Debugger compatibility", "linux-x86-64"):
+            if context.startswith("9700X ") or context in ("RAD Debugger compatibility", "linux-x86-64",
+                    "External projects after merge", "Linux x86-64 external projects",
+                    "macOS AArch64 inventory (qualification pending)", "Windows x86-64 inventory (qualification pending)"):
                 errors.append(f"post-merge diagnostic is required before merging: {context}")
-    for marker in ("raddebugger-compatibility.yml", "9700x-direct-bench.yml",
+    for marker in ("raddebugger-compatibility.yml", "external-projects.yml", "9700x-direct-bench.yml",
                    "9700x-direct-request.yml", "9700x-compiler-request.yml"):
         if marker in admission:
             errors.append(f"post-merge diagnostic participates in merge admission: {marker}")
