@@ -1226,7 +1226,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_rejections(UnitTestArgument
             BUSTER_TEST(arguments, no_output);
             BUSTER_TEST(arguments, exact);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
