@@ -1463,4 +1463,38 @@ the same way and diagnostic only:
 - The default path is within +0.006%.
 - Zen 5 validation stays incomplete (#2761).
 
+For the member-tail width (`c_ast_types_probe_fails`, row 2 of the decline
+census in audit `2026-10-11T093336Z`,
+[#3408](https://github.com/buster14a/buster/pull/3408)),
+these budgets were declared before its measured runs. They use the stage-2
+input and flags (`-g0 -fsyntax-only` and `-g0 -c`) and the four Callgrind
+arms (`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3`
+Release builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `4e5d563f`, which the candidate branches from. The budgets:
+- **Proof first.** A throwaway census build of the base must show, over the
+  whole self-host compile, that every bit-field probe the new rule calls
+  failing does fail and appends no row, and must account for the 120 rows
+  that the census's 1,424 runs append. Without both, no code ships.
+- **Correctness.**
+  - no verify mismatch over the corpus, with the existing answer floors;
+  - a mutation that hands the parent a nonzero width where the rule says 0
+    must fail the corpus gate;
+  - identical diagnostics with and without the flag;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **The slice's own effect (C against B).** Fewer instructions in the whole
+  `-fsyntax-only` compile, with the token test charged, together with fewer
+  machine runs from queries and fewer tree declines. The census ceiling is
+  about 18.6 M. If C is not below B, nothing ships, and the result is recorded
+  on #3102 as a negative one.
+- **Default path (D against A).** The change is confined to the typer, so the
+  default path stays within ±0.05% Ir on `-fsyntax-only` and on `-c` (`-g0`).
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete (#2761) and
+  the hook stays opt-in.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
