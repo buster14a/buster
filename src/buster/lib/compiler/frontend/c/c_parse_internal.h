@@ -256,6 +256,20 @@ enum
 };
 BUSTER_F_DECL u64 c_test_parse_nesting_count(u32 slot);
 
+// Token visits and delimiter/ancestor operations in nested-tag scans.
+// The position-index token population is charged once for its actual build.
+enum
+{
+    C_TEST_PARSE_TAG_SCAN_INDEX_TOKENS,
+    C_TEST_PARSE_TAG_SCAN_DELIMITER_STEPS,
+    C_TEST_PARSE_TAG_SCAN_LAYOUT_TOKENS,
+    C_TEST_PARSE_TAG_SCAN_ALIGNMENT_TOKENS,
+    C_TEST_PARSE_TAG_SCAN_MEMBER_TOKENS,
+    C_TEST_PARSE_TAG_SCAN_ANCESTOR_STEPS,
+    C_TEST_PARSE_TAG_SCAN_SLOTS,
+};
+BUSTER_F_DECL u64 c_test_parse_tag_scan_count(u32 slot);
+
 // Observable answers of the five production specifier-word token queries,
 // including their qualifier writes. No counters or state enter production.
 enum

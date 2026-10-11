@@ -1981,3 +1981,100 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_unused_size_relo
     }
     return result;
 }
+
+// An unindexed archive must read every member's symbol table to choose a
+// provider, so an unreadable one rejects the archive even when only an earlier
+// member would be selected; skipping it could hand a later member a symbol the
+// skipped one defines first. The refusal names the archive and member. A ranlib
+// index over the same members defers the bad member until selection (#1319).
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_unindexed_unreadable_member(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    for (u32 kind = 0; kind < 2; kind += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        Arena* arena = arguments->arena;
+        ObjectSymbol needed_symbol = {.name = S8("needed"), .section = OBJECT_SECTION_DATA, .global = true};
+        ObjectSymbol unused_symbol = {.name = S8("unused"), .section = OBJECT_SECTION_DATA, .global = true};
+        ObjectFile members[] = {
+            compiler_driver_archive_test_object(arena, target, &needed_symbol, 1, 1),
+            compiler_driver_archive_test_object(arena, target, &unused_symbol, 1, 2),
+        };
+        ByteSlice bytes = compiler_driver_archive_test_bytes(arena, members, BUSTER_ARRAY_LENGTH(members), kind);
+        ObjectArchive intact = object_archive_read_link(arena, bytes, target);
+        if (BUSTER_REQUIRE(arguments, intact.error == OBJECT_ERROR_NONE && intact.object_count == 2))
+        {
+            // Member payloads borrow the archive bytes; a 23-byte symbol entry
+            // size makes member1.o's symbol table unreadable.
+            ByteSlice payload = intact.member_bytes[1];
+            u64 table = 0;
+            u16 count = 0;
+            memcpy(&table, payload.pointer + 40, sizeof(table));
+            memcpy(&count, payload.pointer + 60, sizeof(count));
+            bool changed = false;
+            for (u32 section = 0; section < count && !changed; section += 1)
+            {
+                u64 header = table + (u64)section * 64;
+                u32 type = 0;
+                memcpy(&type, payload.pointer + header + 4, sizeof(type));
+                if (type == 2)
+                {
+                    compiler_driver_archive_test_integer(payload.pointer + header + 56, 23, 8, false);
+                    changed = true;
+                }
+            }
+            BUSTER_TEST(arguments, changed);
+            ObjectArchive archive = object_archive_read_link(arena, bytes, target);
+            if (kind)
+            {
+                ObjectSymbol request = {.name = S8("needed"), .section = OBJECT_SECTION_UNDEFINED, .global = true};
+                ObjectFile selected[3] = {compiler_driver_archive_test_object(arena, target, &request, 1, 0)};
+                u32 selected_count = 1;
+                CompilerDriverArchiveState state = {.arena = arena_create((ArenaCreation){.flags = {.no_pool = true}})};
+                BUSTER_TEST(arguments, archive.error == OBJECT_ERROR_NONE);
+                compiler_driver_archive_extract(arena, &state, &archive, selected, &selected_count);
+                BUSTER_TEST(arguments, archive.error == OBJECT_ERROR_NONE && selected_count == 2 && !archive.member_bytes[0].pointer &&
+                                       archive.member_bytes[1].pointer);
+                if (state.arena) arena_destroy(state.arena, 1);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, archive.error == OBJECT_ERROR_INVALID_INPUT && archive.failed_member == 1);
+                BUSTER_STRING_TEST(arguments, archive.diagnostic, S8("member member1.o: unreadable symbol table in an archive without a symbol index"));
+                // The driver keeps the reader's attribution and adds the path,
+                // both for a positional archive and for one found through -l.
+                String8 root = buster_test_temporary_path(arena, S8("buster-unindexed-unreadable-member"), S8(""));
+                os_make_directory(root);
+                String8 archive_path = string_format_z(arena, S8("{S8}/libbuster1319_unindexed.a"), root);
+                ObjectSymbol caller_symbols[] = {
+                    {.name = S8("main"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+                    {.name = S8("needed"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+                };
+                ObjectFile caller = compiler_driver_archive_test_object(arena, target, caller_symbols, BUSTER_ARRAY_LENGTH(caller_symbols), 0);
+                u8 code[] = {0x31, 0xc0, 0xc3};
+                caller.sections[OBJECT_SECTION_TEXT].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(code);
+                ObjectArtifact artifact = object_write(arena, &caller, OBJECT_FORMAT_ELF64);
+                String8 input = string_format_z(arena, S8("{S8}/main.o"), root);
+                String8 output = string_format_z(arena, S8("{S8}/linked"), root);
+                if (BUSTER_REQUIRE(arguments, artifact.error == OBJECT_ERROR_NONE && file_write(input, artifact.bytes) && file_write(archive_path, bytes)))
+                {
+                    String8 expected = string_format(arena, S8("could not read archive {S8}: member member1.o: unreadable symbol table in an archive without a symbol index"),
+                                                    archive_path);
+                    CompilerDriverResult positional = compiler_driver_archive_test_default_link(arena, S8("x86_64-linux"), root, input, archive_path,
+                                                                                                (String8){0}, output);
+                    BUSTER_TEST(arguments, positional.error == COMPILER_DRIVER_ERROR_OBJECT);
+                    BUSTER_STRING_TEST(arguments, positional.diagnostic, expected);
+                    CompilerDriverResult searched = compiler_driver_archive_test_default_link(arena, S8("x86_64-linux"), root, input,
+                                                                                              S8("-lbuster1319_unindexed"), root, output);
+                    BUSTER_TEST(arguments, searched.error == COMPILER_DRIVER_ERROR_OBJECT);
+                    BUSTER_STRING_TEST(arguments, searched.diagnostic, expected);
+                }
+                os_file_delete(input);
+                os_file_delete(archive_path);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
