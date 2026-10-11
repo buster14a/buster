@@ -37,7 +37,7 @@ delivery, and guest loopback UDP. These are smoke controls, not upstream
 selftests or pthread/synchronization qualification. They run with no guest
 network interface, shared host directories, physical disks, or passthrough.
 
-Distribution QEMU with software TCG and its independent firmware boots this
+Distribution QEMU's named `max` CPU model with software TCG and its independent firmware boots this
 reference. No Buster-built QEMU, musl, BusyBox, or guest compiler is used.
 QEMU/firmware, GCC/binutils, glibc, cpio, host generators and their libraries
 are external prerequisites. The workflow records installed package versions,
@@ -71,7 +71,7 @@ The native invocation, after preparing the trusted initramfs and compiler, is:
 Output must not exist. The tool never deletes/reuses a previous result tree.
 The source commit must match the pin; tracked/untracked source drift before
 or after execution fails the diagnostic. Each stage has an independent bound:
-reference configure 120 s, reference build 600 s, reference boot 90 s,
+reference configure 120 s, reference build 600 s, reference boot 90 s, prior `qemu64` exception diagnostic 3 s,
 candidate configure 60 s, and each selected target-C replay 15 s. A timeout
 kills the stage's process group and remains exit 124. Job limits are not
 evidence of successful kernel work.
@@ -141,3 +141,8 @@ QEMU exit zero alone is insufficient: a prior nonrelocatable reference exited
 in 0.09 s with an empty serial log and was rejected before candidate work.
 The declared fixture now enables relocation and early boot diagnostics;
 relocation's role in that earlier exit is not independently established.
+
+The accepted reference CPU cell is `max`. The prior `qemu64` cell is
+retained only as a bounded exception diagnostic: its exit status is never a
+reference pass. The same kernel and initramfs are used in both cells.
+A CPU-model difference, if observed, does not qualify `qemu64` support.

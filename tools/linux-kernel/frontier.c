@@ -486,10 +486,25 @@ BUSTER_GLOBAL_LOCAL int kernel_frontier(char const* fragment)
     valid = valid && kernel_run("reference-build", context->source, build, 600) == 0;
     char kernel[KERNEL_PATH_BYTES];
     valid = kernel_path(kernel, context->reference, "arch/x86/boot/bzImage") && valid;
-    char* boot[] = {"qemu-system-x86_64", "-machine", "pc,accel=tcg", "-cpu", "qemu64", "-smp", "1",
+    char* boot[] = {"qemu-system-x86_64", "-machine", "pc,accel=tcg", "-cpu", "max", "-smp", "1",
         "-m", "128", "-nodefaults", "-display", "none", "-serial", "stdio", "-monitor", "none", "-nic", "none",
         "-no-reboot", "-d", "guest_errors,cpu_reset", "-kernel", kernel, "-initrd", context->initramfs,
         "-append", "console=ttyS0 earlycon=uart8250,io,0x3f8,115200 rdinit=/init panic=-1", 0};
+    if (valid)
+    {
+        // Retain the previously failing CPU cell as a diagnostic only.
+        for (size_t i = 0; boot[i]; ++i)
+        {
+            if (strcmp(boot[i], "-cpu") == 0) { boot[i + 1] = "qemu64"; }
+            if (strcmp(boot[i], "-d") == 0) { boot[i + 1] = "int,guest_errors,cpu_reset"; }
+        }
+        kernel_run("reference-boot-qemu64-diagnostic", context->source, boot, 3);
+        for (size_t i = 0; boot[i]; ++i)
+        {
+            if (strcmp(boot[i], "-cpu") == 0) { boot[i + 1] = "max"; }
+            if (strcmp(boot[i], "-d") == 0) { boot[i + 1] = "guest_errors,cpu_reset"; }
+        }
+    }
     valid = valid && kernel_run("reference-boot", context->source, boot, 90) == 0 &&
             kernel_path(log, context->output, "reference-boot.log") &&
             kernel_contains(log, "LINUX_CONTROL_SUMMARY attempted=7 passed=7 failed=0 skipped=0") &&
