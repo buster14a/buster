@@ -16235,6 +16235,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_empty_dependency_names(U
                     BUSTER_TEST(arguments, no_storage_result.error == COMPILER_DRIVER_ERROR_ARGUMENT);
                     BUSTER_STRING_TEST(arguments, no_storage_result.diagnostic,
                         string_format(arena, S8("missing dependency name storage after {S8}"), options[option]));
+                    no_storage.query = COMPILER_DRIVER_QUERY_LINKER_VERSION;
+                    CompilerDriverResult query_no_storage = compiler_driver_execute_invocation(arena, no_storage);
+                    BUSTER_TEST(arguments, query_no_storage.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                    BUSTER_STRING_TEST(arguments, query_no_storage.diagnostic, no_storage_result.diagnostic);
+                    String8 empty_name[] = {S8("")};
+                    if (option) { no_storage.frameworks = empty_name; }
+                    else { no_storage.libraries = empty_name; }
+                    CompilerDriverResult query_empty = compiler_driver_execute_invocation(arena, no_storage);
+                    BUSTER_TEST(arguments, query_empty.error == COMPILER_DRIVER_ERROR_ARGUMENT && query_empty.output.length == 0);
+                    BUSTER_STRING_TEST(arguments, query_empty.diagnostic, diagnostics[option]);
+                    no_storage.library_count = 0;
+                    no_storage.framework_count = 0;
+                    CompilerDriverResult query_valid = compiler_driver_execute_invocation(arena, no_storage);
+                    BUSTER_TEST(arguments, query_valid.error == COMPILER_DRIVER_ERROR_NONE && query_valid.output.length != 0);
+                    no_storage.library_count = UINT32_MAX;
+                    CompilerDriverResult query_oversized = compiler_driver_execute_invocation(arena, no_storage);
+                    BUSTER_TEST(arguments, query_oversized.error == COMPILER_DRIVER_ERROR_ARGUMENT && query_oversized.output.length == 0);
+                    BUSTER_STRING_TEST(arguments, query_oversized.diagnostic, S8("native library counts exceed driver limits"));
                     String8 valid[] = {S8("-target"), targets[target_index], source, options[option], S8("BusterValid3643")};
                     CompilerDriverInvocation accepted = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(valid));
                     BUSTER_TEST(arguments, accepted.error == COMPILER_DRIVER_ERROR_NONE);

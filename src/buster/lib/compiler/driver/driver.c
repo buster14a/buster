@@ -1046,6 +1046,15 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_linker_query(CompilerDriverInv
 // Embedding callers bypass argv parsing, so validate their lists here too.
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_names(Arena* arena, CompilerDriverInvocation* invocation)
 {
+    // Count admission precedes all array reads, including a linker query.
+    u64 library_count = (u64)invocation->library_count + invocation->framework_count;
+    u32 library_reserve = invocation->target.os == OPERATING_SYSTEM_WINDOWS ? 8u : invocation->target.os == OPERATING_SYSTEM_LINUX ? COMPILER_DRIVER_ELF_SCRIPT_MEMBERS + 3u : 0u;
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE &&
+        (library_count >= (u64)UINT32_MAX - library_reserve || invocation->library_path_count > UINT32_MAX - 9u))
+    {
+        invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation->diagnostic = S8("native library counts exceed driver limits");
+    }
     if (invocation->error == COMPILER_DRIVER_ERROR_NONE &&
         ((invocation->library_count && !invocation->libraries) || (invocation->framework_count && !invocation->frameworks)))
     {
@@ -1074,6 +1083,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_request(Arena* arena, Compiler
     {
         compiler_driver_reject_gpu_native_options(arena, invocation, 0, 0);
     }
+    compiler_driver_validate_dependency_names(arena, invocation);
     compiler_driver_validate_codegen_request(invocation, false);
     compiler_driver_validate_dependency_request(arena, invocation);
     compiler_driver_validate_linker_query(invocation);
@@ -9464,23 +9474,6 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.diagnostic = S8("-Wp dependency path aliases its source or output");
             goto finish;
         }
-    }
-    // Count both explicit entries and the target's defaults before any source
-    // read, fast-path allocation or lookup; export maps also reserve libc.
-    u64 library_count = (u64)invocation.library_count + invocation.framework_count;
-    u32 library_reserve = invocation.target.os == OPERATING_SYSTEM_WINDOWS ? 8u : invocation.target.os == OPERATING_SYSTEM_LINUX ? COMPILER_DRIVER_ELF_SCRIPT_MEMBERS + 3u : 0u;
-    if (library_count >= (u64)UINT32_MAX - library_reserve || invocation.library_path_count > UINT32_MAX - 9u)
-    {
-        result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-        result.diagnostic = S8("native library counts exceed driver limits");
-        goto finish;
-    }
-    compiler_driver_validate_dependency_names(arena, &invocation);
-    if (invocation.error != COMPILER_DRIVER_ERROR_NONE)
-    {
-        result.error = invocation.error;
-        result.diagnostic = invocation.diagnostic;
-        goto finish;
     }
     // The digest covers every structured record, and function sizes are a
     // refinement of a measurement, so neither may be silently empty.
