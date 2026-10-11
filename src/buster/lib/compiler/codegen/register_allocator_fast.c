@@ -21,7 +21,9 @@
 // and keeps on every incoming jump. An edge assigning several general
 // parameters publishes them as a register parallel move
 // (`machine_fast_publish_edge_parallel`) when a register is free to break
-// cycles, and otherwise stages them through the edge-copy tile; either way
+// cycles or a target no copy reads can stage it
+// (`machine_fast_edge_staging_register`), and otherwise stages them through
+// the edge-copy tile; either way
 // a constant or frame-address source rematerializes into its destination
 // (`MACHINE_FAST_EDGE_SOURCE_RECREATED`). `machine_fast_loop_floors` bounds where
 // backward edges can return control, so an escaping value past its last use
@@ -85,6 +87,9 @@ BUSTER_CT_CHECK(MACHINE_FAST_REMATERIALIZE_FRAME >= MACHINE_REF_PAYLOAD_LIMIT);
 // Physical register indices never reach it.
 #define MACHINE_FAST_EDGE_SOURCE_RECREATED (UINT32_MAX - 1u)
 BUSTER_CT_CHECK(MACHINE_FAST_EDGE_SOURCE_RECREATED >= MACHINE_TARGET_REGISTER_LIMIT);
+// A pending parallel-move copy whose source a cycle saved in a tile cell.
+#define MACHINE_FAST_EDGE_SOURCE_TILED (UINT32_MAX - 2u)
+BUSTER_CT_CHECK(MACHINE_FAST_EDGE_SOURCE_TILED >= MACHINE_TARGET_REGISTER_LIMIT);
 // Contract-held, contract-dirty, out-held and out-dirty: the four per-block
 // register-file masks, allocated and cleared as one block.
 #define MACHINE_FAST_BLOCK_MASK_COUNT 4u
@@ -927,6 +932,24 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_free_edge_register(MachineFastState* state,
     return candidates ? machine_fast_first_set(candidates) : UINT32_MAX;
 }
 
+// When no register is free across the whole edge, a target register that no
+// copy reads still holds a dead value until its own copy writes it, so it
+// can stage the phases before the copies. Its copy's source must not be one
+// only a home holds: such a target may be loaded first. Carried, pinned and
+// unsaved callee-saved registers stay excluded. UINT32_MAX when none exists.
+BUSTER_GLOBAL_LOCAL u32 machine_fast_edge_staging_register(MachineFastState* state, u32 terminator_index, u32 const* captured,
+                                                           u32 const* targets, u32 copy_count, u64 busy)
+{
+    MachineTargetDescription const* description = state->description;
+    u64 candidates = 0;
+    for (u32 copy_index = 0; copy_index < copy_count; copy_index += 1)
+    {
+        candidates |= targets[copy_index] != UINT32_MAX && captured[copy_index] != UINT32_MAX ? machine_fast_lane(targets[copy_index]) : 0u;
+    }
+    candidates &= ~busy & ~machine_fast_pin_active(state, terminator_index) & ~(description->callee_saved_mask & ~state->placement->callee_saved_mask);
+    return candidates ? machine_fast_first_set(candidates) : UINT32_MAX;
+}
+
 // Publishes a general-only edge's parameters as a register parallel move.
 // `captured` holds each source's register, `MACHINE_FAST_EDGE_SOURCE_RECREATED`
 // for a constant or frame address, or UINT32_MAX for a source only its home
@@ -942,10 +965,12 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_free_edge_register(MachineFastState* state,
 // sources rematerialize or load last, once no remaining copy reads them. A
 // pinned target that is not a contract register also stores its home, as
 // the staged form did. This replaces the tile's store and load per resident
-// source.
+// source. When `spare` is false, `free_register` is one of the targets
+// (`machine_fast_edge_staging_register`) and is overwritten by the copies,
+// so a cycle saves its value in the first copy's tile cell instead.
 BUSTER_GLOBAL_LOCAL void machine_fast_publish_edge_parallel(MachineFastState* state, MachineBuilderStream* stream, MachinePoint point,
                                                             MachineEdge const* edge, u32 const* captured, u32 const* targets, u32 copy_count,
-                                                            u32 free_register, u32 const* contract_owner, u64 contract_held)
+                                                            u32 free_register, bool spare, u32 const* contract_owner, u64 contract_held)
 {
     MachineFunction* function = state->function;
     MachineBlock const* destination = function->blocks + edge->destination_block;
@@ -1004,6 +1029,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_publish_edge_parallel(MachineFastState* st
             state->placement->boundary_spill_count += 1;
         }
     }
+    u32 tiled_cell = 0;
     while (pending)
     {
         u32 ready = UINT32_MAX;
@@ -1025,15 +1051,33 @@ BUSTER_GLOBAL_LOCAL void machine_fast_publish_edge_parallel(MachineFastState* st
         {
             // Every pending copy writes a register another still reads: a
             // cycle. Save the first one's target and redirect its readers.
+            // A first copy has a register source, so its tile cell is unused,
+            // and its readers finish before the next cycle is broken.
             u32 saved = targets[first];
-            machine_fast_conform_append(state, stream, point, MACHINE_EDIT_COPY, saved, free_register);
+            u32 redirected = spare ? free_register : MACHINE_FAST_EDGE_SOURCE_TILED;
+            tiled_cell = machine_fast_edge_tile_cell(first);
+            if (spare)
+            {
+                machine_fast_conform_append(state, stream, point, MACHINE_EDIT_COPY, saved, free_register);
+            }
+            else
+            {
+                machine_fast_conform_append(state, stream, point, MACHINE_EDIT_TEMP_SPILL, tiled_cell, saved);
+            }
             for (u32 other = 0; other < copy_count; other += 1)
             {
-                move_sources[other] = move_sources[other] == saved ? free_register : move_sources[other];
+                move_sources[other] = move_sources[other] == saved ? redirected : move_sources[other];
             }
             ready = first;
         }
-        machine_fast_conform_append(state, stream, point, MACHINE_EDIT_COPY, move_sources[ready], targets[ready]);
+        if (move_sources[ready] == MACHINE_FAST_EDGE_SOURCE_TILED)
+        {
+            machine_fast_conform_append(state, stream, point, MACHINE_EDIT_TEMP_RELOAD, tiled_cell, targets[ready]);
+        }
+        else
+        {
+            machine_fast_conform_append(state, stream, point, MACHINE_EDIT_COPY, move_sources[ready], targets[ready]);
+        }
         move_sources[ready] = UINT32_MAX;
         pending -= 1;
     }
@@ -1168,7 +1212,9 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
     // A general-only edge publishes as a register parallel move instead of a
     // round trip through the edge-copy tile, when one register is free to
     // stage memory sources bound for homes and to break copy cycles
-    // (`machine_fast_free_edge_register`). Every other staged edge captures
+    // (`machine_fast_free_edge_register`), or else a target no copy reads
+    // can stage them and a cycle saves one value in a tile cell
+    // (`machine_fast_edge_staging_register`). Every other staged edge captures
     // its resident sources into the tile now; the flush below only stores,
     // so the captured registers still hold their sources either way.
     u32* targets = arena_allocate(temporary.arena, u32, copy_count);
@@ -1184,6 +1230,9 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         sources |= captured[copy_index] < MACHINE_FAST_EDGE_SOURCE_RECREATED ? machine_fast_lane(captured[copy_index]) : 0u;
     }
     u32 free_register = general ? machine_fast_free_edge_register(state, terminator_index, sources | written | kept) : UINT32_MAX;
+    bool spare = free_register != UINT32_MAX;
+    free_register = general && !spare ? machine_fast_edge_staging_register(state, terminator_index, captured, targets, copy_count, sources | kept)
+                                      : free_register;
     bool parallel = free_register != UINT32_MAX;
     u32 temporary_offset = 0;
     for (u32 copy_index = 0; !parallel && !direct && copy_index < copy_count; copy_index += 1)
@@ -1216,7 +1265,8 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
     *dirty &= kept;
     if (parallel)
     {
-        machine_fast_publish_edge_parallel(state, stream, point, edge, captured, targets, copy_count, free_register, contract_owner, contract_held);
+        machine_fast_publish_edge_parallel(state, stream, point, edge, captured, targets, copy_count, free_register, spare, contract_owner,
+                                           contract_held);
     }
     temporary_offset = 0;
     for (u32 copy_index = 0; !parallel && copy_index < copy_count; copy_index += 1)

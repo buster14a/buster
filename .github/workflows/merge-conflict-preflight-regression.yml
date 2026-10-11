@@ -42,6 +42,12 @@ jobs:
           mode: source
           source-directory: .
           source-repository: ${{ github.repository }}
+      - name: Build and exercise native maintenance discovery
+        run: |
+          clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/main_push_inventory.c -o tools/main_push_inventory
+          tools/main_push_inventory --self-test
+          gcc -std=c11 -Isrc -O1 -g -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char -fsanitize=address,undefined tools/main_push_inventory.c -o "$RUNNER_TEMP/main-push-inventory-sanitized"
+          "$RUNNER_TEMP/main-push-inventory-sanitized" --self-test
       - name: Exercise merge-tree fixtures and workflow policy
         run: |
           python3 -B tools/merge_conflict_preflight_test.py -v

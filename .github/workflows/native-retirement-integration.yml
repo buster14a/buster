@@ -500,6 +500,8 @@ jobs:
       - name: Run all affected tool and workflow self-tests on the exact final tree
         working-directory: integration
         run: |
+          clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/main_push_inventory.c -o tools/main_push_inventory
+          tools/main_push_inventory --self-test
           python3 tools/native_retirement_dependency_binding_test.py -v
           python3 tools/native_retirement_integration_test.py -v
           python3 tools/native_retirement_automation_test.py -v

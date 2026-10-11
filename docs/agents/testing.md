@@ -117,6 +117,19 @@
   depend on run order; inline assertions follow that block. Define a new test
   function next to the tests of the feature it covers, not after the most
   recently added one. Names that sort adjacently can still conflict.
+- The `direct-ssa-census` job in `compiler-throughput.yml` builds and tests
+  the immutable event/workflow revision (`github.sha`), including the PR test
+  merge, so its diagnostic flags and compiler come from the same source.
+  Reusable calls use a same-commit local `./.github/workflows/` caller; the
+  caller workflow SHA must equal the event SHA.
+  `direct-ssa-census-evidence/source.txt` retains the event, workflow, PR head
+  and base, actual checkout/tree and workflow blob identities; mismatched source
+  fails before any proof runs. The timing comparison and native harness retain
+  their separate PR-head checkout policy. The three-arm production tiny-helper
+  proof remains mandatory when its direct/reference prerequisites succeed.
+  `python3 tools/compiler_throughput_workflow_test.py` exercises old-base Git
+  fixtures across an option-adding main change, source mismatches and proof
+  failure controls. These fixtures validate orchestration, not compiler semantics.
 - Active CI is defined under `.github/workflows/`; the current tree has no
   Forgejo workflow definitions. The source-free broker retirement record is
   documented in `docs/ci-github-hosted-runners.md`. `.github/workflows/ci.yml`
@@ -192,6 +205,27 @@
   `tests/retired/github_runner_bridge_test.py.txt`, outside Python discovery,
   with the same dependency-only support identity. It is historical input,
   not executed bridge coverage; see `docs/ci-github-hosted-runners.md`.
+
+### Just-run executable cleanup
+
+Driver runtime fixtures use `buster_test_executable_delete` after waiting for
+their executable. On Windows it retries only `ERROR_SHARING_VIOLATION` and
+`ERROR_ACCESS_DENIED`, under a 500 ms retry deadline and a 51-attempt ceiling. Native syscall and
+scheduling time can extend elapsed time past that deadline. It does not
+retry compilation, linking or execution; a persistent denial still fails.
+Other platforms make one checked delete attempt. An initial failure logs the
+path, first and final native error codes, attempt count and elapsed time, even
+if cleanup later succeeds.
+
+`compiler_driver_test_executable_cleanup` checks unchanged bytes and one
+attempt for an unrelated error; Windows additionally exercises two injected
+transient errors, a real handle opened without delete sharing, and a real
+read-only file. A two-lane Windows control releases a real held handle while
+cleanup runs and requires eventual deletion when the test quota permits two
+lanes; serial builds and one-lane quotas retain the persistent
+lock controls. Both persistent native errors remain failures until the
+fixture releases its lock or restores the attribute. Missing paths are
+idempotent success, matching `os_file_delete_checked`.
 
 ### Native investigation source-size comparison
 
@@ -388,7 +422,17 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   actual native statuses versus launch errors, binary retention, held and
   escaped writers, cancellation and keeper failure, startup clock expiry,
   ignored/blocked signals, final protocol EOF, actual shim exit, generation
-  isolation and malformed receipt refusal. The signing fixture also requires
+  isolation and malformed receipt refusal. Named lifecycle fields use
+  `ios/lifecycle_receipt.sh` Bash builtins to verify one terminated text row,
+  unique fields and exact value patterns without per-field grep/wc processes.
+  `/bin/bash ios/lifecycle_receipt_test.sh` checks missing, duplicate, invalid,
+  multiple, unterminated and NUL-corrupted rows on system Bash. Extracted phase
+  controls still refuse malformed ownership/caller proof. Cleanup records
+  INT/TERM that arrive during an already-started shutdown, waits the existing
+  bounded invocation-owned phase, and retains 130/143 alongside its actual
+  shutdown result. Deterministic controls signal that real cleanup path during
+  successful and failed shutdowns after either an initial success or failure.
+  The signing fixture also requires
   empty or malformed capture receipts to prevent install/launch, including
   native-success cases. The Python lifecycle and caller-clock controls use
   owned handles or finite fixture release markers; they do not claim
@@ -921,6 +965,9 @@ separate from both live arena bytes and reserved address space.
 Use `BUSTER_TEST_FIXTURE(arguments, function)` for a direct fixture function that
 returns only `UnitTestResult` counts. It preserves call order, consumes counts,
 and rewinds the primary arena after the last assertion and diagnostic consumer.
+The macro calls the fixture through a volatile function pointer so it is not
+inlined into the dispatcher (a compile-time bound for sanitized builds, #2816);
+fixture functions must have exactly the `TestFunction` signature.
 For inline fixture groups, pair `buster_test_arena_begin` and
 `buster_test_arena_end` around the complete set of consumers. Names must be
 static, whitespace-free tokens; the ordinal distinguishes repeated invocations.

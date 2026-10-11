@@ -212,12 +212,15 @@ struct TestArenaScope
 BUSTER_F_DECL TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* arena, String8 name, bool module);
 BUSTER_F_DECL void buster_test_arena_end(UnitTestArguments* arguments, TestArenaScope scope, bool rewind);
 
-// Direct calls preserve normal test control flow and avoid callback dispatch.
+// The volatile function pointer keeps each fixture out of line in optimized builds.
+// Inlining every once-called fixture into one module dispatcher made sanitized
+// Clang spend minutes compiling it (#2816); call order, counts, and arena scopes are unchanged.
 #define BUSTER_TEST_FIXTURE(arguments, function) \
     do \
     { \
         TestArenaScope fixture_scope_ = buster_test_arena_begin((arguments), (arguments)->arena, S8(#function), false); \
-        UnitTestResult fixture_result_ = function(arguments); \
+        TestFunction* volatile fixture_function_ = function; \
+        UnitTestResult fixture_result_ = fixture_function_(arguments); \
         result.test_count += fixture_result_.test_count; \
         result.succeeded_test_count += fixture_result_.succeeded_test_count; \
         buster_test_arena_end((arguments), fixture_scope_, true); \
@@ -254,6 +257,14 @@ BUSTER_F_DECL String8 buster_test_temporary_path(Arena* arena, String8 name, Str
 // for an image a loop compiles and runs per iteration: Windows may refuse to
 // replace an executable that just ran (ERROR_ACCESS_DENIED; #2089, #2836).
 BUSTER_F_DECL String8 buster_test_temporary_unique_path(Arena* arena, String8 name, String8 suffix);
+#if BUSTER_INCLUDE_TESTS
+// Cleanup after waiting for a test image. Windows retries only sharing/access
+// failures with a 500 ms retry deadline and at most 51 attempts; other platforms
+// make one attempt. Native syscall/scheduling time is outside the retry budget.
+// Every initial failure reports its native code, final code, and retry timing.
+// The returned checked error remains nonzero for a persistent lock/denial.
+BUSTER_F_DECL OsError buster_test_executable_delete(UnitTestArguments* arguments, String8 path);
+#endif
 // Limits test-internal parallel work to a validated positive matrix quota.
 BUSTER_F_DECL u64 buster_test_worker_count(u64 requested);
 

@@ -1,0 +1,119 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
+index 2211c7e6..0dc85f0e 100644
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -34951,7 +34951,28 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression(CIntegerIrBuilder* builder, u32 st
+     return result;
+ }
+ 
++#pragma clang diagnostic ignored "-Weverything"
++static u64 census_unary_calls2, census_unary_tokens2;
++BUSTER_C_INTERNAL u32 c_ir_unary_expression_end_impl(CIntegerIrBuilder* builder, u32 start, u32 end);
++static u32* census_update_prefix; static u64 census_unary_none;
++__attribute__((noinline)) static u32 census_unary_noupdate(CIntegerIrBuilder* builder, u32 start, u32 end) { return c_ir_unary_expression_end_impl(builder, start, end); }
++__attribute__((noinline)) static u32 census_unary_update(CIntegerIrBuilder* builder, u32 start, u32 end) { return c_ir_unary_expression_end_impl(builder, start, end); }
+ BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 start, u32 end)
++{
++    if (!census_update_prefix)
++    {
++        census_update_prefix = calloc(builder->preprocess.token_count + 1, sizeof(u32));
++        for (u32 i = 0; i < builder->preprocess.token_count; i += 1)
++            census_update_prefix[i + 1] = census_update_prefix[i] + (c_token_is_punctuator(&builder->preprocess.tokens[i], C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&builder->preprocess.tokens[i], C_PUNCTUATOR_MINUS_MINUS));
++    }
++    bool none = census_update_prefix[end] == census_update_prefix[start];
++    census_unary_none += none;
++    u32 r = none ? census_unary_noupdate(builder, start, end) : census_unary_update(builder, start, end);
++    if (none && r > start + 1 && (c_token_is_punctuator(&builder->preprocess.tokens[r - 1], C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&builder->preprocess.tokens[r - 1], C_PUNCTUATOR_MINUS_MINUS))) abort();
++    census_unary_calls2 += 1; census_unary_tokens2 += r > start ? r - start : 0;
++    return r;
++}
++BUSTER_C_INTERNAL u32 c_ir_unary_expression_end_impl(CIntegerIrBuilder* builder, u32 start, u32 end)
+ {
+     u32 index = start;
+     bool need_primary = true;
+@@ -35189,6 +35210,50 @@ BUSTER_C_INTERNAL u32 c_ir_expression_core_capacity(CIntegerIrBuilder* builder,
+     return visited + C_IR_EXPRESSION_CORE_STACK_SLACK;
+ }
+ 
++// ---- CENSUS (throwaway, not for commit) ----
++#pragma clang diagnostic ignored "-Weverything"
++#include <stdio.h>
++#include <stdlib.h>
++static u64 census_cores, census_core_tokens, census_trivial_control, census_trivial_control_tokens, census_noparen, census_noparen_tokens;
++static u64 census_pc_pushes_trivial, census_pc_pushes_total, census_calls_trivial_found, census_calls_found;
++static u64 census_capacity_tokens;
++static u64 census_visit_hist[6];
++static u8* census_visits; static u32 census_visits_count;
++static void census_print(void) __attribute__((destructor));
++static void census_print(void)
++{
++    if (census_visits) { for (u32 i = 0; i < census_visits_count; i += 1) { u32 v = census_visits[i]; census_visit_hist[v > 5 ? 5 : v] += 1; } }
++    fprintf(stderr, "CENSUS cores=%llu core_tokens=%llu trivial_control=%llu trivial_control_tokens=%llu noparen=%llu noparen_tokens=%llu\n",
++        (unsigned long long)census_cores, (unsigned long long)census_core_tokens, (unsigned long long)census_trivial_control, (unsigned long long)census_trivial_control_tokens,
++        (unsigned long long)census_noparen, (unsigned long long)census_noparen_tokens);
++    fprintf(stderr, "CENSUS pc_pushes_total=%llu pc_pushes_in_trivial=%llu calls_found=%llu calls_found_in_noparen=%llu\n",
++        (unsigned long long)census_pc_pushes_total, (unsigned long long)census_pc_pushes_trivial, (unsigned long long)census_calls_found, (unsigned long long)census_calls_trivial_found);
++    fprintf(stderr, "CENSUS unary_none=%llu\n", (unsigned long long)census_unary_none);
++    fprintf(stderr, "CENSUS unary_calls=%llu unary_tokens=%llu capacity_tokens=%llu\n", (unsigned long long)census_unary_calls2, (unsigned long long)census_unary_tokens2, (unsigned long long)census_capacity_tokens);
++    fprintf(stderr, "CENSUS core-token visit histogram: 0=%llu 1=%llu 2=%llu 3=%llu 4=%llu 5+=%llu\n", (unsigned long long)census_visit_hist[0], (unsigned long long)census_visit_hist[1],
++        (unsigned long long)census_visit_hist[2], (unsigned long long)census_visit_hist[3], (unsigned long long)census_visit_hist[4], (unsigned long long)census_visit_hist[5]);
++}
++__attribute__((noinline)) static u32 census_classify(CIntegerIrBuilder* builder, u32 start, u32 end, bool count)
++{
++    u32 result = 0;
++    if (count && !census_visits) { census_visits_count = builder->preprocess.token_count; census_visits = calloc(census_visits_count, 1); }
++    for (u32 i = start; i < end; i += 1)
++    {
++        CToken t = builder->preprocess.tokens[i];
++        if (count && i < census_visits_count && census_visits[i] < 255) census_visits[i] += 1;
++        if (c_token_is_punctuator(&t, C_PUNCTUATOR_QUESTION) || c_token_is_punctuator(&t, C_PUNCTUATOR_AMPERSAND_AMPERSAND) ||
++            c_token_is_punctuator(&t, C_PUNCTUATOR_PIPE_PIPE) || c_ir_assignment_operator(t)) result |= 1;
++        if (c_token_is_punctuator(&t, C_PUNCTUATOR_LEFT_PARENTHESIS)) result |= 2;
++    }
++    return result;
++}
++__attribute__((noinline)) static void census_pc_trivial(CIntegerIrBuilder* builder, CIrLowerFrame* f) { u32 c0 = builder->prepared_control_expression_count; c_ir_prepare_control_expressions_step(builder, f); census_pc_pushes_trivial += builder->prepared_control_expression_count - c0; }
++__attribute__((noinline)) static void census_pc_nontrivial(CIntegerIrBuilder* builder, CIrLowerFrame* f) { c_ir_prepare_control_expressions_step(builder, f); }
++__attribute__((noinline)) static void census_calls_noparen(CIntegerIrBuilder* builder, CIrLowerFrame* f) { u32 c0 = builder->prepared_call_count; c_ir_prepare_calls_step(builder, f); census_calls_trivial_found += builder->prepared_call_count - c0; }
++__attribute__((noinline)) static void census_calls_paren(CIntegerIrBuilder* builder, CIrLowerFrame* f) { c_ir_prepare_calls_step(builder, f); }
++static u32 census_class;
++// ---- END CENSUS ----
++
+ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builder)
+ {
+     CIrLowerMachine* machine = &builder->lower_machine;
+@@ -35499,7 +35564,12 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
+             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+             return;
+         }
+-        c_ir_prepare_control_expressions_step(builder, machine->frames + machine->frame_count - 1);
++        census_class = census_classify(builder, preparation_start, end, true);
++        census_cores += 1; census_core_tokens += end - preparation_start;
++        { u32 pc0 = builder->prepared_control_expression_count;
++        if (!(census_class & 1)) { census_trivial_control += 1; census_trivial_control_tokens += end - preparation_start; census_pc_trivial(builder, machine->frames + machine->frame_count - 1); }
++        else census_pc_nontrivial(builder, machine->frames + machine->frame_count - 1);
++        census_pc_pushes_total += builder->prepared_control_expression_count - pc0; }
+         if (machine->frame_count != mark || machine->failed)
+         {
+             return;
+@@ -35523,7 +35593,11 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
+             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+             return;
+         }
+-        c_ir_prepare_calls_step(builder, machine->frames + machine->frame_count - 1);
++        census_class = census_classify(builder, preparation_start, end, false);
++        { u32 pk0 = builder->prepared_call_count;
++        if (!(census_class & 2)) { census_noparen += 1; census_noparen_tokens += end - preparation_start; census_calls_noparen(builder, machine->frames + machine->frame_count - 1); }
++        else census_calls_paren(builder, machine->frames + machine->frame_count - 1);
++        census_calls_found += builder->prepared_call_count - pk0; }
+         if (machine->frame_count != mark || machine->failed)
+         {
+             return;
+@@ -35642,6 +35716,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
+         return;
+     }
+     u32 capacity = c_ir_expression_core_capacity(builder, start, end);
++    census_capacity_tokens += end - start;
+     // An operand of a logical operator nests one core per level, each keeping
+     // range-sized stacks until the statement ends. Refuse a nesting that
+     // would run the scratch out with a positioned diagnostic instead of

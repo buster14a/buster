@@ -91,7 +91,8 @@ typedef enum CompilerDriverAction
 } CompilerDriverAction;
 
 // Informational queries answered without any input: --version, -dumpversion,
-// -dumpmachine and -print-target-triple/-print-effective-triple.
+// -dumpmachine, -print-target-triple/-print-effective-triple, and the native
+// linker identity (-Wl,--version or -Xlinker --version).
 // compiler_driver_query_text renders the text.
 typedef enum CompilerDriverQuery
 {
@@ -100,6 +101,7 @@ typedef enum CompilerDriverQuery
     COMPILER_DRIVER_QUERY_DUMP_VERSION,
     COMPILER_DRIVER_QUERY_DUMP_MACHINE,
     COMPILER_DRIVER_QUERY_TARGET_TRIPLE,
+    COMPILER_DRIVER_QUERY_LINKER_VERSION,
     COMPILER_DRIVER_QUERY_COUNT,
 } CompilerDriverQuery;
 
@@ -205,6 +207,8 @@ struct CompilerDriverInvocation
     // arrays remain an execution compatibility path for API-built invocations
     // and are used only when macro_operation_count is zero.
     CPreprocessorOperation* macro_operations;
+    // -fmacro-prefix-map=OLD=NEW, in argv order; only builtin spellings change.
+    CMacroPrefixMap* macro_prefix_maps;
     String8* definitions;
     String8* undefinitions;
     String8* library_paths;
@@ -290,6 +294,7 @@ struct CompilerDriverInvocation
     u32 system_include_path_count;
     u32 forced_include_count;
     u32 macro_operation_count;
+    u32 macro_prefix_map_count;
     u32 definition_count;
     u32 undefinition_count;
     u32 library_path_count;
@@ -308,6 +313,8 @@ struct CompilerDriverInvocation
     // -MD/-MMD enable depfile emission; the last one selects system filtering.
     bool dependency_file;
     bool dependency_exclude_system;
+    // Exact -Wp,-MD,PATH / -Wp,-MMD,PATH: one C input, also named native -S.
+    bool dependency_passthrough;
     // -MP emits phony rules for header prerequisites.
     bool dependency_phony_targets;
     bool verbose;
@@ -334,8 +341,15 @@ struct CompilerDriverInvocation
     // the visibility of definitions that carry no attribute or pragma.
     u8 default_visibility;
     bool pinned_debug_locals_explicit;
+    // Effective optional pass mask: no-flag/positive -O use IR_FAST_ALL,
+    // explicit -O/-O0 use zero, and explicit pass controls override either.
     u32 fast_passes;
     bool measure_fast_passes;
+    // Tiny direct-call inlining defaults off. An explicit optimization level
+    // above -O0 enables it; -O0 disables it. The last -O* or explicit
+    // -fcanonical-inline/-fno-canonical-inline option wins. always_inline
+    // requests remain semantic requirements when tiny is false.
+    IrInlineOptions inline_options;
     bool verify_codegen;
     bool sysv_unnamed_bitfields_integer;
     bool sysv_bitfield_abi_explicit;
@@ -538,6 +552,10 @@ struct CompilerDriverCAstPilotResult
     // segments and hints read from the tree, and bodies left to the token
     // walk and why. Zero when the analysis had no tree to use.
     CAstStatementStatistics statements;
+    // The extent table lowering read controlled body ranges from
+    // (c_gen.c): bodies, entries and answers, and the queries the token
+    // walker answered and why. Zero when lowering had no tree to use.
+    CAstExtentStatistics extents;
     // What lowering read from the tree (CAstLowerStatistics). Zero for
     // -fsyntax-only and when lowering had no tree.
     CAstLowerStatistics lower;
@@ -548,6 +566,7 @@ struct CompilerDriverResult
 {
     IrLocalPromotionStatistics local_promotion;
     IrFastStatistics fast;
+    IrInlineStatistics inlining;
     CIRDirectSsaStatistics direct_ssa;
     CTypeLayoutStatistics type_layout;
     CompilerDriverCAstPilotResult c_ast;
@@ -620,13 +639,20 @@ BUSTER_F_DECL void compiler_prewarm(void);
 // after the first gang starts is too late. The opt-in multi-TU driver calls
 // this before creating its first gang; ordinary serial compilation does not.
 BUSTER_F_DECL void compiler_parallel_prewarm(void);
+// When true, an absent -march keeps the host CPU (the test runners set it);
+// when false, the default is the portable baseline like Clang and GCC (#1557).
+BUSTER_V_DECL bool compiler_driver_host_cpu_default;
 BUSTER_F_DECL CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments);
+// The CPU an absent -march leaves behind: baseline by default, the host CPU
+// under compiler_driver_host_cpu_default (#1557).
+BUSTER_F_DECL Target compiler_driver_default_target(bool host_cpu_default);
 // The layout spelling of -fc-ast-pilot=<layout> ("implicit", "hybrid",
 // "explicit"); "off" for COMPILER_DRIVER_C_AST_PILOT_OFF.
 BUSTER_F_DECL String8 compiler_driver_c_ast_pilot_name(CompilerDriverCAstPilot pilot);
 // The output of a parsed --version/-dumpversion/-dumpmachine query. The version
 // is the one the C frontend presents in __clang_major__/__clang_minor__/
 // __clang_patchlevel__; the machine is the invocation's effective target.
+// The linker query reports Buster's own identity, without a GNU/LLVM version.
 BUSTER_F_DECL String8 compiler_driver_query_text(Arena* arena, CompilerDriverInvocation const* invocation);
 // Resolves an input against -working-directory with the host's path rules, as
 // LLVM's make_absolute does. On Windows a rooted path without a drive ("\\x.c")
