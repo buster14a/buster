@@ -126,7 +126,7 @@ BUSTER_GLOBAL_LOCAL bool userspace_workload(Arena* arena, String8 program_path, 
     make_directory_recursive(arena, path_join(arena, root, S8("bin")));
     make_directory_recursive(arena, path_join(arena, root, S8("tmp")));
     bool valid = musl_copy_object(arena, program_path, path_join(arena, root, S8("bin/busybox"))) &&
-                 musl_copy_object(arena, S8("tests/userspace/workload.sh"), path_join(arena, root, S8("workload.sh")));
+                 musl_copy_object(arena, S8("tools/userspace/fixtures/workload.sh"), path_join(arena, root, S8("workload.sh")));
 #if BUSTER_LINUX
     valid = chmod(path_join(arena, root, S8("bin/busybox")).pointer, 0755) == 0 && valid;
 #endif
@@ -137,7 +137,7 @@ BUSTER_GLOBAL_LOCAL bool userspace_workload(Arena* arena, String8 program_path, 
     {
         ran = userspace_command(arena, S8("."), (SliceString8)BUSTER_ARRAY_TO_SLICE(run_args), 60);
     }
-    String8 expected = clang_suite_read(arena, S8("tests/userspace/expected.txt"));
+    String8 expected = clang_suite_read(arena, S8("tools/userspace/fixtures/expected.txt"));
     valid = userspace_save_command(arena, root, ran) && valid;
     valid = ran.result == PROCESS_RESULT_SUCCESS && expected.length && string_equal(ran.output, expected) && !ran.error.length && valid;
     return valid;
@@ -268,7 +268,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
                                                   S8(MUSL_COMPATIBILITY_TAG), os_get_current_process_id()), true);
                 valid = musl_output.length && userspace_reference_archive(arena, musl, musl_output);
             }
-            String8 config = clang_suite_read(arena, S8("tests/userspace/busybox.config"));
+            String8 config = clang_suite_read(arena, S8("tools/userspace/fixtures/busybox.config"));
             valid = config.length && valid;
             String8 uapi = path_join(arena, directory, S8("uapi"));
             if (valid)

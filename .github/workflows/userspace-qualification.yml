@@ -6,7 +6,7 @@ on:
     paths:
       - '.github/workflows/userspace-qualification.yml'
       - 'tools/userspace*.c'
-      - 'tests/userspace/**'
+      - 'tools/userspace/**'
   workflow_dispatch:
 permissions:
   contents: read

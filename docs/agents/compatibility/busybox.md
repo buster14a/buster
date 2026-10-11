@@ -40,7 +40,7 @@ license decision remains [unselected](../../../LICENSES/README.md).
 
 ## Declared configuration and cells
 
-[busybox.config](../../../tests/userspace/busybox.config) is an explicit seed:
+[busybox.config](../../../tools/userspace/fixtures/busybox.config) is an explicit seed:
 ash, file/directory and process/exit-status operations, text utilities,
 uncompressed tar and SHA-256. Upstream `allnoconfig` first supplies a complete
 disabled basis. The native driver overlays the seed and upstream `defconfig`
@@ -82,13 +82,13 @@ BusyBox remain separate, unqualified cells.
 ## Runtime and evidence
 
 Each successful build is copied into its own initially empty chroot with only
-`/bin/busybox`, a project-owned [workload](../../../tests/userspace/workload.sh),
+`/bin/busybox`, a project-owned [workload](../../../tools/userspace/fixtures/workload.sh),
 and a fresh `/tmp`. ash standalone applet dispatch and an explicit `/bin/busybox` self-exec path
 avoid host utility fallback or a dependency on mounted `/proc`.
 No host filesystem is mounted into the chroot. The workload checks pipelines,
 file copies/moves/symlinks, a tar roundtrip, selected text operations,
 child exit status, background waiting and SHA-256 against
-[fixed expected output](../../../tests/userspace/expected.txt).
+[fixed expected output](../../../tools/userspace/fixtures/expected.txt).
 A zero exit status without the exact transcript fails.
 
 `reference-actions/` and `buster-actions/` retain one directory per CC action:
