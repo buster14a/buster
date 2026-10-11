@@ -7379,10 +7379,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         compiler_driver_finish_investigation(arena, invocation, investigation, &object, &result);
     }
 end:
-    bool dependency_output = invocation.action == COMPILER_DRIVER_ACTION_OBJECT ||
-                             (invocation.dependency_passthrough && invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY &&
-                              invocation.output_path.length);
-    if (invocation.dependency_file && dependency_output && !suppress_object_write &&
+    if (invocation.dependency_file && !suppress_object_write &&
+        (invocation.action == COMPILER_DRIVER_ACTION_OBJECT ||
+         (invocation.dependency_passthrough && invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY && invocation.output_path.length)) &&
         result.error == COMPILER_DRIVER_ERROR_NONE && result.has_object)
     {
         String8 object_path = invocation.output_path.length
