@@ -3740,6 +3740,21 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     {S8_INITIALIZER("int f(int* p, int i) { return p[i + 1]; }"), S8_INITIALIZER("p"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("short f(short a, int b) { return a = b; }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_SHORT},
     {S8_INITIALIZER("long f(long a) { return a += 2; }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    // `++` and `--` keep the operand's own row, unpromoted and pointers
+    // included; checked, the operand must be a modifiable place. An array
+    // parameter is the pointer it is adjusted to, and keeps its array row.
+    {S8_INITIALIZER("int f(int i) { return i++; }"), S8_INITIALIZER("i"), 1, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("long f(long i) { return --i; }"), S8_INITIALIZER("--"), 0, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    {S8_INITIALIZER("unsigned char f(unsigned char c) { return ++c; }"), S8_INITIALIZER("++"), 0, 2, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_UNSIGNED_CHAR},
+    {S8_INITIALIZER("char* f(char* p) { return (p)--; }"), S8_INITIALIZER("("), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("struct S { short n; }; short f(struct S* p) { return p->n++; }"), S8_INITIALIZER("p"), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_SHORT},
+    {S8_INITIALIZER("int f(int* a, int i) { return a[i++]; }"), S8_INITIALIZER("a"), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("int f(int* p) { return *p++ + 1; }"), S8_INITIALIZER("*"), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("void f(int a[4]) { a++; }"), S8_INITIALIZER("a"), 1, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_ARRAY},
+    {S8_INITIALIZER("struct S { int n; }; void f(struct S volatile* p) { p->n++; }"), S8_INITIALIZER("p"), 1, 4, C_TEST_AST_TYPE_PROBE_DECLINE,
+     C_TYPE_INVALID},
     {S8_INITIALIZER("int f(long a, int b) { return (a, b); }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("double f(int c, int a, double b) { return c ? a : b; }"), S8_INITIALIZER("c"), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_DOUBLE},
     {S8_INITIALIZER("long f(long a, long b) { return a ?: b; }"), S8_INITIALIZER("a"), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},

@@ -7275,7 +7275,7 @@ BUSTER_C_INTERNAL bool c_parse_array_parameter_pointer_is_const(CParseResult* re
 // pointer is const: `argv++` and `*SK++` are the ordinary spellings (lmdb's
 // `mdb_copy`, mbedtls's `des_setkey`). A local or member array is not
 // adjusted and stays unmodifiable.
-BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CTypeId type, bool nonplace_projection)
+BUSTER_C_SHARED bool c_parse_update_operand_modifiable(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CTypeId type, bool nonplace_projection)
 {
     bool valid = !nonplace_projection && type.value < result->type_count && c_parse_expression_place_shape(result, preprocess, start, end);
     // Match the place-shape normalization before resolving an identifier:
