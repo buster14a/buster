@@ -616,6 +616,141 @@ misses on a private machine, with and without constraint checks. The
 The default stays off: hosted measurements are diagnostic, and adoption needs
 the Zen 5 route ([measurement plan](#measurement-plan)).
 
+### Qualified member copies
+
+**Status: design only. Nothing here is implemented; it waits for the
+owner's decision on
+[#3102](https://github.com/buster14a/buster/issues/3102).**
+
+`.` and `->` on a const or volatile struct or union, such as
+`preprocess->tokens` with `preprocess` a pointer to const, is the largest
+shape the typer declines: about 57 M machine Ir in the decline census
+(audit `2026-10-11T093336Z`).
+- Each such step in `c_parse_direct_expression_postfix` ends with
+  `c_parse_add_qualified_type`. That appends a qualified copy of the member's
+  row, and a copy of the base's alignment record when it has one.
+- `c_ast_types_member` declines the node, because the row the machine would
+  answer does not exist yet.
+
+The measurements below are hosted Callgrind counts, diagnostic only, from
+audit [`2026-10-11T101621Z`](../../performance-audits/2026-10-11T101621Z.md),
+on main `4e5d563f`:
+- **Copies.** Inside the interning window the machine appends 13,889
+  qualified copies.
+  - 12,946 come from the member step, and 150 more from it inside
+    bit-field-width probes.
+  - They copy only 609 distinct rows. 11,926 repeat a row first made in an
+    earlier body or initializer.
+  - None would inherit an alignment record, and none is restrict or atomic.
+- **The memo.** The number of copies a run appends is not a function of the
+  node.
+  - A sub-range the per-body memo already holds appends nothing, and 881 runs
+    read one partway through.
+  - A bit-field-width probe re-types a member prefix outside the memo.
+  - A checked query cannot read an unchecked query's entry. Of the 1,326
+    ranges queried both ways in one body, 413 appended a different number of
+    copies on the two runs.
+
+The options:
+
+| | Exact answer by | Rows | Cost and risk |
+| --- | --- | --- | --- |
+| (a) replay | re-walking the subtree in the machine's task order, probing the memo per sub-range under the query's flags, re-running the width probes and checked-mode extras, and appending each copy | unchanged | It re-implements the machine's traversal for one shape, and any drift is a different row index. It removes machine Ir only (ceiling about 49.9 M), and every copy, about 392 Ir each, is still made. |
+| (b) intern under the pilot | sharing the copy, so a run over the subtree appends nothing whatever the memo holds | 13,836 copies become 609 shared rows | It adds new interned rows beside the primitive and pointer ones. Prototype: −74 M Ir (−0.80%) on `-fsyntax-only`, and −86 M on `-c`. |
+| (c) decline | — | unchanged | No change. |
+
+**Proposal: (b).** It is the only option that is exact by construction: once
+every copy a subtree needs exists, no memo state changes what a run appends.
+Its rules:
+- **Scope.**
+  - Only the member step's copy in `c_parse_direct_expression_postfix` is
+    shared, and only while `CTypeInterning.enabled` holds and `suspended` is
+    zero.
+  - Every other caller of `c_parse_add_qualified_type` still appends:
+    declarations, conditionals, `__real__`/`__imag__`, and subscripts of
+    qualified arrays.
+  - Outside the pilot nothing changes, because the interning header exists
+    only with the tree.
+- **Exclusions.** A copy that would inherit an alignment record, or that is
+  restrict or atomic, is appended and never shared.
+  - Lowering builds one aligned alias IR type per alignment record
+    (`aligned_alias_types`), so sharing a copy that carries one could change
+    the IR types.
+  - `c_type_parse_root_finish` checks `restrict` only on appended rows.
+- **Matching.** Shared copies keep their own log and slot table beside the
+  primitive and pointer ones.
+  - `c_parse_interned_row_matches` compares only kind, element and
+    qualifiers, so it would take a qualified pointer copy for a plain pointer
+    row.
+  - A copy matches only a row equal in every `CType` field.
+  - Its live count sits in `CParseResult` beside `interned_type_count`, so a
+    rollback forgets what it removes.
+- **The typer.** The member rule accepts a const or volatile aggregate when
+  the exact copy already exists. It looks the copy up without minting it.
+  Otherwise the node declines.
+  - A copy first made in its own body (1,679 runs, 9.7 M) stays with the
+    machine.
+  - That family is below the code-layout noise #3384 measured
+    ([PR #3384](https://github.com/buster14a/buster/pull/3384)), so the
+    proposal adds no re-check for it.
+
+**Why sharing stays unobservable.** The argument is the
+[interned rows](#interned-rows) argument, extended to the
+`has_unqualified_type` rows:
+- A copy is never mutated in place, and the exclusions above give it no
+  alignment record.
+- Lowering maps every row with `has_unqualified_type` through its unqualified
+  row:
+  - const maps to the same IR type;
+  - volatile goes through `c_ir_add_qualified_type`, which returns an
+    existing qualified IR type.
+
+  So a copy has no IR type, and no `-g` entry, of its own. Aggregate copies
+  are not laid out separately, and array copies share their base's bound
+  index.
+- The window opens after every declaration has its rows. So a shared copy
+  only ever replaces a later copy of itself, which maps in the same pass as
+  its unqualified row.
+
+**Prototype evidence.** The prototype is a throwaway patch, measured in the
+audit:
+- **Objects.** `-c` objects of the unity self-host are byte-identical at
+  `-g0` and at `-g`, base and prototype, with and without the pilot.
+- **Tests.**
+  - `c_test_type_interning_objects` passes.
+  - The corpus differential passes in verify mode.
+  - The only failures are the two forms of the `CAstTypeCase` probe that
+    expects `p->a` over `struct S const*` to decline.
+- **Counters.** Declines fall from 24,919 to 17,448.
+- **Where the saving comes from.** About half is the machine runs the tree
+  now answers (−39.4 M). The other half is fewer whole-table layout solves
+  over the smaller table (−39.0 M), and interning alone, with no typer
+  change, already gets that half.
+- **The default path** moves −0.0055%.
+
+**What an implementation must show.** These budgets go into the
+[measurement plan](#measurement-plan) before any measured run. The four arms
+are those of stage 2:
+- **Correctness.**
+  - byte-identical `-c` objects at `-g0` and `-g` across the four arms, and
+    with the window shut and open;
+  - `c_test_type_interning_objects` extended with sources that read members
+    through pointers to const and to volatile aggregates, nested aggregates,
+    array members and an aligned member typedef;
+  - no verify mismatch over the corpus, with a floor on qualified-member
+    answers;
+  - the decline probe for `struct S const*` turned into an answer probe,
+    with a late-row decline probe beside it;
+  - a mutation that shares a copy carrying an alignment record must fail a
+    test.
+- **The default path (D against A):** within ±0.05% Ir on `-fsyntax-only`
+  and on `-c` at `-g0`.
+- **The slice's effect (C against B):** fewer instructions on both
+  workloads, with the lookups and the eager pass charged, and fewer machine
+  runs from queries.
+- **Acceptance:** Zen 5 (#2761) stays incomplete unless the owner asks for a
+  9700X comparison, and the hook stays opt-in.
+
 ## Declaration split from the tree
 
 `c_parse_ast_from_tree` (`c_parse.c`, after `c_parse_ast`) publishes the
@@ -969,7 +1104,9 @@ its measured runs, on the self-host unity input with `-g0`:
   the whole `-fsyntax-only` compile by at least 1% in both instructions and
   paired wall time, without `-c` getting slower, and peak RSS may grow by no
   more than the tree's retained bytes plus 5%. Only the Zen 5 route can
-  establish this.
+  establish this. That route is the owner-requested `ast-pilot-acceptance-v1`
+  profile (#3397) in [benchmarking.md](../benchmarking.md), which reads "plus
+  5%" as 1.05 times the retained bytes.
 
 The tree expression typer's first hosted census is
 [`2026-10-09T132356Z`](../../performance-audits/2026-10-09T132356Z.md). It was

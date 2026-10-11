@@ -767,10 +767,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
 }
 
 // A fresh `cc` process registers the closed x86-64 shape set and resolves
-// each shape on its first serial lookup; this process resolves every shape
-// before compiling.  The two must write the same object bytes for code whose
+// each shape on its first serial lookup, and encodes each variable-memory
+// cell on its first read; this process prepares every shape and cell before
+// compiling.  The two must write the same object bytes for code whose
 // expansions reach the shape bridge (x87, division, atomics, conversions and
-// flag materialization), under every machine allocator.  -fno-machine-fallback turns
+// flag materialization) and for pointer loads and stores at zero, disp8 and
+// disp32 offsets, under every machine allocator.  -fno-machine-fallback turns
 // an unresolved shape into a failed compile instead of a silent canonical
 // fallback.  A child running the opt-in unit gang must resolve every shape
 // before its workers start, or its first worker lookup aborts; its linked
@@ -781,7 +783,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lazy_x86_shapes(UnitTest
 #if !BUSTER_ANDROID && !BUSTER_IOS
     Arena* arena = arguments->arena;
     u64 position = arena->position;
-    machine_x86_64_exact_prewarm_all_shapes();
+    machine_x86_64_exact_prewarm_all();
     String8 input = buster_test_temporary_path(arena, S8("lazy-x86-shapes"), S8(".c"));
     String8 local_output = buster_test_temporary_path(arena, S8("lazy-x86-shapes-local"), S8(".o"));
     String8 child_output = buster_test_temporary_path(arena, S8("lazy-x86-shapes-child"), S8(".o"));
@@ -798,7 +800,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lazy_x86_shapes(UnitTest
                         "{ __atomic_compare_exchange_n(p, &e, d, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return e; }\n"
                         "float integer_to_float(int x) { return (float)x; }\n"
                         "int double_less(double a, double b) { return a < b; }\n"
-                        "unsigned char nonzero(unsigned x) { return (unsigned char)(x != 0); }\n");
+                        "unsigned char nonzero(unsigned x) { return (unsigned char)(x != 0); }\n"
+                        "struct fields { char c; short s; int i; i64 l; char pad[300]; i64 far; };\n"
+                        "i64 copy_fields(struct fields* from, struct fields* to)\n"
+                        "{ to->c = from->c; to->s = from->s; to->i = from->i; to->far = from->l + from->far; return to->l + from->c; }\n");
     ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
                                    .use_process_environment = 1, .search_path = 1};
     // Only the machine allocators reach the shape bridge; the canonical
@@ -10278,13 +10283,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_contract_carry
 // to several parameters, edges mixing constants, computed values and homes,
 // eighteen loop-carried values (more than the register file holds), and an
 // edge mixing general and vector parameters, which keeps the staged form.
+// `rotate_homes`, `swap_homes` and `rotate_calls` keep parameters in their
+// homes across calls while the back edge rotates or swaps them, so one
+// parameter's home is another copy's memory source: the publication must
+// read every memory source (into its target, or through the tile) before it
+// writes the first home. Every AArch64 target takes both read forms under
+// FAST and QUALITY; x86-64 FAST loads targets directly and QUALITY takes both.
 // Every target must select without fallback, and the host runs the program
 // under both allocators and frontend forms; the expected values were
 // cross-checked with host GCC and Clang.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parallel_edge_moves(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 source = S8(
+    // Two literals keep each under the portable string-literal length.
+    String8 loops = S8(
         "static volatile int opaque = 3;\n"
         "static int sink;\n"
         "static __attribute__((noinline)) int bump(int x) { sink += x; return x + 1; }\n"
@@ -10364,19 +10376,64 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parallel_edge_moves(Unit
         "        q = u + i;\n"
         "    }\n"
         "    return x * 3.0 + y + (double)(p * 7 + q);\n"
+        "}\n");
+    String8 homed = S8(
+        "static __attribute__((noinline)) long long rotate_homes(int n)\n"
+        "{\n"
+        "    long long v0 = opaque, v1 = 1, v2 = 2, v3 = 3, v4 = 4, v5 = 5, v6 = 6, v7 = 7, v8 = 8, v9 = 9, v10 = 10, v11 = 11;\n"
+        "    long long v12 = 12, v13 = 13, v14 = 14, v15 = 15, v16 = 16, v17 = 17, v18 = 18, v19 = 19;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long x = bump(i);\n"
+        "        long long t = v0;\n"
+        "        v0 = v1; v1 = v2; v2 = v3 + x; v3 = v4; v4 = v5; v5 = v6; v6 = v7; v7 = v8; v8 = v9; v9 = v10;\n"
+        "        v10 = v11; v11 = v12; v12 = v13; v13 = v14 ^ x; v14 = v15; v15 = v16; v16 = v17; v17 = v18; v18 = v19; v19 = t;\n"
+        "    }\n"
+        "    return v0 + v1 * 2 + v2 * 3 + v3 * 5 + v4 * 7 + v5 * 11 + v6 * 13 + v7 * 17 + v8 * 19 + v9 * 23 + v10 * 29 + v11 * 31 +\n"
+        "           v12 * 37 + v13 * 41 + v14 * 43 + v15 * 47 + v16 * 53 + v17 * 59 + v18 * 61 + v19 * 67;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long swap_homes(int n)\n"
+        "{\n"
+        "    long long a = opaque, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8, k = 9, l = 10, m = 11, o = 12, p = 13, q = 14, r = 15, s = 16;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long x = bump(i);\n"
+        "        long long t;\n"
+        "        t = a; a = s; s = t + x;\n"
+        "        t = b; b = r; r = t;\n"
+        "        t = c; c = q; q = t;\n"
+        "        t = d; d = p; p = t ^ x;\n"
+        "        t = e; e = o; o = t;\n"
+        "        t = f; f = m; m = t;\n"
+        "        t = g; g = l; l = t;\n"
+        "        t = h; h = k; k = t;\n"
+        "        if (x % 3 == 0) { t = a; a = h; h = t; }\n"
+        "    }\n"
+        "    return ((((((((a * 3 + b) * 3 + c) * 3 + d) * 3 + e) * 3 + f) * 3 + g) * 3 + h) * 3 + k) * 7 + l * 11 + m * 13 + o * 17 + p * 19 + q * 23 +\n"
+        "           r * 29 + s * 31;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long rotate_calls(int n)\n"
+        "{\n"
+        "    long long v0 = 1, v1 = 2, v2 = 3, v3 = 4;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long long x = bump(i);\n"
+        "        long long t = v0;\n"
+        "        v0 = v1; v1 = v2 + x; v2 = v3; v3 = t;\n"
+        "        if (x % 3 == 0) { long long u = v1; v1 = v2; v2 = u; }\n"
+        "        if (x % 5 == 0) { v2 += bump(i); }\n"
+        "    }\n"
+        "    return v0 * 1 + v1 * 3 + v2 * 5 + v3 * 7;\n"
         "}\n"
         "int main(void)\n"
         "{\n"
-        "    int bad = 0;\n"
-        "    bad |= (swap_loop(37) != 1819ll) << 0;\n"
-        "    bad |= (rotate3(41) != 60318ll) << 1;\n"
-        "    bad |= (rotate4_fanout(43) != 122175ll) << 2;\n"
-        "    bad |= (mixed_sources(47) != 34865ll) << 3;\n"
-        "    bad |= (wide(53) != 38176ll) << 4;\n"
-        "    bad |= (mixed_class(29) != 0x1.1a12e82p+11) << 5;\n"
-        "    bad |= (sink != 2459) << 6;\n"
-        "    return bad;\n"
+        "    long long swapped = swap_loop(37), rotated3 = rotate3(41), rotated4 = rotate4_fanout(43), mixed = mixed_sources(47), wider = wide(53);\n"
+        "    double classes = mixed_class(29);\n"
+        "    long long homes = rotate_homes(57), swaps = swap_homes(31), calls = rotate_calls(59);\n"
+        "    return swapped != 1819ll ? 1 : rotated3 != 60318ll ? 2 : rotated4 != 122175ll ? 3 : mixed != 34865ll ? 4 : wider != 38176ll ? 5 :\n"
+        "           classes != 0x1.1a12e82p+11 ? 6 : homes != 45328ll ? 7 : swaps != 6724610ll ? 8 : calls != 6346ll ? 9 : sink != 6550 ? 10 : 0;\n"
         "}\n");
+    String8 source = string_format(arguments->arena, S8("{S8}{S8}"), loops, homed);
     String8 input = buster_test_temporary_path(arguments->arena, S8("buster-parallel-edge-moves"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
@@ -10421,8 +10478,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parallel_edge_moves(Unit
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
                 {
-                    // Each subcase owns one exit-status bit, so a failure names
-                    // the function whose result was wrong.
+                    // The exit status is the 1-based number of the first wrong
+                    // result, so a failure names its function.
                     String8 run_arguments[] = {executable};
                     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0},
                         (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
@@ -24008,9 +24065,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_pic_arguments(Un
                                      orders[order].second, S8("pic-model-input.c")};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
                     arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                // An Android x86-64 link is always a PIE, compiled for one.
+                bool android_link = string_equal(targets[target].triple, S8("x86_64-linux-android")) && string_equal(actions[action], S8("-g0"));
                 BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
-                BUSTER_TEST(arguments, invocation.position_independent == (orders[order].surviving.length != 0));
-                BUSTER_TEST(arguments, invocation.image_kind == NATIVE_IMAGE_EXECUTABLE);
+                BUSTER_TEST(arguments, invocation.position_independent == (android_link || orders[order].surviving.length != 0));
+                BUSTER_TEST(arguments, invocation.image_kind == (android_link ? NATIVE_IMAGE_PIE : NATIVE_IMAGE_EXECUTABLE));
                 scratch_end(scope);
             }
         }
@@ -34181,6 +34240,61 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, os_file_delete(literal_source));
         }
         scratch_end(literal_temporary);
+    }
+    // A GNU statement expression in a file-scope initializer (#3364) is
+    // rejected by the frontend at its `(`, as GCC and Clang do, so
+    // -fsyntax-only and -c report the same located diagnostic instead of -c
+    // failing first in the static-initializer folder. Statement expressions
+    // in function bodies still compile. The sources are temporary files, so
+    // the native-retirement inventory stays unchanged.
+    {
+        TemporalArena statement_temporary = arena_begin_temporal(arguments->arena);
+        Arena* statement_arena = statement_temporary.arena;
+        String8 statement_source = buster_test_temporary_path(statement_arena, S8("buster-c-file-scope-statement-expression"), S8(".c"));
+        String8 statement_object = buster_test_temporary_path(statement_arena, S8("buster-c-file-scope-statement-expression"), S8(".o"));
+        String8 statement_texts[] = {
+            S8("static int sx = ({ 1; });\n"
+               "int main(void) { return sx - 1; }\n"),
+            S8("static int sx = ({ typedef int T; T v = 1; v; });\n"
+               "int main(void) { return sx - 1; }\n"),
+            S8("static int sx = sizeof(({ 1; }));\n"
+               "int main(void) { return sx - 4; }\n"),
+            S8("int f(void) { return ({ int a = 2; a; }); }\n"
+               "int main(void) { int v = ({ typedef int T; T t = 1; t; }); return v - 1 + f() - 2; }\n"),
+        };
+        String8 statement_locations[] = {S8(":1:17: "), S8(":1:17: "), S8(":1:24: "), S8("")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(statement_texts); index += 1)
+        {
+            if (BUSTER_REQUIRE(arguments, file_write(statement_source, BUSTER_SLICE_TO_BYTE_SLICE(statement_texts[index]))))
+            {
+                bool rejected = statement_locations[index].length != 0;
+                String8 syntax_command[] = {S8("-std=gnu17"), S8("-fsyntax-only"), statement_source};
+                CompilerDriverResult checked = compiler_driver_execute_invocation(
+                    statement_arena, compiler_driver_parse_arguments(statement_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+                String8 object_command[] = {S8("-std=gnu17"), S8("-g0"), S8("-c"), S8("-o"), statement_object, statement_source};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    statement_arena, compiler_driver_parse_arguments(statement_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+                if (rejected)
+                {
+                    String8 expected = string_format(statement_arena, S8("{S8}statement expression not allowed at file scope"), statement_locations[index]);
+                    BUSTER_TEST_RAW(arguments, checked.error != COMPILER_DRIVER_ERROR_NONE, checked.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, string_first_sequence(checked.diagnostic, expected) != BUSTER_STRING_NO_MATCH, checked.diagnostic);
+                    BUSTER_TEST_RAW(arguments, string_equal(checked.diagnostic, compiled.diagnostic), compiled.diagnostic);
+                }
+                else
+                {
+                    BUSTER_TEST_RAW(arguments, checked.error == COMPILER_DRIVER_ERROR_NONE, checked.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, os_file_delete(statement_object));
+                    }
+                }
+            }
+        }
+        BUSTER_TEST(arguments, os_file_delete(statement_source));
+        scratch_end(statement_temporary);
     }
 #if BUSTER_LINUX
     buster_test_arena_end(arguments, driver_fixture, true);
