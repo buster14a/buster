@@ -942,10 +942,11 @@ active_launch_pipe_dir=
 cleanup() {
     local status=$?
     local prior_status=$status
+    local cleanup_cancellation_status=0
     # Cancellation may arrive after a normal failure already entered EXIT
     # cleanup. Keep its status while the owned bounded shutdown finishes.
-    trap 'status=130; prior_status=130' INT
-    trap 'status=143; prior_status=143' TERM
+    trap 'cleanup_cancellation_status=130' INT
+    trap 'cleanup_cancellation_status=143' TERM
     trap - EXIT
     local shutdown_status
     local shutdown_outcome=unavailable
@@ -972,7 +973,7 @@ cleanup() {
             if [[ $shutdown_outcome == timeout && $shutdown_postcondition_eligible -eq 1 ]]; then
                 if verify_shutdown_postcondition; then
                     echo "warning: iOS simulator shutdown command timed out, but the exact invocation-owned device reached Shutdown" >&2
-                elif [[ $prior_status -eq 0 \
+                elif [[ $prior_status -eq 0 && $cleanup_cancellation_status -eq 0 \
                     && $shutdown_postcondition_probe_status == 0 \
                     && $shutdown_postcondition_parser_status == 4 \
                     && $shutdown_postcondition_state == non-shutdown ]] \
@@ -992,9 +993,17 @@ cleanup() {
                 fi
             fi
         fi
+        if [[ $cleanup_cancellation_status -ne 0 ]]; then
+            status=$cleanup_cancellation_status
+            prior_status=$cleanup_cancellation_status
+        fi
         cleanup_summary="BUSTER_IOS_CLEANUP simulator_udid=$udid prior_status=$prior_status shutdown_status=$shutdown_status shutdown_outcome=$shutdown_outcome postcondition_eligibility=$shutdown_postcondition_eligible postcondition_probe_status=$shutdown_postcondition_probe_status postcondition_parser_status=$shutdown_postcondition_parser_status postcondition_state=$shutdown_postcondition_state shutdown_disposition=$shutdown_disposition result_status=$status"
         printf '%s\n' "$cleanup_summary" >>"${console_log_base}.shutdown.status.log" || true
         printf '%s\n' "$cleanup_summary" >&2
+    fi
+    # A later signal during receipt publication still cannot produce exit 0.
+    if [[ $cleanup_cancellation_status -ne 0 ]]; then
+        status=$cleanup_cancellation_status
     fi
     exit "$status"
 }
