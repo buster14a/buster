@@ -71,7 +71,9 @@ jobs:
       - name: Repaired self-host fixed point
         run: '"$RUNNER_TEMP/sdl3-build" test_self_host --config Release'
       - name: Exact repair source-size comparison
-        run: '"$RUNNER_TEMP/sdl3-build" source_size --rev c2d3b772c5d1a31f14a73376d55dab2ba9005601 --base 27aac48349c2da9c6c24bae660a0f893fa3da6d4'
+        run: |
+          git fetch --no-tags origin c2d3b772c5d1a31f14a73376d55dab2ba9005601 27aac48349c2da9c6c24bae660a0f893fa3da6d4
+          "$RUNNER_TEMP/sdl3-build" source_size --rev c2d3b772c5d1a31f14a73376d55dab2ba9005601 --base 27aac48349c2da9c6c24bae660a0f893fa3da6d4
       - name: Start isolated software display and virtual audio server
         run: |
           mkdir -p "$RUNNER_TEMP/sdl3-environment"
