@@ -393,6 +393,28 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_signals_end(CompilerSamplingSignalSco
 #endif
 }
 
+// Evidence is data, never compiler output: the lab leaves out.exe and
+// reference.exe beside each variant's records and the corpus leaves objects.
+// Twelve pilot executables made campaign 6's packet 0 artifact 135 MB, over
+// the hosted reader's 64 MiB bound, which also refuses executable members.
+// executables_only selects the lab names; otherwise object suffixes are pruned.
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_prune_compiled(Arena* arena, String8 directory, bool executables_only)
+{
+    MuslDirectoryEntry* entries = 0;
+    u64 count = 0;
+    bool missing = generate_path_kind(arena, directory) == GENERATE_PATH_MISSING;
+    bool result = missing || musl_list_directory(arena, directory, &entries, &count);
+    for (u64 i = 0; result && !missing && i < count; i += 1)
+    {
+        String8 name = {(char8*)entries[i].name.pointer, entries[i].name.length};
+        bool compiled = executables_only ? string_equal(name, S8("out.exe")) || string_equal(name, S8("reference.exe")) :
+            string_ends_with_sequence(name, S8(".exe")) || string_ends_with_sequence(name, S8(".o")) ||
+            string_ends_with_sequence(name, S8(".obj")) || string_ends_with_sequence(name, S8(".s"));
+        if (compiled && !entries[i].is_directory) result = os_file_delete(path_join(arena, directory, name));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_sampling_supervision_receipt(Arena* arena, String8 path,
     CompilerExperimentSupervisor supervisor, bool proven, u64 wall_us)
 {
@@ -607,6 +629,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_internal(Arena* arena, C
                         BUSTER_SLICE_TO_BYTE_SLICE(wait.streams[STANDARD_STREAM_OUTPUT])) &&
                         file_write(path_join(arena, output, string_format(arena, S8("trial-{u64}.stderr.log"), trial)),
                         BUSTER_SLICE_TO_BYTE_SLICE(wait.streams[STANDARD_STREAM_ERROR]));
+                    logs = compiler_sampling_prune_compiled(arena, path_join(arena, trial_path, S8("a")), true) &&
+                        compiler_sampling_prune_compiled(arena, path_join(arena, trial_path, S8("b")), true) && logs;
                     complete = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out && cleanup &&
                         !wait.capture_failed && !wait.capture_limit_exceeded && !wait.output_truncated && logs &&
                         closure_before && closure_after && supervision_recorded && !measured.signalled && !measured.reaped && wait.resources.cpu_status == PROCESS_RESOURCE_OBSERVED &&
