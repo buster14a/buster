@@ -2338,6 +2338,9 @@ CodegenTestMachineScratch codegen_test_machine_scratch(Arena* arena, u32 instruc
         {
             other = before[index] != first ? before[index] : 0;
         }
+    }
+    if (other)
+    {
         u64 remaining = other->reserved_size - other->position;
         (void)arena_allocate_bytes(other, remaining > other_remaining ? remaining - other_remaining : 0, 1);
     }
