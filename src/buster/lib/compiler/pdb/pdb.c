@@ -1289,7 +1289,20 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         total_source_file_count += source_counts[module_index];
     }
     String8* source_names = arena_allocate(arena, String8, total_source_file_count ? total_source_file_count : 1);
-    u32* all_names_offsets = arena_allocate(arena, u32, total_source_file_count ? total_source_file_count : 1);
+    // /names holds each distinct path once: every module that names a header
+    // points its checksum entry at the one copy, so the stream and its hash
+    // buckets grow with distinct paths rather than with module references.
+    // name_slots indexes unique_names by content, each slot a unique index
+    // plus one, under half full.
+    String8* unique_names = arena_allocate(arena, String8, total_source_file_count ? total_source_file_count : 1);
+    u32* unique_offsets = arena_allocate(arena, u32, total_source_file_count ? total_source_file_count : 1);
+    u32 unique_name_count = 0;
+    u64 name_slot_count = 16;
+    while (name_slot_count < (u64)total_source_file_count * 2 + 1)
+    {
+        name_slot_count <<= 1;
+    }
+    u32* name_slots = arena_allocate_zeroed(arena, u32, name_slot_count);
     u64 source_names_size = 0;
     u64 names_buffer_size = 1;
     u32 source_cursor = 0;
@@ -1315,14 +1328,26 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
             {
                 return result;
             }
-            source_names[source_cursor] = (String8){
+            String8 name = {
                 .pointer = (char8*)(split->string_table.pointer + string_offset),
                 .length = length,
             };
-            names_offsets[file_index] = (u32)names_buffer_size;
-            all_names_offsets[source_cursor] = names_offsets[file_index];
+            source_names[source_cursor] = name;
+            u64 slot = pdb_hash_string_v1(name) & (name_slot_count - 1);
+            while (name_slots[slot] && !string_equal(unique_names[name_slots[slot] - 1], name))
+            {
+                slot = (slot + 1) & (name_slot_count - 1);
+            }
+            if (!name_slots[slot])
+            {
+                unique_names[unique_name_count] = name;
+                unique_offsets[unique_name_count] = (u32)names_buffer_size;
+                unique_name_count += 1;
+                name_slots[slot] = unique_name_count;
+                names_buffer_size += length + 1;
+            }
+            names_offsets[file_index] = unique_offsets[name_slots[slot] - 1];
             source_cursor += 1;
-            names_buffer_size += length + 1;
             source_names_size += length + 1;
         }
         split->c13 = pdb_rebuild_c13(arena, modules[module_index].codeview_symbols, names_offsets, split->checksum_offsets, source_count);
@@ -1475,7 +1500,7 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     u64 ec_substream_size = align_forward(12 + 1 + 4 + 4 + 4, 4);
     u64 dbg_header_size = PDB_DBG_HEADER_COUNT * sizeof(u16);
     u64 names_bucket_capacity = 2;
-    while (names_bucket_capacity < (u64)source_file_count * 2 + 2)
+    while (names_bucket_capacity < (u64)unique_name_count * 2 + 2)
     {
         names_bucket_capacity *= 2;
     }
@@ -1923,24 +1948,24 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     byte_writer_emit_u32_le(names, 1);
     byte_writer_emit_u32_le(names, (u32)names_buffer_size);
     byte_writer_emit_zero(names, 1);
-    for (u32 file_index = 0; file_index < source_file_count; file_index += 1)
+    for (u32 name_index = 0; name_index < unique_name_count; name_index += 1)
     {
-        byte_writer_emit_bytes(names, source_names[file_index].pointer, source_names[file_index].length);
+        byte_writer_emit_bytes(names, unique_names[name_index].pointer, unique_names[name_index].length);
         byte_writer_emit_zero(names, 1);
     }
     byte_writer_emit_u32_le(names, names_bucket_count);
     u64 names_bucket_start = names->count;
     byte_writer_emit_zero(names, (u64)names_bucket_count * 4);
-    for (u32 file_index = 0; file_index < source_file_count; file_index += 1)
+    for (u32 name_index = 0; name_index < unique_name_count; name_index += 1)
     {
-        u32 bucket = pdb_hash_string_v1(source_names[file_index]) % names_bucket_count;
+        u32 bucket = pdb_hash_string_v1(unique_names[name_index]) % names_bucket_count;
         while (pdb_read_u32((ByteSlice){.pointer = names->bytes, .length = names->count}, names_bucket_start + (u64)bucket * 4))
         {
             bucket = (bucket + 1) % names_bucket_count;
         }
-        byte_writer_patch_u32_le(names, names_bucket_start + (u64)bucket * 4, all_names_offsets[file_index]);
+        byte_writer_patch_u32_le(names, names_bucket_start + (u64)bucket * 4, unique_offsets[name_index]);
     }
-    byte_writer_emit_u32_le(names, source_file_count);
+    byte_writer_emit_u32_le(names, unique_name_count);
     for (u32 index = 0; index < stream_count; index += 1)
     {
         if (streams[index].overflow)

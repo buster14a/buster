@@ -122,6 +122,10 @@ struct CTestAstTypeVerify
     u32 first_count;
 };
 BUSTER_F_DECL void c_test_ast_type_verify_set(bool enabled);
+// A negative control for the differential: while set, every alignment record
+// a replay inherited is held with its range start moved, so the comparison
+// with the machine's record must report a table mismatch.
+BUSTER_F_DECL void c_test_ast_type_verify_perturb_alignments(bool enabled);
 // The counts since the last take, which resets them.
 BUSTER_F_DECL CTestAstTypeVerify c_test_ast_type_verify_take(void);
 
@@ -209,6 +213,11 @@ BUSTER_F_DECL u32 c_test_parse_delimiter_match(CParseResult* result, CPreprocess
 
 BUSTER_F_DECL bool c_test_parse_direct_expression_type(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                      u32 start, u32 end, CTypeId* type_out);
+
+BUSTER_F_DECL bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult const* preprocess,
+                                                             CScopeId scope, u32 body_start, u32 index);
+BUSTER_F_DECL bool c_test_parse_label_address_prefix_paths_agree(CParseResult* result, CPreprocessResult const* preprocess,
+                                                                 CScopeId scope, u32 body_start, u32 index);
 
 // Whether c_parse_validate_label_values would walk this function body's
 // values; the analysis must already have built the scope index.

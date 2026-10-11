@@ -2442,6 +2442,9 @@ BUSTER_GLOBAL_LOCAL CAstCorpusConstruct const c_ast_corpus_constructs[] = {
     {S8_INITIALIZER("int g3(void) { struct L { int a; } l; { int x = ({ 1; }); (void)x; } switch (0) { case 1: break; } return l.a; } int after3;"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("[[maybe_unused]] int attr1; int attr2 [[maybe_unused]]; [[nodiscard]] int attr3(void); [[maybe_unused]]; [[deprecated]] struct SA { int a; };"), C_PREPROCESS_DIALECT_C23},
     {S8_INITIALIZER("typeof(int) tx; __typeof__(tx) ty, *tz; typeof_unqual(tx) tu; __auto_type au = 1;"), C_PREPROCESS_DIALECT_GNU23},
+    // #3493: typeof's comma operand at file scope and in a body.
+    {S8_INITIALIZER("int *p; __typeof__(0, p) q; int f(int a, int b, int c) { __typeof__(a ? b : c, p) r = p; return *r + *q; }"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int *p; typeof_unqual(1, p) u; int g(void) { typeof(0, p) v = u; return *v; }"), C_PREPROCESS_DIALECT_C23},
     {S8_INITIALIZER("constexpr int ce = 1; constexpr int cf = 2, cg = 3; static constexpr double cd = 1.5; auto ai = 1; bool bb = true;"), C_PREPROCESS_DIALECT_C23},
     {S8_INITIALIZER("__extension__ int ex; __extension__ struct SX { int a; }; __extension__ typedef int ET; __extension__ int exf(void) { return 0; }"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("int f(int a, int b) { return a ? b : -b; } int (*pf)(int, int) = f, (*pg)(int, int) = f; int af[] = {1, 2, 3}, ag = 4;"), C_PREPROCESS_DIALECT_GNU17},
@@ -3024,6 +3027,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_oracle(UnitTestArguments* argument
         c_ast_test_expect(arguments, S8("__typeof__(int) y;"), S8("(translation_unit (declaration (decl_specifiers (typeof (type_name (decl_specifiers (specifier_word int))))) (init_declarator (declarator_name y))))"));
         c_ast_test_expect(arguments, S8("typeof(x) y;"), S8("(translation_unit (declaration (decl_specifiers (typeof (identifier x))) (init_declarator (declarator_name y))))"));
         c_ast_test_expect(arguments, S8("typeof(int *) p;"), S8("(translation_unit (declaration (decl_specifiers (typeof (type_name (decl_specifiers (specifier_word int)) (declarator_pointer)))) (init_declarator (declarator_name p))))"));
+        // #3493: typeof's argument is a full expression, comma included;
+        // _Alignas and _BitInt keep their constant-expression argument.
+        c_ast_test_expect(arguments, S8("__typeof__(0, p) q;"), S8("(translation_unit (declaration (decl_specifiers (typeof (comma (number 0) (identifier p)))) (init_declarator (declarator_name q))))"));
+        c_ast_test_expect(arguments, S8("void f(void) { __typeof__(a ? b : c, p) r; }"), S8("(translation_unit (function_definition (decl_specifiers (specifier_word void)) (declarator_function (declarator_name f) (parameter_list (parameter (decl_specifiers (specifier_word void))))) (compound_statement (declaration (decl_specifiers (typeof (comma (conditional (identifier a) (identifier b) (identifier c)) (identifier p)))) (init_declarator (declarator_name r))))))"));
+        c_ast_test_expect_failure(arguments, S8("_Alignas(1, 8) int x;"));
+        c_ast_test_expect_failure(arguments, S8("_BitInt(1, 8) x;"));
 
         // struct, union and enum specifiers
         c_ast_test_expect(arguments, S8("struct S;"), S8("(translation_unit (declaration (decl_specifiers (struct_specifier (tag_name S)))))"));
@@ -3523,6 +3532,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_oracle(UnitTestArguments* argument
         c_ast_oracle_expect_dialect(arguments, C_PREPROCESS_DIALECT_C23, S8("void f(void) { typeof_unqual(x) y; }"), S8("(translation_unit (function_definition (decl_specifiers (specifier_word void)) (declarator_function (declarator_name f) (parameter_list (parameter (decl_specifiers (specifier_word void))))) (compound_statement (declaration (decl_specifiers (typeof_unqual (identifier x))) (init_declarator (declarator_name y))))))"));
         c_ast_oracle_expect_dialect(arguments, C_PREPROCESS_DIALECT_C23, S8("void f(void) { typeof(x) y; }"), S8("(translation_unit (function_definition (decl_specifiers (specifier_word void)) (declarator_function (declarator_name f) (parameter_list (parameter (decl_specifiers (specifier_word void))))) (compound_statement (declaration (decl_specifiers (typeof (identifier x))) (init_declarator (declarator_name y))))))"));
         c_ast_oracle_expect_dialect(arguments, C_PREPROCESS_DIALECT_C23, S8("void f(void) { typeof(int *) p; }"), S8("(translation_unit (function_definition (decl_specifiers (specifier_word void)) (declarator_function (declarator_name f) (parameter_list (parameter (decl_specifiers (specifier_word void))))) (compound_statement (declaration (decl_specifiers (typeof (type_name (decl_specifiers (specifier_word int)) (declarator_pointer)))) (init_declarator (declarator_name p))))))"));
+        c_ast_oracle_expect_dialect(arguments, C_PREPROCESS_DIALECT_C23, S8("void f(void) { typeof_unqual(1, x) y; }"), S8("(translation_unit (function_definition (decl_specifiers (specifier_word void)) (declarator_function (declarator_name f) (parameter_list (parameter (decl_specifiers (specifier_word void))))) (compound_statement (declaration (decl_specifiers (typeof_unqual (comma (number 1) (identifier x)))) (init_declarator (declarator_name y))))))"));
         c_ast_oracle_expect_dialect(arguments, C_PREPROCESS_DIALECT_C23, S8("void f(void) { _BitInt(8) x; }"), S8("(translation_unit (function_definition (decl_specifiers (specifier_word void)) (declarator_function (declarator_name f) (parameter_list (parameter (decl_specifiers (specifier_word void))))) (compound_statement (declaration (decl_specifiers (bitint (number 8))) (init_declarator (declarator_name x))))))"));
         c_ast_oracle_expect_dialect(arguments, C_PREPROCESS_DIALECT_C23, S8("void f(void) { unsigned _BitInt(32) y; }"), S8("(translation_unit (function_definition (decl_specifiers (specifier_word void)) (declarator_function (declarator_name f) (parameter_list (parameter (decl_specifiers (specifier_word void))))) (compound_statement (declaration (decl_specifiers (specifier_word unsigned) (bitint (number 32))) (init_declarator (declarator_name y))))))"));
         c_ast_oracle_expect_dialect(arguments, C_PREPROCESS_DIALECT_C23, S8("void f(void) { switch (a) { case 1: } }"), S8("(translation_unit (function_definition (decl_specifiers (specifier_word void)) (declarator_function (declarator_name f) (parameter_list (parameter (decl_specifiers (specifier_word void))))) (compound_statement (switch (identifier a) (compound_statement (case (number 1)))))))"));
@@ -3781,6 +3791,28 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
      C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
     {S8_INITIALIZER("struct S { unsigned bits : 3; }; int f(struct S s) { return s.bits + 1; }"), S8_INITIALIZER("s"), 1, 5,
      C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    // An operand that ends in `. name` without being a member node: the
+    // machine re-types the tokens before the final `.` for a bit-field width
+    // (c_ast_types_operand_width). On `a + s`, `c ? a : s` and `a + s` under
+    // a unary operator that probe fails without a new row, so the width is 0
+    // and `unsigned` stays unsigned; a width of 3 would promote it to int.
+    {S8_INITIALIZER("struct S { unsigned bits : 3; }; unsigned f(struct S s, unsigned a) { return (a + s.bits) << 1; }"), S8_INITIALIZER("("), 1, 9,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
+    {S8_INITIALIZER("struct S { unsigned bits : 3; }; unsigned f(struct S s, unsigned a) { return -(a + s.bits); }"), S8_INITIALIZER("-"), 0, 8,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
+    {S8_INITIALIZER("struct S { unsigned bits : 3; }; unsigned f(struct S s, int c, unsigned a) { return (c ? a : s.bits) + 1u; }"),
+     S8_INITIALIZER("("), 1, 11, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
+    // On `t.n + s` the probe walks `t.n`, an accepted member over an
+    // unqualified aggregate, and fails at `+` without a new row.
+    {S8_INITIALIZER("struct S { unsigned bits : 3; unsigned n; }; unsigned f(struct S s, struct S t) { return (t.n + s.bits) << 1; }"),
+     S8_INITIALIZER("("), 1, 11, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
+    // The probe on `x, s` succeeds through the comma and reads width 3, and
+    // on `t->n + s` over a const aggregate its member step appends a
+    // qualified copy before `+` fails it: both stay with the machine.
+    {S8_INITIALIZER("struct S { unsigned bits : 3; }; int f(struct S s, int x) { return (x, s.bits) << 1; }"), S8_INITIALIZER("("), 1, 9,
+     C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("struct S { unsigned bits : 3; unsigned n; }; unsigned f(struct S s, struct S const* t) { return (t->n + s.bits) << 1; }"),
+     S8_INITIALIZER("("), 1, 11, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
     {S8_INITIALIZER("int f(long a, long b) { return a < b; }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("int f(int* p) { return p != 0; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("int f(int* p, int n) { return p && n; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
@@ -3870,15 +3902,32 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
      false, C_TYPE_INVALID, false, true},
     {S8_INITIALIZER("unsigned short const* f(void) { return u\"text\"; }"), S8_INITIALIZER("u\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_ANSWER,
      C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
+    // A member of a const or volatile aggregate over an accepted base: the
+    // answer is the qualified copy of the member's row that the replay of
+    // the machine's two calls appends, through `->` or `.`, in parentheses,
+    // and for a member that is itself an aggregate.
+    {S8_INITIALIZER("struct S { int a; }; int f(struct S const* p) { return p->a; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
+    {S8_INITIALIZER("struct S { char* name; }; char* f(struct S const s) { return s.name; }"), S8_INITIALIZER("s"), 1, 3,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
+    {S8_INITIALIZER("union U { long a; }; long f(union U volatile* p) { return (p->a); }"), S8_INITIALIZER("("), 1, 5,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
+    {S8_INITIALIZER("struct T { int x; }; struct S { struct T t; }; int f(struct S const* p) { return p->t.x; }"), S8_INITIALIZER("p"), 1, 3,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
     // Declined: whatever would make the machine append a type row (a
-    // qualified member, a string, a cast to a type name with a qualified
+    // qualified member that is not the queried node, a member of a member of
+    // a qualified aggregate, a string, a cast to a type name with a qualified
     // typedef, a tag, a qualified or restrict pointer or a declarator other
     // than `*`, an array operand of `+`, a pointer conditional), a builtin
     // call, a parenthesized callee, and a conditional whose middle operand
     // holds an assignment, which the machine splits there instead. A string
     // literal of several tokens is left to the machine.
-    {S8_INITIALIZER("struct S { int a; }; int f(struct S const* p) { return p->a; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_DECLINE,
-     C_TYPE_INVALID},
+    {S8_INITIALIZER("struct S { int a; }; int f(struct S const* p) { return p->a + 1; }"), S8_INITIALIZER("p"), 1, 5,
+     C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("struct T { int x; }; struct S { struct T t; }; int f(struct S const* p) { return p->t.x; }"), S8_INITIALIZER("p"), 1, 5,
+     C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("struct S { int a; }; long f(struct S const* p) { return (long)p->a; }"), S8_INITIALIZER("("), 1, 6,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, true},
     {S8_INITIALIZER("char const* f(void) { return \"te\" \"xt\"; }"), S8_INITIALIZER("\"te\""), 0, 2, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
     {S8_INITIALIZER("typedef int T; T const* f(void* p) { return (const T*)p; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_DECLINE,
      C_TYPE_INVALID},
@@ -4033,6 +4082,35 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
     CTestAstTypeVerify verify = c_test_ast_type_verify_take();
     BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count && verify.probes == 4 && verify.probe_mismatches == 0);
     c_test_scratch_end(temporary);
+    // A member of a const aggregate whose type is an aligned typedef: the
+    // replay's qualified copy inherits the typedef's alignment record, and
+    // verify mode holds that record to the machine's, field by field. With
+    // the held record's range moved, the comparison must fail.
+    for (u32 perturb = 0; perturb < 2; perturb += 1)
+    {
+        temporary = scratch_begin(&arguments->arena, 1);
+        preprocess = c_ast_test_preprocess(temporary.arena,
+                                           S8("typedef int A __attribute__((aligned(16))); struct S { A a; }; A f(struct S const* p) { return p->a; }"),
+                                           C_PREPROCESS_DIALECT_GNU17);
+        built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        if (BUSTER_REQUIRE(arguments, built.complete))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.ast = &built.ast;
+            syntax.type_interning = true;
+            c_test_ast_type_verify_take();
+            c_test_ast_type_verify_set(true);
+            c_test_ast_type_verify_perturb_alignments(perturb != 0);
+            analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            c_test_ast_type_verify_perturb_alignments(false);
+            c_test_ast_type_verify_set(false);
+            verify = c_test_ast_type_verify_take();
+            BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count && verify.compared > 0);
+            BUSTER_TEST(arguments, perturb ? verify.mismatches > 0 && verify.first[0].reasons == C_TEST_AST_TYPE_MISMATCH_TABLES : verify.mismatches == 0);
+        }
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
     return result;
 }
 

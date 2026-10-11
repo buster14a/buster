@@ -58,14 +58,13 @@ actions.
 
 ## Approved same-commit reusable workflow
 
-`./.github/workflows/throughput-real-source.yml` reuses the existing native
-workload qualification after both pinned apt profiles pass, without copying its build/admission commands into a
-second harness. GitHub resolves this literal `./` workflow from the caller's
-same commit; there is no floating external branch, tag or downloaded action.
-The called workflow retains read-only contents permission and its existing
-source identity, native oracle, admission and artifact checks. Direct PR runs
-remain opt-in; only the path-filtered apt qualification sets the new boolean
-input. See [pinned input qualification](ci-apt-inputs.md).
+The former `./.github/workflows/throughput-real-source.yml` caller was retired
+by #3501. Full external source staging/oracles/admission now belong to
+[the main-push owner](../.github/workflows/external-projects.yml), with no
+PR/manual/reusable route. The frozen action-pin allowlist retains its historical
+literal for compatibility tests; the native scheduling policy rejects any live
+workflow that attempts to use it. See [pinned input qualification](ci-apt-inputs.md)
+and [the migration map](external-project-ci.md).
 
 `./.github/workflows/compiler-throughput.yml` is also approved for the
 same-commit `Compiler throughput requests` caller. It shares the reviewed PR
@@ -77,7 +76,7 @@ retains read-only contents permission and no inherited secrets. See
 
 The checker does not accept arbitrary local actions, path traversal, local
 `@ref` suffixes, expressions or unreviewed remote references. The additional
-controls in `tests/ci_apt_test.py` exercise those rejection boundaries; the
+controls loaded by `tools/ci_apt_retry_test.py` exercise those rejection boundaries; the
 existing action-policy tests and independent actionlint remain required.
 
 The pinned actionlint predates GitHub's `concurrency.queue` syntax. Workflow

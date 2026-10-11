@@ -11,7 +11,8 @@
 // refused by link_elf_eh_frame_header_write; link_elf_eh_frame_entries_sort
 // skips radix bytes no address varies in and already ordered tables),
 // PE export/import plumbing,
-// CodeView/PDB resolution (link_pe_resolved_codeview), SHA-256 for build
+// CodeView/PDB resolution (link_pe_resolved_codeview, grouped per module by
+// link_pe_resolved_codeview_modules), SHA-256 for build
 // ids — but each owns its image layout whole, because the formats agree
 // on almost nothing. A position-independent image (NativeImageKind SHARED
 // for -shared, PIE for -pie) has one writer,
@@ -116,6 +117,12 @@
 // it without -rdynamic (link_elf_symbol_referenced_by_library). ELF executable
 // TLS exports reuse link_elf_thread_local_offset and packed loaded section indices;
 // their dynamic symbols carry STT_TLS offsets rather than image addresses.
+//
+// Mach-O imports keep one identity: a call reaches the import's stub and a
+// GOT load its bound __got slot, while an absolute pointer in __DATA
+// (__data, __const, the initializer and thread-local templates) is itself
+// a dyld bind site with the relocation's addend (link_mach_import_pointer,
+// #3547). Any other direct reference to imported data is refused.
 //
 // AArch64 fixed-address TLS relaxation (link_aarch64_tls_relax): sites are
 // heap-sorted by section and offset; an initial-exec ADRP/LDR pair may have
@@ -10345,9 +10352,13 @@ BUSTER_GLOBAL_LOCAL bool link_pe_base_relocations_write(u8* bytes, u64 capacity,
     return output == end_output;
 }
 
-ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebugModule* debug_module,
-                                                       u32 const* object_output_sections, u64 const* object_section_offsets,
-                                                       u32 output_section_count)
+// Resolves one module's CodeView symbol records against the relocations
+// listed in `relocations`, in that order, or against every relocation of the
+// merged object when `relocations` is null. Relocations outside the module's
+// symbol range are skipped either way.
+BUSTER_GLOBAL_LOCAL ByteSlice link_pe_codeview_resolve(Arena* arena, ObjectFile* object, ObjectDebugModule* debug_module,
+                                                       u32 const* relocations, u32 relocation_count, u32 const* object_output_sections,
+                                                       u64 const* object_section_offsets, u32 output_section_count)
 {
     ByteSlice result = {0};
     if (arena && object && debug_module && object_output_sections && object_section_offsets && output_section_count &&
@@ -10356,9 +10367,10 @@ ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebu
     {
         u8* bytes = arena_allocate(arena, u8, debug_module->symbols_size);
         memcpy(bytes, object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.pointer + debug_module->symbols_offset, debug_module->symbols_size);
-        for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+        u32 count = relocations ? relocation_count : object->relocation_count;
+        for (u32 list_index = 0; list_index < count; list_index += 1)
         {
-            ObjectRelocation* relocation = object->relocations + relocation_index;
+            ObjectRelocation* relocation = object->relocations + (relocations ? relocations[list_index] : list_index);
             if (relocation->section != OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS || relocation->offset < debug_module->symbols_offset ||
                 relocation->offset - debug_module->symbols_offset >= debug_module->symbols_size || relocation->symbol >= object->symbol_count)
             {
@@ -10411,6 +10423,92 @@ ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebu
     }
 
     return result;
+}
+
+ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebugModule* debug_module,
+                                                       u32 const* object_output_sections, u64 const* object_section_offsets,
+                                                       u32 output_section_count)
+{
+    return link_pe_codeview_resolve(arena, object, debug_module, 0, 0, object_output_sections, object_section_offsets, output_section_count);
+}
+
+// Resolving each module against every relocation costs modules times
+// relocations. link_objects lays modules out in input order, so their symbol
+// ranges ascend without overlap; then each CodeView relocation belongs to at
+// most one module, found by binary search, and a counting pass groups them
+// per module while keeping relocation order, which is the order the full
+// scan applies them in. Modules out of order or overlapping fall back to the
+// full scan for every module.
+void link_pe_resolved_codeview_modules(Arena* arena, ObjectFile* object, u32 const* object_output_sections, u64 const* object_section_offsets,
+                                       u32 output_section_count, ByteSlice* symbols)
+{
+    u32 module_count = object->debug_module_count;
+    bool ordered = module_count > 1;
+    for (u32 module = 1; ordered && module < module_count; module += 1)
+    {
+        ObjectDebugModule* previous = object->debug_modules + module - 1;
+        ordered = previous->symbols_offset <= UINT64_MAX - previous->symbols_size &&
+                  previous->symbols_offset + previous->symbols_size <= object->debug_modules[module].symbols_offset;
+    }
+    u32* starts = 0;
+    u32* grouped = 0;
+    u32* owners = 0;
+    if (ordered)
+    {
+        starts = arena_allocate_zeroed(arena, u32, (u64)module_count + 1);
+        owners = arena_allocate(arena, u32, object->relocation_count ? object->relocation_count : 1);
+        for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+        {
+            ObjectRelocation* relocation = object->relocations + relocation_index;
+            u32 owner = UINT32_MAX;
+            if (relocation->section == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS)
+            {
+                // The last module starting at or before the offset.
+                u32 low = 0;
+                u32 high = module_count;
+                while (low < high)
+                {
+                    u32 middle = low + (high - low) / 2;
+                    if (object->debug_modules[middle].symbols_offset <= relocation->offset)
+                    {
+                        low = middle + 1;
+                    }
+                    else
+                    {
+                        high = middle;
+                    }
+                }
+                ObjectDebugModule* module = low ? object->debug_modules + low - 1 : 0;
+                if (module && relocation->offset - module->symbols_offset < module->symbols_size)
+                {
+                    owner = low - 1;
+                    starts[owner + 1] += 1;
+                }
+            }
+            owners[relocation_index] = owner;
+        }
+        for (u32 module = 0; module < module_count; module += 1)
+        {
+            starts[module + 1] += starts[module];
+        }
+        grouped = arena_allocate(arena, u32, starts[module_count] ? starts[module_count] : 1);
+        u32* cursors = arena_allocate(arena, u32, module_count);
+        memcpy(cursors, starts, (u64)module_count * sizeof(*cursors));
+        for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+        {
+            if (owners[relocation_index] != UINT32_MAX)
+            {
+                grouped[cursors[owners[relocation_index]]++] = relocation_index;
+            }
+        }
+    }
+    for (u32 module = 0; module < module_count; module += 1)
+    {
+        u32 const* list = ordered ? grouped + starts[module] : 0;
+        u32 list_count = ordered ? starts[module + 1] - starts[module] : 0;
+        symbols[module] = link_pe_codeview_resolve(arena, object, object->debug_modules + module, list, list_count, object_output_sections,
+                                                   object_section_offsets, output_section_count);
+    }
 }
 
 // An undefined global DATA _tls_index whose every reference is a loader TLS
@@ -12241,12 +12339,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             }
             PdbModule* pdb_modules = arena_allocate(arena, PdbModule, object->debug_module_count);
             PdbContribution* pdb_contributions = arena_allocate(arena, PdbContribution, object->debug_module_count);
+            ByteSlice* module_symbols = arena_allocate(arena, ByteSlice, object->debug_module_count);
+            link_pe_resolved_codeview_modules(arena, object, object_output_sections, object_section_offsets, pe_section_count, module_symbols);
             u64 identity_size = base_file_size;
             for (u32 module_index = 0; module_index < object->debug_module_count && result.error == LINK_ERROR_NONE; module_index += 1)
             {
                 ObjectDebugModule* source = object->debug_modules + module_index;
-                ByteSlice symbols =
-                    link_pe_resolved_codeview(arena, object, source, object_output_sections, object_section_offsets, pe_section_count);
+                ByteSlice symbols = module_symbols[module_index];
                 if (!link_pdb_module_validate(object, source, symbols, object_section_offsets[OBJECT_SECTION_TEXT], text_virtual_size, &identity_size))
                 {
                     result.error = LINK_ERROR_OBJECT_WRITE;
@@ -13414,12 +13513,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
             }
             PdbModule* pdb_modules = arena_allocate(arena, PdbModule, object->debug_module_count);
             PdbContribution* pdb_contributions = arena_allocate(arena, PdbContribution, object->debug_module_count);
+            ByteSlice* module_symbols = arena_allocate(arena, ByteSlice, object->debug_module_count);
+            link_pe_resolved_codeview_modules(arena, object, object_output_sections, object_section_offsets, pe_section_count, module_symbols);
             u64 identity_size = base_file_size;
             for (u32 module_index = 0; module_index < object->debug_module_count && result.error == LINK_ERROR_NONE; module_index += 1)
             {
                 ObjectDebugModule* source = object->debug_modules + module_index;
-                ByteSlice symbols =
-                    link_pe_resolved_codeview(arena, object, source, object_output_sections, object_section_offsets, pe_section_count);
+                ByteSlice symbols = module_symbols[module_index];
                 if (!link_pdb_module_validate(object, source, symbols, 0, sections[PE_SECTION_TEXT].virtual_size, &identity_size))
                 {
                     result.error = LINK_ERROR_OBJECT_WRITE;
@@ -13580,6 +13680,46 @@ BUSTER_GLOBAL_LOCAL u64 link_uleb128_write(u8* bytes, u64 offset, u64 value)
         bytes[offset++] = byte;
     } while (value);
     return offset;
+}
+
+BUSTER_GLOBAL_LOCAL u64 link_sleb128_write(u8* bytes, u64 offset, s64 value)
+{
+    bool more = true;
+    while (more)
+    {
+        u8 byte = (u8)(value & 0x7f);
+        value = value < 0 ? ~(~value >> 7) : value >> 7;
+        more = !((value == 0 && !(byte & 0x40)) || (value == -1 && (byte & 0x40)));
+        if (more)
+        {
+            byte |= 0x80;
+        }
+        bytes[offset++] = byte;
+    }
+    return offset;
+}
+
+// The sections link_native_executable_mach_o64 lays out in its writable
+// __DATA segment (segment index 2); everything else that can carry a fixup
+// sits in __TEXT.  __const is here too: ld64 moves a __const that needs
+// fixups into __DATA_CONST, which dyld writes before protecting it, and this
+// writer keeps it writable in __DATA, so dyld binds and rebases it the same way.
+BUSTER_GLOBAL_LOCAL bool link_mach_data_segment_section(u32 section)
+{
+    return section == OBJECT_SECTION_DATA || section == OBJECT_SECTION_ZERO || section == OBJECT_SECTION_READ_ONLY_DATA ||
+           section == OBJECT_SECTION_INIT_ARRAY || section == OBJECT_SECTION_FINI_ARRAY || section == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+           section == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+}
+
+// #3547: a pointer-sized word in __DATA that names an import holds that
+// import's own address, which only dyld knows.  It is bound like Apple ld
+// binds it -- BIND_TYPE_POINTER with the relocation's addend -- rather than
+// rebased to the call stub, whose address differs from the one every other
+// image and `dlsym` see, and which for imported data is code, not the object.
+BUSTER_GLOBAL_LOCAL bool link_mach_import_pointer(ObjectFile* object, ObjectRelocation* relocation)
+{
+    return relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 && link_mach_data_segment_section(relocation->section) &&
+           relocation->symbol < object->symbol_count && object->symbols[relocation->symbol].section == OBJECT_SECTION_UNDEFINED;
 }
 
 // The `align` field of a section command is the power of two, not the
@@ -14289,6 +14429,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         linkedit_vm_offset = align_forward(has_dwarf ? dwarf_vm_cursor : BUSTER_MAX(data_vm_end, data_file_offset + 1), MACH_PAGE_SIZE);
     }
     u32 rebase_count = 0;
+    u32 import_pointer_count = 0;
+    u64 import_pointer_name_size = 0;
     if (result.error == LINK_ERROR_NONE)
     {
         rebase_count = 0;
@@ -14299,7 +14441,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             {
                 continue;
             }
-            if (relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 && !(object->target.cpu_arch == CPU_ARCH_AARCH64 && relocation.section == OBJECT_SECTION_TEXT))
+            if (link_mach_import_pointer(object, &relocation))
+            {
+                import_pointer_count += 1;
+                import_pointer_name_size += object->symbols[relocation.symbol].name.length + 2;
+            }
+            else if (relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 && !(object->target.cpu_arch == CPU_ARCH_AARCH64 && relocation.section == OBJECT_SECTION_TEXT))
             {
                 rebase_count += 1;
             }
@@ -14329,7 +14476,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             {
                 ObjectRelocation* relocation = &object->relocations[relocation_index];
                 if (relocation->kind != OBJECT_RELOCATION_ABSOLUTE64 || (object->target.cpu_arch == CPU_ARCH_AARCH64 && relocation->section == OBJECT_SECTION_TEXT) ||
-                    (relocation->section < OBJECT_SECTION_COUNT && object_section_kind_is_debug((ObjectSectionKind)relocation->section)))
+                    (relocation->section < OBJECT_SECTION_COUNT && object_section_kind_is_debug((ObjectSectionKind)relocation->section)) ||
+                    link_mach_import_pointer(object, relocation))
                 {
                     continue;
                 }
@@ -14340,12 +14488,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 u8 segment_index = 0;
                 if (result.error == LINK_ERROR_NONE)
                 {
-                    segment_index = relocation->section == OBJECT_SECTION_DATA || relocation->section == OBJECT_SECTION_ZERO ||
-                                               relocation->section == OBJECT_SECTION_READ_ONLY_DATA ||
-                                               relocation->section == OBJECT_SECTION_INIT_ARRAY || relocation->section == OBJECT_SECTION_FINI_ARRAY ||
-                                               relocation->section == OBJECT_SECTION_THREAD_LOCAL_DATA || relocation->section == OBJECT_SECTION_THREAD_LOCAL_ZERO
-                                           ? 2
-                                           : 1;
+                    segment_index = link_mach_data_segment_section(relocation->section) ? 2 : 1;
                 }
                 u64 segment_offset = 0;
                 if (result.error == LINK_ERROR_NONE)
@@ -14390,7 +14533,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     u64 bind_capacity = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        bind_capacity = import_name_size + (u64)import_count * 20 + 4;
+        bind_capacity = import_name_size + (u64)import_count * 20 + 4 + import_pointer_name_size + (u64)import_pointer_count * 24;
     }
     u8*bind_bytes = 0;
     if (result.error == LINK_ERROR_NONE)
@@ -14419,6 +14562,29 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 memcpy(bind_bytes + bind_size, symbol->name.pointer, symbol->name.length);
                 bind_size += symbol->name.length;
                 bind_bytes[bind_size++] = 0;
+                bind_bytes[bind_size++] = 0x90;
+            }
+            // Then each __DATA word that points at an import, named by its
+            // own segment offset and carrying its addend.  The library
+            // ordinal and the pointer type set above still hold, so a site
+            // takes the same lookup as the import's __got slot.
+            for (u32 relocation_index = 0; import_pointer_count && relocation_index < object->relocation_count; relocation_index += 1)
+            {
+                ObjectRelocation* relocation = &object->relocations[relocation_index];
+                if (!link_mach_import_pointer(object, relocation))
+                {
+                    continue;
+                }
+                ObjectSymbol* symbol = &object->symbols[relocation->symbol];
+                bind_bytes[bind_size++] = 0x40;
+                bind_bytes[bind_size++] = '_';
+                memcpy(bind_bytes + bind_size, symbol->name.pointer, symbol->name.length);
+                bind_size += symbol->name.length;
+                bind_bytes[bind_size++] = 0;
+                bind_bytes[bind_size++] = 0x72;
+                bind_size = link_uleb128_write(bind_bytes, bind_size, section_offsets[relocation->section] + relocation->offset - data_file_offset);
+                bind_bytes[bind_size++] = 0x60;
+                bind_size = link_sleb128_write(bind_bytes, bind_size, relocation->addend);
                 bind_bytes[bind_size++] = 0x90;
             }
             bind_bytes[bind_size++] = 0;
@@ -14856,6 +15022,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             bool got_load = object_relocation_kind_is_x86_got(relocation->kind) ||
                             relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 ||
                             relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12;
+            bool import_pointer = link_mach_import_pointer(object, relocation);
             bool thread_local_pointer = false;
             if (result.error == LINK_ERROR_NONE)
             {
@@ -14882,11 +15049,21 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                         }
                     }
                 }
+                else if (import_pointer)
+                {
+                    // dyld writes the word from the bind stream; the file
+                    // holds zero until it does.
+                    if (import_indices[relocation->symbol] == UINT32_MAX)
+                    {
+                        result.error = LINK_ERROR_RELOCATION;
+                        result.symbol = symbol->name;
+                    }
+                }
                 else if (symbol->section == OBJECT_SECTION_UNDEFINED)
                 {
                     // Only a call may reach an import through its stub; any
                     // other direct reference to imported data would read the
-                    // stub's code.
+                    // stub's code.  A __DATA pointer to it is bound above.
                     if (!got_load && symbol->kind == OBJECT_SYMBOL_DATA &&
                         (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 ||
                          relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_ABSOLUTE64))
@@ -15130,6 +15307,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                         instruction |= (page_offset >> shift) << 10;
                         link_write_u32(bytes, output_offset, instruction);
                     }
+                }
+                else if (import_pointer)
+                {
+                    link_write_u64(bytes, output_offset, 0);
                 }
                 else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
                 {

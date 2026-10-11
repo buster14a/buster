@@ -2659,8 +2659,9 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_specs(CAstBuilder* builder, CAstFrame* frame
                 {
                     frame->a += 1;
                     frame->flags |= C_AST_SPECS_SEEN_TYPE;
+                    // C23 6.7.2.5: typeof takes a full expression, comma included (#3493).
                     c_ast_push_keyword_paren(builder, info == C_AST_WORD_TYPEOF ? C_AST_TYPEOF : C_AST_TYPEOF_UNQUAL,
-                                             C_AST_KEYWORD_PAREN_TYPE | C_AST_KEYWORD_PAREN_EXPR);
+                                             C_AST_KEYWORD_PAREN_TYPE | C_AST_KEYWORD_PAREN_EXPR | C_AST_KEYWORD_PAREN_COMMA);
                     running = false;
                     break;
                 }
@@ -2742,7 +2743,9 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_keyword_paren(CAstBuilder* builder, CAstFram
                 }
                 else
                 {
-                    c_ast_push_expr(builder, C_AST_PREC_ASSIGN, 0);
+                    // _Alignas and _BitInt take a constant expression; typeof
+                    // sets C_AST_KEYWORD_PAREN_COMMA for its full expression.
+                    c_ast_push_expr(builder, (frame->flags & C_AST_KEYWORD_PAREN_COMMA) ? C_AST_PREC_COMMA : C_AST_PREC_ASSIGN, 0);
                 }
                 running = false;
             }
