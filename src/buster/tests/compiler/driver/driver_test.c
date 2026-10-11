@@ -23943,7 +23943,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_probe_spellings(UnitTest
     BUSTER_STRING_TEST(arguments, working_host.input_paths[2], S8("/x:y.c"));
     BUSTER_STRING_TEST(arguments, working_host.input_paths[3], S8("/\\name.c"));
     BUSTER_STRING_TEST(arguments, compiler_driver_working_directory_path(arena, S8("\\\\server\\share"), S8("C:x.c")), S8("\\\\server\\share/C:x.c"));
-    String8 backslash_directory = buster_test_temporary_path(arena, S8("driver-wd\\"), S8(""));
+    String8 backslash_directory = string_format_z(arena, S8("{S8}\\"), buster_test_temporary_path(arena, S8("driver-wd"), S8("")));
     if (BUSTER_REQUIRE(arguments, os_make_directory_attempt(backslash_directory)))
     {
         String8 backslash_line[] = {S8("-working-directory"), backslash_directory, S8("-fsyntax-only"), S8("ordinary.c")};
