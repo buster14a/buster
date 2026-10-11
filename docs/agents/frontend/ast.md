@@ -809,17 +809,28 @@ Rows are appended only by the machine's own calls, in the machine's order:
 `c_parse_add_qualified_type`. So the type table matches the machine's row for
 row.
 
-The lists are found through an index of every `DECL_SPECIFIERS` node's first
-token, built once per analysis. The kind column is scanned eight nodes at a
-time, and the few lists that postorder closes after a later-starting one are
-moved back into place. A lookup gallops forward from the previous answer,
-because each of analysis's passes types declarations in token order.
+The lists are found through an index, built once per analysis, of the first
+token of every **word-only** `DECL_SPECIFIERS` node: a list whose children are
+`SPECIFIER_WORD` and `TYPEDEF_NAME` leaves on consecutive tokens. Only such a
+list can be read, and no other is indexed. A word-only list holds no other
+list and lies in no other word-only list, so postorder reaches these lists in
+token order. The index is therefore appended in one pass, with no sorting. A
+list out of that order, which a valid tree never has, is left out rather than
+moved. So the build reads each list's children at most once, whatever the
+input. Indexing every list and sorting as it went was quadratic in tag
+nesting: postorder closes an enclosing declaration's list after every list
+its members hold. The kind column is scanned eight nodes at a time. A lookup
+gallops forward from the previous answer, because each of analysis's passes
+types declarations in token order.
 
 Everything else goes to the machine unchanged. `CAstSpecifierFallback` names
 each case:
-- `input`: no list in the tree begins at the run's first token;
-- `specifiers`: a tag, `typeof`, an attribute or another word outside the
-  plain set, no type at all, or a word right after the list;
+- `input`: no word-only list begins at the run's first token, because the list
+  there holds a tag, `typeof`, `_Atomic(T)`, `_Alignas`, `_BitInt` or an
+  attribute, or because there is no list;
+- `specifiers`: a word outside the plain set (`restrict`, `_Atomic`,
+  `__extension__`, ...), no type at all, both a type word and a name, or a word
+  right after the list;
 - `storage`: a repeated or conflicting storage class;
 - `primitive`: words the machine's scan combines into no row, which it
   diagnoses. The syntax pass rejects such combinations first, so only a tree
@@ -835,7 +846,9 @@ machine.
 
 `c_ast_test_specifiers` runs, in every layout, one unit whose block,
 file-scope and parameter runs are all read from the tree, and one shape per
-fallback reason. The `input` and `primitive` shapes use a tampered tree. The
+fallback reason. One `input` shape and the `primitive` shape use a tampered
+tree. A unit with tags nested a thousand deep must index its one word-only
+list, reading no more list children than the tree has nodes. The
 [corpus differential](#corpus-differential) compares the whole analysis model
 field by field.
 

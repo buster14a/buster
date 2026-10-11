@@ -2129,9 +2129,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          tree.statements.fallbacks ? tree.statements.fallback_token : UINT32_MAX);
             // Counts: the declaration specifier runs read from the tree, and the runs left to the type machine, by reason.
             CAstSpecifierStatistics specifiers = tree.specifiers;
-            string_print(S8("C_AST_SPECIFIERS lists={u64} primitive_answers={u64} typedef_answers={u64} fallbacks={u64} input={u64} specifiers={u64} "
+            string_print(S8("C_AST_SPECIFIERS lists={u64} indexed={u64} index_reads={u64} primitive_answers={u64} typedef_answers={u64} fallbacks={u64} input={u64} specifiers={u64} "
                             "storage={u64} primitive={u64} typedef={u64} reason={S8} fallback_token={u32}\n"),
-                         specifiers.lists, specifiers.primitive_answers, specifiers.typedef_answers, specifiers.fallbacks,
+                         specifiers.lists, specifiers.indexed, specifiers.index_reads, specifiers.primitive_answers, specifiers.typedef_answers, specifiers.fallbacks,
                          specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_INPUT], specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_SPECIFIERS],
                          specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_STORAGE], specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_PRIMITIVE],
                          specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_TYPEDEF],

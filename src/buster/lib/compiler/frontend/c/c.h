@@ -1486,20 +1486,23 @@ struct CAstStatementStatistics
 
 // Why a declaration's specifier run went to the type machine instead of being
 // read from its DECL_SPECIFIERS node (c_parse_declaration_specifiers_type,
-// GitHub #3102). The run's first token names the node; a reason other than
-// INPUT says what the node holds that the tree read leaves to the machine.
+// GitHub #3102). The run's first token names a word-only list, one whose
+// children are word and name leaves on consecutive tokens; a reason other
+// than INPUT says what that list holds that the tree read leaves to the
+// machine.
 typedef enum CAstSpecifierFallback
 {
     C_AST_SPECIFIER_FALLBACK_NONE,
-    // No specifier list in the tree begins at the run's first token.
+    // No word-only specifier list begins at the run's first token: the list
+    // there holds a tag, typeof, `_Atomic(T)`, `_Alignas`, `_BitInt` or an
+    // attribute, or there is none.
     C_AST_SPECIFIER_FALLBACK_INPUT,
-    // The list holds something other than plain words and one type: a tag,
-    // typeof, `_Atomic(T)`, `_Alignas`, `_BitInt`, an attribute, a word
-    // outside the plain set (restrict, `_Atomic`, nullability, auto,
-    // constexpr, `__extension__`, `__auto_type`, `__builtin_va_list`,
-    // `_Imaginary`, `__float128`), no type word or name at all, or both. A
-    // word or an attribute right after the list, which the machine's scans
-    // would read on into, counts here too; the tree puts both in the list.
+    // The word-only list holds a word outside the plain set (restrict,
+    // `_Atomic`, nullability, auto, constexpr, `__extension__`,
+    // `__auto_type`, `__builtin_va_list`, `_Imaginary`, `__float128`), no
+    // type word or name at all, or both. A word or an attribute right after
+    // the list, which the machine's scans would read on into, counts here
+    // too; the tree puts both in the list.
     C_AST_SPECIFIER_FALLBACK_SPECIFIERS,
     // The storage-class words repeat or conflict, which the machine
     // diagnoses.
@@ -1517,12 +1520,15 @@ typedef enum CAstSpecifierFallback
 
 // What the specifier read did over one analysis: the runs it answered from
 // the tree, by base (primitive words or a typedef name), and the runs it left
-// to the machine and why. `lists` counts the specifier lists in the tree's
-// index.
+// to the machine and why. `lists` counts the tree's specifier lists,
+// `indexed` the word-only ones the index holds, and `index_reads` the list
+// children the index build read, which is at most the tree's node count.
 typedef struct CAstSpecifierStatistics CAstSpecifierStatistics;
 struct CAstSpecifierStatistics
 {
     u64 lists;
+    u64 indexed;
+    u64 index_reads;
     u64 primitive_answers;
     u64 typedef_answers;
     u64 fallbacks;

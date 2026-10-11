@@ -4387,10 +4387,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statements(UnitTestArguments* argu
 // layout: one whose block, file-scope and parameter specifier runs are all
 // read from the tree, and one shape per CAstSpecifierFallback -- a tree whose
 // specifier list does not start at the run's first token, a tag and an
-// attribute, conflicting storage classes, a word the tree calls a type word
-// where the scan finds none, and a restrict-qualified typedef under a
-// qualifier. Each analysis with the tree must equal the analysis without it,
-// model and diagnostics alike.
+// attribute (lists that are not word-only), `_Atomic` among the words,
+// conflicting storage classes, a word the tree calls a type word where the
+// scan finds none, and a restrict-qualified typedef under a qualifier. Each
+// analysis with the tree must equal the analysis without it, model and
+// diagnostics alike. Last, tags nested a thousand deep must build the index
+// in one read of each list's children.
 typedef enum CAstSpecifierTamper
 {
     C_AST_SPECIFIER_TAMPER_NONE,
@@ -4427,8 +4429,9 @@ BUSTER_GLOBAL_LOCAL CAstSpecifierCase const c_ast_specifier_cases[] = {
                     "}\n"),
      C_AST_SPECIFIER_TAMPER_NONE, C_AST_SPECIFIER_FALLBACK_NONE, 7, 5, false},
     {S8_INITIALIZER("int x;\n"), C_AST_SPECIFIER_TAMPER_TOKEN, C_AST_SPECIFIER_FALLBACK_INPUT, 0, 0, false},
-    {S8_INITIALIZER("struct S { int a; };\nconst struct S s;\n"), C_AST_SPECIFIER_TAMPER_NONE, C_AST_SPECIFIER_FALLBACK_SPECIFIERS, 0, 0, false},
-    {S8_INITIALIZER("int __attribute__((unused)) x;\n"), C_AST_SPECIFIER_TAMPER_NONE, C_AST_SPECIFIER_FALLBACK_SPECIFIERS, 0, 0, false},
+    {S8_INITIALIZER("struct S { int a; };\nconst struct S s;\n"), C_AST_SPECIFIER_TAMPER_NONE, C_AST_SPECIFIER_FALLBACK_INPUT, 0, 0, false},
+    {S8_INITIALIZER("int __attribute__((unused)) x;\n"), C_AST_SPECIFIER_TAMPER_NONE, C_AST_SPECIFIER_FALLBACK_INPUT, 0, 0, false},
+    {S8_INITIALIZER("_Atomic int x;\n"), C_AST_SPECIFIER_TAMPER_NONE, C_AST_SPECIFIER_FALLBACK_SPECIFIERS, 0, 0, false},
     {S8_INITIALIZER("static extern int x;\n"), C_AST_SPECIFIER_TAMPER_NONE, C_AST_SPECIFIER_FALLBACK_STORAGE, 0, 0, true},
     {S8_INITIALIZER("static x;\n"), C_AST_SPECIFIER_TAMPER_WORD, C_AST_SPECIFIER_FALLBACK_PRIMITIVE, 0, 0, true},
     {S8_INITIALIZER("typedef int *restrict RP;\nconst RP p;\n"), C_AST_SPECIFIER_TAMPER_NONE, C_AST_SPECIFIER_FALLBACK_TYPEDEF, 1, 0, false},
@@ -4506,6 +4509,61 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_specifiers(UnitTestArguments* argu
         }
         c_ast_release(&built.ast);
         BUSTER_TEST(arguments, string_equal(c_ast_specifier_fallback_name(C_AST_SPECIFIER_FALLBACK_PRIMITIVE), S8("primitive")));
+        scratch_end(temporary);
+    }
+    // `struct S0 { struct S1 { ... int x; } m1; ... } m0;`: postorder closes
+    // each enclosing list after every list it holds, so an index sorted as it
+    // is built moved each list past all the inner ones, quadratic in the
+    // depth. The index holds only the one word-only list and reads every
+    // list's children at most once.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 const depth = 1000;
+        u64 capacity = (u64)depth * 40 + 64;
+        char8* text = arena_allocate(temporary.arena, char8, capacity);
+        u64 length = 0;
+        for (u32 level = 0; level < depth; level += 1)
+        {
+            // Braces are written apart from the format, which reads `{` as a field.
+            String8 parts[] = {string_format(temporary.arena, S8("struct S{u32} "), level), S8("{\n")};
+            for (u32 part = 0; part < BUSTER_ARRAY_LENGTH(parts); part += 1)
+            {
+                memcpy(text + length, parts[part].pointer, parts[part].length);
+                length += parts[part].length;
+            }
+        }
+        String8 inner = S8("int x;\n");
+        memcpy(text + length, inner.pointer, inner.length);
+        length += inner.length;
+        for (u32 level = depth; level > 0; level -= 1)
+        {
+            String8 parts[] = {S8("}"), string_format(temporary.arena, S8(" m{u32};\n"), level - 1)};
+            for (u32 part = 0; part < BUSTER_ARRAY_LENGTH(parts); part += 1)
+            {
+                memcpy(text + length, parts[part].pointer, parts[part].length);
+                length += parts[part].length;
+            }
+        }
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, (String8){.pointer = text, .length = length}, C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        if (BUSTER_REQUIRE(arguments, preprocess.error_count == 0 && built.complete))
+        {
+            CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+            CAstSpecifierStatistics statistics = {0};
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.ast = &built.ast;
+            syntax.ast_specifier_statistics = &statistics;
+            CAnalysisResult read = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &read);
+            difference = difference.length ? difference : c_ast_corpus_model_differ(temporary.arena, &plain, &read);
+            BUSTER_TEST_RAW(arguments, difference.length == 0, difference);
+            BUSTER_TEST_RAW(arguments,
+                            statistics.lists == depth + 1 && statistics.indexed == 1 && statistics.index_reads <= built.ast.node_count &&
+                                statistics.fallbacks == 1 && statistics.fallback_counts[C_AST_SPECIFIER_FALLBACK_INPUT] == 1,
+                            string_format(temporary.arena, S8("nested tags: {u64} lists, {u64} indexed, {u64} reads over {u32} nodes, {u64} fallbacks"),
+                                          statistics.lists, statistics.indexed, statistics.index_reads, built.ast.node_count, statistics.fallbacks));
+        }
+        c_ast_release(&built.ast);
         scratch_end(temporary);
     }
     return result;

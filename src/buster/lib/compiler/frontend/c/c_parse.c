@@ -18524,27 +18524,38 @@ void c_test_ast_specifiers_set(bool enabled)
 }
 #endif
 
-// The first token of every DECL_SPECIFIERS node, ascending, with its node, in
-// the phase arena (CTypeParseMachine). Postorder lists a member's specifiers
-// before the enclosing declaration's, so the few lists that close after a
-// later-starting one are moved back into place as they are added. The kind
+// The first token of every word-only DECL_SPECIFIERS node, ascending, with
+// its node, in the phase arena (CTypeParseMachine). A list is word-only when
+// its children are SPECIFIER_WORD and TYPEDEF_NAME leaves on consecutive
+// tokens from its own; only such a list can be read
+// (c_parse_tree_specifiers_type), so no other is indexed. A word-only list
+// holds no other list and lies in no other word-only list, so postorder
+// reaches these lists in token order: the index is appended in one pass,
+// and a list out of that order (which a valid tree never has) is left out
+// rather than moved, so no input makes the build superlinear. The kind
 // column is read eight nodes at a time: each byte equal to the kind sets the
 // top bit of its lane in an exact zero-byte mask of the block xor the kind,
 // and the lowest set lane is the next node (a little-endian load; a
-// big-endian host reads the block's bytes in order instead).
-BUSTER_GLOBAL_LOCAL void c_parse_specifier_index_append(CAst const* ast, u32* starts, u32* nodes, u32* filled, u32 node)
+// big-endian host reads the block's bytes in order instead). Every child is
+// read at most once, counted in CAstSpecifierStatistics.index_reads.
+BUSTER_GLOBAL_LOCAL void c_parse_specifier_index_append(CAst const* ast, u32* starts, u32* nodes, u32* filled, u64* reads, u32 node)
 {
     u32 token = ast->tokens[node];
-    u32 slot = *filled;
-    while (slot && starts[slot - 1] > token)
+    u32 first = c_ast_subtree_begin(ast, node);
+    bool words = first < node && (*filled == 0 || starts[*filled - 1] < token);
+    u32 child = first;
+    for (; words && child < node; child += 1)
     {
-        starts[slot] = starts[slot - 1];
-        nodes[slot] = nodes[slot - 1];
-        slot -= 1;
+        u32 kind = ast->kinds[child];
+        words = (kind == C_AST_SPECIFIER_WORD || kind == C_AST_TYPEDEF_NAME) && ast->tokens[child] == token + (child - first);
     }
-    starts[slot] = token;
-    nodes[slot] = node;
-    *filled += 1;
+    *reads += child - first;
+    if (words)
+    {
+        starts[*filled] = token;
+        nodes[*filled] = node;
+        *filled += 1;
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void c_parse_specifier_index_prepare(CTypeParseMachine* machine, Arena* arena)
@@ -18570,6 +18581,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_specifier_index_prepare(CTypeParseMachine* mach
         u64 const low_bits = UINT64_C(0x7f7f7f7f7f7f7f7f);
         u64 const pattern = UINT64_C(0x0101010101010101) * C_AST_DECL_SPECIFIERS;
         u32 filled = 0;
+        u64 reads = 0;
         u32 block = 0;
         for (; block + 8 <= ast->node_count; block += 8)
         {
@@ -18582,13 +18594,13 @@ BUSTER_GLOBAL_LOCAL void c_parse_specifier_index_prepare(CTypeParseMachine* mach
             {
                 if (ast->kinds[node] == C_AST_DECL_SPECIFIERS)
                 {
-                    c_parse_specifier_index_append(ast, starts, nodes, &filled, node);
+                    c_parse_specifier_index_append(ast, starts, nodes, &filled, &reads, node);
                 }
             }
 #else
             while (equal)
             {
-                c_parse_specifier_index_append(ast, starts, nodes, &filled, block + trailing_zeroes_u64(equal) / 8);
+                c_parse_specifier_index_append(ast, starts, nodes, &filled, &reads, block + trailing_zeroes_u64(equal) / 8);
                 equal &= equal - 1;
             }
 #endif
@@ -18597,15 +18609,17 @@ BUSTER_GLOBAL_LOCAL void c_parse_specifier_index_prepare(CTypeParseMachine* mach
         {
             if (ast->kinds[node] == C_AST_DECL_SPECIFIERS)
             {
-                c_parse_specifier_index_append(ast, starts, nodes, &filled, node);
+                c_parse_specifier_index_append(ast, starts, nodes, &filled, &reads, node);
             }
         }
         machine->ast_specifier_starts = starts;
         machine->ast_specifier_nodes = nodes;
-        machine->ast_specifier_count = count;
+        machine->ast_specifier_count = filled;
         if (machine->ast_specifier_statistics)
         {
             machine->ast_specifier_statistics->lists += count;
+            machine->ast_specifier_statistics->indexed += filled;
+            machine->ast_specifier_statistics->index_reads += reads;
         }
     }
 }

@@ -7338,6 +7338,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.c_ast.statements.fallback_token = unit.c_ast.statements.fallback_token;
         }
         result.c_ast.specifiers.lists += unit.c_ast.specifiers.lists;
+        result.c_ast.specifiers.indexed += unit.c_ast.specifiers.indexed;
+        result.c_ast.specifiers.index_reads += unit.c_ast.specifiers.index_reads;
         result.c_ast.specifiers.primitive_answers += unit.c_ast.specifiers.primitive_answers;
         result.c_ast.specifiers.typedef_answers += unit.c_ast.specifiers.typedef_answers;
         result.c_ast.specifiers.fallbacks += unit.c_ast.specifiers.fallbacks;
