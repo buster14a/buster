@@ -1574,6 +1574,8 @@ struct CTypeParseMachine
     // inside one is reported there, because neither path has a later fallback
     // that names it.
     u32 member_declarator_depth;
+    // Active aggregate-member frames; replaces per-core ancestor rescans.
+    u32 aggregate_segment_depth;
     // The `(` and `)` of the identifier list of the old-style definition
     // whose parenthesized declarator is being parsed, `(a)` in
     // `int (k(a)) int a; {...}`, else both zero: its names are parameters,
