@@ -463,7 +463,8 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         self.assertNotIn("test_all_combinations_ci", native)
         self.assertIn("fail-fast: false", native)
         self.assertNotIn("actions/download-artifact", native)
-        self.assertIn("BUSTER_CI_REQUIRED: modes differential", native)
+        self.assertIn("BUSTER_CI_REQUIRED: modes differential (plus ebpf_kernel on Linux x86-64)", native)
+        self.assertIn("matrix.os == 'linux' && matrix.arch == 'x86_64' && 'modes differential ebpf_kernel'", native)
         entries = re.findall(r"(?m)^          - name: (.+)\n            runner: (.+)$", native)
         self.assertEqual(entries, list(zip(_frozen_ci.github_ci_time.UNIX_NATIVE, (
             "ubuntu-26.04", "ubuntu-26.04-arm", "macos-26"))))

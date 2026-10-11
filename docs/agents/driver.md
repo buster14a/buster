@@ -1531,9 +1531,31 @@ switches, runtime paths, version scripts, and other `-z` modes are refused.
 
 `-Wp,` and `-Wa,` are unsupported and are never warning options. This includes
 preprocessor macro/include operations and dependency requests. Direct `-D`,
-`-U`, and `-I` remain available; dependency generation (`-M`, `-MM`, `-MD`,
-`-MMD`, `-MF`, `-MT`, `-MP`) is refused in every spelling. A failed request
-preserves any existing artifact instead of reporting a successful stale build.
+`-U`, and `-I` remain available; `-Wp,-M*` stays refused. The driver supports
+the bounded `-MD`/`-MMD` dependency-file contract described below; standalone
+`-M`, `-MM`, and `-MG` remain unsupported.
+
+## Dependency files
+
+`-MD` and `-MMD` write a Make-compatible depfile for C `-c` output. The default
+depfile path comes from the object path by removing only the basename's last
+extension and appending `.d`; `-MF` overrides it. `-MT` adds a raw target,
+`-MQ` adds an escaped target, and the default target is the escaped object path.
+Multiple target options retain command-line order. `-MP` adds phony rules for
+header prerequisites. `-MF`, `-MT`, `-MQ`, and `-MP` require `-MD` or `-MMD`;
+explicit `-MF`/target options cannot be used with multiple inputs.
+
+Prerequisites come from resolved preprocessor include identities, in
+first-inclusion order; the main source comes first unless compiling stdin.
+Repeated identities appear once, builtin headers and `<command-line>` do not
+appear, and forced includes follow the main source. `-MMD` excludes headers
+found in system include paths and all headers included from a system header.
+Makefile-special spaces, tabs, dollar signs, and `#` characters are escaped.
+Paths containing a newline or carriage return cannot be represented and fail
+with a file-write diagnostic.
+The depfile is atomically published only after successful compilation and
+object publication, so a failed compile preserves existing object and depfile
+contents.
 
 ## Warning options
 
@@ -1602,6 +1624,12 @@ ordinary compilation focused on time to an artifact: it avoids constructing
 source debug models and their larger object payloads unless requested.
 `-g` selects DWARF 4 for native ELF/Mach-O targets and CodeView for Windows
 objects. Unwind information remains independent of source debug information.
+
+A linked Windows image's PDB (`pdb_build`) gives its TPI stream a hash stream:
+one `hashTypeRecord` bucket per record modulo `0x3ffff` (`pdb_type_record_hash`)
+and a sparse type-index offset entry per 8 KiB of records. DbgHelp (cdb,
+WinDbg, `symchk`, `dbh`) faults with `0xc0000005` loading a PDB whose TPI
+stream names no hash stream (#3411). The regression is `pdb_test_tpi_hashes`.
 
 With `-g`, named scalar locals that need more than one defining instruction to
 describe stay in distinct frame slots, so their location lists follow stores
