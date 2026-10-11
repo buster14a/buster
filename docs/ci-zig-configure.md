@@ -38,7 +38,7 @@ in `combinations.log`. The manifest is diagnostic-only: it neither certifies
 successful compiler probes nor replaces the coverage/result consumers.
 Each tree's raw `.ninja_log` is retained as `<tree>/ninja_log.txt` (a nonhidden
 name kept by artifact upload), alongside `ninja-log-summary.json`. Manifest
-`retained_path` identifies each file's location in the artifact. Per-edge
+`retained_path` identifies each file's location in the artifact. Per-output-group
 summaries are printed as `NINJA_LOG_*` lines; this remains diagnostic-only (#2816).
 The summary rows are per-output groups after merging relative/absolute aliases.
 Each row's duration is that output's edge duration. The
