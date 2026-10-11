@@ -2173,7 +2173,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             string_print(S8("C_AST_LOWER bodies={u64} conditionals={u64} steps={u64} answers={u64} negatives={u64} fallbacks={u64}\n"),
                          tree.lower.bodies, tree.lower.conditionals, tree.lower.steps, tree.lower.answers, tree.lower.negatives, tree.lower.fallbacks);
         }
-        if (invocation.fast_passes)
+        // Also report disabled passes: -O0 must expose its selected policy.
         {
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
             {
