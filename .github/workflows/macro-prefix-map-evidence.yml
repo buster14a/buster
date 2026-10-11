@@ -1,32 +1,204 @@
 name: Macro prefix map exact-source evidence
+
+# Explicit #3628 development replay. No PR, queue, or main trigger.
 on:
+  workflow_dispatch:
   push:
     branches: ['codex/3628-prefix-map-evidence']
-    paths: ['.github/workflows/macro-prefix-map-evidence.yml']
+    paths:
+      - .github/workflows/macro-prefix-map-evidence.yml
+
 permissions:
   contents: read
+
 concurrency:
   group: macro-prefix-map-evidence-${{ github.ref }}
   cancel-in-progress: false
+
 jobs:
-  baseline:
+  frontier:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       BUSTER_TEST_JOBS: '2'
+      BUSTER_KERNEL_REFERENCE_CC: gcc-14
+      BUSTER_PREFIX_MAP_ORACLES: '1'
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 6ed0aac8e5c431f420be10132a4485fc944109e9
           persist-credentials: false
-      - uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+          fetch-depth: 0
+          ref: cac747195d4a1866b6517bd5227ec4f541c37b51
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          requested-runner: ubuntu-26.04
-      - name: Baseline self-host fixed point
+          repository: buster14a/buster
+          ref: 6114a5fcdede89dd09e5cea6ecb319be3bb8c635
+          path: harness
+          persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: torvalds/linux
+          ref: adc218676eef25575469234709c2d87185ca223a
+          path: external/linux
+          persist-credentials: false
+      - name: Record Linux identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: external/linux
+          source-repository: torvalds/linux
+      - name: Provision external reference prerequisites and retain licenses
+        shell: bash
         run: |
-          mkdir -p .ci-tools
+          set -euo pipefail
+          mkdir -p evidence/licenses .ci-tools
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y gcc gcc-14 bison flex bc libelf-dev libssl-dev cpio qemu-system-x86
+          dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' > evidence/host-packages.tsv
+          for package in gcc gcc-14 cpp-14 gcc-15 cpp-15 binutils libc6 libc6-dev libc6-dev-bin bison flex bc libelf-dev libssl-dev cpio qemu-system-x86 qemu-system-common seabios ipxe-qemu; do
+            if test -f "/usr/share/doc/$package/copyright"; then
+              cp "/usr/share/doc/$package/copyright" "evidence/licenses/$package.copyright"
+            else
+              printf 'missing=%s\n' "$package" >> evidence/licenses/unavailable.txt
+            fi
+          done
+          cp external/linux/COPYING evidence/licenses/linux-COPYING
+          tar -cf evidence/licenses/linux-license-texts.tar -C external/linux LICENSES Documentation/process/license-rules.rst
+          git -C external/linux grep -n SPDX-License-Identifier > evidence/licenses/linux-spdx.txt
+          git -C external/linux rev-parse HEAD 'HEAD^{tree}' > evidence/linux-identity.txt
+          git -C external/linux ls-tree -r HEAD > evidence/linux-files.txt
+          git rev-parse HEAD 'HEAD^{tree}' > evidence/buster-identity.txt
+          gcc --version > evidence/gcc.txt
+          gcc-14 --version > evidence/kernel-reference-gcc.txt
+          gcc-14 -Q --help=target > evidence/kernel-reference-target.txt
+          gcc-14 -dM -E -x c /dev/null > evidence/kernel-reference-predefines.txt
+          clang --version > evidence/clang.txt
+          ld --version > evidence/ld.txt
+          as --version > evidence/as.txt
+          qemu-system-x86_64 --version > evidence/qemu.txt
+          sha256sum "$(command -v gcc)" "$(gcc -print-prog-name=cc1)" "$(command -v gcc-14)" "$(gcc-14 -print-prog-name=cc1)" "$(command -v ld)" "$(command -v as)" "$(command -v qemu-system-x86_64)" "$(command -v cpio)" > evidence/external-tools.sha256
+          find /usr/share/qemu /usr/share/seabios -type f -print0 | sort -z | xargs -0 sha256sum > evidence/firmware.sha256
+          printf 'Cloud diagnostic only. Host tools/firmware are external dependencies. No Zen 5 performance validation.\n' > evidence/scope.txt
+      - name: Build native frontier tool and independent trusted init
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Iharness/src -std=c11 -Wall -Wextra -Wpedantic -Werror -fwrapv -fno-strict-aliasing -funsigned-char harness/tools/linux-kernel/frontier.c -o .ci-tools/kernel-frontier
+          gcc -Iharness/src -std=c11 -Wall -Wextra -Wpedantic -Werror -fwrapv -fno-strict-aliasing -funsigned-char harness/tools/linux-kernel/frontier.c -o .ci-tools/kernel-frontier-gcc
+          .ci-tools/kernel-frontier self-test
+          .ci-tools/kernel-frontier-gcc self-test
+          mkdir -p "$RUNNER_TEMP/kernel-initramfs/dev" "$RUNNER_TEMP/kernel-initramfs/tmp"
+          gcc -Isrc -static -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror -fwrapv -fno-strict-aliasing -funsigned-char harness/tools/linux-kernel/control_init.c -o "$RUNNER_TEMP/kernel-initramfs/init"
+          sudo mknod "$RUNNER_TEMP/kernel-initramfs/dev/console" c 5 1
+          chmod 1777 "$RUNNER_TEMP/kernel-initramfs/tmp"
+          (cd "$RUNNER_TEMP/kernel-initramfs" && find . -print0 | sort -z | cpio --null -o --format=newc) > "$RUNNER_TEMP/kernel-control.cpio"
+          sha256sum .ci-tools/kernel-frontier "$RUNNER_TEMP/kernel-initramfs/init" "$RUNNER_TEMP/kernel-control.cpio" harness/tools/linux-kernel/minimal.config > evidence/harness-inputs.sha256
+      - name: Build trusted Buster compiler through its native driver
+        id: compiler
+        shell: bash
+        run: |
+          set -euo pipefail
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o .ci-tools/build
           .ci-tools/build generate --ci --cc clang --linker DEFAULT --no-sanitize --no-fuzz --no-lto
           .ci-tools/build build --config Release -t ide
+          sha256sum .ci-tools/build build/Release/ide > evidence/compiler.sha256
+      - name: Validate compiler driver and self-host
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/Release/ide test --module=compiler_driver_tests --verbose=1 --ci=1
+          build/Release/ide test --module=c_frontend_tests --verbose=1 --ci=1
           .ci-tools/build test_self_host --config Release
+      - name: Validate all registered modules
+        run: .ci-tools/build build --config Release -t test_all
+      - name: Validate native source-size acknowledgement
+        shell: bash
+        run: |
+          set -euo pipefail
+          .ci-tools/build source_size --base "$(git merge-base origin/main HEAD)" | tee evidence/source-size-report.txt
+          cp docs/source-size-baseline.txt evidence/source-size-baseline.txt
+      - name: Run bounded native reference and Buster frontier
+        id: frontier
+        shell: bash
+        run: |
+          set -euo pipefail
+          .ci-tools/kernel-frontier run "$PWD/external/linux" "$PWD/build/Release/ide" "$PWD/evidence/frontier" "$RUNNER_TEMP/kernel-control.cpio" "$PWD/harness/tools/linux-kernel/minimal.config" 2>&1 | tee evidence/frontier.log
+      - name: Preserve generated inputs and object identities
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          reference="$PWD/evidence/frontier/reference"
+          if test -f "$reference/.config"; then
+            cp "$reference/.config" evidence/reference.config
+          fi
+          if test -f "$reference/System.map"; then
+            cp "$reference/System.map" evidence/reference-System.map.txt
+          fi
+          if test -d "$reference/include"; then
+            tar -cf evidence/reference-generated.tar -C "$reference" include arch/x86/include/generated
+          fi
+          if test -d "$reference"; then
+            find "$reference" -type f \( -name '*.o' -o -name '*.cmd' -o -name '*.a' -o -name '*.lds' -o -name bzImage -o -name vmlinux \) -print0 | sort -z | xargs -0 -r sha256sum > evidence/reference-artifacts.sha256
+            find "$reference" -type f \( -name '*.cmd' -o -name '*.lds' \) -print0 | tar --null -T - -cf evidence/kbuild-commands.tar
+          fi
+          git diff --check origin/main...HEAD
+          python3 tools/check_action_pins.py
+          python3 tools/check_markdown_links.py
+      - name: Retain machine records in existing evidence
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: evidence
+      - name: Publish honest diagnostic scope
+        if: always()
+        shell: bash
+        env:
+          FRONTIER_OUTCOME: ${{ steps.frontier.outcome }}
+        run: |
+          printf 'Frontier infrastructure result: %s\n' "$FRONTIER_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
+          printf 'This is an opt-in reference/blocker census, not Buster Linux qualification or a performance result.\n' >> "$GITHUB_STEP_SUMMARY"
+          for log in evidence/frontier/*.log; do
+            if test -f "$log"; then
+              printf '%s\n' "$log"
+              tail -n 24 "$log"
+            fi
+          done
+          for file in evidence/frontier/stages.txt evidence/frontier/frontier.txt; do
+            if test -f "$file"; then cat "$file" >> "$GITHUB_STEP_SUMMARY"; fi
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: linux-kernel-frontier-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            evidence/*.txt
+            evidence/*.tsv
+            evidence/*.sha256
+            evidence/*.config
+            evidence/*.tar
+            evidence/*.log
+            evidence/machine-specifications/
+            evidence/licenses/
+            evidence/frontier/*.argv
+            evidence/frontier/*.result
+            evidence/frontier/*.log
+            evidence/frontier/*.txt
+            evidence/frontier/*.tsv
+            evidence/frontier/commands/
