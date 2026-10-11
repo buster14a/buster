@@ -383,14 +383,31 @@ left baseline code generation and no hint that the request was ignored.
 `-fno-strict-overflow` is accepted as `-fwrapv` (signed overflow already wraps;
 there is no `-fno-wrapv`, so `-fstrict-overflow` stays unsupported). `-w` is
 accepted and publishes no warning text or records and outranks every other
-warning option. `--version`, `-dumpversion` and
-`-dumpmachine` need no input and exit 0 (`compiler_driver_query_text`):
+warning option. `--version`, `-dumpversion`, `-dumpmachine` and
+`-print-target-triple`/`-print-effective-triple` need no input and exit 0
+(`compiler_driver_query_text`):
 `-dumpversion` prints `18.0.0`, the `__clang_major__`/`__clang_minor__`/
 `__clang_patchlevel__` triple (`__clang_version__` is `18.0.0 (buster)`);
 `-dumpmachine` prints the effective target as `arch-os[-environment]` with the
 `gnu` environment on Linux and `msvc` on Windows (for example
 `x86_64-linux-gnu`); `--version` prints `Buster clang version 18.0.0 (buster)`,
-`Target: <that triple>` and `Thread model: posix`.
+`Target: <that triple>` and `Thread model: posix`. `-print-target-triple` and
+`-print-effective-triple` print Clang's normalized `arch-vendor-os[-environment]`
+form, with the vendor `apple` on macOS/iOS and `unknown` elsewhere (for example
+`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-android`,
+`x86_64-unknown-windows-msvc`).
+`-trigraphs` and `-ftrigraphs` enable trigraph replacement and `-fno-trigraphs`
+disables it. A later `-std=` restores that dialect's default (on in strict C99
+to C17, off in GNU modes and C23), so the last of these options wins, as in
+Clang. `-nostdlibinc` drops the system include directories but keeps the
+compiler resource directory (`stddef.h` and the other freestanding headers);
+`-nostdinc` drops both. `-working-directory=DIR` and `-working-directory DIR`
+resolve relative input paths against `DIR` with host path rules (on POSIX only
+a leading `/` is absolute and `\` and `:` are ordinary filename bytes; on
+Windows `\x.c` takes the root name of `DIR` (`C:` or UNC `\\server`) and
+`C:x.c` its root-relative directory, as in LLVM's `make_absolute`). Output paths and `-I` directories stay relative to the process
+directory, and a `DIR` that is not a directory is rejected with
+`unable to set working directory: DIR`.
 Windows targets implement the MSVC ABI only, so the MinGW spellings
 (`*-mingw32`, and a `gnu`/`gnullvm` environment on Windows) are rejected with
 `unsupported target environment` instead of being aliased to MSVC (#1492);
@@ -507,9 +524,11 @@ unit's declaration records then come from the tree
 which hands any unit that `c_parse_ast` would diagnose or read differently
 back to `c_parse_ast`. Semantic analysis answers function-body
 expression-type queries from the tree where it can (the
-[tree expression typer](frontend/ast.md#tree-expression-typer)), and its body
+[tree expression typer](frontend/ast.md#tree-expression-typer)), its body
 binder follows each function body's
-[statement plan](frontend/ast.md#statement-plan-from-the-tree); no other
+[statement plan](frontend/ast.md#statement-plan-from-the-tree), and lowering
+answers its root-conditional splits from it
+([lowering from the tree](frontend/ast.md#lowering-from-the-tree)); no other
 stage reads it. Only under the flag does analysis share the primitive and
 pointer type rows those queries mint
 ([interned rows](frontend/ast.md#interned-rows)). With the flag the object
@@ -518,8 +537,8 @@ the unit with the parse error class and a located diagnostic published like
 `c_parse_ast`'s. It does nothing for `-E`, assembly inputs or the other
 languages. Any other layout value is an argument error
 (`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints
-`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT` and `C_AST_STATEMENTS`
-rows beside `C_TYPE_LAYOUT`.
+`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT`, `C_AST_STATEMENTS` and
+`C_AST_LOWER` rows beside `C_TYPE_LAYOUT`.
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
 nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`
@@ -1208,13 +1227,31 @@ with `INPUT`, `GROUP`, `AS_NEEDED`, `OUTPUT_FORMAT`, `OUTPUT_ARCH`, or
 whitespace and C block comments are accepted for this classification. The
 first script in search order stops lookup; a later ELF library cannot hide it.
 The driver neither interprets script members nor creates an image from them.
-Ordinary missing/malformed-library policy and automatic runtime-provider
+Other ELF missing/malformed-library policy and automatic runtime-provider
 lookup retain their existing behavior. `compiler_driver_test_elf_linker_scripts`
 covers literal script/non-script boundaries, both ELF CPUs, normal/exact
 library spellings, single/multi-input links, first-request error ordering,
 later-ELF/script precedence, and preservation of an existing output.
-General GNU linker-script interpretation and Apple's missing-library behavior
-remain separate #1285 work.
+General GNU linker-script interpretation remains separate work.
+
+On macOS and iOS, `-lNAME` searches explicit `-L` roots in order, probing
+`libNAME.tbd` before `libNAME.dylib` within each root, then
+`<sysroot>/usr/lib` when a sysroot was supplied. A compatible thin or fat
+Mach-O dylib contributes its `LC_ID_DYLIB` install name and current and
+compatibility versions to `LC_LOAD_DYLIB`; TAPI YAML TBD v1-v4 stubs provide
+the same metadata, and wrong-CPU or wrong-platform candidates are skipped.
+Mach-O dylib platforms come from `LC_BUILD_VERSION` and `LC_VERSION_MIN_*`;
+TBD v4 `targets:` entries must match both architecture and platform suffix,
+while TBD v1-v3 `archs:` entries match the CPU and an optional top-level
+`platform:` narrows the platform. Located versions are written verbatim,
+including zero; absent TBD current/compatibility versions default to 1.0.0,
+while a present malformed version makes the stub unusable. `-lc` and `-lm` keep
+their existing implicit behavior. Without a located candidate, only the
+allowlisted Apple system libraries retain the legacy `/usr/lib/libNAME.dylib`
+fallback; other requests fail with `cannot find -l<request>`. TBD v5 JSON is
+unsupported. `compiler_driver_test_mach_library_search` covers parser bounds,
+architecture selection, search order, versions, fallback, refusal and archive
+interaction on every host without running the cross-linked image.
 
 ELF executable data placement honors both page and requested object alignment.
 Align the final virtual address, not only its file offset: an initialized
