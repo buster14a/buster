@@ -125,11 +125,20 @@ BUSTER_GLOBAL_LOCAL bool userspace_workload(Arena* arena, String8 program_path, 
 {
     make_directory_recursive(arena, path_join(arena, root, S8("bin")));
     make_directory_recursive(arena, path_join(arena, root, S8("tmp")));
+    make_directory_recursive(arena, path_join(arena, root, S8("dev")));
     bool valid = musl_copy_object(arena, program_path, path_join(arena, root, S8("bin/busybox"))) &&
                  musl_copy_object(arena, S8("tools/userspace/fixtures/workload.sh"), path_join(arena, root, S8("workload.sh")));
 #if BUSTER_LINUX
     valid = chmod(path_join(arena, root, S8("bin/busybox")).pointer, 0755) == 0 && valid;
 #endif
+    if (valid)
+    {
+        // Noninteractive ash opens /dev/null for a background child.
+        String8 device_args[] = {S8("sudo"), S8("-n"), S8("mknod"), S8("-m"), S8("666"),
+                                 path_join(arena, root, S8("dev/null")), S8("c"), S8("1"), S8("3")};
+        ClangSuiteCommand device = userspace_command(arena, S8("."), (SliceString8)BUSTER_ARRAY_TO_SLICE(device_args), 60);
+        valid = device.result == PROCESS_RESULT_SUCCESS;
+    }
     String8 run_args[] = {S8("sudo"), S8("-n"), S8("env"), S8("-i"), S8("PATH=/bin"), S8("LC_ALL=C"), S8("TZ=UTC"),
                           S8("/usr/sbin/chroot"), root, S8("/bin/busybox"), S8("ash"), S8("/workload.sh")};
     ClangSuiteCommand ran = {.result = PROCESS_RESULT_FAILED};

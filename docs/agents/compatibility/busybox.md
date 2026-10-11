@@ -83,7 +83,8 @@ BusyBox remain separate, unqualified cells.
 
 Each successful build is copied into its own initially empty chroot with only
 `/bin/busybox`, a project-owned [workload](../../../tools/userspace/fixtures/workload.sh),
-and a fresh `/tmp`. ash standalone applet dispatch and an explicit `/bin/busybox` self-exec path
+a fresh `/tmp`, and a private kernel `/dev/null` node for ash background jobs.
+No host device/filesystem mount is used. ash standalone applet dispatch and an explicit `/bin/busybox` self-exec path
 avoid host utility fallback or a dependency on mounted `/proc`.
 No host filesystem is mounted into the chroot. The workload checks pipelines,
 file copies/moves/symlinks, a tar roundtrip, selected text operations,
