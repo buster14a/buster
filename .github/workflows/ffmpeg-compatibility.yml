@@ -1,0 +1,99 @@
+name: FFmpeg compatibility census
+
+# Explicit opt-in diagnostic branch. No PR, merge-group or main workload.
+on:
+  push:
+    branches: [codex/3177-ffmpeg-qualification]
+    paths:
+      - build.c
+      - tools/ffmpeg_compatibility.c
+      - .github/workflows/ffmpeg-compatibility.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ffmpeg-census-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  portable:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: ubuntu-26.04
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: FFmpeg/FFmpeg
+          ref: f46e514491172d15bd74b4abb1814cd2f05a763e
+          fetch-depth: 2
+          path: external/ffmpeg
+          persist-credentials: false
+      - name: Record FFmpeg identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: external/ffmpeg
+          source-repository: FFmpeg/FFmpeg
+      - name: Hosted native build-driver bootstrap
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/ffmpeg-driver"
+          gcc -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -fsyntax-only build.c
+      - name: Configure and build trusted compiler
+        id: compiler
+        run: |
+          "$RUNNER_TEMP/ffmpeg-driver" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          "$RUNNER_TEMP/ffmpeg-driver" build --config Release -t ide
+      - name: Pristine source negative controls
+        run: |
+          "$RUNNER_TEMP/ffmpeg-driver" test_ffmpeg --self-test "$GITHUB_WORKSPACE/external/ffmpeg"
+      - name: Portable census and independent reference
+        run: |
+          "$RUNNER_TEMP/ffmpeg-driver" test_ffmpeg --portable "$GITHUB_WORKSPACE/external/ffmpeg" "$GITHUB_WORKSPACE/build/ffmpeg-census" "$GITHUB_WORKSPACE/build/Release/ide"
+      - name: Candidate source-size report
+        if: always() && steps.compiler.outcome == 'success'
+        run: |
+          "$RUNNER_TEMP/ffmpeg-driver" source_size --write-baseline
+          cat docs/source-size-baseline.txt
+      - name: Retain machine records
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: build/ffmpeg-evidence
+      - name: Retain diagnostics without external sources or binaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ffmpeg-census-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/ffmpeg-census/**/*.argv
+            build/ffmpeg-census/**/*.status
+            build/ffmpeg-census/**/*.stdout
+            build/ffmpeg-census/**/*.stderr
+            build/ffmpeg-census/**/config.h
+            build/ffmpeg-census/**/config_components.h
+            build/ffmpeg-census/**/config.mak
+            build/ffmpeg-census/**/config.log
+            build/ffmpeg-census/receipt.txt
+            build/ffmpeg-census/**/tests/data/fate/*.rep
+            build/ffmpeg-evidence/machine-specifications
+            docs/source-size-baseline.txt
+          retention-days: 14
+          if-no-files-found: warn
