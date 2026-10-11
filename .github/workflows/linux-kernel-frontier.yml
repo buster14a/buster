@@ -76,6 +76,8 @@ jobs:
           git rev-parse HEAD 'HEAD^{tree}' > evidence/buster-identity.txt
           gcc --version > evidence/gcc.txt
           gcc-14 --version > evidence/kernel-reference-gcc.txt
+          gcc-14 -Q --help=target > evidence/kernel-reference-target.txt
+          gcc-14 -dM -E -x c /dev/null > evidence/kernel-reference-predefines.txt
           clang --version > evidence/clang.txt
           ld --version > evidence/ld.txt
           as --version > evidence/as.txt
@@ -126,6 +128,9 @@ jobs:
           reference="$PWD/evidence/frontier/reference"
           if test -f "$reference/.config"; then
             cp "$reference/.config" evidence/reference.config
+          fi
+          if test -f "$reference/System.map"; then
+            cp "$reference/System.map" evidence/reference-System.map.txt
           fi
           if test -d "$reference/include"; then
             tar -cf evidence/reference-generated.tar -C "$reference" include arch/x86/include/generated

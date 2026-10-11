@@ -72,7 +72,7 @@ Output must not exist. The tool never deletes/reuses a previous result tree.
 The source commit must match the pin; tracked/untracked source drift before
 or after execution fails the diagnostic. Each stage has an independent bound:
 reference configure 120 s, reference build 600 s, reference boot 90 s, prior `qemu64` exception diagnostic 3 s,
-candidate configure 60 s, and each selected target-C replay 15 s. A timeout
+candidate configure 60 s, each direct driver reduction 15 s, and each selected target-C replay 15 s. A timeout
 kills the stage's process group and remains exit 124. Job limits are not
 evidence of successful kernel work.
 
@@ -96,7 +96,10 @@ The Buster CC wrapper forwards all arguments as `ide cc`, including
 preprocessor/identity probes. It never impersonates GCC, substitutes another
 compiler for target C, fabricates configure answers, or ignores kernel flags.
 
-The first candidate attempt is pristine Kbuild configuration. A failure is
+The first candidate attempt is pristine Kbuild configuration. Separate
+`buster-driver-version` and `buster-driver-preprocessing` reductions retain
+CLI diagnostics Kbuild redirects away; the preprocessing reduction uses empty
+`/dev/null` input and is not a compiler-identity oracle. A failure is
 retained as a blocker in `buster-configure.log` and `stages.txt`.
 Independent target-C replays then use reference-generated headers explicitly
 marked unqualified for a candidate kernel. They are diagnostic reductions,
@@ -132,7 +135,7 @@ Integrate separately qualified #3179 userspace only after independent kernel
 and userspace controls pass. Keep #3186 open until its staged acceptance is
 actually satisfied.
 
-The harness and opt-in workflow add approximately 44 KiB of build-category
+The harness and opt-in workflow add approximately 46 KiB of build-category
 code. The native driver's generated source-size baseline acknowledges this
 new reference/control/provenance capability; it changes no compiler behavior
 or native-retirement identity bindings.
@@ -146,3 +149,10 @@ The accepted reference CPU cell is `max`. The prior `qemu64` cell is
 retained only as a bounded exception diagnostic: its exit status is never a
 reference pass. The same kernel and initramfs are used in both cells.
 A CPU-model difference, if observed, does not qualify `qemu64` support.
+
+The initial hosted census records 929 C-to-object and three C-to-assembly
+required actions. Its `max` reference passes all seven controls and clean
+poweroff, while the same image triple-faults on `qemu64`. Kbuild rejects the
+Buster compiler as unknown, and all 24 unchanged-flag diagnostic replays
+refuse `-Wp,-MMD,<path>`; the other 908 actions remain unattempted.
+The passing frontier reports `qualified_kernel=no` and leaves #3186 open.

@@ -495,14 +495,26 @@ BUSTER_GLOBAL_LOCAL int kernel_frontier(char const* fragment)
         // Retain the previously failing CPU cell as a diagnostic only.
         for (size_t i = 0; boot[i]; ++i)
         {
-            if (strcmp(boot[i], "-cpu") == 0) { boot[i + 1] = "qemu64"; }
-            if (strcmp(boot[i], "-d") == 0) { boot[i + 1] = "int,guest_errors,cpu_reset"; }
+            if (strcmp(boot[i], "-cpu") == 0)
+            {
+                boot[i + 1] = "qemu64";
+            }
+            if (strcmp(boot[i], "-d") == 0)
+            {
+                boot[i + 1] = "int,guest_errors,cpu_reset";
+            }
         }
         kernel_run("reference-boot-qemu64-diagnostic", context->source, boot, 3);
         for (size_t i = 0; boot[i]; ++i)
         {
-            if (strcmp(boot[i], "-cpu") == 0) { boot[i + 1] = "max"; }
-            if (strcmp(boot[i], "-d") == 0) { boot[i + 1] = "guest_errors,cpu_reset"; }
+            if (strcmp(boot[i], "-cpu") == 0)
+            {
+                boot[i + 1] = "max";
+            }
+            if (strcmp(boot[i], "-d") == 0)
+            {
+                boot[i + 1] = "guest_errors,cpu_reset";
+            }
         }
     }
     valid = valid && kernel_run("reference-boot", context->source, boot, 90) == 0 &&
@@ -514,6 +526,11 @@ BUSTER_GLOBAL_LOCAL int kernel_frontier(char const* fragment)
         char* candidate_configure[] = {"make", "-C", context->source, candidate, "ARCH=x86",
                                       buster, host, config, "V=1", "allnoconfig", 0};
         int candidate_status = kernel_run("buster-configure", context->source, candidate_configure, 60);
+        char* version_probe[] = {context->compiler, "cc", "--version", 0};
+        char* preprocessing_probe[] = {context->compiler, "cc", "-E", "-P", "-x", "c", "/dev/null", 0};
+        // Reductions expose diagnostics hidden by Kbuild's probe redirection.
+        kernel_run("buster-driver-version", context->candidate, version_probe, 15);
+        kernel_run("buster-driver-preprocessing", context->candidate, preprocessing_probe, 15);
         // A refused configure is a retained blocker, never a manufactured pass.
         char facts[256], path[KERNEL_PATH_BYTES];
         int bytes = snprintf(facts, sizeof(facts), "reference_boot=pass\nreference_controls=7/7\n"
