@@ -573,7 +573,7 @@ fi
                         "shutdown_postcondition_state=unavailable\nshutdown_disposition=not-attempted\n"
                         "adopt_pending_create_identity() { :; }\n"
                         "run_lifecycle_phase() {\n"
-                        '    [[ $1 == shutdown && $6 == xcrun && $7 == simctl && $8 == shutdown && $9 == "$udid" ]]\n'
+                        '    [[ $1 == shutdown && $5 == xcrun && $6 == simctl && $7 == shutdown && $8 == "$udid" ]]\n'
                         "    kill -" + str(signum) + ' "$$"\n'
                         "    kill -" + str(signum) + ' "$$"\n'
                         '    printf "owned shutdown completed\\n" >"$console_log_base.shutdown-completed"\n'
