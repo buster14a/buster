@@ -18,6 +18,7 @@ jobs:
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/issue3636-driver"
           "$RUNNER_TEMP/issue3636-driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
           "$RUNNER_TEMP/issue3636-driver" build --config Release -t ide
+          "$RUNNER_TEMP/issue3636-driver" build --config Release -t test_all
           "$RUNNER_TEMP/issue3636-driver" test_self_host --config Release
       - name: GNU label cast independent oracles and candidate
         shell: bash
@@ -38,7 +39,8 @@ jobs:
                 result=$?
                 set -e
                 echo "candidate dialect=$dialect pilot=$pilot form=$form result=$result"
-                if [ "$result" -eq 0 ]; then "$RUNNER_TEMP/buster-probe"; fi
+                test "$result" -eq 0
+                "$RUNNER_TEMP/buster-probe"
               done
             done
           done

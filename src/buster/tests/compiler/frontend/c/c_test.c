@@ -38755,6 +38755,115 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_type_prediction(UnitTestAr
 // which has no `typeof`, so it split at the `+` and the declaration it typed
 // declared nothing.  The neighbours at the end resolved before and must keep
 // resolving.
+// First-party GNU17/GNU23 witnesses: typeof's operand is not the outer
+// cast's type-word grammar. Conjunction and sizeof/alignof neighbors still
+// resolve the next name as an ordinary identifier, even when it is a label.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_label_address(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "int main(void) { int a=1,b=0;"
+        " void *p=(__typeof__((void*)0))&&done;"
+        " void *q=(__typeof(void*))&&done;"
+        " void *r=(typeof((void*)0))&&done;"
+        " void *s=(__typeof__((a && b,(void*)0)))&&done;"
+        "done: return p!=&&done || q!=&&done || r!=&&done || s!=&&done; }");
+    String8 invalid[] = {
+        S8("int main(void) { return (1) && done; done: return 0; }"),
+        S8("int main(void) { return sizeof(__typeof__((void*)0)) && done; done: return 0; }"),
+        S8("int main(void) { return _Alignof(__typeof__((void*)0)) && done; done: return 0; }"),
+        S8("int main(void) { void *p=(__typeof__((void*)unknown))&&done; done: return p!=&&done; }"),
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = targets[target_index], .dialect = dialects[dialect]});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !semantic.diagnostic_count, source);
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("typeof-label.c"), tokens, semantic, targets[target_index],
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, !lowered.diagnostic_count && lowered.program && lowered.program->module_count == 1))
+                {
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                }
+            }
+            scratch_end(temporary);
+        }
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, invalid[index],
+                (CPreprocessOptions){.target = target_native, .dialect = dialects[dialect]});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            bool undeclared = false;
+            for (u32 row = 0; row < semantic.diagnostic_count; row += 1)
+            {
+                undeclared |= string_first_sequence(semantic.diagnostics[row].message, S8("use of undeclared identifier")) != BUSTER_STRING_NO_MATCH;
+            }
+            BUSTER_TEST_RAW(arguments, undeclared, invalid[index]);
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 path = buster_test_temporary_path(arguments->arena, S8("typeof-label"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 standards[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(standards); dialect += 1)
+        {
+            for (u32 pilot = 0; pilot < 2; pilot += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+                    {
+                        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                        String8 output = buster_test_temporary_path(temporary.arena, S8("typeof-label-run"), S8(".exe"));
+                        String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), standards[dialect], modes[mode], S8("-fverify-codegen"),
+                            form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-o"), output, path};
+                        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                            (SliceString8){command + !pilot, BUSTER_ARRAY_LENGTH(command) - !pilot});
+                        invocation.reject_machine_fallback = true;
+                        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            String8 run[] = {output};
+                            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                (ProcessSpawnOptions){.use_process_environment = true});
+                            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                            {
+                                ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                                BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                            }
+                        }
+                        scratch_end(temporary);
+                    }
+                }
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_cast_prefix_operator(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -62984,6 +63093,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_typeof_conditional_type);
     C_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
     C_TEST_FIXTURE(arguments, c_test_typeof_invalid_operand_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_typeof_label_address);
     C_TEST_FIXTURE(arguments, c_test_typeof_malformed_operand_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_typeof_statement_expression_declarations);
     C_TEST_FIXTURE(arguments, c_test_u64_initializer_slots);

@@ -25487,6 +25487,20 @@ BUSTER_C_INTERNAL bool c_parse_label_address_prefix_with_typedef_at(CParseResult
             else if (c_parse_type_start_token(result, *preprocess, scope, token))
             {
                 type_name = true;
+                // The operand belongs to typeof's expression/type grammar,
+                // not the enclosing cast's restricted type-word proof.
+                u16 words = c_parse_word_bits_token(*preprocess, token);
+                bool typeof_specifier = (words & C_WORD_TYPEOF) ||
+                                        (c_preprocess_dialect_is_c23(preprocess->dialect) && (words & C_WORD_TYPEOF_UNQUAL));
+                if (typeof_specifier && scan + 1 < index - 1 &&
+                    c_token_is_punctuator(&preprocess->tokens[scan + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    u32 close = c_parse_matching_delimiter_indexed(result, *preprocess, scan + 1);
+                    if (close < index - 1 && scan + 2 < close)
+                    {
+                        scan = close;
+                    }
+                }
             }
             else
             {
@@ -38571,6 +38585,13 @@ BUSTER_C_INTERNAL bool c_parse_label_address_cast_at(CParseResult* result, CPrep
         {
             type = c_parse_pointer_chain(result, preprocess, type, &cursor, index - 1);
             label = type.value < result->type_count && cursor == index - 1;
+        }
+        else
+        {
+            // The machineless reader cannot resolve typeof operands. The
+            // binder's scoped prefix proof admits their balanced group;
+            // ordinary semantic typing still validates the complete cast.
+            label = c_parse_label_address_prefix_with_typedef_at(result, &preprocess, scope, start, index, open);
         }
     }
     return label;
