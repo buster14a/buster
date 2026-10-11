@@ -1046,6 +1046,12 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_linker_query(CompilerDriverInv
 // Embedding callers bypass argv parsing, so validate their lists here too.
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_names(Arena* arena, CompilerDriverInvocation* invocation)
 {
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE &&
+        ((invocation->library_count && !invocation->libraries) || (invocation->framework_count && !invocation->frameworks)))
+    {
+        compiler_driver_argument_error(arena, invocation, S8("missing dependency name storage after {S8}"),
+                                       invocation->library_count && !invocation->libraries ? S8("-l") : S8("-framework"));
+    }
     for (u32 index = 0; invocation->error == COMPILER_DRIVER_ERROR_NONE && index < invocation->library_count; index += 1)
     {
         if (!invocation->libraries[index].length)
@@ -1064,7 +1070,6 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_names(Arena* arena,
 
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_request(Arena* arena, CompilerDriverInvocation* invocation)
 {
-    compiler_driver_validate_dependency_names(arena, invocation);
     if (invocation->error == COMPILER_DRIVER_ERROR_NONE && invocation->has_gpu_target)
     {
         compiler_driver_reject_gpu_native_options(arena, invocation, 0, 0);
@@ -9468,6 +9473,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     {
         result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         result.diagnostic = S8("native library counts exceed driver limits");
+        goto finish;
+    }
+    compiler_driver_validate_dependency_names(arena, &invocation);
+    if (invocation.error != COMPILER_DRIVER_ERROR_NONE)
+    {
+        result.error = invocation.error;
+        result.diagnostic = invocation.diagnostic;
         goto finish;
     }
     // The digest covers every structured record, and function sizes are a

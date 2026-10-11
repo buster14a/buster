@@ -16227,6 +16227,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_empty_dependency_names(U
                             }
                         }
                     }
+                    CompilerDriverInvocation no_storage = {.target = target_parse_triple(targets[target_index]).target,
+                        .action = COMPILER_DRIVER_ACTION_LINK};
+                    no_storage.library_count = option ? 0 : 1;
+                    no_storage.framework_count = option ? 1 : 0;
+                    CompilerDriverResult no_storage_result = compiler_driver_execute_invocation(arena, no_storage);
+                    BUSTER_TEST(arguments, no_storage_result.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                    BUSTER_STRING_TEST(arguments, no_storage_result.diagnostic,
+                        string_format(arena, S8("missing dependency name storage after {S8}"), options[option]));
                     String8 valid[] = {S8("-target"), targets[target_index], source, options[option], S8("BusterValid3643")};
                     CompilerDriverInvocation accepted = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(valid));
                     BUSTER_TEST(arguments, accepted.error == COMPILER_DRIVER_ERROR_NONE);
