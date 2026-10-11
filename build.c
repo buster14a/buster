@@ -41,6 +41,7 @@
 //   tools/ci_no_code.c                          conservative no-code admission plan
 //   tools/source_size.c                         source-size report and ratchet
 //   tools/ci_unit_tests.c                       isolated test-module partitions
+//   tools/qemu_compat.c                         opt-in pinned QEMU TCG blocker census
 //   tools/clang_suite.c                         pinned external Clang source ledger and preprocessing probes
 //   compatibility_spawn_self_test              harness environment/script contracts
 //   test_raddebugger_action                     pinned upstream unity compilation/link diagnostic
@@ -147,6 +148,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_RADDEBUGGER,
     BUILD_COMMAND_TEST_MODE_MATRIX,
     BUILD_COMMAND_TEST_DIFFERENTIAL,
+    BUILD_COMMAND_TEST_QEMU,
     BUILD_COMMAND_TEST_CLANG_SUITE,
     BUILD_COMMAND_TEST_GPU_TOOLCHAINS,
     BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS,
@@ -25390,6 +25392,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION:
         case BUILD_COMMAND_OPTNONE_AUDIT:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
+        case BUILD_COMMAND_TEST_QEMU:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
@@ -39347,6 +39350,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 #include "tools/source_size.c"
 #include "tools/ci_no_code.c"
 #include "tools/ci_unit_tests.c"
+#include "tools/qemu_compat.c"
 #include "tools/clang_suite.c"
 #include "tools/compiler_profile_qualification.c"
 
@@ -39408,6 +39412,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_RADDEBUGGER] = S8_INITIALIZER("test_raddebugger"),
         [BUILD_COMMAND_TEST_MODE_MATRIX] = S8_INITIALIZER("test_mode_matrix"),
         [BUILD_COMMAND_TEST_DIFFERENTIAL] = S8_INITIALIZER("test_differential"),
+        [BUILD_COMMAND_TEST_QEMU] = S8_INITIALIZER("test_qemu"),
         [BUILD_COMMAND_TEST_CLANG_SUITE] = S8_INITIALIZER("test_clang_suite"),
         [BUILD_COMMAND_TEST_GPU_TOOLCHAINS] = S8_INITIALIZER("test_gpu_toolchains"),
         [BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS] = S8_INITIALIZER("native_retirement_census"),
@@ -39517,6 +39522,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION: result = compiler_profile_qualification_main(arena, owned_arguments); break;
             case BUILD_COMMAND_OPTNONE_AUDIT: result = optnone_audit_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_DIFFERENTIAL: result = differential_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_TEST_QEMU: result = qemu_compat_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_CLANG_SUITE: result = clang_suite_main(arena, owned_arguments); break;
             case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS: result = native_retirement_census_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UEFI: result = uefi_boot_main(arena, owned_arguments, arguments.pointer[0]); break;

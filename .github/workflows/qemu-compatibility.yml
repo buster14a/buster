@@ -1,0 +1,143 @@
+name: QEMU TCG compatibility census
+# Explicit campaign branch only; never expands PR/main/merge-group CI.
+on:
+  push:
+    branches: [codex/3185-qemu-tcg-census]
+    paths:
+      - 'tools/qemu_compat.c'
+      - '.github/workflows/qemu-compatibility.yml'
+      - 'build.c'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: qemu-census-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  linux-x86-64:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: ubuntu-26.04
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: qemu/qemu
+          ref: b2995afed254e4804611df52210067a4d5dbdf0b
+          path: external/qemu
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: qemu/keycodemapdb
+          ref: f5772a62ec52591ff6870b7e8ef32482371f22c6
+          path: external/qemu/subprojects/keycodemapdb
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ucb-bar/berkeley-softfloat-3
+          ref: b64af41c3276f97f0e181920400ee056b9c88037
+          path: external/qemu/subprojects/berkeley-softfloat-3
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ucb-bar/berkeley-testfloat-3
+          ref: e7af9751d9f9fd3b47911f51a5cfd08af256a9ab
+          path: external/qemu/subprojects/berkeley-testfloat-3
+          persist-credentials: false
+      - name: Install external upstream build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends meson ninja-build pkg-config libglib2.0-dev libpixman-1-dev zlib1g-dev python3-venv python3-setuptools python3-tomli
+      - name: Freeze diagnostic environment and license inputs
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD 'HEAD^{tree}' > evidence/buster-identity.txt
+          dpkg-query -W > evidence/packages.txt
+          clang --version > evidence/clang.txt
+          meson --version > evidence/meson.txt
+          ninja --version > evidence/ninja.txt
+          pkg-config --modversion glib-2.0 pixman-1 zlib > evidence/library-versions.txt
+          cp external/qemu/LICENSE external/qemu/COPYING external/qemu/COPYING.LIB evidence/
+          cp external/qemu/subprojects/keycodemapdb/LICENSE.BSD evidence/keycodemapdb-LICENSE.BSD
+          cp external/qemu/subprojects/berkeley-softfloat-3/COPYING.txt evidence/softfloat-COPYING.txt
+          cp external/qemu/subprojects/berkeley-testfloat-3/COPYING.txt evidence/testfloat-COPYING.txt
+          sha256sum external/qemu/subprojects/*.wrap > evidence/wrap-inputs.sha256
+          find external/qemu/subprojects/packagefiles -type f -print0 | sort -z | xargs -0 sha256sum > evidence/generator-build-inputs.sha256
+          printf 'Cloud diagnostic only. Guest, firmware, functional and Zen 5 performance qualification pending.\n' > evidence/scope.txt
+      - name: Bootstrap native build driver
+        id: bootstrap
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/qemu-driver"
+      - name: Input refusal controls
+        run: |
+          "$RUNNER_TEMP/qemu-driver" test_qemu --self-test
+      - name: Build trusted Buster compiler
+        id: compiler
+        run: |
+          "$RUNNER_TEMP/qemu-driver" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT
+          "$RUNNER_TEMP/qemu-driver" build --config Release -t ide
+          sha256sum "$RUNNER_TEMP/qemu-driver" build/Release/ide > evidence/compiler-identities.sha256
+      - name: Preserve self-host fixed point
+        id: selfhost
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/qemu-driver" test_self_host --config Release 2>&1 | tee evidence/self-host.log
+      - name: Run independent reference and Buster census
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/qemu-driver" test_qemu "$GITHUB_WORKSPACE/external/qemu" "$GITHUB_WORKSPACE/build/Release/ide" 2>&1 | tee evidence/qemu-census.log
+      - name: Source-size ratchet
+        if: ${{ !cancelled() && steps.bootstrap.outcome == 'success' }}
+        run: |
+          "$RUNNER_TEMP/qemu-driver" source_size --base abb1c5afbcf55e120d83283ffbad402fc75bd80a
+      - name: Retain generated source-size acknowledgment candidate
+        if: ${{ !cancelled() && steps.bootstrap.outcome == 'success' }}
+        run: |
+          "$RUNNER_TEMP/qemu-driver" source_size --write-baseline
+          cp docs/source-size-baseline.txt evidence/source-size-baseline.txt
+          cat evidence/source-size-baseline.txt
+      - name: Retain machine records
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: evidence
+      - name: Retain census and failed-stage diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: qemu-census-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            evidence/
+            build/qemu-*/*.command
+            build/qemu-*/*.stdout
+            build/qemu-*/*.stderr
+            build/qemu-*/*.status
+            build/qemu-*/summary.tsv
+            build/qemu-*/reference/config.log
+            build/qemu-*/buster/config.log
+            build/qemu-*/reference/meson-logs/
+            build/qemu-*/buster/meson-logs/
+            build/qemu-*/reference/compile_commands.json
+            build/qemu-*/buster/compile_commands.json
+            build/qemu-*/reference/build.ninja
+            build/qemu-*/buster/build.ninja
