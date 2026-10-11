@@ -143,6 +143,10 @@ def baseline_workers(environment):
     return int(text)
 
 
+def expected_primary_module(platform, architecture):
+    return "compiler_driver_tests" if platform == "windows" and architecture == "aarch64" else "c_frontend_tests"
+
+
 def provenance(directory, binary, platform, environment):
     revision = environment.get("BUSTER_TEST_SOURCE_REVISION", "")
     measure.require(re.fullmatch(r"[0-9a-f]{40}", revision) is not None, "Missing exact source revision")
@@ -180,7 +184,7 @@ def assemble(directory, binary, platform, pairs, environment):
     identities = provenance(directory, binary, platform, environment)
     baseline_jobs = baseline_workers(environment)
     rows, profile, inventory_primary = inventory_proof(directory / "inventory.log")
-    expected_primary = "c_frontend_tests" if platform == "windows" else "compiler_driver_tests"
+    expected_primary = expected_primary_module(identities["platform"], identities["architecture"])
     measure.require(inventory_primary == expected_primary, "Inventory primary module differs from platform policy")
     if profile is not None:
         measure.require(profile["architecture"] == identities["architecture"], "Native host profile architecture differs")
