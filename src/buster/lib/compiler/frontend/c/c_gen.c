@@ -37206,8 +37206,21 @@ BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValue
 
 BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
 
-BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
-                                               u32* expression_end);
+BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+                                                    u32* expression_end);
+BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+                                                    u32* expression_end);
+
+// Whether [start, end) is a `?:` at the root, and its tokens: from the syntax
+// tree when lowering has one for this body (c_ir_tree_root_conditional), else
+// by the token scan. Inline, so the default path calls the scan directly.
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question,
+                                                             u32* colon, u32* expression_end)
+{
+    bool result = builder->tree_conditionals ? c_ir_tree_root_conditional(builder, start, end, expression_start, question, colon, expression_end)
+                                             : c_ir_root_conditional_scan(builder, start, end, expression_start, question, colon, expression_end);
+    return result;
+}
 
 struct CIrConditionTask
 {
@@ -39687,14 +39700,6 @@ BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u3
         builder->ast_lower_statistics->negatives += verdict == C_IR_TREE_ROOT_FALSE;
         builder->ast_lower_statistics->fallbacks += verdict == C_IR_TREE_ROOT_UNKNOWN;
     }
-    return result;
-}
-
-BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
-                                               u32* expression_end)
-{
-    bool result = builder->tree_conditionals ? c_ir_tree_root_conditional(builder, start, end, expression_start, question, colon, expression_end)
-                                             : c_ir_root_conditional_scan(builder, start, end, expression_start, question, colon, expression_end);
     return result;
 }
 
