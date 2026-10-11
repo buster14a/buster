@@ -1830,4 +1830,16 @@ negative result, diagnostic only:
 - **Leaf budget fails.** The leaf grows by 0.53 M, or by 0.25 M when a first
   sight is probed only once. The code does not ship.
 
+That audit's other lead, 273 M Ir of first-sight decodes under
+`c_parse_infer_initializer_array_count_core`, was censused in
+[`2026-10-11T142043Z`](../../performance-audits/2026-10-11T142043Z.md), with
+no candidate and so no budgets:
+- The decodes are the 2,936 string pools of the generated assembly headers,
+  about 4 KB each and 11.6 MB in all. Each is decoded once, and `-c`
+  reuses the bytes.
+- On `-march=x86-64-v3` builds, `simd.h`'s masked load, store and compare are
+  64-lane scalar loops, about 1,218 Ir per 64-byte window. The AVX-512 path
+  is estimated at about 7 M Ir for the same work. Hosted v3 censuses
+  overstate masked kernels accordingly.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
