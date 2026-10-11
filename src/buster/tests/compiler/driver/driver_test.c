@@ -282,25 +282,66 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_test_mach_read_u32(ByteSlice bytes, u64 
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_mach_dylib(Arena* arena, u32 cputype, u32 filetype, String8 install_name,
-                                                               u32 current_version, u32 compatibility_version)
+BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_mach_dylib_with_platforms(Arena* arena, u32 cputype, u32 filetype,
+                                                                             String8 install_name, u32 current_version,
+                                                                             u32 compatibility_version, u32 const* platforms,
+                                                                             u32 platform_count, u32 version_min_command)
 {
-    u32 command_size = (u32)align_forward(24 + install_name.length + 1, 8);
-    u64 length = 32 + command_size;
+    u32 identity_command_size = (u32)align_forward(24 + install_name.length + 1, 8);
+    u32 command_bytes = identity_command_size + platform_count * 24 + (version_min_command ? 16 : 0);
+    u32 command_count = 1 + platform_count + (version_min_command ? 1 : 0);
+    u64 length = 32 + command_bytes;
     u8* bytes = arena_allocate(arena, u8, length);
     memset(bytes, 0, length);
     compiler_driver_test_store(bytes, 0, 0xfeedfacf, 4);
     compiler_driver_test_store(bytes, 4, cputype, 4);
     compiler_driver_test_store(bytes, 12, filetype, 4);
-    compiler_driver_test_store(bytes, 16, 1, 4);
-    compiler_driver_test_store(bytes, 20, command_size, 4);
+    compiler_driver_test_store(bytes, 16, command_count, 4);
+    compiler_driver_test_store(bytes, 20, command_bytes, 4);
     compiler_driver_test_store(bytes, 32, 0xd, 4);
-    compiler_driver_test_store(bytes, 36, command_size, 4);
+    compiler_driver_test_store(bytes, 36, identity_command_size, 4);
     compiler_driver_test_store(bytes, 40, 24, 4);
     compiler_driver_test_store(bytes, 48, current_version, 4);
     compiler_driver_test_store(bytes, 52, compatibility_version, 4);
     memcpy(bytes + 56, install_name.pointer, install_name.length);
+    u64 cursor = 32 + identity_command_size;
+    for (u32 index = 0; index < platform_count; index += 1)
+    {
+        compiler_driver_test_store(bytes, cursor, 0x32, 4);
+        compiler_driver_test_store(bytes, cursor + 4, 24, 4);
+        compiler_driver_test_store(bytes, cursor + 8, platforms[index], 4);
+        cursor += 24;
+    }
+    if (version_min_command)
+    {
+        compiler_driver_test_store(bytes, cursor, version_min_command, 4);
+        compiler_driver_test_store(bytes, cursor + 4, 16, 4);
+    }
     return (ByteSlice){.pointer = bytes, .length = length};
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_mach_dylib_with_platform(Arena* arena, u32 cputype, u32 filetype,
+                                                                             String8 install_name, u32 current_version,
+                                                                             u32 compatibility_version, u32 platform)
+{
+    ByteSlice result;
+    if (platform)
+    {
+        result = compiler_driver_test_mach_dylib_with_platforms(arena, cputype, filetype, install_name, current_version,
+                                                                 compatibility_version, &platform, 1, 0);
+    }
+    else
+    {
+        result = compiler_driver_test_mach_dylib_with_platforms(arena, cputype, filetype, install_name, current_version,
+                                                                 compatibility_version, 0, 0, 0);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_mach_dylib(Arena* arena, u32 cputype, u32 filetype, String8 install_name,
+                                                               u32 current_version, u32 compatibility_version)
+{
+    return compiler_driver_test_mach_dylib_with_platform(arena, cputype, filetype, install_name, current_version, compatibility_version, 0);
 }
 
 BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_mach_fat(Arena* arena, ByteSlice const* slices, u32 const* cputypes, u32 slice_count,
@@ -14691,6 +14732,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
     Arena* arena = arguments->arena;
     Target aarch64 = target_parse_triple(S8("aarch64-apple-macos")).target;
     Target x86_64 = target_parse_triple(S8("x86_64-apple-macos")).target;
+    Target ios = target_parse_triple(S8("aarch64-apple-ios")).target;
     ByteSlice arm_dylib = compiler_driver_test_mach_dylib(arena, 0x0100000c, 6, S8("@rpath/libarm.dylib"), 0x10203, 0x10000);
     ByteSlice x86_dylib = compiler_driver_test_mach_dylib(arena, 0x01000007, 6, S8("@rpath/libx86.dylib"), 0x20304, 0x10000);
     CompilerDriverMachDylibIdentity identity = {0};
@@ -14700,6 +14742,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
     BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(x86_dylib, x86_64, &identity) == COMPILER_DRIVER_MACH_DYLIB_USABLE);
     BUSTER_STRING_TEST(arguments, identity.install_name, S8("@rpath/libx86.dylib"));
     BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(arm_dylib, x86_64, &identity) == COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    ByteSlice ios_dylib = compiler_driver_test_mach_dylib_with_platform(arena, 0x0100000c, 6, S8("@rpath/libios.dylib"), 0x10000,
+                                                                        0x10000, 2);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(ios_dylib, aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(ios_dylib, ios, &identity) == COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    ByteSlice macos_dylib = compiler_driver_test_mach_dylib_with_platform(arena, 0x0100000c, 6, S8("@rpath/libmacos.dylib"),
+                                                                           0x10000, 0x10000, 1);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(macos_dylib, aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    u32 zippered_platforms[] = {1, 6};
+    ByteSlice zippered_dylib = compiler_driver_test_mach_dylib_with_platforms(arena, 0x0100000c, 6,
+                                                                               S8("@rpath/libzippered.dylib"), 0x10000, 0x10000,
+                                                                               zippered_platforms, BUSTER_ARRAY_LENGTH(zippered_platforms), 0);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(zippered_dylib, aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    ByteSlice min_ios_dylib = compiler_driver_test_mach_dylib_with_platforms(arena, 0x0100000c, 6,
+                                                                              S8("@rpath/libmin-ios.dylib"), 0x10000, 0x10000, 0, 0,
+                                                                              0x25);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(min_ios_dylib, aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
     u8 bytes32[4] = {0xce, 0xfa, 0xed, 0xfe};
     BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity((ByteSlice){.pointer = bytes32, .length = sizeof(bytes32)}, aarch64,
                                                                &identity) == COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
@@ -14759,6 +14821,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
                                COMPILER_DRIVER_MACH_DYLIB_USABLE);
     BUSTER_STRING_TEST(arguments, identity.install_name, S8("@rpath/libquoted.dylib"));
     BUSTER_TEST(arguments, identity.current_version == 0x1020c && identity.compatibility_version == 0x10000);
+    String8 tbd_ios_target = S8("--- !tapi-tbd-v4\n"
+                                "targets: [ arm64-ios ]\n"
+                                "install-name: @rpath/libios-target.dylib\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_ios_target), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_ios_target), ios, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    String8 tbd_catalyst = S8("--- !tapi-tbd-v4\n"
+                              "targets: [ arm64-maccatalyst ]\n"
+                              "install-name: @rpath/libcatalyst.dylib\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_catalyst), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_catalyst), ios, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    String8 tbd_ios_simulator = S8("--- !tapi-tbd-v4\n"
+                                   "targets: [ arm64-ios-simulator ]\n"
+                                   "install-name: @rpath/libsimulator.dylib\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_ios_simulator), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_ios_simulator), ios, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
     String8 tbd_arm64e = S8("--- !tapi-tbd-v4\n"
                             "targets: [ arm64e-macos ]\n"
                             "install-name: /usr/lib/libarm64e.dylib\n");
@@ -14773,6 +14856,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
                                COMPILER_DRIVER_MACH_DYLIB_USABLE);
     BUSTER_STRING_TEST(arguments, identity.install_name, S8("/usr/lib/libplain.dylib"));
     BUSTER_TEST(arguments, identity.current_version == 0x1020c && identity.compatibility_version == 0x10000);
+    String8 tbd_v3_ios_platform = S8("--- !tapi-tbd-v3\n"
+                                     "archs: [ arm64 ]\n"
+                                     "platform: 'ios'\n"
+                                     "install-name: /usr/lib/libios-platform.dylib\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_v3_ios_platform), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    String8 tbd_v3_zippered_platform = S8("--- !tapi-tbd-v3\n"
+                                          "archs: [ arm64 ]\n"
+                                          "platform: zippered\n"
+                                          "install-name: /usr/lib/libzippered-platform.dylib\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_v3_zippered_platform), aarch64,
+                                                              &identity) == COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    String8 tbd_default_versions = S8("--- !tapi-tbd-v3\ninstall-name: /usr/lib/libdefaults.dylib\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_default_versions), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_TEST(arguments, identity.current_version == 0x10000 && identity.compatibility_version == 0x10000);
     String8 tbd_missing_name = S8("--- !tapi-tbd-v4\ntargets: [ arm64-macos ]\n");
     BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_missing_name), aarch64, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
@@ -14786,8 +14885,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
     BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity((ByteSlice){0}, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
     String8 tbd_bad_version = S8("--- !tapi-tbd-v3\ninstall-name: /usr/lib/libversion.dylib\ncurrent-version: 1.999\n");
     BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_bad_version), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    String8 tbd_zero_version = S8("--- !tapi-tbd-v3\ninstall-name: /usr/lib/libzero.dylib\ncurrent-version: 0\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_zero_version), aarch64, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_USABLE);
-    BUSTER_TEST(arguments, identity.current_version == 0);
+    BUSTER_TEST(arguments, identity.current_version == 0 && identity.compatibility_version == 0x10000);
 
     static String8 const target_names[] = {
         S8_INITIALIZER("aarch64-apple-macos"),
@@ -14804,7 +14906,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
         BUSTER_TEST(arguments, os_make_directory_attempt(base));
         BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int bar(void); int main(void) { return bar(); }\n"))));
         u32 output_index = 0;
-        for (u32 scenario = 0; scenario < 16; scenario += 1)
+        for (u32 scenario = 0; scenario < 20; scenario += 1)
         {
             String8 directory = string_format_z(arena, S8("{S8}/scenario-{u32}"), base, scenario);
             String8 first = string_format_z(arena, S8("{S8}/first"), directory);
@@ -14818,7 +14920,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
             String8 expected_name = {0};
             u32 expected_current_version = 0x10000;
             u32 expected_compatibility_version = 0x10000;
-            bool expected_success = scenario != 0 && scenario != 4 && scenario != 12 && scenario != 15;
+            bool expected_success = scenario != 0 && scenario != 4 && scenario != 12 && scenario != 15 && scenario != 18;
             switch (scenario)
             {
                 case 0:
@@ -14869,12 +14971,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
                     BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), directory),
                         compiler_driver_test_mach_dylib(arena, target_cputypes[target_index], 6, S8("@rpath/libbar_dylib.dylib"),
                                                         0x10000, 0x10000)));
+                    String8 target_platform = target_index == 2 ? S8("arm64-ios")
+                                            : target_index == 1 ? S8("x86_64-macos")
+                                                                : S8("arm64-macos");
+                    String8 target_tbd = string_format(
+                        arena,
+                        S8("--- !tapi-tbd-v4\ntargets: [ {S8} ]\ninstall-name: \"@rpath/libbar_tbd.dylib\"\n"
+                           "current-version: 4.5.6\ncompatibility-version: 2.3\n"),
+                        target_platform);
                     BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.tbd"), directory),
-                        BUSTER_SLICE_TO_BYTE_SLICE(S8("--- !tapi-tbd-v4\n"
-                                                      "targets: [ arm64-macos, x86_64-macos ]\n"
-                                                      "install-name: \"@rpath/libbar_tbd.dylib\"\n"
-                                                      "current-version: 4.5.6\n"
-                                                      "compatibility-version: 2.3\n"))));
+                                                     BUSTER_SLICE_TO_BYTE_SLICE(target_tbd)));
                     options[option_count++] = S8("-L");
                     options[option_count++] = directory;
                     options[option_count++] = S8("-lbar");
@@ -14988,6 +15094,82 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
                     options[option_count++] = directory;
                     options[option_count++] = S8("-lq");
                     break;
+                case 16:
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), directory),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index], 6, S8("@rpath/libbar-zero.dylib"), 0, 0)));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = directory;
+                    options[option_count++] = S8("-lbar");
+                    expected_name = S8("@rpath/libbar-zero.dylib");
+                    expected_current_version = 0;
+                    expected_compatibility_version = 0;
+                    break;
+                case 17:
+                case 18:
+                case 19:
+                {
+                    String8 wrong_platform_target = target_index == 2       ? S8("arm64-macos")
+                                                    : target_cputypes[target_index] == 0x0100000c ? S8("arm64-ios")
+                                                                                                 : S8("x86_64-ios");
+                    String8 wrong_platform_tbd =
+                        string_format(arena, S8("--- !tapi-tbd-v4\ntargets: [ {S8} ]\ninstall-name: @rpath/libbar-wrong-platform.dylib\n"),
+                                      wrong_platform_target);
+                    if (scenario == 17)
+                    {
+                        BUSTER_TEST(arguments, os_make_directory_attempt(first));
+                        BUSTER_TEST(arguments, os_make_directory_attempt(second));
+                        BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.tbd"), first),
+                                                         BUSTER_SLICE_TO_BYTE_SLICE(wrong_platform_tbd)));
+                        BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), second),
+                            compiler_driver_test_mach_dylib_with_platform(
+                                arena, target_cputypes[target_index], 6, S8("@rpath/libbar-platform-later.dylib"), 0x20100,
+                                0x10000, target_index == 2 ? 2 : 1)));
+                        options[option_count++] = S8("-L");
+                        options[option_count++] = first;
+                        options[option_count++] = S8("-L");
+                        options[option_count++] = second;
+                        options[option_count++] = S8("-lbar");
+                        expected_name = S8("@rpath/libbar-platform-later.dylib");
+                        expected_current_version = 0x20100;
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.tbd"), directory),
+                                                         BUSTER_SLICE_TO_BYTE_SLICE(wrong_platform_tbd)));
+                        if (scenario == 18)
+                        {
+                            options[option_count++] = S8("-L");
+                            options[option_count++] = directory;
+                            options[option_count++] = S8("-lbar");
+                        }
+                        else
+                        {
+                            String8 member_source = string_format_z(arena, S8("{S8}/bar-member.c"), directory);
+                            String8 member_object = string_format_z(arena, S8("{S8}/bar-member.o"), directory);
+                            BUSTER_TEST(arguments, file_write(member_source,
+                                                             BUSTER_SLICE_TO_BYTE_SLICE(S8("int bar(void) { return 0; }\n"))));
+                            String8 compile_command[] = {
+                                S8("-target"), target_names[target_index], S8("-g0"), S8("-c"), S8("-o"), member_object, member_source,
+                            };
+                            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_command)));
+                            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                            FileMapRead member_map = file_map_read(arena, member_object, (FileReadOptions){0});
+                            if (member_map.bytes.pointer)
+                            {
+                                ByteSlice members[] = {member_map.bytes};
+                                String8 member_names[] = {S8("bar.o")};
+                                ByteSlice archive = compiler_driver_test_archive(arena, members, member_names, BUSTER_ARRAY_LENGTH(members));
+                                BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.a"), directory), archive));
+                            }
+                            file_map_unmap(member_map);
+                            options[option_count++] = S8("-L");
+                            options[option_count++] = directory;
+                            options[option_count++] = S8("-lbar");
+                        }
+                    }
+                }
+                    break;
             }
             String8 output = string_format_z(arena, S8("{S8}/output-{u32}.macho"), directory, output_index++);
             String8 sentinel = S8("preserve Mach-O output");
@@ -15023,11 +15205,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
                 ByteSlice image = file_read(arena, output, (FileReadOptions){0});
                 CompilerDriverTestMachLoadCommands commands = compiler_driver_test_mach_load_commands(image);
                 BUSTER_TEST(arguments, commands.valid);
-                BUSTER_TEST(arguments, compiler_driver_test_mach_extra_library_count(commands) == (scenario == 10 ? 0u : 1u));
+                BUSTER_TEST(arguments,
+                            compiler_driver_test_mach_extra_library_count(commands) == (scenario == 10 || scenario == 19 ? 0u : 1u));
                 if (expected_name.length)
                 {
-                    BUSTER_TEST(arguments, compiler_driver_test_mach_has_library(commands, expected_name, expected_current_version,
-                                                                                  expected_compatibility_version));
+                    BUSTER_TEST_RAW(arguments,
+                                    compiler_driver_test_mach_has_library(commands, expected_name, expected_current_version,
+                                                                           expected_compatibility_version),
+                                    string_format(arena, S8("Mach-O target={S8} scenario={u32} expected={S8} versions={u32}/{u32}"),
+                                                  target_names[target_index], scenario, expected_name, expected_current_version,
+                                                  expected_compatibility_version));
                 }
             }
         }

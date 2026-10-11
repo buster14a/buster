@@ -15003,10 +15003,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             link_write_u32(bytes, command, 0xc);
             link_write_u32(bytes, command + 4, dylib_command_size);
             link_write_u32(bytes, command + 8, 24);
-            link_write_u32(bytes, command + 16, options.dynamic_libraries[library_index].mach_current_version
+            link_write_u32(bytes, command + 16, options.dynamic_libraries[library_index].mach_versions_present
                                                     ? options.dynamic_libraries[library_index].mach_current_version
                                                     : 0x10000);
-            link_write_u32(bytes, command + 20, options.dynamic_libraries[library_index].mach_compatibility_version
+            link_write_u32(bytes, command + 20, options.dynamic_libraries[library_index].mach_versions_present
                                                     ? options.dynamic_libraries[library_index].mach_compatibility_version
                                                     : 0x10000);
             memcpy(bytes + command + 24, library.pointer, library.length);

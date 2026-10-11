@@ -1188,7 +1188,13 @@ On macOS and iOS, `-lNAME` searches explicit `-L` roots in order, probing
 `<sysroot>/usr/lib` when a sysroot was supplied. A compatible thin or fat
 Mach-O dylib contributes its `LC_ID_DYLIB` install name and current and
 compatibility versions to `LC_LOAD_DYLIB`; TAPI YAML TBD v1-v4 stubs provide
-the same metadata, and wrong-CPU candidates are skipped. `-lc` and `-lm` keep
+the same metadata, and wrong-CPU or wrong-platform candidates are skipped.
+Mach-O dylib platforms come from `LC_BUILD_VERSION` and `LC_VERSION_MIN_*`;
+TBD v4 `targets:` entries must match both architecture and platform suffix,
+while TBD v1-v3 `archs:` entries match the CPU and an optional top-level
+`platform:` narrows the platform. Located versions are written verbatim,
+including zero; absent TBD current/compatibility versions default to 1.0.0,
+while a present malformed version makes the stub unusable. `-lc` and `-lm` keep
 their existing implicit behavior. Without a located candidate, only the
 allowlisted Apple system libraries retain the legacy `/usr/lib/libNAME.dylib`
 fallback; other requests fail with `cannot find -l<request>`. TBD v5 JSON is

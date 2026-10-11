@@ -3667,6 +3667,13 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_mach_target_cputype(Target target)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_platform_matches(Target target, u32 platform)
+{
+    bool result = (target.os == OPERATING_SYSTEM_MACOS && platform == 1) ||
+                  (target.os == OPERATING_SYSTEM_IOS && platform == 2);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL CompilerDriverMachDylibStatus compiler_driver_mach_thin_dylib_identity(ByteSlice bytes, Target target,
                                                                                             CompilerDriverMachDylibIdentity* identity)
 {
@@ -3694,6 +3701,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverMachDylibStatus compiler_driver_mach_thin_dyli
         {
             bool valid = true;
             bool found_identity = false;
+            bool platform_present = false;
+            bool platform_compatible = false;
             u64 cursor = 32;
             u64 command_end = cursor + command_bytes;
             for (u32 command_index = 0; command_index < command_count && valid; command_index += 1)
@@ -3744,10 +3753,40 @@ BUSTER_GLOBAL_LOCAL CompilerDriverMachDylibStatus compiler_driver_mach_thin_dyli
                             }
                         }
                     }
+                    else if (command == 0x32)
+                    {
+                        u32 platform = 0;
+                        if (command_size < 24 || !compiler_driver_mach_read_u32_le(bytes, cursor + 8, &platform))
+                        {
+                            valid = false;
+                        }
+                        else
+                        {
+                            platform_present = true;
+                            platform_compatible |= compiler_driver_mach_platform_matches(target, platform);
+                        }
+                    }
+                    else if (command == 0x24 || command == 0x25 || command == 0x2f || command == 0x30)
+                    {
+                        if (command_size < 16)
+                        {
+                            valid = false;
+                        }
+                        else
+                        {
+                            platform_present = true;
+                            platform_compatible |= (command == 0x24 && target.os == OPERATING_SYSTEM_MACOS) ||
+                                                   (command == 0x25 && target.os == OPERATING_SYSTEM_IOS);
+                        }
+                    }
                     cursor += command_size;
                 }
             }
-            if (valid && cursor == command_end && found_identity)
+            if (valid && cursor == command_end && platform_present && !platform_compatible)
+            {
+                result = COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE;
+            }
+            else if (valid && cursor == command_end && found_identity)
             {
                 *identity = parsed;
                 result = COMPILER_DRIVER_MACH_DYLIB_USABLE;
@@ -3885,9 +3924,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_tbd_unquote(String8 value, String8
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL u32 compiler_driver_mach_tbd_version(String8 value)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_tbd_version(String8 value, u32* version)
 {
-    u32 result = 0;
     String8 unquoted = {0};
     bool valid = compiler_driver_mach_tbd_unquote(value, &unquoted) && unquoted.length;
     u32 components[3] = {0};
@@ -3923,9 +3961,9 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_mach_tbd_version(String8 value)
     valid = valid && digits;
     if (valid)
     {
-        result = (components[0] << 16) | (components[1] << 8) | components[2];
+        *version = (components[0] << 16) | (components[1] << 8) | components[2];
     }
-    return result;
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_tbd_arch_delimiter(char8 byte)
@@ -3975,6 +4013,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_tbd_arch_list(ByteSlice bytes, u64
                     if (compiler_driver_mach_tbd_unquote(token, &unquoted))
                     {
                         u64 architecture_length = unquoted.length;
+                        u64 platform_start = unquoted.length;
                         if (targets)
                         {
                             for (u64 byte = 0; byte < unquoted.length; byte += 1)
@@ -3982,13 +4021,26 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_tbd_arch_list(ByteSlice bytes, u64
                                 if (unquoted.pointer[byte] == '-')
                                 {
                                     architecture_length = byte;
+                                    platform_start = byte + 1;
                                     break;
                                 }
                             }
                         }
                         String8 architecture = {.pointer = unquoted.pointer, .length = architecture_length};
                         String8 expected = target.cpu_arch == CPU_ARCH_AARCH64 ? S8("arm64") : S8("x86_64");
-                        *compatible |= string_equal(architecture, expected);
+                        if (targets && platform_start < unquoted.length)
+                        {
+                            String8 platform = {.pointer = unquoted.pointer + platform_start, .length = unquoted.length - platform_start};
+                            String8 expected_platform = target.os == OPERATING_SYSTEM_MACOS ? S8("macos")
+                                                        : target.os == OPERATING_SYSTEM_IOS ? S8("ios")
+                                                                                           : (String8){0};
+                            *compatible |= string_equal(architecture, expected) && expected_platform.length &&
+                                          string_equal(platform, expected_platform);
+                        }
+                        else if (!targets)
+                        {
+                            *compatible |= string_equal(architecture, expected);
+                        }
                     }
                     else
                     {
@@ -4011,7 +4063,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_tbd_arch_list(ByteSlice bytes, u64
 CompilerDriverMachDylibStatus compiler_driver_mach_tbd_identity(ByteSlice bytes, Target target, CompilerDriverMachDylibIdentity* identity)
 {
     CompilerDriverMachDylibStatus result = COMPILER_DRIVER_MACH_DYLIB_UNUSABLE;
-    CompilerDriverMachDylibIdentity parsed = {0};
+    CompilerDriverMachDylibIdentity parsed = {.current_version = 0x10000, .compatibility_version = 0x10000};
     if (identity)
     {
         *identity = (CompilerDriverMachDylibIdentity){0};
@@ -4021,12 +4073,14 @@ CompilerDriverMachDylibStatus compiler_driver_mach_tbd_identity(ByteSlice bytes,
         u64 cursor = 0;
         String8 line = {0};
         bool found_marker = false;
+        bool tbd_v4 = false;
         while (!found_marker && compiler_driver_mach_tbd_line(bytes, &cursor, &line))
         {
             String8 trimmed = compiler_driver_mach_tbd_trim(line);
             if (trimmed.length)
             {
                 found_marker = line.length >= 3 && memcmp(line.pointer, "---", 3) == 0;
+                tbd_v4 = found_marker && trimmed.length >= 16 && memcmp(trimmed.pointer, "--- !tapi-tbd-v4", 16) == 0;
                 if (!found_marker)
                 {
                     cursor = bytes.length;
@@ -4040,6 +4094,8 @@ CompilerDriverMachDylibStatus compiler_driver_mach_tbd_identity(ByteSlice bytes,
             bool arch_list_present = false;
             bool architecture_compatible = false;
             bool architecture_incompatible = false;
+            bool platform_present = false;
+            bool platform_compatible = false;
             while (valid && compiler_driver_mach_tbd_line(bytes, &cursor, &line))
             {
                 if (line.length >= 3 && (!memcmp(line.pointer, "---", 3) || !memcmp(line.pointer, "...", 3)))
@@ -4057,15 +4113,39 @@ CompilerDriverMachDylibStatus compiler_driver_mach_tbd_identity(ByteSlice bytes,
                                                                   &unquoted) && unquoted.length;
                         parsed.install_name = unquoted;
                     }
+                    else if (line.length >= 12 && memcmp(line.pointer, "tbd-version:", 12) == 0)
+                    {
+                        String8 version = {0};
+                        if (compiler_driver_mach_tbd_unquote((String8){.pointer = line.pointer + 12, .length = line.length - 12},
+                                                             &version))
+                        {
+                            tbd_v4 |= string_equal(version, S8("4"));
+                        }
+                    }
+                    else if (line.length >= 9 && memcmp(line.pointer, "platform:", 9) == 0)
+                    {
+                        String8 platform = {0};
+                        valid = compiler_driver_mach_tbd_unquote((String8){.pointer = line.pointer + 9, .length = line.length - 9},
+                                                                  &platform);
+                        if (valid)
+                        {
+                            platform_present = true;
+                            platform_compatible |=
+                                (target.os == OPERATING_SYSTEM_MACOS &&
+                                 (string_equal(platform, S8("macosx")) || string_equal(platform, S8("macos")) ||
+                                  string_equal(platform, S8("zippered")))) ||
+                                (target.os == OPERATING_SYSTEM_IOS && string_equal(platform, S8("ios")));
+                        }
+                    }
                     else if (line.length >= 16 && memcmp(line.pointer, "current-version:", 16) == 0)
                     {
-                        parsed.current_version = compiler_driver_mach_tbd_version(
-                            (String8){.pointer = line.pointer + 16, .length = line.length - 16});
+                        valid = compiler_driver_mach_tbd_version((String8){.pointer = line.pointer + 16, .length = line.length - 16},
+                                                                 &parsed.current_version);
                     }
                     else if (line.length >= 22 && memcmp(line.pointer, "compatibility-version:", 22) == 0)
                     {
-                        parsed.compatibility_version = compiler_driver_mach_tbd_version(
-                            (String8){.pointer = line.pointer + 22, .length = line.length - 22});
+                        valid = compiler_driver_mach_tbd_version(
+                            (String8){.pointer = line.pointer + 22, .length = line.length - 22}, &parsed.compatibility_version);
                     }
                     else if (line.length >= 8 && memcmp(line.pointer, "targets:", 8) == 0)
                     {
@@ -4091,7 +4171,8 @@ CompilerDriverMachDylibStatus compiler_driver_mach_tbd_identity(ByteSlice bytes,
             }
             if (valid && install_name_seen && parsed.install_name.length)
             {
-                if (arch_list_present && (!architecture_compatible || architecture_incompatible))
+                if ((arch_list_present && (!architecture_compatible || architecture_incompatible)) ||
+                    (platform_present && !platform_compatible && !tbd_v4))
                 {
                     result = COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE;
                 }
@@ -4719,6 +4800,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         String8 name = {0};
         u32 mach_current_version = 0;
         u32 mach_compatibility_version = 0;
+        bool mach_versions_present = false;
         if (apple_target)
         {
             if (!exact && string_equal(requested, S8("m")))
@@ -4731,6 +4813,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
                 name = identity.install_name;
                 mach_current_version = identity.current_version;
                 mach_compatibility_version = identity.compatibility_version;
+                mach_versions_present = true;
             }
             else if (!exact && compiler_driver_mach_system_library(requested))
             {
@@ -4794,6 +4877,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
                 .name = name,
                 .mach_current_version = mach_current_version,
                 .mach_compatibility_version = mach_compatibility_version,
+                .mach_versions_present = mach_versions_present,
             };
         }
     }
