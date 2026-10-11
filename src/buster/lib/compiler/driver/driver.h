@@ -91,7 +91,8 @@ typedef enum CompilerDriverAction
 } CompilerDriverAction;
 
 // Informational queries answered without any input: --version, -dumpversion,
-// -dumpmachine and -print-target-triple/-print-effective-triple.
+// -dumpmachine, -print-target-triple/-print-effective-triple, and the native
+// linker identity (-Wl,--version or -Xlinker --version).
 // compiler_driver_query_text renders the text.
 typedef enum CompilerDriverQuery
 {
@@ -100,6 +101,7 @@ typedef enum CompilerDriverQuery
     COMPILER_DRIVER_QUERY_DUMP_VERSION,
     COMPILER_DRIVER_QUERY_DUMP_MACHINE,
     COMPILER_DRIVER_QUERY_TARGET_TRIPLE,
+    COMPILER_DRIVER_QUERY_LINKER_VERSION,
     COMPILER_DRIVER_QUERY_COUNT,
 } CompilerDriverQuery;
 
@@ -336,6 +338,11 @@ struct CompilerDriverInvocation
     bool pinned_debug_locals_explicit;
     u32 fast_passes;
     bool measure_fast_passes;
+    // Tiny direct-call inlining defaults off. An explicit optimization level
+    // above -O0 enables it; -O0 disables it. The last -O* or explicit
+    // -fcanonical-inline/-fno-canonical-inline option wins. always_inline
+    // requests remain semantic requirements when tiny is false.
+    IrInlineOptions inline_options;
     bool verify_codegen;
     bool sysv_unnamed_bitfields_integer;
     bool sysv_bitfield_abi_explicit;
@@ -552,6 +559,7 @@ struct CompilerDriverResult
 {
     IrLocalPromotionStatistics local_promotion;
     IrFastStatistics fast;
+    IrInlineStatistics inlining;
     CIRDirectSsaStatistics direct_ssa;
     CTypeLayoutStatistics type_layout;
     CompilerDriverCAstPilotResult c_ast;
@@ -637,6 +645,7 @@ BUSTER_F_DECL String8 compiler_driver_c_ast_pilot_name(CompilerDriverCAstPilot p
 // The output of a parsed --version/-dumpversion/-dumpmachine query. The version
 // is the one the C frontend presents in __clang_major__/__clang_minor__/
 // __clang_patchlevel__; the machine is the invocation's effective target.
+// The linker query reports Buster's own identity, without a GNU/LLVM version.
 BUSTER_F_DECL String8 compiler_driver_query_text(Arena* arena, CompilerDriverInvocation const* invocation);
 // Resolves an input against -working-directory with the host's path rules, as
 // LLVM's make_absolute does. On Windows a rooted path without a drive ("\\x.c")

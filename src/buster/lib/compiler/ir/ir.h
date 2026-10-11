@@ -897,6 +897,53 @@ struct IrFastStatistics
     u64 instructions_after;
 };
 
+// Direct-call expansion is independent of register allocation and FAST cleanup.
+// Zero option limits select these defaults; limits count canonical rows/sites.
+#define IR_INLINE_TINY_INSTRUCTIONS 16u
+#define IR_INLINE_FUNCTION_GROWTH (2u * IR_INLINE_TINY_INSTRUCTIONS * IR_INLINE_CALL_SITES)
+#define IR_INLINE_MODULE_GROWTH 4096u
+#define IR_INLINE_CALL_SITES 64u
+
+typedef struct IrInlineOptions IrInlineOptions;
+struct IrInlineOptions
+{
+    bool tiny;
+    u32 max_callee_instructions;
+    u32 max_function_growth;
+    u32 max_module_growth;
+    u32 max_call_sites;
+};
+
+typedef enum IrInlineBudgetReason
+{
+    IR_INLINE_BUDGET_NONE,
+    IR_INLINE_BUDGET_WORK,
+    IR_INLINE_BUDGET_SCRATCH,
+    IR_INLINE_BUDGET_CALL_SITES,
+    IR_INLINE_BUDGET_FUNCTION_GROWTH,
+    IR_INLINE_BUDGET_MODULE_GROWTH,
+    IR_INLINE_BUDGET_STORAGE,
+    IR_INLINE_BUDGET_COPY_ROWS,
+} IrInlineBudgetReason;
+
+typedef struct IrInlineStatistics IrInlineStatistics;
+struct IrInlineStatistics
+{
+    u64 candidates;
+    u64 inlined;
+    u64 always_inlined;
+    u64 copied_instructions;
+    u64 growth;
+    u64 budget_skips;
+    u64 shape_skips;
+    u64 linkage_skips;
+    u64 recursion_skips;
+    u64 visits;
+    IrInlineBudgetReason required_budget_reason;
+    u64 required_budget_demand;
+    u64 required_budget_limit;
+};
+
 typedef struct IrModule IrModule;
 struct IrModule
 {
@@ -939,6 +986,8 @@ struct IrModule
     u32 label_difference_count;
     bool local_promotion_complete;
     IrLocalPromotionStatistics local_promotion;
+    bool inline_complete;
+    IrInlineStatistics inlining;
     bool fast_complete;
     IrFastStatistics fast;
 };
@@ -970,6 +1019,9 @@ struct IrProgram
 {
     Arena* arena;
     TargetDataLayout data_layout;
+    // Whether the target runtime can preempt a default-visible strong function definition.
+    // ELF-like targets preserve interposition; Windows COFF binds strong definitions locally.
+    bool external_function_definitions_interposable;
     IrModule* modules;
     IrTypeTable types;
     IrAbiContext abi_contexts[IR_ABI_CONVENTION_COUNT];
@@ -990,6 +1042,7 @@ struct IrProgram
     // that the debugger reads for the whole function. The driver enables this by
     // default for -g and accepts -fno-pinned-debug-locals as an explicit opt-out.
     bool pin_debug_locals;
+    IrInlineOptions inline_options;
     u32 fast_passes;
     bool measure_fast_passes;
     u32 module_count;
@@ -1015,6 +1068,8 @@ typedef enum IrValidationError
     IR_VALIDATION_INSTRUCTION_OWNERSHIP,
     IR_VALIDATION_ALIAS_TARGET,
     IR_VALIDATION_INITIALIZER_TARGET,
+    // A reachable direct always_inline call could not be safely expanded.
+    IR_VALIDATION_INLINE_REQUIRED,
     IR_VALIDATION_COUNT,
 } IrValidationError;
 
@@ -1023,6 +1078,7 @@ typedef enum IrValidationBoundary
     IR_VALIDATION_BOUNDARY_UNSPECIFIED,
     IR_VALIDATION_BOUNDARY_CANONICAL_INPUT,
     IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT,
+    IR_VALIDATION_BOUNDARY_INLINE_OUTPUT,
     IR_VALIDATION_BOUNDARY_FAST_OUTPUT,
     IR_VALIDATION_BOUNDARY_CFG_PUBLICATION,
 } IrValidationBoundary;

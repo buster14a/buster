@@ -37,9 +37,11 @@ No external implementation code is reused.
 `object_write_elf64` runs in two phases over the object after the priority
 split (`object_split_initializer_priorities`). The split appends one section
 per constructor/destructor priority group and records where each grouped
-initializer entry went; it does not copy the relocations. Both phases place
-each relocation through `object_initializer_relocation_place` as they reach
-it. The split's tables are sized by sections and entries, and a split past the
+initializer entry went; it does not copy the relocations. When the split
+grouped an entry (`object_initializer_split_grouped`), both phases place each
+relocation through `object_initializer_relocation_place` as they reach it.
+Without a group they read each relocation as it is and place nothing (#990).
+The split's tables are sized by sections and entries, and a split past the
 section limit or the arena is refused like the plan's own limits.
 
 1. **Plan** (`object_elf64_plan`). One pass over the relocations counts each
