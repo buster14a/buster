@@ -14537,7 +14537,10 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_exact_prepare_fixed_template_family(
             .mask_register_plus_one = mask_register_plus_one,
             .zeroing = zeroing,
         };
-        for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
+        // `fixed` already bounds the count by four; the bound is restated so
+        // GCC's stringop-overflow check can see the copy stays inside.
+        u32 copy_count = BUSTER_MIN(operand_count, (u32)BUSTER_ARRAY_LENGTH(family->operand_kinds));
+        for (u32 operand_index = 0; operand_index < copy_count; operand_index += 1)
         {
             family->operand_kinds[operand_index] = operand_kinds[operand_index];
             family->operand_widths[operand_index] = operand_widths[operand_index];
