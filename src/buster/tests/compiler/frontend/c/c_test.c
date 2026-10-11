@@ -2239,12 +2239,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_address_prefix_indexed_paths(Uni
                         "    (void)(a && b);\n"
                         "    (void)((a) && (b));\n"
                         "    (void)((a && b) && a);\n"
+                        "    (void)((__typeof__((a && b,(void*)0))) &&cast_typeof);\n"
+                        "    (void)((const __typeof__((a && b,(void*)0))) &&cast_qualified);\n"
                         "    switch (a) { case 0: &&case_label; break; }\n"
                         "body_start:\n"
                         "cast_int:\n"
                         "cast_void:\n"
                         "cast_struct:\n"
                         "cast_typedef:\n"
+                        "cast_typeof:\n"
+                        "cast_qualified:\n"
                         "case_label:\n"
                         "return_label:\n"
                         "    return &&return_label;\n"
@@ -2267,7 +2271,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_address_prefix_indexed_paths(Uni
     }
     BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
     BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-    bool expected_label_address_prefix_results[] = {true, false, true, true, true, true, false, false, false, false, false, false, false, true, true};
+    bool expected_label_address_prefix_results[] = {true, false, true, true, true, true, false, false, false, false, false, false, false, false, true, false, true, true, true};
     CParseResult parse_without_position_index = parse;
     parse_without_position_index.position_index = NULL;
     if (BUSTER_REQUIRE(arguments, body_start != UINT32_MAX && parse.position_index))

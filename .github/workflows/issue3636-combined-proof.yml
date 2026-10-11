@@ -48,6 +48,11 @@ jobs:
       - name: Registered Release suite and fixed point
         shell: bash
         run: |
-          "$RUNNER_TEMP/issue3636-driver" build --config Release -t test_all
-          "$RUNNER_TEMP/issue3636-driver" test_self_host --config Release
+          build/Release/ide test --module=c_frontend_tests --verbose=1 --ci=1
           "$RUNNER_TEMP/issue3636-driver" source_size --base 674bc77660c8c588c815c21fcc9e148f83094de1
+      - name: Checked-reference frontend controls
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/issue3636-driver" generate --build-directory build/combined-checks --cc clang --config Release --sanitize --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          "$RUNNER_TEMP/issue3636-driver" build --build-directory build/combined-checks --config Release -t ide
+          build/combined-checks/Release/ide test --module=c_frontend_tests --verbose=1 --ci=1
