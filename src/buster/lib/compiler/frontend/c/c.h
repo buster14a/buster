@@ -1484,6 +1484,46 @@ struct CAstStatementStatistics
     u32 fallback_token;
 };
 
+// Why lowering's token walker, not the tree's extent table
+// (c_ir_statement_extents in c_gen.c, GitHub #3102), answered a controlled
+// body range query.
+typedef enum CAstExtentFallback
+{
+    C_AST_EXTENT_FALLBACK_NONE,
+    // The body has no table: no tree, no function definition whose body is
+    // this one, or a body whose delimiters do not nest.
+    C_AST_EXTENT_FALLBACK_INPUT,
+    // A token the grammar puts next to a statement's anchor (the `(` after a
+    // header keyword, the `else` before an else-branch, the `goto` before a
+    // label) is not that token; the whole body goes to the walker.
+    C_AST_EXTENT_FALLBACK_ANCHOR,
+    // The query does not start at a controlled substatement the table holds
+    // (a statement-expression interior, a label shape the walker reads
+    // differently, a statement no rule measures), or its bound is shorter
+    // than the statement.
+    C_AST_EXTENT_FALLBACK_SHAPE,
+    C_AST_EXTENT_FALLBACK_COUNT,
+} CAstExtentFallback;
+
+// What the extent table did over one lowering. A table is built for a body
+// the first time lowering asks it for a controlled body range; its entries
+// are the body's controlled substatements. `walked` counts the queries the
+// token walker answered, by reason; `body_fallbacks` counts the bodies whose
+// table was refused, by reason.
+typedef struct CAstExtentStatistics CAstExtentStatistics;
+struct CAstExtentStatistics
+{
+    u64 bodies;
+    u64 entries;
+    u64 entry_declines;
+    u64 answers;
+    u64 walked[C_AST_EXTENT_FALLBACK_COUNT];
+    u64 body_fallbacks[C_AST_EXTENT_FALLBACK_COUNT];
+    // The last body fallback: its reason, and the `{` of the body.
+    CAstExtentFallback reason;
+    u32 fallback_token;
+};
+
 typedef struct CParserResult CParserResult;
 struct CParserResult
 {
@@ -1935,6 +1975,8 @@ struct CIRLowerOptions
     // and the preprocessing result must outlive lowering; nothing lowering
     // publishes holds a node id or a pointer into it.
     CAst const* syntax_tree;
+    // Optional: receives the extent table's counts, added to what it holds.
+    CAstExtentStatistics* syntax_tree_extent_statistics;
 };
 
 typedef struct CIRDirectSsaStatistics CIRDirectSsaStatistics;
@@ -2131,6 +2173,8 @@ BUSTER_F_DECL CParserResult c_parse_ast_from_tree(Arena* arena, CPreprocessResul
 BUSTER_F_DECL String8 c_parser_tree_fallback_name(CParserTreeFallback reason);
 // The CAstStatementFallback in lower case without its prefix ("none", "input", "tokens").
 BUSTER_F_DECL String8 c_ast_statement_fallback_name(CAstStatementFallback reason);
+// The CAstExtentFallback in lower case without its prefix ("none", "input", "anchor", "shape").
+BUSTER_F_DECL String8 c_ast_extent_fallback_name(CAstExtentFallback reason);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 // Complete syntax and semantic analysis without constructing canonical IR.
 BUSTER_F_DECL CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax);

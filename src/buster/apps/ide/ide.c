@@ -2127,6 +2127,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          tree.statements.declaration_hints, tree.statements.loop_hints, tree.statements.declines, tree.statements.fallbacks,
                          c_ast_statement_fallback_name(tree.statements.fallbacks ? tree.statements.reason : C_AST_STATEMENT_FALLBACK_NONE),
                          tree.statements.fallbacks ? tree.statements.fallback_token : UINT32_MAX);
+            // Counts: the extent table lowering read controlled body ranges from, and the queries its token walker answered.
+            string_print(S8("C_AST_EXTENTS bodies={u64} entries={u64} entry_declines={u64} answers={u64} walked_input={u64} walked_anchor={u64} "
+                            "walked_shape={u64} refused_input={u64} refused_anchor={u64} reason={S8} fallback_token={u32}\n"),
+                         tree.extents.bodies, tree.extents.entries, tree.extents.entry_declines, tree.extents.answers,
+                         tree.extents.walked[C_AST_EXTENT_FALLBACK_INPUT], tree.extents.walked[C_AST_EXTENT_FALLBACK_ANCHOR],
+                         tree.extents.walked[C_AST_EXTENT_FALLBACK_SHAPE], tree.extents.body_fallbacks[C_AST_EXTENT_FALLBACK_INPUT],
+                         tree.extents.body_fallbacks[C_AST_EXTENT_FALLBACK_ANCHOR], c_ast_extent_fallback_name(tree.extents.reason),
+                         tree.extents.reason ? tree.extents.fallback_token : UINT32_MAX);
         }
         if (invocation.fast_passes)
         {

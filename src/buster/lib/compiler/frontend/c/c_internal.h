@@ -1691,6 +1691,12 @@ BUSTER_C_EXTERN bool c_parse_type_identity_sites_absent(CParseResult* result, u3
 // enumerator list still being parsed.
 BUSTER_C_EXTERN bool c_parse_pending_enum_possible(CParseResult const* result);
 
+// The last token of the statement at `node` by the statement plan's anchor
+// rules (c_parse.c), or UINT32_MAX when no rule states it. `lasts` memoizes
+// answers per node - `begin`, zeroed by the caller; `limit` is the body's `}`.
+// Lowering's extent table (c_gen.c) reads the same rules.
+BUSTER_C_EXTERN u32 c_parse_plan_statement_last(CAst const* ast, CPreprocessResult const* preprocess, u32* lasts, u32 begin, u32 node, u32 limit);
+
 // A tree answer held for verify mode; defined below for tests builds.
 typedef struct CAstTypePending CAstTypePending;
 

@@ -5604,7 +5604,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                                          invocation.enable_pinned_debug_locals),
                                                                     // Lowering reads statement extents from the pilot's
                                                                     // tree; it is released at `end:`, after lowering.
-                                                                    .syntax_tree = pilot_tree_built ? &pilot_tree : 0});
+                                                                    .syntax_tree = pilot_tree_built ? &pilot_tree : 0,
+                                                                    .syntax_tree_extent_statistics = pilot_tree_built ? &result.c_ast.extents : 0});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     result.type_layout = lowered.type_layout;
@@ -7338,6 +7339,20 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             result.c_ast.statements.reason = unit.c_ast.statements.reason;
             result.c_ast.statements.fallback_token = unit.c_ast.statements.fallback_token;
+        }
+        result.c_ast.extents.bodies += unit.c_ast.extents.bodies;
+        result.c_ast.extents.entries += unit.c_ast.extents.entries;
+        result.c_ast.extents.entry_declines += unit.c_ast.extents.entry_declines;
+        result.c_ast.extents.answers += unit.c_ast.extents.answers;
+        for (u32 reason = 0; reason < C_AST_EXTENT_FALLBACK_COUNT; reason += 1)
+        {
+            result.c_ast.extents.walked[reason] += unit.c_ast.extents.walked[reason];
+            result.c_ast.extents.body_fallbacks[reason] += unit.c_ast.extents.body_fallbacks[reason];
+        }
+        if (unit.c_ast.extents.reason)
+        {
+            result.c_ast.extents.reason = unit.c_ast.extents.reason;
+            result.c_ast.extents.fallback_token = unit.c_ast.extents.fallback_token;
         }
         result.local_promotion.candidate_locals += unit.local_promotion.candidate_locals;
         result.local_promotion.promoted_locals += unit.local_promotion.promoted_locals;
