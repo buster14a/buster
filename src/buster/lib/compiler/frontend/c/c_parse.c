@@ -24034,8 +24034,11 @@ BUSTER_C_INTERNAL CParserLocalIndex const* c_parser_local_index_build(Arena* are
         Simd512 declaration_kind = simd512_splat((u8)C_AST_DECLARATION);
         for (u32 base = 0; base < ast->node_count; base += 64)
         {
-            Mask64 valid = mask64_prefix(ast->node_count - base);
-            Mask64 hits = mask64_and(simd512_equal_u8(simd512_load_masked(ast->kinds + base, valid), declaration_kind), valid);
+            // Only the last window is partial; a whole one loads unmasked.
+            u32 remaining = ast->node_count - base;
+            Mask64 valid = mask64_prefix(remaining);
+            Simd512 kinds = remaining >= 64 ? simd512_load(ast->kinds + base) : simd512_load_masked(ast->kinds + base, valid);
+            Mask64 hits = mask64_and(simd512_equal_u8(kinds, declaration_kind), valid);
             for (; hits && count < bound; hits = mask64_and(hits, hits - 1))
             {
                 found[count++] = base + mask64_first_set(hits);
