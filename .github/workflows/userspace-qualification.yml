@@ -59,11 +59,11 @@ jobs:
           "$RUNNER_TEMP/userspace-build" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT
           "$RUNNER_TEMP/userspace-build" build --config Release -t ide
           sha256sum "$RUNNER_TEMP/userspace-build" build/Release/ide > "$RUNNER_TEMP/userspace-evidence/compiler.sha256"
-      - name: Requalify existing musl and libc-test
+      - name: Requalify musl and attempt the declared BusyBox userspace
         shell: bash
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/userspace-build" test_musl --config Release "$RUNNER_TEMP/userspace-inputs/musl" "$RUNNER_TEMP/userspace-inputs/libc-test" 2>&1 | tee "$RUNNER_TEMP/userspace-evidence/musl.log"
+          "$RUNNER_TEMP/userspace-build" test_userspace "$RUNNER_TEMP/userspace-inputs/busybox" "$RUNNER_TEMP/userspace-inputs/musl" "$RUNNER_TEMP/userspace-inputs/libc-test" "$RUNNER_TEMP/userspace-evidence/joint" 2>&1 | tee "$RUNNER_TEMP/userspace-evidence/userspace.log"
       - name: Retain machine records
         if: ${{ !cancelled() }}
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
