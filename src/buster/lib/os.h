@@ -431,6 +431,9 @@ BUSTER_F_DECL bool os_make_directory_attempt(String8 path);
 BUSTER_F_DECL bool os_file_delete(String8 path);
 // The native error behind os_file_delete; a missing path is still success.
 BUSTER_F_DECL OsError os_file_delete_checked(String8 path);
+// Returns copied entry names without "." or ".."; missing and unreadable paths
+// return an empty slice.
+BUSTER_F_DECL SliceString8 os_directory_entry_names(Arena* arena, String8 path);
 // Deletes `path` and everything under it. Symbolic links are removed as links
 // rather than followed, so the walk cannot escape the tree it was given.
 // Returns whether the tree is gone; a missing `path` counts as success.

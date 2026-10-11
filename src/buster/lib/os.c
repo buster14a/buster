@@ -7,7 +7,8 @@
 // os_file_close_checked, os_file_flush), replacement publication
 // (os_file_replacement_target_stats, os_file_staging_create, os_file_replace),
 // process spawn/wait with deadlines, executable lookup, dynamic libraries, and
-// the crash/failure printers. Replacement publication follows os_file_close.
+// the crash/failure printers. os_directory_entry_names copies names from one
+// directory for ordered consumers; replacement publication follows os_file_close.
 // Opt-in child resource witnesses in os_process_wait_deadline retain native
 // accounting scope; they do not alter process ownership or cleanup.
 // os_process_capture_step separates ordinary POSIX pipe drain transitions
@@ -1520,6 +1521,126 @@ OsDirectoryCreateResult os_make_directory_exclusive(String8 path)
 bool os_file_delete(String8 path)
 {
     return !os_file_delete_checked(path).v;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_directory_entry_names_append(Arena* arena, String8** entries, u64* count, u64* capacity, String8 name)
+{
+    bool result = true;
+    if (*count == *capacity)
+    {
+        u64 new_capacity = *capacity ? *capacity * 2 : 16;
+        if (new_capacity < *capacity || new_capacity > UINT64_MAX / sizeof(String8))
+        {
+            result = false;
+        }
+        else
+        {
+            String8* new_entries = arena_allocate(arena, String8, new_capacity);
+            if (*count)
+            {
+                memcpy(new_entries, *entries, (size_t)(*count * sizeof(String8)));
+            }
+            *entries = new_entries;
+            *capacity = new_capacity;
+        }
+    }
+    if (result)
+    {
+        (*entries)[*count] = string_duplicate_arena(arena, name, false);
+        *count += 1;
+    }
+    return result;
+}
+
+SliceString8 os_directory_entry_names(Arena* arena, String8 path)
+{
+    SliceString8 result = {0};
+    String8* entries = 0;
+    u64 entry_count = 0;
+    u64 entry_capacity = 0;
+    bool valid = arena && path.pointer && path.length;
+    if (valid)
+    {
+        String8Z path_z = {0};
+        valid = string8z_copy_arena(arena, path, &path_z);
+        if (valid)
+        {
+#if BUSTER_WINDOWS
+            String8 pattern = string_format_z(arena, S8("{S8}\\*"), (String8){.pointer = path_z.pointer, .length = path_z.length});
+            String16Z pattern_w = {0};
+            valid = string16z_from_string8_arena(arena, pattern, &pattern_w);
+            if (valid)
+            {
+                WIN32_FIND_DATAW find_data;
+                HANDLE find = FindFirstFileW(pattern_w.pointer, &find_data);
+                if (find != INVALID_HANDLE_VALUE)
+                {
+                    bool more = true;
+                    while (valid && more)
+                    {
+                        String16 name16 = {
+                            .pointer = (char16*)find_data.cFileName,
+                            .length = wcslen(find_data.cFileName),
+                        };
+                        String8 name = string8_from_string16(arena, name16, false);
+                        if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
+                        {
+                            valid = os_directory_entry_names_append(arena, &entries, &entry_count, &entry_capacity, name);
+                        }
+                        if (valid)
+                        {
+                            more = FindNextFileW(find, &find_data) != 0;
+                            if (!more && GetLastError() != ERROR_NO_MORE_FILES)
+                            {
+                                valid = false;
+                            }
+                        }
+                        else
+                        {
+                            more = false;
+                        }
+                    }
+                    FindClose(find);
+                }
+                else
+                {
+                    valid = false;
+                }
+            }
+#elif BUSTER_LINUX || BUSTER_MACOS
+            DIR* directory = opendir(path_z.pointer);
+            if (directory)
+            {
+                errno = 0;
+                struct dirent* entry;
+                while (valid && (entry = readdir(directory)) != 0)
+                {
+                    if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, ".."))
+                    {
+                        String8 name = {
+                            .pointer = (char8*)entry->d_name,
+                            .length = strlen(entry->d_name),
+                        };
+                        valid = os_directory_entry_names_append(arena, &entries, &entry_count, &entry_capacity, name);
+                    }
+                }
+                valid = valid && errno == 0;
+                closedir(directory);
+            }
+            else
+            {
+                valid = false;
+            }
+#else
+            valid = false;
+#endif
+        }
+    }
+    if (valid)
+    {
+        result = (SliceString8){.pointer = entries, .length = entry_count};
+    }
+    return result;
 }
 
 #if defined(_WIN32)

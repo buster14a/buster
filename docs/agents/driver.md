@@ -1152,6 +1152,25 @@ or name libgcc_s. This uses an installed target runtime; it installs or embeds
 none. Apple, Windows, Android and freestanding runtime provisioning remain
 separate #1272 work.
 
+For Linux x86-64 ELF links, strong undefined references to exactly
+`__cpu_indicator_init`, `__cpu_model`, or `__cpu_features2` select only the
+needed members from the target's `libgcc.a` (GitHub #3399). Weak references,
+links without those unresolved names, and names already defined by selected
+objects do not read or name the archive. Search checks each explicit `-L`
+directory first, then GCC version directories below `/usr/lib/gcc`,
+`/usr/lib64/gcc`, and `/usr/lib/gcc-cross` under the supplied sysroot (or the
+host root), trying `x86_64-linux-gnu`, `x86_64-pc-linux-gnu`, and
+`x86_64-redhat-linux` for each base. Only dotted-numeric version directory
+names participate, in descending numeric order. The first existing
+`libgcc.a` is authoritative: only archive members defining still-needed
+symbols are admitted, and a missing archive, unreadable archive, or archive
+without a required definition fails before replacing the output. Diagnostics
+are `cannot find libgcc.a providing GCC CPU-feature runtime symbol: {name}`,
+`{path} does not define GCC CPU-feature runtime symbol: {name}`, and
+`could not read archive {path}: {diagnostic}`. AArch64's
+`__aarch64_cpu_features` and outline-atomic helpers, Apple, Windows, and
+freestanding runtime provisioning remain out of scope.
+
 `compiler_driver_elf_dynamic_symbols` walks that table once and produces two
 things.
 
