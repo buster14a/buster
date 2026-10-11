@@ -530,7 +530,11 @@ captures (#2741).
   that can claim performance validation has a row in
   [`docs/performance-validation-v1.json`](../performance-validation-v1.json),
   either a 9700X route with the consumer that checks its evidence, or an
-  explicit `NOT VALIDATED` with a resolution. `tools/bench_direct/performance_inventory_test.py`
+  explicit `NOT VALIDATED` with a resolution and a `claim_route`: the existing
+  9700X route a claim about it must use instead, or `none` for a visible gap
+  with no Zen 5 route yet. A tool that includes `<buster/...>` headers cannot
+  claim the direct-workload route, because each workload is compiled alone
+  against system headers. `tools/bench_direct/performance_inventory_test.py`
   (part of the required benchmark policy check) discovers entry points from
   `build.c`, `uarch_lab.py`, `ide`, `tools/` and the workflows, and fails on an
   unregistered or stale one. Each published 9700X compiler receipt must name

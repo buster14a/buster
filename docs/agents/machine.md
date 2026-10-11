@@ -1256,6 +1256,25 @@ pinned to the same register.
 `c_test_inline_assembly_constraint_unions` hold the byte oracles (GNU as 2.47)
 and the neighbouring refusals; only unprivileged MXCSR/x87 round trips execute.
 
+## Narrow x86-64 call results
+
+Ordinary Boolean and 8/16-bit integer results are captured from RAX with
+zero/sign extension at their ABI width, before their canonical value reaches a
+branch, conversion or spill. Foreign callees may leave the upper RAX bits
+unspecified. `machine_x64_receive_call_result` uses the existing scalar shape's
+extension opcode for direct and indirect calls; aggregate parts and floating,
+vector and full-width scalar capture retain their own paths.
+
+`machine_test_x64_narrow_call_results` checks selected RAX capture widths on all
+five x86-64 OS targets, both frontend forms and both allocators.
+`compiler_driver_test_x64_narrow_call_results` uses independently assembled
+foreign callees with dirty upper bits and literal C expectations. Matching
+Linux/macOS x86-64 hosts first run a host-compiled client, then Buster clients
+against the same foreign object, covering direct/indirect Boolean branches,
+signed/unsigned byte and word boundaries, and 32/64-bit controls. Other hosts
+retain selection and object-generation coverage; cross-generation is not native
+execution.
+
 ## Wide integer conversion rounding
 
 - AArch64 i128-to-f32/f64 casts normalize the magnitude as two scalar MIR
