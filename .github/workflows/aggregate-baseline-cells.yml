@@ -1,0 +1,81 @@
+name: Separate aggregate baseline controls
+on:
+  push:
+    branches:
+      - codex/3444-aggregate-baseline-cells
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: aggregate-baseline-cells-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  correctness:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Record checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - name: Bootstrap and build trusted compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/aggregate-evidence"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/aggregate-evidence/identity.txt"
+          clang --version > "$RUNNER_TEMP/aggregate-evidence/clang.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/aggregate-build"
+          "$RUNNER_TEMP/aggregate-build" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT
+          "$RUNNER_TEMP/aggregate-build" build --config Release -t ide
+      - name: Independent baseline refusal cells
+        shell: bash
+        run: |
+          set -euo pipefail
+          for case_id in 0 1; do
+            clang -E -P -std=c99 -DCASE="$case_id" .github/diagnostics/aggregate-baseline-cells.c -o "$RUNNER_TEMP/case-$case_id.c"
+            clang -std=c99 -O0 "$RUNNER_TEMP/case-$case_id.c" -o "$RUNNER_TEMP/reference-$case_id"
+            "$RUNNER_TEMP/reference-$case_id"
+            for allocator in fast quality; do
+              if build/Release/ide cc -std=c99 -g0 -fregister-allocator="$allocator" "$RUNNER_TEMP/case-$case_id.c" -o "$RUNNER_TEMP/baseline-$case_id-$allocator" > "$RUNNER_TEMP/aggregate-evidence/case-$case_id-$allocator.log" 2>&1; then
+                echo "error: baseline unexpectedly accepted case=$case_id allocator=$allocator"
+                exit 1
+              fi
+              cat "$RUNNER_TEMP/aggregate-evidence/case-$case_id-$allocator.log"
+              grep -Fq 'opcode=aggregate' "$RUNNER_TEMP/aggregate-evidence/case-$case_id-$allocator.log"
+              echo "BASELINE_EXPECTED_REFUSAL case=$case_id allocator=$allocator reference=pass diagnostic=AGGREGATE"
+            done
+          done
+      - name: Retain machine records
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/aggregate-evidence
+      - name: Retain diagnostic evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: aggregate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/aggregate-evidence/
+            build/CMakeCache.txt
+            build/musl*
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: warn
