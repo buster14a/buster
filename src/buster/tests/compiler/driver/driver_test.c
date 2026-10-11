@@ -30144,6 +30144,42 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_llvm23_header_contracts(
     return result;
 }
 
+// The host default is documented in docs/agents/driver.md (#1557).
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_default_cpu_model(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 default_line[] = {S8("-c"), S8("source.c")};
+    CompilerDriverInvocation implicit_native = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(default_line));
+    BUSTER_TEST(arguments, implicit_native.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, implicit_native.target.cpu_arch == target_native.cpu_arch);
+    BUSTER_TEST(arguments, implicit_native.target.os == target_native.os);
+    BUSTER_TEST(arguments, implicit_native.target.cpu_model == target_native.cpu_model);
+    BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(implicit_native.target), target_cpu_features_effective(target_native)));
+    String8 native_line[] = {S8("--target=native"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation explicit_native = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(native_line));
+    BUSTER_TEST(arguments, explicit_native.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, explicit_native.target.cpu_arch == target_native.cpu_arch);
+    BUSTER_TEST(arguments, explicit_native.target.os == target_native.os);
+    BUSTER_TEST(arguments, explicit_native.target.cpu_model == target_native.cpu_model);
+    BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(explicit_native.target), target_cpu_features_effective(target_native)));
+    String8 x86_64_line[] = {S8("--target=x86_64-linux"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation x86_64 = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(x86_64_line));
+    BUSTER_TEST(arguments, x86_64.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, x86_64.target.cpu_model == CPU_MODEL_BASELINE);
+    String8 aarch64_line[] = {S8("--target=aarch64-linux"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation aarch64 = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(aarch64_line));
+    BUSTER_TEST(arguments, aarch64.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, aarch64.target.cpu_model == CPU_MODEL_BASELINE);
+    if (target_native.cpu_arch == CPU_ARCH_X86_64)
+    {
+        String8 march_native_line[] = {S8("--target=x86_64-linux"), S8("-march=native"), S8("-c"), S8("source.c")};
+        CompilerDriverInvocation march_native = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(march_native_line));
+        BUSTER_TEST(arguments, march_native.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(march_native.target), target_cpu_features_effective(target_native)));
+    }
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -30155,6 +30191,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_diagnostic_streams);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_warning_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_gcc_spellings);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_default_cpu_model);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_forced_include);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_pack_state);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_arguments);
