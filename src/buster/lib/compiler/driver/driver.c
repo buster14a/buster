@@ -4091,10 +4091,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_tbd_unquote(String8 value, String8
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_tbd_version(String8 value, u32* version)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_tbd_version_text(String8 unquoted, u32* version)
 {
-    String8 unquoted = {0};
-    bool valid = compiler_driver_mach_tbd_unquote(value, &unquoted) && unquoted.length;
+    bool valid = unquoted.length;
     u32 components[3] = {0};
     u32 component = 0;
     u32 digits = 0;
@@ -4130,6 +4129,13 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_tbd_version(String8 value, u32* ve
     {
         *version = (components[0] << 16) | (components[1] << 8) | components[2];
     }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_tbd_version(String8 value, u32* version)
+{
+    String8 unquoted = {0};
+    bool valid = compiler_driver_mach_tbd_unquote(value, &unquoted) && compiler_driver_mach_tbd_version_text(unquoted, version);
     return valid;
 }
 
@@ -4713,7 +4719,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverMachDylibStatus compiler_driver_mach_tbd_v5_id
                         compiler_driver_mach_json_targets(arena, entry, target, &matches);
                 if (valid && field)
                 {
-                    valid = compiler_driver_mach_tbd_version(plain, &packed);
+                    valid = compiler_driver_mach_tbd_version_text(plain, &packed);
                 }
                 seen = true;
                 if (valid && matches)

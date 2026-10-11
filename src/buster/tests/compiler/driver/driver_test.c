@@ -15299,6 +15299,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
     BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(v5_minimal), ios, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
     static String8 const v5_bad_fields[] = {
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\"}],\"current_versions\":[{\"version\":\"\\\"1\\\"\"}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\"}],\"current_versions\":[{\"version\":\"'1'\"}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\"}],\"current_versions\":[{\"version\":\" 1\"}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\"}],\"current_versions\":[{\"version\":\"1 \"}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\"}],\"current_versions\":[{\"version\":\"1\\n\"}]"),
         S8_INITIALIZER("\"target_info\":[],\"install_names\":[{\"name\":\"a\"}]"),
         S8_INITIALIZER("\"target_info\":[\"arm64-macos\"],\"install_names\":[{\"name\":\"a\"}]"),
         S8_INITIALIZER("\"target_info\":[{}],\"install_names\":[{\"name\":\"a\"}]"),
