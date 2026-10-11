@@ -1417,7 +1417,7 @@ diagnostic only:
   Objects are byte-identical at `-g0` and `-g` across the four arms.
 - **Coverage.** The self-host tree-splits all 41,586 of its block
   declarations, with no fallback.
-- **Ship.** C against B is −19.95 M Ir (−0.21%): `c_parse_local_declarations`
+- **Ship.** C against B is −19.90 M Ir (−0.21%) on the final candidate: `c_parse_local_declarations`
   falls by 26.2 M, and the index costs 6.2 M. The first candidate gave
   −4.01 M and failed the 5 M budget, because its masked window loads took
   `simd.h`'s per-lane fallback on the v3 build. Loading whole windows
