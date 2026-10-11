@@ -551,42 +551,15 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             }
             if (inline_requested)
             {
-                // Expansion consumes exactly the strict canonical form. Optional
-                // candidates in legacy certified modules remain unchanged.
-                IrValidationResult input = validated ? ir_validation_ok() : ir_validate_canonical_module(program, module);
-                if (input.error == IR_VALIDATION_NONE)
-                {
-                    module->inlining = (IrInlineStatistics){0};
-                    result = ir_inline_module(program, module);
-                    // The unchanged input or independently checked inline
-                    // output has passed the strict canonical validator.
-                    validated = result.error == IR_VALIDATION_NONE;
-                }
-                else
-                {
-                    // Optional candidates may retain legacy certified shapes.
-                    // A direct source directive must instead report its call.
-                    for (u32 index = 0; index < module->function_count && result.error == IR_VALIDATION_NONE; index += 1)
-                    {
-                        IrFunction* function = module->functions + index;
-                        if (function->state != IR_FUNCTION_LOWERED) continue;
-                        for (u32 block = 0; block < function->block_count && result.error == IR_VALIDATION_NONE; block += 1)
-                        {
-                            for (u32 row = function->blocks[block].first_instruction.value;
-                                 row < function->instruction_count && result.error == IR_VALIDATION_NONE;
-                                 row = function->instructions[row].next.value)
-                            {
-                                IrInstruction* call = function->instructions + row;
-                                IrSymbol* symbol = call->opcode == IR_OPCODE_CALL ? ir_symbol_from_id(&program->symbols, call->symbol) : 0;
-                                if (symbol && symbol->always_inline && ir_inline_direct_call(function, call))
-                                {
-                                    result = ir_inline_required(function, (IrBlockId){.value = block}, (IrInstructionId){.value = row});
-                                }
-                            }
-                        }
-                    }
-                    module->inlining.shape_skips += 1;
-                }
+                // Expansion checks each caller and callee it reads, and each
+                // caller it rewrites, against the strict canonical form; a
+                // legacy certified shape stays a call when optional and
+                // reports its call when required. A module-wide scan here
+                // would repeat the FAST input guard on every default compile.
+                // Rewritten callers pass that check, so `validated` still
+                // describes the module.
+                module->inlining = (IrInlineStatistics){0};
+                result = ir_inline_module(program, module);
             }
             module->inline_complete = result.error == IR_VALIDATION_NONE;
         }

@@ -103,6 +103,24 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_reserve_work(IrFunction const* caller, u64 add
     return result;
 }
 
+// Expansion reads and writes only the strict canonical form. Rather than scan
+// the whole module, check each function the pass reads (a candidate's caller
+// and callee) or rewrites (a spliced caller), once per state change: 0 is
+// unknown, then IR_INLINE_STRICT_VALID or IR_INLINE_STRICT_INVALID.
+#define IR_INLINE_STRICT_VALID 1u
+#define IR_INLINE_STRICT_INVALID 2u
+
+BUSTER_GLOBAL_LOCAL bool ir_inline_function_strict(IrProgram* program, IrModule* module, u8* strict, u32 index)
+{
+    if (!strict[index])
+    {
+        strict[index] = ir_validate_canonical_function(program, module->functions + index).error == IR_VALIDATION_NONE
+                            ? IR_INLINE_STRICT_VALID : IR_INLINE_STRICT_INVALID;
+    }
+    bool result = strict[index] == IR_INLINE_STRICT_VALID;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void ir_inline_record_budget_refusal(IrModule* module, bool required,
                                                                   IrInlineBudgetReason reason, u64 demand, u64 limit)
 {
@@ -604,6 +622,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                 u32* function_growth_used = arena_allocate(arena, u32, count ? count : 1u);
                 u64* function_storage_used = arena_allocate(arena, u64, count ? count : 1u);
                 u32* function_sites_used = arena_allocate(arena, u32, count ? count : 1u);
+                u8* strict = arena_allocate_zeroed(arena, u8, count ? count : 1u);
                 memset(function_growth_used, 0, sizeof(u32) * (count ? count : 1u));
                 memset(function_storage_used, 0, sizeof(u64) * (count ? count : 1u));
                 memset(function_sites_used, 0, sizeof(u32) * (count ? count : 1u));
@@ -883,6 +902,15 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             if (!tiny_eligible)
                             {
                                 module->inlining.shape_skips += 1;
+                                continue;
+                            }
+                            // A legacy certified shape stays a call when optional;
+                            // a source directive reports the call instead.
+                            if (!ir_inline_function_strict(program, module, strict, caller_index) ||
+                                !ir_inline_function_strict(program, module, strict, callee_index))
+                            {
+                                module->inlining.shape_skips += 1;
+                                if (required) result = ir_inline_callsite_error(caller, block, row);
                                 continue;
                             }
                             u64 callee_payload_units = callee->extra_count;
@@ -1307,6 +1335,13 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         // over-approximates, so no full-function remap or compaction is needed here.
                         ir_inline_cfg_rebuild_predecessors(program->arena, caller);
                         ir_function_invalidate_cfg(caller);
+                        IrValidationResult output = ir_validate_canonical_function(program, caller);
+                        strict[caller_index] = output.error == IR_VALIDATION_NONE ? IR_INLINE_STRICT_VALID : IR_INLINE_STRICT_INVALID;
+                        if (output.error != IR_VALIDATION_NONE)
+                        {
+                            result = output;
+                            result.boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT;
+                        }
                         module->local_promotion_complete = false;
                         module->local_promotion = (IrLocalPromotionStatistics){0};
                         module->fast_complete = false;
@@ -1317,11 +1352,6 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     function_sites_used[caller_index] = function_sites;
                     scratch_end(function_scratch);
                     }
-                }
-                if (result.error == IR_VALIDATION_NONE && module->inlining.inlined)
-                {
-                    result = ir_validate_canonical_module(program, module);
-                    result.boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT;
                 }
                 if (result.error == IR_VALIDATION_NONE) module->inline_complete = true;
                 }

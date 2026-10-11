@@ -216,8 +216,15 @@ capacities through projected appends, including geometric growth floors and
 alignment. Callee payloads and clone maps remain charged per splice.
 Tiny bodies are screened before payload scans. Mandatory expansion is still
 subject to resource guards,
-including bounded planning work and retained cloning storage. A mandatory call in a legacy
-producer-certified module that cannot pass strict validation is diagnosed. The verbose
+including bounded planning work and retained cloning storage. Expansion checks
+strict canonical validity per function, never by a module-wide scan: each
+candidate's caller and callee once before they are read, and each spliced caller
+again after its last splice (an output failure reports the `inlining output`
+boundary). A mandatory call whose caller or callee is a legacy producer-certified
+shape that fails that check is diagnosed; an optional one stays a call. Rewritten
+callers pass the same check, so a module the input scan already proved stays proven
+and the FAST input guard described above still pays the only module-wide scan on a
+producer-certified default compile. The verbose
 `IR_INLINE` record reports candidates, accepted/mandatory calls, copied rows,
 growth, rejection categories and visits. These counts are diagnostics, not a
 performance result. Mandatory budget refusals additionally report the first
