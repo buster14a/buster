@@ -9193,8 +9193,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_lexical_block_nest
     return result;
 }
 
-// The default and -g0 must omit debug payloads in the serialized artifact,
-// while -g opts in and the final debug option wins for every native format.
 // Direct writers cannot honor source-debug requests. Refuse before reading
 // source or publishing output, including API requests without argv markers.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_nonnative_debug_options(UnitTestArguments* arguments)
@@ -9329,6 +9327,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_nonnative_debug_options(
     return result;
 }
 
+// The default and -g0 must omit debug payloads in the serialized artifact,
+// while -g opts in and the final debug option wins for every native format.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_options(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
