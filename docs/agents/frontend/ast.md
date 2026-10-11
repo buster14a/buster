@@ -460,7 +460,10 @@ unchanged.
     the cast replay.
 
   The replayed row is the answer. A leaf that fails is undone, and the query
-  runs the machine.
+  runs the machine. The leaf's element count already comes through
+  `CParseResult.string_literals`, which decodes each narrow token once per
+  unit. A count fast path in front of it measured as a loss (see the
+  [measurement plan](#measurement-plan)).
 - **Constraint checks.** A checked query is answered only from a node whose
   operands are safe and whose own checked-mode rule cannot fire. For the
   binary operators that is the machine's operand rule. The cases it settles by
@@ -1333,5 +1336,17 @@ check, encoding scan) and memo probes. The budgets:
   on the whole compile.
 - **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
   requested, so Zen 5 validation stays incomplete (#2761).
+
+The count cache's hosted census is
+[`2026-10-11T095929Z`](../../performance-audits/2026-10-11T095929Z.md), a
+negative result, diagnostic only:
+- **Census.** Of the leaf's 32,707 calls, 83% are the first time any consumer
+  sees the token. Their decode (38.4 M Ir) is the one lowering reuses. The
+  5,477 repeats cost 1.38 M, so a candidate was built.
+- **Candidates.** A fast path answers a lone, recorded, unprefixed fragment
+  from the existing memo, with no second table. Objects are byte-identical at
+  `-g0` and `-g`, and the whole compile moves by at most +0.0035%.
+- **Leaf budget fails.** The leaf grows by 0.53 M, or by 0.25 M when a first
+  sight is probed only once. The code does not ship.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
