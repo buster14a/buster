@@ -969,7 +969,9 @@ its measured runs, on the self-host unity input with `-g0`:
   the whole `-fsyntax-only` compile by at least 1% in both instructions and
   paired wall time, without `-c` getting slower, and peak RSS may grow by no
   more than the tree's retained bytes plus 5%. Only the Zen 5 route can
-  establish this.
+  establish this. That route is the owner-requested `ast-pilot-acceptance-v1`
+  profile (#3397) in [benchmarking.md](../benchmarking.md), which reads "plus
+  5%" as 1.05 times the retained bytes.
 
 The tree expression typer's first hosted census is
 [`2026-10-09T132356Z`](../../performance-audits/2026-10-09T132356Z.md). It was

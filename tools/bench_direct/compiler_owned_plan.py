@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import re
-from compiler_receipt import PROFILE, THROUGHPUT_PROFILE, SCALING_PROFILE, INLINE_ACCEPTANCE_PROFILE, named_main_profile
+from compiler_receipt import (PROFILE, THROUGHPUT_PROFILE, SCALING_PROFILE, INLINE_ACCEPTANCE_PROFILE,
+                              AST_PILOT_ACCEPTANCE_PROFILE, named_main_profile)
 
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 COMMIT = re.compile(r"[a-f0-9]{40}\Z")
@@ -21,6 +22,7 @@ LAB_TIMEOUT = 3000
 CORPUS_TIMEOUT = 1800
 SCALING_TIMEOUT = 1200
 INLINE_TIMEOUT = 10800
+AST_PILOT_TIMEOUT = 7200
 POPULATION_SCHEMA = "buster-compiler-snapshot-phases-v1"
 UTILITY_POPULATION_SCHEMA = "buster-compiler-utility-phases-v1"
 MAIN_POPULATION_SCHEMA = "buster-compiler-main-owned-phases-v1"
@@ -87,6 +89,10 @@ def _commands(receipt: dict, ownership: dict, *, utility: bool = False,
         add("inline-acceptance", [python, "-B", trusted + "/tools/bench_direct/inline_acceptance.py",
             "--lab", lab, "--candidate-ide", bins + "/ide-cand", "--repo-root", root, "--head-revision", head,
             "--cpu", str(PROFILE["cpu"]), "--output", work + "/inline-acceptance"], INLINE_TIMEOUT)
+    if receipt.get("ast_pilot_acceptance") is not None:
+        add("ast-pilot-acceptance", [python, "-B", trusted + "/tools/bench_direct/ast_pilot_acceptance.py",
+            "--lab", lab, "--candidate-ide", bins + "/ide-cand", "--repo-root", root, "--head-revision", head,
+            "--cpu", str(AST_PILOT_ACCEPTANCE_PROFILE["cpu"]), "--output", work + "/ast-pilot-acceptance"], AST_PILOT_TIMEOUT)
     if legacy:
         build("closure", base)
     else:
@@ -201,6 +207,11 @@ def validate_plan(receipt: object, ownership: object, core_rows: object, *,
                 (not inline["requested"] and inline.get("profile") is not None) or \
                 (receipt.get("scaling_profile") is not None and
                     (receipt["mode"] != "pull" or not _same(receipt["scaling_profile"], SCALING_PROFILE))):
+            return ["ordinary snapshot semantic plan extension profile/mode unsupported"]
+        ast = receipt.get("ast_pilot_acceptance")
+        if ast is not None and (restricted or receipt["mode"] != "pull" or not isinstance(ast, dict) or
+                                ast.get("requested") is not True or
+                                not _same(ast.get("profile"), AST_PILOT_ACCEPTANCE_PROFILE)):
             return ["ordinary snapshot semantic plan extension profile/mode unsupported"]
         planned = _commands(receipt, ownership, utility=utility, main_profile=profile if main else None)
         if len(core_rows) != len(planned):

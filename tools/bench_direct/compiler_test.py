@@ -27,6 +27,7 @@ import compiler_compare  # noqa: E402
 import compiler_publish  # noqa: E402
 import compiler_receipt  # noqa: E402
 import inline_acceptance  # noqa: E402
+import ast_pilot_acceptance  # noqa: E402
 
 A256, B256 = "1" * 64, "2" * 64
 
@@ -3180,6 +3181,287 @@ class InlineAcceptanceTest(unittest.TestCase):
             self.assertEqual(stage1_ids, result["stage1_compilers"])
             self.assertEqual(stage2_ids, stage1_ids)
             self.assertIn("build/generated", result["frozen_input_tree"])
+
+
+def ast_pilot_raw_cell(cell: str, binary: str = "c" * 64, wall: float = 0.9, instructions: object = 0.9) -> dict:
+    """One synthetic, complete raw uarch_lab cell of the #3397 profile."""
+    pairs = compiler_receipt.AST_PILOT_ACCEPTANCE_PROFILE["pairs"]
+    argv = ast_pilot_acceptance.cell_command(cell)
+    labs = {}
+    for key, extra in ast_pilot_acceptance.EXTRA_BY_VARIANT.items():
+        command = ["/bin/ide"] + (argv[:-2] + extra + argv[-2:] if cell == "object" else argv + extra)
+        labs[key] = {"config": {"extra": list(extra), "cpu": 2, "ast_pilot_cell": cell, "ide": "/bin/ide",
+                                "command": " ".join(command)}}
+    insn = {"ratio": instructions, "a_median": 1e10 if instructions is not None else None,
+            "b_median": 1e10 * instructions if instructions is not None else None}
+    summary = {"schema": ast_pilot_acceptance.UARCH_SCHEMA,
+               "plan": {"pairs": pairs, "complete_pairs": pairs, "order": "ABBA", "fresh_copy": True},
+               "baseline": {"sha256": binary, "failed": 0, "deterministic": True, "runs": pairs},
+               "candidate": {"sha256": binary, "failed": 0, "deterministic": True, "runs": pairs},
+               "metrics": {"wall": {"a_median": 2.0, "b_median": 2.0 * wall, "ratio": wall,
+                                    "ci_low": wall - 0.01, "ci_high": wall + 0.005},
+                           "instructions": insn, "peak_rss": {"a_median": 1e9, "b_median": 1.02e9, "ratio": 1.02}},
+               "counters": {"perf_stat": instructions is not None,
+                            "reason": "usable" if instructions is not None else "perf_event_paranoid"},
+               "outputs_identical": True, "diagnostics_identical": True}
+    meta = {"config": {"ast_pilot_pair": cell, "extra_by_variant": copy.deepcopy(ast_pilot_acceptance.EXTRA_BY_VARIANT),
+                       "canonical_inline_pair": False, "command": " ".join(["IDE"] + argv), "pairs": pairs,
+                       "warmups": 1, "cpu": 2, "extra": [], "profile_steps": [], "fresh_copy": True}}
+    return {"summary": summary, "meta": meta, "a": labs["a"], "b": labs["b"]}
+
+
+AST_PILOT_PROBE = {"command": compiler_receipt.AST_PILOT_COMPILE + ["-fsyntax-only", "-v"],
+                   "a": {"exit": 0, "extra": [], "tree_lines": []},
+                   "b": {"exit": 0, "extra": ["-fc-ast-pilot"], "tree_lines": [
+                       "C_AST nodes=2776521 tokens=4180360 build_ns=65332858 retained_bytes=36094773 "
+                       "transient_high_water=61008 column_copy_bytes=0 finalize_child_entries=0 layout=implicit"]}}
+
+
+def ast_pilot_evidence(head: str = "a" * 40, binary: str = "c" * 64, **cell_change) -> tuple[dict, dict, dict]:
+    """(receipt record, raw bundle, acceptance) built through the helper's own record and verdict code."""
+    raw = {cell: ast_pilot_raw_cell(cell, binary, **cell_change.get(cell, {})) for cell in compiler_receipt.AST_PILOT_CELLS}
+    cells = {cell: ast_pilot_acceptance.cell_record(raw[cell]["summary"]) for cell in raw}
+    tree = ast_pilot_acceptance.validate_probe(AST_PILOT_PROBE)
+    acceptance = {"schema": compiler_receipt.AST_PILOT_ACCEPTANCE_SCHEMA, "status": "complete", "source_revision": head,
+                  "profile": {**compiler_receipt.AST_PILOT_ACCEPTANCE_PROFILE, "source_sha256": "e" * 64},
+                  "candidate_compiler": {"sha256": binary, "size_bytes": 10}, "cells": cells, "tree": tree,
+                  "verdict": ast_pilot_acceptance.verdict(cells, tree)}
+    bundle = {"acceptance": acceptance, "probe": copy.deepcopy(AST_PILOT_PROBE)}
+    for cell, documents in raw.items():
+        for key, value in documents.items():
+            bundle[f"{cell}_{key}"] = value
+    record = {"requested": True, "request_line": compiler_receipt.AST_PILOT_ACCEPTANCE_REQUEST_LINE,
+              "profile": compiler_receipt.AST_PILOT_ACCEPTANCE_PROFILE, "summary": acceptance,
+              "status": "complete", "exit": 0}
+    return json.loads(json.dumps(record)), json.loads(json.dumps(bundle)), acceptance
+
+
+class AstPilotAcceptanceTest(unittest.TestCase):
+    def test_publisher_revalidates_raw_cells_and_tree_probe(self) -> None:
+        head, binary = "a" * 40, "c" * 64
+        record, bundle, acceptance = ast_pilot_evidence(head, binary)
+        self.assertEqual(compiler_publish.validate_ast_pilot_bundle(record, bundle, head, binary), [])
+        self.assertEqual(acceptance["verdict"]["outcome"], "pass")
+
+        def broken(change) -> list[str]:
+            changed = copy.deepcopy(bundle)
+            change(changed)
+            return compiler_publish.validate_ast_pilot_bundle(record, changed, head, binary)
+        cases = {
+            "wrong flag": lambda value: value["syntax-only_meta"]["config"].update(
+                extra_by_variant={"a": [], "b": ["-fcanonical-inline"]}),
+            "flag on A": lambda value: value["object_a"]["config"].update(extra=["-fc-ast-pilot"]),
+            "lab command": lambda value: value["object_b"]["config"].update(
+                command=value["object_a"]["config"]["command"]),
+            "linking command": lambda value: value["object_meta"]["config"].update(
+                command=" ".join(["IDE"] + compiler_receipt.AST_PILOT_COMPILE + ["-o", "OUT"])),
+            "cell swap": lambda value: value["object_meta"]["config"].update(ast_pilot_pair="syntax-only"),
+            "wrong binary": lambda value: value["syntax-only_summary"]["candidate"].update(sha256="d" * 64),
+            "cpu": lambda value: value["object_meta"]["config"].update(cpu=3),
+            "pair count": lambda value: value["object_summary"]["plan"].update(pairs=12, complete_pairs=12),
+            "missing cell": lambda value: [value.pop(f"object_{key}") for key in ("summary", "meta", "a", "b")],
+            "A built a tree": lambda value: value["probe"]["a"].update(tree_lines=value["probe"]["b"]["tree_lines"]),
+            "B built no tree": lambda value: value["probe"]["b"].update(tree_lines=[]),
+            "retained bytes": lambda value: value["acceptance"]["tree"].update(retained_bytes=1),
+            "metrics": lambda value: value["object_summary"]["metrics"]["wall"].update(ratio=1.2),
+            "diagnostics": lambda value: value["object_summary"].update(diagnostics_identical=None),
+        }
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(broken(change))
+        self.assertTrue(compiler_publish.validate_ast_pilot_bundle(dict(record, status="failed"), bundle, head, binary))
+        self.assertTrue(compiler_publish.validate_ast_pilot_bundle(dict(record, request_line="ast-pilot"), bundle, head, binary))
+        self.assertTrue(compiler_publish.validate_ast_pilot_bundle(record, None, head, binary))
+        self.assertTrue(compiler_publish.validate_ast_pilot_bundle(record, bundle, head, "d" * 64))
+        self.assertEqual(compiler_publish.validate_ast_pilot_bundle(None, None, head, binary), [])
+
+    def test_receipt_validator_needs_both_cells_frozen_profile_and_recomputed_verdict(self) -> None:
+        head, binary = "a" * 40, "c" * 64
+        unused_record, unused_bundle, acceptance = ast_pilot_evidence(head, binary)
+        self.assertEqual(compiler_receipt.validate_ast_pilot_acceptance(acceptance, head, binary), [])
+        for name, change in {
+            "profile": lambda value: value["profile"].update(pairs=2),
+            "extra profile key": lambda value: value["profile"].update(flags=["-O3"]),
+            "missing cell": lambda value: value["cells"].pop("syntax-only"),
+            "verdict": lambda value: value["verdict"].update(outcome="pass" if value["verdict"]["outcome"] != "pass" else "fail"),
+            "revision": lambda value: value.update(source_revision="b" * 40),
+            "binary": lambda value: value["candidate_compiler"].update(sha256="d" * 64),
+            "no tree": lambda value: value["tree"].update(retained_bytes=0),
+            "A tree": lambda value: value["tree"].update(a_tree_lines=1),
+        }.items():
+            changed = copy.deepcopy(acceptance)
+            change(changed)
+            with self.subTest(case=name):
+                self.assertTrue(compiler_receipt.validate_ast_pilot_acceptance(changed, head, binary))
+
+    def test_budget_verdict_follows_the_ast_md_adoption_budget(self) -> None:
+        cases = (({}, "pass"),
+                 ({"syntax-only": {"wall": 0.995}}, "fail"),
+                 ({"syntax-only": {"instructions": 0.995}}, "fail"),
+                 ({"syntax-only": {"instructions": None}}, "inconclusive"),
+                 ({"object": {"wall": 1.03}}, "fail"),
+                 ({"object": {"wall": 1.005}}, "pass"))
+        for change, expected in cases:
+            with self.subTest(change=change):
+                self.assertEqual(ast_pilot_evidence(**change)[2]["verdict"]["outcome"], expected)
+        unused_record, unused_bundle, acceptance = ast_pilot_evidence()
+        cells = {cell: acceptance["cells"][cell]["metrics"] for cell in compiler_receipt.AST_PILOT_CELLS}
+        identical = {"object_outputs_identical": True, "diagnostics_identical": True}
+        noisy = copy.deepcopy(cells)
+        noisy["syntax-only"]["wall"]["ci_high"] = 1.001
+        self.assertEqual(compiler_receipt.ast_pilot_budget_verdict(noisy, 36094773, identical)["outcome"], "inconclusive")
+        verdict = compiler_receipt.ast_pilot_budget_verdict(cells, 10_000_000, identical)
+        self.assertEqual((verdict["outcome"], verdict["checks"]["object_peak_rss"]["outcome"]), ("fail", "fail"))
+        differs = compiler_receipt.ast_pilot_budget_verdict(cells, 36094773, dict(identical, object_outputs_identical=False))
+        self.assertEqual((differs["outcome"], differs["checks"]["correctness"]["outcome"]), ("fail", "fail"))
+
+    def test_raw_cell_loader_refuses_wrong_flags_binaries_and_unexplained_na(self) -> None:
+        binary = "c" * 64
+        for cell in compiler_receipt.AST_PILOT_CELLS:
+            raw = ast_pilot_raw_cell(cell, binary)
+            documents = (raw["summary"], raw["meta"], {"a": raw["a"], "b": raw["b"]})
+            ast_pilot_acceptance.validate_documents(cell, *documents, binary)
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "frozen candidate-HEAD"):
+                ast_pilot_acceptance.validate_documents(cell, *documents, "d" * 64)
+            other = "object" if cell == "syntax-only" else "syntax-only"
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "fixed -fc-ast-pilot"):
+                ast_pilot_acceptance.validate_documents(other, *documents, binary)
+            na = ast_pilot_raw_cell(cell, binary, instructions=None)
+            ast_pilot_acceptance.validate_documents(cell, na["summary"], na["meta"], {"a": na["a"], "b": na["b"]}, binary)
+            na["summary"]["counters"] = {"perf_stat": True, "reason": "usable"}
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "NA without"):
+                ast_pilot_acceptance.validate_documents(cell, na["summary"], na["meta"], {"a": na["a"], "b": na["b"]}, binary)
+        with self.assertRaisesRegex(RuntimeError, "unknown"):
+            ast_pilot_acceptance.validate_documents("link", *documents, binary)
+
+    def test_compare_command_is_fixed_and_uses_one_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for cell in compiler_receipt.AST_PILOT_CELLS:
+                with mock.patch.object(ast_pilot_acceptance.subprocess, "run") as run:
+                    ast_pilot_acceptance.run_compare(root / "uarch_lab.py", root / "ide", root, 2, root / cell, "perf", cell)
+                argv = run.call_args.args[0]
+                self.assertEqual(argv[argv.index("--ast-pilot-pair") + 1], cell)
+                self.assertEqual(argv[argv.index("--baseline") + 1], argv[argv.index("--candidate") + 1])
+                self.assertEqual(argv[argv.index("--pairs") + 1], "20")
+                self.assertNotIn("--", argv)
+                self.assertNotIn("--canonical-inline-pair", argv)
+
+    def test_profile_runs_both_cells_on_candidate_head_and_records_the_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "ide"
+            candidate.write_bytes(b"candidate compiler")
+            repo = root / "repo"
+            source = repo / "src/buster/apps/ide/ide.c"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"int frozen_unity_source;\n")
+            (repo / "build/generated").mkdir(parents=True)
+            lab = root / "trusted-uarch.py"
+            lab.write_bytes(b"trusted test stub")
+            binary = hashlib.sha256(b"candidate compiler").hexdigest()
+            args = argparse.Namespace(lab=lab, repo_root=repo, candidate_ide=candidate, output=root / "profile",
+                                      head_revision="a" * 40, cpu=2, perf="perf")
+            cells = []
+            with mock.patch.object(ast_pilot_acceptance, "git", return_value="a" * 40), \
+                 mock.patch.object(ast_pilot_acceptance, "run_compare",
+                                   side_effect=lambda *values: cells.append(values[-1])), \
+                 mock.patch.object(ast_pilot_acceptance, "load_complete",
+                                   side_effect=lambda path, cell, sha: ast_pilot_raw_cell(cell, sha)["summary"]), \
+                 mock.patch.object(ast_pilot_acceptance, "probe_tree", return_value=copy.deepcopy(AST_PILOT_PROBE)):
+                result = ast_pilot_acceptance.execute(args)
+            self.assertEqual(cells, ["syntax-only", "object"])
+            self.assertEqual(result["tree"]["retained_bytes"], 36094773)
+            self.assertEqual(compiler_receipt.validate_ast_pilot_acceptance(result, "a" * 40, binary), [])
+            args.cpu = 3
+            args.output = root / "other"
+            with mock.patch.object(ast_pilot_acceptance, "git", return_value="a" * 40), \
+                 self.assertRaisesRegex(RuntimeError, "pins CPU 2"):
+                ast_pilot_acceptance.execute(args)
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            def git(*args: str) -> str:
+                return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                                      text=True).stdout.strip()
+            git("init", "-q")
+            git("config", "user.name", "Ast Pilot Test")
+            git("config", "user.email", "ast-pilot@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            git("add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            git("commit", "-qm", "seed")
+            line = compiler_receipt.AST_PILOT_ACCEPTANCE_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                git("commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.ast_pilot_request_selection(repo, git("rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            git("commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.ast_pilot_request_selection(repo, git("rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.AST_PILOT_ACCEPTANCE_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", ast_pilot_acceptance=ast_pilot_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        self.assertEqual(compiler_publish.verify_analyzer_request_freshness(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", compiler_publish.verify_analyzer_request_freshness(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", compiler_publish.verify_analyzer_request_freshness(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("ast_pilot_acceptance")
+        self.assertIn("no ast-pilot acceptance record",
+                      compiler_publish.verify_analyzer_request_freshness(Api(1, 0), expected, plain, {}))
+        self.assertEqual(compiler_publish.verify_analyzer_request_freshness(Api(1, 1), expected, plain, {}), "")
+        self.assertEqual(compiler_publish.verify_analyzer_request_freshness(
+            Api(1, 0), expected, dict(plain, state="superseded"), {}), "")
+
+    def test_decision_needs_pull_mode_the_9700x_and_the_complete_bundle(self) -> None:
+        record, bundle, unused_acceptance = ast_pilot_evidence("a" * 40, B256)
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["ast_pilot_acceptance"] = record
+        expected = dict(EXPECTED, mode="pull")
+        values = {"expected": expected, "authorized": True, "compare_result": "success", "receipt": pull,
+                  "summary": summary(), "policy_value": "", "throughput": dict(corpus(), ast_pilot_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "missing cell": {"throughput": dict(corpus(), ast_pilot_bundle={
+                key: value for key, value in bundle.items() if not key.startswith("object_")})},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("Issue #3397 -fc-ast-pilot adoption budget: complete, verdict pass", report)
+        self.assertIn("| syntax-only | 0.9000", report)
 
 
 if __name__ == "__main__":
