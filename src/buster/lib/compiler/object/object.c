@@ -66,6 +66,8 @@
 //   object_read_elf64, object_read_coff,           the three format readers;
 //                                                  COFF joins repeated C13
 //                                                  debug contributions
+//   object_mach_o_restore_thread_variables         Mach-O __thread_vars
+//                                                  descriptors -> canonical TLS
 //   object_read_mach_o64, object_read              and their dispatcher
 //   object_bytes_are_object, object_archive_read   eager archive reading;
 //   object_archive_read_link                       borrowed lazy link metadata
@@ -93,6 +95,10 @@
 //   object_elf64_plan, object_elf64_emit,          the ELF writer: plan every
 //   object_write_elf64                             range, then store each
 //                                                  byte once
+//   object_coff_bind_tls_index,                    platform TLS spelling the
+//   object_coff_place_tls,                         COFF/Mach-O writers apply:
+//   object_mach_o_place_thread_variables           _tls_index, .tls$, and
+//                                                  __thread_vars descriptors
 //   object_write_coff, object_write_mach_o64,      the other two writers and
 //   object_write_core, object_write                the dispatcher, which
 //                                                  counts every writer's work
@@ -8032,6 +8038,120 @@ BUSTER_GLOBAL_LOCAL bool object_mach_eh_frame_record_start(ByteSlice bytes, u64 
     return false;
 }
 
+// A Mach-O thread-local variable is named by a three-word __thread_vars
+// descriptor {thunk, key, storage address} in an S_THREAD_LOCAL_VARIABLES
+// section; the variable's initial value lives in __thread_data or
+// __thread_bss under the descriptor symbol's name plus this suffix.
+#define OBJECT_MACH_THREAD_VARIABLE_SIZE 24u
+#define OBJECT_MACH_THREAD_VARIABLES_NAME S8("__thread_vars")
+#define OBJECT_MACH_THREAD_STORAGE_SUFFIX S8("$tlv$init")
+
+// Inverse of object_mach_o_place_thread_variables: each __thread_vars
+// descriptor's symbol (the variable, which every TLV/TLVP relocation names)
+// moves onto the `$tlv$init` storage its third word addresses. That storage
+// alias and any other label on the descriptor are dropped, their references
+// following the variable. The result is the canonical model the native
+// linkers synthesize descriptors from: the variable defined in thread-local
+// data. Of several labels on one descriptor the variable is the one a TLV
+// relocation names, else a global one, else the first.
+BUSTER_GLOBAL_LOCAL bool object_mach_o_restore_thread_variables(Arena* arena, ObjectFile* object, u32 const* symbol_map, u32 source_symbol_count,
+                                                                u32 const* variable_inits, u32 variable_count, u32 const* labels,
+                                                                u32 const* label_entries, u32 label_count)
+{
+    u32 const THREAD_VARIABLE_KEPT = UINT32_MAX;
+    u32 const THREAD_VARIABLE_DESCRIPTOR = UINT32_MAX - 1;
+    bool valid = !variable_count || object_reader_arena_can_allocate_count(arena, 3 * (u64)object->symbol_count + variable_count, sizeof(u32),
+                                                                           BUSTER_ALIGN_OF(u32));
+    if (valid && variable_count)
+    {
+        // Per symbol: THREAD_VARIABLE_KEPT, THREAD_VARIABLE_DESCRIPTOR for a
+        // chosen variable, or the variable a dropped label now stands for.
+        u32* roles = arena_allocate(arena, u32, object->symbol_count);
+        u32* ranks = arena_allocate(arena, u32, object->symbol_count);
+        u32* variables = arena_allocate(arena, u32, variable_count);
+        for (u32 index = 0; index < object->symbol_count; index += 1)
+        {
+            roles[index] = THREAD_VARIABLE_KEPT;
+            ranks[index] = object->symbols[index].global;
+        }
+        for (u32 index = 0; index < object->relocation_count; index += 1)
+        {
+            ObjectRelocationKind kind = object->relocations[index].kind;
+            if (kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32 || kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 ||
+                kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12)
+            {
+                ranks[object->relocations[index].symbol] = 2;
+            }
+        }
+        for (u32 entry = 0; entry < variable_count; entry += 1)
+        {
+            variables[entry] = UINT32_MAX;
+        }
+        for (u32 label = 0; valid && label < label_count; label += 1)
+        {
+            u32 symbol = labels[label];
+            u32 entry = label_entries[label];
+            valid = symbol < object->symbol_count && entry < variable_count;
+            if (valid && (variables[entry] == UINT32_MAX || ranks[symbol] > ranks[variables[entry]]))
+            {
+                variables[entry] = symbol;
+            }
+        }
+        for (u32 label = 0; valid && label < label_count; label += 1)
+        {
+            u32 variable = variables[label_entries[label]];
+            roles[labels[label]] = labels[label] == variable ? THREAD_VARIABLE_DESCRIPTOR : variable;
+        }
+        for (u32 entry = 0; valid && entry < variable_count; entry += 1)
+        {
+            u32 variable = variables[entry];
+            u32 source_init = variable_inits[entry];
+            u32 storage = source_init < source_symbol_count ? symbol_map[source_init] : UINT32_MAX;
+            // A descriptor no label names cannot be referenced; it only
+            // needs a storage target.
+            valid = storage < object->symbol_count && roles[storage] == THREAD_VARIABLE_KEPT;
+            ObjectSymbol* init = valid ? object->symbols + storage : 0;
+            valid = valid && init->section < object->section_count &&
+                    (object->sections[init->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                     object->sections[init->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO);
+            if (valid && variable != UINT32_MAX)
+            {
+                ObjectSymbol* descriptor = object->symbols + variable;
+                descriptor->section = init->section;
+                descriptor->value = init->value;
+                descriptor->size = init->size;
+                roles[storage] = variable;
+            }
+        }
+        if (valid)
+        {
+            u32* renumbered = ranks;
+            u32 kept = 0;
+            for (u32 index = 0; index < object->symbol_count; index += 1)
+            {
+                renumbered[index] = roles[index] >= THREAD_VARIABLE_DESCRIPTOR ? kept++ : UINT32_MAX;
+            }
+            for (u32 index = 0; index < object->symbol_count; index += 1)
+            {
+                if (roles[index] < THREAD_VARIABLE_DESCRIPTOR)
+                {
+                    renumbered[index] = renumbered[roles[index]];
+                }
+                else
+                {
+                    object->symbols[renumbered[index]] = object->symbols[index];
+                }
+            }
+            for (u32 index = 0; index < object->relocation_count; index += 1)
+            {
+                object->relocations[index].symbol = renumbered[object->relocations[index].symbol];
+            }
+            object->symbol_count = kept;
+        }
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice bytes, Target target)
 {
     bool read_ok = true;
@@ -8211,6 +8331,25 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
         eh_frame_sections = arena_allocate(arena, bool, mach_section_count);
         memset(compact_sections, 0, (u64)mach_section_count * sizeof(*compact_sections));
         memset(eh_frame_sections, 0, (u64)mach_section_count * sizeof(*eh_frame_sections));
+        if (!object_reader_arena_can_allocate_count(arena, mach_section_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+        {
+            read_ok = false;
+        }
+    }
+    // S_THREAD_LOCAL_VARIABLES sections hold the 24-byte descriptors that
+    // name each thread-local variable. They are not copied: their symbols are
+    // moved onto the storage the descriptors address (object_mach_o_place_thread_variables
+    // is the inverse). Each such section's first entry index into
+    // thread_variable_inits, or UINT32_MAX for any other section.
+    u32*thread_variable_firsts = 0;
+    u32 thread_variable_count = 0;
+    if (read_ok)
+    {
+        thread_variable_firsts = arena_allocate(arena, u32, mach_section_count);
+        for (u32 section_index = 0; section_index < mach_section_count; section_index += 1)
+        {
+            thread_variable_firsts[section_index] = UINT32_MAX;
+        }
     }
     u64 section_sizes[OBJECT_SECTION_COUNT] = {0};
     u32 section_alignments[OBJECT_SECTION_COUNT];
@@ -8297,10 +8436,21 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                             name.length += 1;
                         }
                     }
+                    bool thread_variables = false;
+                    if (read_ok)
+                    {
+                        thread_variables = section_type == 0x13;
+                        if (thread_variables && (section_size % OBJECT_MACH_THREAD_VARIABLE_SIZE ||
+                                                 section_size / OBJECT_MACH_THREAD_VARIABLE_SIZE > UINT32_MAX - thread_variable_count))
+                        {
+                            read_ok = false;
+                        }
+                    }
                     bool is_thread_local = false;
                     if (read_ok)
                     {
-                        is_thread_local = section_type == 0x11 || section_type == 0x12 || string_starts_with_sequence(name, S8("__thread"));
+                        is_thread_local = !thread_variables && (section_type == 0x11 || section_type == 0x12 ||
+                                                                string_starts_with_sequence(name, S8("__thread")));
                     }
                     bool compact_unwind = false;
                     if (read_ok)
@@ -8365,7 +8515,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     u64 output_size = 0;
                     if (read_ok)
                     {
-                        output_size = compact_unwind ? 0 : section_size;
+                        output_size = compact_unwind || thread_variables ? 0 : section_size;
                     }
                     u64 base = 0;
                     if (read_ok)
@@ -8389,8 +8539,16 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                         section_addresses[output_section_index] = address;
                         compact_sections[output_section_index] = compact_unwind;
                         eh_frame_sections[output_section_index] = eh_frame;
-                        section_sizes[output_kind] = base + output_size;
-                        section_alignments[output_kind] = BUSTER_MAX(section_alignments[output_kind], alignment);
+                        if (thread_variables)
+                        {
+                            thread_variable_firsts[output_section_index] = thread_variable_count;
+                            thread_variable_count += (u32)(section_size / OBJECT_MACH_THREAD_VARIABLE_SIZE);
+                        }
+                        else
+                        {
+                            section_sizes[output_kind] = base + output_size;
+                            section_alignments[output_kind] = BUSTER_MAX(section_alignments[output_kind], alignment);
+                        }
                         relocation_capacity += relocation_count;
                         output_section_index += 1;
                     }
@@ -8483,7 +8641,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             // Gate on the resolved kind (the allocation decision), not the raw type
             // flag: a `__bss`-named section is OBJECT_SECTION_ZERO and has no buffer.
             if (section_type != 1 && section_type != 0x12 && !object_section_kind_is_zero_fill(kind) && size && !compact_sections[section_index] &&
-                !(has_compact && eh_frame_sections[section_index]))
+                !(has_compact && eh_frame_sections[section_index]) && thread_variable_firsts[section_index] == UINT32_MAX)
             {
                 memcpy(result.sections[kind].data.pointer + section_bases[section_index], bytes.pointer + offset, size);
             }
@@ -8505,6 +8663,31 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
     if (read_ok)
     {
         symbol_map = arena_allocate(arena, u32, symbol_count);
+        if (!object_reader_arena_can_allocate_count(arena, (u64)thread_variable_count + (thread_variable_count ? 2 * (u64)symbol_count : 0),
+                                                    sizeof(u32), BUSTER_ALIGN_OF(u32)))
+        {
+            read_ok = false;
+        }
+    }
+    // Per descriptor, the source symbol its third word addresses (the
+    // variable's `$tlv$init` storage); per label defined in a descriptor, its
+    // symbol and descriptor. Clang also puts an `ltmp` label on the first.
+    u32*thread_variable_inits = 0;
+    u32*thread_variable_labels = 0;
+    u32*thread_variable_label_entries = 0;
+    u32 thread_variable_label_count = 0;
+    if (read_ok)
+    {
+        thread_variable_inits = arena_allocate(arena, u32, thread_variable_count);
+        for (u32 entry = 0; entry < thread_variable_count; entry += 1)
+        {
+            thread_variable_inits[entry] = UINT32_MAX;
+        }
+        if (thread_variable_count)
+        {
+            thread_variable_labels = arena_allocate(arena, u32, symbol_count);
+            thread_variable_label_entries = arena_allocate(arena, u32, symbol_count);
+        }
     }
     u64 symbol_name_bytes = 0;
     if (read_ok)
@@ -8650,8 +8833,27 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     {
                         symbol_kind = (ObjectSectionKind)section_kinds[section_index];
                     }
+                    // A descriptor symbol takes its storage's place once the
+                    // descriptor relocations are read.
+                    u32 descriptor_first = read_ok ? thread_variable_firsts[section_index] : UINT32_MAX;
+                    if (descriptor_first != UINT32_MAX)
+                    {
+                        u64 descriptor_size = 0;
+                        object_read_u64(bytes, mach_sections[section_index] + 40, &descriptor_size);
+                        u64 entry = relative_value / OBJECT_MACH_THREAD_VARIABLE_SIZE;
+                        if (relative_value % OBJECT_MACH_THREAD_VARIABLE_SIZE || relative_value >= descriptor_size)
+                        {
+                            read_ok = false;
+                        }
+                        else
+                        {
+                            thread_variable_labels[thread_variable_label_count] = destination_index;
+                            thread_variable_label_entries[thread_variable_label_count] = (u32)(descriptor_first + entry);
+                            thread_variable_label_count += 1;
+                        }
+                    }
                     u64 symbol_base = 0;
-                    if (read_ok)
+                    if (read_ok && descriptor_first == UINT32_MAX)
                     {
                         symbol_base = section_bases[section_index];
                         if (symbol_base > result.sections[symbol_kind].virtual_size || relative_value > result.sections[symbol_kind].virtual_size - symbol_base ||
@@ -8741,6 +8943,41 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             object_read_u32(bytes, section + 48, &raw_offset);
             object_read_u32(bytes, section + 56, &relocation_offset);
             object_read_u32(bytes, section + 60, &relocation_count);
+            // Each descriptor carries exactly two UNSIGNED 64-bit extern
+            // relocations: _tlv_bootstrap at +0 and its storage at +16. The
+            // canonical model keeps neither; the storage names the variable.
+            u32 descriptor_first = thread_variable_firsts[section_index];
+            for (u32 relocation_index = 0; descriptor_first != UINT32_MAX && relocation_index < relocation_count && read_ok; relocation_index += 1)
+            {
+                u64 relocation = relocation_offset + (u64)relocation_index * MACH_RELOCATION_SIZE;
+                u32 address = 0;
+                u32 information = 0;
+                object_read_u32(bytes, relocation, &address);
+                object_read_u32(bytes, relocation + 4, &information);
+                u32 source_symbol = information & 0x00ffffff;
+                u32 field = address % OBJECT_MACH_THREAD_VARIABLE_SIZE;
+                u64 entry = (u64)descriptor_first + address / OBJECT_MACH_THREAD_VARIABLE_SIZE;
+                // r_extern, r_length 3, not pc-relative, type UNSIGNED (0).
+                read_ok = (address & UINT32_C(0x80000000)) == 0 && address < section_size && (information & UINT32_C(0xff000000)) == (3u << 25 | 1u << 27) &&
+                          source_symbol < symbol_count && symbol_map[source_symbol] != UINT32_MAX && (field == 0 || field == 16);
+                if (read_ok && field == 0)
+                {
+                    ObjectSymbol* bootstrap = result.symbols + symbol_map[source_symbol];
+                    read_ok = bootstrap->section == OBJECT_SECTION_UNDEFINED && string_equal(bootstrap->name, S8("_tlv_bootstrap"));
+                }
+                if (read_ok && field == 16)
+                {
+                    // The variable is the storage symbol itself, never an offset into it.
+                    u64 inline_addend = 1;
+                    read_ok = thread_variable_inits[entry] == UINT32_MAX && object_read_u64(bytes, (u64)raw_offset + address, &inline_addend) &&
+                              inline_addend == 0;
+                    thread_variable_inits[entry] = source_symbol;
+                }
+            }
+            if (descriptor_first != UINT32_MAX)
+            {
+                continue;
+            }
             if (compact_sections[section_index] || (has_compact && eh_frame_sections[section_index]))
             {
                 continue;
@@ -9498,6 +9735,12 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                 }
             }
         }
+    }
+    if (read_ok && !object_mach_o_restore_thread_variables(arena, &result, symbol_map, symbol_count, thread_variable_inits, thread_variable_count,
+                                                           thread_variable_labels, thread_variable_label_entries, thread_variable_label_count))
+    {
+        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+        read_ok = false;
     }
     if (read_ok)
     {
@@ -14910,7 +15153,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64_with_capacity(Arena* ar
             }
             s64 addend = source->addend;
             bool place_difference = prel32_place_symbols[relocation] != UINT32_MAX;
-            if (source->kind == OBJECT_RELOCATION_X86_64_PC32 && !place_difference)
+            // X86_64_RELOC_SIGNED and X86_64_RELOC_TLV both store the
+            // displacement from the end of their four-byte field; the reader
+            // maps inline B to canonical A = B - 4 for both.
+            if ((source->kind == OBJECT_RELOCATION_X86_64_PC32 || source->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32) && !place_difference)
             {
                 addend += 4;
             }
@@ -15090,7 +15336,9 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64_with_capacity(Arena* ar
         ObjectSection* source = object->sections + section;
         statistics->section_visits += 1;
         u64 offset = segment_offset + MACH_SEGMENT_COMMAND_SIZE + (u64)section * MACH_SECTION_SIZE;
-        String8 section_name = source->kind == OBJECT_SECTION_TEXT                ? S8("__text")
+        bool thread_variables = string_equal(source->name, OBJECT_MACH_THREAD_VARIABLES_NAME);
+        String8 section_name = thread_variables                                   ? OBJECT_MACH_THREAD_VARIABLES_NAME
+                               : source->kind == OBJECT_SECTION_TEXT                ? S8("__text")
                                : source->kind == OBJECT_SECTION_READ_ONLY_DATA    ? S8("__const")
                                : source->kind == OBJECT_SECTION_ZERO              ? S8("__bss")
                                : source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA ? S8("__thread_data")
@@ -15136,7 +15384,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64_with_capacity(Arena* ar
         object_write_u32_at(&buffer, offset + 56, relocation_counts[section] ? relocation_offsets[section] : 0);
         object_write_u32_at(&buffer, offset + 60, relocation_counts[section]);
         object_write_u32_at(&buffer, offset + 64,
-                            source->kind == OBJECT_SECTION_TEXT                ? 0x80000400
+                            thread_variables                                   ? 0x13
+                            : source->kind == OBJECT_SECTION_TEXT                ? 0x80000400
                             : source->kind == OBJECT_SECTION_ZERO              ? 0x1
                             : source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA ? 0x11
                             : source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? 0x12
@@ -15161,6 +15410,102 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64_with_capacity(Arena* ar
     return result;
 }
 
+// dyld reaches a thread-local variable through its __thread_vars
+// descriptor, and ld64 accepts TLV/TLVP relocations only against such a
+// descriptor. The canonical model instead defines the variable on its
+// storage and lets the native Mach-O linker synthesize descriptors. For a
+// written object, move each thread-local symbol `v` onto a new descriptor
+// {_tlv_bootstrap, 0, v$tlv$init} and leave a local `v$tlv$init` on the
+// storage, as Clang does. Existing indices are unchanged, so every TLV/TLVP
+// relocation keeps naming the variable; object_mach_o_restore_thread_variables
+// is the reader's inverse.
+BUSTER_GLOBAL_LOCAL bool object_mach_o_place_thread_variables(Arena* arena, ObjectFile* object, ObjectWriteStatistics* statistics)
+{
+    u32 variable_count = 0;
+    u32 bootstrap = UINT32_MAX;
+    for (u32 index = 0; index < object->symbol_count; index += 1)
+    {
+        ObjectSymbol* symbol = object->symbols + index;
+        statistics->symbol_visits += 1;
+        variable_count += symbol->section < object->section_count &&
+                          (object->sections[symbol->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                           object->sections[symbol->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO);
+        bootstrap = symbol->section == OBJECT_SECTION_UNDEFINED && string_equal(symbol->name, S8("_tlv_bootstrap")) ? index : bootstrap;
+    }
+    u32 added_symbols = variable_count + (bootstrap == UINT32_MAX);
+    bool valid = !variable_count || ((u64)object->symbol_count + added_symbols <= 0x00ffffff &&
+                                     (u64)object->relocation_count + 2 * (u64)variable_count <= UINT32_MAX &&
+                                     object->section_count < 255 && (u64)variable_count * OBJECT_MACH_THREAD_VARIABLE_SIZE <= UINT32_MAX);
+    if (valid && variable_count)
+    {
+        u32 descriptor_section = object->section_count;
+        u32 symbol_count = object->symbol_count + added_symbols;
+        ObjectSymbol* symbols = arena_allocate(arena, ObjectSymbol, symbol_count);
+        memcpy(symbols, object->symbols, (u64)object->symbol_count * sizeof(*symbols));
+        if (bootstrap == UINT32_MAX)
+        {
+            bootstrap = symbol_count - 1;
+            symbols[bootstrap] = (ObjectSymbol){
+                .name = S8("_tlv_bootstrap"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            };
+        }
+        ObjectSection* sections = arena_allocate(arena, ObjectSection, object->section_count + 1);
+        memcpy(sections, object->sections, (u64)object->section_count * sizeof(*sections));
+        u64 descriptor_bytes = (u64)variable_count * OBJECT_MACH_THREAD_VARIABLE_SIZE;
+        sections[descriptor_section] = (ObjectSection){
+            .name = OBJECT_MACH_THREAD_VARIABLES_NAME,
+            .data = {.pointer = arena_allocate_zeroed(arena, u8, descriptor_bytes), .length = descriptor_bytes},
+            .virtual_size = descriptor_bytes,
+            .kind = OBJECT_SECTION_DATA,
+            .alignment = 8,
+        };
+        u32 relocation_count = object->relocation_count + 2 * variable_count;
+        ObjectRelocation* relocations = arena_allocate(arena, ObjectRelocation, relocation_count);
+        memcpy(relocations, object->relocations, (u64)object->relocation_count * sizeof(*relocations));
+        u32 entry = 0;
+        for (u32 index = 0; index < object->symbol_count; index += 1)
+        {
+            ObjectSymbol* variable = symbols + index;
+            statistics->symbol_visits += 1;
+            if (variable->section < object->section_count && (object->sections[variable->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                                                               object->sections[variable->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO))
+            {
+                u32 storage = object->symbol_count + entry;
+                symbols[storage] = *variable;
+                symbols[storage].name = string_format(arena, S8("{S8}{S8}"), variable->name, OBJECT_MACH_THREAD_STORAGE_SUFFIX);
+                symbols[storage].global = false;
+                symbols[storage].weak = false;
+                variable->section = descriptor_section;
+                variable->value = (u64)entry * OBJECT_MACH_THREAD_VARIABLE_SIZE;
+                variable->size = OBJECT_MACH_THREAD_VARIABLE_SIZE;
+                relocations[object->relocation_count + 2 * entry] = (ObjectRelocation){
+                    .offset = variable->value,
+                    .section = descriptor_section,
+                    .symbol = bootstrap,
+                    .kind = OBJECT_RELOCATION_ABSOLUTE64,
+                };
+                relocations[object->relocation_count + 2 * entry + 1] = (ObjectRelocation){
+                    .offset = variable->value + 16,
+                    .section = descriptor_section,
+                    .symbol = storage,
+                    .kind = OBJECT_RELOCATION_ABSOLUTE64,
+                };
+                entry += 1;
+            }
+        }
+        object->symbols = symbols;
+        object->symbol_count = symbol_count;
+        object->sections = sections;
+        object->section_count = descriptor_section + 1;
+        object->relocations = relocations;
+        object->relocation_count = relocation_count;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFile* object, ObjectWriteStatistics* statistics)
 {
     ObjectArtifact result = {
@@ -15169,10 +15514,15 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
     };
     u64 arena_start = arena->position;
     u64 capacity = 0;
-    if (object_writer_32_capacity(object, OBJECT_FORMAT_MACH_O64, &capacity, statistics) &&
-        object_writer_32_arena_fits(arena, object, OBJECT_FORMAT_MACH_O64, capacity))
+    ObjectFile placed = *object;
+    if (!object_mach_o_place_thread_variables(arena, &placed, statistics))
     {
-        result = object_write_mach_o64_with_capacity(arena, object, capacity, statistics);
+        result.error = OBJECT_ERROR_CAPACITY;
+    }
+    else if (object_writer_32_capacity(&placed, OBJECT_FORMAT_MACH_O64, &capacity, statistics) &&
+             object_writer_32_arena_fits(arena, &placed, OBJECT_FORMAT_MACH_O64, capacity))
+    {
+        result = object_write_mach_o64_with_capacity(arena, &placed, capacity, statistics);
     }
     if (result.error != OBJECT_ERROR_NONE)
     {

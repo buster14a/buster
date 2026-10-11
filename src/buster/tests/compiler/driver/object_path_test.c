@@ -2567,6 +2567,239 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTest
 }
 #endif
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
+// The Mach-O thread-local contract a platform linker reads, decoded from the
+// written bytes independently of object_read: one S_THREAD_LOCAL_VARIABLES
+// section whose 24-byte descriptors each carry an UNSIGNED 64-bit extern
+// relocation to __tlv_bootstrap at +0 and to a local `$tlv$init` storage
+// symbol at +16, with the variable symbols defined on the descriptors.
+typedef struct CompilerDriverMachTls CompilerDriverMachTls;
+struct CompilerDriverMachTls
+{
+    u64 descriptor_size;
+    u32 descriptor_sections;
+    u32 bootstrap_relocations;
+    u32 storage_relocations;
+    u32 other_relocations;
+    u32 descriptor_symbols;
+    u32 storage_symbols;
+};
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_field(ByteSlice bytes, u64 offset, u32 width, u64* value)
+{
+    bool result = offset <= bytes.length && width <= bytes.length - offset;
+    *value = 0;
+    if (result)
+    {
+        memcpy(value, bytes.pointer + offset, width);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_mach_string(ByteSlice bytes, u64 table, u64 table_size, u64 index)
+{
+    String8 result = {0};
+    if (index < table_size && table <= bytes.length && table_size <= bytes.length - table)
+    {
+        result.pointer = (char8*)bytes.pointer + table + index;
+        while (index + result.length < table_size && result.pointer[result.length])
+        {
+            result.length += 1;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerDriverMachTls compiler_driver_mach_tls(ByteSlice bytes)
+{
+    CompilerDriverMachTls result = {0};
+    u64 magic = 0;
+    u64 command_count = 0;
+    bool valid = compiler_driver_mach_field(bytes, 0, 4, &magic) && magic == 0xfeedfacf && compiler_driver_mach_field(bytes, 16, 4, &command_count);
+    u64 command = 32;
+    u32 section_number = 0;
+    u32 descriptor_number = 0;
+    u64 descriptor_relocations = 0;
+    u64 descriptor_relocation_count = 0;
+    u64 symbols = 0;
+    u64 symbol_count = 0;
+    u64 strings = 0;
+    u64 string_size = 0;
+    for (u64 index = 0; valid && index < command_count; index += 1)
+    {
+        u64 kind = 0;
+        u64 size = 0;
+        valid = compiler_driver_mach_field(bytes, command, 4, &kind) && compiler_driver_mach_field(bytes, command + 4, 4, &size) && size >= 8;
+        if (valid && kind == 0x19)
+        {
+            u64 section_total = 0;
+            valid = compiler_driver_mach_field(bytes, command + 64, 4, &section_total);
+            for (u64 section = 0; valid && section < section_total; section += 1)
+            {
+                u64 header = command + 72 + section * 80;
+                u64 flags = 0;
+                section_number += 1;
+                valid = compiler_driver_mach_field(bytes, header + 64, 4, &flags);
+                if (valid && (flags & 0xff) == 0x13)
+                {
+                    result.descriptor_sections += 1;
+                    descriptor_number = section_number;
+                    valid = compiler_driver_mach_field(bytes, header + 40, 8, &result.descriptor_size) &&
+                            compiler_driver_mach_field(bytes, header + 56, 4, &descriptor_relocations) &&
+                            compiler_driver_mach_field(bytes, header + 60, 4, &descriptor_relocation_count);
+                }
+            }
+        }
+        if (valid && kind == 0x2)
+        {
+            valid = compiler_driver_mach_field(bytes, command + 8, 4, &symbols) && compiler_driver_mach_field(bytes, command + 12, 4, &symbol_count) &&
+                    compiler_driver_mach_field(bytes, command + 16, 4, &strings) && compiler_driver_mach_field(bytes, command + 20, 4, &string_size);
+        }
+        command += size;
+    }
+    for (u64 index = 0; valid && index < symbol_count; index += 1)
+    {
+        u64 name = 0;
+        u64 type = 0;
+        u64 section = 0;
+        valid = compiler_driver_mach_field(bytes, symbols + index * 16, 4, &name) && compiler_driver_mach_field(bytes, symbols + index * 16 + 4, 1, &type) &&
+                compiler_driver_mach_field(bytes, symbols + index * 16 + 5, 1, &section);
+        String8 text = compiler_driver_mach_string(bytes, strings, string_size, name);
+        bool defined = (type & 0x0e) == 0x0e;
+        bool storage = text.length > 9 && string_equal(string_slice(text, text.length - 9, text.length), S8("$tlv$init"));
+        result.descriptor_symbols += defined && section == descriptor_number &&
+                                     (string_equal(text, S8("_tl")) || string_equal(text, S8("_tz")) || string_equal(text, S8("_ts")));
+        result.storage_symbols += defined && storage && !(type & 1) && section != descriptor_number;
+    }
+    for (u64 index = 0; valid && descriptor_number && index < descriptor_relocation_count; index += 1)
+    {
+        u64 address = 0;
+        u64 information = 0;
+        u64 name = 0;
+        valid = compiler_driver_mach_field(bytes, descriptor_relocations + index * 8, 4, &address) &&
+                compiler_driver_mach_field(bytes, descriptor_relocations + index * 8 + 4, 4, &information) &&
+                compiler_driver_mach_field(bytes, symbols + (information & 0xffffff) * 16, 4, &name);
+        String8 text = compiler_driver_mach_string(bytes, strings, string_size, name);
+        // r_extern, r_length 3 (eight bytes), not pc-relative, UNSIGNED.
+        bool unsigned_extern = (information >> 24) == ((3u << 1) | (1u << 3));
+        bool bootstrap = unsigned_extern && address % 24 == 0 && string_equal(text, S8("__tlv_bootstrap"));
+        bool storage = unsigned_extern && address % 24 == 16 && text.length > 9 &&
+                       string_equal(string_slice(text, text.length - 9, text.length), S8("$tlv$init"));
+        result.bootstrap_relocations += bootstrap;
+        result.storage_relocations += storage;
+        result.other_relocations += !bootstrap && !storage;
+    }
+    if (!valid)
+    {
+        result = (CompilerDriverMachTls){0};
+    }
+    return result;
+}
+
+// GitHub #1323 M1: Buster's Mach-O TLS objects carry the __thread_vars
+// descriptors ld64 requires, read back to the canonical model, and link
+// (natively) to the same bytes as a direct compile. ld64.lld links them
+// where it is installed; the libSystem stub only supplies __tlv_bootstrap.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_mach_tls_object_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = buster_test_temporary_path(arena, S8("buster-mach-tls"), S8(".c"));
+    String8 stub = buster_test_temporary_path(arena, S8("buster-mach-tls-libSystem"), S8(".tbd"));
+    BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("_Thread_local int tl = 5;\n_Thread_local int tz;\n"
+                                                                        "static _Thread_local long ts = 7;\n"
+                                                                        "int get(void) { return tl + tz + (int)ts; }\n"
+                                                                        "int main(void) { tz = 1; return get() == 13 ? 0 : 1; }\n"))));
+    BUSTER_TEST(arguments, file_write(stub, BUSTER_SLICE_TO_BYTE_SLICE(S8("--- !tapi-tbd\ntbd-version: 4\ntargets: [ x86_64-macos, arm64-macos ]\n"
+                                                                      "install-name: '/usr/lib/libSystem.B.dylib'\ncurrent-version: 1311\n"
+                                                                      "exports:\n  - targets: [ x86_64-macos, arm64-macos ]\n"
+                                                                      "    symbols: [ __tlv_bootstrap, dyld_stub_binder ]\n...\n"))));
+    String8 linker_names[] = {S8("ld64.lld"), S8("ld64.lld-21"), S8("ld64.lld-20"), S8("ld64.lld-19"), S8("ld64.lld-18")};
+    String8 linker = {0};
+    for (u32 index = 0; !linker.length && index < BUSTER_ARRAY_LENGTH(linker_names); index += 1)
+    {
+        linker = executable_resolve_in_path(arena, linker_names[index]);
+    }
+    String8 targets[] = {S8("aarch64-apple-macos"), S8("x86_64-apple-macos")};
+    String8 architectures[] = {S8("arm64"), S8("x86_64")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        String8 object_path = buster_test_temporary_path(arena, S8("buster-mach-tls"), string_format(arena, S8("-{u32}.o"), target_index));
+        String8 direct_path = buster_test_temporary_path(arena, S8("buster-mach-tls-direct"), string_format(arena, S8("-{u32}"), target_index));
+        String8 via_path = buster_test_temporary_path(arena, S8("buster-mach-tls-via"), string_format(arena, S8("-{u32}"), target_index));
+        String8 object_command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target_index], S8("-o"), object_path, source};
+        CompilerDriverResult compiled =
+            compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+        bool compiled_ok = compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object;
+        BUSTER_TEST(arguments, compiled_ok);
+        ByteSlice bytes = compiled_ok ? file_read(arena, object_path, (FileReadOptions){0}) : (ByteSlice){0};
+        CompilerDriverMachTls tls = compiler_driver_mach_tls(bytes);
+        BUSTER_TEST(arguments, tls.descriptor_sections == 1 && tls.descriptor_size == 3 * 24 && tls.bootstrap_relocations == 3 &&
+                                   tls.storage_relocations == 3 && tls.other_relocations == 0 && tls.descriptor_symbols == 3 &&
+                                   tls.storage_symbols == 3);
+        if (compiled_ok)
+        {
+            // The reader restores the canonical model: the variables on
+            // their storage, no descriptor bytes in the TLS template and no
+            // `$tlv$init` aliases left to receive descriptors of their own.
+            ObjectFile reread = object_read(arena, bytes, compiled.object.target);
+            u32 variables = 0;
+            u32 aliases = 0;
+            for (u32 index = 0; reread.error == OBJECT_ERROR_NONE && index < reread.symbol_count; index += 1)
+            {
+                ObjectSymbol* symbol = reread.symbols + index;
+                bool thread_local = symbol->section < reread.section_count && (reread.sections[symbol->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                                                                              reread.sections[symbol->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO);
+                variables += thread_local && (string_equal(symbol->name, S8("tl")) || string_equal(symbol->name, S8("tz")) || string_equal(symbol->name, S8("ts")));
+                aliases += string_first_sequence(symbol->name, S8("$tlv$init")) < symbol->name.length;
+            }
+            BUSTER_TEST(arguments, reread.error == OBJECT_ERROR_NONE && variables == 3 && aliases == 0 &&
+                                       reread.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ==
+                                           compiled.object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length &&
+                                       reread.sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size ==
+                                           compiled.object.sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size);
+            String8 direct_command[] = {S8("-g0"), S8("-target"), targets[target_index], S8("-o"), direct_path, source};
+            String8 via_command[] = {S8("-g0"), S8("-target"), targets[target_index], S8("-o"), via_path, object_path};
+            CompilerDriverResult direct =
+                compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(direct_command)));
+            CompilerDriverResult via =
+                compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(via_command)));
+            ByteSlice direct_bytes = direct.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, direct_path, (FileReadOptions){0}) : (ByteSlice){0};
+            ByteSlice via_bytes = via.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, via_path, (FileReadOptions){0}) : (ByteSlice){0};
+            BUSTER_TEST(arguments, direct_bytes.length && direct_bytes.length == via_bytes.length &&
+                                       memcmp(direct_bytes.pointer, via_bytes.pointer, direct_bytes.length) == 0);
+        }
+        if (!linker.length)
+        {
+            arguments->show(arguments, S8("MACH_TLS_EXTERNAL status=unavailable reason=missing-ld64.lld target={S8}\n"), targets[target_index]);
+        }
+        else if (compiled_ok)
+        {
+            String8 output = buster_test_temporary_path(arena, S8("buster-mach-tls-ld64"), string_format(arena, S8("-{u32}"), target_index));
+            String8 link_command[] = {linker, S8("-arch"), architectures[target_index], S8("-platform_version"), S8("macos"), S8("11.0"), S8("11.0"),
+                                      object_path, stub, S8("-o"), output};
+            ProcessSpawnOptions options = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                           .use_process_environment = true, .new_process_group = true};
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link_command), (SliceString8){0}, (SliceString8){0}, options);
+            ProcessWaitResult waited = spawned.handle ? os_process_wait_deadline(arena, spawned, UINT64_C(30000000)) : (ProcessWaitResult){0};
+            bool linked = spawned.handle && waited.result == PROCESS_RESULT_SUCCESS;
+            if (!linked && spawned.handle)
+            {
+                ByteSlice error = waited.streams[STANDARD_STREAM_ERROR];
+                arguments->show(arguments, S8("MACH_TLS_EXTERNAL linker stderr={S8}\n"),
+                                (String8){.pointer = (char8*)error.pointer, .length = BUSTER_MIN(error.length, 2000)});
+            }
+            arguments->show(arguments, S8("MACH_TLS_EXTERNAL status={S8} target={S8} linker={S8}\n"), linked ? S8("pass") : S8("fail"),
+                            targets[target_index], linker);
+            BUSTER_TEST(arguments, linked);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+#endif
+
 UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2582,6 +2815,7 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_aarch64_printer_roundtrip);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_android_preinit_tags);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_mach_tls_object_tests);
 #endif
 #if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_semantic_tests);

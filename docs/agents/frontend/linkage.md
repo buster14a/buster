@@ -143,6 +143,28 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   same section. `link_test_pe_x64_tls_index_object` checks the written
   sections and that the TLS template linked from the object equals the direct
   link's (GitHub #1323 W3).
+- **Mach-O thread-local variables are named by `__thread_vars` descriptors.**
+  dyld reaches a variable through a 24-byte descriptor `{thunk, key,
+  storage}` in an `S_THREAD_LOCAL_VARIABLES` (0x13) section, and ld64 accepts
+  TLV/TLVP relocations only against such a descriptor. The canonical model
+  defines the variable on its storage and the native Mach-O linker
+  synthesizes descriptors. `object_mach_o_place_thread_variables` therefore
+  moves each written thread-local symbol `v` onto a new descriptor with
+  `UNSIGNED` relocations to `__tlv_bootstrap` (+0) and a local `v$tlv$init`
+  left on the `__thread_data`/`__thread_bss` storage (+16), as Clang does;
+  indices are unchanged, so TLV/TLVP relocations keep naming `v`. The reader
+  inverts it in `object_mach_o_restore_thread_variables`: descriptor sections
+  are not copied, each descriptor's symbol moves onto its storage, and the
+  storage alias and any other label on the descriptor (Clang's `ltmp`) are
+  dropped, their references following the variable. Only the exact
+  descriptor shape is admitted. X86_64_RELOC_TLV, like SIGNED, stores the
+  displacement from the end of its field: the writer restores B = A + 4 for
+  `OBJECT_RELOCATION_X86_64_MACH_TLV_PC32`, which the reader maps to A = B - 4.
+  `compiler_driver_mach_tls_object_tests` decodes the written descriptors
+  independently, checks the canonical read-back, requires the object-linked
+  executable to equal a direct compile on AArch64 and x86-64, and links the
+  objects with `ld64.lld` against a libSystem stub that only supplies
+  `__tlv_bootstrap`, recording `status=unavailable` without it (GitHub #1323 M1).
 - **COFF section alignment is a linker placement contract.** A nonzero
   `ObjectSection.alignment` is preserved in `IMAGE_SCN_ALIGN_*`; zero resolves
   through `object_section_default_alignment` for that kind. COFF represents
