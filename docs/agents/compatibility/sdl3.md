@@ -12,9 +12,13 @@ native `build.c` driver still configures and builds the trusted compiler.
 
 Use SDL 3.2.28 at
 [`7f3ae3d57459e59943a4ecfefc8f6277ec6bf540`](https://github.com/libsdl-org/SDL/tree/7f3ae3d57459e59943a4ecfefc8f6277ec6bf540).
-The tool refuses a different HEAD, tracked modifications and untracked files,
-then repeats the check after execution. The hosted workflow exercises a dirty-input refusal;
-a separate wrong-pin negative control remains pending. Build directories are outside the
+The tool refuses Git environment redirection, replacement refs, sparse checkout,
+hidden index flags, different HEAD, tracked modifications, ignored and untracked files.
+It additionally compares every regular file's unfiltered raw Git object hash and
+executable mode against the immutable, replacement-disabled pinned tree, independently
+of the index, then repeats the checks after execution. The hosted workflow exercises
+untracked, ignored, assume-unchanged, skip-worktree, sparse, environment, replacement
+and wrong-pin refusals plus a final clean control. Build directories are outside the
 upstream checkout. Wrong-pin/dirty failures must not be repaired by patching
 sources or accepting a different revision.
 

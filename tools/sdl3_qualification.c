@@ -22,6 +22,9 @@
 #define BUSTER_SDL_TEXT (4 * 1024 * 1024)
 
 static char sdl_text[BUSTER_SDL_TEXT];
+static char sdl_manifest[BUSTER_SDL_TEXT];
+static size_t sdl_text_size;
+extern char** environ;
 static const char* sdl_out;
 static unsigned sdl_sequence;
 
@@ -47,6 +50,7 @@ static bool sdl_read(const char* path)
         ok = fclose(file) == 0 && ok;
     }
     sdl_text[count] = 0;
+    sdl_text_size = count;
     return ok;
 }
 
@@ -115,6 +119,13 @@ static int sdl_run(const char* role, char* const args[], const char* seconds)
             _exit(125);
         }
         close(fd);
+        if (!strcmp(args[0], "git") &&
+            (setenv("GIT_CONFIG_NOSYSTEM", "1", 1) != 0 ||
+             setenv("GIT_CONFIG_GLOBAL", "/dev/null", 1) != 0 ||
+             setenv("GIT_ATTR_NOSYSTEM", "1", 1) != 0))
+        {
+            _exit(125);
+        }
         execvp(supervised[0], supervised);
         _exit(127);
     }
@@ -176,26 +187,137 @@ static int sdl_run(const char* role, char* const args[], const char* seconds)
     return status;
 }
 
-static bool sdl_pristine(const char* source)
+// Git environment redirection is refused before these controlled subprocesses.
+// Every output is retained; object comparisons bypass index flags and filters.
+static int sdl_git(const char* role, const char* source, char* const parameters[])
 {
-    char* identity[] = {"git", "-C", (char*)source, "rev-parse", "HEAD", NULL};
+    char* args[BUSTER_SDL_ARGS] = {"git", "--no-replace-objects",
+        "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+        "-C", (char*)source, NULL};
+    unsigned count = 8;
+    bool ok = true;
+    for (unsigned i = 0; parameters[i] && ok; i += 1)
+    {
+        ok = count + 1 < BUSTER_SDL_ARGS;
+        if (ok)
+        {
+            args[count++] = parameters[i];
+        }
+    }
+    args[count] = NULL;
     unsigned sequence = sdl_sequence;
-    bool ok = sdl_run("source-pin", identity, "20") == 0;
+    int result = ok ? sdl_run(role, args, "20") : 125;
     char name[128], path[BUSTER_SDL_PATH];
-    snprintf(name, sizeof(name), "%03u-source-pin.log", sequence);
+    snprintf(name, sizeof(name), "%03u-%s.log", sequence, role);
     sdl_path(path, sdl_out, name);
+    if (!sdl_read(path))
+    {
+        result = 125;
+    }
+    return result;
+}
+
+static bool sdl_raw_objects(const char* source)
+{
+    char* tree[] = {"ls-tree", "-rz", "--full-tree", BUSTER_SDL_PIN, NULL};
+    bool ok = sdl_git("source-tree", source, tree) == 0 && sdl_text_size > 0;
+    size_t size = sdl_text_size, offset = 0;
     if (ok)
     {
-        ok = sdl_read(path) && !strcmp(sdl_text, BUSTER_SDL_PIN "\n");
+        memcpy(sdl_manifest, sdl_text, size);
+    }
+    while (ok && offset < size)
+    {
+        char* args[132] = {"hash-object", "--no-filters", "--", NULL};
+        char* entries[128];
+        unsigned count = 0;
+        while (ok && offset < size && count < 128)
+        {
+            char* entry = sdl_manifest + offset;
+            char* end = memchr(entry, 0, size - offset);
+            ok = end && end - entry > 53 &&
+                (!memcmp(entry, "100644 blob ", 12) || !memcmp(entry, "100755 blob ", 12)) &&
+                entry[52] == '\t';
+            if (ok)
+            {
+                char path[BUSTER_SDL_PATH];
+                sdl_path(path, source, entry + 53);
+                struct stat file;
+                ok = lstat(path, &file) == 0 && S_ISREG(file.st_mode) &&
+                    ((file.st_mode & 0111) != 0) == (entry[3] == '7');
+            }
+            if (ok)
+            {
+                entries[count] = entry;
+                args[3 + count++] = entry + 53;
+                offset = (size_t)(end - sdl_manifest) + 1;
+            }
+        }
+        args[3 + count] = NULL;
+        if (ok)
+        {
+            ok = sdl_git("source-raw-blobs", source, args) == 0 &&
+                sdl_text_size == (size_t)count * 41;
+            for (unsigned i = 0; ok && i < count; i += 1)
+            {
+                ok = !memcmp(sdl_text + i * 41, entries[i] + 12, 40) &&
+                    sdl_text[i * 41 + 40] == '\n';
+            }
+        }
+    }
+    return ok;
+}
+
+static bool sdl_pristine(const char* source)
+{
+    bool ok = true;
+    for (char** variable = environ; *variable && ok; variable += 1)
+    {
+        ok = strncmp(*variable, "GIT_", 4) != 0;
+    }
+    char* identity[] = {"rev-parse", "--verify", "HEAD", NULL};
+    if (ok)
+    {
+        ok = sdl_git("source-pin", source, identity) == 0 &&
+            !strcmp(sdl_text, BUSTER_SDL_PIN "\n");
+    }
+    char* replacements[] = {"for-each-ref", "refs/replace", NULL};
+    if (ok)
+    {
+        ok = sdl_git("source-replacements", source, replacements) == 0 && !sdl_text_size;
+    }
+    char* sparse[] = {"config", "--bool", "--get", "core.sparseCheckout", NULL};
+    if (ok)
+    {
+        int configured = sdl_git("source-sparse", source, sparse);
+        ok = (configured == 1 && !sdl_text_size) ||
+            (configured == 0 && !strcmp(sdl_text, "false\n"));
+    }
+    char* flags[] = {"ls-files", "-v", "-z", NULL};
+    if (ok)
+    {
+        ok = sdl_git("source-index-flags", source, flags) == 0 && sdl_text_size > 0;
+        size_t offset = 0;
+        while (ok && offset < sdl_text_size)
+        {
+            char* entry = sdl_text + offset;
+            char* end = memchr(entry, 0, sdl_text_size - offset);
+            ok = end && end - entry > 2 && entry[0] == 'H' && entry[1] == ' ';
+            if (ok)
+            {
+                offset = (size_t)(end - sdl_text) + 1;
+            }
+        }
+    }
+    char* dirty[] = {"status", "--porcelain=v1", "--untracked-files=all",
+        "--ignored=matching", NULL};
+    if (ok)
+    {
+        ok = sdl_git("source-pristine", source, dirty) == 0 && !sdl_text_size;
     }
     if (ok)
     {
-        char* dirty[] = {"git", "-C", (char*)source, "status", "--porcelain=v1", "--untracked-files=all", NULL};
-        sequence = sdl_sequence;
-        ok = sdl_run("source-pristine", dirty, "20") == 0;
-        snprintf(name, sizeof(name), "%03u-source-pristine.log", sequence);
-        sdl_path(path, sdl_out, name);
-        ok = ok && sdl_read(path) && !sdl_text[0];
+        ok = sdl_raw_objects(source);
     }
     if (!ok)
     {

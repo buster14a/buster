@@ -74,14 +74,43 @@ jobs:
           pactl load-module module-null-sink sink_name=buster_sdl3 rate=48000 channels=1
           pactl set-default-sink buster_sdl3
           pactl list sinks >"$RUNNER_TEMP/sdl3-environment/sinks.txt"
-      - name: Reject modified upstream input
+      - name: Pristine input negative controls
         run: |
-          touch external/SDL/buster-dirty-input-control
-          if "$RUNNER_TEMP/sdl3-qualification" --check "$GITHUB_WORKSPACE/external/SDL" "$RUNNER_TEMP/sdl3-dirty-control"; then
-            exit 1
-          fi
-          rm external/SDL/buster-dirty-input-control
-          "$RUNNER_TEMP/sdl3-qualification" --check "$GITHUB_WORKSPACE/external/SDL" "$RUNNER_TEMP/sdl3-clean-control"
+          src="$GITHUB_WORKSPACE/external/SDL"
+          tool="$RUNNER_TEMP/sdl3-qualification"
+          refuse() {
+            if "$tool" --check "$src" "$RUNNER_TEMP/sdl3-controls/$1"; then
+              echo "Expected input refusal: $1"; exit 1
+            fi
+          }
+          mkdir -p "$RUNNER_TEMP/sdl3-controls"
+          touch "$src/buster-dirty-input-control"
+          refuse untracked
+          rm "$src/buster-dirty-input-control"
+          printf '%s\n' '/buster-ignored-input.h' >> "$src/.git/info/exclude"
+          touch "$src/buster-ignored-input.h"
+          refuse ignored
+          rm "$src/buster-ignored-input.h"
+          for flag in assume-unchanged skip-worktree; do
+            git -C "$src" update-index "--$flag" README.md
+            printf '\nchanged\n' >> "$src/README.md"
+            refuse "$flag"
+            git -C "$src" update-index "--no-$flag" README.md
+            git -C "$src" checkout -- README.md
+          done
+          git -C "$src" config core.sparseCheckout true
+          refuse sparse
+          git -C "$src" config --unset core.sparseCheckout
+          GIT_INDEX_FILE="$RUNNER_TEMP/redirected-index" refuse environment
+          pin=7f3ae3d57459e59943a4ecfefc8f6277ec6bf540
+          control=$(git -C "$src" -c user.name=SDL-control -c user.email=sdl-control@example.invalid commit-tree HEAD^{tree} -p HEAD -m control)
+          git -C "$src" replace "$pin" "$control"
+          refuse replacement
+          git -C "$src" replace -d "$pin"
+          git -C "$src" checkout --detach "$control"
+          refuse wrong-pin
+          git -C "$src" checkout --detach "$pin"
+          "$tool" --check "$src" "$RUNNER_TEMP/sdl3-controls/clean"
       - name: Pristine reference and Buster intake
         run: |
           "$RUNNER_TEMP/sdl3-qualification" "$GITHUB_WORKSPACE/external/SDL" "$GITHUB_WORKSPACE/build/Release/ide" "$RUNNER_TEMP/sdl3-evidence"
@@ -99,7 +128,6 @@ jobs:
           path: |
             ${{ runner.temp }}/sdl3-evidence
             ${{ runner.temp }}/sdl3-environment
-            ${{ runner.temp }}/sdl3-dirty-control
-            ${{ runner.temp }}/sdl3-clean-control
+            ${{ runner.temp }}/sdl3-controls
           if-no-files-found: warn
           retention-days: 14
