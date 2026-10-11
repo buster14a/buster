@@ -2338,9 +2338,10 @@ CodegenTestMachineScratch codegen_test_machine_scratch(Arena* arena, u32 instruc
         {
             other = before[index] != first ? before[index] : 0;
         }
-    }
-    if (other)
-    {
+        // A thread context holds SCRATCH_ARENA_COUNT distinct live arenas,
+        // so one besides `first` exists; anything else is a broken context,
+        // and the control must fail rather than quietly not occupy one.
+        BUSTER_VALIDATE(other != 0);
         u64 remaining = other->reserved_size - other->position;
         (void)arena_allocate_bytes(other, remaining > other_remaining ? remaining - other_remaining : 0, 1);
     }
