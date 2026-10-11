@@ -16,6 +16,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import unittest
 import warnings
@@ -2052,6 +2053,166 @@ def archive(members: dict) -> bytes:
     return stream.getvalue()
 
 
+def machine_fields(**change: object) -> dict:
+    """A #2758 record as the C collector writes it: every field carries value, status and reason."""
+    unknown = {"value": "unknown", "status": "unknown", "reason": "not exposed by this OS, unsupported or probe failed"}
+    available = {"schema": "buster-machine-specifications-v1", "run_id": EXPECTED["run_id"],
+                 "run_attempt": EXPECTED["run_attempt"], "job": "compare", "cpu_model": HOST["cpu_model"],
+                 "machine_arch": "x86_64", "cpu_logical_online": "16", "kernel_release": "6.8.0"}
+    record = {key: {"value": value, "status": "available", "reason": ""} for key, value in available.items()}
+    record["cpu_vendor"] = dict(unknown)
+    record["cpu_affinity"] = {"value": "unavailable", "status": "unavailable", "reason": "probe refused"}
+    record.update(change)
+    return {key: value for key, value in record.items() if value is not None}
+
+
+def machine_bytes(**change: object) -> bytes:
+    return json.dumps(machine_fields(**change)).encode()
+
+
+class MachineRecordTest(unittest.TestCase):
+    """The publisher's consumption of the retained #2758 record (#2761)."""
+
+    def check(self, raw: object, mode: str = "main", run_id: str = "92", attempt: str = "1",
+              current: object = None, require: bool = True) -> tuple[list[str], dict]:
+        return compiler_publish.machine_record(raw, receipt() if current is None else current, mode, run_id, attempt,
+                                               require=require)
+
+    def test_matching_record_passes_and_keeps_unavailable_facts_explicit(self) -> None:
+        problems, facts = self.check(machine_bytes())
+        self.assertEqual(problems, [])
+        self.assertEqual(facts["cpu_model"], HOST["cpu_model"])
+        self.assertEqual(facts["cpu_vendor"], "unknown (not exposed by this OS, unsupported or probe failed)")
+        self.assertEqual(facts["cpu_affinity"], "unavailable (probe refused)")
+        self.assertEqual(facts["memory_total_bytes"], "absent from the record")
+        pull = machine_bytes(job={"value": "compare-pull", "status": "available", "reason": ""})
+        self.assertEqual(self.check(pull, mode="pull")[0], [])
+
+    def test_absent_record_fails_unless_recovering_a_past_attempt(self) -> None:
+        self.assertIn("missing", self.check(None)[0][0])
+        self.assertEqual(self.check(None, require=False), ([], {}))
+        self.assertTrue(self.check(machine_bytes(cpu_model={"value": "Intel", "status": "available", "reason": ""}),
+                                   require=False)[0])
+
+    def test_malformed_record_fails(self) -> None:
+        for raw in (b"{not json", b"\xff", b"[]", b"{}", b'{"a": 1, "a": 1}', b'{"cpu_model": "AMD Ryzen 7 9700X"}',
+                    json.dumps({"cpu_model": {"value": "x", "status": "guessed", "reason": ""}}).encode(),
+                    json.dumps({"cpu_model": {"value": 1, "status": "available", "reason": ""}}).encode(),
+                    json.dumps(dict(machine_fields(), job={"value": "compare", "status": "available"})).encode(),
+                    "AMD Ryzen 7 9700X"):
+            with self.subTest(raw=raw):
+                problems, facts = self.check(raw)
+                self.assertTrue(problems)
+                self.assertIn("malformed", problems[0])
+                self.assertEqual(facts, {})
+
+    def test_required_facts_must_be_available_and_are_never_fabricated(self) -> None:
+        for key in compiler_publish.MACHINE_REQUIRED:
+            for value in (None, {"value": "unknown", "status": "unknown", "reason": "probe failed"},
+                          {"value": "AMD Ryzen 7 9700X", "status": "partial", "reason": "bounded field truncated"}):
+                with self.subTest(key=key, value=value):
+                    problems = self.check(machine_bytes(**{key: value}))[0]
+                    self.assertEqual(problems, [f"machine-specification record lacks required host fact {key}: "
+                                                + ("absent from the record" if value is None else
+                                                   f"{value['status']} ({value['reason']})")])
+
+    def test_non_9700x_record_fails(self) -> None:
+        for model in ("AMD EPYC 9B14", "AMD Ryzen 9 9950X 16-Core Processor", "Intel(R) Xeon(R) Platinum 8370C"):
+            with self.subTest(model=model):
+                fields = {"cpu_model": {"value": model, "status": "available", "reason": ""}}
+                problems = self.check(machine_bytes(**fields),
+                                      current=dict(receipt(), host=dict(HOST, cpu_model=model)))[0]
+                self.assertEqual(len(problems), 1)
+                self.assertIn("is not the approved Zen 5 host", problems[0])
+        arch = self.check(machine_bytes(machine_arch={"value": "aarch64", "status": "available", "reason": ""}))[0]
+        self.assertEqual(arch, ["machine-specification record architecture 'aarch64' is not x86_64"])
+
+    def test_record_and_receipt_must_name_the_same_model(self) -> None:
+        other = "AMD Ryzen 7 9700X 8-Core Processor (other)"
+        for current in (dict(receipt(), host=dict(HOST, cpu_model=other)), dict(receipt(), host={}),
+                        dict(receipt(), host=None)):
+            with self.subTest(host=current["host"]):
+                problems = self.check(machine_bytes(), current=current)[0]
+                self.assertEqual(len(problems), 1)
+                self.assertIn("differs from the receipt's observed CPU", problems[0])
+
+    def test_stale_run_attempt_or_job_identity_fails(self) -> None:
+        for label, change in (("an earlier run", {"run_id": "91"}), ("an earlier attempt", {"attempt": "2"}),
+                              ("another job", {"mode": "pull"}), ("an unknown mode", {"mode": "queue"})):
+            with self.subTest(label=label):
+                problems = self.check(machine_bytes(), **change)[0]
+                self.assertEqual(len(problems), 1)
+                self.assertIn("is not this attempt's", problems[0])
+        schema = {"value": "buster-machine-specifications-v0", "status": "available", "reason": ""}
+        self.assertIn("schema", self.check(machine_bytes(schema=schema))[0][0])
+
+    def test_publication_fails_through_the_retained_artifact(self) -> None:
+        base = {"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary()),
+                "throughput/summary.json": json.dumps(corpus()["summary"]),
+                "throughput/metadata.json": json.dumps(corpus()["metadata"])}
+        stale = machine_bytes(run_attempt={"value": "2", "status": "available", "reason": ""})
+        for members, expected in ((base, "failure"), (dict(base, **{compiler_publish.MACHINE_RECORD: machine_bytes()}), "success"),
+                                  (dict(base, **{compiler_publish.MACHINE_RECORD: stale}), "failure"),
+                                  (dict(base, **{compiler_publish.MACHINE_RECORD: b"{"}), "failure")):
+            with self.subTest(members=sorted(members), expected=expected):
+                got = compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+                problems = self.check(got[4]["machine"])[0]
+                decision = compiler_publish.decide(dict(EXPECTED), True, "success", got[0], got[1], "", got[4],
+                                                   extra_reasons=problems)
+                self.assertEqual(decision[0], expected)
+                self.assertEqual(decision[2], problems)
+        oversized = dict(base, **{compiler_publish.MACHINE_RECORD: b" " * (compiler_publish.MEMBER_LIMIT + 1)})
+        got = compiler_publish.read_evidence(FakeApi(archive(oversized)), "92", "buster-9700x-compiler-x-1")
+        self.assertIn("malformed", self.check(got[4]["machine"])[0][0])
+
+    def test_owned_main_layout_keeps_the_record_at_the_same_path(self) -> None:
+        files = compiler_publish.main_archive_files(archive({"evidence/receipt.json": "{}",
+                                                             "evidence/" + compiler_publish.MACHINE_RECORD: machine_bytes()}))
+        self.assertEqual(files[compiler_publish.MACHINE_RECORD], machine_bytes())
+
+
+def contents_record(text: str) -> dict:
+    raw = text.encode()
+    return {"type": "file", "encoding": "base64", "size": len(raw), "content": base64.b64encode(raw).decode()}
+
+
+class MachineRecordRequiredTest(unittest.TestCase):
+    """Recovery waives the record only for a bench workflow revision that never retained it."""
+
+    REVISION = "7" * 40
+    WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "9700x-direct-bench.yml"
+
+    def required(self, answer: object, revision: str = REVISION) -> tuple[bool, list[str]]:
+        paths: list[str] = []
+
+        class Contents:
+            def request(self, path: str, data: dict | None = None) -> object:
+                paths.append(path)
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+        return compiler_publish.machine_record_required(Contents(), revision), paths
+
+    def test_current_workflow_retains_the_record_in_every_compare_upload(self) -> None:
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(text.count(compiler_publish.MACHINE_RETENTION_STEP), 3)
+        self.assertEqual(self.required(contents_record(text))[0], True)
+
+    def test_only_a_readable_legacy_revision_waives_the_record(self) -> None:
+        legacy = self.WORKFLOW.read_text(encoding="utf-8").replace(compiler_publish.MACHINE_RETENTION_STEP, "x\n")
+        required, paths = self.required(contents_record(legacy))
+        self.assertEqual(required, False)
+        self.assertEqual(urllib.parse.urlsplit(paths[0]).path, "/contents/.github/workflows/9700x-direct-bench.yml")
+        self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(paths[0]).query), {"ref": [self.REVISION]})
+        for label, answer in (("absent file", urllib.error.HTTPError("u", 404, "absent", {}, None)),
+                              ("server error", urllib.error.HTTPError("u", 502, "bad gateway", {}, None)),
+                              ("network", OSError("reset")), ("malformed record", {"type": "dir"}),
+                              ("size mismatch", dict(contents_record(legacy), size=1))):
+            with self.subTest(label=label):
+                self.assertEqual(self.required(answer)[0], True)
+        self.assertEqual(self.required(contents_record(legacy), revision="main"), (True, []))
+
+
 class EvidenceTest(unittest.TestCase):
     def test_reads_receipt_and_summary_as_data(self) -> None:
         payload = archive({"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary()),
@@ -2061,7 +2222,7 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual(got[:3], (receipt(), summary(), ""))
         self.assertEqual(got[3]["name"], "buster-9700x-compiler-x-1")
         unscaled = {name: {"summary": None, "metadata": None} for name in compiler_receipt.SCALING_PROFILE["series"]}
-        self.assertEqual(got[4], dict(corpus(), scaling=unscaled))
+        self.assertEqual(got[4], dict(corpus(), scaling=unscaled, machine=None))
         bundles = scaling()
         members = {f"scaling/{name}/{leaf}": json.dumps(bundles[name][key]) for name in bundles
                    for leaf, key in (("scaling.json", "summary"), ("scaling-metadata.json", "metadata"))}
@@ -4254,6 +4415,30 @@ class FrontendSelectorTest(unittest.TestCase):
                 conclusion, unused_title, reasons = self.publish(record, changed)
                 self.assertEqual(conclusion, "failure", reasons)
 
+    def test_out_of_range_numbers_fail_closed_through_publication(self) -> None:
+        record, bundle = frontend_selector_evidence()
+        huge = 10 ** 309
+        line = bundle["bench"]["runs"][0]["line"]
+        cases = {
+            "frontend wall sample": lambda changed: changed["results"][0]["compilers"]["candidate"]["wall_seconds"]
+            .__setitem__(0, huge),
+            "frontend cpu sample": lambda changed: changed["results"][5]["compilers"]["baseline"]["cpu_seconds"]
+            .__setitem__(1, huge),
+            "selection median": lambda changed: changed["report"]["workloads"][0]["samples"]["baseline"][0]["selection"]
+            .update(median_ns=huge),
+            "selection compile time": lambda changed: changed["report"]["workloads"][1]["samples"]["candidate"][0]["objects"]
+            ["quality"].update(wall_ns=huge),
+            "ide bench median": lambda changed: [run.update(line=line.replace("median_ns=1000", "median_ns=" + "9" * 330))
+                                                 for run in changed["bench"]["runs"][:2]],
+        }
+        for name, mutate in cases.items():
+            changed = copy.deepcopy(bundle)
+            mutate(changed)
+            with self.subTest(case=name):
+                self.assertTrue(self.validate(changed), name)
+                conclusion, unused_title, reasons = self.publish(record, changed)
+                self.assertEqual(conclusion, "failure", reasons)
+
     def test_any_wrongly_typed_field_fails_closed_without_raising(self) -> None:
         unused_record, bundle = frontend_selector_evidence()
         def paths(value: object, prefix: tuple = ()):
@@ -4261,7 +4446,8 @@ class FrontendSelectorTest(unittest.TestCase):
             children = value.items() if isinstance(value, dict) else enumerate(value[:1]) if isinstance(value, list) else ()
             for key, child in children:
                 yield from paths(child, (*prefix, key))
-        replacements = (None, [], {}, "x", -1, 1.5, True, [[]], {"": {}})
+        replacements = (None, [], {}, "x", -1, 1.5, True, [[]], {"": {}}, 10 ** 309, -(10 ** 309),
+                        float("nan"), float("inf"))
         checked = 0
         for key in bundle:
             for path in paths(bundle[key]):
