@@ -12,11 +12,15 @@ struct CompilerDriverDependencyTestRule
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_dependency_test_path_equal(String8 left, String8 right)
 {
-    bool equal = left.length == right.length;
-    for (u64 index = 0; index < left.length && index < right.length; index += 1)
+    u64 left_start = left.length >= 2 && left.pointer[0] == '.' && (left.pointer[1] == '/' || left.pointer[1] == '\\') ? 2 : 0;
+    u64 right_start = right.length >= 2 && right.pointer[0] == '.' && (right.pointer[1] == '/' || right.pointer[1] == '\\') ? 2 : 0;
+    u64 left_length = left.length - left_start;
+    u64 right_length = right.length - right_start;
+    bool equal = left_length == right_length;
+    for (u64 index = 0; index < left_length && index < right_length; index += 1)
     {
-        char8 left_byte = left.pointer[index] == '\\' ? '/' : left.pointer[index];
-        char8 right_byte = right.pointer[index] == '\\' ? '/' : right.pointer[index];
+        char8 left_byte = left.pointer[left_start + index] == '\\' ? '/' : left.pointer[left_start + index];
+        char8 right_byte = right.pointer[right_start + index] == '\\' ? '/' : right.pointer[right_start + index];
         equal &= left_byte == right_byte;
     }
     return equal;
