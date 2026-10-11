@@ -896,6 +896,13 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_edge_parameter_target(MachineFastState* sta
     return target;
 }
 
+// The edge-copy tile cell of copy `copy_index` on a general-only edge: the
+// staged layout's offset, eight bytes per copy counted from the first.
+BUSTER_GLOBAL_LOCAL u32 machine_fast_edge_tile_cell(u32 copy_index)
+{
+    return (copy_index + 1u) * 8u;
+}
+
 // A general register an edge publication may clobber at a terminator: not
 // `busy` (the edge's source and target registers and the carried values it
 // keeps), not owned by a pinned span there, and not a callee-saved register
@@ -916,16 +923,18 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_free_edge_register(MachineFastState* state,
 // `captured` holds each source's register, `MACHINE_FAST_EDGE_SOURCE_RECREATED`
 // for a constant or frame address, or UINT32_MAX for a source only its home
 // holds; `targets` holds each parameter's register or UINT32_MAX for a
-// home. Homes are written before memory sources are read, so the caller
-// never passes an edge with both: a home can be another copy's source.
-// Order: homes from source registers store straight from them, and homes
-// from recreated sources rematerialize through `free_register`; register
-// targets then copy in dependency order, a cycle saving one target's old
-// value in `free_register` first; and register targets of memory or
-// recreated sources load or rematerialize last, once no remaining copy
-// reads them. A pinned target that is not a contract register also stores
-// its home, as the staged form did. This replaces the tile's store and load
-// per resident source.
+// home. A home can also be another copy's source (a loop back edge rotating
+// homed parameters), so when the edge writes any home, every memory source
+// is read first: straight into its register target when no resident source
+// occupies it, else through `free_register` into its edge-copy tile cell.
+// Then homes from source registers store straight from them, and homes from
+// recreated or tiled sources pass through `free_register`; register targets
+// then copy in dependency order, a cycle saving one target's old value in
+// `free_register` first; and register targets of recreated or remaining
+// sources rematerialize or load last, once no remaining copy reads them. A
+// pinned target that is not a contract register also stores its home, as
+// the staged form did. This replaces the tile's store and load per resident
+// source.
 BUSTER_GLOBAL_LOCAL void machine_fast_publish_edge_parallel(MachineFastState* state, MachineBuilderStream* stream, MachinePoint point,
                                                             MachineEdge const* edge, u32 const* captured, u32 const* targets, u32 copy_count,
                                                             u32 free_register, u32 const* contract_owner, u64 contract_held)
@@ -934,18 +943,51 @@ BUSTER_GLOBAL_LOCAL void machine_fast_publish_edge_parallel(MachineFastState* st
     MachineBlock const* destination = function->blocks + edge->destination_block;
     TemporalArena temporary = scratch_begin(&state->arena, 1);
     u32* move_sources = arena_allocate(temporary.arena, u32, copy_count);
+    // Per copy: 0 still to load, 1 read early into its target, 2 read early
+    // into its tile cell (`machine_fast_edge_tile_cell`).
+    u8* early = arena_allocate(temporary.arena, u8, copy_count);
+    bool memory_sources = false;
+    bool home_writes = false;
+    u64 resident = 0;
+    for (u32 copy_index = 0; copy_index < copy_count; copy_index += 1)
+    {
+        u32 destination_value = function->block_parameters[destination->parameter_offset + copy_index].virtual_register;
+        early[copy_index] = 0;
+        memory_sources = memory_sources || captured[copy_index] == UINT32_MAX;
+        home_writes = home_writes || targets[copy_index] == UINT32_MAX || !machine_fast_owner_match_mask(contract_owner, contract_held, destination_value);
+        resident |= captured[copy_index] < MACHINE_FAST_EDGE_SOURCE_RECREATED ? machine_fast_lane(captured[copy_index]) : 0u;
+    }
+    for (u32 copy_index = 0; memory_sources && home_writes && copy_index < copy_count; copy_index += 1)
+    {
+        if (captured[copy_index] == UINT32_MAX)
+        {
+            MachineRef source = function->edge_copy_sources[edge->copy_offset + copy_index];
+            u32 target = targets[copy_index];
+            bool direct = target != UINT32_MAX && !(resident & machine_fast_lane(target));
+            machine_fast_load_edge_source(state, stream, point, source, direct ? target : free_register);
+            if (!direct)
+            {
+                machine_fast_conform_append(state, stream, point, MACHINE_EDIT_TEMP_SPILL, machine_fast_edge_tile_cell(copy_index), free_register);
+            }
+            early[copy_index] = direct ? 1u : 2u;
+        }
+    }
     u32 pending = 0;
     for (u32 copy_index = 0; copy_index < copy_count; copy_index += 1)
     {
         u32 destination_value = function->block_parameters[destination->parameter_offset + copy_index].virtual_register;
         u32 source = captured[copy_index];
-        bool resident = source < MACHINE_FAST_EDGE_SOURCE_RECREATED;
-        move_sources[copy_index] = resident && targets[copy_index] != UINT32_MAX && targets[copy_index] != source ? source : UINT32_MAX;
+        bool in_register = source < MACHINE_FAST_EDGE_SOURCE_RECREATED;
+        move_sources[copy_index] = in_register && targets[copy_index] != UINT32_MAX && targets[copy_index] != source ? source : UINT32_MAX;
         pending += move_sources[copy_index] != UINT32_MAX;
         if (targets[copy_index] == UINT32_MAX)
         {
-            u32 stored = resident ? source : free_register;
-            if (!resident)
+            u32 stored = in_register ? source : free_register;
+            if (early[copy_index] == 2u)
+            {
+                machine_fast_conform_append(state, stream, point, MACHINE_EDIT_TEMP_RELOAD, machine_fast_edge_tile_cell(copy_index), free_register);
+            }
+            else if (!in_register)
             {
                 machine_fast_load_edge_source(state, stream, point, function->edge_copy_sources[edge->copy_offset + copy_index], free_register);
             }
@@ -991,7 +1033,11 @@ BUSTER_GLOBAL_LOCAL void machine_fast_publish_edge_parallel(MachineFastState* st
     {
         u32 destination_value = function->block_parameters[destination->parameter_offset + copy_index].virtual_register;
         u32 target = targets[copy_index];
-        if (target != UINT32_MAX && captured[copy_index] >= MACHINE_FAST_EDGE_SOURCE_RECREATED)
+        if (target != UINT32_MAX && early[copy_index] == 2u)
+        {
+            machine_fast_conform_append(state, stream, point, MACHINE_EDIT_TEMP_RELOAD, machine_fast_edge_tile_cell(copy_index), target);
+        }
+        else if (target != UINT32_MAX && !early[copy_index] && captured[copy_index] >= MACHINE_FAST_EDGE_SOURCE_RECREATED)
         {
             machine_fast_load_edge_source(state, stream, point, function->edge_copy_sources[edge->copy_offset + copy_index], target);
         }
@@ -1119,8 +1165,6 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
     // so the captured registers still hold their sources either way.
     u32* targets = arena_allocate(temporary.arena, u32, copy_count);
     bool general = !direct;
-    bool homes = false;
-    bool memory_sources = false;
     u64 sources = 0;
     u64 written = 0;
     for (u32 copy_index = 0; copy_index < copy_count; copy_index += 1)
@@ -1128,16 +1172,9 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         u32 destination_value = state->function->block_parameters[destination->parameter_offset + copy_index].virtual_register;
         general = general && state->function->virtual_registers[destination_value].register_class == MACHINE_REGISTER_CLASS_GENERAL;
         targets[copy_index] = machine_fast_edge_parameter_target(state, destination, contract_owner, contract_held, destination_value);
-        homes = homes || targets[copy_index] == UINT32_MAX;
-        memory_sources = memory_sources || captured[copy_index] == UINT32_MAX;
         written |= targets[copy_index] != UINT32_MAX ? machine_fast_lane(targets[copy_index]) : 0u;
         sources |= captured[copy_index] < MACHINE_FAST_EDGE_SOURCE_RECREATED ? machine_fast_lane(captured[copy_index]) : 0u;
     }
-    // A parameter home can also be a source's home (a loop header's
-    // parameter feeding another parameter), and the parallel publication
-    // stores homes before it reloads memory sources; an edge with both
-    // keeps the staged form, which reads every source before writing.
-    general = general && !(homes && memory_sources);
     u32 free_register = general ? machine_fast_free_edge_register(state, terminator_index, sources | written | kept) : UINT32_MAX;
     bool parallel = free_register != UINT32_MAX;
     u32 temporary_offset = 0;

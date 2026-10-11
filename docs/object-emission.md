@@ -158,15 +158,19 @@ of another name is ordinary data, as the host linkers leave it, and the
 assembler refuses a `@preinit_array` section of another name. A preinit entry
 in a `-shared` output is refused with a named diagnostic, as `ld` does.
 
-A dynamic executable (x86-64 fixed-address or `-pie`, AArch64, and the
-Android images staged through them) publishes its preinit entries through
+A dynamic executable (x86-64 fixed-address or `-pie`, AArch64, the x86-64
+Android PIE and the AArch64 Android image staged through them) publishes its
+preinit entries through
 `DT_PREINIT_ARRAY`/`DT_PREINIT_ARRAYSZ`, so the loader runs them with argc,
 argv and envp before the constructors of the shared objects it loads, as for
 `ld` and `lld` (#1243). `link_elf_preinit_array_split` moves the leading
 preinit run of the merged constructor array onto the end of the writable data
 with its relocations, so the entry stub calls only the constructors. A static
 executable has no loader and no dependency constructors; its entry stub still
-calls the preinit entries first. See the
+calls the preinit entries first. An x86-64 Android executable is always the
+PIE, so each array entry carries an `R_X86_64_RELATIVE`; the Android CI job
+executes one under bionic and checks the order (`android/runtime_order.sh`).
+See the
 [ELF initialization contract](https://gabi.xinuos.com/v42/elf/08-dynamic.html#initialization-and-termination-functions).
 
 The bounded refusal repair for #1243 rejects unsupported allocated section
@@ -212,11 +216,16 @@ last of its dynamic relocations, so ld.so fills it while relocating the library,
 before any initializer runs, including an executable's `DT_PREINIT_ARRAY`
 callbacks that call into the library. On AArch64 the runner
 passes hwcap 0, so a resolver that dispatches on hwcap selects its baseline
-implementation. An undefined IFUNC, or one outside code, stays refused, and
-the C frontend's own `ifunc` attribute is still refused by name.
+implementation. An undefined IFUNC, or one outside code, stays refused. The
+C frontend's own `__attribute__((ifunc("resolver")))` writes the same symbol
+(an indirect `IrSymbolAlias` becomes `ObjectSymbol.indirect` at the
+resolver's address), and is refused by name for COFF and Mach-O output; see
+[linkage](agents/frontend/linkage.md).
 `compiler_driver_elf_ifunc_tests` checks single resolution and address identity
 against the host linker for static, dynamic, `-pie` and `-shared` images, and a
 host-linked executable whose preinit callback calls a `-shared` library's IFUNC.
+It also compiles the same C with `ide cc`, at `-O0` and `-O2`, and with a
+local (`static`) ifunc, and runs each image against the host-built oracle.
 `.ctors`/`.dtors` and `.init`/`.fini` inputs stay refused: GNU ld 2.42 folds
 `.ctors` into `.init_array` in reverse but emits a null `.fini_array` slot for
 `.dtors`, and lld 18 runs neither, so no consistent oracle exists, and the

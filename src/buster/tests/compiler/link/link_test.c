@@ -4568,6 +4568,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_copy_symbol_table(UnitTestArgum
                              : (ByteSlice){.pointer = (u8*)aarch64_text, .length = sizeof(aarch64_text)};
         for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
         {
+            // An x86-64 Android executable is the PIE, whose copy slots follow
+            // the references that need them; this text makes none.
+            if (architectures[architecture] == CPU_ARCH_X86_64 && systems[system] == OPERATING_SYSTEM_ANDROID)
+            {
+                continue;
+            }
             ObjectSymbol symbols[] = {
                 {.name = S8("main"), .size = text.length, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
                 {.name = S8("local_zero"), .value = 1, .size = 4, .section = OBJECT_SECTION_ZERO, .kind = OBJECT_SYMBOL_DATA},
@@ -6311,6 +6317,123 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_final_text_padding(UnitTestArgument
     return result;
 }
 
+// Stable insertion-sort reference for the unwind-header radix sort: order
+// carries the previous round's original indices and is resorted by this
+// round's keys, so equal keys keep their prior relative order.
+BUSTER_GLOBAL_LOCAL void link_test_eh_frame_reference_sort(u64 const* keys, u32* order, u32 count)
+{
+    for (u32 index = 1; index < count; index += 1)
+    {
+        u32 moving = order[index];
+        u32 slot = index;
+        while (slot && keys[order[slot - 1]] > keys[moving])
+        {
+            order[slot] = order[slot - 1];
+            slot -= 1;
+        }
+        order[slot] = moving;
+    }
+}
+
+// Issue 951: the ELF unwind-header sort skips radix bytes no address varies in
+// and every pass on an already ordered table. Each case pins the pass count
+// and the stable order against a reference, across rounds that reuse buffers
+// left by odd and even pass counts.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_eh_frame_sort(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    u64 const high = UINT64_C(1) << 63;
+    // Sorted, reversed and equal tables; one varying byte; varying bytes with
+    // holes between them; keys either side of 2^63 and at UINT64_MAX.
+    u64 empty[1] = {0};
+    u64 single[] = {UINT64_MAX};
+    u64 sorted[] = {0x1000, 0x1010, 0x1020, 0x2000, 0x2000, UINT64_MAX};
+    u64 equal[] = {0x40, 0x40, 0x40, 0x40};
+    u64 one_byte[] = {0x1030, 0x1010, 0x1020, 0x1010, 0x1000};
+    u64 holes[] = {UINT64_C(0x0100000000000005), 0x05, UINT64_C(0x0100000003000001), 0x03000005, 0x01, UINT64_C(0x0100000000000005)};
+    u64 sign[] = {high, high - 1, UINT64_MAX, 0, high + 1, high - 1, UINT64_MAX - 1};
+    u64 reversed[] = {0x5000, 0x4000, 0x3000, 0x2000, 0x1000};
+    // Rounds 1 and 2 of these run one pass each, leaving the result in the
+    // former scratch buffer before the next round starts from it.
+    u64 rounds[] = {
+        0x30, 0x10, 0x20, 0x10,
+        0x3100, 0x1100, 0x2100, 0x1001,
+        0x01, 0x01, 0x00, 0x02,
+        0x01, 0x01, 0x00, 0x02,
+    };
+    struct
+    {
+        u64 const* addresses;
+        u32 count;
+        u32 round_count;
+        u32 passes[4];
+    } cases[] = {
+        {empty, 0, 1, {0}},
+        {single, 1, 1, {0}},
+        {sorted, BUSTER_ARRAY_LENGTH(sorted), 1, {0}},
+        {equal, BUSTER_ARRAY_LENGTH(equal), 1, {0}},
+        {one_byte, BUSTER_ARRAY_LENGTH(one_byte), 1, {1}},
+        {holes, BUSTER_ARRAY_LENGTH(holes), 1, {3}},
+        {sign, BUSTER_ARRAY_LENGTH(sign), 1, {8}},
+        {reversed, BUSTER_ARRAY_LENGTH(reversed), 1, {1}},
+        {rounds, 4, 4, {1, 2, 1, 0}},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        u32 count = cases[case_index].count;
+        u32 round_count = cases[case_index].round_count;
+        u32 order[8] = {0};
+        u32 expected[8] = {0};
+        u32 passes[4] = {0};
+        for (u32 index = 0; index < count; index += 1)
+        {
+            expected[index] = index;
+        }
+        for (u32 round = 0; round < round_count; round += 1)
+        {
+            link_test_eh_frame_reference_sort(cases[case_index].addresses + (u64)round * count, expected, count);
+        }
+        bool distinct = link_elf_eh_frame_sort_test(arena, cases[case_index].addresses, count, round_count, order, passes);
+        BUSTER_TEST(arguments, distinct);
+        BUSTER_TEST(arguments, memcmp(order, expected, sizeof(order)) == 0);
+        BUSTER_TEST(arguments, memcmp(passes, cases[case_index].passes, sizeof(passes)) == 0);
+    }
+    // Pseudo-random keys with duplicates, alternating between two pairs of
+    // varying bytes, over several rounds; every round runs exactly two passes
+    // and the final order must match the stable reference.
+    u32 const random_count = 97;
+    u32 const random_rounds = 5;
+    u64* keys = arena_allocate(arena, u64, (u64)random_count * random_rounds);
+    u32* order = arena_allocate(arena, u32, random_count);
+    u32* expected = arena_allocate(arena, u32, random_count);
+    u32 passes[5] = {0};
+    u64 state = UINT64_C(0x9e3779b97f4a7c15);
+    for (u32 index = 0; index < random_count * random_rounds; index += 1)
+    {
+        state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+        u64 mask = (index / random_count) & 1 ? UINT64_C(0xff000000000000ff) : UINT64_C(0x0000ff0000000f00);
+        keys[index] = (state >> 7) & mask;
+    }
+    for (u32 index = 0; index < random_count; index += 1)
+    {
+        expected[index] = index;
+    }
+    for (u32 round = 0; round < random_rounds; round += 1)
+    {
+        link_test_eh_frame_reference_sort(keys + (u64)round * random_count, expected, random_count);
+    }
+    BUSTER_TEST(arguments, link_elf_eh_frame_sort_test(arena, keys, random_count, random_rounds, order, passes));
+    BUSTER_TEST(arguments, memcmp(order, expected, sizeof(u32) * random_count) == 0);
+    for (u32 round = 0; round < random_rounds; round += 1)
+    {
+        BUSTER_TEST(arguments, passes[round] == 2);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_function_addresses(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6473,6 +6596,120 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_stack_contract(UnitTestArgument
     return result;
 }
 
+// Finds the single `mov eax, [rip + disp32]; ret` in .text and returns the
+// absolute address it loads together with the TLS directory's AddressOfIndex.
+BUSTER_GLOBAL_LOCAL bool link_test_pe_x64_tls_index_load(ByteSlice image, u64* load_address, u64* address_of_index)
+{
+    bool result = false;
+    u32 pe_offset = image.length >= 0x40 && image.pointer[0] == 'M' && image.pointer[1] == 'Z' ? link_read_u32(image.pointer, 0x3c) : 0;
+    if (pe_offset && pe_offset <= image.length && image.length - pe_offset >= 24 + 192 && memcmp(image.pointer + pe_offset, "PE\0\0", 4) == 0)
+    {
+        u16 section_count = 0;
+        u16 optional_size = 0;
+        memcpy(&section_count, image.pointer + pe_offset + 6, sizeof(section_count));
+        memcpy(&optional_size, image.pointer + pe_offset + 20, sizeof(optional_size));
+        u64 optional = (u64)pe_offset + 24;
+        u64 section_table = optional + optional_size;
+        u64 image_base = link_read_u64(image.pointer, optional + 24);
+        u32 tls_rva = link_read_u32(image.pointer, optional + 184);
+        u32 load_count = 0;
+        bool index_found = false;
+        if (optional_size >= 192 && section_table <= image.length && (u64)section_count <= (image.length - section_table) / 40)
+        {
+            for (u16 section_index = 0; section_index < section_count; section_index += 1)
+            {
+                u64 header = section_table + (u64)section_index * 40;
+                u32 virtual_address = link_read_u32(image.pointer, header + 12);
+                u32 raw_size = link_read_u32(image.pointer, header + 16);
+                u32 raw_offset = link_read_u32(image.pointer, header + 20);
+                if (raw_offset > image.length || raw_size > image.length - raw_offset)
+                {
+                    continue;
+                }
+                if (tls_rva >= virtual_address && tls_rva - virtual_address <= raw_size && raw_size - (tls_rva - virtual_address) >= 40)
+                {
+                    *address_of_index = link_read_u64(image.pointer, raw_offset + (tls_rva - virtual_address) + 16);
+                    index_found = true;
+                }
+                if (memcmp(image.pointer + header, ".text\0", 6) == 0)
+                {
+                    for (u32 offset = 0; raw_size >= 7 && offset <= raw_size - 7; offset += 1)
+                    {
+                        u8 const* bytes = image.pointer + raw_offset + offset;
+                        if (bytes[0] == 0x8b && bytes[1] == 0x05 && bytes[6] == 0xc3)
+                        {
+                            s32 displacement = (s32)link_read_u32(bytes, 2);
+                            *load_address = (u64)((s64)(image_base + virtual_address + offset + 6) + displacement);
+                            load_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        result = tls_rva && index_found && load_count == 1;
+    }
+    return result;
+}
+
+// GitHub #1323 W1: an x86-64 COFF object must bind the TLS index load to the
+// loader's _tls_index, so linking that object (here, or with lld-link/link.exe)
+// resolves the load to AddressOfIndex rather than to the TLS template.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_pe_x64_tls_index_object(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS};
+    // mov eax, [rip + _tls_index]; ret
+    u8 code[] = {0x8b, 0x05, 0x00, 0x00, 0x00, 0x00, 0xc3};
+    u32 tls_values[] = {0x41414141, 5};
+    ObjectSymbol symbols[] = {
+        {.name = S8("main"), .size = sizeof(code), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("tls_a"), .size = 4, .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        {.name = S8("tls_b"), .value = 4, .size = 4, .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
+    };
+    // Codegen's canonical form: the index load names the variable it serves.
+    ObjectRelocation relocations[] = {
+        {.addend = -4, .offset = 2, .section = OBJECT_SECTION_TEXT, .symbol = 2, .kind = OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32},
+    };
+    ObjectFile object = link_test_object_make(arguments->arena, target, (ByteSlice){.pointer = code, .length = sizeof(code)}, symbols,
+                                              BUSTER_ARRAY_LENGTH(symbols), relocations, BUSTER_ARRAY_LENGTH(relocations));
+    object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data = (ByteSlice){.pointer = (u8*)tls_values, .length = sizeof(tls_values)};
+    object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].virtual_size = sizeof(tls_values);
+    NativeExecutableLinkOptions options = {.entry_symbol = S8("main")};
+
+    NativeExecutableLinkResult direct = link_native_executable(arguments->arena, &object, options);
+    u64 direct_load = 0;
+    u64 direct_index = 0;
+    BUSTER_TEST(arguments, direct.error == LINK_ERROR_NONE &&
+                               link_test_pe_x64_tls_index_load(direct.executable, &direct_load, &direct_index) && direct_load == direct_index);
+
+    ObjectArtifact artifact = object_write(arguments->arena, &object, OBJECT_FORMAT_COFF);
+    ObjectFile roundtrip = object_read(arguments->arena, artifact.bytes, target);
+    bool bound = artifact.error == OBJECT_ERROR_NONE && roundtrip.error == OBJECT_ERROR_NONE && roundtrip.relocation_count == 1 &&
+                 roundtrip.relocations[0].symbol < roundtrip.symbol_count;
+    if (BUSTER_REQUIRE(arguments, bound))
+    {
+        ObjectRelocation* relocation = roundtrip.relocations;
+        ObjectSymbol* index_symbol = roundtrip.symbols + relocation->symbol;
+        BUSTER_TEST(arguments, relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 && relocation->addend == -4 &&
+                                   relocation->offset == 2 && index_symbol->section == OBJECT_SECTION_UNDEFINED && index_symbol->global &&
+                                   index_symbol->kind == OBJECT_SYMBOL_DATA);
+        BUSTER_STRING_TEST(arguments, index_symbol->name, S8("_tls_index"));
+        NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &roundtrip, options);
+        u64 linked_load = 0;
+        u64 linked_index = 0;
+        BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE &&
+                                   link_test_pe_x64_tls_index_load(linked.executable, &linked_load, &linked_index) &&
+                                   linked_load == linked_index);
+
+        // Any other use of the loader symbol is not an index load; the PE
+        // linker must not quietly resolve it to the index slot.
+        relocation->kind = OBJECT_RELOCATION_X86_64_PC32;
+        NativeExecutableLinkResult misused = link_native_executable(arguments->arena, &roundtrip, options);
+        BUSTER_TEST(arguments, misused.error != LINK_ERROR_NONE && !misused.executable.length);
+    }
+    return result;
+}
+
 UnitTestResult link_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6538,6 +6775,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult initializer_array_symbol = link_test_elf_initializer_array_symbol(arguments);
     result.succeeded_test_count += initializer_array_symbol.succeeded_test_count;
     result.test_count += initializer_array_symbol.test_count;
+    BUSTER_TEST_FIXTURE(arguments, link_test_elf_eh_frame_sort);
     BUSTER_TEST_FIXTURE(arguments, link_test_elf_function_addresses);
     BUSTER_TEST_FIXTURE(arguments, link_test_elf_weak_unwind);
     UnitTestResult merged_symbol_table = link_test_elf_merged_symbol_table(arguments);
@@ -6560,6 +6798,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     result.test_count += hardened_layout.test_count;
     BUSTER_TEST_FIXTURE(arguments, link_test_aarch64_tls_initial_exec_relaxation);
     BUSTER_TEST_FIXTURE(arguments, link_test_aarch64_tls_descriptor_relaxation);
+    BUSTER_TEST_FIXTURE(arguments, link_test_pe_x64_tls_index_object);
     static u8 const sha256_abc[32] = {
         0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
         0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
@@ -7727,8 +7966,8 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         ObjectFile tls_roundtrip = object_read(arguments->arena, tls_artifact.bytes, a64_pe_target);
         bool tls_bound = tls_artifact.error == OBJECT_ERROR_NONE && tls_roundtrip.error == OBJECT_ERROR_NONE &&
                          tls_roundtrip.relocation_count == 4 &&
-                         string_equal(tls_roundtrip.symbols[tls_roundtrip.relocations[0].symbol].name, S8("__tls_index")) &&
-                         string_equal(tls_roundtrip.symbols[tls_roundtrip.relocations[1].symbol].name, S8("__tls_index")) &&
+                         string_equal(tls_roundtrip.symbols[tls_roundtrip.relocations[0].symbol].name, S8("_tls_index")) &&
+                         string_equal(tls_roundtrip.symbols[tls_roundtrip.relocations[1].symbol].name, S8("_tls_index")) &&
                          string_equal(tls_roundtrip.symbols[tls_roundtrip.relocations[2].symbol].name, S8("tls_value")) &&
                          string_equal(tls_roundtrip.symbols[tls_roundtrip.relocations[3].symbol].name, S8("tls_value"));
         BUSTER_TEST(arguments, tls_bound);

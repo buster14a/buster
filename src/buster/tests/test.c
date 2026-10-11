@@ -2188,6 +2188,22 @@ BUSTER_GLOBAL_LOCAL bool test_oracle_probe_disposition_self_test(void)
 #else
         wrong_exit.wait.platform_status = 2;
 #endif
+        // The function-parameter fixture qualifies only GCC 13's exact -std=gnu23 spelling refusal.
+        // Clang's refusal, another dialect, colored output and non-C-locale quoting must not qualify.
+        TestProcessObservation clang_refusal = refusal;
+        test_process_observation_set_capture(&clang_refusal, (String8){0},
+            S8("clang: error: invalid value 'gnu23' in '-std=gnu23'\n"));
+        TestProcessObservation other_dialect_refusal = refusal;
+        test_process_observation_set_capture(&other_dialect_refusal, (String8){0},
+            S8("gcc: error: unrecognized command-line option '-std=gnu2y'; did you mean '-std=gnu2x'?\n"));
+        TestProcessObservation colored_refusal = refusal;
+        test_process_observation_set_capture(&colored_refusal, (String8){0},
+            S8("\x1b[01m\x1b[Kgcc:\x1b[m\x1b[K \x1b[01;31m\x1b[Kerror: \x1b[m\x1b[Kunrecognized command-line option "
+               "'\x1b[01m\x1b[K-std=gnu23\x1b[m\x1b[K'; did you mean '\x1b[01m\x1b[K-std=gnu2x\x1b[m\x1b[K'?\n"));
+        TestProcessObservation localized_refusal = refusal;
+        test_process_observation_set_capture(&localized_refusal, (String8){0},
+            S8("gcc: error: unrecognized command-line option \xe2\x80\x98-std=gnu23\xe2\x80\x99; "
+               "did you mean \xe2\x80\x98-std=gnu2x\xe2\x80\x99?\n"));
         TestProcessObservation unexpected_success_diagnostic = capable;
         test_process_observation_set_capture(&unexpected_success_diagnostic, (String8){0}, S8("unexpected note\n"));
 
@@ -2232,7 +2248,16 @@ BUSTER_GLOBAL_LOCAL bool test_oracle_probe_disposition_self_test(void)
             &capable_contract, false) == TEST_ORACLE_PROBE_FAILURE;
         bool success_with_diagnostic_fails = buster_test_oracle_probe_disposition(&unexpected_success_diagnostic, false, false,
             true, false, &capable_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool clang_refusal_fails = buster_test_oracle_probe_disposition(&clang_refusal, true, true, false, true,
+            &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool other_dialect_refusal_fails = buster_test_oracle_probe_disposition(&other_dialect_refusal, true, true, false, true,
+            &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool colored_refusal_fails = buster_test_oracle_probe_disposition(&colored_refusal, true, true, false, true,
+            &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool localized_refusal_fails = buster_test_oracle_probe_disposition(&localized_refusal, true, true, false, true,
+            &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
         result = environment_snapshot_owned && capable_accepted && local_unavailable_is_not_run && required_unavailable_is_incomplete &&
+                 clang_refusal_fails && other_dialect_refusal_fails && colored_refusal_fails && localized_refusal_fails &&
                  unauthenticated_refusal_fails && unhealthy_refusal_fails && mismatched_environment_fails && altered_diagnostic_fails &&
                  extra_diagnostic_fails && wrong_configuration_fails && wrong_environment_fails && missing_tool_fails &&
                  abnormal_exit_fails &&
@@ -3421,7 +3446,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
         // The metadata and machine suites exercise x86 emission on every host,
         // including AArch64 CI. Prepare the exact-plan tables, with every shape
         // resolved, before their lanes.
-        machine_x86_64_exact_prewarm_all_shapes();
+        machine_x86_64_exact_prewarm_all();
         x86_64_metadata_test_prewarm_symbolic_immediate_plans();
         // Every lane in the gang below is an aarch64 suite, and each one queries
         // canonical form validity per encode and per decode.
