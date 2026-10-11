@@ -15374,42 +15374,42 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
                         "current-version: \"1.2.12\"\n"
                         "compatibility-version: '1'\n"
                         "...\n");
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_v4), aarch64, &identity) ==
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_v4), aarch64, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_USABLE);
     BUSTER_STRING_TEST(arguments, identity.install_name, S8("@rpath/libquoted.dylib"));
     BUSTER_TEST(arguments, identity.current_version == 0x1020c && identity.compatibility_version == 0x10000);
     String8 tbd_ios_target = S8("--- !tapi-tbd-v4\n"
                                 "targets: [ arm64-ios ]\n"
                                 "install-name: @rpath/libios-target.dylib\n");
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_ios_target), aarch64, &identity) ==
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_ios_target), aarch64, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_ios_target), ios, &identity) ==
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_ios_target), ios, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_USABLE);
     String8 tbd_catalyst = S8("--- !tapi-tbd-v4\n"
                               "targets: [ arm64-maccatalyst ]\n"
                               "install-name: @rpath/libcatalyst.dylib\n");
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_catalyst), aarch64, &identity) ==
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_catalyst), aarch64, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_catalyst), ios, &identity) ==
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_catalyst), ios, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
     String8 tbd_ios_simulator = S8("--- !tapi-tbd-v4\n"
                                    "targets: [ arm64-ios-simulator ]\n"
                                    "install-name: @rpath/libsimulator.dylib\n");
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_ios_simulator), aarch64, &identity) ==
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_ios_simulator), aarch64, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_ios_simulator), ios, &identity) ==
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_ios_simulator), ios, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
     String8 tbd_arm64e = S8("--- !tapi-tbd-v4\n"
                             "targets: [ arm64e-macos ]\n"
                             "install-name: /usr/lib/libarm64e.dylib\n");
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_arm64e), aarch64, &identity) ==
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_arm64e), aarch64, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
     String8 tbd_v3 = S8("--- !tapi-tbd-v3\n"
                         "archs: [ x86_64 ]\n"
                         "install-name: /usr/lib/libplain.dylib\n"
                         "current-version: 1.2.12\n"
                         "compatibility-version: 1\n");
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_v3), x86_64, &identity) ==
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_v3), x86_64, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_USABLE);
     BUSTER_STRING_TEST(arguments, identity.install_name, S8("/usr/lib/libplain.dylib"));
     BUSTER_TEST(arguments, identity.current_version == 0x1020c && identity.compatibility_version == 0x10000);
@@ -15417,36 +15417,201 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
                                      "archs: [ arm64 ]\n"
                                      "platform: 'ios'\n"
                                      "install-name: /usr/lib/libios-platform.dylib\n");
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_v3_ios_platform), aarch64, &identity) ==
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_v3_ios_platform), aarch64, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
     String8 tbd_v3_zippered_platform = S8("--- !tapi-tbd-v3\n"
                                           "archs: [ arm64 ]\n"
                                           "platform: zippered\n"
                                           "install-name: /usr/lib/libzippered-platform.dylib\n");
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_v3_zippered_platform), aarch64,
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_v3_zippered_platform), aarch64,
                                                               &identity) == COMPILER_DRIVER_MACH_DYLIB_USABLE);
     String8 tbd_default_versions = S8("--- !tapi-tbd-v3\ninstall-name: /usr/lib/libdefaults.dylib\n");
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_default_versions), aarch64, &identity) ==
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_default_versions), aarch64, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_USABLE);
     BUSTER_TEST(arguments, identity.current_version == 0x10000 && identity.compatibility_version == 0x10000);
     String8 tbd_missing_name = S8("--- !tapi-tbd-v4\ntargets: [ arm64-macos ]\n");
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_missing_name), aarch64, &identity) ==
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_missing_name), aarch64, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
     String8 tbd_second_document = S8("--- !tapi-tbd-v4\ntargets: [ arm64-macos ]\n"
                                      "--- !tapi-tbd-v4\ninstall-name: /usr/lib/libsecond.dylib\n");
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_second_document), aarch64, &identity) ==
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_second_document), aarch64, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
     String8 tbd_v5_json = S8("{\"tbd-version\":5,\"install-name\":\"/usr/lib/libv5.dylib\"}");
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_v5_json), aarch64, &identity) ==
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_v5_json), aarch64, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity((ByteSlice){0}, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, (ByteSlice){0}, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
     String8 tbd_bad_version = S8("--- !tapi-tbd-v3\ninstall-name: /usr/lib/libversion.dylib\ncurrent-version: 1.999\n");
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_bad_version), aarch64, &identity) ==
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_bad_version), aarch64, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
     String8 tbd_zero_version = S8("--- !tapi-tbd-v3\ninstall-name: /usr/lib/libzero.dylib\ncurrent-version: 0\n");
-    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_zero_version), aarch64, &identity) ==
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_zero_version), aarch64, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_USABLE);
     BUSTER_TEST(arguments, identity.current_version == 0 && identity.compatibility_version == 0x10000);
+
+    String8 v5 = S8("{\"tapi_tbd_version\":5,\"main_library\":{"
+                      "\"target_info\":[{\"target\":\"arm64-macos\"},{\"target\":\"x86_64-macos\"},{\"target\":\"arm64-ios\"}],"
+                      "\"install_names\":[{\"name\":\"/usr/lib/libv5.dylib\"}],"
+                      "\"current_versions\":[{\"version\":\"4.5.6\",\"targets\":[\"arm64-macos\",\"x86_64-macos\"]},"
+                      "{\"version\":\"0\",\"targets\":[\"arm64-ios\"]}],"
+                      "\"compatibility_versions\":[{\"version\":\"2.3\"}],"
+                      "\"exported_symbols\":[{\"text\":{\"global\":[\"_bar\"]}}]},"
+                      "\"libraries\":[{\"install_names\":[{\"name\":\"ignored\"}]}]}");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(v5), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("/usr/lib/libv5.dylib"));
+    BUSTER_TEST(arguments, identity.current_version == 0x40506 && identity.compatibility_version == 0x20300);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(v5), x86_64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_TEST(arguments, identity.current_version == 0x40506 && identity.compatibility_version == 0x20300);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(v5), ios, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_TEST(arguments, identity.current_version == 0 && identity.compatibility_version == 0x20300);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(v5), ios, 0) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    for (u64 length = 0; length < v5.length; length += 1)
+    {
+        BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena,
+            (ByteSlice){.pointer = (u8*)v5.pointer, .length = length}, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+        BUSTER_TEST(arguments, !identity.install_name.length && !identity.current_version && !identity.compatibility_version);
+    }
+    String8 v5_minimal = S8(" \n{\"main_library\":{\"install_names\":[{\"name\":\"/usr/lib/libdefaults.dylib\"}],"
+                              "\"target_info\":[{\"target\":\"arm64-macos\"}]},\"tapi_tbd_version\":5}\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(v5_minimal), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_TEST(arguments, identity.current_version == 0x10000 && identity.compatibility_version == 0x10000);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(v5_minimal), x86_64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(v5_minimal), ios, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    static String8 const v5_bad_fields[] = {
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\"}],\"current_versions\":[{\"version\":\"\\\"1\\\"\"}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\"}],\"current_versions\":[{\"version\":\"'1'\"}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\"}],\"current_versions\":[{\"version\":\" 1\"}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\"}],\"current_versions\":[{\"version\":\"1 \"}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\"}],\"current_versions\":[{\"version\":\"1\\n\"}]"),
+        S8_INITIALIZER("\"target_info\":[],\"install_names\":[{\"name\":\"a\"}]"),
+        S8_INITIALIZER("\"target_info\":[\"arm64-macos\"],\"install_names\":[{\"name\":\"a\"}]"),
+        S8_INITIALIZER("\"target_info\":[{}],\"install_names\":[{\"name\":\"a\"}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":false}],\"install_names\":[{\"name\":\"a\"}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"\"}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\",\"name\":\"b\"}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\"}],\"current_versions\":[{\"version\":\"1.999\"}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\"}],\"compatibility_versions\":[{\"version\":\"65536\"}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\"}],\"current_versions\":[{\"version\":0}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\"}],\"current_versions\":null"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\"}],\"current_versions\":[]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\",\"targets\":false}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\",\"targets\":[0]}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\"},{\"name\":\"b\"}]"),
+        S8_INITIALIZER("\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\\u0000b\"}]"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(v5_bad_fields); index += 1)
+    {
+        String8 stub = string_format(arena, S8("{S8}{S8}{S8}"), S8("{\"tapi_tbd_version\":5,\"main_library\":{"),
+                                     v5_bad_fields[index], S8("}}"));
+        BUSTER_TEST_RAW(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(stub), aarch64, &identity) ==
+                                   COMPILER_DRIVER_MACH_DYLIB_UNUSABLE, stub);
+    }
+    static String8 const v5_bad_json[] = {
+        S8_INITIALIZER("{\"tapi_tbd_version\":5,}"),
+        S8_INITIALIZER("{\"tapi_tbd_version\" 5}"),
+        S8_INITIALIZER("{\"tapi_tbd_version\":05}"),
+        S8_INITIALIZER("{\"tapi_tbd_version\":5.}"),
+        S8_INITIALIZER("{\"tapi_tbd_version\":5e+}"),
+        S8_INITIALIZER("{\"a\":[1,]}"),
+        S8_INITIALIZER("{\"a\":[1 2]}"),
+        S8_INITIALIZER("{\"a\":tru}"),
+        S8_INITIALIZER("{\"a\":\"\\q\"}"),
+        S8_INITIALIZER("{\"a\":\"\\u12\"}"),
+        S8_INITIALIZER("{\"a\":\"line\nbreak\"}"),
+        S8_INITIALIZER("{\"a\":\"\xc0\x80\"}"),
+        S8_INITIALIZER("{\"a\":\"\xed\xa0\x80\"}"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(v5_bad_json); index += 1)
+    {
+        String8 prefix = {.pointer = v5.pointer, .length = v5.length - 1};
+        String8 stub = string_format(arena, S8("{S8}{S8}{S8}{S8}"), prefix, S8(",\"probe\":"), v5_bad_json[index], S8("}"));
+        BUSTER_TEST_RAW(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(stub), aarch64,
+                                                                   &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE, stub);
+    }
+    String8 v5_scoped_names = S8("{\"tapi_tbd_version\":5,\"main_library\":{"
+                                 "\"target_info\":[{\"target\":\"arm64-macos\"},{\"target\":\"arm64-ios\"}],"
+                                 "\"install_names\":[{\"name\":\"@rpath/mac.dylib\",\"targets\":[\"arm64-macos\"]},"
+                                 "{\"name\":\"@rpath/ios.dylib\",\"targets\":[\"arm64-ios\"]}],"
+                                 "\"current_versions\":[{\"version\":\"3\",\"targets\":[\"arm64-ios\"]}]}}");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(v5_scoped_names), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("@rpath/mac.dylib"));
+    BUSTER_TEST(arguments, identity.current_version == 0x10000 && identity.compatibility_version == 0x10000);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(v5_scoped_names), ios, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("@rpath/ios.dylib"));
+    BUSTER_TEST(arguments, identity.current_version == 0x30000 && identity.compatibility_version == 0x10000);
+    String8 v5_escaped = S8("{\"tapi_tbd_vers\\u0069on\":5,\"main_libr\\u0061ry\":{"
+                            "\"target_info\":[{\"target\":\"arm64-\\u006dacos\"}],"
+                            "\"install_names\":[{\"na\\u006de\":\"\\/usr\\/lib\\/lib\\u00e9\\u20ac\\ud83d\\ude00.dylib\"}],"
+                            "\"current_versions\":[{\"version\":\"\\u0031.\\u0032.3\",\"targets\":[\"arm64-macos\"]}]}}");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(v5_escaped), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("/usr/lib/lib\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80.dylib"));
+    BUSTER_TEST(arguments, identity.current_version == 0x10203 && identity.compatibility_version == 0x10000);
+    String8 v5_control_escapes = S8("{\"tapi_tbd_version\":5,\"main_library\":{"
+                                    "\"target_info\":[{\"target\":\"arm64-macos\"}],"
+                                    "\"install_names\":[{\"name\":\"a\\\"\\\\\\/\\b\\f\\n\\r\\t\"}]}}");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(v5_control_escapes), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("a\"\\/\b\f\n\r\t"));
+    static String8 const v5_bad_unicode[] = {
+        S8_INITIALIZER("\\ud800"),
+        S8_INITIALIZER("\\udc00"),
+        S8_INITIALIZER("\\ud800\\u0041"),
+        S8_INITIALIZER("\\u0000"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(v5_bad_unicode); index += 1)
+    {
+        String8 stub = string_format(arena, S8("{S8}{S8}{S8}"),
+                                    S8("{\"tapi_tbd_version\":5,\"main_library\":{\"target_info\":[{\"target\":\"arm64-macos\"}],"
+                                       "\"install_names\":[{\"name\":\""), v5_bad_unicode[index], S8("\"}]}}"));
+        BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(stub), aarch64, &identity) ==
+                                   COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    }
+    String8 v5_escaped_duplicate = S8("{\"tapi_tbd_version\":5,\"tapi_tbd_vers\\u0069on\":5,"
+                                      "\"main_library\":{\"target_info\":[{\"target\":\"arm64-macos\"}],"
+                                      "\"install_names\":[{\"name\":\"a\"}]}}");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(v5_escaped_duplicate), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    String8 v5_prefix = {.pointer = v5.pointer, .length = v5.length - 1};
+    String8 v5_extra = string_format(arena, S8("{S8}{S8}"), v5_prefix,
+                                        S8(",\"ignored\":[true,false,null,-12.5e+2,[],{},"
+                                           "\"\\\"\\\\\\/\\b\\f\\n\\r\\t\\u0041\",\"\xc3\xa9\"]}"));
+    BUSTER_TEST_RAW(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(v5_extra), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE, v5_extra);
+    String8 v5_trailing = string_format(arena, S8("{S8} false"), v5);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(v5_trailing), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    String8 v5_duplicate = S8("{\"tapi_tbd_version\":5,\"tapi_tbd_version\":5,\"main_library\":"
+                                 "{\"target_info\":[{\"target\":\"arm64-macos\"}],\"install_names\":[{\"name\":\"a\"}]}}");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(v5_duplicate), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    char8 deep_json[256];
+    u64 deep_length = 0;
+    deep_json[deep_length++] = '{';
+    memcpy(deep_json + deep_length, "\"a\":", 4);
+    deep_length += 4;
+    for (u32 index = 0; index < 80; index += 1)
+    {
+        deep_json[deep_length++] = '[';
+    }
+    deep_json[deep_length++] = '0';
+    for (u32 index = 0; index < 80; index += 1)
+    {
+        deep_json[deep_length++] = ']';
+    }
+    deep_json[deep_length++] = '}';
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena,
+        (ByteSlice){.pointer = (u8*)deep_json, .length = deep_length}, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
 
     static String8 const target_names[] = {
         S8_INITIALIZER("aarch64-apple-macos"),
@@ -15463,7 +15628,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
         BUSTER_TEST(arguments, os_make_directory_attempt(base));
         BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int bar(void); int main(void) { return bar(); }\n"))));
         u32 output_index = 0;
-        for (u32 scenario = 0; scenario < 20; scenario += 1)
+        for (u32 scenario = 0; scenario < 30; scenario += 1)
         {
             String8 directory = string_format_z(arena, S8("{S8}/scenario-{u32}"), base, scenario);
             String8 first = string_format_z(arena, S8("{S8}/first"), directory);
@@ -15725,6 +15890,64 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
                             options[option_count++] = S8("-lbar");
                         }
                     }
+                }
+                    break;
+                case 20:
+                case 21:
+                case 22:
+                case 23:
+                case 24:
+                case 25:
+                case 26:
+                case 27:
+                case 28:
+                case 29:
+                {
+                    String8 compatible_target = target_index == 2 ? S8("arm64-ios")
+                                                  : target_index == 1 ? S8("x86_64-macos") : S8("arm64-macos");
+                    String8 stub_target = scenario == 23 ? (target_index == 2 ? S8("arm64-macos")
+                                                                                           : S8("arm64-ios"))
+                                          : scenario == 24 ? (target_index == 1 ? S8("arm64-macos") : S8("x86_64-macos"))
+                                                           : compatible_target;
+                    String8 versions = scenario == 21 ? S8(",\"current_versions\":[{\"version\":\"0\"}],"
+                                                            "\"compatibility_versions\":[{\"version\":\"0\"}]")
+                                        : scenario == 22 ? S8("")
+                                        : scenario == 25 ? S8(",\"current_versions\":[{\"version\":\"1.999\"}]")
+                                        : scenario == 26 ? S8(",\"compatibility_versions\":[{\"version\":\"bad\"}]")
+                                                         : S8(",\"current_versions\":[{\"version\":\"4.5.6\"}],"
+                                                              "\"compatibility_versions\":[{\"version\":\"2.3\"}]");
+                    String8 stub = string_format(
+                        arena, S8("{S8}{S8}{S8}{S8}{S8}"),
+                        S8("{\"tapi_tbd_version\":5,\"main_library\":{\"target_info\":[{\"target\":\""),
+                        stub_target, S8("\"}],\"install_names\":[{\"name\":\"@rpath/libbar_v5.dylib\"}]"), versions, S8("}}"));
+                    if (scenario == 29)
+                    {
+                        stub = string_format(arena, S8("{S8}{S8}{S8}"),
+                            S8("{\"tapi_tbd_version\":5,\"main_library\":{\"target_info\":[{\"target\":\""), compatible_target,
+                            S8("\"}],\"install_names\":[{\"name\":\"@rpath\\/libbar_\\u00e9.dylib\"}]}}"));
+                    }
+                    else if (scenario == 27)
+                    {
+                        stub.length -= 1;
+                    }
+                    else if (scenario == 28)
+                    {
+                        stub = string_format(arena, S8("{S8} trailing"), stub);
+                    }
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.tbd"), directory),
+                                                     BUSTER_SLICE_TO_BYTE_SLICE(stub)));
+                    if (scenario == 20 || scenario >= 23)
+                    {
+                        BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), directory),
+                            compiler_driver_test_mach_dylib_with_platform(arena, target_cputypes[target_index], 6,
+                                S8("@rpath/libbar_v5_fallback.dylib"), 0x10203, 0x10000, target_index == 2 ? 2 : 1)));
+                    }
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = directory;
+                    options[option_count++] = S8("-lbar");
+                    expected_name = scenario == 29 ? S8("@rpath/libbar_\xc3\xa9.dylib") : scenario >= 23 ? S8("@rpath/libbar_v5_fallback.dylib") : S8("@rpath/libbar_v5.dylib");
+                    expected_current_version = scenario == 29 ? 0x10000 : scenario >= 23 ? 0x10203 : scenario == 21 ? 0 : scenario == 22 ? 0x10000 : 0x40506;
+                    expected_compatibility_version = scenario >= 23 || scenario == 22 ? 0x10000 : scenario == 21 ? 0 : 0x20300;
                 }
                     break;
             }
