@@ -735,8 +735,8 @@ audit:
   change, already gets that half.
 - **The default path** moves −0.0055%.
 
-**What an implementation must show.** These budgets go into the
-[measurement plan](#measurement-plan) before any measured run. The four arms
+**What an implementation must show.** These budgets are declared in the
+[measurement plan](#measurement-plan) for the implementation. The four arms
 are those of stage 2:
 - **Correctness.**
   - byte-identical `-c` objects at `-g0` and `-g` across the four arms, and
@@ -1268,6 +1268,35 @@ The same audit records that version's hosted census, diagnostic only:
 - On the merge with main `f6e8d25f`, the same arms read −0.077% on the
   default path and −0.84% under the pilot.
 - The requested 9700X comparison decides the performance disposition (#2761).
+
+For the shared [qualified member copies](#qualified-member-copies), these
+budgets were declared before their measured runs. The base is main
+`680e16d3`. The input, flags and four Callgrind arms are stage 2's, on
+tests-off `-march=x86-64-v3` builds, run on `-fsyntax-only` and on `-c`
+(`-g0`):
+- **Correctness.**
+  - byte-identical `-c` objects at `-g0` and `-g` across the four arms;
+  - `c_test_type_interning_objects` passes with the window shut and open,
+    over new sources:
+    - members read through pointers to const and to volatile aggregates;
+    - nested aggregates and array members;
+    - a member of an aligned typedef type;
+  - no verify mismatch over the corpus, and a floor on shared-copy member
+    answers;
+  - the `struct S const*` member probe answers, and a late-row probe beside
+    it declines;
+  - a mutation that shares a copy carrying an alignment record fails a test.
+- **Default path (D against A):** within ±0.05% Ir on both workloads. Outside
+  the pilot the step makes one extra test for the interning header.
+- **The slice (C against B):**
+  - at least 40 M fewer instructions on `-fsyntax-only`, about half of the
+    prototype's −74 M, with the lookups, the eager pass and code layout
+    charged;
+  - fewer instructions on `-c`;
+  - at least 5,000 fewer machine runs from queries.
+- **Acceptance:** hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761), and the hook stays
+  opt-in.
 
 For the in-place columns ([storage](#storage-and-lifetime)), these budgets were
 declared before the measured runs, on the same input and flags, with stage 2's
