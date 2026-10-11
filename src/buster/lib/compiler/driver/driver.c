@@ -4862,60 +4862,68 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
                                                  : string_format(arena, S8("C object linking failed with {S8}"), link_error_name(linked.error));
         return;
     }
-    String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
-    CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, 0, &linked.object);
-    if (dynamic_libraries.missing_request.length)
+    if (invocation.retain_linked_object)
     {
-        result->error = COMPILER_DRIVER_ERROR_LINK;
-        result->diagnostic = dynamic_libraries.unsupported_script_path.length
-                                 ? string_format(arena, S8("unsupported GNU linker script {S8} requested by -l{S8}"),
-                                                 dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_request)
-                                 : string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
-        compiler_driver_dynamic_libraries_release(&dynamic_libraries);
-        return;
+        result->object = linked.object;
+        result->has_object = true;
     }
-    if (dynamic_libraries.missing_runtime_symbol.length)
+    else
     {
-        result->error = COMPILER_DRIVER_ERROR_LINK;
-        result->native_link.error = LINK_ERROR_UNRESOLVED_SYMBOL;
-        result->native_link.symbol = dynamic_libraries.missing_runtime_symbol;
-        result->diagnostic = string_format(arena, S8("target library {S8} does not provide callable compiler helper: {S8}"),
-                                          dynamic_libraries.runtime_failure_library, dynamic_libraries.missing_runtime_symbol);
+        String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
+        CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, 0, &linked.object);
+        if (dynamic_libraries.missing_request.length)
+        {
+            result->error = COMPILER_DRIVER_ERROR_LINK;
+            result->diagnostic = dynamic_libraries.unsupported_script_path.length
+                                     ? string_format(arena, S8("unsupported GNU linker script {S8} requested by -l{S8}"),
+                                                     dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_request)
+                                     : string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
+            compiler_driver_dynamic_libraries_release(&dynamic_libraries);
+            return;
+        }
+        if (dynamic_libraries.missing_runtime_symbol.length)
+        {
+            result->error = COMPILER_DRIVER_ERROR_LINK;
+            result->native_link.error = LINK_ERROR_UNRESOLVED_SYMBOL;
+            result->native_link.symbol = dynamic_libraries.missing_runtime_symbol;
+            result->diagnostic = string_format(arena, S8("target library {S8} does not provide callable compiler helper: {S8}"),
+                                              dynamic_libraries.runtime_failure_library, dynamic_libraries.missing_runtime_symbol);
+            compiler_driver_dynamic_libraries_release(&dynamic_libraries);
+            return;
+        }
+        result->native_link = link_native_executable(arena, &linked.object,
+                                                    (NativeExecutableLinkOptions){
+                                                        .output_path = output,
+                                                        .entry_symbol = invocation.entry_symbol.length ? invocation.entry_symbol
+                                                                                                       : compiler_driver_default_entry_symbol(invocation.target),
+                                                        .sysroot = invocation.sysroot,
+                                                        .library_paths = invocation.library_paths,
+                                                        .framework_paths = invocation.framework_paths,
+                                                        .frameworks = invocation.frameworks,
+                                                        .linker_arguments = invocation.linker_arguments,
+                                                        .library_path_count = invocation.library_path_count,
+                                                        .framework_path_count = invocation.framework_path_count,
+                                                        .framework_count = invocation.framework_count,
+                                                        .linker_argument_count = invocation.linker_argument_count,
+                                                        .dynamic_libraries = dynamic_libraries.pointer,
+                                                        .dynamic_library_count = dynamic_libraries.count,
+                                                        .runtime_exported_symbols = dynamic_libraries.runtime.exported_symbols,
+                                                        .runtime_data_symbols = dynamic_libraries.runtime.exported_data_symbols,
+                                                        .runtime_versioned_symbols = dynamic_libraries.runtime.versioned_symbols,
+                                                        .runtime_exported_symbol_count = dynamic_libraries.runtime.exported_symbol_count,
+                                                        .runtime_data_symbol_count = dynamic_libraries.runtime.exported_data_symbol_count,
+                                                        .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
+                                                        .runtime_exports_known = dynamic_libraries.runtime.exports_known,
+                                                        .debug_info = invocation.debug_info,
+                                                        .image_kind = (u8)invocation.image_kind,
+                                                    });
         compiler_driver_dynamic_libraries_release(&dynamic_libraries);
-        return;
-    }
-    result->native_link = link_native_executable(arena, &linked.object,
-                                                (NativeExecutableLinkOptions){
-                                                    .output_path = output,
-                                                    .entry_symbol = invocation.entry_symbol.length ? invocation.entry_symbol
-                                                                                                   : compiler_driver_default_entry_symbol(invocation.target),
-                                                    .sysroot = invocation.sysroot,
-                                                    .library_paths = invocation.library_paths,
-                                                    .framework_paths = invocation.framework_paths,
-                                                    .frameworks = invocation.frameworks,
-                                                    .linker_arguments = invocation.linker_arguments,
-                                                    .library_path_count = invocation.library_path_count,
-                                                    .framework_path_count = invocation.framework_path_count,
-                                                    .framework_count = invocation.framework_count,
-                                                    .linker_argument_count = invocation.linker_argument_count,
-                                                    .dynamic_libraries = dynamic_libraries.pointer,
-                                                    .dynamic_library_count = dynamic_libraries.count,
-                                                    .runtime_exported_symbols = dynamic_libraries.runtime.exported_symbols,
-                                                    .runtime_data_symbols = dynamic_libraries.runtime.exported_data_symbols,
-                                                    .runtime_versioned_symbols = dynamic_libraries.runtime.versioned_symbols,
-                                                    .runtime_exported_symbol_count = dynamic_libraries.runtime.exported_symbol_count,
-                                                    .runtime_data_symbol_count = dynamic_libraries.runtime.exported_data_symbol_count,
-                                                    .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
-                                                    .runtime_exports_known = dynamic_libraries.runtime.exports_known,
-                                                    .debug_info = invocation.debug_info,
-                                                    .image_kind = (u8)invocation.image_kind,
-                                                });
-    compiler_driver_dynamic_libraries_release(&dynamic_libraries);
-    WORK_LEDGER_RECORD(OUTPUT_LINK_IMAGE_BYTES, result->native_link.executable.length);
-    if (result->native_link.error != LINK_ERROR_NONE)
-    {
-        result->error = COMPILER_DRIVER_ERROR_LINK;
-        result->diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result->native_link);
+        WORK_LEDGER_RECORD(OUTPUT_LINK_IMAGE_BYTES, result->native_link.executable.length);
+        if (result->native_link.error != LINK_ERROR_NONE)
+        {
+            result->error = COMPILER_DRIVER_ERROR_LINK;
+            result->diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result->native_link);
+        }
     }
 }
 
@@ -7594,6 +7602,10 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     }
     result.object = linked.object;
     result.has_object = true;
+    if (invocation.retain_linked_object)
+    {
+        goto finish;
+    }
     String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
     CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, static_libraries, &linked.object);
     if (dynamic_libraries.missing_request.length)

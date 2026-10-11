@@ -229,6 +229,11 @@ struct CompilerDriverInvocation
     // other preprocessed count is still gathered. The cc command sets it when
     // it prints neither report.
     bool omit_spelled_bytes;
+    // API-only (`ide run`): with COMPILER_DRIVER_ACTION_LINK, stop after
+    // link_objects on either the single-unit or multi-input path and return
+    // the merged in-memory object in CompilerDriverResult.object; do not look
+    // up dynamic libraries, write an executable or create an output file.
+    bool retain_linked_object;
     // `-dM`: with -E, print the macros defined at the end of preprocessing as
     // `#define` lines instead of the preprocessed text. Ignored without -E.
     bool dump_macros;
