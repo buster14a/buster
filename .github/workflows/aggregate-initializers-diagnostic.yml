@@ -78,16 +78,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-user
       - name: Mode matrix
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/aggregate-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/aggregate-evidence/mode-matrix.log"
       - name: Source size
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/aggregate-build" source_size --base 27aac48349c2da9c6c24bae660a0f893fa3da6d4 2>&1 | tee "$RUNNER_TEMP/aggregate-evidence/source-size.log"
       - name: Full pristine musl manifest
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
