@@ -11893,7 +11893,8 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             };
             continue;
         }
-        bool string_value = c_ir_tokens_are_string_literals(preprocess, designator.value_start, value_end);
+        // Only an aggregate subobject asks whether its value is a string.
+        bool string_value = aggregate && c_ir_tokens_are_string_literals(preprocess, designator.value_start, value_end);
         if (aggregate && !(string_value && c_parse_initializer_type_takes_string(result, value_type)) &&
             (string_value || !c_parse_initializer_value_is_aggregate_expression(machine, result_arena, preprocess, result, scope, designator.value_start, value_end,
                                                                                 designator.value_type)))
@@ -33616,15 +33617,18 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_message(CTypeParseMachin
     return message;
 }
 
-BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value(CTypeParseMachine* machine, CParseResult* result,
-                                                              CPreprocessResult preprocess, CScopeId scope, CTypeId destination,
-                                                              u32 start, u32 end, bool simple_value_conversion, String8* message_out)
+// Whether a value of type `source`, spelled by [start, end), is incompatible
+// with `destination`. A caller that has already typed the range passes that
+// type here instead of typing it again; c_parse_incompatible_aggregate_value
+// types it first.
+BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_source(CTypeParseMachine* machine, CParseResult* result,
+                                                               CPreprocessResult preprocess, CScopeId scope, CTypeId destination,
+                                                               CTypeId source, u32 start, u32 end, bool simple_value_conversion,
+                                                               String8* message_out)
 {
-    CTypeId source = C_TYPE_ID_INVALID;
     bool incompatible = false;
     if (message_out) *message_out = (String8){0};
-    if (destination.value < result->type_count &&
-        c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, start, end, &source) && source.value < result->type_count)
+    if (destination.value < result->type_count && source.value < result->type_count)
     {
         CType target = result->types[destination.value];
         CType from = result->types[source.value];
@@ -33686,6 +33690,43 @@ BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value(CTypeParseMachine* m
             arena_set_position(machine->scratch_arena, mark);
         }
     }
+    return incompatible;
+}
+
+BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value(CTypeParseMachine* machine, CParseResult* result,
+                                                              CPreprocessResult preprocess, CScopeId scope, CTypeId destination,
+                                                              u32 start, u32 end, bool simple_value_conversion, String8* message_out)
+{
+    CTypeId source = C_TYPE_ID_INVALID;
+    bool typed = destination.value < result->type_count &&
+                 c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, start, end, &source);
+    return c_parse_incompatible_aggregate_source(machine, result, preprocess, scope, destination, typed ? source : C_TYPE_ID_INVALID,
+                                                 start, end, simple_value_conversion, message_out);
+}
+
+// The assignment-conversion check of a value the caller has just typed with
+// c_parse_checked_expression_type. A valid checked type is reused rather than
+// typed again unchecked. The two can name different rows, because a cast
+// parses its type name afresh on every query, but the rows are structurally
+// the same, so the verdict and message are too. Reference checks compare both.
+BUSTER_C_INTERNAL bool c_parse_incompatible_checked_value(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                            CScopeId scope, CTypeId destination, bool checked, CTypeId source,
+                                                            u32 start, u32 end, String8* message_out)
+{
+    bool reuse = checked && source.value < result->type_count;
+    bool incompatible = reuse
+        ? c_parse_incompatible_aggregate_source(machine, result, preprocess, scope, destination, source, start, end, true, message_out)
+        : c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, destination, start, end, true, message_out);
+#if BUSTER_REFERENCE_CHECKS
+    if (reuse)
+    {
+        String8 reference_message = {0};
+        bool reference = c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, destination, start, end, true,
+                                                              message_out ? &reference_message : 0);
+        BUSTER_CHECK(reference == incompatible);
+        BUSTER_CHECK(!message_out || string_equal(reference_message, *message_out));
+    }
+#endif
     return incompatible;
 }
 
@@ -34668,10 +34709,10 @@ BUSTER_C_INTERNAL bool c_parse_initializer_expression_constraint(CTypeParseMachi
                                             preprocess.tokens[start].kind == C_TOKEN_CHARACTER_LITERAL));
     if (start < end)
     {
-        c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, scope, start, end, &source, &checked);
+        bool typed = c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, scope, start, end, &source, &checked);
         String8 conversion_message = {0};
-        if (!checked.message.length && c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, destination, start, end,
-                                                                            true, &conversion_message))
+        if (!checked.message.length && c_parse_incompatible_checked_value(machine, result, preprocess, scope, destination, typed, source,
+                                                                          start, end, &conversion_message))
             c_parse_lowering_constraint_consider(&checked,
                 conversion_message.length ? conversion_message : S8("initializer has an incompatible type"), start, end);
     }
@@ -35824,11 +35865,11 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
                     if (!c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_BRACE))
                     {
                         CTypeId initializer_type = C_TYPE_ID_INVALID;
-                        c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, entity->scope,
+                        bool typed = c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, entity->scope,
                             cursor + 1, value_end, &initializer_type, diagnostic);
                         String8 conversion_message = {0};
-                        if (c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type,
-                                                                  cursor + 1, value_end, true, &conversion_message))
+                        if (c_parse_incompatible_checked_value(machine, result, preprocess, entity->scope, entity->type, typed, initializer_type,
+                                                               cursor + 1, value_end, &conversion_message))
                             c_parse_lowering_constraint_consider(diagnostic,
                                 conversion_message.length ? conversion_message : S8("initializer has an incompatible type"), cursor, value_end);
                     }
