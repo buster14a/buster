@@ -233,7 +233,7 @@ jobs:
           mkdir -p direct-ssa-census-evidence
           source_sha=$(git rev-parse HEAD)
           printf 'event_sha=%s\nworkflow_sha=%s\npr_head_sha=%s\npr_base_sha=%s\nsource_sha=%s\nsource_tree=%s\nworkflow_blob=%s\n' "$CENSUS_EVENT_SHA" "$CENSUS_WORKFLOW_SHA" "$CENSUS_PR_HEAD_SHA" "$CENSUS_PR_BASE_SHA" "$source_sha" "$(git rev-parse 'HEAD^{tree}')" "$(git rev-parse HEAD:.github/workflows/compiler-throughput.yml)" | tee direct-ssa-census-evidence/source.txt
-          if [[ "$source_sha" != "$CENSUS_EVENT_SHA" || "$source_sha" != "$CENSUS_WORKFLOW_SHA" ]]; then
+          if ! [[ "$source_sha" == "$CENSUS_EVENT_SHA" && "$source_sha" == "$CENSUS_WORKFLOW_SHA" ]]; then
             printf 'diagnostic source must match the immutable event and workflow revision; no proof was run\n' >&2
             exit 1
           fi
