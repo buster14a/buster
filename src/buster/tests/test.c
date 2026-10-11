@@ -462,6 +462,14 @@ TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* aren
         result.watch_parent_module = watch->module_scope;
         test_watch_publish(watch, arguments->memory_module, name, result.index, module, module ? (String8){0} : watch->last_completed);
     }
+#if BUSTER_IOS
+    // Pair module-named observations with the ending scope clock. Process CPU
+    // includes all app threads; parallel module intervals can overlap.
+    if (module && result.timing)
+    {
+        buster_ios_launch_trace(arguments->memory_module);
+    }
+#endif
     if (result.timing)
     {
         result.start = timestamp_take();
@@ -478,6 +486,12 @@ void buster_test_arena_end(UnitTestArguments* arguments, TestArenaScope scope, b
     {
         end = timestamp_take();
     }
+#if BUSTER_IOS
+    if (scope.module && scope.timing)
+    {
+        buster_ios_launch_trace(arguments->memory_module);
+    }
+#endif
     u64 ends[BUSTER_ARRAY_LENGTH(scope.marks)] = {0};
     u64 peaks[BUSTER_ARRAY_LENGTH(scope.marks)] = {0};
     // Capture every arena before formatting, which itself uses scratch memory.
