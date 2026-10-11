@@ -24034,19 +24034,23 @@ struct CParseDeclaratorHint
     bool plain;
 };
 
-// A block declaration's declarator hints, in source order, and whether its
-// specifiers hold no `auto` or `__auto_type` word, so it infers no type.
+// A block declaration's declarator hints, in source order; the storage-class
+// words its specifiers spell (C_PARSE_STORAGE_CLASS_KEYWORDS bits); and
+// whether no `auto` or `__auto_type` word stands where the auto-inference
+// scan reads, so it infers no type.
 typedef struct CParseDeclaratorHints CParseDeclaratorHints;
 struct CParseDeclaratorHints
 {
     CParseDeclaratorHint const* declarators;
+    u64 storage_class_bits;
     u32 count;
     bool no_auto;
     CAstStatementStatistics* statistics;
 };
 
 // The block-declaration split. `hints`, from the planned walk alone, replaces
-// the auto-inference scan, the `,` and `=` scans of each declarator it states
+// the auto-inference scan, the storage-class scan, the `,` and `=` scans of
+// each declarator it states
 // (each checked against the token there; a refused one returns the rest of
 // the declaration to the scans), and the per-token tests of a plain
 // initializer. Without hints it is the token split, and both callers below
@@ -24072,8 +24076,11 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypePar
     // -- `int v = ({ static int s = 3; s; });` declares an automatic `v` and a
     // static `s` -- and an array parameter's `[static 3]` is a bound qualifier
     // rather than a storage class.
+    // A hint carries the set its DECL_SPECIFIERS items spell; in a
+    // declaration the tree accepts, no storage-class word stands outside
+    // them and outside every delimiter.
     u32 specifier_depth = 0;
-    for (u32 token_index = start; token_index < end; token_index += 1)
+    for (u32 token_index = hints ? end : start; token_index < end; token_index += 1)
     {
         CToken specifier_token = preprocess.tokens[token_index];
         if (c_token_is_punctuator(&specifier_token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&specifier_token, C_PUNCTUATOR_LEFT_BRACKET) ||
@@ -24094,6 +24101,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypePar
         }
         storage_class_bits |= c_token_well_known_bit(preprocess.spelling_base, specifier_token, C_PARSE_STORAGE_CLASS_KEYWORDS);
     }
+    storage_class_bits |= hints ? hints->storage_class_bits : 0;
     bool is_typedef = (storage_class_bits & C_SYMBOL_WELL_KNOWN_BIT(TYPEDEF)) != 0;
     bool is_static_storage = (storage_class_bits & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
     bool is_register = (storage_class_bits & C_SYMBOL_WELL_KNOWN_BIT(REGISTER)) != 0;
@@ -25855,7 +25863,10 @@ struct CParseStatementPlanEntry
     u32 separator;
     u32 loop_end;
     CParseStatementPlanKind kind;
-    // A declaration whose specifiers hold no `auto` or `__auto_type` word.
+    // A declaration's storage-class words (CParseDeclaratorHints).
+    u64 storage_class_bits;
+    // A declaration with no `auto` or `__auto_type` word where the
+    // auto-inference scan reads.
     bool no_auto;
 };
 
@@ -25890,6 +25901,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_planned_local_declarations(CTypeParseMachine* m
     {
         hints = (CParseDeclaratorHints){
             .declarators = plan->declarators + entry->separator,
+            .storage_class_bits = entry->storage_class_bits,
             .count = entry->loop_end,
             .no_auto = entry->no_auto,
             .statistics = plan->statistics,
@@ -26217,25 +26229,40 @@ BUSTER_GLOBAL_LOCAL u32 c_parse_plan_expression_end(CAst const* ast, CPreprocess
 // the last, the `;`) past its greatest anchor's closers, and its `=` follows
 // the closers of the child before its initializer. A declaration any of whose
 // declarators those tokens do not confirm gets none, and is split from
-// tokens. Returns whether its specifiers hold no `auto` or `__auto_type`
-// word.
+// tokens. Stores the storage-class words its DECL_SPECIFIERS items spell,
+// folded by the split's own test, in `storage_class_bits`. Returns whether no
+// `auto` or `__auto_type` word stands where c_parse_auto_declaration_info
+// reads: the specifiers and the first declarator up to its initializer, any
+// depth (`int (*f)(__auto_type x);` reads one in a parameter).
 BUSTER_GLOBAL_LOCAL bool c_parse_plan_declarators(CAst const* ast, CPreprocessResult const* preprocess, CParseDeclaratorHint* declarators,
-                                                  u32* declarator_count, u32 declarator_capacity, u32 node, u32 terminator, u32 limit)
+                                                  u32* declarator_count, u32 declarator_capacity, u32 node, u32 terminator, u32 limit,
+                                                  u64* storage_class_bits)
 {
     u32 floor = c_ast_subtree_begin(ast, node);
     u32 count = 0;
     u32 specifiers = node - 1;
+    u32 first = node;
     while (specifiers > floor && ast->kinds[specifiers] == C_AST_INIT_DECLARATOR)
     {
         count += 1;
+        first = specifiers;
         specifiers = c_ast_subtree_begin(ast, specifiers) - 1;
     }
     bool no_auto = ast->kinds[specifiers] == C_AST_DECL_SPECIFIERS;
+    u64 storage = 0;
     for (u32 cursor = specifiers; no_auto && cursor > c_ast_subtree_begin(ast, specifiers); cursor = c_ast_subtree_begin(ast, cursor - 1))
     {
-        no_auto = !(ast->kinds[cursor - 1] == C_AST_SPECIFIER_WORD &&
-                    (ast->data[cursor - 1] == C_AST_WORD_AUTO || ast->data[cursor - 1] == C_AST_WORD_AUTO_TYPE));
+        if (ast->kinds[cursor - 1] == C_AST_SPECIFIER_WORD)
+        {
+            storage |= c_token_well_known_bit(preprocess->spelling_base, preprocess->tokens[ast->tokens[cursor - 1]], C_PARSE_STORAGE_CLASS_KEYWORDS);
+        }
     }
+    u32 stop = first == node ? node : (ast->data[first] & 4) ? c_ast_subtree_begin(ast, first - 1) : first;
+    for (u32 cursor = floor; no_auto && cursor < stop; cursor += 1)
+    {
+        no_auto = !(ast->kinds[cursor] == C_AST_SPECIFIER_WORD && (ast->data[cursor] == C_AST_WORD_AUTO || ast->data[cursor] == C_AST_WORD_AUTO_TYPE));
+    }
+    *storage_class_bits = storage;
     bool confirmed = ast->kinds[specifiers] == C_AST_DECL_SPECIFIERS && *declarator_count + count <= declarator_capacity;
     u32 declarator = node - 1;
     for (u32 slot = count; slot && confirmed; slot -= 1)
@@ -26598,14 +26625,16 @@ BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseM
                     {
                         u32 first_declarator = plan.declarator_count;
                         u32 declarator_count = first_declarator;
+                        u64 storage_class_bits = 0;
                         bool no_auto = c_parse_plan_declarators(ast, &preprocess, plan.declarators, &declarator_count, plan.declarator_capacity, node,
-                                                                terminator, limit);
+                                                                terminator, limit, &storage_class_bits);
                         plan.declarator_count = declarator_count;
                         ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_DECLARATION, anchor, terminator, first_declarator,
                                                       plan.declarator_count - first_declarator);
                         if (ordered)
                         {
                             plan.entries[plan.count - 1].no_auto = no_auto;
+                            plan.entries[plan.count - 1].storage_class_bits = storage_class_bits;
                         }
                     }
                     else

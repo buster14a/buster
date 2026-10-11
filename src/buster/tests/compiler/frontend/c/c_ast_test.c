@@ -17,10 +17,13 @@
 // frontend sources and holds the tree to c_parse_ast's top-level declaration
 // split, the declaration split read from the tree (c_parse_ast_from_tree) to
 // c_parse_ast's records field by field (c_ast_corpus_split), and the tree
-// expression typer (c_ast_types.c) to the type machine (c_ast_corpus_types).
-// c_ast_test_types probes the typer's accepted kinds, declines and misses one
-// range at a time; c_ast_test_split runs the tree split on one shape per
-// fallback reason in every layout.
+// expression typer (c_ast_types.c) to the type machine (c_ast_corpus_types),
+// where the analysis with the tree must also equal the analysis without it in
+// every model row (c_ast_corpus_models_differ). c_ast_test_types probes the
+// typer's accepted kinds, declines and misses one range at a time;
+// c_ast_test_split runs the tree split on one shape per fallback reason in
+// every layout; c_ast_test_declaration_hints holds the statement plan's
+// declaration hints (storage classes, the auto precheck) to the walker.
 //
 // Case helpers (macros: they add into the caller's `result`):
 //   c_ast_test_expect(arguments, source, expected_dump)
@@ -1454,6 +1457,249 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_bindings_differ(Arena* arena, CAnalysis
     return difference;
 }
 
+// The first difference between two analyses: the sizes of the type tables,
+// then the diagnostics (count, then each message, kind, severity and
+// location). Empty when there is none.
+BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_analyses_differ(Arena* arena, CAnalysisResult const* left, CAnalysisResult const* right)
+{
+    String8 difference = {0};
+    if (left->type_count != right->type_count || left->array_bound_count != right->array_bound_count || left->member_count != right->member_count ||
+        left->entity_count != right->entity_count)
+    {
+        difference = string_format(arena, S8("tables differ: {u32} types, {u32} bounds, {u32} members, {u32} entities without the tree; "
+                                             "{u32}, {u32}, {u32}, {u32} with it"),
+                                   left->type_count, left->array_bound_count, left->member_count, left->entity_count, right->type_count,
+                                   right->array_bound_count, right->member_count, right->entity_count);
+    }
+    else if (left->diagnostic_count != right->diagnostic_count || left->analysis_complete != right->analysis_complete)
+    {
+        difference = string_format(arena, S8("{u32} diagnostics (complete {u32}) without the tree, {u32} (complete {u32}) with it"), left->diagnostic_count,
+                                   (u32)left->analysis_complete, right->diagnostic_count, (u32)right->analysis_complete);
+    }
+    for (u32 index = 0; index < left->diagnostic_count && !difference.length; index += 1)
+    {
+        CDiagnostic const* a = left->diagnostics + index;
+        CDiagnostic const* b = right->diagnostics + index;
+        if (!string_equal(a->message, b->message) || a->kind != b->kind || a->severity != b->severity || a->location.offset != b->location.offset ||
+            a->location.line != b->location.line || a->location.column != b->location.column || a->location.file != b->location.file)
+        {
+            difference = string_format(arena, S8("diagnostic {u32} differs: '{S8}' without the tree, '{S8}' with it"), index, a->message, b->message);
+        }
+    }
+    return difference;
+}
+
+
+// The analysis model field by field: every row of the type, entity, scope,
+// array-bound, alignment, declaration, identifier-use, member, enum-member
+// and parameter tables. Names are compared by content and the syntax record
+// pointer not at all; each analysis parses its own. The counts are compared
+// first (c_ast_corpus_analyses_differ), so the rows line up. `rows` receives
+// the number of rows compared.
+#define C_AST_MODEL_FIELD(table, field) \
+    (difference.length || left->table[index].field == right->table[index].field ? difference \
+                                                                                 : string_format(arena, S8(#table " {u32} differs in " #field), index))
+#define C_AST_MODEL_NAME(table, field) \
+    (difference.length || string_equal(left->table[index].field, right->table[index].field) \
+         ? difference \
+         : string_format(arena, S8(#table " {u32} differs in " #field), index))
+#define C_AST_MODEL_SITE(table, field) \
+    (difference.length || (left->table[index].field.map_offset_plus_one == right->table[index].field.map_offset_plus_one && \
+                           left->table[index].field.file == right->table[index].field.file) \
+         ? difference \
+         : string_format(arena, S8(#table " {u32} differs in " #field), index))
+
+BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_models_differ(Arena* arena, CAnalysisResult const* left, CAnalysisResult const* right, u64* rows)
+{
+    String8 difference = {0};
+    if (left->declaration_count != right->declaration_count || left->parameter_count != right->parameter_count ||
+        left->enum_member_count != right->enum_member_count || left->alignment_count != right->alignment_count ||
+        left->scope_count != right->scope_count || left->identifier_use_count != right->identifier_use_count)
+    {
+        difference = string_format(arena, S8("model tables differ: {u32} declarations, {u32} parameters, {u32} enum members, {u32} alignments, {u32} scopes, "
+                                             "{u32} uses without the tree; {u32}, {u32}, {u32}, {u32}, {u32}, {u32} with it"),
+                                   left->declaration_count, left->parameter_count, left->enum_member_count, left->alignment_count, left->scope_count,
+                                   left->identifier_use_count, right->declaration_count, right->parameter_count, right->enum_member_count,
+                                   right->alignment_count, right->scope_count, right->identifier_use_count);
+    }
+    for (u32 index = 0; index < left->type_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_NAME(types, tag);
+        difference = C_AST_MODEL_FIELD(types, tag_scope.value);
+        difference = C_AST_MODEL_FIELD(types, element_type.value);
+        difference = C_AST_MODEL_FIELD(types, return_type.value);
+        difference = C_AST_MODEL_FIELD(types, unqualified_type.value);
+        difference = C_AST_MODEL_FIELD(types, array_bound);
+        difference = C_AST_MODEL_FIELD(types, parameter_start);
+        difference = C_AST_MODEL_FIELD(types, parameter_count);
+        difference = C_AST_MODEL_FIELD(types, member_start);
+        difference = C_AST_MODEL_FIELD(types, member_count);
+        difference = C_AST_MODEL_FIELD(types, enum_member_start);
+        difference = C_AST_MODEL_FIELD(types, enum_member_count);
+        difference = C_AST_MODEL_FIELD(types, definition_start);
+        difference = C_AST_MODEL_FIELD(types, definition_token_count);
+        difference = C_AST_MODEL_FIELD(types, vector_byte_size);
+        difference = C_AST_MODEL_FIELD(types, kind);
+        difference = C_AST_MODEL_FIELD(types, is_const);
+        difference = C_AST_MODEL_FIELD(types, is_volatile);
+        difference = C_AST_MODEL_FIELD(types, is_restrict);
+        difference = C_AST_MODEL_FIELD(types, is_atomic);
+        difference = C_AST_MODEL_FIELD(types, is_variadic);
+        difference = C_AST_MODEL_FIELD(types, is_complete);
+        difference = C_AST_MODEL_FIELD(types, is_transparent_union);
+        difference = C_AST_MODEL_FIELD(types, has_unqualified_type);
+        difference = C_AST_MODEL_FIELD(types, is_unprototyped);
+        difference = C_AST_MODEL_FIELD(types, has_fixed_underlying_type);
+    }
+    for (u32 index = 0; index < left->entity_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_NAME(entities, name);
+        difference = C_AST_MODEL_FIELD(entities, symbol);
+        difference = C_AST_MODEL_SITE(entities, location);
+        difference = C_AST_MODEL_FIELD(entities, type.value);
+        difference = C_AST_MODEL_FIELD(entities, scope.value);
+        difference = C_AST_MODEL_FIELD(entities, next_in_scope.value);
+        difference = C_AST_MODEL_FIELD(entities, next_in_lookup.value);
+        difference = C_AST_MODEL_FIELD(entities, next_typedef_in_lookup.value);
+        difference = C_AST_MODEL_FIELD(entities, next_by_name.value);
+        difference = C_AST_MODEL_FIELD(entities, declaration_index);
+        difference = C_AST_MODEL_FIELD(entities, declaration_token_plus_one);
+        difference = C_AST_MODEL_FIELD(entities, declaration_statement_start);
+        difference = C_AST_MODEL_FIELD(entities, declaration_token_start);
+        difference = C_AST_MODEL_FIELD(entities, declaration_token_count);
+        difference = C_AST_MODEL_FIELD(entities, alignment_start);
+        difference = C_AST_MODEL_FIELD(entities, alignment_count);
+        difference = C_AST_MODEL_FIELD(entities, kind);
+        difference = C_AST_MODEL_FIELD(entities, is_definition);
+        difference = C_AST_MODEL_FIELD(entities, is_static_storage);
+        difference = C_AST_MODEL_FIELD(entities, is_thread_local);
+        difference = C_AST_MODEL_FIELD(entities, is_constexpr);
+        difference = C_AST_MODEL_FIELD(entities, has_constant_value);
+        difference = C_AST_MODEL_FIELD(entities, constant_is_negative);
+        difference = C_AST_MODEL_FIELD(entities, has_cleanup);
+        difference = C_AST_MODEL_FIELD(entities, cleanup_attribute_checked);
+        difference = C_AST_MODEL_FIELD(entities, is_register);
+        difference = C_AST_MODEL_FIELD(entities, is_extern);
+        difference = C_AST_MODEL_FIELD(entities, definition_is_gnu_inline_only);
+        difference = C_AST_MODEL_FIELD(entities, has_internal_linkage);
+        difference = C_AST_MODEL_FIELD(entities, cleanup_function.value);
+        difference = C_AST_MODEL_FIELD(entities, cleanup_attribute_token);
+        difference = C_AST_MODEL_FIELD(entities, cleanup_attribute_end);
+        difference = C_AST_MODEL_FIELD(entities, enum_member_plus_one);
+        difference = C_AST_MODEL_FIELD(entities, definition_parameter_count_plus_one);
+        difference = C_AST_MODEL_FIELD(entities, prototype_parameter_count_plus_one);
+        difference = C_AST_MODEL_FIELD(entities, constant_value);
+    }
+    for (u32 index = 0; index < left->scope_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_FIELD(scopes, parent.value);
+        difference = C_AST_MODEL_FIELD(scopes, first_entity.value);
+        difference = C_AST_MODEL_FIELD(scopes, last_entity.value);
+        difference = C_AST_MODEL_FIELD(scopes, token_start);
+        difference = C_AST_MODEL_FIELD(scopes, token_end);
+        difference = C_AST_MODEL_FIELD(scopes, entity_count);
+    }
+    for (u32 index = 0; index < left->array_bound_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_FIELD(array_bounds, inferred_count);
+        difference = C_AST_MODEL_FIELD(array_bounds, token_start);
+        difference = C_AST_MODEL_FIELD(array_bounds, token_count);
+        difference = C_AST_MODEL_FIELD(array_bounds, is_static);
+        difference = C_AST_MODEL_FIELD(array_bounds, is_star);
+        difference = C_AST_MODEL_FIELD(array_bounds, has_inferred_count);
+        difference = C_AST_MODEL_FIELD(array_bounds, is_const);
+        difference = C_AST_MODEL_FIELD(array_bounds, is_parameter_declarator);
+    }
+    for (u32 index = 0; index < left->alignment_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_FIELD(alignments, type.value);
+        difference = C_AST_MODEL_FIELD(alignments, token_start);
+        difference = C_AST_MODEL_FIELD(alignments, token_count);
+    }
+    for (u32 index = 0; index < left->declaration_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_NAME(declarations, name);
+        difference = C_AST_MODEL_SITE(declarations, location);
+        difference = C_AST_MODEL_FIELD(declarations, token_start);
+        difference = C_AST_MODEL_FIELD(declarations, token_count);
+        difference = C_AST_MODEL_FIELD(declarations, declarator_start);
+        difference = C_AST_MODEL_FIELD(declarations, declarator_count);
+        difference = C_AST_MODEL_FIELD(declarations, body_start);
+        difference = C_AST_MODEL_FIELD(declarations, body_token_count);
+        difference = C_AST_MODEL_FIELD(declarations, identifier_list_start);
+        difference = C_AST_MODEL_FIELD(declarations, identifier_list_token_count);
+        difference = C_AST_MODEL_FIELD(declarations, parameter_declaration_start);
+        difference = C_AST_MODEL_FIELD(declarations, parameter_declaration_token_count);
+        difference = C_AST_MODEL_FIELD(declarations, parameter_start);
+        difference = C_AST_MODEL_FIELD(declarations, parameter_count);
+        difference = C_AST_MODEL_FIELD(declarations, alignment_start);
+        difference = C_AST_MODEL_FIELD(declarations, alignment_count);
+        difference = C_AST_MODEL_FIELD(declarations, type.value);
+        difference = C_AST_MODEL_FIELD(declarations, base_type.value);
+        difference = C_AST_MODEL_FIELD(declarations, entity.value);
+        difference = C_AST_MODEL_FIELD(declarations, scope.value);
+        difference = C_AST_MODEL_FIELD(declarations, kind);
+        difference = C_AST_MODEL_FIELD(declarations, is_definition);
+        difference = C_AST_MODEL_FIELD(declarations, is_variadic);
+        difference = C_AST_MODEL_FIELD(declarations, is_constexpr);
+        difference = C_AST_MODEL_FIELD(declarations, is_identifier_list_definition);
+        difference = C_AST_MODEL_FIELD(declarations, is_gnu_inline_only);
+        difference = C_AST_MODEL_FIELD(declarations, is_declarator_continuation);
+    }
+    for (u32 index = 0; index < left->identifier_use_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_FIELD(identifier_uses, token_index);
+        difference = C_AST_MODEL_FIELD(identifier_uses, entity.value);
+        difference = C_AST_MODEL_FIELD(identifier_uses, scope.value);
+    }
+    for (u32 index = 0; index < left->member_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_NAME(members, name);
+        difference = C_AST_MODEL_SITE(members, location);
+        difference = C_AST_MODEL_FIELD(members, symbol);
+        difference = C_AST_MODEL_FIELD(members, type.value);
+        difference = C_AST_MODEL_FIELD(members, alignment_start);
+        difference = C_AST_MODEL_FIELD(members, alignment_count);
+        difference = C_AST_MODEL_FIELD(members, bit_width);
+        difference = C_AST_MODEL_FIELD(members, bit_width_token_start);
+        difference = C_AST_MODEL_FIELD(members, bit_width_token_count);
+        difference = C_AST_MODEL_FIELD(members, is_bit_field);
+        difference = C_AST_MODEL_FIELD(members, is_packed);
+        difference = C_AST_MODEL_FIELD(members, bit_width_resolved);
+        difference = C_AST_MODEL_FIELD(members, has_incomplete_type);
+    }
+    for (u32 index = 0; index < left->enum_member_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_NAME(enum_members, name);
+        difference = C_AST_MODEL_SITE(enum_members, location);
+        difference = C_AST_MODEL_FIELD(enum_members, symbol);
+        difference = C_AST_MODEL_FIELD(enum_members, token_index);
+        difference = C_AST_MODEL_FIELD(enum_members, enum_type.value);
+        difference = C_AST_MODEL_FIELD(enum_members, declaration_type.value);
+        difference = C_AST_MODEL_FIELD(enum_members, type.value);
+        difference = C_AST_MODEL_FIELD(enum_members, value);
+        difference = C_AST_MODEL_FIELD(enum_members, is_negative);
+        difference = C_AST_MODEL_FIELD(enum_members, is_published);
+        difference = C_AST_MODEL_FIELD(enum_members, is_prototype_scope);
+        difference = C_AST_MODEL_FIELD(enum_members, is_expression_defined);
+    }
+    for (u32 index = 0; index < left->parameter_count && !difference.length; index += 1)
+    {
+        difference = C_AST_MODEL_NAME(parameters, name);
+        difference = C_AST_MODEL_SITE(parameters, location);
+        difference = C_AST_MODEL_FIELD(parameters, type.value);
+        difference = C_AST_MODEL_FIELD(parameters, entity.value);
+        difference = C_AST_MODEL_FIELD(parameters, symbol);
+    }
+    *rows += (u64)left->type_count + left->entity_count + left->scope_count + left->array_bound_count + left->alignment_count + left->declaration_count +
+             left->identifier_use_count + left->member_count + left->enum_member_count + left->parameter_count;
+    return difference;
+}
+
+#undef C_AST_MODEL_SITE
+#undef C_AST_MODEL_NAME
+#undef C_AST_MODEL_FIELD
+
 #if !BUSTER_ANDROID && !BUSTER_IOS
 // Mobile test runs carry no repository tree, so the fixture-reading suites
 // below run only where the tests/ directory exists, as c_test.c's do.
@@ -2114,6 +2360,11 @@ enum
     C_AST_CORPUS_STATEMENT_USE_FLOOR = 20000,
     C_AST_CORPUS_HOSTED_STATEMENT_SEGMENT_FLOOR = 27000,
     C_AST_CORPUS_HOSTED_STATEMENT_USE_FLOOR = 100000,
+    // Analysis model rows compared field by field with and without the tree
+    // (c_ast_corpus_models_differ): about 125,700 from the fixtures on Linux
+    // x86-64 and about 497,400 in all with the frontend's own sources.
+    C_AST_CORPUS_MODEL_ROW_FLOOR = 100000,
+    C_AST_CORPUS_HOSTED_MODEL_ROW_FLOOR = 440000,
     // Block declarators the split took from their plan hints, and the plain
     // initializers among them: about 3,550 and 2,960 from the fixtures on
     // Linux x86-64, and about 19,000 and 18,100 in all with the frontend's
@@ -2185,6 +2436,9 @@ struct CAstCorpusTally
     u64 statement_declarator_declines;
     u64 statement_fallbacks;
     u64 statement_compared;
+    // Analysis model rows compared field by field in the same analyses
+    // (c_ast_corpus_models_differ).
+    u64 model_rows;
 };
 
 // c_parse_ast_from_tree on one input whose tree is complete, held to
@@ -2207,38 +2461,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_split(UnitTestArguments* argumen
     }
     tally->split_compared += derived.declaration_count;
     return result;
-}
-
-// The first difference between two analyses: the sizes of the type tables,
-// then the diagnostics (count, then each message, kind, severity and
-// location). Empty when there is none.
-BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_analyses_differ(Arena* arena, CAnalysisResult const* left, CAnalysisResult const* right)
-{
-    String8 difference = {0};
-    if (left->type_count != right->type_count || left->array_bound_count != right->array_bound_count || left->member_count != right->member_count ||
-        left->entity_count != right->entity_count)
-    {
-        difference = string_format(arena, S8("tables differ: {u32} types, {u32} bounds, {u32} members, {u32} entities without the tree; "
-                                             "{u32}, {u32}, {u32}, {u32} with it"),
-                                   left->type_count, left->array_bound_count, left->member_count, left->entity_count, right->type_count,
-                                   right->array_bound_count, right->member_count, right->entity_count);
-    }
-    else if (left->diagnostic_count != right->diagnostic_count || left->analysis_complete != right->analysis_complete)
-    {
-        difference = string_format(arena, S8("{u32} diagnostics (complete {u32}) without the tree, {u32} (complete {u32}) with it"), left->diagnostic_count,
-                                   (u32)left->analysis_complete, right->diagnostic_count, (u32)right->analysis_complete);
-    }
-    for (u32 index = 0; index < left->diagnostic_count && !difference.length; index += 1)
-    {
-        CDiagnostic const* a = left->diagnostics + index;
-        CDiagnostic const* b = right->diagnostics + index;
-        if (!string_equal(a->message, b->message) || a->kind != b->kind || a->severity != b->severity || a->location.offset != b->location.offset ||
-            a->location.line != b->location.line || a->location.column != b->location.column || a->location.file != b->location.file)
-        {
-            difference = string_format(arena, S8("diagnostic {u32} differs: '{S8}' without the tree, '{S8}' with it"), index, a->message, b->message);
-        }
-    }
-    return difference;
 }
 
 // The tree expression typer (c_ast_types.c, #3102) on one input whose tree is
@@ -2275,6 +2497,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
         // The body binder followed the tree's statement plans in the second
         // analysis; its bindings must be the token walk's, field by field.
         difference = c_ast_corpus_bindings_differ(arguments->arena, &plain, &typed);
+        if (!difference.length)
+        {
+            difference = c_ast_corpus_models_differ(arguments->arena, &plain, &typed, &tally->model_rows);
+        }
         BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(arguments->arena, S8("{S8}: statement plan: {S8}"), label, difference));
         tally->statement_bodies += statements.bodies;
         tally->statement_segments += statements.segments;
@@ -2695,6 +2921,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_sources(UnitTestArguments* argum
     BUSTER_TEST(arguments, !hosted || tally->type_answers >= C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR);
     BUSTER_TEST(arguments, !hosted || (tally->statement_segments >= C_AST_CORPUS_HOSTED_STATEMENT_SEGMENT_FLOOR &&
                                        tally->statement_uses >= C_AST_CORPUS_HOSTED_STATEMENT_USE_FLOOR));
+    BUSTER_TEST(arguments, !hosted || tally->model_rows >= C_AST_CORPUS_HOSTED_MODEL_ROW_FLOOR);
     BUSTER_TEST(arguments, !hosted || (tally->statement_declarators >= C_AST_CORPUS_HOSTED_STATEMENT_DECLARATOR_FLOOR &&
                                        tally->statement_initializers >= C_AST_CORPUS_HOSTED_STATEMENT_INITIALIZER_FLOOR &&
                                        tally->statement_declarator_declines == 0));
@@ -2735,6 +2962,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
     BUSTER_TEST(arguments, tally.split_records >= C_AST_CORPUS_SPLIT_RECORD_FLOOR && tally.split_compared >= tally.split_records);
     BUSTER_TEST(arguments, tally.statement_segments >= C_AST_CORPUS_STATEMENT_SEGMENT_FLOOR && tally.statement_uses >= C_AST_CORPUS_STATEMENT_USE_FLOOR &&
                                tally.statement_compared >= tally.statement_uses && tally.statement_hints);
+    BUSTER_TEST(arguments, tally.model_rows >= C_AST_CORPUS_MODEL_ROW_FLOOR);
     BUSTER_TEST(arguments, tally.statement_declarators >= C_AST_CORPUS_STATEMENT_DECLARATOR_FLOOR &&
                                tally.statement_initializers >= C_AST_CORPUS_STATEMENT_INITIALIZER_FLOOR && tally.statement_declarator_declines == 0);
 #if BUSTER_LINUX && !BUSTER_ANDROID
@@ -4336,6 +4564,64 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statements(UnitTestArguments* argu
         c_test_release_preprocess_arenas(); \
     } while (0)
 
+// The declaration hints' specifier facts (c_parse_plan_declarators, #3102)
+// on chosen bodies, in every layout: storage classes in every position the
+// walker folds (a list, a typedef, a statement expression's own static, a
+// `for` declaration, an initializer that spells none), and `auto` or
+// `__auto_type` words where the auto-inference scan reads them, the
+// specifiers and the first declarator, as a parameter's specifier included.
+// Each analysis with the tree must equal the analysis without it, diagnostics
+// and model rows alike.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_declaration_hints(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const sources[] = {
+        S8("int g(int);\n"
+           "void f(int c)\n"
+           "{\n"
+           "    static int s = 1, t;\n"
+           "    extern int x;\n"
+           "    register int r = c;\n"
+           "    typedef int T;\n"
+           "    T u = s + g(r);\n"
+           "    static __thread int w;\n"
+           "    int v = ({ static int z = 2; z + t + w; });\n"
+           "    for (register int i = 0; i < c; i += 1) { u += i; }\n"
+           "    (void)u; (void)v; (void)x;\n"
+           "}\n"),
+        S8("void f(int c) { __auto_type a = c; auto int b = c; (void)a; (void)b; }\n"),
+        S8("void f(void) { int (*h)(__auto_type x); (void)h; }\n"),
+        S8("void f(int c) { int (*h)(int), k = c; __typeof__(c) m = k; (void)h; (void)m; }\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 label = string_format(temporary.arena, S8("declaration hint case {u32}, layout {u32}"), index, layout);
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, sources[index], C_PREPROCESS_DIALECT_GNU17);
+            CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
+            if (BUSTER_REQUIRE(arguments, preprocess.error_count == 0 && built.complete))
+            {
+                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+                CAstStatementStatistics statistics = {0};
+                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                syntax.ast = &built.ast;
+                syntax.ast_statement_statistics = &statistics;
+                CAnalysisResult planned = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &planned);
+                u64 rows = 0;
+                difference = difference.length ? difference : c_ast_corpus_models_differ(temporary.arena, &plain, &planned, &rows);
+                BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(temporary.arena, S8("{S8}: {S8}"), label, difference));
+                BUSTER_TEST_RAW(arguments, statistics.bodies == 1 && statistics.fallbacks == 0, label);
+            }
+            c_ast_release(&built.ast);
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult c_ast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4361,6 +4647,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_AST_TEST_FIXTURE(arguments, c_ast_test_types);
     C_AST_TEST_FIXTURE(arguments, c_ast_test_split);
     C_AST_TEST_FIXTURE(arguments, c_ast_test_statements);
+    C_AST_TEST_FIXTURE(arguments, c_ast_test_declaration_hints);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     C_AST_TEST_FIXTURE(arguments, c_ast_test_fixture_sweep);
     C_AST_TEST_FIXTURE(arguments, c_ast_test_corpus);
