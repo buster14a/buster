@@ -85,6 +85,23 @@ expect_contains '--target=x86_64-linux-android35 -O2 -fPIC -shared -nostdlib' "$
 expect_contains "ide cc -target x86_64-linux-android -nostdinc -g0 $repo_root/android/runtime_order/probe.c $work/indirect.o" "$FAKE_RUNTIME_ORDER_LOG"
 [[ -f $work/runtime_order_probe && -f $work/libruntime_order_dependency.so ]]
 
+# Without a supplied ide, the selected native driver generates and builds one
+# under the work directory; this script runs no CMake itself.
+cat >"$fake_bin/driver" <<'FAKE_DRIVER'
+#!/usr/bin/env bash
+printf 'driver %s\n' "$*" >>"$FAKE_RUNTIME_ORDER_LOG"
+if [[ $1 == build ]]; then
+    mkdir -p "$3/Debug"
+    cp "$(dirname "$0")/ide" "$3/Debug/ide"
+fi
+FAKE_DRIVER
+chmod +x "$fake_bin/driver"
+BUSTER_ANDROID_HOST_IDE= BUSTER_ANDROID_HOST_DRIVER=$fake_bin/driver bash "$script" build "$test_root/driven" >"$test_root/driven.out" 2>&1
+expect_contains 'ANDROID_RUNTIME_ORDER_RESULT mode=build phase=done status=0' "$test_root/driven.out"
+expect_contains "driver generate --build-directory $test_root/driven/host-ide --linker DEFAULT --no-include-tests" "$FAKE_RUNTIME_ORDER_LOG"
+expect_contains "driver build --build-directory $test_root/driven/host-ide --config Debug -t ide" "$FAKE_RUNTIME_ORDER_LOG"
+[[ -f $test_root/driven/runtime_order_probe ]]
+
 # A missing NDK clang fails before any build.
 if BUSTER_ANDROID_RUNTIME_ORDER_CLANG=$test_root/missing-clang bash "$script" build "$test_root/no-clang" >"$test_root/no-clang.out" 2>&1; then
     echo "assertion failed: a missing NDK clang built the probe" >&2

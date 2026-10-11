@@ -327,12 +327,23 @@ if [[ $android_aarch64_package == 1 ]]; then
     echo "TIMING_ANDROID aarch64_package_seconds=$((SECONDS - aarch64_started))"
 fi
 
+# A probe that fails to build is recorded like one that fails to run: the
+# batch fails, and both payloads still run.
+runtime_order_built=0
 if [[ $android_runtime_order == 1 ]]; then
     android_phase=runtime-order-build
     android_config=none
     runtime_order_started=$SECONDS
     echo "Building the Android runtime-order probe while the emulator boots"
-    ANDROID_NDK_HOME="$android_ndk" bash "$android_runtime_order_script" build "$android_runtime_order_directory"
+    if ANDROID_NDK_HOME="$android_ndk" bash "$android_runtime_order_script" build "$android_runtime_order_directory"; then
+        runtime_order_built=1
+    else
+        runtime_order_status=$?
+        echo "error: Android runtime-order probe build failed with status $runtime_order_status" >&2
+        if [[ $runtime_order_status -eq 130 || $runtime_order_status -eq 143 ]]; then
+            exit "$runtime_order_status"
+        fi
+    fi
     echo "TIMING_ANDROID runtime_order_build_seconds=$((SECONDS - runtime_order_started))"
 fi
 
@@ -366,7 +377,10 @@ android_test_args=${BUSTER_ANDROID_TEST_ARGUMENT_STRING:-"test --verbose=1 --ci=
 overall_status=0
 first_failed_config=none
 # A wrong start-up order is a failed batch, but the compiler payloads still run.
-if [[ $android_runtime_order == 1 ]]; then
+if [[ $android_runtime_order == 1 && $runtime_order_built == 0 ]]; then
+    overall_status=1
+    first_failed_config=runtime-order
+elif [[ $android_runtime_order == 1 ]]; then
     android_phase=runtime-order
     android_config=runtime-order
     runtime_order_started=$SECONDS

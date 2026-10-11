@@ -1358,6 +1358,17 @@ jobs:
             --package "$BUSTER_ANDROID_SYSTEM_IMAGE"
           printf '%s\n' "$ANDROID_HOME/emulator" "$ANDROID_HOME/platform-tools" >>"$GITHUB_PATH"
 
+      - name: Bootstrap the build driver (Android runtime order)
+        if: ${{ matrix.os == 'android' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Hosted jobs build build.c only with Clang (the documented CI
+          # bootstrap exception); android/runtime_order.sh uses this driver to
+          # generate and build its host ide.
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
+            build.c -o "$RUNNER_TEMP/buster-android-build-driver"
+
       - name: Test (Android)
         id: android
         if: ${{ matrix.os == 'android' }}
@@ -1371,6 +1382,7 @@ jobs:
           BUSTER_ANDROID_EMULATOR_LOG: ${{ runner.temp }}/buster-ci/android-emulator.log
           BUSTER_ANDROID_EMULATOR_STARTED_MARKER: ${{ runner.temp }}/buster-ci/android-emulator.started
           BUSTER_ANDROID_RUNTIME_ORDER: "1"
+          BUSTER_ANDROID_HOST_DRIVER: ${{ runner.temp }}/buster-android-build-driver
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"

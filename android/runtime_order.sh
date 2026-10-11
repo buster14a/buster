@@ -5,9 +5,11 @@
 # the host and run from /data/local/tmp through `adb shell` instead.
 #
 #   runtime_order.sh build <work-directory>
-#       Builds a host `ide` (Debug, no tests) unless BUSTER_ANDROID_HOST_IDE
-#       names one, then links android/runtime_order/probe.c with Buster against
-#       a shared library and an IFUNC object built by the NDK's clang.
+#       Unless BUSTER_ANDROID_HOST_IDE names one, has the native build driver
+#       (BUSTER_ANDROID_HOST_DRIVER, else build.sh) generate and build a host
+#       `ide` (Debug, no tests) under the work directory, then links
+#       android/runtime_order/probe.c with Buster against a shared library and
+#       an IFUNC object built by the NDK's clang.
 #   runtime_order.sh run <adb> <work-directory>
 #       Pushes the probe and its library, runs it, and requires its
 #       `status=ok` record and exit status 0.
@@ -65,24 +67,13 @@ build_probe() {
 
     phase=host-ide
     if [[ -z $host_ide ]]; then
-        # The probe only needs the linker, so a Debug tree without the test
-        # suite keeps this inside the emulator boot it overlaps.
-        cmake --warn-uninitialized -Werror=dev \
-            -B "$host_build_directory" \
-            -S "$repo_root" \
-            -G "Ninja Multi-Config" \
-            -DCMAKE_C_COMPILER="${BUSTER_ANDROID_HOST_CC:-clang}" \
-            -DCMAKE_DEFAULT_BUILD_TYPE=Debug \
-            -DCMAKE_CONFIGURATION_TYPES="Debug;Release" \
-            -DCMAKE_LINKER_TYPE=DEFAULT \
-            -DBUSTER_CI=ON \
-            -DBUSTER_OPTIMIZE=OFF \
-            -DBUSTER_SANITIZE=OFF \
-            -DBUSTER_FUZZ_AVAILABLE=OFF \
-            -DBUSTER_INCLUDE_TESTS=OFF \
-            -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF \
-            -DBUSTER_DEVELOPER_TARGETS=OFF
-        cmake --build "$host_build_directory" --config Debug --target ide
+        # build.c owns the build: this only selects the driver. The probe needs
+        # only the linker, so a Debug tree without the test suite keeps this
+        # inside the emulator boot it overlaps.
+        local driver=${BUSTER_ANDROID_HOST_DRIVER:-$repo_root/build.sh}
+        "$driver" generate --build-directory "$host_build_directory" --linker DEFAULT \
+            --no-include-tests --no-developer-targets --no-check-optional-warnings
+        "$driver" build --build-directory "$host_build_directory" --config Debug -t ide
         host_ide=$host_build_directory/Debug/ide
     fi
 
