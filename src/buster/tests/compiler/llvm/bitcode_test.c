@@ -4163,7 +4163,6 @@ struct LlvmBitcodeTestAlias
     u32 visibility;
 };
 
-#if !BUSTER_ANDROID && !BUSTER_IOS
 // Inspect MODULE_CODE_ALIAS (14) records independently of the writer: each
 // version-1 record is [value type, address space, aliasee, linkage,
 // visibility, DLL storage, thread-local], and its aliasee must be an earlier
@@ -4246,18 +4245,49 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_aliases(ByteSlice bytes, LlvmBitcodeT
     }
     return !reader.failed && saw_module && !in_module && alias_count == expected_count;
 }
-#endif
 
 // __attribute__((alias)) used to leave LLVM bitcode as a declaration of the
 // alias name, so an independent link failed with an undefined reference
 // (#1338). Both frontend forms must emit one alias record per alias,
 // deterministically, and Clang must link and run the unit at -O0 and -O2.
+// The unit is embedded and written to scratch so that the record checks also
+// run on Android and iOS, whose bundles carry no source fixtures. It covers
+// function and data aliases, an alias used before its declaration with a
+// static target, weak, hidden and internal aliases, and address equality;
+// main returns 0 only when every alias is its target.
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_alias(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-#if !BUSTER_ANDROID && !BUSTER_IOS
-    // Mobile app bundles contain tests/ inputs, not additional source fixtures.
-    String8 source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_alias.c");
+    String8 text = S8(
+        "int target(void) { return 1; }\n"
+        "int other(void) __attribute__((alias(\"target\")));\n"
+        "\n"
+        "int used_early(void);\n"
+        "int early(void) { return used_early(); }\n"
+        "static int local_target(void) { return 30; }\n"
+        "int used_early(void) __attribute__((alias(\"local_target\")));\n"
+        "\n"
+        "int counter = 5;\n"
+        "extern int counter_alias __attribute__((alias(\"counter\")));\n"
+        "int table[3] = {1, 2, 3};\n"
+        "extern int table_alias[3] __attribute__((alias(\"table\")));\n"
+        "\n"
+        "int weak_other(void) __attribute__((weak, alias(\"target\")));\n"
+        "__attribute__((visibility(\"hidden\"))) int hidden_other(void) __attribute__((alias(\"target\")));\n"
+        "static int local_other(void) __attribute__((alias(\"target\")));\n"
+        "\n"
+        "int (*saved)(void) = other;\n"
+        "int* counter_address = &counter_alias;\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    counter_alias += 4;\n"
+        "    table_alias[1] = 7;\n"
+        "    int same_function = saved == target && &weak_other != 0;\n"
+        "    int same_data = counter_address == &counter && table_alias == table;\n"
+        "    int calls = other() + early() + weak_other() + hidden_other() + local_other();\n"
+        "    return same_function && same_data && calls == 34 && counter == 9 && table[1] == 7 ? 0 : 1;\n"
+        "}\n");
     // Fixture order: other, used_early, counter_alias, table_alias,
     // weak_other (weak = 16), hidden_other (hidden = 1), local_other
     // (internal = 3).
@@ -4274,7 +4304,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_alias(UnitTestArguments* ar
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         Arena* arena = temporary.arena;
+        String8 source = buster_test_temporary_path(arena, S8("buster-llvm-alias"), S8(".c"));
         String8 bitcode = buster_test_temporary_path(arena, S8("buster-llvm-alias"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(text)));
         String8 command[] = {S8("-emit-llvm"), S8("-target"), target, S8("-g0"), frontends[frontend], S8("-o"), bitcode, source};
         CompilerDriverResult emitted = compiler_driver_execute_invocation(arena,
             compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
@@ -4311,9 +4343,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_alias(UnitTestArguments* ar
 #endif
         scratch_end(temporary);
     }
-#else
-    BUSTER_UNUSED(arguments);
-#endif
     return result;
 }
 

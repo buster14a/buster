@@ -105,12 +105,13 @@ alias symbol's own declaration rows are not emitted. An alias whose target is
 not a function or global definition in the emitted module fails with
 `LLVM bitcode alias target is not a function or global definition`; an
 indirect alias (`__attribute__((ifunc))`) still fails with `LLVM bitcode does
-not represent ifunc symbols`. `llvm_bitcode_test_alias` reads the alias
-records of `basic_c_llvm_alias.c` independently in both frontend forms,
-checks deterministic repeated emission, and links and runs the unit through
-Clang at `-O0` and `-O2`: function and data aliases, an alias used before its
-declaration with a static target, weak, hidden and internal aliases, and
-address equality with the target.
+not represent ifunc symbols`. `llvm_bitcode_test_alias` writes its embedded
+C unit to test scratch, so the record checks also run in the Android and iOS
+bundles, and reads the alias records independently in both frontend forms,
+checks deterministic repeated emission, and on Linux links and runs the unit
+through Clang at `-O0` and `-O2`: function and data aliases, an alias used
+before its declaration with a static target, weak, hidden and internal
+aliases, and address equality with the target.
 
 Canonical scalar integer leading-zero count, trailing-zero count, and
 population count emit overloaded `llvm.ctlz.iN`, `llvm.cttz.iN`, and
