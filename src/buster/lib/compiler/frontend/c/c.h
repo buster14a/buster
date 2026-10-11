@@ -2035,8 +2035,9 @@ typedef enum CParserTreeFallback
     // A parenthesized specifier (typeof, _Atomic(T), _Alignas, _BitInt) or
     // an enum's fixed underlying type.
     C_PARSER_TREE_FALLBACK_SPECIFIERS,
-    // Redundant parentheses (#3215's family), attributes inside the
-    // declarator, a function derivation followed by a suffix, or no name.
+    // Redundant parentheses after a typedef or tag name (#3215's family),
+    // attributes inside the declarator, a function derivation followed by a
+    // suffix, or no name.
     C_PARSER_TREE_FALLBACK_DECLARATOR,
     // An old-style definition with a declaration list.
     C_PARSER_TREE_FALLBACK_OLD_STYLE,
