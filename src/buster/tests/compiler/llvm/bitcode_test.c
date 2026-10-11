@@ -4156,6 +4156,196 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_consumers(UnitTestArgu
     return result;
 }
 
+typedef struct LlvmBitcodeTestAlias LlvmBitcodeTestAlias;
+struct LlvmBitcodeTestAlias
+{
+    u32 linkage;
+    u32 visibility;
+};
+
+// Inspect MODULE_CODE_ALIAS (14) records independently of the writer: each
+// version-1 record is [value type, address space, aliasee, linkage,
+// visibility, DLL storage, thread-local], and its aliasee must be an earlier
+// global (7) or function (8) record with the same value type. The writer
+// emits every global before every function, so a module value id is that
+// record's position.
+BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_aliases(ByteSlice bytes, LlvmBitcodeTestAlias* expected, u32 expected_count)
+{
+    LlvmBitcodeTestReader reader = {.bytes = bytes, .bit = 32};
+    u32 code_width = 2;
+    u64 entity_types[64];
+    u32 entity_count = 0;
+    u32 alias_count = 0;
+    bool in_module = false;
+    bool saw_module = false;
+    while (!reader.failed && reader.bit < bytes.length * 8)
+    {
+        u64 code = llvm_bitcode_test_bits(&reader, code_width);
+        if (code == 1)
+        {
+            u64 block = llvm_bitcode_test_vbr(&reader, 8);
+            u64 width = llvm_bitcode_test_vbr(&reader, 4);
+            reader.bit = (reader.bit + 31) & ~UINT64_C(31);
+            u64 words = llvm_bitcode_test_bits(&reader, 32);
+            if (!in_module && !saw_module && block == 8 && width > 0 && width <= 32)
+            {
+                in_module = true;
+                saw_module = true;
+                code_width = (u32)width;
+            }
+            else if (reader.bit <= bytes.length * 8 && words <= (bytes.length * 8 - reader.bit) / 32)
+            {
+                reader.bit += words * 32;
+            }
+            else
+            {
+                reader.failed = true;
+            }
+        }
+        else if (code == 0 && in_module)
+        {
+            reader.bit = (reader.bit + 31) & ~UINT64_C(31);
+            in_module = false;
+            code_width = 2;
+        }
+        else if (code == 3 && in_module)
+        {
+            u64 record = llvm_bitcode_test_vbr(&reader, 6);
+            u64 count = llvm_bitcode_test_vbr(&reader, 6);
+            u64 operands[8] = {0};
+            for (u64 index = 0; index < count && !reader.failed; index += 1)
+            {
+                u64 operand = llvm_bitcode_test_vbr(&reader, 6);
+                if (index < BUSTER_ARRAY_LENGTH(operands))
+                {
+                    operands[index] = operand;
+                }
+            }
+            if ((record == 7 || record == 8) && !reader.failed)
+            {
+                // An entity after an alias would shift the alias value ids.
+                reader.failed = alias_count != 0 || entity_count >= BUSTER_ARRAY_LENGTH(entity_types);
+                if (!reader.failed)
+                {
+                    entity_types[entity_count++] = operands[0];
+                }
+            }
+            else if (record == 14 && !reader.failed)
+            {
+                u32 index = alias_count++;
+                reader.failed = count != 7 || index >= expected_count || operands[1] != 0 || operands[2] >= entity_count ||
+                                entity_types[operands[2]] != operands[0] || operands[3] != expected[index].linkage ||
+                                operands[4] != expected[index].visibility || operands[5] != 0 || operands[6] != 0;
+            }
+        }
+        else
+        {
+            reader.failed = true;
+        }
+    }
+    return !reader.failed && saw_module && !in_module && alias_count == expected_count;
+}
+
+// __attribute__((alias)) used to leave LLVM bitcode as a declaration of the
+// alias name, so an independent link failed with an undefined reference
+// (#1338). Both frontend forms must emit one alias record per alias,
+// deterministically, and Clang must link and run the unit at -O0 and -O2.
+// The unit is embedded and written to scratch so that the record checks also
+// run on Android and iOS, whose bundles carry no source fixtures. It covers
+// function and data aliases, an alias used before its declaration with a
+// static target, weak, hidden and internal aliases, and address equality;
+// main returns 0 only when every alias is its target.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_alias(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 text = S8(
+        "int target(void) { return 1; }\n"
+        "int other(void) __attribute__((alias(\"target\")));\n"
+        "\n"
+        "int used_early(void);\n"
+        "int early(void) { return used_early(); }\n"
+        "static int local_target(void) { return 30; }\n"
+        "int used_early(void) __attribute__((alias(\"local_target\")));\n"
+        "\n"
+        "int counter = 5;\n"
+        "extern int counter_alias __attribute__((alias(\"counter\")));\n"
+        "int table[3] = {1, 2, 3};\n"
+        "extern int table_alias[3] __attribute__((alias(\"table\")));\n"
+        "\n"
+        "int weak_other(void) __attribute__((weak, alias(\"target\")));\n"
+        "__attribute__((visibility(\"hidden\"))) int hidden_other(void) __attribute__((alias(\"target\")));\n"
+        "static int local_other(void) __attribute__((alias(\"target\")));\n"
+        "\n"
+        "int (*saved)(void) = other;\n"
+        "int* counter_address = &counter_alias;\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    counter_alias += 4;\n"
+        "    table_alias[1] = 7;\n"
+        "    int same_function = saved == target && &weak_other != 0;\n"
+        "    int same_data = counter_address == &counter && table_alias == table;\n"
+        "    int calls = other() + early() + weak_other() + hidden_other() + local_other();\n"
+        "    return same_function && same_data && calls == 34 && counter == 9 && table[1] == 7 ? 0 : 1;\n"
+        "}\n");
+    // Fixture order: other, used_early, counter_alias, table_alias,
+    // weak_other (weak = 16), hidden_other (hidden = 1), local_other
+    // (internal = 3).
+    LlvmBitcodeTestAlias expected[] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}, {16, 0}, {0, 1}, {3, 0}};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+    String8 compiler = executable_resolve_in_path(arguments->arena, S8("clang"));
+    BUSTER_TEST(arguments, compiler.length != 0);
+    String8 target = BUSTER_CPU_ARCH_X86_64 ? S8("x86_64-linux") : S8("aarch64-linux");
+#else
+    String8 target = S8("x86_64-linux");
+#endif
+    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 source = buster_test_temporary_path(arena, S8("buster-llvm-alias"), S8(".c"));
+        String8 bitcode = buster_test_temporary_path(arena, S8("buster-llvm-alias"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+        String8 command[] = {S8("-emit-llvm"), S8("-target"), target, S8("-g0"), frontends[frontend], S8("-o"), bitcode, source};
+        CompilerDriverResult emitted = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        bool success = emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success;
+        BUSTER_TEST_RAW(arguments, success, emitted.diagnostic);
+        command[6] = buster_test_temporary_path(arena, S8("buster-llvm-alias-repeat"), S8(".bc"));
+        CompilerDriverResult repeated = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        bool repeated_success = repeated.error == COMPILER_DRIVER_ERROR_NONE && repeated.has_llvm_bitcode && repeated.llvm_bitcode.success;
+        BUSTER_TEST_RAW(arguments, repeated_success, repeated.diagnostic);
+        if (success && repeated_success)
+        {
+            BUSTER_TEST(arguments, emitted.llvm_bitcode.bytes.length == repeated.llvm_bitcode.bytes.length &&
+                                  !memcmp(emitted.llvm_bitcode.bytes.pointer, repeated.llvm_bitcode.bytes.pointer, emitted.llvm_bitcode.bytes.length));
+            BUSTER_TEST(arguments, llvm_bitcode_test_aliases(emitted.llvm_bitcode.bytes, expected, BUSTER_ARRAY_LENGTH(expected)));
+        }
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+        for (u32 optimization = 0; success && compiler.length && optimization < 2; optimization += 1)
+        {
+            String8 level = optimization ? S8("-O2") : S8("-O0");
+            String8 executable = buster_test_temporary_path(arena, S8("buster-llvm-alias"), S8(""));
+            String8 stage = string_format(arena, S8("alias {S8} {S8}"), frontends[frontend], level);
+            ProcessWaitResult completed;
+            String8 link[] = {compiler, level, bitcode, S8("-o"), executable};
+            bool linked = llvm_bitcode_test_weak_process(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link), stage, (String8){0}, &completed);
+            BUSTER_TEST(arguments, linked);
+            if (linked)
+            {
+                String8 run[] = {executable};
+                BUSTER_TEST(arguments, llvm_bitcode_test_weak_process(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run), stage, (String8){0},
+                                                                     &completed));
+            }
+        }
+#endif
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_relocated_globals(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4899,6 +5089,7 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_integer_encoding);
     BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_weak_records);
     BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_weak_consumers);
+    BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_alias);
     BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_scalar_abi_wire);
     BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_scalar_abi_runtime);
 

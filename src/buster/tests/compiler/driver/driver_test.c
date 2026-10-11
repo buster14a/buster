@@ -4348,6 +4348,58 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_ifunc_attribute(UnitTest
     return result;
 }
 
+// A finished WebAssembly module and an eBPF object have no second name for a
+// definition, so each direct emitter refuses an __attribute__((alias)) by name
+// instead of dropping it: Wasm used to turn the call into an unresolved
+// import, eBPF to leave the name out of the object (#1338). The control is the
+// same program calling the target directly, which both emitters accept.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_alias_direct_emitters(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("int target(void) { return 1; }\nint other(void) __attribute__((alias(\"target\")));\nint main(void) { return other() == 1 ? 0 : 1; }\n"),
+        S8("int target(void) { return 1; }\nint main(void) { return target() == 1 ? 0 : 1; }\n"),
+    };
+    String8 targets[] = {S8("wasm64-unknown-freestanding"), S8("wasm32-wasip1"), S8("bpfel-unknown-linux")};
+    String8 refusals[] = {S8("WebAssembly output does not represent symbol aliases"), S8("WebAssembly output does not represent symbol aliases"),
+                          S8("eBPF output does not represent symbol aliases")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                String8 input = buster_test_temporary_path(arena, S8("buster-alias-direct-emitter"), S8(".c"));
+                String8 output = buster_test_temporary_path(arena, S8("buster-alias-direct-emitter"), S8(".o"));
+                bool aliased = source_index == 0;
+                if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(sources[source_index]))))
+                {
+                    String8 command[] = {S8("-target"), targets[target_index], S8("-nostdinc"), S8("-g0"), forms[form], S8("-c"), S8("-o"), output, input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 detail = string_format(arena, S8("target={S8} form={S8} aliased={u32}\ndiagnostic={S8}"), targets[target_index], forms[form],
+                                                   (u32)aliased, compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, (compiled.error == COMPILER_DRIVER_ERROR_NONE) == !aliased, detail);
+                    if (aliased)
+                    {
+                        BUSTER_TEST_RAW(arguments, string_first_sequence(compiled.diagnostic, refusals[target_index]) != BUSTER_STRING_NO_MATCH, detail);
+                        BUSTER_TEST_RAW(arguments, !compiled.has_wasm && !compiled.has_ebpf && !compiled.has_object, detail);
+                    }
+                    else
+                    {
+                        BUSTER_TEST_RAW(arguments, target_index == 2 ? compiled.has_ebpf : compiled.has_wasm, detail);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equivalence(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5234,7 +5286,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_declarator_group_cases(UnitTe
     return result;
 }
 
-// Declarators wrapped in redundant parentheses (GitHub #3215). The split read
+// Declarators wrapped in redundant parentheses (GitHub #3215, #3368). The split read
 // `int ((*pq))(int) = f;` as a function and `int (gd(int a)) { ... }` with
 // the declaration after it as one object, so both programs failed with an
 // undeclared name. The pilot publishes the split from the tree for all but
@@ -5252,6 +5304,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_gro
             "int main(void) { tp = id; return a + b + c[1] + (d != 0) + e() + (g != 0) + t[1] + tp(0) + (int)sizeof(t) - 8; }\n"),
          true},
         {S8("int (gv(int a, ...)) { return a; }\nint main(void) { return gv(0, 1, 2); }\n"), false},
+        // #3368: an old-style definition whose name sits in a redundant
+        // group; the split refuses its declaration list.
+        {S8("int (k(a)) int a; { return a; }\nint main(void) { return k(0); }\n"), false},
+        {S8("static int v;\nint z(void) { return 0; }\nint (k2)(a) int a; { return a; }\nint (*(k3(a))) int a; { v = a; return &v; }\n"
+            "int (*(k4(a)))(void) int a; { (void)a; return z; }\nint (k5(a, b)) int a; char *b; { return a + (b != 0); }\n"
+            "double ((k6)(a, d)) float d; int a; { return a + d; }\n"
+            "int main(void) { return k2(0) + *k3(0) + k4(1)() + k5(0, 0) + (int)k6(1, -1.0f); }\n"),
+         false},
+        {S8("typedef int a;\nint (k(a)) { return 0; }\nint x, (kd(int c));\nint (kd(int c)) { return c; }\n"
+            "int main(void) { return k(5) + kd(x); }\n"),
+         true},
     };
     return compiler_driver_declarator_group_cases(arguments, cases, BUSTER_ARRAY_LENGTH(cases));
 }
@@ -6751,6 +6814,53 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_symbolic_pages(U
                     }
                     BUSTER_TEST(arguments, accepted != 0 && rejected != 0);
                 }
+            }
+        }
+        os_file_delete(input);
+        os_file_delete(output);
+    }
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// The issue #3192 repro: a standalone ELF unit's `adrp Xd, :got:sym` and
+// `ldr Xt, [Xn, :got_lo12:sym]` reach the object as R_AARCH64_ADR_GOT_PAGE
+// and R_AARCH64_LD64_GOT_LO12_NC with a zero addend, and read back the same.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_got_operands(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("got-operands"), S8(".s"));
+    String8 output = buster_test_temporary_path(arena, S8("got-operands"), S8(".o"));
+    String8 source = S8(".text\n.globl f\nf:\nadrp x0, :got:ext_data\nldr x0, [x0, :got_lo12:ext_data]\nret\n");
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 command[] = {S8("-target"), S8("aarch64-unknown-linux"), S8("-c"), input, S8("-o"), output};
+        CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        ObjectRelocationKind const kinds[] = {OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21, OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12};
+        BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object &&
+            assembled.object.relocation_count == BUSTER_ARRAY_LENGTH(kinds), assembled.diagnostic);
+        if (assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object &&
+            assembled.object.relocation_count == BUSTER_ARRAY_LENGTH(kinds))
+        {
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(kinds); index += 1)
+            {
+                ObjectRelocation relocation = assembled.object.relocations[index];
+                BUSTER_TEST_RAW(arguments, relocation.kind == kinds[index] && relocation.offset == 4 * index && relocation.addend == 0 &&
+                    relocation.symbol < assembled.object.symbol_count &&
+                    string_equal(assembled.object.symbols[relocation.symbol].name, S8("ext_data")), source);
+            }
+            ObjectFile reread = object_read(arena, file_read(arena, output, (FileReadOptions){0}), assembled.object.target);
+            BUSTER_TEST(arguments, reread.error == OBJECT_ERROR_NONE && reread.relocation_count == BUSTER_ARRAY_LENGTH(kinds));
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(kinds) && reread.relocation_count == BUSTER_ARRAY_LENGTH(kinds); index += 1)
+            {
+                BUSTER_TEST(arguments, reread.relocations[index].kind == kinds[index] && reread.relocations[index].offset == 4 * index);
             }
         }
         os_file_delete(input);
@@ -24366,6 +24476,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_pic_outputs(Unit
                 BUSTER_TEST(arguments, text.pointer && string_first_sequence(printed, S8("adrp x0, :got:pic_ext_value")) != BUSTER_STRING_NO_MATCH);
                 BUSTER_TEST(arguments, string_first_sequence(printed, S8(":got_lo12:pic_ext_value")) != BUSTER_STRING_NO_MATCH);
                 BUSTER_TEST(arguments, string_first_sequence(printed, S8("add x0, x0, :lo12:pic_static_value")) != BUSTER_STRING_NO_MATCH);
+                // The printed unit is itself accepted (#3192): its GOT lines
+                // assemble back to the same relocation pair.
+                String8 printed_input = buster_test_temporary_path(arena, S8("buster-aarch64-pic-printed"), S8(".s"));
+                String8 printed_output = buster_test_temporary_path(arena, S8("buster-aarch64-pic-reassembled"), S8(".o"));
+                if (text.pointer && file_write(printed_input, text))
+                {
+                    String8 reassemble[] = {S8("-target"), S8("aarch64-linux"), S8("-c"), printed_input, S8("-o"), printed_output};
+                    CompilerDriverResult reassembled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(reassemble)));
+                    BUSTER_TEST_RAW(arguments, reassembled.error == COMPILER_DRIVER_ERROR_NONE && reassembled.has_object,
+                                    reassembled.diagnostic);
+                    u32 pages = compiler_driver_test_symbol_relocations(&reassembled.object, S8("pic_ext_value"),
+                                                                        OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21);
+                    u32 loads = compiler_driver_test_symbol_relocations(&reassembled.object, S8("pic_ext_value"),
+                                                                        OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12);
+                    BUSTER_TEST_RAW(arguments, pages != 0 && pages == loads, printed);
+                }
+                (void)os_file_delete(printed_input);
+                (void)os_file_delete(printed_output);
             }
             (void)os_file_delete(output);
             scratch_end(scope);
@@ -30784,6 +30913,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_constant_short_circuit_verification);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembler_language);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_symbolic_pages);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_got_operands);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bare_dwarf_sections);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_statements);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_quoted_assembly_round_trip);
@@ -30948,6 +31078,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_ownership);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_ifunc_attribute);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_alias_direct_emitters);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_c_ast_pilot);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_redundant_declarator_groups);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_name_declarator_groups);
