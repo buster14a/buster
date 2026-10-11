@@ -318,7 +318,8 @@ Under `-v` the driver prints six rows with the other verbose counters:
   declarator_hints=<block declarators the split took from their hints>
   initializer_hints=<plain initializers among them> auto_skips=<declarations
   whose auto-inference scans were skipped> declarator_declines=<declarator
-  hints the split refused> fallbacks=<bodies left wholly to the token loop>
+  hints the split refused> braced=<statements planned around their
+  initializer lists' braces> fallbacks=<bodies left wholly to the token loop>
   reason=<CAstStatementFallback of the last fallback> fallback_token=<that
   body's `{`>`
 
@@ -928,6 +929,20 @@ given tokens the plan tells it what it would otherwise scan for:
   is not entered while a state the plan cannot see reaches into it: a pending
   GNU typeof declaration, a live asm range, an attribute resume point, or the
   end of a statement scope.
+- **Braced segments.** An expression statement, `return`, `if`, `while` or
+  `switch` header, `case` value or do-while tail whose subtree also holds
+  compound literals, initializer lists and designators, and at most 16 lists,
+  is planned as segments split at each list's `{` and `}`
+  (`c_parse_plan_braced`). The loop gives a compound literal's `{` a block
+  scope and starts a statement after each brace, so it still reads every
+  brace itself and the segments between them carry its state as before. A
+  list's `}` follows its last item's last token, that token's closers and an
+  optional `,` (an empty list's follows its `{`); lists come in node order,
+  so an inner list's `}` is known before the outer one's, and the last-token
+  rule stops at a list on the rightmost chain. A `{` or `}` the tokens do
+  not confirm leaves the statement to the loop. These compound literals,
+  mostly the codebase's `S8("...")`, were 9,629 of the 10,378 statements the
+  plan declined on the self-host unity input.
 - **Declaration hints.** A block `DECLARATION` gives its `;`, so the loop's
   scan for it and its search for a GNU typeof statement expression are
   skipped. It also carries a **declarator hint** per `INIT_DECLARATOR`
@@ -966,8 +981,10 @@ grammar puts there:
 
 A statement whose rule cannot state its boundaries, and every label, asm
 statement, attributed statement, static assertion, nested function and
-statement whose subtree is not plain, gets no entry, and the loop reads it as
-it always has. A token the grammar fixes next to an anchor that is not that
+statement whose subtree is neither plain nor braced, gets no entry, and the
+loop reads it as it always has. Labels, asm statements and static
+assertions were 47 of the declined statements on the self-host unity input,
+too few to repay a rule. A token the grammar fixes next to an anchor that is not that
 token sends the whole body to the loop, as does a body the tree does not have;
 `CAstStatementFallback` names the two cases (`tokens`, `input`). The plan is
 built by one preorder walk over statements on an explicit stack, so entries
@@ -983,9 +1000,12 @@ the per-token use map, every scope and every entity of the analysis with the
 plan against the analysis without the tree. `c_ast_test_statements` runs one
 body that takes every kind of entry, one whose statements the plan leaves to
 the loop (with an `__builtin_offsetof` bail), and one tampered tree per
-fallback reason, in every layout, and a body of block declarations whose
+fallback reason, in every layout, a body of block declarations whose
 declarators take every hint, with a tampered declarator whose `=` hint the
-split refuses. On the self-host unity input every body follows its plan, with
+split refuses, and a body with a compound literal in every braced position
+(each designator kind, nested, empty and over-cap lists, a trailing comma, a
+bail inside a list), with a tampered list anchor that leaves its statement to
+the loop. On the self-host unity input every body follows its plan, with
 no fallback, no bail and no refused declarator hint.
 
 ## Corpus differential
@@ -1598,6 +1618,62 @@ The census also found that the switch and control-statement validators'
 `c_parse_statement_end` calls cost 1.05 M in total (7,586 calls) on that input.
 Reading their ends from the tree cannot repay its own lookup, so they stay
 with tokens; this is recorded as a negative result, not a budget.
+
+For the statement plan's [braced segments](#statement-plan-from-the-tree),
+these budgets were declared before their measured runs. The input, flags and
+four Callgrind arms are the statement plan's (`-g0 -fsyntax-only`, the
+self-host unity input, `--cache-sim=no --branch-sim=no`, tests-off
+`-march=x86-64-v3` builds). The base is main `680e16d3`.
+
+A throwaway census of that base recorded every declined statement's reason.
+It switched Callgrind collection on only while the walk was at a declined
+statement's own tokens. The 10,378 declined statements cost 188.3 M Ir, of
+which:
+- compound literals were 9,629 statements and 156.1 M (7,187 expression
+  statements, 2,442 `if`, `return` and `while` headers);
+- block declarations holding a member or enumerator list were 702 and
+  31.8 M;
+- labels (12), asm statements (2) and static assertions (33) were too few to
+  matter.
+
+Of the compound literals' cost, about 9 M is the census's own toggling, and
+roughly 120 M is the walk's per-token chain and tests, which a segment skips;
+the binding calls stay. The budgets:
+- **Correctness.**
+  - 0 binding differences over the corpus and the frontend sources (the
+    statement plan's differential, unchanged);
+  - a one-off comparison of the same fields on the self-host unity input,
+    also with 0 differences;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **Coverage** on the self-host unity input:
+  - no body falls back, and no segment bails;
+  - at least 9,000 statements are planned braced, and the declines fall by at
+    least 9,000.
+- **The braced segments' own effect (C against B).** The whole compile costs
+  at least 50 M fewer instructions (about 0.5%), with their construction
+  charged.
+- **The default path (D against A).** The walk and the segment binder are
+  unchanged, and the plan builder runs only under the pilot. The criterion is
+  the owner's work equivalence for the body walk (above): identical callees
+  and call counts, and identical objects. Instruction counts are reported.
+- **Adoption of the hook as the default.** Unchanged, with acceptance on the
+  Zen 5 route (#2761).
+
+The braced segments' hosted census is
+[`2026-10-11T151745Z`](../../performance-audits/2026-10-11T151745Z.md), taken
+the same way and diagnostic only:
+- Correctness, object identity and coverage pass:
+  - 0 binding differences on the corpus, the frontend sources and the
+    self-host unity input;
+  - identical `-c` objects in the four arms;
+  - 9,627 statements planned braced, with the declines falling from 10,378 to
+    751, and no fallback or bail.
+- The body binder falls by 73.3 M (9.5%), and the whole compile by 73.2 M
+  (0.79%, C against B), with about 11 M of plan construction charged.
+- The default path meets work equivalence: the planless walk makes identical
+  calls, and D against A is +0.003%, all of it libc string comparison with
+  identical call counts.
+- Acceptance stays with Zen 5 (#2761), so the default stays off.
 
 For the split's [diagnostic probe](#declaration-split-from-the-tree)
 (`c_parser_tree_probe`), these budgets were declared before its measured runs.

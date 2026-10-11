@@ -12,7 +12,7 @@ enum
     CODEGEN_TEST_CODEVIEW_S_LOCAL = 0x113e,
     CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD = 0x1140,
     CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER = 0x1141,
-    CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL = 0x1142,
+    CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL = 0x1145,
     CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
 };
 
@@ -1052,23 +1052,32 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_codeview_location_mask(ByteSlice bytes, s32
                 mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_LOCAL ? CODEGEN_TEST_CONSUMER_LOCAL : 0;
                 local_count += record_kind == CODEGEN_TEST_CODEVIEW_S_LOCAL;
                 mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER ? CODEGEN_TEST_CONSUMER_REGISTER : 0;
-                mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL ? CODEGEN_TEST_CONSUMER_FRAME : 0;
-                if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL && record_length >= 6)
+                // REGISTER_REL: base register, flags (bit 0 spilledUdtMember,
+                // bits 4..15 offset in parent), then the base-relative offset.
+                u16 relative_flags = 0;
+                s32 frame = 0;
+                if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL && record_length >= 10)
                 {
-                    s32 frame = 0;
-                    memcpy(&frame, bytes.pointer + record + 4, 4);
-                    *found_frame_value |= frame == expected_frame;
+                    memcpy(&relative_flags, bytes.pointer + record + 6, 2);
+                    memcpy(&frame, bytes.pointer + record + 8, 4);
                 }
-                mask |= (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
-                         record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER) ? CODEGEN_TEST_CONSUMER_PIECE : 0;
+                bool frame_member = record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL && (relative_flags & 1u);
+                bool whole_frame = record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL && !relative_flags;
+                mask |= whole_frame ? CODEGEN_TEST_CONSUMER_FRAME : 0;
+                *found_frame_value |= whole_frame && frame == expected_frame;
+                mask |= (frame_member || record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER) ? CODEGEN_TEST_CONSUMER_PIECE : 0;
                 mask |= record_kind == 0x1107 ? CODEGEN_TEST_CONSUMER_CONSTANT : 0; // S_CONSTANT
                 u32 range_start = UINT32_MAX;
                 u16 range_length = 0;
-                if ((record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER ||
-                     record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL) && record_length >= 14)
+                if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER && record_length >= 14)
                 {
                     memcpy(&range_start, bytes.pointer + record + 8, 4);
                     memcpy(&range_length, bytes.pointer + record + 14, 2);
+                }
+                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL && record_length >= 18)
+                {
+                    memcpy(&range_start, bytes.pointer + record + 12, 4);
+                    memcpy(&range_length, bytes.pointer + record + 18, 2);
                 }
                 else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER && record_length >= 18)
                 {
@@ -1086,11 +1095,10 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_codeview_location_mask(ByteSlice bytes, s32
                     defrange_count += 1;
                     exact_mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER && range_start == 0 && range_length == 10
                                       ? CODEGEN_TEST_CONSUMER_REGISTER : 0;
-                    exact_mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL && range_start == 10 && range_length == 10
-                                      ? CODEGEN_TEST_CONSUMER_FRAME : 0;
-                    exact_piece_count += (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
-                                          record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER) &&
-                                         range_start == 20 && range_length == 10;
+                    exact_mask |= whole_frame && range_start == 10 && range_length == 10 ? CODEGEN_TEST_CONSUMER_FRAME : 0;
+                    // The two frame-resident pieces: bytes 0..8 at +32 and 8..12 at +16.
+                    exact_piece_count += frame_member && range_start == 20 && range_length == 10 &&
+                                         ((relative_flags >> 4 == 0 && frame == 32) || (relative_flags >> 4 == 8 && frame == 16));
                     found_unavailable_range |= range_start == 30 && range_length == 10;
                 }
                 record += 2 + record_length;

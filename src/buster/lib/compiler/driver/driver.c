@@ -9069,6 +9069,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.statements.initializer_hints += unit.c_ast.statements.initializer_hints;
         result.c_ast.statements.auto_skips += unit.c_ast.statements.auto_skips;
         result.c_ast.statements.declarator_declines += unit.c_ast.statements.declarator_declines;
+        result.c_ast.statements.braced += unit.c_ast.statements.braced;
         if (unit.c_ast.statements.fallbacks)
         {
             result.c_ast.statements.reason = unit.c_ast.statements.reason;

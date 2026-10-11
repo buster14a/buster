@@ -939,8 +939,8 @@ Not in this vocabulary, and still refused unless another owner accepts them:
   label LDR, and ELF `:got:`/`:got_lo12:` are documented above);
 - CASP, LDAPR (RCPC), LDTR/STTR, CRC32 and pointer authentication;
 - AdvSIMD forms beyond the list above that the direct SIMD owner does not
-  cover, such as by-element arithmetic (`fmla v0.4s, v1.4s, v2.s[0]`) and
-  multi-register or replicating structure loads and stores.
+  cover. By-element FMLA such as `fmla v0.4s, v1.4s, v2.s[0]` is encoded and
+  asserted by `aarch64_base_assembly_tests` (#2932).
 
 `aarch64_base_assembly_tests` checks the encoder against llvm-mc-derived words
 for each family, plus refusal and feature-gating controls. The driver round
@@ -1784,6 +1784,18 @@ and a sparse type-index offset entry per 8 KiB of records. DbgHelp (cdb,
 WinDbg, `symchk`, `dbh`) faults with `0xc0000005` loading a PDB whose TPI
 stream names no hash stream (#3411). The regression is `pdb_test_tpi_hashes`.
 
+CodeView names a frame-resident location with `S_DEFRANGE_REGISTER_REL`
+against RBP (x86-64) or X29 (AArch64), the base codegen normalizes FRAME offsets
+to (`codeview_emit_frame_relative`). `S_DEFRANGE_FRAMEPOINTER_REL` is not used:
+it needs an `S_FRAMEPROC` record this producer does not emit, and cdb and RAD
+drop it without one. A frame-resident piece of a split variable uses the same
+record with the `spilledUdtMember` flag and its 12-bit offset in the parent; a
+piece past that offset stays unavailable. Consecutive line entries for one
+source line become one C13 row, so a `file:line` breakpoint resolves to a
+single range. Regressions: `codeview_test_long_location_range`,
+`codeview_test_line_ranges`, `codeview_test_pointer_sizes` and the CodeView
+consumer in `codegen_test_machine_debug_locations`.
+
 With `-g`, named scalar locals that need more than one defining instruction to
 describe stay in distinct frame slots, so their location lists follow stores
 through reassignment and control-flow joins. A frame location starts after its
@@ -2025,3 +2037,28 @@ SOURCE input metrics. Include resolution, preprocessing, semantics, canonical
 IR validation, backends and publication run fresh. See
 [bounded raw source reuse](../source-lex-reuse.md), including ownership and
 qualified-host performance acceptance, which remains pending.
+
+
+## Native fixture-derived AArch64 assembly census
+
+`./build.sh test_aarch64_assembly_census --ide build/Release/ide` compiles the
+sorted `tests/*.c` fixture set for AArch64 Linux at O0, O1 and O2, records
+producer failures and include exclusions, and compares the deduplicated constant
+instruction rows with `llvm-mc` through `llvm-objdump`. Symbolic and nonconstant
+rows are explicit exclusions and need the separate relocation suites. This is a
+fixture-derived correctness census, not a full ISA census or runtime test.
+
+Use `--clang`, `--llvm-mc`, `--llvm-objdump`, `--out` and `--timeout-seconds`
+to pin tools and retain evidence. The output directory must be new. Process,
+capture, fixture, instruction and elapsed-time bounds fail closed. Unknown
+assembler refusals, observer failures, empty comparisons and encoding differences
+fail; every successful row partition accounts for each row as a comparison or an
+unknown refusal. Producer exclusions are reported as `PASS_WITH_EXCLUSIONS`, which
+does not establish coverage for the excluded C fixtures. No refusal is exempt:
+the by-element FMLA spelling once documented by #2688 is encoded since #2932.
+
+`./build.sh test_aarch64_assembly_census --self-test` runs deterministic native
+subprocess controls for refusal detection, observer failures, empty and
+malformed disassembly, raw-word parsing and unequal encodings. The hosted workflow
+retains source/tool/binary identities, listings, constant rows, object files,
+disassembly and the report on success or failure.

@@ -1516,6 +1516,9 @@ struct CAstStatementStatistics
     u64 initializer_hints;
     u64 auto_skips;
     u64 declarator_declines;
+    // Statements planned around the braces of their initializer lists
+    // (compound literals), which the token loop still reads itself.
+    u64 braced;
     // The last fallback: its reason, and the `{` of the body.
     CAstStatementFallback reason;
     u32 fallback_token;
