@@ -2096,6 +2096,53 @@ class RetirementFlowTests(Fakes, unittest.TestCase):
 
 
 class CanonicalInlinePairTest(unittest.TestCase):
+    def prepare_self_reproducing_compiler(self, root, mode, warmups):
+        compiler = os.path.join(root, "compiler")
+        with open(compiler, "w") as handle:
+            handle.write("#!" + sys.executable + "\nimport os, shutil, sys\n"
+                         "shutil.copyfile(__file__, sys.argv[1])\n"
+                         "os.chmod(sys.argv[1], %d)\n" % mode)
+        os.chmod(compiler, 0o755)
+        subject = mock.Mock(output=root, transcripts=False, last_elapsed=0.0,
+                            meta={"capabilities": {}, "config": {"role": "candidate"}})
+        subject.pin.return_value = []
+
+        def run_workload(prefix, out, flags, log):
+            completed = subprocess.run([compiler, out], capture_output=True, text=True, check=False)
+            return completed.returncode, completed.stdout, completed.stderr
+
+        subject.run_workload.side_effect = run_workload
+        lab.prepare_variant(subject, warmups)
+        return compiler, os.path.join(root, "out.exe"), os.path.join(root, "reference.exe")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX executable permission contract")
+    def test_saved_stage_one_compiler_executes_and_reproduces_its_bytes(self):
+        for warmups in (0, 1):
+            with self.subTest(warmups=warmups), tempfile.TemporaryDirectory() as root:
+                compiler, produced, reference = self.prepare_self_reproducing_compiler(root, 0o751, warmups)
+                stage_two = os.path.join(root, "stage-two")
+                subprocess.run([reference, stage_two], check=True, capture_output=True)
+                self.assertEqual(stat.S_IMODE(os.stat(reference).st_mode), 0o751)
+                self.assertEqual(lab.sha256_file(reference), lab.sha256_file(produced))
+                self.assertEqual(lab.sha256_file(reference), lab.sha256_file(compiler))
+                self.assertEqual(lab.sha256_file(stage_two), lab.sha256_file(reference))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX executable permission contract")
+    def test_saved_reference_does_not_grant_missing_execute_permission(self):
+        with tempfile.TemporaryDirectory() as root:
+            _, produced, reference = self.prepare_self_reproducing_compiler(root, 0o640, 1)
+            self.assertEqual(stat.S_IMODE(os.stat(reference).st_mode), 0o640)
+            self.assertEqual(lab.sha256_file(reference), lab.sha256_file(produced))
+            with self.assertRaises(PermissionError):
+                subprocess.run([reference, os.path.join(root, "stage-two")], check=True)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX executable permission contract")
+    def test_reference_permission_copy_failure_is_not_masked(self):
+        with tempfile.TemporaryDirectory() as root:
+            with mock.patch.object(lab.shutil, "copymode", side_effect=PermissionError("mode denied")):
+                with self.assertRaisesRegex(PermissionError, "mode denied"):
+                    self.prepare_self_reproducing_compiler(root, 0o751, 1)
+
     def test_fixed_profile_gives_only_candidate_the_feature_flag(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = os.path.abspath(temporary)
