@@ -1,0 +1,93 @@
+name: OpenSSL qualification intake
+
+# Bounded opt-in experiment for #3184. No PR/queue/main workload expansion.
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/3184-openssl-qualification]
+    paths:
+      - '.github/workflows/openssl-qualification.yml'
+      - 'tools/openssl_compatibility.c'
+      - 'build.c'
+permissions:
+  contents: read
+concurrency:
+  group: openssl-intake-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  linux-x86-64:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: ubuntu-26.04
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Record candidate identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: openssl/openssl
+          ref: 45e844fa2a14ec92d146bd8f5778ac130b6625fb
+          path: external/openssl
+          persist-credentials: false
+      - name: Record upstream identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: external/openssl
+          source-repository: openssl/openssl
+      - name: Hosted native bootstrap
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/openssl-driver"
+      - name: Input and compiler provenance controls
+        run: |
+          "$RUNNER_TEMP/openssl-driver" test_openssl --self-test
+      - name: Configure trusted candidate
+        run: |
+          "$RUNNER_TEMP/openssl-driver" generate --cc clang --ci --linker DEFAULT
+      - name: Build trusted compiler
+        id: compiler
+        run: |
+          "$RUNNER_TEMP/openssl-driver" build --config Release -t ide -- -j2
+      - name: Pristine reference and Buster cells
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        run: |
+          "$RUNNER_TEMP/openssl-driver" test_openssl "$GITHUB_WORKSPACE/external/openssl" "$GITHUB_WORKSPACE/build/openssl-intake" "$GITHUB_WORKSPACE/build/Release/ide" "$(command -v clang)"
+      - name: Candidate self-host fixed point
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        run: |
+          "$RUNNER_TEMP/openssl-driver" test_self_host --config Release
+      - name: Source size review record
+        if: ${{ !cancelled() }}
+        run: |
+          "$RUNNER_TEMP/openssl-driver" source_size --write-baseline
+          cat docs/source-size-baseline.txt
+      - name: Retain machine records
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: build
+      - name: Retain diagnostics on failure
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: openssl-intake-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/openssl-intake
+            build/CMakeCache.txt
+            build/compile_commands.json
+            build/machine-specifications
+            docs/source-size-baseline.txt
+          retention-days: 14
+          if-no-files-found: warn
