@@ -1475,6 +1475,20 @@ the same way and diagnostic only:
 - The default path is within +0.006%.
 - Zen 5 validation stays incomplete (#2761).
 
+The stage-1 adoption budget is **not yet measured** on the Ryzen 7 9700X. As
+of main `a6705764` no approved route can time one compiler binary with and
+without `-fc-ast-pilot`:
+- the pull-request comparison (`compiler-compare-v1`) times two binaries with
+  default flags, and only for `-c`;
+- the one same-binary flag pair, the issue #48 inline profile, accepts
+  `-fcanonical-inline` only;
+- a direct workload cannot build or run the compiler.
+
+[#3397](https://github.com/buster14a/buster/issues/3397) proposes a fixed
+`compare-pull` profile for this measurement. Until it merges and one owner
+request runs it, the budget is neither passed nor failed. The hosted counts
+above are not acceptance, and the default stays off.
+
 For the member-tail width (`c_ast_types_probe_fails`, row 2 of the decline
 census in audit `2026-10-11T093336Z`,
 [#3408](https://github.com/buster14a/buster/pull/3408)),
