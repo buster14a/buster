@@ -3,7 +3,8 @@
 // rather than in per-platform files, so the contract stays in one place:
 // virtual memory (os_reserve/os_commit/os_decommit, the advisory os_prefault
 // hint, and protection flags),
-// threads, mutexes, and TLS, checked file IO (os_file_write_checked,
+// threads, mutexes, and TLS, directory listing (os_directory_entry_names),
+// checked file IO (os_file_write_checked,
 // os_file_close_checked, os_file_flush), replacement publication
 // (os_file_replacement_target_stats, os_file_staging_create, os_file_replace),
 // process spawn/wait with deadlines, executable lookup, dynamic libraries, and
@@ -1990,6 +1991,76 @@ bool os_directory_delete(String8 path)
     BUSTER_UNUSED(path);
 #endif
 
+    return result;
+}
+
+// The names are arena-owned and unordered; "." and ".." are omitted. A
+// missing or unreadable directory lists nothing.
+String8* os_directory_entry_names(Arena* arena, String8 path, u32* count)
+{
+    String8* result = 0;
+    u32 capacity = 0;
+    *count = 0;
+#if defined(__linux__) || defined(__APPLE__)
+    String8 path_z = string_format_z(arena, S8("{S8}"), path);
+    DIR* directory = path.length ? opendir((char const*)path_z.pointer) : 0;
+    if (directory)
+    {
+        struct dirent* entry;
+        while ((entry = readdir(directory)) != 0)
+        {
+            String8 name = string_from_pointer((char8 const*)entry->d_name);
+            if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
+            {
+                if (*count == capacity)
+                {
+                    capacity = capacity ? capacity * 2 : 16;
+                    String8* grown = arena_allocate(arena, String8, capacity);
+                    if (*count)
+                    {
+                        memcpy(grown, result, sizeof(*result) * *count);
+                    }
+                    result = grown;
+                }
+                result[(*count)++] = string_duplicate_arena(arena, name, false);
+            }
+        }
+        closedir(directory);
+    }
+#elif defined(_WIN32)
+    String8 pattern_string = string_format_z(arena, S8("{S8}\\*"), path);
+    String16Z pattern = {0};
+    WIN32_FIND_DATAW find_data = {0};
+    HANDLE find = path.length && string16z_from_string8_arena(arena, pattern_string, &pattern) ? FindFirstFileW(pattern.pointer, &find_data)
+                                                                                                 : INVALID_HANDLE_VALUE;
+    bool more = find != INVALID_HANDLE_VALUE;
+    while (more)
+    {
+        String8 name = string8_from_string16(arena, os_string16_from_wide(find_data.cFileName), false);
+        if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
+        {
+            if (*count == capacity)
+            {
+                capacity = capacity ? capacity * 2 : 16;
+                String8* grown = arena_allocate(arena, String8, capacity);
+                if (*count)
+                {
+                    memcpy(grown, result, sizeof(*result) * *count);
+                }
+                result = grown;
+            }
+            result[(*count)++] = name;
+        }
+        more = FindNextFileW(find, &find_data) != 0;
+    }
+    if (find != INVALID_HANDLE_VALUE)
+    {
+        FindClose(find);
+    }
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(path);
+#endif
     return result;
 }
 
