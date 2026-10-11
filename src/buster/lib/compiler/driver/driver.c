@@ -9532,6 +9532,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         .warning_policy = invocation.warning_policy,
     };
     CompilerDriverResult result = {.compilation_workers = 1};
+    String8 linker_report = {0};
     CompilerDriverArchiveState archive_state = {0};
     FileMapRead* input_archive_maps = 0;
     FileMapRead* library_archive_maps = 0;
@@ -9660,7 +9661,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.diagnostic = S8("link operation stream does not cover inputs and libraries in order");
         goto finish;
     }
-    result.linker_report = compiler_driver_native_link_report(arena, invocation);
+    linker_report = compiler_driver_native_link_report(arena, invocation);
     compiler_driver_validate_spirv_invocation(&invocation);
     if (invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {
@@ -10648,6 +10649,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result.native_link);
     }
 finish:
+    result.linker_report = linker_report;
     result.source_cache = c_source_cache_stats(invocation.source_cache);
     c_source_cache_destroy(owned_source_cache);
     if (archive_state.arena) arena_destroy(archive_state.arena, 1);

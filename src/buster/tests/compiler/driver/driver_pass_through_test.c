@@ -406,6 +406,65 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_images(Unit
             }
         }
     }
+    bool report_source_written = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n")));
+    BUSTER_TEST(arguments, report_source_written);
+    String8 report_prefix = string_format(arena, S8(" buster-native-ld -o {S8} "), output);
+    String8 report_suffix = S8("-lc\n");
+    if (report_source_written)
+    {
+        String8 verbose_arguments[] = {S8("-v"), S8("-o"), output, source};
+        CompilerDriverInvocation verbose_invocation =
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(verbose_arguments));
+        CompilerDriverResult verbose_result = compiler_driver_execute_invocation(arena, verbose_invocation);
+        bool verbose_report_line = verbose_result.linker_report.length >= report_prefix.length + report_suffix.length &&
+                                   string_starts_with_sequence(verbose_result.linker_report, report_prefix) &&
+                                   memcmp(verbose_result.linker_report.pointer + verbose_result.linker_report.length - report_suffix.length,
+                                          report_suffix.pointer, report_suffix.length) == 0;
+        BUSTER_TEST(arguments, verbose_invocation.error == COMPILER_DRIVER_ERROR_NONE &&
+                                   verbose_result.error == COMPILER_DRIVER_ERROR_NONE && verbose_report_line);
+
+        String8 linker_verbose_arguments[] = {S8("-Wl,-v"), S8("-o"), output, source};
+        CompilerDriverInvocation linker_verbose_invocation =
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(linker_verbose_arguments));
+        CompilerDriverResult linker_verbose_result = compiler_driver_execute_invocation(arena, linker_verbose_invocation);
+        BUSTER_TEST(arguments, linker_verbose_invocation.error == COMPILER_DRIVER_ERROR_NONE &&
+                                   linker_verbose_result.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_STRING_TEST(arguments, linker_verbose_result.linker_report,
+                           S8("Buster native linker\nTarget: x86_64-unknown-linux-gnu\n"));
+
+        bool syntax_source_written = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0 }\n")));
+        BUSTER_TEST(arguments, syntax_source_written);
+        if (syntax_source_written)
+        {
+            String8 syntax_arguments[] = {S8("-v"), S8("-o"), output, source};
+            CompilerDriverInvocation syntax_invocation =
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_arguments));
+            CompilerDriverResult syntax_result = compiler_driver_execute_invocation(arena, syntax_invocation);
+            bool syntax_report_line = syntax_result.linker_report.length >= report_prefix.length + report_suffix.length &&
+                                      string_starts_with_sequence(syntax_result.linker_report, report_prefix) &&
+                                      memcmp(syntax_result.linker_report.pointer + syntax_result.linker_report.length - report_suffix.length,
+                                             report_suffix.pointer, report_suffix.length) == 0;
+            BUSTER_TEST(arguments, syntax_invocation.error == COMPILER_DRIVER_ERROR_NONE &&
+                                       syntax_result.error != COMPILER_DRIVER_ERROR_NONE && syntax_report_line);
+        }
+
+        bool undefined_source_written =
+            file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("extern int linker_report_missing(void); int main(void) { return linker_report_missing(); }\n")));
+        BUSTER_TEST(arguments, undefined_source_written);
+        if (undefined_source_written)
+        {
+            String8 undefined_arguments[] = {S8("-Wl,-v"), S8("-o"), output, source};
+            CompilerDriverInvocation undefined_invocation =
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(undefined_arguments));
+            CompilerDriverResult undefined_result = compiler_driver_execute_invocation(arena, undefined_invocation);
+            BUSTER_TEST(arguments, undefined_invocation.error == COMPILER_DRIVER_ERROR_NONE &&
+                                       undefined_result.error == COMPILER_DRIVER_ERROR_LINK);
+            BUSTER_STRING_TEST(arguments, undefined_result.linker_report,
+                               S8("Buster native linker\nTarget: x86_64-unknown-linux-gnu\n"));
+        }
+    }
+    BUSTER_TEST(arguments, os_file_delete(source));
+    BUSTER_TEST(arguments, os_file_delete(output));
     scratch_end(temporary);
 #else
     BUSTER_UNUSED(arguments);
