@@ -75,7 +75,9 @@
 // A node is accepted only when every operand the machine types for it is, so
 // by induction an accepted node's whole machine run appends nothing. It is
 // checked-safe when its operands are and its own checked-mode rule raises no
-// constraint.
+// constraint. The pass keeps no state between nodes beyond these arrays and a
+// small memo of member lookups (c_ast_types_member_lookup), which is exact
+// because nothing the lookup reads changes during the pass.
 //
 // The query. c_parse_expression_type_query reads the per-body memo first and
 // asks this file only on a miss, before the literal fast path and the machine
@@ -189,6 +191,7 @@
 //   c_ast_types_looked_up_entity                 an initializer's unbound names
 //   c_ast_types_span, c_ast_types_expand         span rules
 //   c_ast_types_type_body, c_ast_types_type_node the eager pass and its rules
+//   c_ast_types_member_lookup                    the pass's member memo
 //   c_ast_types_builtin_call                     void builtins, failing calls
 //   c_ast_types_binary, c_ast_types_unary,       stage-2 operator rules
 //   c_ast_types_conditional
@@ -245,6 +248,25 @@ BUSTER_CT_CHECK(C_AST_TYPE_FLAG_STRING <= UINT8_MAX);
 
 // INIT_DECLARATOR's presence bit for an initializer, its last child (c_ast.h).
 #define C_AST_TYPE_INIT_DECLARATOR_INITIALIZER (1u << 2)
+
+// One remembered member lookup: `symbol` in the aggregate row `aggregate`
+// answered `type` with bit-field width `width`. `aggregate` is 0 for an empty
+// entry and the row + 1 otherwise.
+typedef struct CAstTypeMemberMemo CAstTypeMemberMemo;
+struct CAstTypeMemberMemo
+{
+    u32 aggregate;
+    u32 symbol;
+    CTypeId type;
+    u32 width;
+};
+
+// Entries in a pass's member memo; c_ast_types_member_lookup takes the top six
+// bits of its hash.
+#define C_AST_TYPE_MEMBER_MEMO_COUNT 64
+BUSTER_CT_CHECK(C_AST_TYPE_MEMBER_MEMO_COUNT == 64);
+// c_ast_types_type_body fills the entity array with all-ones bytes.
+BUSTER_CT_CHECK(C_AST_TYPE_NONE == UINT32_MAX);
 
 // The `{` token of every top-level function definition, ascending, and the
 // FUNCTION_DEFINITION node it opens; and the first token of every top-level
@@ -305,12 +327,25 @@ struct CAstTypeBody
     // literal fast path does not answer (c_ast_types_region_fill).
     bool waiting;
     CAstTypeStatistics local_statistics;
+    // c_parse_member_type's answers during one eager pass
+    // (c_ast_types_member_lookup), cleared when the pass starts.
+    CAstTypeMemberMemo members[C_AST_TYPE_MEMBER_MEMO_COUNT];
 };
+
+// The kinds the eager pass types, as one load per node: the expression kinds
+// (IDENTIFIER through COMMA, without _Generic's associations) and
+// INITIALIZER_LIST.
+#define C_AST_TYPES_EXPRESSION_KIND(kind)                                                                                                      \
+    (((kind) >= C_AST_IDENTIFIER && (kind) <= C_AST_COMMA && (kind) != C_AST_GENERIC_ASSOCIATION && (kind) != C_AST_GENERIC_DEFAULT) ||        \
+     (kind) == C_AST_INITIALIZER_LIST)
+#define C_AST_TYPES_EXPRESSION_ENTRY(name, contract, a, b) (u8)C_AST_TYPES_EXPRESSION_KIND(C_AST_##name),
+BUSTER_GLOBAL_LOCAL u8 const c_ast_types_expression_kinds[C_AST_KIND_COUNT] = {C_AST_KIND_LIST(C_AST_TYPES_EXPRESSION_ENTRY)};
+#undef C_AST_TYPES_EXPRESSION_ENTRY
+#undef C_AST_TYPES_EXPRESSION_KIND
 
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_expression_kind(u32 kind)
 {
-    return (kind >= C_AST_IDENTIFIER && kind <= C_AST_COMMA && kind != C_AST_GENERIC_ASSOCIATION && kind != C_AST_GENERIC_DEFAULT) ||
-           kind == C_AST_INITIALIZER_LIST;
+    return kind < C_AST_KIND_COUNT && c_ast_types_expression_kinds[kind];
 }
 
 // The first child of an interior node: the oldest subtree tiling its interval.
@@ -787,6 +822,50 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_literal(CAstTypeBody* body, CTypeParseMachi
     }
 }
 
+// c_parse_member_type for `aggregate` and the member name at `token`, which
+// within one eager pass depends only on the two: the pass appends no row and
+// runs no machine, so the aggregate's members cannot change under it. A
+// repeated pair is answered from the pass's memo. Only a member found directly
+// in the aggregate's own row is remembered: that search reads the member index
+// in the result's arena, while a promoted search into anonymous members takes
+// guarded body scratch (#1256), so a repeat of it is left to make the same
+// request again. A token without an interned symbol is always looked up.
+BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_member_lookup(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess, CTypeId aggregate,
+                                                      u32 token, u32* width_out)
+{
+    CParseResult* result = body->result;
+    CToken name = preprocess->tokens[token];
+    u64 key = ((u64)aggregate.value << 32) | name.symbol;
+    CAstTypeMemberMemo* entry = body->members + ((key * UINT64_C(0x9E3779B97F4A7C15)) >> 58);
+    bool remembered = name.symbol && entry->aggregate == aggregate.value + 1 && entry->symbol == name.symbol;
+    CTypeId type = remembered ? entry->type : C_TYPE_ID_INVALID;
+    u32 width = remembered ? entry->width : 0;
+    if (!remembered)
+    {
+        CTypeId found_in = C_TYPE_ID_INVALID;
+        u32 member = 0;
+        type = c_parse_member_type(machine->scratch_arena, result, aggregate, name.symbol, c_token_spelling(preprocess->spelling_base, name), &width,
+                                   &found_in, &member);
+        // The row c_parse_member_type searches first: an incomplete row's
+        // unqualified link, else the aggregate itself.
+        CType const* value = result->types + aggregate.value;
+        u32 searched = !value->is_complete && value->has_unqualified_type && value->unqualified_type.value < result->type_count
+                           ? value->unqualified_type.value
+                           : aggregate.value;
+        if (name.symbol && type.value < result->type_count && found_in.value == searched)
+        {
+            *entry = (CAstTypeMemberMemo){
+                .aggregate = aggregate.value + 1,
+                .symbol = name.symbol,
+                .type = type,
+                .width = width,
+            };
+        }
+    }
+    *width_out = width;
+    return type;
+}
+
 // `base.name` and `base->name`. The machine walks the whole postfix chain from
 // one base type; per node that is this step, with the aggregate resolved the
 // way c_parse_direct_expression_postfix resolves it. The member's bit-field
@@ -824,10 +903,8 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_member(CAstTypeBody* body, CTypeParseMachin
     }
     if (aggregate.value != C_ID_UNDERLYING_INVALID)
     {
-        CToken name = preprocess->tokens[member_token];
         u32 width = 0;
-        CTypeId type = c_parse_member_type(machine->scratch_arena, result, aggregate, name.symbol, c_token_spelling(preprocess->spelling_base, name), &width,
-                                           0, 0);
+        CTypeId type = c_ast_types_member_lookup(body, machine, preprocess, aggregate, member_token, &width);
         if (type.value < result->type_count && width <= UINT8_MAX)
         {
             body->widths[relative] = (u8)width;
@@ -1616,33 +1693,35 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_body(CAstTypeBody* body, CTypeParseMac
     CAst const* ast = body->ast;
     u32 visited = 0;
     u32 accepted = 0;
+    // Every node starts unaccepted, and a member node without a width. A
+    // node's type is read only once it is accepted (c_ast_types_accept writes
+    // both), and its link only through a chain it was linked into, so neither
+    // is cleared. The span is stored for every node, before the node's rule
+    // reads it: an operand of another kind has none.
+    u64 count = (u64)body->node - body->begin + 1;
+    memset(body->flags, 0, sizeof(*body->flags) * count);
+    memset(body->widths, 0, sizeof(*body->widths) * count);
+    if (body->entities)
+    {
+        memset(body->entities, 0xff, sizeof(*body->entities) * count);
+    }
+    memset(body->members, 0, sizeof(body->members));
     for (u32 node = body->begin; node <= body->node; node += 1)
     {
         u32 relative = node - body->begin;
-        body->types[relative] = C_TYPE_ID_INVALID;
-        body->flags[relative] = 0;
-        body->first[relative] = C_AST_TYPE_NONE;
-        body->end[relative] = C_AST_TYPE_NONE;
-        body->link[relative] = 0;
-        body->widths[relative] = 0;
-        if (body->entities)
+        bool expression = c_ast_types_expression_kind(ast->kinds[node]);
+        u32 first = C_AST_TYPE_NONE;
+        u32 end = C_AST_TYPE_NONE;
+        bool spanned = expression && c_ast_types_span(body, node, relative, &first, &end) && first >= body->token_start && end <= body->token_end;
+        body->first[relative] = spanned ? first : C_AST_TYPE_NONE;
+        body->end[relative] = spanned ? end : C_AST_TYPE_NONE;
+        visited += expression;
+        if (spanned)
         {
-            body->entities[relative] = C_AST_TYPE_NONE;
-        }
-        if (c_ast_types_expression_kind(ast->kinds[node]))
-        {
-            visited += 1;
-            u32 first = C_AST_TYPE_NONE;
-            u32 end = C_AST_TYPE_NONE;
-            if (c_ast_types_span(body, node, relative, &first, &end) && first >= body->token_start && end <= body->token_end)
-            {
-                body->first[relative] = first;
-                body->end[relative] = end;
-                body->link[relative] = body->start_head[first - body->token_start];
-                body->start_head[first - body->token_start] = relative + 1;
-                c_ast_types_type_node(body, machine, preprocess, node, relative);
-                accepted += (body->flags[relative] & C_AST_TYPE_FLAG_ACCEPTED) != 0;
-            }
+            body->link[relative] = body->start_head[first - body->token_start];
+            body->start_head[first - body->token_start] = relative + 1;
+            c_ast_types_type_node(body, machine, preprocess, node, relative);
+            accepted += (body->flags[relative] & C_AST_TYPE_FLAG_ACCEPTED) != 0;
         }
     }
     body->statistics->nodes_typed += visited;

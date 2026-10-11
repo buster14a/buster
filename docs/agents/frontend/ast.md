@@ -335,6 +335,18 @@ unchanged.
   only when every operand the machine types for it is accepted. Its arrays
   live in the machine's scratch arena above the body's validation mark and are
   released with the rest of the body's scratch.
+- **Why bodies are typed eagerly.** Initializers wait for their first query
+  (below), but bodies gain nothing from that. On the unity self-host, 6,531 of
+  6,612 bodies receive a query that the literal fast path does not answer, and
+  90% of the typed body expression nodes lie inside some queried node's
+  subtree. The pass is made cheaper per node instead (audit
+  [`2026-10-10T203657Z`](../../performance-audits/2026-10-10T203657Z.md)):
+  - one table load classifies a node's kind;
+  - only the arrays that are read before they are written are cleared;
+  - `c_ast_types_member_lookup` remembers, for the length of one pass, a member
+    found directly in its aggregate's row. Nothing the lookup reads changes
+    during a pass. A promoted search into anonymous members is never
+    remembered, because it takes guarded body scratch (#1256).
 - **File-scope initializers.** `c_parse_validate_static_initializers` made
   nearly all of the queries outside a typed body: 77,545 of 79,035 on the unity
   self-host, at about 190 M machine Ir, against at most 3 M for any other
@@ -1246,5 +1258,43 @@ the same way and diagnostic only:
   - tree declines fall from 52,535 to 42,239.
 - The hook is now 8.76% below the default in instructions on this input.
   Zen 5 validation is incomplete (#2761), and the default stays off.
+
+For a cheaper eager pass (`c_ast_types_type_body`, the tree typer's
+per-body and per-initializer typing), these budgets were declared before its
+measured runs. They use the stage-2 input, flags and four Callgrind arms on
+tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `f38a7716`, which the candidate branches from. The budgets:
+- **Correctness.** No answer changes:
+  - no verify mismatch over the corpus;
+  - the typer's `-v` counters on the self-host are identical in B and C: bodies,
+    initializers, nodes typed and accepted, answers, declines, misses and gated
+    queries;
+  - identical diagnostics with and without the flag;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **The pass's own cost (C against B).** `c_ast_types_type_body`'s inclusive
+  instructions fall by at least 5%, and the whole compile falls by at least
+  the pass's saving less 1 M, so the saving is not moved elsewhere.
+- **Default path (D against A).** The change is confined to the typer, so
+  the default path stays within ±0.05% Ir on `-fsyntax-only` and on `-c`
+  (`-g0`).
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested for this change, so Zen 5 validation stays
+  incomplete (#2761) and the hook stays opt-in.
+
+The cheaper pass's hosted census is
+[`2026-10-10T203657Z`](../../performance-audits/2026-10-10T203657Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. The typer's counters are identical in B and C,
+  and the objects of all four arms are identical.
+- `c_ast_types_type_body` falls from 359.7 M to 322.4 M Ir (−10.4%), and the
+  pilot's compile by 36.5 M (−0.39%).
+- The memo answers 58% of the pass's member lookups.
+- The default path is within +0.006%.
+- Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
