@@ -163,4 +163,4 @@ A registered target or emitted bytes are not a support claim. Direct code genera
 
 ## Updating this catalogue
 
-Edit `docs/backend-capabilities-v1.json`, run `python3 tools/backend_capabilities.py --write`, and commit both files. CI runs `--self-test` and `--check` to verify the catalogue and detect drift.
+Edit `docs/backend-capabilities-v1.json`, run `python3 tools/backend_capabilities.py --write`, and commit both files. CI runs `python3 -B tools/backend_capabilities_test.py` and `--check` to verify the catalogue and detect drift.

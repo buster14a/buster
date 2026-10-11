@@ -137,7 +137,7 @@ jobs:
           python3 tools/new_audit.py --check
           python3 -B tools/check_markdown_links.py --self-test
           python3 -B tools/check_markdown_links.py
-          python3 -B tools/backend_capabilities.py --self-test
+          python3 -B tools/backend_capabilities_test.py
           python3 -B tools/backend_capabilities.py --check
       - name: Verify generated vendor builtin sources
         shell: bash
@@ -291,7 +291,7 @@ jobs:
           python3 tools/new_audit.py --check
           python3 -B tools/check_markdown_links.py --self-test
           python3 -B tools/check_markdown_links.py
-          python3 -B tools/backend_capabilities.py --self-test
+          python3 -B tools/backend_capabilities_test.py
           python3 -B tools/backend_capabilities.py --check
       - name: Verify generated vendor builtin sources
         shell: bash
