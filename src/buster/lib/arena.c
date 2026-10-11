@@ -9,9 +9,12 @@
 BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 
 BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(256);
-// Huge-page advice covers a reservation only above this prefix. Every arena's
-// header already dirties its first extent, so a huge page there is pure RSS
-// overhead; the measured win is in the sparse touches beyond it (#1585).
+// Huge-page advice covers a reservation only above this prefix. This is the
+// shape the #1585 candidate measured, not a base-page guarantee: no
+// MADV_NOHUGEPAGE is issued, so an `always`-policy host may still back the
+// prefix with a huge page. The exemption also does not claim the small-arena
+// source #1585 rejected — sparse touches in large arenas dominate the RSS
+// cost there.
 BUSTER_GLOBAL_LOCAL u64 arena_huge_page_exempt_size = BUSTER_MB(2);
 BUSTER_GLOBAL_LOCAL u64 initial_size_granularity_factor = 4;
 BUSTER_GLOBAL_LOCAL void arena_set_position_unchecked(Arena* arena, u64 position);
