@@ -15550,8 +15550,11 @@ BUSTER_GLOBAL_LOCAL ObjectError object_mach_o_place_thread_variables(Arena* aren
         if (symbol->section < object->section_count && (object->sections[symbol->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
                                                         object->sections[symbol->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO))
         {
-            fits = object_writer_scratch_plan(arena, &planned, symbol->name.length + OBJECT_MACH_THREAD_STORAGE_SUFFIX.length, sizeof(char8),
-                                              BUSTER_ALIGN_OF(char8));
+            // The storage name's length must not wrap; the emission below
+            // repeats this sum once the plan has admitted it.
+            u64 suffix_length = OBJECT_MACH_THREAD_STORAGE_SUFFIX.length;
+            fits = symbol->name.length <= UINT64_MAX - suffix_length &&
+                   object_writer_scratch_plan(arena, &planned, symbol->name.length + suffix_length, sizeof(char8), BUSTER_ALIGN_OF(char8));
         }
     }
     if (valid && fits && variable_count)

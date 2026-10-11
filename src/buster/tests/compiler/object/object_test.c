@@ -4757,6 +4757,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_tls_writer_arena_limits(UnitTestA
             arena_set_position(temporary.arena, position);
         }
         BUSTER_TEST(arguments, accepted >= position + demand && refusals == accepted - position);
+        // A generated `$tlv$init` name whose length would wrap is refused
+        // before any allocation or copy.
+        symbols[1].name.length = UINT64_MAX;
+        ObjectArtifact oversized = shape->format == OBJECT_FORMAT_MACH_O64 ? object_write(temporary.arena, &object, shape->format) : (ObjectArtifact){0};
+        BUSTER_TEST(arguments, shape->format != OBJECT_FORMAT_MACH_O64 ||
+                                   (oversized.error == OBJECT_ERROR_CAPACITY && !oversized.bytes.pointer && !oversized.bytes.length &&
+                                    temporary.arena->position == position));
         scratch_end(temporary);
     }
     return result;
