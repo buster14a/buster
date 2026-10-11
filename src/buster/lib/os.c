@@ -2030,7 +2030,7 @@ String8* os_directory_entry_names(Arena* arena, String8 path, u32* count)
 #elif defined(_WIN32)
     String8 pattern_string = string_format_z(arena, S8("{S8}\\*"), path);
     String16Z pattern = {0};
-    WIN32_FIND_DATAW find_data;
+    WIN32_FIND_DATAW find_data = {0};
     HANDLE find = path.length && string16z_from_string8_arena(arena, pattern_string, &pattern) ? FindFirstFileW(pattern.pointer, &find_data)
                                                                                                  : INVALID_HANDLE_VALUE;
     bool more = find != INVALID_HANDLE_VALUE;
