@@ -3834,19 +3834,28 @@ BUSTER_GLOBAL_LOCAL CompilerDriverCpuRuntime compiler_driver_elf_cpu_runtime(Are
             ObjectFile* selected = arena_allocate(arena, ObjectFile, object_count + archive.object_count);
             memcpy(selected, objects, sizeof(*objects) * object_count);
             u32 selected_count = object_count;
-            for (u32 member = 0; archive.error == OBJECT_ERROR_NONE && member < archive.object_count; member += 1)
+            // A selected member may reference a CPU-runtime name an earlier
+            // member defines, so scan again until a pass selects nothing. A
+            // selected member defines its names, so none is selected twice.
+            bool added = true;
+            while (added && archive.error == OBJECT_ERROR_NONE)
             {
-                ObjectFile const* candidate = archive.objects + member;
-                bool needed = false;
-                for (u32 index = 0; !needed && index < candidate->symbol_count; index += 1)
+                added = false;
+                for (u32 member = 0; archive.error == OBJECT_ERROR_NONE && member < archive.object_count; member += 1)
                 {
-                    ObjectSymbol const* symbol = candidate->symbols + index;
-                    needed = symbol->global && symbol->section != OBJECT_SECTION_UNDEFINED && compiler_driver_elf_cpu_runtime_symbol(symbol->name) &&
-                             compiler_driver_elf_cpu_runtime_needed(selected, selected_count, symbol->name);
-                }
-                if (needed && compiler_driver_archive_admit(arena, &archive, member))
-                {
-                    selected[selected_count++] = archive.objects[member];
+                    ObjectFile const* candidate = archive.objects + member;
+                    bool needed = false;
+                    for (u32 index = 0; !needed && index < candidate->symbol_count; index += 1)
+                    {
+                        ObjectSymbol const* symbol = candidate->symbols + index;
+                        needed = symbol->global && symbol->section != OBJECT_SECTION_UNDEFINED && compiler_driver_elf_cpu_runtime_symbol(symbol->name) &&
+                                 compiler_driver_elf_cpu_runtime_needed(selected, selected_count, symbol->name);
+                    }
+                    if (needed && compiler_driver_archive_admit(arena, &archive, member))
+                    {
+                        selected[selected_count++] = archive.objects[member];
+                        added = true;
+                    }
                 }
             }
             missing = archive.error == OBJECT_ERROR_NONE ? compiler_driver_elf_cpu_runtime_missing(selected, selected_count) : missing;
