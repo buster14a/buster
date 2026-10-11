@@ -449,7 +449,8 @@ unchanged.
       the published `void` row (`c_ast_types_builtin_call`).
 - **What it declines.** Every shape whose machine answer appends a row stays
   with the machine:
-  - a qualified member or array element;
+  - a qualified member or array element, except a member access queried
+    alone, which is replayed (below);
   - an array operand of `+` or `-`, which decays;
   - a pointer or `nullptr` conditional;
   - a qualified operand whose unqualified row was never recorded;
@@ -515,6 +516,23 @@ unchanged.
   `CParseResult.string_literals`, which decodes each narrow token once per
   unit. A count fast path in front of it measured as a loss (see the
   [measurement plan](#measurement-plan)).
+
+  A query of a `.` or `->` alone, perhaps parenthesized, over a base the pass
+  accepts (and safe, with constraint checks) and a const or volatile struct or
+  union is replayed too. The machine types the base as the tree does, then
+  makes two calls (`c_parse_direct_expression_postfix`):
+  - `c_parse_member_type` on the qualified aggregate;
+  - `c_parse_add_qualified_type` on the member it finds, which appends the
+    member's qualified copy.
+
+  The decline branch reports it (`c_ast_types_decline`) as
+  `C_AST_TYPE_STRING` with the member node's kind, so the query function's
+  code is unchanged. The replay probes the memo for the access's tokens, as
+  the machine's root task does after stripping the parentheses. On a miss,
+  `c_parse_expression_tree_member` makes the same two calls, and the appended
+  row is the answer. The node is never accepted, so its parents still decline.
+  Verify mode holds the replayed row, and any alignment record it inherits,
+  to the machine's.
 - **Constraint checks.** A checked query is answered only from a node whose
   operands are safe and whose own checked-mode rule cannot fire. For the
   binary operators that is the machine's operand rule. The cases it settles by
@@ -2099,5 +2117,83 @@ the same way and diagnostic only:
   compiles in 0.37 s under the pilot (4.44 s before), with 163,834 build
   steps.
 - **Zen 5.** Validation is incomplete (#2761), and the default stays off.
+
+For the checked casts the typer still declines in the operand (236 on the
+unity self-host after the failing-operand rule: members, string runs, builtin
+calls and `&` over a declined member), these budgets were declared before any
+measured run. They use the stage-2 input and flags and four Callgrind arms on
+tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `a6705764`, which the candidate branches from. The budgets:
+- **Census first.** A throwaway build of the base, not committed, records
+  each of those checked casts by exact operand shape: which member rule
+  refused it, the length of a string run, the builtin's name, and the operand
+  of `&`. It charges the inclusive Ir of each one's machine run. A shape is a
+  candidate only when the machine provably appends no row and raises nothing
+  for it, or when an exact replay exists. If the candidate shapes' machine Ir
+  totals below 1 M, no candidate is built, and the negative result is
+  recorded.
+- **Correctness.**
+  - no verify mismatch over the corpus;
+  - identical diagnostics and type-table sizes with and without the tree;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **The gain that ships it (C against B).** At least 1 M fewer instructions
+  in the whole compile, with the eager pass, the query function and any wider
+  node flags charged, and fewer machine runs from queries. A smaller gain, or
+  a loss, is recorded as a negative result, and the code does not ship.
+- **Default path (D against A).** Within ±0.05% Ir on `-fsyntax-only` and on
+  `-c` (`-g0`).
+- **Acceptance.** Hosted counts are diagnostic. Zen 5 validation (#2761)
+  stays incomplete, and the hook stays opt-in.
+
+The census, taken on a tests-off build of the base under Callgrind, counted
+254 such checked casts. It fails the 1 M gate for them:
+- 141 members of a qualified aggregate, each appending 1 to 3 rows;
+- 28 string runs and 23 `&` over a member, which append rows;
+- 31 builtin calls, 30 of them appending nothing;
+- 31 others, 26 of them appending nothing.
+
+The 56 shapes that append nothing cost 0.71 M machine Ir together. No
+candidate is built for them. The same census showed that the member rule
+declines 3,650 other queries whose node is itself a member of a const
+aggregate. Their base is accepted, and their machine run appends exactly one
+row, the member's qualified copy, at 7.8 M machine Ir. For that shape, these
+budgets were declared before the candidate's measured runs, on the same arms
+and base:
+- **The replay.** A declined query whose node is `.` or `->` over an accepted
+  base (safe, with constraint checks) and a const or volatile struct or union
+  is answered from the decline branch. The answer makes the machine's two calls
+  on the query's tokens: `c_parse_member_type` on the qualified aggregate, then
+  `c_parse_add_qualified_type`. The row it appends is the answer. Nothing
+  changes on the path that ordinary answers take, and the node flags stay
+  `u8`.
+- **Correctness.** No verify mismatch over the corpus, with the replayed row
+  held to the machine's. Identical diagnostics and type-table sizes with and
+  without the tree, and byte-identical `-c` objects (`-g0` and `-g`) across
+  the four arms. New `CAstTypeCase` probes cover the replay.
+- **The gain that ships it (C against B).** At least 1 M fewer instructions
+  in the whole compile, and fewer machine runs from queries. Otherwise the
+  negative result is recorded, and the code does not ship.
+- **Default path (D against A).** Within ±0.05% Ir on `-fsyntax-only` and on
+  `-c` (`-g0`).
+
+The census and the replay's hosted measurements are in audit
+[`2026-10-11T111859Z`](../../performance-audits/2026-10-11T111859Z.md),
+diagnostic only:
+- **Census.** The gate fails for the declined checked casts (0.71 M).
+- **Correctness.** 0 verify mismatches. Objects are byte-identical at `-g0`
+  and `-g` across the four arms.
+- **Ship.** C against B is −1.01 M (−0.011%), with 3,650 fewer machine runs
+  from queries. That passes the gate by 11.7 K Ir.
+- **Default path.** +4 Ir on `-fsyntax-only` and +5 on `-c`.
+- **Code layout.** Four earlier versions with the same work measured from
+  +21 M to +6 M on the pilot, and up to +0.147% on the default path, because
+  the code inlined into `c_parse_expression_type_query` changed. The shipped
+  version keeps the whole decline tail in one out-of-line function that
+  returns its answer by value.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
