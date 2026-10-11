@@ -1998,6 +1998,8 @@ struct CParseResult
     // The live entries of the interning log (CAggregateLookup.type_interning),
     // checkpointed with type_count so a rollback forgets the rows it removes.
     u32 interned_type_count;
+    // The same for its log of shared qualified member copies.
+    u32 interned_qualified_count;
     u32 bfloat16_builtin_call_count;
     u32 bfloat16_builtin_call_capacity;
     // Phase-arena bytes semantic analysis released (logical) and the releases
