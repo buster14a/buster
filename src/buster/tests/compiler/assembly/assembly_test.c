@@ -2514,6 +2514,61 @@ static AssemblyA64M1GprCorpusCase const assembly_a64_m1_gpr_corpus[] = {
     {S8_INITIALIZER("xpaci x1\n"), {225, 67, 193, 218}},
 };
 
+// Symbol interning keeps first-definition identity under a name index: many
+// labels whose names share prefixes and collide in a small table, each
+// referenced before and after its definition, must each resolve to one
+// symbol, and redefining an early one is still refused. Numeric labels must
+// resolve exactly as the equivalent named labels do.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbol_interning(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    u32 label_count = 600;
+    u64 capacity = 64 + (u64)label_count * 48;
+    char8* text = arena_allocate(arguments->arena, char8, capacity);
+    u64 length = 0;
+    String8 prologue = S8(".text\n");
+    memcpy(text, prologue.pointer, prologue.length);
+    length += prologue.length;
+    for (u32 index = 0; index < label_count; index += 1)
+    {
+        String8 line = string_format(arguments->arena, S8(".globl g{u32}\ng{u32}:\ncall g{u32}\n"), index, index, (index + 1) % label_count);
+        memcpy(text + length, line.pointer, line.length);
+        length += line.length;
+    }
+    String8 source = {.pointer = text, .length = length};
+    AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = target});
+    BUSTER_TEST(arguments, unit.diagnostic_count == 0 && unit.symbol_count == label_count && unit.relocation_count == label_count);
+    if (!unit.diagnostic_count && unit.symbol_count == label_count && unit.relocation_count == label_count)
+    {
+        for (u32 index = 0; index < label_count; index += 1)
+        {
+            String8 defined = string_format(arguments->arena, S8("g{u32}"), index);
+            String8 called = string_format(arguments->arena, S8("g{u32}"), (index + 1) % label_count);
+            u32 symbol = unit.relocations[index].symbol;
+            BUSTER_TEST(arguments, string_equal(unit.symbols[index].name, defined) && unit.symbols[index].defined && unit.symbols[index].global);
+            BUSTER_TEST(arguments, symbol < unit.symbol_count && string_equal(unit.symbols[symbol].name, called));
+        }
+    }
+    String8 redefined = string_format(arguments->arena, S8("{S8}g0:\nret\n"), source);
+    AssemblyUnitResult duplicate = assembly_unit_encode(arguments->arena, redefined, (AssemblyEncodeOptions){.target = target});
+    BUSTER_TEST(arguments, duplicate.diagnostic_count == 1 && duplicate.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_DUPLICATE_SYMBOL);
+
+    AssemblyUnitResult numeric = assembly_unit_encode(arguments->arena, S8(".text\n1: jmp 1f\n1: 2: jmp 1b\njmp 2b\n1: jmp 2f\n2: jmp 1b\nret\n"),
+                                                      (AssemblyEncodeOptions){.target = target});
+    AssemblyUnitResult named = assembly_unit_encode(arguments->arena, S8(".text\n.La: jmp .Lb\n.Lb: .Lc: jmp .Lb\njmp .Lc\n.Ld: jmp .Le\n.Le: jmp .Ld\nret\n"),
+                                                    (AssemblyEncodeOptions){.target = target});
+    BUSTER_TEST(arguments, numeric.diagnostic_count == 0 && named.diagnostic_count == 0 && numeric.section_count == 1 && named.section_count == 1 &&
+                               numeric.relocation_count == named.relocation_count);
+    if (!numeric.diagnostic_count && !named.diagnostic_count && numeric.section_count == 1 && named.section_count == 1)
+    {
+        ByteSlice left = numeric.sections[0].data;
+        ByteSlice right = named.sections[0].data;
+        BUSTER_TEST(arguments, left.length && left.length == right.length && memcmp(left.pointer, right.pointer, left.length) == 0);
+    }
+    return result;
+}
+
 // Independently specified relocation algebra: GNU as and llvm-mc produce
 // PC32/PREL32 with addend 5 at offset 8, PC64/PREL64 with addend -7 at 16,
 // and section-base absolute addresses for each separate `.` field. The
@@ -5421,6 +5476,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_section_stack);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_section_flags_and_types);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_location_counter);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_interning);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_statement_retention);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_statements);
