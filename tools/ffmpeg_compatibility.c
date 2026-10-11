@@ -101,6 +101,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_cc(Arena* arena, SliceString8 arguments
             OsArgumentBuilder builder = os_argument_builder_start(arena);
             os_argument_builder_append(&builder, compiler);
             os_argument_builder_append(&builder, S8("cc"));
+            os_argument_builder_append(&builder, S8("-target"));
+            os_argument_builder_append(&builder, S8("x86_64-linux"));
+            os_argument_builder_append(&builder, S8("-mcpu=baseline"));
+            os_argument_builder_append(&builder, S8("-g0"));
             for (u64 i = 3; i < arguments.length; i += 1)
             {
                 os_argument_builder_append(&builder, arguments.pointer[i]);
@@ -147,11 +151,12 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_configure(Arena* arena, String8 checkout, String
         S8("--enable-parser=h264,hevc,flac,mpegaudio,aac"),
         S8("--enable-demuxer=matroska,mov,flac,mp3,aac,wav,image2,rawvideo,pcm_s16le"),
         S8("--enable-encoder=flac,pcm_s16le,rawvideo"),
-        S8("--enable-muxer=framecrc,framemd5,crc,null,wav,flac,matroska,mp4,image2,rawvideo"),
+        S8("--enable-muxer=framecrc,framemd5,crc,null,wav,flac,matroska,mp4,image2,rawvideo,pcm_s16le"),
         S8("--enable-filter=aresample,aformat,format,scale,anull,null,abuffer,buffer,abuffersink,buffersink"),
         string_format(arena, S8("--cc={S8}"), cc),
         string_format(arena, S8("--ld={S8}"), clang),
-        string_format(arena, S8("--host-cc={S8}"), clang),
+        string_format(arena, S8("--host-cc={S8}"), cc),
+        string_format(arena, S8("--host-ld={S8}"), clang),
         string_format(arena, S8("--dep-cc={S8}"), clang),
     };
     FfmpegCommand command = ffmpeg_run(arena, directory, path_join(arena, directory, S8("configure")), (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), BUSTER_FFMPEG_COMMAND_SECONDS);
@@ -160,9 +165,55 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_configure(Arena* arena, String8 checkout, String
 
 BUSTER_GLOBAL_LOCAL bool ffmpeg_make(Arena* arena, String8 directory, String8 target, String8 prefix)
 {
-    String8 arguments[] = {S8("make"), S8("-k"), S8("-j2"), S8("V=1"), target};
+    String8 arguments[] = {S8("make"), S8("-k"), S8("-j2"), S8("V=1"), S8("SAMPLES="), S8("IGNORE_TESTS="), S8("GEN=no"), S8("TARGET_EXEC="), S8("THREADS=1"), target};
     FfmpegCommand command = ffmpeg_run(arena, directory, path_join(arena, directory, prefix), (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), BUSTER_FFMPEG_COMMAND_SECONDS);
     return ffmpeg_ok(command);
+}
+
+
+BUSTER_GLOBAL_LOCAL bool ffmpeg_fate_counts(Arena* arena, String8 directory, String8 list, bool fate_passed)
+{
+    u64 declared = 0, attempted = 0, passed = 0, failed = 0, missing = 0;
+    bool valid = list.length != 0;
+    String8List rows = {0};
+    string8_list_push(arena, &rows, S8("target\tstatus\n"));
+    for (u64 start = 0; start < list.length;)
+    {
+        u64 end = start;
+        while (end < list.length && list.pointer[end] != '\n') { end += 1; }
+        String8 target = string_slice(list, start, end);
+        start = end < list.length ? end + 1 : end;
+        if (target.length)
+        {
+            bool target_valid = string_starts_with_sequence(target, S8("fate-")) && clang_suite_safe_path(target);
+            valid = target_valid && valid;
+            if (target_valid)
+            {
+                declared += 1;
+                String8 name = string_slice(target, 5, target.length);
+                String8 report = clang_suite_read(arena, path_join(arena, directory, string_format(arena, S8("tests/data/fate/{S8}.rep"), name)));
+                String8 prefix = string_format(arena, S8("{S8}:"), name);
+                bool report_valid = string_starts_with_sequence(report, prefix);
+                bool success = report_valid && report.length >= prefix.length + 2 &&
+                               report.pointer[prefix.length] == '0' && report.pointer[prefix.length + 1] == ':';
+                String8 status;
+                if (!report.length) { missing += 1; status = S8("not-run"); }
+                else
+                {
+                    attempted += 1;
+                    if (success) { passed += 1; status = S8("pass"); }
+                    else { failed += 1; status = S8("fail"); }
+                    valid = report_valid && valid;
+                }
+                string8_list_push(arena, &rows, string_format(arena, S8("{S8}\t{S8}\n"), target, status));
+            }
+        }
+    }
+    string8_list_push(arena, &rows, string_format(arena, S8("declared\t{u64}\nattempted\t{u64}\npass\t{u64}\nfail\t{u64}\n"
+                                                          "not-run\t{u64}\nskip\t0\nsample-tests\tunqualified\n"), declared, attempted, passed, failed, missing));
+    bool written = clang_suite_write(arena, path_join(arena, directory, S8("fate-counts.tsv")), string_join_arena(arena, string8_list_to_slice(arena, rows), false));
+    valid = written && declared != 0 && attempted == declared && passed == declared && !failed && !missing && fate_passed && valid;
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool ffmpeg_pcm_fixture(Arena* arena, String8 path)
@@ -343,9 +394,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
                     media[i] = ffmpeg_media(arena, directories[i], pcm);
                     // The denominator is only upstream's no-external-sample
                     // tests for this declared configuration. Sample FATE stays pending.
-                    String8 list_arguments[] = {S8("make"), S8("fate-list")};
+                    String8 list_arguments[] = {S8("make"), S8("SAMPLES="), S8("IGNORE_TESTS="), S8("GEN=no"), S8("TARGET_EXEC="), S8("fate-list")};
                     FfmpegCommand list = ffmpeg_run(arena, directories[i], path_join(arena, directories[i], S8("fate-list")), (SliceString8)BUSTER_ARRAY_TO_SLICE(list_arguments), BUSTER_FFMPEG_CC_SECONDS);
-                    fate[i] = ffmpeg_ok(list) && ffmpeg_make(arena, directories[i], S8("fate"), S8("fate"));
+                    bool ran = ffmpeg_ok(list) && ffmpeg_make(arena, directories[i], S8("fate"), S8("fate"));
+                    fate[i] = ffmpeg_fate_counts(arena, directories[i], list.output, ran);
                 }
             }
             string_print(S8("FFMPEG_CENSUS compiler={S8} configure={u32} build={u32} media={u32} no_sample_fate={u32}\n"),

@@ -52,12 +52,14 @@ Unmodified upstream shell/generation scripts are external prerequisites; no
 repository shell workflow replaces the native orchestration. The independent
 Clang reference runs first and remains visible if Buster fails. Candidate CC
 invocations go through the native driver's `--cc` mode, which forwards every
-argument to `ide cc` and records each invocation separately. It never compiles
+argument to `ide cc` and records each invocation separately, with an explicit Linux x86-64 baseline
+and disabled debug output. It never compiles
 a required candidate C object with Clang or substitutes reference objects.
 
-External Clang owns explicitly declared linking, dependency preprocessing and
-normal upstream host generators. These are separate dependency stages; the
-result is not a native-Buster-linker qualification. Both configurations request
+External Clang owns explicitly declared target/host linking and target dependency
+preprocessing. Candidate host C utilities also use the recorded Buster wrapper.
+These are separate dependency stages; the result is not a native-Buster-linker
+qualification. Both configurations request
 Linux x86-64/generic, static libraries, assembly disabled, no hardware
 acceleration, no network and no external autodetection. Preserve the exact
 generated configuration and command records; requested components are not
@@ -90,9 +92,9 @@ tolerances or cross-decoding reference/candidate outputs.
 
 The action retains upstream `fate-list`, runs `make fate` without external
 samples, and preserves test reports. This is the applicable no-sample subset of
-the declared configuration. Explicit attempted/pass/fail/skip accounting and
-the complete licensed/pinned sample subset are still required before issue
-acceptance. A reference failure remains a failure, not expected output to
+the declared configuration. The native count ledger joins every declared no-sample test to its report,
+records attempted/pass/fail/not-run/skip counts, and fails missing reports.
+The complete licensed/pinned sample subset is still required before acceptance. A reference failure remains a failure, not expected output to
 regenerate with Buster.
 
 Artifacts include source Git-object inventory; compiler SHA-256 identities;
@@ -116,7 +118,7 @@ on failure. Broader scheduling needs its own runner-cost review.
 ## Remaining qualification
 
 Keep #3177 open until its staged acceptance is met. In particular, implement
-complete sample provenance/negative controls and test counts; audit selected
+complete sample provenance/negative controls and sample-test counts; audit selected
 components/test assets; minimize actual compiler blockers with their existing
 owners; validate all required C actions and libraries; add optimized/checkasm
 and declared video/audio media cells; retain independent reference artifacts;
