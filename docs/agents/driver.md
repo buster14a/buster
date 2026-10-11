@@ -1675,6 +1675,18 @@ builds of the driver fixture use smaller counts to keep their deadlines. A reser
 is a positioned `initializer working storage exceeds the scratch reservation`
 or `initializer nesting exceeds its capacity` diagnostic and a failed result.
 
+Automatic aggregate initializers lower through the nested compound-literal
+machine, which zero-fills each brace-enclosed element before storing its
+members. Its scratch is per element and released with it: the zero-value task
+stack grows with the widest path through the type (`c_ir_emit_zero_value`),
+the cursor stack follows the type's nesting depth, and the unit-lifetime query
+stack gets its own mapping when it would leave lowering less than half of the
+thread scratch. `c_test_ir_local_table_zero_scratch` lowers a 20,000-entry
+local table that previously exhausted the scratch (#2527); generating machine
+code for a function that large still aborts in the fast register allocator
+(#3413). A task stack that cannot grow is the diagnostic
+`aggregate zero-initializer exceeds the lowering scratch reservation`.
+
 ## ELF TLS companion lookup
 
 The x86-64 executable writers index TLSGD/TLSLD section/offset sites in link
