@@ -69,6 +69,14 @@ jobs:
           done
           echo "PROBE failures=$failures"
           test "$failures" -eq 0
+      - name: Pristine musl inventory
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://git.musl-libc.org/git/musl "$RUNNER_TEMP/aggregate-musl"
+          git -C "$RUNNER_TEMP/aggregate-musl" checkout --detach 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          "$RUNNER_TEMP/aggregate-build" test_musl --config Release "$RUNNER_TEMP/aggregate-musl" 2>&1 | tee "$RUNNER_TEMP/aggregate-evidence/musl.log"
       - name: Retain machine records
         if: ${{ !cancelled() }}
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
