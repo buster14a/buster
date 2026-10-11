@@ -4353,6 +4353,57 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_priority_split_ledger(UnitTe
     return result;
 }
 
+// The 32-bit writers group relocations by section before emitting their
+// tables, one u32 per relocation. The arena preflight must count that table:
+// an arena with room for the image and the other scratch, but not the
+// grouping, is refused with OBJECT_ERROR_CAPACITY before anything is
+// allocated, instead of failing inside the writer.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_32_writer_grouping_preflight(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    enum
+    {
+        RELOCATION_COUNT = 1024,
+        // Past the image, room for the per-section and per-symbol scratch the
+        // preflight counted before grouping, but far from RELOCATION_COUNT u32s.
+        SHORT_SCRATCH = 1024,
+    };
+    u8* data = arena_allocate(temporary.arena, u8, RELOCATION_COUNT * 8);
+    memset(data, 0, RELOCATION_COUNT * 8);
+    ObjectRelocation* relocations = arena_allocate(temporary.arena, ObjectRelocation, RELOCATION_COUNT);
+    for (u32 index = 0; index < RELOCATION_COUNT; index += 1)
+    {
+        relocations[index] = (ObjectRelocation){.offset = (u64)index * 8, .section = 0, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+    }
+    ObjectSection section = {.name = S8(".data"), .kind = OBJECT_SECTION_DATA, .alignment = 8, .data = {.pointer = data, .length = RELOCATION_COUNT * 8}};
+    ObjectSymbol symbol = {.name = S8("value"), .section = 0, .kind = OBJECT_SYMBOL_DATA, .global = true};
+    ObjectFile object = {.sections = &section, .section_count = 1, .symbols = &symbol, .symbol_count = 1, .relocations = relocations,
+                         .relocation_count = RELOCATION_COUNT};
+    ObjectFormat formats[] = {OBJECT_FORMAT_COFF, OBJECT_FORMAT_MACH_O64};
+    for (u32 format_index = 0; format_index < BUSTER_ARRAY_LENGTH(formats); format_index += 1)
+    {
+        ObjectFormat format = formats[format_index];
+        object.target = (Target){.cpu_arch = CPU_ARCH_X86_64, .os = format == OBJECT_FORMAT_COFF ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS};
+        u64 capacity = 0;
+        if (BUSTER_REQUIRE(arguments, object_test_32_capacity(&object, format, &capacity) == OBJECT_ERROR_NONE && capacity))
+        {
+            u64 position = temporary.arena->position;
+            u64 reserved_size = temporary.arena->reserved_size;
+            temporary.arena->reserved_size = position + capacity + SHORT_SCRATCH;
+            ObjectArtifact refused = object_write(temporary.arena, &object, format);
+            temporary.arena->reserved_size = reserved_size;
+            BUSTER_TEST(arguments, refused.error == OBJECT_ERROR_CAPACITY && !refused.bytes.pointer && !refused.bytes.length &&
+                                       !refused.statistics.retained_bytes && temporary.arena->position == position);
+            ObjectArtifact written = object_write(temporary.arena, &object, format);
+            BUSTER_TEST(arguments, written.error == OBJECT_ERROR_NONE && written.bytes.length);
+            arena_set_position(temporary.arena, position);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer_limits(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5065,6 +5116,9 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     UnitTestResult coff_priority_split = object_test_coff_priority_split_ledger(arguments);
     result.test_count += coff_priority_split.test_count;
     result.succeeded_test_count += coff_priority_split.succeeded_test_count;
+    UnitTestResult grouping_preflight = object_test_32_writer_grouping_preflight(arguments);
+    result.test_count += grouping_preflight.test_count;
+    result.succeeded_test_count += grouping_preflight.succeeded_test_count;
     UnitTestResult planned_writer_limits = object_test_elf_planned_writer_limits(arguments);
     result.test_count += planned_writer_limits.test_count;
     result.succeeded_test_count += planned_writer_limits.succeeded_test_count;
