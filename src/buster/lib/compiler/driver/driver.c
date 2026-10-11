@@ -5601,7 +5601,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     .omit_debug_locals = !invocation.debug_info,
                                                                     .pin_debug_locals = invocation.debug_info &&
                                                                                         (!invocation.pinned_debug_locals_explicit ||
-                                                                                         invocation.enable_pinned_debug_locals)});
+                                                                                         invocation.enable_pinned_debug_locals),
+                                                                    // Lowering reads statement extents from the pilot's
+                                                                    // tree; it is released at `end:`, after lowering.
+                                                                    .syntax_tree = pilot_tree_built ? &pilot_tree : 0});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     result.type_layout = lowered.type_layout;

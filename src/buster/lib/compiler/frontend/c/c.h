@@ -1928,6 +1928,13 @@ struct CIRLowerOptions
     // in its frame slot unless its one write is the entry initializer and an
     // instruction result names it (see IrProgram pin_debug_locals).
     bool pin_debug_locals;
+    // The unit's complete syntax tree when the caller built one (the driver's
+    // -fc-ast-pilot): lowering reads statement extents from it where it can
+    // (c_ir_statement_extents in c_gen.c) and walks tokens for the rest. Null
+    // means no tree, and lowering behaves exactly as it always has. The tree
+    // and the preprocessing result must outlive lowering; nothing lowering
+    // publishes holds a node id or a pointer into it.
+    CAst const* syntax_tree;
 };
 
 typedef struct CIRDirectSsaStatistics CIRDirectSsaStatistics;
