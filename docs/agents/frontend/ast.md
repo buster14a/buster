@@ -1876,6 +1876,60 @@ diagnostic only, and its result is negative. No candidate was built:
 - 92% of the machine Ir still left under the pilot is declines and misses
   inside typed bodies.
 
+For the member-tail width (`c_ast_types_probe_fails`, row 2 of the decline
+census in audit
+[`2026-10-11T093336Z`](../../performance-audits/2026-10-11T093336Z.md)),
+these budgets were declared before its measured runs. They use the stage-2
+input and flags (`-g0 -fsyntax-only` and `-g0 -c`) and the four Callgrind
+arms (`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3`
+Release builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `4e5d563f`, which the candidate branches from. The budgets:
+- **Proof first.** A throwaway census build of the base must show, over the
+  whole self-host compile, that every bit-field probe the new rule calls
+  failing does fail and appends no row, and must account for the 120 rows
+  that the census's 1,424 runs append. Without both, no code ships.
+- **Correctness.**
+  - no verify mismatch over the corpus, with the existing answer floors;
+  - a mutation that hands the parent a nonzero width where the rule says 0
+    must fail the corpus gate;
+  - identical diagnostics with and without the flag;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **The slice's own effect (C against B).** Fewer instructions in the whole
+  `-fsyntax-only` compile, with the token test charged, together with fewer
+  machine runs from queries and fewer tree declines. The census ceiling is
+  about 18.6 M. If C is not below B, nothing ships, and the result is recorded
+  on #3102 as a negative one.
+- **Default path (D against A).** The change is confined to the typer, so the
+  default path stays within ±0.05% Ir on `-fsyntax-only` and on `-c` (`-g0`).
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete (#2761) and
+  the hook stays opt-in.
+
+The member-tail width's hosted census is
+[`2026-10-11T103427Z`](../../performance-audits/2026-10-11T103427Z.md), taken
+the same way and diagnostic only:
+- **Proof.** On the base, all 546 probes the rule calls failing did fail,
+  and none appended a row. The 1,440 runs the width rule refused first
+  append 162 rows, all const-qualified copies:
+  - 158 come from a qualified member elsewhere in the same query;
+  - 4 come from probes the rule leaves to the machine.
+- **Budgets.** Every budget passes:
+  - the corpus verify gate has 0 mismatches, and its tree answers rise from
+    58,322 to 58,365;
+  - the mutation (width 3 instead of 0) fails the gate;
+  - objects are byte-identical across the four arms at `-g0` and `-g`.
+- **Effect.** The pilot runs 5.60 M fewer instructions (−0.060%). Declines
+  fall by 508, and the pass costs 1.18 M more.
+- **Default path.** −0.002% on `-fsyntax-only` and −0.0015% on `-c`.
+- **What stays.** The other 908 runs keep their machine run: their probe
+  starts at a cast or a comma, or walks a qualified chain.
+- Zen 5 validation stays incomplete (#2761).
+
 The count cache's audit, below, leaves a second lead: under `-fsyntax-only`
 nothing reads the bytes a first sight records. The candidate counts a narrow
 fragment's first sight (`c_ir_count_quoted`) and records only its length, but
@@ -2021,59 +2075,5 @@ the same way and diagnostic only:
   compiles in 0.37 s under the pilot (4.44 s before), with 163,834 build
   steps.
 - **Zen 5.** Validation is incomplete (#2761), and the default stays off.
-
-For the member-tail width (`c_ast_types_probe_fails`, row 2 of the decline
-census in audit
-[`2026-10-11T093336Z`](../../performance-audits/2026-10-11T093336Z.md)),
-these budgets were declared before its measured runs. They use the stage-2
-input and flags (`-g0 -fsyntax-only` and `-g0 -c`) and the four Callgrind
-arms (`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3`
-Release builds:
-- A: base, default flags;
-- B: base with `-fc-ast-pilot`;
-- C: candidate with `-fc-ast-pilot`;
-- D: candidate, default flags.
-
-The base is main `4e5d563f`, which the candidate branches from. The budgets:
-- **Proof first.** A throwaway census build of the base must show, over the
-  whole self-host compile, that every bit-field probe the new rule calls
-  failing does fail and appends no row, and must account for the 120 rows
-  that the census's 1,424 runs append. Without both, no code ships.
-- **Correctness.**
-  - no verify mismatch over the corpus, with the existing answer floors;
-  - a mutation that hands the parent a nonzero width where the rule says 0
-    must fail the corpus gate;
-  - identical diagnostics with and without the flag;
-  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
-- **The slice's own effect (C against B).** Fewer instructions in the whole
-  `-fsyntax-only` compile, with the token test charged, together with fewer
-  machine runs from queries and fewer tree declines. The census ceiling is
-  about 18.6 M. If C is not below B, nothing ships, and the result is recorded
-  on #3102 as a negative one.
-- **Default path (D against A).** The change is confined to the typer, so the
-  default path stays within ±0.05% Ir on `-fsyntax-only` and on `-c` (`-g0`).
-- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
-  comparison is requested, so Zen 5 validation stays incomplete (#2761) and
-  the hook stays opt-in.
-
-The member-tail width's hosted census is
-[`2026-10-11T103427Z`](../../performance-audits/2026-10-11T103427Z.md), taken
-the same way and diagnostic only:
-- **Proof.** On the base, all 546 probes the rule calls failing did fail,
-  and none appended a row. The 1,440 runs the width rule refused first
-  append 162 rows, all const-qualified copies:
-  - 158 come from a qualified member elsewhere in the same query;
-  - 4 come from probes the rule leaves to the machine.
-- **Budgets.** Every budget passes:
-  - the corpus verify gate has 0 mismatches, and its tree answers rise from
-    58,322 to 58,365;
-  - the mutation (width 3 instead of 0) fails the gate;
-  - objects are byte-identical across the four arms at `-g0` and `-g`.
-- **Effect.** The pilot runs 5.60 M fewer instructions (−0.060%). Declines
-  fall by 508, and the pass costs 1.18 M more.
-- **Default path.** −0.002% on `-fsyntax-only` and −0.0015% on `-c`.
-- **What stays.** The other 908 runs keep their machine run: their probe
-  starts at a cast or a comma, or walks a qualified chain.
-- Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
