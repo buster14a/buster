@@ -259,7 +259,8 @@ BUSTER_F_DECL String8 buster_test_temporary_path(Arena* arena, String8 name, Str
 BUSTER_F_DECL String8 buster_test_temporary_unique_path(Arena* arena, String8 name, String8 suffix);
 #if BUSTER_INCLUDE_TESTS
 // Cleanup after waiting for a test image. Windows retries only sharing/access
-// failures for at most 500 ms / 51 attempts; other platforms make one attempt.
+// failures with a 500 ms retry deadline and at most 51 attempts; other platforms
+// make one attempt. Native syscall/scheduling time is outside the retry budget.
 // Every initial failure reports its native code, final code, and retry timing.
 // The returned checked error remains nonzero for a persistent lock/denial.
 BUSTER_F_DECL OsError buster_test_executable_delete(UnitTestArguments* arguments, String8 path);

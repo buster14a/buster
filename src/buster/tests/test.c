@@ -3387,12 +3387,12 @@ OsError buster_test_executable_delete(UnitTestArguments* arguments, String8 path
 {
     // DeleteFileW refuses a mapped image or an open handle without
     // FILE_SHARE_DELETE. Retry only cleanup, never compilation or execution.
-    enum { RETRY_MICROSECONDS = 500000, RETRY_MILLISECONDS = 10, MAX_ATTEMPTS = 51 };
     u64 start = os_now_microseconds();
     OsError error = os_file_delete_checked(path);
     OsError first_error = error;
     u32 attempts = 1;
 #if BUSTER_WINDOWS
+    enum { RETRY_MICROSECONDS = 500000, RETRY_MILLISECONDS = 10, MAX_ATTEMPTS = 51 };
     while ((error.v == ERROR_SHARING_VIOLATION || error.v == ERROR_ACCESS_DENIED) &&
            attempts < MAX_ATTEMPTS && os_now_microseconds() - start < RETRY_MICROSECONDS)
     {

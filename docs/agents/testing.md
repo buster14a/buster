@@ -210,7 +210,8 @@
 
 Driver runtime fixtures use `buster_test_executable_delete` after waiting for
 their executable. On Windows it retries only `ERROR_SHARING_VIOLATION` and
-`ERROR_ACCESS_DENIED`, for at most 500 ms and 51 delete attempts. It does not
+`ERROR_ACCESS_DENIED`, under a 500 ms retry deadline and a 51-attempt ceiling. Native syscall and
+scheduling time can extend elapsed time past that deadline. It does not
 retry compilation, linking or execution; a persistent denial still fails.
 Other platforms make one checked delete attempt. An initial failure logs the
 path, first and final native error codes, attempt count and elapsed time, even
@@ -219,7 +220,9 @@ if cleanup later succeeds.
 `compiler_driver_test_executable_cleanup` checks unchanged bytes and one
 attempt for an unrelated error; Windows additionally exercises two injected
 transient errors, a real handle opened without delete sharing, and a real
-read-only file. Both persistent native errors remain failures until the
+read-only file. A two-lane Windows control releases a real held handle while
+cleanup runs and requires eventual deletion; serial builds retain the persistent
+lock controls. Both persistent native errors remain failures until the
 fixture releases its lock or restores the attribute. Missing paths are
 idempotent success, matching `os_file_delete_checked`.
 

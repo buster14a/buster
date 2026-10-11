@@ -84,6 +84,37 @@
 #include <poll.h>
 #endif
 
+
+#if BUSTER_WINDOWS && !BUSTER_SINGLE_THREADED
+typedef struct CompilerDriverExecutableCleanupLanes CompilerDriverExecutableCleanupLanes;
+struct CompilerDriverExecutableCleanupLanes
+{
+    UnitTestArguments* arguments;
+    String8 path;
+    OsFileDescriptor* holder;
+    OsError blocked;
+    OsError cleaned;
+    bool closed;
+};
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_test_executable_cleanup_lane(void* pointer)
+{
+    CompilerDriverExecutableCleanupLanes* state = pointer;
+    if (!lane_index()) { state->blocked = os_file_delete_checked(state->path); }
+    // Both lanes see a real sharing failure before either releases its owner.
+    lane_sync();
+    if (!lane_index())
+    {
+        state->cleaned = buster_test_executable_delete(state->arguments, state->path);
+    }
+    else
+    {
+        Sleep(20);
+        state->closed = os_file_close(state->holder);
+    }
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_executable_cleanup(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -137,6 +168,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_executable_cleanup(UnitT
                 BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, path).v);
             }
         }
+
+#if !BUSTER_SINGLE_THREADED
+        if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
+        {
+            OsFileDescriptor* holder = os_file_open(path, (OpenFlags){0}, (OsFileAccess){.read = 1},
+                                                   (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
+            if (BUSTER_REQUIRE(arguments, holder != 0))
+            {
+                CompilerDriverExecutableCleanupLanes state = {.arguments = arguments, .path = path, .holder = holder};
+                lane_run(2, compiler_driver_test_executable_cleanup_lane, &state);
+                BUSTER_TEST(arguments, state.blocked.v == ERROR_SHARING_VIOLATION);
+                BUSTER_TEST(arguments, state.closed && !state.cleaned.v);
+                FileStats released_stats = os_path_followed_stats(path);
+                BUSTER_TEST(arguments, released_stats.valid && released_stats.kind == OS_FILE_KIND_MISSING);
+            }
+        }
+#endif
         if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
         {
             String16 wide = string16_from_string8(arena, path, true);
