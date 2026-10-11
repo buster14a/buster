@@ -23606,6 +23606,67 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_classify_type(UnitTestArgument
     return result;
 }
 
+// Builtin vector results need not share a semantic row to be compatible.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_simd_conditional_types(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("typedef unsigned char V __attribute__((vector_size(64)));\n"
+           "typedef unsigned char W __attribute__((vector_size(64)));\n"
+           "void f(unsigned char const* p, unsigned char* out, int flag, unsigned long long mask)\n"
+           "{\n"
+           "    V a = flag ? __builtin_buster_simd_load(p) : __builtin_buster_simd_load(p + 1);\n"
+           "    V b = flag ? __builtin_buster_simd_load(p) : __builtin_buster_simd_load_masked(p, mask);\n"
+           "    W alias = b;\n"
+           "    V c = flag ? a : alias;\n"
+           "    __builtin_buster_simd_store(out, c);\n"
+           "    __builtin_buster_simd_store(out, flag ? a : __builtin_buster_simd_load(p));\n"
+           "}\n"),
+        S8("typedef unsigned char V __attribute__((vector_size(64)));\n"
+           "typedef unsigned char W __attribute__((vector_size(16)));\n"
+           "void f(int flag, V a, W b) { V c = flag ? a : b; }\n"),
+        S8("typedef unsigned char V __attribute__((vector_size(64)));\n"
+           "typedef unsigned int W __attribute__((vector_size(64)));\n"
+           "void f(int flag, V a, W b) { V c = flag ? a : b; }\n"),
+        S8("typedef unsigned char V __attribute__((vector_size(64)));\n"
+           "void f(int flag, V a) { V c = flag ? a : 1; }\n"),
+    };
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+    {
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_AMD_ZEN_5, .os = systems[system]};
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, sources[source_index],
+                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+                CParseResult parsed = c_parse(temporary.arena, tokens);
+                BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+                if (source_index == 0)
+                {
+                    BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("simd-conditional.c"), tokens, parsed, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0, lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none"));
+                    if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+                    {
+                        BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    }
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, parsed.diagnostic_count != 0);
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 // GNU vector subscripts are scalar lanes even inside conditional expressions.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vector_subscript_conditional_type(UnitTestArguments* arguments)
 {
@@ -62888,6 +62949,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_variadic_function_pointer_cast);
     C_TEST_FIXTURE(arguments, c_test_variadic_function_pointer_cast_runtime);
     C_TEST_FIXTURE(arguments, c_test_variadic_va_opt);
+    C_TEST_FIXTURE(arguments, c_test_simd_conditional_types);
     C_TEST_FIXTURE(arguments, c_test_vector_subscript_conditional_type);
     C_TEST_FIXTURE(arguments, c_test_vendor_builtin_admission);
     C_TEST_FIXTURE(arguments, c_test_vendor_fixed_lane_selection);
