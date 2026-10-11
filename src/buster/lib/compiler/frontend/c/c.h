@@ -1441,6 +1441,11 @@ struct CAstTypeStatistics
     u64 declines;
     u64 misses;
     u64 gated;
+    // Name checks of answered nodes (c_ast_types_lookups_settled): those a
+    // settled region answered without a lookup, and those that walked the
+    // node's subtree.
+    u64 lookups_settled;
+    u64 lookups_walked;
 };
 
 typedef struct CParserResult CParserResult;

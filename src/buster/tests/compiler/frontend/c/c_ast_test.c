@@ -17,8 +17,9 @@
 // c_parse_ast's records field by field (c_ast_corpus_split), and the tree
 // expression typer (c_ast_types.c) to the type machine (c_ast_corpus_types).
 // c_ast_test_types probes the typer's accepted kinds, declines and misses one
-// range at a time; c_ast_test_split runs the tree split on one shape per
-// fallback reason in every layout.
+// range at a time; c_ast_test_type_lookups holds its name checks to the
+// machine on shadowing shapes; c_ast_test_split runs the tree split on one
+// shape per fallback reason in every layout.
 //
 // Case helpers (macros: they add into the caller's `result`):
 //   c_ast_test_expect(arguments, source, expected_dump)
@@ -3886,6 +3887,87 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
     return result;
 }
 
+// The typer's name checks (c_ast_types_lookups_settled): a region whose
+// marked names no entity outside the file scope shares settles once and
+// answers its checks without a lookup; a name that a parameter or a local
+// also spells is checked by walking the query's subtree, and so is every
+// check of a region with more such names than it records. Each source is
+// analyzed with the tree, and again with every tree answer verified against
+// the machine.
+typedef struct CAstTypeLookupCase CAstTypeLookupCase;
+struct CAstTypeLookupCase
+{
+    String8 source;
+    bool settled;
+    bool walked;
+    // Some query is declined: its name resolves to another entity in the
+    // query's scope.
+    bool declined;
+};
+
+BUSTER_GLOBAL_LOCAL CAstTypeLookupCase const c_ast_type_lookup_cases[] = {
+    // File-scope callees, a typedef name and an enumerator in a body.
+    {S8_INITIALIZER("typedef long L; enum { A = 3 }; int g(int); long f(int a) { int r = g(a); { long s = (L)g(r); r += (int)s; } return (L)r + A; }"),
+     true, false, false},
+    // A callee through a parameter is checked by the walk; the file-scope
+    // callee in the same body is still settled.
+    {S8_INITIALIZER("int g(int); int f(int (*h)(int), int a) { int r = h(a); return r + g(a); }"), true, true, false},
+    // A local declared after the call shadows the callee in the query's
+    // scope, so the walk declines the call.
+    {S8_INITIALIZER("int g(void); int f(void) { int r = g(); int g = 2; return r + g; }"), false, true, true},
+    // The same name as a local of another function only.
+    {S8_INITIALIZER("int g(void); int h(void) { int g = 1; return g; } int f(void) { int r = g(); return r + g(); }"), false, true, false},
+    // More callees through parameters than a region records.
+    {S8_INITIALIZER("int g(int); int f(int (*h)(int)) { return g(0) + h(1) + h(2) + h(3) + h(4) + h(5) + h(6) + h(7) + h(8) + h(9) + h(10) + h(11) + "
+                    "h(12) + h(13) + h(14) + h(15) + h(16) + h(17); }"),
+     false, true, false},
+    // File-scope initializers: unbound names and typedef names resolve in the
+    // file scope; one a local elsewhere also spells is walked.
+    {S8_INITIALIZER("typedef unsigned short U16; enum { A = 3 }; long x = (U16)A + 1;"), true, false, false},
+    {S8_INITIALIZER("enum { v = 4 }; int f(void) { int v = 1; return v; } long x = v + 1L;"), false, true, false},
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_type_lookups(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ast_type_lookup_cases); index += 1)
+    {
+        CAstTypeLookupCase const* lookup_case = c_ast_type_lookup_cases + index;
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, lookup_case->source, C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        if (BUSTER_REQUIRE(arguments, built.complete))
+        {
+            CAstTypeStatistics statistics = {0};
+            CParserResult typed_syntax = c_parse_ast(temporary.arena, preprocess);
+            typed_syntax.ast = &built.ast;
+            typed_syntax.ast_type_statistics = &statistics;
+            typed_syntax.type_interning = true;
+            CAnalysisResult typed = c_analyze_semantics_only(temporary.arena, preprocess, typed_syntax);
+            BUSTER_TEST_RAW(arguments,
+                            typed.analysis_complete && !typed.diagnostic_count && (statistics.lookups_settled != 0) == lookup_case->settled &&
+                                (statistics.lookups_walked != 0) == lookup_case->walked && (!lookup_case->declined || statistics.declines),
+                            string_format(temporary.arena, S8("{S8}: {u64} settled, {u64} walked, {u64} answers, {u64} declines, {u32} diagnostics"),
+                                          lookup_case->source, statistics.lookups_settled, statistics.lookups_walked, statistics.answers,
+                                          statistics.declines, typed.diagnostic_count));
+            CParserResult verified_syntax = c_parse_ast(temporary.arena, preprocess);
+            verified_syntax.ast = &built.ast;
+            verified_syntax.type_interning = true;
+            c_test_ast_type_verify_take();
+            c_test_ast_type_verify_set(true);
+            c_analyze_semantics_only(temporary.arena, preprocess, verified_syntax);
+            c_test_ast_type_verify_set(false);
+            CTestAstTypeVerify verify = c_test_ast_type_verify_take();
+            BUSTER_TEST_RAW(arguments, verify.compared && !verify.mismatches,
+                            string_format(temporary.arena, S8("{S8}: {u64} of {u64} verified answers disagree with the machine"), lookup_case->source,
+                                          verify.mismatches, verify.compared));
+        }
+        c_ast_release(&built.ast);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // c_parse_ast_from_tree on one shape per fallback reason, and on shapes it
 // publishes itself, in every layout: the result is always c_parse_ast's, and
 // the statistics name the reason. The #3215 shapes are among the published
@@ -4020,6 +4102,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_oracle);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_uninterned);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_types);
+    BUSTER_TEST_FIXTURE(arguments, c_ast_test_type_lookups);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_split);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_fixture_sweep);
