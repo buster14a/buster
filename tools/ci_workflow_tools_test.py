@@ -190,6 +190,15 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         completion = ci.split("\n  complete:", 1)[1]
         self.assertIn("ref: main", completion)
         self.assertIn("path: no-code-trusted", completion)
+        # #3395: the workspace stays shallow; reclassification reads its own
+        # bare blobless candidate and never fetches lazily or into the workspace.
+        self.assertEqual(re.findall(r"(?m)^\s+fetch-depth: (.*)$", completion), ["1", "1"])
+        self.assertIn("fetch --quiet --no-tags --no-write-fetch-head --filter=blob:none", completion)
+        self.assertIn('"$SOURCE_URL" "$TESTED_SHA" "$policy"', completion)
+        self.assertIn("GIT_NO_LAZY_FETCH: '1'", completion)
+        self.assertIn('ci_no_code --repo "$RUNNER_TEMP/no-code-candidate"', completion)
+        self.assertNotIn("git fetch --quiet --no-tags origin", completion)
+        self.assertNotIn("persist-credentials: true", completion)
         audit = (ROOT / ".github/workflows/self-host-audit.yml").read_text()
         events = re.search(r"(?ms)^on:(.*?)(?=^[A-Za-z_][\w-]*:|\Z)", audit).group(1)
         self.assertEqual(tuple(line.rstrip() for line in events.splitlines()

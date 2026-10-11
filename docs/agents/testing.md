@@ -536,6 +536,27 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   failure: always inspect every `ANDROID_CONFIG_RESULT` line — both Debug and
   Release — plus the batch line's `status=` field; a missing per-config line or
   `status=not-run` is itself evidence of an incomplete run.
+  With `BUSTER_ANDROID_RUNTIME_ORDER=1`, which the workflow's Android step
+  sets, `android/test_ci.sh` also executes a Buster-linked program on the
+  emulator (#1243). The APK payload cannot do this: Android 10+ app data is
+  W^X, so its sandbox cannot execute a freshly written file. While the
+  emulator boots, `android/runtime_order.sh build` has the native build driver
+  generate and build a host `ide` (Debug, no tests): the workflow bootstraps
+  that driver with Clang and passes it as `BUSTER_ANDROID_HOST_DRIVER`, and a
+  local run selects `build.sh`. It then links `android/runtime_order/probe.c`
+  against a shared library and an IFUNC object built by the NDK's clang. After boot, `run` pushes the
+  probe to `/data/local/tmp`, runs it through `adb shell` with the
+  `BUSTER_ANDROID_ADB_COMMAND_TIMEOUT_SECONDS` adb bounds and a 30-second
+  probe bound (`BUSTER_ANDROID_RUNTIME_ORDER_TIMEOUT_SECONDS`), and requires
+  exit status 0 and the anchored record: both preinit entries in order, then
+  the library's constructor, then the program's, with the IFUNC resolved once
+  and callable from preinit. `ANDROID_RUNTIME_ORDER_RESULT` reports each mode
+  and `ANDROID_RUNTIME_ORDER_CHECK` the batch's view (`disabled` when not
+  requested). A build or run failure fails the batch with
+  `config=runtime-order` while both payloads still run; a probe that did not
+  build is not run. `bash android/runtime_order_test.sh` (run by
+  `android/run_tests_test.sh`) covers the script with fake tools; the frozen
+  shared mobile suite keeps the check disabled.
   `android/run_tests.sh` bounds each complete suite with a 180-second monitor
   watchdog, independently of adb command/install/boot deadlines. Debug compiler
   fixtures exceeded the former 60-second budget while still reporting progress
@@ -737,9 +758,13 @@ The fixture then runs the subject comparisons; any capable compiler that
 disagrees with Buster remains a failed assertion.
 
 An optional local compiler refusal is reported as NOT_RUN. It is explicit
-non-participation, never a passing assertion. In required CI, the same narrowly
-authenticated refusal is INCOMPLETE and adds a failed assertion, so
-ide test --ci=1 cannot accept that required reference obligation as complete.
+non-participation, never a passing assertion. In required CI, the type-specifier
+fixture's narrowly authenticated `_Float16` refusal is INCOMPLETE and adds a
+failed assertion, so ide test --ci=1 cannot accept that required reference
+obligation as complete. The function-parameter fixture's GCC `-std=gnu23`
+rows are the exception (#2579): GCC 13 lacks only that dialect spelling, which
+GCC 14 added, so its exact authenticated refusal is NOT_RUN under --ci=1 too.
+A GCC 14 or newer host still runs those rows.
 Other outcomes are failures: missing tools, an unauthenticated profile, an
 unhealthy control, altered or additional diagnostics, unexpected stdout or
 artifacts, abnormal exit, timeout, capture loss, or cleanup failure. A refusal

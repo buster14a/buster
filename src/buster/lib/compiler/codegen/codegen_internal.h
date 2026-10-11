@@ -27,6 +27,11 @@ struct CodegenBuffer
     CodegenError error;
 };
 
+// Appends one frame event at a function-relative offset; false when the
+// descriptor's action array is full. Encoders publish their prologue through
+// a local descriptor with code_offset zero.
+BUSTER_F_DECL bool codegen_unwind_action_append(CodegenFunctionDescriptor* descriptor, u32 capacity, u32 code_offset,
+                                                CodegenUnwindActionKind kind, u8 register_index, u32 value);
 // Shared bounded AArch64 Windows probe. Returns false for a small or
 // misaligned request; a handled request reports emission errors in buffer.
 BUSTER_F_DECL bool codegen_a64_windows_large_stack_adjust(CodegenBuffer* buffer, u32 size, bool subtract,

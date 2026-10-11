@@ -1959,10 +1959,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_local_seed_coverage(UnitTe
                         BUSTER_TEST_RAW(arguments, found_available, local_label);
                     }
                 }
-                // Locals first written after a branch (#2717): a location
-                // starts only past every path's write and follows the
-                // must-initialized blocks, so a one-sided write never
-                // reaches the join and the entry stack bytes are never shown.
+                // Locals first written after a branch (#2717): locations
+                // start only past the must-initialized writes, so a one-sided
+                // write never reaches the join or exposes entry stack bytes.
                 IrFunction* path_function = codegen_test_c_function_find(module, S8("path_only"));
                 CodegenFunctionDescriptor* path_descriptor =
                     path_function && generated.error == CODEGEN_ERROR_NONE ? codegen_test_c_descriptor_find(&generated, path_function->symbol) : 0;
@@ -2178,6 +2177,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_homeless_register(
                                                                         &ir_function, &function, &placement, row_offsets, 100, 150, 80, target));
     BUSTER_TEST(arguments, unaddressable.error == CODEGEN_ERROR_INVALID_IR);
     BUSTER_TEST(arguments, unaddressable_dense.error == CODEGEN_ERROR_INVALID_IR);
+    return result;
+}
+
+// A run spanning three adjacent block ranges must seed the same merged
+// location as replaying those ranges independently.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_layout_run_span(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    MachineInstruction instructions[4] = {0};
+    MachineLineMark marks[4] = {
+        {.instruction = 0, .row = 0},
+        {.instruction = 1, .row = 1},
+        {.instruction = 2, .row = 2},
+        {.instruction = 3, .row = 3},
+    };
+    MachineDebugValue run_value = {
+        .constant = 7,
+        .local = {.value = 0},
+        .first_instruction = 1,
+        .instruction_count = 1,
+        .tail_first_instruction = 3,
+        .tail_instruction_count = 1,
+        .kind = MACHINE_DEBUG_VALUE_CONSTANT,
+        .value_size = 8,
+    };
+    MachineDebugValue block_values[3] = {
+        {.constant = 7, .local = {.value = 0}, .first_instruction = 1, .instruction_count = 1,
+         .kind = MACHINE_DEBUG_VALUE_CONSTANT, .value_size = 8},
+        {.constant = 7, .local = {.value = 0}, .first_instruction = 2, .instruction_count = 1,
+         .kind = MACHINE_DEBUG_VALUE_CONSTANT, .value_size = 8},
+        {.constant = 7, .local = {.value = 0}, .first_instruction = 3, .instruction_count = 1,
+         .kind = MACHINE_DEBUG_VALUE_CONSTANT, .value_size = 8},
+    };
+    MachineFunction run_function = {
+        .instructions = instructions,
+        .line_marks = marks,
+        .debug_values = &run_value,
+        .target = machine_target_x86_64(),
+        .instruction_count = BUSTER_ARRAY_LENGTH(instructions),
+        .line_mark_count = BUSTER_ARRAY_LENGTH(marks),
+        .debug_value_count = 1,
+    };
+    MachineFunction blocks_function = run_function;
+    blocks_function.debug_values = block_values;
+    blocks_function.debug_value_count = BUSTER_ARRAY_LENGTH(block_values);
+    MachineStackPlacement placement = {.valid = true};
+    u32 row_offsets[4] = {0, 10, 20, 30};
+    DebugLocationSeed run_seeds[4] = {0};
+    DebugLocationSeed block_seeds[4] = {0};
+    CodegenModule run_module = {.debug_locations = run_seeds};
+    CodegenModule blocks_module = {.debug_locations = block_seeds};
+    IrFunction ir_function = {.symbol = {.value = 7}};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    bool run_recorded = codegen_test_record_machine_locations(arguments->arena, &run_module, BUSTER_ARRAY_LENGTH(run_seeds),
+                                                               &ir_function, &run_function, &placement, row_offsets, 100, 140, 80, target);
+    bool blocks_recorded = codegen_test_record_machine_locations(arguments->arena, &blocks_module, BUSTER_ARRAY_LENGTH(block_seeds),
+                                                                  &ir_function, &blocks_function, &placement, row_offsets, 100, 140,
+                                                                  80, target);
+    BUSTER_TEST(arguments, run_recorded && blocks_recorded && run_module.error == CODEGEN_ERROR_NONE &&
+                               blocks_module.error == CODEGEN_ERROR_NONE && run_module.debug_location_count == 1 &&
+                               blocks_module.debug_location_count == 1);
+    if (run_module.debug_location_count == 1 && blocks_module.debug_location_count == 1)
+    {
+        BUSTER_TEST(arguments, codegen_test_debug_seeds_equal(run_seeds, block_seeds) && run_seeds[0].start == 110 &&
+                                   run_seeds[0].end == 140 && run_seeds[0].location.kind == DEBUG_LOCATION_CONSTANT &&
+                                   run_seeds[0].location.constant == 7);
+    }
     return result;
 }
 
@@ -3716,6 +3782,9 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     UnitTestResult homeless_debug = codegen_test_machine_debug_homeless_register(arguments);
     result.succeeded_test_count += homeless_debug.succeeded_test_count;
     result.test_count += homeless_debug.test_count;
+    UnitTestResult layout_run = codegen_test_machine_debug_layout_run_span(arguments);
+    result.succeeded_test_count += layout_run.succeeded_test_count;
+    result.test_count += layout_run.test_count;
     UnitTestResult machine_debug_differential = codegen_test_machine_debug_differential(arguments);
     result.succeeded_test_count += machine_debug_differential.succeeded_test_count;
     result.test_count += machine_debug_differential.test_count;
