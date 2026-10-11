@@ -427,6 +427,13 @@ unchanged.
     - a call of an unbound void `__builtin_` with no arguments
       (`__builtin_debugtrap()`, `__builtin_unreachable()`), whose answer is
       the published `void` row (`c_ast_types_builtin_call`).
+  - `++` and `--`, prefix and postfix (`c_ast_types_update`): the operand's
+    own row, unpromoted, which is what the machine's `UPDATE` operation and
+    its leaf's postfix update answer. Neither appends a row. With constraint
+    checks the node is safe only where `c_parse_update_operand_modifiable`
+    holds and the operand is not a struct, union or `nullptr`. For a lone
+    bound identifier the pass reads that test from the binding and the row;
+    any other operand runs it over the operand's tokens.
 - **What it declines.** Every shape whose machine answer appends a row stays
   with the machine:
   - a qualified member or array element;
@@ -1464,8 +1471,8 @@ the same way and diagnostic only:
 - Zen 5 validation stays incomplete (#2761).
 
 For the typer's `++` and `--` rule (`c_ast_types_update`), proposed by the
-decline census in audit
-[`2026-10-11T093336Z`](../../performance-audits/2026-10-11T093336Z.md), these
+decline census in audit `2026-10-11T093336Z`
+([#3408](https://github.com/buster14a/buster/pull/3408)), these
 budgets were declared before its measured runs. They use the stage-2 input,
 flags and four Callgrind arms (`--cache-sim=no --branch-sim=no`) on tests-off
 `-march=x86-64-v3` Release builds. The base is main `4e5d563f`, which the
