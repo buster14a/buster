@@ -41,6 +41,7 @@ class BackendCapabilityTests(unittest.TestCase):
                 "backend": "fixture",
                 "feature": "calls",
                 "status": "supported",
+                "note": "The fixture is conditionally compiled.",
                 "evidence": [{
                     "file": "src/buster/tests/test.c",
                     "symbol": "fixture_test",
@@ -310,6 +311,7 @@ class BackendCapabilityTests(unittest.TestCase):
         self.assert_error(self.errors(), "fixture_test' is not reachable from any registered test module")
 
     def run_ci_report(self, log, environment=None):
+        self.write("docs/backend-capabilities-v1.json", json.dumps(self.data))
         log_path = self.write("run.log", log)
         output = io.StringIO()
         errors = io.StringIO()
@@ -319,27 +321,71 @@ class BackendCapabilityTests(unittest.TestCase):
                 result = capabilities.main(["--ci-report", str(log_path), "--root", str(self.root)])
         return result, output.getvalue(), errors.getvalue()
 
-    def test_ci_report_passed_failed_not_run_and_unset_run_url(self):
-        records = (
-            ("TEST_MODULE_TIMING index=0 module=fixture_tests duration_ns=10 passed=1 failed=0 assertions=1 status=pass\n",
-             "passed"),
-            ("TEST_MODULE_TIMING index=0 module=fixture_tests duration_ns=10 passed=0 failed=1 assertions=1 status=fail\n",
-             "failed"),
-            ("", "not run"),
+    def test_ci_report_passed_module_without_fixture_is_not_observed(self):
+        self.data["cells"][0]["evidence"][0].pop("requires")
+        result, output, errors = self.run_ci_report(
+            "TEST_MODULE_TIMING index=0 module=fixture_tests duration_ns=10 passed=1 failed=0 assertions=1 status=pass\n"
         )
-        for log, status in records:
-            with self.subTest(status=status):
-                result, output, errors = self.run_ci_report(log)
-                self.assertEqual(0, result, errors)
-                self.assertIn(f"| fixture_tests | {status} |", output)
-                self.assertIn(f"Revision: `{('b' * 40)}`", output)
-                self.assertNotIn("actions/runs/", output)
+        self.assertEqual(0, result, errors)
+        self.assertIn(
+            "| fixture_tests | module passed; fixture not observed (may be compiled out on this host) |",
+            output,
+        )
+        self.assertIn("| The fixture is conditionally compiled. |", output)
+        self.assertIn(f"Revision: `{('b' * 40)}`", output)
+        self.assertNotIn("actions/runs/", output)
+
+    def test_ci_report_passed_module_with_observed_fixture(self):
+        self.data["cells"][0]["evidence"][0].pop("requires")
+        log = (
+            "TEST_FIXTURE_START_V1 kind=fixture module=fixture_tests fixture=fixture_test index=0\n"
+            "TEST_MODULE_TIMING index=0 module=fixture_tests duration_ns=10 passed=1 failed=0 assertions=1 status=pass\n"
+        )
+        result, output, errors = self.run_ci_report(log)
+        self.assertEqual(0, result, errors)
+        self.assertIn("| fixture_tests | fixture observed; module passed |", output)
+
+    def test_ci_report_marks_skip_requirement_as_maybe_skipped(self):
+        log = (
+            "TEST_FIXTURE_START_V1 kind=fixture module=fixture_tests fixture=fixture_test index=0\n"
+            "TEST_MODULE_TIMING index=0 module=fixture_tests duration_ns=10 passed=1 failed=0 assertions=1 status=pass\n"
+        )
+        result, output, errors = self.run_ci_report(log)
+        self.assertEqual(0, result, errors)
+        self.assertIn(
+            "| fixture_tests | fixture observed; module passed; requirement node may have skipped |",
+            output,
+        )
+
+    def test_ci_report_failed_module_with_and_without_observed_fixture(self):
+        self.data["cells"][0]["evidence"][0].pop("requires")
+        timing = "TEST_MODULE_TIMING index=0 module=fixture_tests duration_ns=10 passed=0 failed=1 assertions=1 status=fail\n"
+        result, output, errors = self.run_ci_report(timing)
+        self.assertEqual(0, result, errors)
+        self.assertIn("| fixture_tests | module failed; fixture not observed |", output)
+        result, output, errors = self.run_ci_report(
+            "TEST_FIXTURE_START_V1 kind=fixture module=fixture_tests fixture=fixture_test index=0\n" + timing
+        )
+        self.assertEqual(0, result, errors)
+        self.assertIn("| fixture_tests | fixture observed; module failed |", output)
+
+    def test_ci_report_missing_module_is_not_run(self):
+        self.data["cells"][0]["evidence"][0].pop("requires")
+        result, output, errors = self.run_ci_report("")
+        self.assertEqual(0, result, errors)
+        self.assertIn("| fixture_tests | not run |", output)
 
     def test_ci_report_rejects_malformed_timing_line(self):
         result, output, errors = self.run_ci_report("TEST_MODULE_TIMING malformed\n")
         self.assertEqual(1, result)
         self.assertEqual("", output)
         self.assertIn("malformed TEST_MODULE_TIMING", errors)
+
+    def test_ci_report_rejects_malformed_fixture_start_line(self):
+        result, output, errors = self.run_ci_report("TEST_FIXTURE_START_V1 malformed\n")
+        self.assertEqual(1, result)
+        self.assertEqual("", output)
+        self.assertIn("malformed TEST_FIXTURE_START_V1", errors)
 
     def test_ci_report_writes_to_step_summary_when_set(self):
         summary = self.root / "summary.md"

@@ -31,6 +31,10 @@ TIMING_LINE = re.compile(
     r"^TEST_MODULE_TIMING index=(\d+) module=([A-Za-z_]\w*) duration_ns=(\d+) "
     r"passed=(\d+) failed=(\d+) assertions=(\d+) status=(pass|fail)$"
 )
+FIXTURE_START_LINE = re.compile(
+    r"^TEST_FIXTURE_START_V1 kind=(module|fixture) module=([A-Za-z_]\w*) "
+    r"fixture=([A-Za-z_]\w*) index=(\d+)$"
+)
 TOP_LEVEL_KEYS = {
     "schema",
     "reviewed_revision",
@@ -625,17 +629,26 @@ def load_catalogue(path, label):
 
 def render_ci_report(data, root, log_text, environment=None):
     statuses = {}
+    observed = set()
     errors = []
     for line_number, line in enumerate(log_text.splitlines(), 1):
-        if not line.strip().startswith("TEST_MODULE_TIMING"):
+        line = line.strip()
+        if line.startswith("TEST_MODULE_TIMING"):
+            match = TIMING_LINE.fullmatch(line)
+            if match is None:
+                errors.append(f"line {line_number}: malformed TEST_MODULE_TIMING record")
+                continue
+            module, status = match.group(2), "passed" if match.group(7) == "pass" else "failed"
+            if status == "failed" or module not in statuses:
+                statuses[module] = status
             continue
-        match = TIMING_LINE.fullmatch(line.strip())
+        if not line.startswith("TEST_FIXTURE_START_V1"):
+            continue
+        match = FIXTURE_START_LINE.fullmatch(line)
         if match is None:
-            errors.append(f"line {line_number}: malformed TEST_MODULE_TIMING record")
-            continue
-        module, status = match.group(2), "passed" if match.group(7) == "pass" else "failed"
-        if status == "failed" or module not in statuses:
-            statuses[module] = status
+            errors.append(f"line {line_number}: malformed TEST_FIXTURE_START_V1 record")
+        elif match.group(1) == "fixture":
+            observed.add((match.group(2), match.group(3)))
     if errors:
         return None, errors
 
@@ -658,9 +671,19 @@ def render_ci_report(data, root, log_text, environment=None):
         lines.append(f"Run: {code_span(run_url)}")
     lines.extend([
         "",
-        "| Backend | Feature | Evidence | Module | Status |",
-        "|---|---|---|---|---|",
+        "Status legend: `fixture observed; module passed` and `fixture observed; module failed` "
+        "mean an exact fixture-start record was found; `module passed; fixture not observed "
+        "(may be compiled out on this host)` and `module failed; fixture not observed` mean "
+        "the module ran without that record; `not run` means no module result was recorded. "
+        "A `missing: skip` requirement is reported as possibly skipped when its module ran.",
+        "",
+        "| Backend | Feature | Evidence | Module | Status | Note / scope |",
+        "|---|---|---|---|---|---|",
     ])
+    notes = {
+        (cell["backend"], cell["feature"]): cell.get("note", "—")
+        for cell in data["cells"]
+    }
     for cell in report["cells"]:
         for evidence in cell["evidence"]:
             label = (
@@ -671,13 +694,30 @@ def render_ci_report(data, root, log_text, environment=None):
             if not modules:
                 modules = [None]
             for module in modules:
-                status = statuses.get(module, "not run") if module else "not run"
+                module_status = statuses.get(module) if module else None
+                fixture_seen = module and (module, evidence.get("symbol")) in observed
+                if module_status is None:
+                    status = "not run"
+                elif fixture_seen:
+                    status = f"fixture observed; module {module_status}"
+                else:
+                    status = f"module {module_status}; fixture not observed"
+                    if module_status == "passed":
+                        status += " (may be compiled out on this host)"
+                requirement_id = evidence.get("requires")
+                requirement = data["requirements"].get(requirement_id, {})
+                if module_status is not None and requirement.get("missing") == "skip":
+                    status += f"; requirement {requirement_id} may have skipped"
+                note = " ".join(notes[(cell["backend"], cell["feature"])].split())
+                if len(note) > 120:
+                    note = note[:117].rstrip() + "..."
                 lines.append("| " + " | ".join((
                     markdown_cell(cell["backend"]),
                     markdown_cell(cell["feature"]),
                     markdown_cell(label),
                     markdown_cell(module or "—"),
-                    status,
+                    markdown_cell(status),
+                    markdown_cell(note),
                 )) + " |")
     return "\n".join(lines) + "\n", []
 
