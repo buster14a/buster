@@ -1,5 +1,6 @@
 // Driver integration tests: compiler_driver_tests registers argument parsing,
-// artifact, link, runtime, and cross-mode checks. compiler_driver_test_output_paths
+// artifact, link, runtime, and cross-mode checks.
+// compiler_driver_test_mach_framework_search owns Apple framework file search/identity. compiler_driver_test_output_paths
 // owns stdout/output placement and publication refusal coverage.
 // compiler_driver_test_pic_arguments
 // owns the configured external compiler command for the ELF PIC fixture.
@@ -15406,6 +15407,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
                             "targets: [ arm64e-macos ]\n"
                             "install-name: /usr/lib/libarm64e.dylib\n");
     BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_arm64e), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("/usr/lib/libarm64e.dylib"));
+    BUSTER_TEST(arguments, identity.current_version == 0x10000 && identity.compatibility_version == 0x10000);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_arm64e), x86_64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(tbd_arm64e), ios, &identity) ==
                                COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
     String8 tbd_v3 = S8("--- !tapi-tbd-v3\n"
                         "archs: [ x86_64 ]\n"
@@ -16003,6 +16010,234 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
         }
         scratch_end(temporary);
     }
+    return result;
+}
+
+// Framework search observes independent load-command names/versions, never runs the foreign image.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_framework_search(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    static String8 const targets[] = {S8_INITIALIZER("aarch64-apple-macos"), S8_INITIALIZER("aarch64-apple-ios")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 base = buster_test_temporary_path(arena, string_format(arena, S8("buster-framework-search-{u32}"), target_index), S8(""));
+        BUSTER_TEST(arguments, os_make_directory_attempt(base));
+        String8 source = string_format_z(arena, S8("{S8}/main.c"), base);
+        String8 other = string_format_z(arena, S8("{S8}/other.c"), base);
+        BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
+        BUSTER_TEST(arguments, file_write(other, BUSTER_SLICE_TO_BYTE_SLICE(S8("int other(void) { return 1; }\n"))));
+        for (u32 scenario = 0; scenario < 18; scenario += 1)
+        {
+            String8 directory = string_format_z(arena, S8("{S8}/case-{u32}"), base, scenario);
+            String8 first = string_format_z(arena, S8("{S8}/first"), directory);
+            String8 second = string_format_z(arena, S8("{S8}/second"), directory);
+            String8 sdk = string_format_z(arena, S8("{S8}/sdk"), directory);
+            String8 system = string_format_z(arena, S8("{S8}/System"), sdk);
+            String8 library = string_format_z(arena, S8("{S8}/Library"), system);
+            String8 frameworks = string_format_z(arena, S8("{S8}/Frameworks"), library);
+            String8 directories[] = {directory, first, second, sdk, system, library, frameworks};
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(directories); index += 1)
+            {
+                BUSTER_TEST(arguments, os_make_directory_attempt(directories[index]));
+            }
+            String8 roots[] = {first, second, frameworks};
+            String8 bundles[3];
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(roots); index += 1)
+            {
+                bundles[index] = string_format_z(arena, S8("{S8}/BusterSearch3588.framework"), roots[index]);
+                BUSTER_TEST(arguments, os_make_directory_attempt(bundles[index]));
+            }
+            u32 platform = target_index == 0 ? 1 : 2;
+            String8 tbd_target = target_index == 0 ? S8("arm64-macos") : S8("arm64-ios");
+            String8 wrong_target = target_index == 0 ? S8("arm64-ios") : S8("arm64-macos");
+            String8 expected_name = S8("@rpath/BusterSearch3588.framework/Versions/A/BusterSearch3588");
+            u32 current = scenario == 11 ? 0 : 0x30405;
+            u32 compatibility = scenario == 11 ? 0 : 0x10200;
+            ByteSlice binary = compiler_driver_test_mach_dylib_with_platform(
+                arena, 0x0100000c, 6, expected_name, current, compatibility, platform);
+            bool success = scenario != 0 && scenario != 7 && scenario != 8 && scenario != 16 && scenario != 17;
+            if (scenario == 1 || scenario == 3 || scenario == 10 || scenario == 11 || scenario == 12 || scenario == 13)
+            {
+                BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/BusterSearch3588"), bundles[0]), binary));
+            }
+            if (scenario == 2 || scenario == 5 || scenario == 6 || scenario == 9)
+            {
+                BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/BusterSearch3588"), bundles[1]), binary));
+            }
+            if (scenario == 1 || scenario == 2 || scenario == 3 || scenario == 4)
+            {
+                u32 root_index = scenario == 3 ? 0 : scenario == 1 ? 1 : 2;
+                String8 stub_name = scenario == 3 || scenario == 4
+                                       ? S8("/System/Library/Frameworks/BusterSearch3588.framework/Versions/C/BusterSearch3588")
+                                       : S8("@rpath/shadowed-framework");
+                String8 stub = string_format(arena,
+                    S8("--- !tapi-tbd-v4\ntargets: [ {S8} ]\ninstall-name: {S8}\ncurrent-version: 4.5.6\ncompatibility-version: 2.3\n"),
+                    tbd_target, stub_name);
+                BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/BusterSearch3588.tbd"), bundles[root_index]),
+                                                  BUSTER_SLICE_TO_BYTE_SLICE(stub)));
+                if (scenario == 1)
+                {
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/BusterSearch3588.tbd"), bundles[2]),
+                                                      BUSTER_SLICE_TO_BYTE_SLICE(stub)));
+                }
+                if (scenario == 3 || scenario == 4)
+                {
+                    expected_name = stub_name;
+                    current = 0x40506;
+                    compatibility = 0x20300;
+                }
+            }
+            if (scenario == 5 || scenario == 8 || scenario == 9)
+            {
+                ByteSlice wrong = compiler_driver_test_mach_dylib_with_platform(
+                    arena, scenario == 9 ? 0x0100000c : 0x01000007, 6, S8("@rpath/wrong-framework"), 0x10000, 0x10000,
+                    scenario == 9 ? (platform == 1 ? 2 : 1) : platform);
+                BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/BusterSearch3588"), bundles[0]), wrong));
+            }
+            if (scenario == 6 || scenario == 8 || scenario == 10 || scenario == 12)
+            {
+                String8 stub = scenario == 10 ? S8("not a TAPI stub")
+                               : string_format(arena, S8("--- !tapi-tbd-v4\ntargets: [ {S8} ]\ninstall-name: @rpath/wrong-stub\n"),
+                                   scenario == 12 ? (target_index == 0 ? S8("x86_64-macos") : S8("x86_64-ios")) : wrong_target);
+                BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/BusterSearch3588.tbd"), bundles[0]),
+                                                  BUSTER_SLICE_TO_BYTE_SLICE(stub)));
+            }
+            if (scenario >= 14)
+            {
+                String8 arm64e_target = scenario == 16
+                    ? (target_index == 0 ? S8("arm64e-ios") : S8("arm64e-macos"))
+                    : scenario == 17
+                        ? (target_index == 0 ? S8("arm64e2-macos") : S8("arm64e2-ios"))
+                        : (target_index == 0 ? S8("arm64e-macos, arm64e-maccatalyst, x86_64-maccatalyst")
+                                             : S8("arm64e-ios, arm64e-ios-simulator, x86_64-ios-simulator"));
+                String8 stub = scenario == 15
+                    ? string_format(arena, S8("--- !tapi-tbd-v3\narchs: [ arm64e ]\nplatform: {S8}\ninstall-name: {S8}\n"
+                                               "current-version: 3.4.5\ncompatibility-version: 1.2\n"),
+                                    target_index == 0 ? S8("macosx") : S8("ios"), expected_name)
+                    : string_format(arena, S8("--- !tapi-tbd\ntbd-version: 4\ntargets: [ {S8} ]\ninstall-name: {S8}\n"
+                                               "current-version: 3.4.5\ncompatibility-version: 1.2\n"),
+                                    arm64e_target, expected_name);
+                BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/BusterSearch3588.tbd"), bundles[0]),
+                                                  BUSTER_SLICE_TO_BYTE_SLICE(stub)));
+                if (scenario == 14 || scenario == 15)
+                {
+                    Target wrong_cpu = target_parse_triple(target_index == 0 ? S8("x86_64-apple-macos") : S8("x86_64-apple-ios")).target;
+                    CompilerDriverMachDylibIdentity identity = {0};
+                    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(arena, BUSTER_SLICE_TO_BYTE_SLICE(stub), wrong_cpu, &identity)
+                                           == COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+                }
+            }
+            for (u32 multi = 0; multi < 2; multi += 1)
+            {
+                String8 options[16];
+                u32 count = 0;
+                if (scenario != 7)
+                {
+                    if (scenario != 13)
+                    {
+                        options[count++] = S8("--sysroot");
+                        options[count++] = sdk;
+                    }
+                    if (scenario != 4)
+                    {
+                        options[count++] = S8("-F");
+                        options[count++] = first;
+                        options[count++] = S8("-F");
+                        options[count++] = second;
+                    }
+                }
+                options[count++] = S8("-framework");
+                options[count++] = S8("BusterSearch3588");
+                if (scenario == 11)
+                {
+                    options[count++] = S8("-framework");
+                    options[count++] = S8("BusterSearch3588");
+                }
+                if (multi)
+                {
+                    options[count++] = other;
+                }
+                String8 output = string_format_z(arena, S8("{S8}/output-{u32}"), directory, multi);
+                String8 sentinel = S8("preserve framework output");
+                BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+                CompilerDriverResult linked = compiler_driver_test_mach_link(arena, targets[target_index], source, output, options, count);
+                BUSTER_TEST_RAW(arguments, linked.error == (success ? COMPILER_DRIVER_ERROR_NONE : COMPILER_DRIVER_ERROR_LINK),
+                    string_format(arena, S8("framework target={S8} scenario={u32} multi={u32}: {S8}"),
+                                  targets[target_index], scenario, multi, linked.diagnostic));
+                ByteSlice image = file_read(arena, output, (FileReadOptions){0});
+                if (success)
+                {
+                    CompilerDriverTestMachLoadCommands commands = compiler_driver_test_mach_load_commands(image);
+                    BUSTER_TEST(arguments, commands.valid && compiler_driver_test_mach_extra_library_count(commands) == 1);
+                    BUSTER_TEST(arguments, compiler_driver_test_mach_has_library(commands, expected_name, current, compatibility));
+                }
+                else
+                {
+                    BUSTER_STRING_TEST(arguments, linked.diagnostic, S8("framework not found: BusterSearch3588"));
+                    BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, image), sentinel);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+#if BUSTER_MACOS && !BUSTER_IOS
+    // Inspect the same real SDK used by self_host_link_arguments, so hosted
+    // evidence distinguishes file/layout/format refusal from a guessed cause.
+    Arena* arena = arguments->arena;
+    String8 sdk_command[] = {S8("xcrun"), S8("--sdk"), S8("macosx"), S8("--show-sdk-path")};
+    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(sdk_command), (SliceString8){0}, (SliceString8){0},
+        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                              .use_process_environment = true, .search_path = true});
+    BUSTER_TEST(arguments, spawn.handle != 0);
+    if (spawn.handle)
+    {
+        ProcessWaitResult wait = os_process_wait_sync(arena, spawn);
+        String8 sdk = BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]);
+        while (sdk.length && (u8)sdk.pointer[sdk.length - 1] <= ' ')
+        {
+            sdk.length -= 1;
+        }
+        BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS && sdk.length);
+        if (wait.result == PROCESS_RESULT_SUCCESS && sdk.length)
+        {
+            Target target = target_parse_triple(BUSTER_CPU_ARCH_AARCH64 ? S8("aarch64-apple-macos") : S8("x86_64-apple-macos")).target;
+            String8 names[] = {S8("AppKit"), S8("Metal"), S8("QuartzCore"), S8("Foundation")};
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+            {
+                bool found = false;
+                for (u32 candidate = 0; candidate < 2 && !found; candidate += 1)
+                {
+                    String8 path = string_format_z(arena, S8("{S8}/System/Library/Frameworks/{S8}.framework/{S8}{S8}"),
+                                                   sdk, names[index], names[index], candidate == 0 ? S8(".tbd") : S8(""));
+                    FileMapRead map = file_map_read(arena, path, (FileReadOptions){0});
+                    CompilerDriverMachDylibIdentity identity = {0};
+                    CompilerDriverMachDylibStatus status = candidate == 0
+                        ? compiler_driver_mach_tbd_identity(arena, map.bytes, target, &identity)
+                        : compiler_driver_mach_dylib_identity(map.bytes, target, &identity);
+                    u64 first = 0;
+                    while (map.bytes.pointer && first < map.bytes.length && map.bytes.pointer[first] <= ' ') { first += 1; }
+                    String8 format = !map.bytes.pointer ? S8("missing") : candidate ? S8("mach-o")
+                                     : first < map.bytes.length && map.bytes.pointer[first] == '{' ? S8("json") : S8("yaml");
+                    string_print(S8("MACH_FRAMEWORK_SDK framework={S8} path={S8} format={S8} bytes={u64} status={u32} "
+                                    "install_name={S8} current={u32} compatibility={u32}\n"),
+                                 names[index], path, format, map.bytes.length, (u32)status, identity.install_name,
+                                 identity.current_version, identity.compatibility_version);
+                    if (candidate == 0 && map.bytes.pointer && status != COMPILER_DRIVER_MACH_DYLIB_USABLE)
+                    {
+                        u64 header_length = map.bytes.length < 1024 ? map.bytes.length : 1024;
+                        string_print(S8("MACH_FRAMEWORK_SDK_HEADER framework={S8}\n{S8}\n"),
+                                     names[index], (String8){.pointer = (char8*)map.bytes.pointer, .length = header_length});
+                    }
+                    found = status == COMPILER_DRIVER_MACH_DYLIB_USABLE;
+                    file_map_unmap(map);
+                }
+                BUSTER_TEST_RAW(arguments, found, string_format(arena, S8("real SDK framework {S8} has no compatible identity"), names[index]));
+            }
+        }
+    }
+#endif
     return result;
 }
 
@@ -33440,6 +33675,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_linker_scripts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_library_search);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_framework_search);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_canonical_inlining);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocessed_c_input);
@@ -39329,7 +39565,16 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     {
         String8 apple_tls_path =
             buster_test_temporary_path(arguments->arena, S8("buster-c-thread-local-apple"), string_format(arguments->arena, S8("-{u32}"), target_index));
+        String8 framework_root = buster_test_temporary_path(arguments->arena, S8("buster-tls-framework"), S8(""));
+        String8 framework_bundle = string_format_z(arguments->arena, S8("{S8}/CoreFoundation.framework"), framework_root);
+        BUSTER_TEST(arguments, os_make_directory_attempt(framework_root));
+        BUSTER_TEST(arguments, os_make_directory_attempt(framework_bundle));
+        String8 framework_stub = string_format_z(arguments->arena, S8("{S8}/CoreFoundation.tbd"), framework_bundle);
+        BUSTER_TEST(arguments, file_write(framework_stub,
+            BUSTER_SLICE_TO_BYTE_SLICE(S8("--- !tapi-tbd-v3\narchs: [ arm64, x86_64 ]\nplatform: macosx\n"
+                                          "install-name: /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation\n"))));
         String8 apple_tls_command_line[] = {
+            S8("-F"), framework_root,
             S8("-target"),  c_thread_local_apple_targets[target_index], S8("-framework"), S8("CoreFoundation"), S8("-o"),
             apple_tls_path, S8("tests/basic_c_thread_local.c"),
         };

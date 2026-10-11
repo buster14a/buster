@@ -209,9 +209,11 @@ jobs:
             ubuntu-26.04
       # Diagnostic-only compiler, isolated from the uninstrumented timing job.
       # #497's registered geometric work budgets are compiled out otherwise.
+      # Use the event revision that supplies this workflow (the PR test merge),
+      # so a newer diagnostic never requests flags from an older PR-head compiler.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Record actual checkout identity
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
@@ -219,6 +221,22 @@ jobs:
           mode: source
           source-directory: .
           source-repository: ${{ github.repository }}
+      - name: Bind diagnostic source to its workflow revision
+        shell: bash
+        env:
+          CENSUS_EVENT_SHA: ${{ github.sha }}
+          CENSUS_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          CENSUS_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CENSUS_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p direct-ssa-census-evidence
+          source_sha=$(git rev-parse HEAD)
+          printf 'event_sha=%s\nworkflow_sha=%s\npr_head_sha=%s\npr_base_sha=%s\nsource_sha=%s\nsource_tree=%s\nworkflow_blob=%s\n' "$CENSUS_EVENT_SHA" "$CENSUS_WORKFLOW_SHA" "$CENSUS_PR_HEAD_SHA" "$CENSUS_PR_BASE_SHA" "$source_sha" "$(git rev-parse 'HEAD^{tree}')" "$(git rev-parse HEAD:.github/workflows/compiler-throughput.yml)" | tee direct-ssa-census-evidence/source.txt
+          if ! [[ "$source_sha" == "$CENSUS_EVENT_SHA" && "$source_sha" == "$CENSUS_WORKFLOW_SHA" ]]; then
+            printf 'diagnostic source must match the immutable event and workflow revision; no proof was run\n' >&2
+            exit 1
+          fi
       - name: Install existing Linux linker dependency
         shell: bash
         run: |
@@ -264,7 +282,7 @@ jobs:
           BUSTER_ALLOCATION_CENSUS=1 ./build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -c -fsource-metrics=direct-ssa-census-evidence/direct.metrics src/buster/apps/ide/ide.c -o build/unity-direct.o > direct-ssa-census-evidence/direct.stdout.log 2> direct-ssa-census-evidence/direct.stderr.log
           test -s direct-ssa-census-evidence/direct.metrics
           sha256sum build/unity-direct.o > direct-ssa-census-evidence/direct-output.sha256
-          python3 tools/allocation_census.py --input direct-ssa-census-evidence/direct.stderr.log --output direct-ssa-census-evidence/direct-allocation --label 'current-head direct SSA; diagnostic only'
+          python3 tools/allocation_census.py --input direct-ssa-census-evidence/direct.stderr.log --output direct-ssa-census-evidence/direct-allocation --label 'workflow-revision direct SSA; diagnostic only'
       - name: Census the same unity input with shared local promotion
         id: reference
         if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
@@ -274,7 +292,7 @@ jobs:
           BUSTER_ALLOCATION_CENSUS=1 ./build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -c -fno-frontend-ssa -fsource-metrics=direct-ssa-census-evidence/reference.metrics src/buster/apps/ide/ide.c -o build/unity-reference.o > direct-ssa-census-evidence/reference.stdout.log 2> direct-ssa-census-evidence/reference.stderr.log
           test -s direct-ssa-census-evidence/reference.metrics
           sha256sum build/unity-reference.o > direct-ssa-census-evidence/reference-output.sha256
-          python3 tools/allocation_census.py --input direct-ssa-census-evidence/reference.stderr.log --output direct-ssa-census-evidence/reference-allocation --label 'current-head shared local promotion; diagnostic only'
+          python3 tools/allocation_census.py --input direct-ssa-census-evidence/reference.stderr.log --output direct-ssa-census-evidence/reference-allocation --label 'workflow-revision shared local promotion; diagnostic only'
       - name: Verify production tiny helper call removal
         id: tiny
         if: ${{ !cancelled() && steps.direct.outcome == 'success' && steps.reference.outcome == 'success' }}

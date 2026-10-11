@@ -2523,4 +2523,81 @@ diagnostic only:
   version keeps the whole decline tail in one out-of-line function that
   returns its answer by value.
 
+### Initializer value typing
+
+This section has its own anchor because other open AST branches append to
+the plan's final paragraph. After [#3552](https://github.com/buster14a/buster/pull/3552),
+`c_parse_infer_initializer_array_count_core` was still the largest
+semantic-analysis cost in audit
+[`2026-10-11T142104Z`](../../performance-audits/2026-10-11T142104Z.md)'s
+census. A Callgrind caller/callee census of main `b504c4e9` on
+`-fsyntax-only` (exploratory, base only) splits it:
+- **One cost, not two.** `c_parse_validate_initializer_shape` (1,346.8 M Ir
+  inclusive) spends 1,200.1 M of that in the infer core's 3,156 calls that
+  carry a diagnostic. The core is 1,567.9 M in all.
+- **Per-element typing dominates.** `c_parse_initializer_expression_constraint`
+  costs 780.7 M under the core over 572,857 calls (605,695 in all, 922.5 M).
+  Each call types the element with `c_parse_checked_expression_type`
+  (458.6 M). Then `c_parse_incompatible_aggregate_value` (408.2 M) types the
+  same range again, unchecked, before it decides the conversion.
+- **The walk.** The rest is the walk itself: designators 209.2 M, element
+  ends 95.5 M, the core's own 247.1 M, and 45.7 M of
+  `c_ir_tokens_are_string_literals` over 968,227 elements. Only 2,154 of
+  those elements are aggregates, the one case that reads the answer.
+- **Strings.** The literal shape work left after #3552 is 112.4 M under the
+  core, and it stays.
+
+A throwaway instrumented build (not committed) compared the two typings.
+- Of the 605,678 elements whose checked typing succeeds, 5,848 get a
+  different row from the unchecked query (397 under `-fc-ast-pilot`). Every
+  one is a cast, whose type name is parsed afresh, as a new row, on every
+  query.
+- The verdict and message of the conversion check computed from the checked
+  row agree with the base's in all 605,678.
+- The local scalar initializers in `c_parse_validate_lowering_constraints`
+  repeat the same pair 38,959 times, with no row difference.
+
+The candidate:
+- reuses the checked type at those two sites when the checked typing
+  succeeded (`c_parse_incompatible_checked_value`), and types the range again
+  only when it did not;
+- asks `c_ir_tokens_are_string_literals` only for aggregate elements.
+
+Debug and sanitized builds (`BUSTER_REFERENCE_CHECKS`) also run the base's
+re-typing for every reused value, and require the same verdict and message.
+
+These budgets were declared before the measured runs. The base is main
+`b504c4e9`. The input, flags and four Callgrind arms are the count-only first
+sight's, above (`--cache-sim=no --branch-sim=no`):
+- **Correctness:**
+  - no verify mismatch over the corpus;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms;
+  - the same exit status and no diagnostics on `-fsyntax-only` in every arm;
+  - the reference check passes in a Debug run of the C frontend and AST
+    tests;
+  - the census expectations in `c_test.c` are unchanged.
+- **`-fsyntax-only` (D against A, and C against B).** The whole compile must
+  run at least 1 M fewer instructions, and more than the 0.05% rebuild noise
+  fewer. Each arm reports its calls to `c_parse_expression_type_query` and
+  `c_ir_tokens_are_string_literals`.
+- **`-c` (D against A, `-g0`).** The same validation runs before lowering, so
+  the compile must also fall by at least 1 M. It may in no case grow by more
+  than the 0.05% noise. If it does not fall, the result is recorded as
+  negative, and the code does not ship.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761).
+
+The initializer value typing census is
+[`2026-10-11T170541Z`](../../performance-audits/2026-10-11T170541Z.md),
+diagnostic only. The second candidate passes every budget and ships:
+- `-fsyntax-only` falls by 278.1 M Ir on the default path (−2.663%) and by
+  220.1 M under the pilot (−2.395%). `-c` falls by 278.2 M (−1.130%).
+- 633,657 typings and 966,073 string tests are no longer made.
+- Objects are byte-identical across the four arms at `-g0` and `-g`.
+- The first candidate reused every valid checked type, which saved 32 M
+  more. It dropped 397 unreferenced `char[N]` DWARF types from the `-g`
+  object, so it failed the identity budget. The base's re-query had
+  created them as type rows for string operands in casts. The candidate
+  that ships therefore reuses a type only when its typing appended no row.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
