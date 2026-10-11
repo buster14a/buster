@@ -35,8 +35,10 @@ The strict retirement workflow has five native hosts instead of six.
 
 All active GitHub workflows and their matrices are covered by the workflow
 policy regression. The inspected tree contains no Forgejo workflow definitions
-or reusable Intel Apple workflow. Other Apple-hosted auxiliaries use `macos-26`; the fake-tool mobile
-lifecycle lane retains its existing Apple Silicon `macos-15` label. No Rosetta, nightly replacement or opt-in Intel job is introduced.
+or reusable Intel Apple workflow. Apple-hosted auxiliaries use the explicit
+`macos-26` Apple Silicon runner, including both mobile monitor matrix cells
+(`launch-trace` and `fake-tools`). No Rosetta, nightly replacement or opt-in
+Intel job is introduced.
 Unused Intel resource samplers, runner lint registration, iOS CI architecture
 selection and the Intel macOS Zig download pin are removed.
 
@@ -56,6 +58,36 @@ certify a live `CI complete` run.
 The merge-queue watcher's live step budgets match the five desktop release
 lanes. Its separate historical Intel budget preserves cancellation of old
 workflow revisions and the #1866 incident regression; it schedules no work.
+
+## Mobile monitor runner policy (#3489)
+
+[The mobile monitor workflow](../.github/workflows/ios-monitor-tests.yml) keeps
+three separate jobs:
+
+| Job | Runner selection | Job cap |
+|---|---|---|
+| `launch-trace` | `ubuntu-26.04`, `macos-26` | 5 minutes |
+| `fake-tools` | `ubuntu-26.04`, `macos-26` | 10 minutes |
+| `native-probes` | `macos-26` | 30 minutes |
+
+The Linux siblings and Darwin controls remain required by their existing
+path-filtered pull-request/main-push workflow; it has no merge-group trigger.
+The iOS controls use `/bin/bash`; Android controls use Homebrew Bash and GNU
+coreutils on macOS. Both matrix jobs retain Python, system/selected Bash and
+the positively verified GNU timer path/version alongside checkout and machine
+records. Artifact names remain keyed by `matrix.os`, run ID and attempt.
+
+Runner migration qualification requires repeated hosted execution of both
+complete matrix suites on the recorded candidate/checkout, retaining every
+attempt's image, tools, results and artifacts. Passing native simulator probes
+alone does not qualify these different suites. The selected image does not
+establish a speedup or resolve the independent lifecycle failures in
+[#2684](https://github.com/buster14a/buster/issues/2684) or
+[#3479](https://github.com/buster14a/buster/issues/3479). All inner deadlines,
+child-process ownership/cleanup assertions and the 5/10/30-minute caps remain.
+The maintained workflow-policy regression covers both matrix selections,
+the native-probe runner, caps and artifact templates; there is no macOS-15
+version exception.
 
 ## Compiler and retirement boundaries
 
