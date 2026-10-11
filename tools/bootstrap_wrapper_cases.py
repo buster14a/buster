@@ -202,6 +202,7 @@ class CaseProcess(bootstrap.WrapperProcess):
         self.ownership = type(self).ownership
         self.cleanup_seconds = 0.0
         self.descendant_cleanup_error = None
+        self.descendant_waited_pids = []
         with self.ownership.lock:
             if self.ownership.cancelled.is_set():
                 raise RuntimeError("bootstrap case execution cancelled before launch")
@@ -239,6 +240,7 @@ class CaseProcess(bootstrap.WrapperProcess):
                 finally:
                     if tree is not None:
                         tree.wait_until(started + bootstrap.CLEANUP_TIMEOUT_SECONDS)
+                        self.descendant_waited_pids.extend(pid for pid, _ in tree.handles)
                 if capture_error is not None:
                     raise capture_error
             except Exception as error:

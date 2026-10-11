@@ -187,6 +187,7 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(len(descendants), 1)
         pid = descendants[0]
         if os.name == "nt":
+            self.assertIn(pid, children[0].descendant_waited_pids, diagnostics)
             import ctypes
             from ctypes import wintypes
             kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -269,6 +270,7 @@ class SchedulerTests(unittest.TestCase):
     def check_windows_cleanup_order(self, wait_error=None, capture_error=None):
         events = []
         tree = mock.Mock()
+        tree.handles = [(24, "owned-descendant")]
         tree.wait_until.side_effect = lambda deadline: events.append(("wait", deadline))
         if wait_error is not None:
             def failed_wait(deadline):
@@ -280,6 +282,7 @@ class SchedulerTests(unittest.TestCase):
         child.cleanup_lock = threading.RLock()
         child.cleanup_seconds = 0.0
         child.descendant_cleanup_error = None
+        child.descendant_waited_pids = []
         child.cleaned = False
         child.process = mock.Mock(pid=123)
         child.process.poll.return_value = None
@@ -307,6 +310,7 @@ class SchedulerTests(unittest.TestCase):
             else:
                 child.cleanup()  # Already cleaned; do not recapture stale numeric PIDs.
         factory.assert_called_once_with(123, child.process._handle)
+        self.assertEqual(child.descendant_waited_pids, [] if error is not None else [24])
         expected = [("direct",)]
         if capture_error is None:
             expected += [("wait", 100 + scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS), ("close",)]
