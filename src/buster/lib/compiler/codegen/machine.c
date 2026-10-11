@@ -2841,7 +2841,7 @@ BUSTER_GLOBAL_LOCAL void machine_debug_facts_record_local_store(Arena* arena, Ir
         if (!(initialized->written[cell] & bit))
         {
             initialized->written[cell] |= bit;
-            MachineDebugWriteEvent* event = machine_stream_append(arena, &initialized->write_event_stream);
+            MachineDebugWriteEvent* event = (MachineDebugWriteEvent*)machine_stream_append(arena, &initialized->write_event_stream);
             *event = (MachineDebugWriteEvent){.tracked = tracked, .after = instruction_index + 1u};
         }
     }
