@@ -915,7 +915,9 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    - a `summary.txt` that is not `status=passed` for this head, or that lacks
      `correctness=test_all` and `debug_sections=absent`, or that names a
      production compiler hash other than the measured `pgo-lto` binary;
-   - a `BUSTER_PGO_PHASES_V1` ledger other than 23 complete passed phases;
+   - a `BUSTER_PGO_PHASES_V1` ledger other than the 23 frozen phases
+     (`PRODUCTION_PROFILE_LEDGER_PHASES`), each passed exactly once in slot
+     order, so a duplicated, missing, substituted or reordered phase fails;
    - identical release and PGO+LTO binaries;
    - any corpus evidence the ordinary corpus validator refuses.
 
