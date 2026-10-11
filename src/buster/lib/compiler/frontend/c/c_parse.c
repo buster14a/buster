@@ -13754,7 +13754,7 @@ BUSTER_C_INTERNAL bool c_parse_type_definition_at(CPreprocessResult preprocess, 
 
 // A definition with attributes between its keyword and its body, which
 // c_parse_type_definition_at does not take: `enum __attribute__((packed)) {`.
-BUSTER_C_INTERNAL bool c_parse_attributed_definition_at(CPreprocessResult preprocess, u32 index, u32 end)
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_parse_attributed_definition_at(CPreprocessResult preprocess, u32 index, u32 end)
 {
     bool attributed = false;
     if (index + 1 < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
@@ -24867,12 +24867,6 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
     return c_parse_local_declarations_split(machine, arena, result, preprocess, scope, declaration_index, start, end, is_for_initializer, 0);
 }
 
-// The same split of a planned block declaration, following its hints.
-BUSTER_GLOBAL_LOCAL bool c_parse_planned_local_declarations(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess,
-                                                            CScopeId scope, u32 declaration_index, u32 start, u32 end, CParseDeclaratorHints const* hints)
-{
-    return c_parse_local_declarations_split(machine, arena, result, preprocess, scope, declaration_index, start, end, false, hints);
-}
 
 // Old-style parameter declarations use the same declarator grammar as block
 // object declarations.  Parse each row through that existing path, then turn
@@ -25840,6 +25834,29 @@ struct CParseStatementPlan
     u32 cursor;
     u32 next;
 };
+
+// The split of a block declaration in a planned body, following its
+// statement-plan entry's declarator hints when it has one.
+BUSTER_GLOBAL_LOCAL bool c_parse_planned_local_declarations(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess,
+                                                            CScopeId scope, u32 declaration_index, u32 start, u32 end, CParseStatementPlan* plan,
+                                                            CParseStatementPlanEntry const* entry)
+{
+    CParseDeclaratorHints hints = {0};
+    if (entry)
+    {
+        hints = (CParseDeclaratorHints){
+            .declarators = plan->declarators + entry->separator,
+            .count = entry->loop_end,
+            .no_auto = entry->no_auto,
+            .statistics = plan->statistics,
+        };
+        if (entry->no_auto && plan->statistics)
+        {
+            plan->statistics->auto_skips += 1;
+        }
+    }
+    return c_parse_local_declarations_split(machine, arena, result, preprocess, scope, declaration_index, start, end, false, entry ? &hints : 0);
+}
 
 // Node classes. PLAIN: expression syntax, or a type name without a member or
 // enumerator list, attributes or braces. CONTAINER: a node whose tokens hold
@@ -27309,26 +27326,13 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_parse_bind_block_walk(CTypeParseMachine
             }
             // A planned declaration states its declarators, and whether its
             // specifiers rule out inference, which both scans would find.
-            CParseDeclaratorHints declarator_hints = {0};
-            if (planned_declaration)
-            {
-                declarator_hints = (CParseDeclaratorHints){
-                    .declarators = plan->declarators + declaration_hint->separator,
-                    .count = declaration_hint->loop_end,
-                    .no_auto = declaration_hint->no_auto,
-                    .statistics = plan->statistics,
-                };
-                if (declaration_hint->no_auto && plan->statistics)
-                {
-                    plan->statistics->auto_skips += 1;
-                }
-            }
+            bool no_auto = planned_declaration && declaration_hint->no_auto;
             CAutoDeclarationInfo auto_declaration_info = {0};
-            bool auto_declaration = !declarator_hints.no_auto &&
-                                    c_parse_auto_declaration_info(result, preprocess, scope_stack[scope_count - 1], index, end, &auto_declaration_info);
+            bool auto_declaration =
+                !no_auto && c_parse_auto_declaration_info(result, preprocess, scope_stack[scope_count - 1], index, end, &auto_declaration_info);
             if (end < body_end &&
                 (plan ? c_parse_planned_local_declarations(machine, result_arena, result, preprocess, scope_stack[scope_count - 1], declaration_index,
-                                                           index, end, planned_declaration ? &declarator_hints : 0)
+                                                           index, end, plan, planned_declaration ? declaration_hint : 0)
                       : c_parse_local_declarations(machine, result_arena, result, preprocess, scope_stack[scope_count - 1], declaration_index, index,
                                                    end, false)))
             {
