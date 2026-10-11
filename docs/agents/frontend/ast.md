@@ -8,11 +8,13 @@ appends a complete syntax tree as it goes. The tree covers declarations and
 declarators, statements, expressions, initializers and designators,
 attributes, assembly and the supported GNU/C23 forms, function bodies
 included. **Status: pilot.** The default pipeline does not build it. The
-opt-in [driver hook](#driver-pilot-hook) builds it, and two consumers read it:
+opt-in [driver hook](#driver-pilot-hook) builds it, and three consumers read it:
 - the [declaration split](#declaration-split-from-the-tree) publishes
   `c_parse_ast`'s top-level records from its declaration nodes;
 - the [tree expression typer](#tree-expression-typer) answers function-body
-  and file-scope initializer expression-type queries during semantic analysis.
+  and file-scope initializer expression-type queries during semantic analysis;
+- [lowering](#lowering-reads) reads a function body's root-conditional
+  splits from its expression nodes.
 
 Otherwise `c_analyze_semantics_only` and `c_lower_to_ir_with_options` still
 rediscover syntax from token ranges, as described in the
@@ -274,7 +276,9 @@ which the unit releases when it ends. The driver then takes the unit's
 declaration records from `c_parse_ast_from_tree` in place of `c_parse_ast`
 ([declaration split](#declaration-split-from-the-tree)), and hands the tree to
 semantic analysis in `CParserResult.ast`, where the
-[tree expression typer](#tree-expression-typer) reads it; nothing else does.
+[tree expression typer](#tree-expression-typer) reads it, and to lowering in
+`CIRLowerOptions.syntax_tree` ([lowering reads](#lowering-reads)); nothing
+else does.
 With it the driver sets `CParserResult.type_interning`, which the typer's
 answers for casts and `&` need ([interned rows](#interned-rows)). The object,
 every diagnostic and every later stage are unchanged. The driver has no phase arena to lend (`c_preprocess` is not
@@ -283,7 +287,7 @@ not complete fails the unit with the parse error class; its diagnostic is
 published exactly as a `c_parse_ast` diagnostic is. `-E` and assembly inputs
 never reach the hook.
 
-Under `-v` the driver prints four rows with the other verbose counters:
+Under `-v` the driver prints five rows with the other verbose counters:
 
 - `C_AST nodes=<n> tokens=<parser tokens> build_ns=<c_ast_build wall time>
   retained_bytes=<> transient_high_water=<> column_copy_bytes=<>
@@ -303,9 +307,12 @@ Under `-v` the driver prints four rows with the other verbose counters:
   published> fallbacks=<units it handed to c_parse_ast's walker>
   reason=<CParserTreeFallback of the last fallback> fallback_token=<the first
   token of the declaration that caused it>`
+- `C_AST_LOWER bodies=<> nodes_spanned=<> answers=<> declines=<> misses=<>`:
+  lowering's tree reads, described under [Lowering reads](#lowering-reads).
 
-The second row's passes run only under `-v`; they are diagnostic. The third
-and fourth rows count what the typer and the split did; they time nothing. Each feeds a
+The second row's passes run only under `-v`; they are diagnostic. The third,
+fourth and fifth rows count what the typer, the split and lowering's tree
+reads did; they time nothing. Each feeds a
 counter that is printed (`walk_steps`, `scan_calls`, `child_entries`), so the
 compiler cannot drop the measured loop. Both rows use the driver's own clock
 and are summed over the inputs of one invocation; the layout is the
@@ -753,6 +760,73 @@ preprocessor reports. `__float128` is now a builtin type word.
 `_Float128`, `_Float64x` and `_Float128x` stay identifiers that a header may
 typedef.
 
+## Lowering reads
+
+Under `-fc-ast-pilot`, the driver also passes the tree to lowering
+(`CIRLowerOptions.syntax_tree`). Lowering reads one structural question from
+it: `c_ir_root_conditional` in `c_gen.c`, which asks whether the root
+operator of a token range is `?:` and where the range splits. Lowering uses
+that answer before it lowers a conditional, and the condition walk uses it
+before it branches on one. The census in the
+[measurement plan](#measurement-plan) found it the costliest of the
+root-split predicates.
+
+- **The index.** One `CIrSyntaxTree` serves a lowering:
+  - It indexes the top-level function definitions once
+    (`c_ast_definitions_index`).
+  - Before each function, `c_ir_syntax_tree_begin` finds that body's
+    `COMPOUND_STATEMENT` by its `{`, and checks that the declaration's braces
+    match it.
+  - On the body's first query, `c_ast_spans_build` spans every expression
+    node of the body. It applies the typer's own span rules (`CAstSpans`,
+    shared through `c_internal.h`) in a forward loop, and chains each node
+    by its first token.
+  - The arrays live in a private arena that is rewound for each function.
+  - Without a tree, or when the stream's delimiters do not nest, there is no
+    record, and every query scans tokens.
+- **The answer.** `c_ast_spans_locate` maps the range to the node that spans
+  it exactly. It strips redundant outer parentheses one pair at a time, as
+  the token rule does. A statement expression has a node of its own, so it is
+  never stripped.
+  - **`CONDITIONAL`:** the split is its `?` anchor and the `:` just after the
+    middle operand, past any parentheses around that operand.
+  - **`CONDITIONAL_OMITTED`:** in a GNU dialect it splits at its `?` and the
+    `:` after it. Any other dialect answers no, as the token rule does.
+  - **`COMMA`:** left to the token rule, which splits `a ? b : c, d` at the
+    conditional inside it.
+  - **Any other expression node:** answers no. Its root tokens hold no `?`,
+    because a conditional below a tighter operator, or below an assignment,
+    is parenthesized or sits in an operand the token rule does not reach
+    first.
+  - **Ranges that map to no node,** including ranges outside the indexed
+    body, scan tokens.
+- **Evaluation order.** The answer only classifies the range. The existing
+  frames still lower the condition first and then branch, so no arm is
+  visited before its block is chosen. Nothing in lowering's frames, and
+  nothing in the IR, holds a node index.
+- **Proof.** `c_ast_corpus_lowering` in `c_ast_tests` lowers every corpus
+  input that analyzes cleanly twice, without the tree and with it.
+  - The two programs must be identical, instruction by instruction.
+  - The second run is in verify mode (`c_test_ir_tree_verify_set`). The
+    token rule answers every split the tree answered, and both answers must
+    agree, positions included.
+  - The fixtures give about 76,600 checked splits and the frontend sources
+    about 338,300 more, with floors on both.
+  - A corpus construct covers parenthesized arms, nested and chained
+    conditionals, GNU `?:`, comma roots, a statement expression and
+    `__extension__`.
+  - `compiler_driver_tests` compares the pilot's objects, in every layout, with
+    the default's at `-g0` and `-g`.
+- **Counters.** `-v` prints `C_AST_LOWER bodies=<bodies whose span index was
+  built> nodes_spanned=<expression nodes given a span> answers=<splits read
+  from the tree> declines=<ranges that mapped to a node left to the token
+  rule> misses=<ranges that mapped to no node>`. The counts are zero for
+  `-fsyntax-only`, which does not lower.
+
+The token rule stays the default path and the per-query fallback. Retiring
+it, and moving the other root-split predicates, waits on the hook becoming
+the default.
+
 ## Consumer and retirement map
 
 These token walkers currently rediscover structure that the tree records once.
@@ -766,7 +840,7 @@ differential tests pass.
 | `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Not migrated. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Not migrated. |
-| `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | Not migrated. |
+| `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | `c_ir_root_conditional` is read under `-fc-ast-pilot` ([lowering reads](#lowering-reads)); the token rule stays the default path and the fallback. The rest are not migrated. |
 | `c_ir_predict_expression_type*`, `c_ir_query_*` | type-name probes, operand types over token ranges | `TYPE_NAME` / `CAST` / `SIZEOF_*` nodes plus retained semantic facts | Not migrated. |
 | `c_ir_build_delimiter_index`, `CTokenPositionIndex` matching delimiters | bracket matching for every structural query | subtree extents | Not migrated. |
 
@@ -1296,5 +1370,43 @@ the same way and diagnostic only:
 - The memo answers 58% of the pass's member lookups.
 - The default path is within +0.006%.
 - Zen 5 validation stays incomplete (#2761).
+
+For lowering's [root-conditional split](#lowering-reads) from the tree
+(`c_ir_root_conditional` under `-fc-ast-pilot`), these budgets were declared
+before its measured runs. The input is the unity self-host, compiled
+`-g0 -fsyntax-only` and `-g0 -c`. Four Callgrind arms
+(`--cache-sim=no --branch-sim=no`) are counted on tests-off
+`-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `a6705764`, which the candidate branches from. A throwaway
+census build of the base, with the root-split predicates kept out of line,
+put `c_ir_root_conditional` at 145.1 M Ir over about 827,000 calls in B's
+`-c`. That is the largest of them: `c_ir_has_root_assignment` costs 40.9 M,
+`c_ir_has_root_comma` 25.7 M and `c_ir_has_root_control_operator` 26.0 M.
+The budgets:
+- **Correctness.**
+  - The corpus differential (`c_ast_corpus_lowering`) has 0 verify
+    mismatches above its floors. It also finds identical programs,
+    instruction by instruction, with and without the tree.
+  - `-c` objects of the self-host are byte-identical across the four arms,
+    at `-g0` and at `-g`.
+- **Coverage.** In C's `-c`, the tree answers at least 90% of the
+  root-conditional queries (`C_AST_LOWER answers` against the census's
+  calls).
+- **The split's own effect (C against B).**
+  - On `-c`, the whole compile costs at least 20 M fewer instructions (about
+    0.1%), with the span index builds and the lookups charged.
+  - On `-fsyntax-only`, nothing lowers. The typer's span rules only moved,
+    so the difference stays within ±0.05% Ir.
+- **Default path (D against A).** Lowering reads no tree there, so the
+  difference stays within ±0.05% Ir on `-fsyntax-only` and on `-c`.
+- **Performance acceptance.** The hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete
+  ([#2761](https://github.com/buster14a/buster/issues/2761)), and the hook
+  stays opt-in.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.

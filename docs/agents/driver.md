@@ -411,8 +411,9 @@ unit's declaration records then come from the tree
 which hands any unit that `c_parse_ast` would diagnose or read differently
 back to `c_parse_ast`. Semantic analysis answers function-body
 expression-type queries from the tree where it can (the
-[tree expression typer](frontend/ast.md#tree-expression-typer)); no other
-stage reads it. Only under the flag does analysis share the primitive and
+[tree expression typer](frontend/ast.md#tree-expression-typer)), and
+lowering reads a function body's root-conditional splits from it
+([lowering reads](frontend/ast.md#lowering-reads)); no other stage reads it. Only under the flag does analysis share the primitive and
 pointer type rows those queries mint
 ([interned rows](frontend/ast.md#interned-rows)). With the flag the object
 and every diagnostic are byte-identical, and a tree the builder rejects fails
@@ -420,7 +421,7 @@ the unit with the parse error class and a located diagnostic published like
 `c_parse_ast`'s. It does nothing for `-E`, assembly inputs or the other
 languages. Any other layout value is an argument error
 (`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints
-`C_AST`, `C_AST_WALK`, `C_AST_TYPES` and `C_AST_SPLIT` rows beside
+`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT` and `C_AST_LOWER` rows beside
 `C_TYPE_LAYOUT`.
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
