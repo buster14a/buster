@@ -107,6 +107,17 @@ this denominator. A reference failure or skipped prerequisite must remain
 visible. An upstream unit-test assertion failure cannot be turned into a
 successful compiler or runtime result.
 
+The native operation witness uses new private repositories with fixed author,
+committer, dates and configuration. It checks a three-stage unmerged index
+after an expected conflict (exit 1), resolves that conflict, creates a successful
+non-fast-forward merge, pushes to a private bare remote, clones it locally,
+pushes another commit and fetches/fast-forwards the original. It verifies the
+literal final file contents, runs repack and full fsck, and requires a missing
+reference to fail with exit 128. Both cells' final commit and tree identities
+must match; arbitrary pack bytes are never compared. These checks are attempted
+only after a full build succeeds. Their implementation is not execution
+evidence.
+
 The hosted workflow records machine specifications and actual checkout
 identity and retains diagnostics even when the census fails. The shipped
 workflow is intended to be manually opted into; no ordinary PR, merge-group
@@ -117,9 +128,8 @@ or main-push qualification is authorized by this guide.
 Build-census success alone does not satisfy #3180. Qualification still needs:
 
 - The complete applicable upstream integration inventory and exact skip reasons.
-- Explicit deterministic init/add/commit, conflict and successful merge,
-  local clone/fetch/push, checkout, pack/repack and fsck witnesses compared
-  against the independent reference; failure paths with specified outcomes.
+- A successful execution of the implemented deterministic operation witness
+  with both builds, including its paired commit/tree comparison.
 - Complete selected header/generated-input/dependency and link closure.
 - Clean/source-edit/header-edit rebuilds, checked operation runtime, code/debug
   size and defined memory accounting; debug/debug first, optimized gap separate.
