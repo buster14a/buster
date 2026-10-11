@@ -45,11 +45,11 @@ struct CiUnitWork
     bool audits;
 };
 
-// Choose the measured long module without changing the two-child quota.
-// The test executable independently derives the same platform projection.
+// The frontend dominates the rest group on sanitized lanes; Windows ARM keeps
+// the driver split.
 BUSTER_GLOBAL_LOCAL String8 ci_unit_primary_module(void)
 {
-    String8 result = BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64 ? S8("c_frontend_tests") : S8("compiler_driver_tests");
+    String8 result = BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 ? S8("compiler_driver_tests") : S8("c_frontend_tests");
     return result;
 }
 
