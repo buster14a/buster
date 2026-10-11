@@ -38510,7 +38510,7 @@ BUSTER_C_INTERNAL bool c_parse_label_address_cast_at(CParseResult* result, CPrep
     bool operand = !depth && open > start && preprocess.tokens[open - 1].kind == C_TOKEN_IDENTIFIER &&
                    (c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[open - 1], C_SYMBOL_WELL_KNOWN_SIZEOF) ||
                     c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[open - 1])));
-    if (!depth && !operand && c_parse_label_address_group_may_be_type(result, open, index - 1))
+    if (!depth && !operand)
     {
         u32 cursor = open + 1;
         CTypeId type = c_parse_machineless_base_type(result, preprocess, scope, cursor, index - 1, &cursor);
