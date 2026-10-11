@@ -9970,6 +9970,7 @@ BUSTER_CT_CHECK(MACHINE_X64_METADATA_SHAPE_REGISTRATION_CAPACITY <= UINT16_MAX);
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prewarm(void);
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_all(void);
 BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_fixed_templates(void);
+BUSTER_GLOBAL_LOCAL void machine_x64_fixed_templates_publish_all(void);
 
 enum
 {
@@ -11603,7 +11604,36 @@ struct MachineX64FixedTemplate
     u8 valid;
 };
 BUSTER_CT_CHECK(sizeof(MachineX64FixedTemplate) == 16);
+// `valid` is zero for an unpublished or refused row and one for a published
+// row.  Prewarm allots every row but encodes none: it marks each row pending,
+// and the row is encoded and proven on its first serial emit, by the queries
+// the eager walk ran for it, while a small compile emits a handful of rows
+// (#1295).  machine_x86_64_exact_prewarm_all publishes every row before a gang
+// may emit, so worker lanes only read.
+#define MACHINE_X64_FIXED_TEMPLATE_PUBLISHED 1u
+#define MACHINE_X64_FIXED_TEMPLATE_PENDING 2u
 BUSTER_GLOBAL_LOCAL MachineX64FixedTemplate machine_x64_fixed_templates[MACHINE_X64_FIXED_TEMPLATE_CAPACITY];
+// The operands, flags and token a dynamic family's rows are encoded from.
+typedef struct MachineX64FixedTemplateFamily MachineX64FixedTemplateFamily;
+struct MachineX64FixedTemplateFamily
+{
+    BusterX86MetadataMachineExactToken token;
+    u16 operand_widths[4];
+    u16 first_row;
+    u8 operand_kinds[4];
+    u8 operand_count;
+    u8 sequence;
+    u8 force_disp32;
+    u8 force_lock;
+    u8 mask_register_plus_one;
+    u8 zeroing;
+};
+BUSTER_GLOBAL_LOCAL MachineX64FixedTemplateFamily machine_x64_fixed_template_families[MACHINE_X64_FIXED_TEMPLATE_DYNAMIC_CAPACITY];
+// The family of each dynamic row, indexed from MACHINE_X64_FIXED_TEMPLATE_STATIC_COUNT.
+BUSTER_GLOBAL_LOCAL u16 machine_x64_fixed_template_row_families[MACHINE_X64_FIXED_TEMPLATE_DYNAMIC_CAPACITY];
+BUSTER_GLOBAL_LOCAL u32 machine_x64_fixed_template_family_count;
+BUSTER_GLOBAL_LOCAL bool machine_x64_fixed_templates_complete;
+BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST bool machine_x64_fixed_template_resolve(u32 template_id);
 // Rows allotted so far, the static rows included, and how many of them the
 // authority refused.
 BUSTER_GLOBAL_LOCAL u32 machine_x64_fixed_template_count;
@@ -11623,7 +11653,9 @@ typedef enum MachineX64FixedTemplateResult
 BUSTER_GLOBAL_LOCAL MachineX64FixedTemplateResult machine_x64_emit_fixed_template(MachineX64Encoder* encoder, u32 template_id, u64 patch_value)
 {
     MachineX64FixedTemplateResult result;
-    if (template_id >= MACHINE_X64_FIXED_TEMPLATE_CAPACITY || !machine_x64_fixed_templates[template_id].valid)
+    if (template_id >= MACHINE_X64_FIXED_TEMPLATE_CAPACITY ||
+        (machine_x64_fixed_templates[template_id].valid != MACHINE_X64_FIXED_TEMPLATE_PUBLISHED &&
+         !machine_x64_fixed_template_resolve(template_id)))
     {
         result = MACHINE_X64_FIXED_TEMPLATE_UNPUBLISHED;
     }
@@ -12668,21 +12700,21 @@ void machine_x86_64_exact_prewarm(void)
     machine_x64_exact_prepare_opcode_map(prepared, plan_valid);
     machine_x64_exact_prepare_chunk_memory_tables();
     machine_x64_metadata_shape_cache_prewarm();
-    // Templates are encoded through the shape cache and the staged tokens,
-    // so they are published last.
+    // Template rows are allotted last; each is encoded through the shape
+    // cache or its staged token on its first emit.
     machine_x64_exact_prepare_fixed_templates();
 
     // Every row was staged serially above.  The ready bit is written last;
     // codegen_prewarm() completes before any worker lane can observe globals.
-    // Closed-set shapes the templates did not reach stay registered but
-    // unresolved, and variable-memory cells outside the frame-chunk rows stay
-    // unencoded: a serial compile prepares the few it emits on first use.
+    // Closed-set shapes stay registered but unresolved, dense tables,
+    // template rows and variable-memory cells outside the frame-chunk rows
+    // stay unencoded: a serial compile prepares the few it emits on first use.
     machine_x64_exact_opcode_map_ready = true;
 }
 
 // The gang form of the prewarm: also resolves every registered shape and
-// encodes every variable-memory cell, so a worker lane's bridge lookup and
-// table read are plain reads.  Call it serially before any lane_run that may
+// encodes every dense table, variable-memory cell and template row, so a
+// worker lane's bridge lookups and table reads are plain reads.  Call it serially before any lane_run that may
 // emit x86-64 code, like buster_x86_metadata_prewarm_all_forms.
 void machine_x86_64_exact_prewarm_all(void)
 {
@@ -12690,6 +12722,7 @@ void machine_x86_64_exact_prewarm_all(void)
     machine_x64_metadata_shape_cache_resolve_all();
     machine_x64_gpr_encoding_tables_fill_all();
     machine_x64_variable_memory_fill_all_cells();
+    machine_x64_fixed_templates_publish_all();
 }
 
 #if BUSTER_INCLUDE_TESTS
@@ -12768,6 +12801,10 @@ MachineX64ExactMapAudit machine_x86_64_exact_map_audit(void)
     }
     result.fixed_template_rows = machine_x64_fixed_template_count;
     result.fixed_template_invalid_rows = machine_x64_fixed_template_invalid_count;
+    for (u32 template_id = 0; template_id < machine_x64_fixed_template_count; template_id += 1)
+    {
+        result.fixed_template_pending_rows += machine_x64_fixed_templates[template_id].valid == MACHINE_X64_FIXED_TEMPLATE_PENDING;
+    }
     for (u32 table_index = 0; table_index < machine_x64_gpr_encoding_table_count; table_index += 1)
     {
         result.dense_encoding_ready_tables += machine_x64_gpr_encoding_tables[table_index].state == MACHINE_X64_GPR_ENCODING_TABLE_READY;
@@ -14210,162 +14247,193 @@ BUSTER_GLOBAL_LOCAL MachineX64Encoder machine_x64_fixed_template_scratch(u8* byt
     return (MachineX64Encoder){.bytes = bytes, .capacity = 16};
 }
 
-BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_static_fixed_templates(void)
+// Encodes one static row -- and proves a patched row's second value class --
+// through the bridge shapes the encoder site names.  A row with no shape
+// here stays unpublished.
+BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_prepare_static_row(u32 template_id)
 {
     u8 scratch_bytes[16];
     u8 probe_bytes[16];
-    MachineX64Encoder scratch;
-    MachineX64Encoder probe;
+    MachineX64Encoder scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+    MachineX64Encoder probe = machine_x64_fixed_template_scratch(probe_bytes);
     BusterX86MetadataFeatureInput no_features = {0};
     BusterX86MetadataFeatureInput avx = {.names = machine_x64_avx_features, .count = BUSTER_ARRAY_LENGTH(machine_x64_avx_features)};
     BusterX86MetadataPhysicalAttributes attributes = {0};
-    for (u32 reg = 0; reg < 16; reg += 1)
+    u32 reg = template_id & 15u;
+    u32 width_row = (template_id - MACHINE_X64_FIXED_TEMPLATE_XOR_RDX_RDX) & 1u;
+    u16 width = width_row ? 64 : 32;
+    // Each register-indexed family is sixteen rows from its first, and each
+    // width pair two rows from its first.
+    u32 family = template_id < MACHINE_X64_FIXED_TEMPLATE_CMP32_RAX_RCX ? template_id & ~15u
+                 : template_id >= MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF && template_id < MACHINE_X64_FIXED_TEMPLATE_LEAVE
+                     ? MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF
+                 : template_id >= MACHINE_X64_FIXED_TEMPLATE_XOR_RDX_RDX && template_id < MACHINE_X64_FIXED_TEMPLATE_MUL_RCX64
+                     ? template_id - width_row
+                     : template_id;
+    reg = family == MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF ? template_id - MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF : reg;
+    bool store = template_id == MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE8 || template_id == MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE32;
+    switch (family)
     {
-        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+    case MACHINE_X64_FIXED_TEMPLATE_PUSH:
         (void)machine_x64_emit_metadata_register(&scratch, S8("PUSH"), reg, 64, 0);
-        machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_PUSH + reg, &scratch, 0);
-        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_POP:
         (void)machine_x64_emit_metadata_register(&scratch, S8("POP"), reg, 64, 0);
-        machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_POP + reg, &scratch, 0);
-        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_CALL_REGISTER:
         (void)machine_x64_emit_metadata_register(&scratch, S8("CALL"), reg, 64, 0);
-        machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_CALL_REGISTER + reg, &scratch, 0);
-        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_JMP_REGISTER:
         (void)machine_x64_emit_metadata_register(&scratch, S8("JMP"), reg, 64, 0);
-        machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_JMP_REGISTER + reg, &scratch, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_LEA_RIP:
+    {
         BusterX86MetadataPhysicalOperand rip_operands[2] = {
             machine_x64_exact_gpr_operand(reg, 64), machine_x64_exact_rip_memory_operand(),
         };
-        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
         (void)machine_x64_emit_metadata_instruction(&scratch, S8("LEA"), rip_operands, 2, no_features, attributes, 0);
-        machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_LEA_RIP + reg, &scratch, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    }
+    case MACHINE_X64_FIXED_TEMPLATE_MOV_R32_IMM32:
         // The case-value move is proven for both non-negative classes the
         // chain passes: a byte and a full 32-bit value.
-        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
         (void)machine_x64_emit_metadata_register_immediate(&scratch, S8("MOV"), reg, 0, 32, 32, 0);
-        machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_MOV_R32_IMM32 + reg, &scratch, 4);
-        probe = machine_x64_fixed_template_scratch(probe_bytes);
+        machine_x64_fixed_template_publish(template_id, &scratch, 4);
         (void)machine_x64_emit_metadata_register_immediate(&probe, S8("MOV"), reg, 0x5a, 32, 32, 0);
-        machine_x64_fixed_template_prove(MACHINE_X64_FIXED_TEMPLATE_MOV_R32_IMM32 + reg, &probe, 0x5a);
+        machine_x64_fixed_template_prove(template_id, &probe, 0x5a);
         probe = machine_x64_fixed_template_scratch(probe_bytes);
         (void)machine_x64_emit_metadata_register_immediate(&probe, S8("MOV"), reg, UINT64_C(0x5aa55aa5), 32, 32, 0);
-        machine_x64_fixed_template_prove(MACHINE_X64_FIXED_TEMPLATE_MOV_R32_IMM32 + reg, &probe, UINT64_C(0x5aa55aa5));
-        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        machine_x64_fixed_template_prove(template_id, &probe, UINT64_C(0x5aa55aa5));
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_CMP32_RCX:
         (void)machine_x64_emit_metadata_registers(&scratch, S8("CMP"), MACHINE_X64_RCX, reg, 32, 0);
-        machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_CMP32_RCX + reg, &scratch, 0);
-        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_CMP64_RCX:
         (void)machine_x64_emit_metadata_registers(&scratch, S8("CMP"), MACHINE_X64_RCX, reg, 64, 0);
-        machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_CMP64_RCX + reg, &scratch, 0);
-        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF:
         (void)machine_x64_emit_metadata_registers(&scratch, S8("XOR"), reg, reg, 32, 0);
-        machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF + reg, &scratch, 0);
-    }
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_instruction(&scratch, S8("LEAVE"), 0, 0, no_features, attributes, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_LEAVE, &scratch, 0);
-    for (u32 store = 0; store < 2; store += 1)
-    {
-        u32 short_row = store ? MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE8 : MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD8;
-        u32 wide_row = store ? MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE32 : MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD32;
-        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-        (void)machine_x64_emit_metadata_xmm_memory(&scratch, S8("MOVUPS"), 0, MACHINE_X64_RBP, -8, store != 0, 128, 0);
-        machine_x64_fixed_template_publish(short_row, &scratch, 1);
-        probe = machine_x64_fixed_template_scratch(probe_bytes);
-        (void)machine_x64_emit_metadata_xmm_memory(&probe, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x5b, store != 0, 128, 0);
-        machine_x64_fixed_template_prove(short_row, &probe, (u8)(-0x5b));
-        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-        (void)machine_x64_emit_metadata_xmm_memory(&scratch, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x1000, store != 0, 128, 0);
-        machine_x64_fixed_template_publish(wide_row, &scratch, 4);
-        probe = machine_x64_fixed_template_scratch(probe_bytes);
-        (void)machine_x64_emit_metadata_xmm_memory(&probe, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x5aa55aa5, store != 0, 128, 0);
-        machine_x64_fixed_template_prove(wide_row, &probe, (u32)-0x5aa55aa5);
-    }
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_registers(&scratch, S8("CMP"), MACHINE_X64_RAX, MACHINE_X64_RCX, 32, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_CMP32_RAX_RCX, &scratch, 0);
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_registers(&scratch, S8("CMP"), MACHINE_X64_RAX, MACHINE_X64_RCX, 64, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_CMP64_RAX_RCX, &scratch, 0);
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_registers(&scratch, S8("MOV"), MACHINE_X64_RBP, MACHINE_X64_RSP, 64, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_MOV_RBP_RSP, &scratch, 0);
-
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_LEAVE:
+        (void)machine_x64_emit_metadata_instruction(&scratch, S8("LEAVE"), 0, 0, no_features, attributes, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD8:
+    case MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE8:
+        (void)machine_x64_emit_metadata_xmm_memory(&scratch, S8("MOVUPS"), 0, MACHINE_X64_RBP, -8, store, 128, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 1);
+        (void)machine_x64_emit_metadata_xmm_memory(&probe, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x5b, store, 128, 0);
+        machine_x64_fixed_template_prove(template_id, &probe, (u8)(-0x5b));
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_LOAD32:
+    case MACHINE_X64_FIXED_TEMPLATE_MOVUPS_FRAME_STORE32:
+        (void)machine_x64_emit_metadata_xmm_memory(&scratch, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x1000, store, 128, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 4);
+        (void)machine_x64_emit_metadata_xmm_memory(&probe, S8("MOVUPS"), 0, MACHINE_X64_RBP, -0x5aa55aa5, store, 128, 0);
+        machine_x64_fixed_template_prove(template_id, &probe, (u32)-0x5aa55aa5);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_CMP32_RAX_RCX:
+        (void)machine_x64_emit_metadata_registers(&scratch, S8("CMP"), MACHINE_X64_RAX, MACHINE_X64_RCX, 32, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_CMP64_RAX_RCX:
+        (void)machine_x64_emit_metadata_registers(&scratch, S8("CMP"), MACHINE_X64_RAX, MACHINE_X64_RCX, 64, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_MOV_RBP_RSP:
+        (void)machine_x64_emit_metadata_registers(&scratch, S8("MOV"), MACHINE_X64_RBP, MACHINE_X64_RSP, 64, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
     // The patched rows: publish a representative of the value class the
     // site passes, then prove a second value of the same class moves only
     // the trailing field.
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_register_immediate(&scratch, S8("SUB"), MACHINE_X64_RSP, 16, 64, 8, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_SUB_RSP_IMM8, &scratch, 1);
-    probe = machine_x64_fixed_template_scratch(probe_bytes);
-    (void)machine_x64_emit_metadata_register_immediate(&probe, S8("SUB"), MACHINE_X64_RSP, 0x5a, 64, 8, 0);
-    machine_x64_fixed_template_prove(MACHINE_X64_FIXED_TEMPLATE_SUB_RSP_IMM8, &probe, 0x5a);
-
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_register_immediate(&scratch, S8("SUB"), MACHINE_X64_RSP, 4096, 64, 32, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_SUB_RSP_IMM32, &scratch, 4);
-    probe = machine_x64_fixed_template_scratch(probe_bytes);
-    (void)machine_x64_emit_metadata_register_immediate(&probe, S8("SUB"), MACHINE_X64_RSP, UINT64_C(0x5aa55aa5), 64, 32, 0);
-    machine_x64_fixed_template_prove(MACHINE_X64_FIXED_TEMPLATE_SUB_RSP_IMM32, &probe, UINT64_C(0x5aa55aa5));
-
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_memory_immediate(&scratch, S8("TEST"), MACHINE_X64_RSP, 0, 0, 8, 8, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_PROBE, &scratch, 0);
-
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_register_memory(&scratch, S8("LEA"), MACHINE_X64_RSP, MACHINE_X64_RBP, -8, 64, 64, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_LEA_RSP_RBP_DISP8, &scratch, 1);
-    probe = machine_x64_fixed_template_scratch(probe_bytes);
-    (void)machine_x64_emit_metadata_register_memory(&probe, S8("LEA"), MACHINE_X64_RSP, MACHINE_X64_RBP, -0x5b, 64, 64, 0);
-    machine_x64_fixed_template_prove(MACHINE_X64_FIXED_TEMPLATE_LEA_RSP_RBP_DISP8, &probe, (u8)(-0x5b));
-
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_register_immediate(&scratch, S8("MOV"), MACHINE_X64_RAX, 0, 32, 32, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_MOV_EAX_IMM32, &scratch, 4);
-    probe = machine_x64_fixed_template_scratch(probe_bytes);
-    (void)machine_x64_emit_metadata_register_immediate(&probe, S8("MOV"), MACHINE_X64_RAX, 0x5a, 32, 32, 0);
-    machine_x64_fixed_template_prove(MACHINE_X64_FIXED_TEMPLATE_MOV_EAX_IMM32, &probe, 0x5a);
-
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_instruction(&scratch, S8("RET"), 0, 0, no_features, attributes, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_RET, &scratch, 0);
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_relative(&scratch, S8("CALL"), 0, 32, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_CALL_REL32, &scratch, 0);
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_relative(&scratch, S8("JMP"), 0, 32, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_JMP_REL32, &scratch, 0);
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_relative(&scratch, S8("JZ"), 0, 32, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_JZ_REL32, &scratch, 0);
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_instruction(&scratch, S8("VZEROUPPER"), 0, 0, avx, attributes, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_VZEROUPPER, &scratch, 0);
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_instruction(&scratch, S8("UD2"), 0, 0, no_features, attributes, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_UD2, &scratch, 0);
-
-    for (u32 width_row = 0; width_row < 2; width_row += 1)
-    {
-        u16 width = width_row ? 64 : 32;
-        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+    case MACHINE_X64_FIXED_TEMPLATE_SUB_RSP_IMM8:
+        (void)machine_x64_emit_metadata_register_immediate(&scratch, S8("SUB"), MACHINE_X64_RSP, 16, 64, 8, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 1);
+        (void)machine_x64_emit_metadata_register_immediate(&probe, S8("SUB"), MACHINE_X64_RSP, 0x5a, 64, 8, 0);
+        machine_x64_fixed_template_prove(template_id, &probe, 0x5a);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_SUB_RSP_IMM32:
+        (void)machine_x64_emit_metadata_register_immediate(&scratch, S8("SUB"), MACHINE_X64_RSP, 4096, 64, 32, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 4);
+        (void)machine_x64_emit_metadata_register_immediate(&probe, S8("SUB"), MACHINE_X64_RSP, UINT64_C(0x5aa55aa5), 64, 32, 0);
+        machine_x64_fixed_template_prove(template_id, &probe, UINT64_C(0x5aa55aa5));
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_PROBE:
+        (void)machine_x64_emit_metadata_memory_immediate(&scratch, S8("TEST"), MACHINE_X64_RSP, 0, 0, 8, 8, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_LEA_RSP_RBP_DISP8:
+        (void)machine_x64_emit_metadata_register_memory(&scratch, S8("LEA"), MACHINE_X64_RSP, MACHINE_X64_RBP, -8, 64, 64, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 1);
+        (void)machine_x64_emit_metadata_register_memory(&probe, S8("LEA"), MACHINE_X64_RSP, MACHINE_X64_RBP, -0x5b, 64, 64, 0);
+        machine_x64_fixed_template_prove(template_id, &probe, (u8)(-0x5b));
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_MOV_EAX_IMM32:
+        (void)machine_x64_emit_metadata_register_immediate(&scratch, S8("MOV"), MACHINE_X64_RAX, 0, 32, 32, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 4);
+        (void)machine_x64_emit_metadata_register_immediate(&probe, S8("MOV"), MACHINE_X64_RAX, 0x5a, 32, 32, 0);
+        machine_x64_fixed_template_prove(template_id, &probe, 0x5a);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_RET:
+        (void)machine_x64_emit_metadata_instruction(&scratch, S8("RET"), 0, 0, no_features, attributes, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_CALL_REL32:
+        (void)machine_x64_emit_metadata_relative(&scratch, S8("CALL"), 0, 32, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_JMP_REL32:
+        (void)machine_x64_emit_metadata_relative(&scratch, S8("JMP"), 0, 32, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_JZ_REL32:
+        (void)machine_x64_emit_metadata_relative(&scratch, S8("JZ"), 0, 32, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_VZEROUPPER:
+        (void)machine_x64_emit_metadata_instruction(&scratch, S8("VZEROUPPER"), 0, 0, avx, attributes, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_UD2:
+        (void)machine_x64_emit_metadata_instruction(&scratch, S8("UD2"), 0, 0, no_features, attributes, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_XOR_RDX_RDX:
         (void)machine_x64_emit_metadata_registers(&scratch, S8("XOR"), MACHINE_X64_RDX, MACHINE_X64_RDX, width, 0);
-        machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_XOR_RDX_RDX + width_row, &scratch, 0);
-        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_DIV_RCX:
         (void)machine_x64_emit_metadata_register(&scratch, S8("DIV"), MACHINE_X64_RCX, width, 0);
-        machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_DIV_RCX + width_row, &scratch, 0);
-        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_IDIV_RCX:
         (void)machine_x64_emit_metadata_register(&scratch, S8("IDIV"), MACHINE_X64_RCX, width, 0);
-        machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_IDIV_RCX + width_row, &scratch, 0);
-        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_CDQ_CQO:
         (void)machine_x64_emit_metadata_instruction(&scratch, width_row ? S8("CQO") : S8("CDQ"), 0, 0, no_features, attributes, 0);
-        machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_CDQ_CQO + width_row, &scratch, 0);
-        scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_MOV_RAX_RDX:
         (void)machine_x64_emit_metadata_registers(&scratch, S8("MOV"), MACHINE_X64_RAX, MACHINE_X64_RDX, width, 0);
-        machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_MOV_RAX_RDX + width_row, &scratch, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    case MACHINE_X64_FIXED_TEMPLATE_MUL_RCX64:
+        (void)machine_x64_emit_metadata_register(&scratch, S8("MUL"), MACHINE_X64_RCX, 64, 0);
+        machine_x64_fixed_template_publish(template_id, &scratch, 0);
+        break;
+    default:
+        break;
     }
-    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-    (void)machine_x64_emit_metadata_register(&scratch, S8("MUL"), MACHINE_X64_RCX, 64, 0);
-    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_MUL_RCX64, &scratch, 0);
 }
 
 // Projects one fixed operand kind the way the recipe tail (or, with
@@ -14457,20 +14525,29 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_exact_prepare_fixed_template_family(
     if (fixed && machine_x64_fixed_template_count + row_count <= MACHINE_X64_FIXED_TEMPLATE_CAPACITY)
     {
         u32 first_row = machine_x64_fixed_template_count;
+        u32 family_index = machine_x64_fixed_template_family_count;
+        MachineX64FixedTemplateFamily* family = machine_x64_fixed_template_families + family_index;
+        *family = (MachineX64FixedTemplateFamily){
+            .token = token,
+            .first_row = (u16)first_row,
+            .operand_count = (u8)operand_count,
+            .sequence = sequence,
+            .force_disp32 = force_disp32,
+            .force_lock = force_lock,
+            .mask_register_plus_one = mask_register_plus_one,
+            .zeroing = zeroing,
+        };
+        for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
+        {
+            family->operand_kinds[operand_index] = operand_kinds[operand_index];
+            family->operand_widths[operand_index] = operand_widths[operand_index];
+        }
         for (u32 row = 0; row < row_count; row += 1)
         {
-            BusterX86MetadataPhysicalOperand operands[4];
-            for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
-            {
-                (void)machine_x64_fixed_template_operand(operand_kinds[operand_index], operand_widths[operand_index], row, sequence,
-                                                         operands + operand_index);
-            }
-            u8 scratch_bytes[16];
-            MachineX64Encoder scratch = machine_x64_fixed_template_scratch(scratch_bytes);
-            (void)machine_x64_emit_exact_form(&scratch, token, operands, operand_count, force_disp32, force_lock,
-                                              mask_register_plus_one, zeroing, 0);
-            machine_x64_fixed_template_publish(first_row + row, &scratch, 0);
+            machine_x64_fixed_template_row_families[first_row + row - MACHINE_X64_FIXED_TEMPLATE_STATIC_COUNT] = (u16)family_index;
+            machine_x64_fixed_templates[first_row + row] = (MachineX64FixedTemplate){.valid = MACHINE_X64_FIXED_TEMPLATE_PENDING};
         }
+        machine_x64_fixed_template_family_count += 1;
         machine_x64_fixed_template_count += row_count;
         *family_slot = gpr_slot;
         result = (u16)(first_row + 1u);
@@ -14482,7 +14559,11 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_fixed_templates(void)
 {
     machine_x64_fixed_template_count = MACHINE_X64_FIXED_TEMPLATE_STATIC_COUNT;
     machine_x64_fixed_template_invalid_count = 0;
-    machine_x64_exact_prepare_static_fixed_templates();
+    machine_x64_fixed_template_family_count = 0;
+    for (u32 template_id = 0; template_id < MACHINE_X64_FIXED_TEMPLATE_STATIC_COUNT; template_id += 1)
+    {
+        machine_x64_fixed_templates[template_id] = (MachineX64FixedTemplate){.valid = MACHINE_X64_FIXED_TEMPLATE_PENDING};
+    }
     for (u32 ordinal = 0; ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT; ordinal += 1)
     {
         MachineX64PreparedExactOpcode* entry = machine_x64_exact_opcode_map + ordinal;
@@ -14539,6 +14620,64 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_fixed_templates(void)
                 }
             }
         }
+    }
+}
+
+// Encodes one dynamic row the way its recipe tail or sequence step would
+// have: the family's token and fixed operands, the row's register in its
+// GPR slot.
+BUSTER_GLOBAL_LOCAL void machine_x64_fixed_template_prepare_dynamic_row(u32 template_id)
+{
+    MachineX64FixedTemplateFamily const* family =
+        machine_x64_fixed_template_families + machine_x64_fixed_template_row_families[template_id - MACHINE_X64_FIXED_TEMPLATE_STATIC_COUNT];
+    u32 row = template_id - family->first_row;
+    BusterX86MetadataPhysicalOperand operands[4];
+    for (u32 operand_index = 0; operand_index < family->operand_count; operand_index += 1)
+    {
+        (void)machine_x64_fixed_template_operand(family->operand_kinds[operand_index], family->operand_widths[operand_index], row,
+                                                 family->sequence != 0, operands + operand_index);
+    }
+    u8 scratch_bytes[16];
+    MachineX64Encoder scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+    (void)machine_x64_emit_exact_form(&scratch, family->token, operands, family->operand_count, family->force_disp32 != 0,
+                                      family->force_lock != 0, family->mask_register_plus_one, family->zeroing != 0, 0);
+    machine_x64_fixed_template_publish(template_id, &scratch, 0);
+}
+
+// Encodes a pending row on its first emit; false keeps the caller's
+// metadata lane.  Serial only, like every lazily published table.
+BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST bool machine_x64_fixed_template_resolve(u32 template_id)
+{
+    MachineX64FixedTemplate* record = machine_x64_fixed_templates + template_id;
+    if (record->valid == MACHINE_X64_FIXED_TEMPLATE_PENDING)
+    {
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
+        *record = (MachineX64FixedTemplate){0};
+        if (template_id < MACHINE_X64_FIXED_TEMPLATE_STATIC_COUNT)
+        {
+            machine_x64_fixed_template_prepare_static_row(template_id);
+        }
+        else
+        {
+            machine_x64_fixed_template_prepare_dynamic_row(template_id);
+        }
+    }
+    bool result = record->valid == MACHINE_X64_FIXED_TEMPLATE_PUBLISHED;
+    return result;
+}
+
+// The complete preparation: every allotted row, in row order.  Call it
+// serially before any lane_run that may emit x86-64 code.
+BUSTER_GLOBAL_LOCAL void machine_x64_fixed_templates_publish_all(void)
+{
+    if (!machine_x64_fixed_templates_complete)
+    {
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
+        for (u32 template_id = 0; template_id < machine_x64_fixed_template_count; template_id += 1)
+        {
+            (void)machine_x64_fixed_template_resolve(template_id);
+        }
+        machine_x64_fixed_templates_complete = true;
     }
 }
 

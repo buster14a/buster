@@ -2225,6 +2225,8 @@ struct MachineX64ExactMapAudit
     // the metadata authority refused (those rows keep their metadata lane).
     u32 fixed_template_rows;
     u32 fixed_template_invalid_rows;
+    // Rows still pending after machine_x86_64_exact_prewarm_all.
+    u32 fixed_template_pending_rows;
     bool valid;
     u8 reserved[3];
 };

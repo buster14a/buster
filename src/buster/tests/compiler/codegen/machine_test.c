@@ -11577,6 +11577,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // MULH64's mul rcx adds one static row.
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_rows == 1503,
                     string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1503 (rows: {u32})"), exact_map.fixed_template_rows));
+    BUSTER_TEST(arguments, exact_map.fixed_template_pending_rows == 0);
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
     BUSTER_TEST_FIXTURE(arguments, machine_test_gpr_preparation);
