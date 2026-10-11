@@ -15,10 +15,10 @@ BUSTER_GLOBAL_LOCAL bool curl_compat_step(Arena* arena, String8 directory, Strin
     RaddebuggerCommandResult run = raddebugger_command(arena, arguments, directory, path_join(arena, evidence, name),
                                                       RADDEBUGGER_ENVIRONMENT_INHERIT, stopped);
     bool result = raddebugger_command_ok(run);
-    if (!result)
+    if (!result || string_equal(name, S8("upstream-tests")))
     {
-        // Keep full streams in evidence; show bounded tails for cloud triage.
-        string_print(S8("CURL_STAGE_FAILED stage={S8} directory={S8}\n"), name, directory);
+        // Keep full streams in evidence; show bounded failures/test summaries.
+        string_print(S8("CURL_STAGE stage={S8} directory={S8} status={S8}\n"), name, directory, result ? S8("pass") : S8("fail"));
         for (u32 stream = 0; stream < 2; stream += 1)
         {
             String8 text = BYTE_SLICE_TO_STRING(8, run.wait.streams[stream]);
@@ -171,9 +171,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult curl_compat_census(Arena* arena, SliceString8 
                     String8 run[] = {binary, S8("--version")};
                     RaddebuggerCommandResult version_run = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run), directory,
                                                                               path_join(arena, directory, S8("version")), RADDEBUGGER_ENVIRONMENT_HEADLESS, &stopped);
-                    version = raddebugger_command_ok(version_run) && string_starts_with_sequence(version_run.output, S8("curl 8.16.0 ")) &&
+                    version = raddebugger_command_ok(version_run) && string_starts_with_sequence(version_run.output, S8("curl 8.16.0-DEV ")) &&
                               string_first_sequence(version_run.output, S8("OpenSSL/")) != BUSTER_STRING_NO_MATCH &&
                               string_first_sequence(version_run.output, S8("https")) != BUSTER_STRING_NO_MATCH;
+                    string_print(S8("CURL_VERSION compiler={S8} library={S8} status={S8}\n{S8}\n"),
+                                 compiler_name, library_name, version ? S8("pass") : S8("fail"), version_run.output);
                     String8 tests[] = {cmake, S8("--build"), directory, S8("--parallel"), S8("2"), S8("--target"), S8("test-nonflaky")};
                     tested = curl_compat_step(arena, output, directory, S8("upstream-tests"), (SliceString8)BUSTER_ARRAY_TO_SLICE(tests), &stopped);
                 }

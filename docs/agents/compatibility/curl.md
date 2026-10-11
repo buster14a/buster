@@ -13,8 +13,11 @@ The native build driver exposes an opt-in Linux x86-64 build-system census:
 ```
 
 Build the trusted Release `ide` first through the normal native driver.
-The external checkout must be exactly curl 8.16.0,
+The external checkout must be exactly the curl 8.16.0 Git tag,
 [`11b991232fbcaa88e2b1faecac224416b0001e35`](https://github.com/curl/curl/commit/11b991232fbcaa88e2b1faecac224416b0001e35).
+Its unchanged `include/curl/curlver.h` declares `8.16.0-DEV`; the release
+archive's rewritten version header is a different source input. The version
+oracle requires the Git header's exact `8.16.0-DEV` identity.
 The output parent must already exist; the output itself must be absent and
 outside upstream. Driver/output paths containing a CMake list separator (`;`)
 are rejected. Compilation and correctness use authorized cloud hosts.
