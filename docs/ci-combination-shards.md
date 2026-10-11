@@ -309,10 +309,11 @@ trees. Their serialized test phases receive
 the whole low-core budget (see [build guidance](agents/build.md)).
 CI trees expose `test_units_partitioned` and `test_unit_inventory` for the
 native `build.c test_units_partitioned <ide-path>` diagnostic. The partition
-driver runs the `primary` module (`c_frontend_tests` on Windows x86-64,
-`compiler_driver_tests` elsewhere) and the remaining enabled modules in
-separate processes. It shares one built executable, divides its supplied test
-budget between the children, and replays their captured output in stable order.
+driver runs `c_frontend_tests` as the `primary` module on partitioned trees
+except Windows AArch64, where `compiler_driver_tests` is primary; the
+remaining enabled modules run in a separate process. It shares one built
+executable, divides its supplied test budget between the children, and replays
+their captured output in stable order.
 It rejects missing/duplicate module evidence, failed assertions/processes,
 timeouts, capture failures and incomplete cleanup. Whole-table audit exclusions
 remain owned by the original tree policy. Each child retains at least two test

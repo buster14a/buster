@@ -5506,7 +5506,10 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
             result.diagnostic = string_format(arena, S8("{S8}: relocation family {u32} has no object representation"), path, (u32)relocation.kind);
             return result;
         }
-        if (relocation.plt)
+        // Mach-O spells a direct call or jump X86_64_RELOC_BRANCH and every
+        // other rip-relative field SIGNED; the object model carries the
+        // branch as PLT32, the form ELF gives a call to a preemptible name.
+        if (relocation.plt || (relocation.x86_branch && object_format_for_target(invocation.target) == OBJECT_FORMAT_MACH_O64))
         {
             kind = OBJECT_RELOCATION_X86_64_PLT32;
         }
@@ -7987,6 +7990,10 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.statements.declaration_hints += unit.c_ast.statements.declaration_hints;
         result.c_ast.statements.loop_hints += unit.c_ast.statements.loop_hints;
         result.c_ast.statements.declines += unit.c_ast.statements.declines;
+        result.c_ast.statements.declarator_hints += unit.c_ast.statements.declarator_hints;
+        result.c_ast.statements.initializer_hints += unit.c_ast.statements.initializer_hints;
+        result.c_ast.statements.auto_skips += unit.c_ast.statements.auto_skips;
+        result.c_ast.statements.declarator_declines += unit.c_ast.statements.declarator_declines;
         if (unit.c_ast.statements.fallbacks)
         {
             result.c_ast.statements.reason = unit.c_ast.statements.reason;
