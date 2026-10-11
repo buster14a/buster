@@ -13702,9 +13702,10 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
             {
                 message = S8("an AArch64 GOT operand modifier requires a symbol expression");
             }
-            else if ((*got || *mach_got) && parsed.addend != 0)
+            else if ((*got || *mach_got || *tlvp) && parsed.addend != 0)
             {
-                message = S8("an AArch64 GOT relocation takes no addend");
+                message = *tlvp ? S8("an AArch64 TLVP relocation takes no addend")
+                                : S8("an AArch64 GOT relocation takes no addend");
             }
             else
             {

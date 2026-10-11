@@ -812,7 +812,8 @@ The segment/section pairs normalize to the object's section names, so
 attributes and extra operands are structured directive diagnostics.
 AArch64 `adrp Xd, sym@TLVPPAGE` and
 `ldr Xt, [Xn, sym@TLVPPAGEOFF]` retain the Darwin TLVP page/load relocations,
-including signed addends. The low half must be a plain 64-bit unsigned-offset
+with zero addends; nonzero signed addends are refused because the platform
+linker rejects them. The low half must be a plain 64-bit unsigned-offset
 LDR; ADD, stores, other widths and writeback are refused. The Mach-O-only
 `@GOTPAGE`/`@GOTPAGEOFF` pair uses the existing GOT-load page/load kinds;
 its addend must be zero and its low half must load into a 64-bit integer
