@@ -23691,7 +23691,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_simd_conditional_header(UnitTestArgume
                 command_line.length -= 1;
             }
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, command_line);
-            invocation.reject_machine_fallback = true;
+            invocation.reject_machine_fallback = action != 0;
             CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
             BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                 string_format(temporary.arena, S8("SIMD conditional header {S8} {S8}: {S8}"), actions[action], frontends[form], compiled.diagnostic));
