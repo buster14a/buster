@@ -39402,7 +39402,8 @@ struct CIrTreeFirstMemo
 // token is the smallest anchor on the leftmost path. A label address `&&l` is
 // anchored at its label. The walk ends at an indexed conditional, which brings
 // its own first token, so a chain of conditionals on each other's leftmost
-// paths is walked once in all. Parentheses have no node: `*widen_from` gets
+// paths is walked once in all; finding it is a binary search over the body's
+// indexed conditionals, which `*steps` does not count. Parentheses have no node: `*widen_from` gets
 // the token the caller's widening resumes at, the conditional's widened start
 // when its first token was taken, else the first token. `*steps` counts the
 // nodes the walk visits, siblings included.
@@ -39563,9 +39564,11 @@ BUSTER_C_INTERNAL u64 c_ir_tree_conditionals_size(CAst const* ast, u32* body_cou
 // Indexes the conditional nodes of every top-level function body of `ast`
 // (see above) in `arena`, sized by c_ir_tree_conditionals_size. A body nested
 // in another (a GNU nested function) is not indexed: its queries run the scan.
-// The work is linear in the bodies' nodes: each one's leftmost-path walks stop
-// at the conditionals already indexed (CIrTreeFirstMemo), and each `(` is
-// widened over once. CAstLowerStatistics.steps counts it.
+// The walks and widening are linear in the bodies' nodes: each leftmost-path
+// walk stops at a conditional already indexed (CIrTreeFirstMemo), and each `(`
+// is widened over once; CAstLowerStatistics.steps counts them. Each memo
+// lookup is a binary search over the body's indexed conditionals, so the
+// whole build is O(n log n) in the worst case.
 BUSTER_C_INTERNAL CIrTreeConditionalIndex c_ir_tree_conditionals_build(Arena* arena, CAst const* ast, CPreprocessResult const* preprocess,
                                                                         u32 const* stream_matching_delimiters_plus_one, u32 body_count,
                                                                         u32 conditional_count, CAstLowerStatistics* statistics)

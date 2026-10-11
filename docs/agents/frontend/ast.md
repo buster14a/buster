@@ -908,16 +908,18 @@ and `CONDITIONAL_OMITTED` nodes, and for each one it records three tokens:
 A record whose `:` cannot be found this way is left out, but its `?` is still
 indexed. Each body keeps its `?` tokens and its records in ascending order.
 
-The build's work is linear in the bodies' nodes. Postorder indexes every
-conditional on another's leftmost path before that one, so the walk for a
-first token stops at an indexed conditional and takes its first token and
-widened start. Those parentheses close before the earlier `?`, so they
+The build's walks and widening are linear in the bodies' nodes. Postorder
+indexes every conditional on another's leftmost path before that one, so the
+walk for a first token stops at an indexed conditional and takes its first
+token and widened start. Those parentheses close before the earlier `?`, so they
 widen the later one too, and each `(` is widened over once. Without the
 memo, a left-nested chain `((a ? b : c) ? b : c) ...` walked its shared
 paths and parentheses again for every level, which was quadratic.
-`CAstLowerStatistics.steps` counts the work, and
-`c_test_tree_root_conditional_chains` requires it to stay linear as chains
-double. Parenthesis matches come from the stream's delimiter array, so a
+`CAstLowerStatistics.steps` counts the walks and widening, and
+`c_test_tree_root_conditional_chains` requires that count to stay linear as
+chains double. Finding an indexed conditional is a binary search over the
+body's conditionals, which `steps` leaves out, so the whole build is
+O(n log n) in the worst case. Parenthesis matches come from the stream's delimiter array, so a
 stream with mismatched delimiters gets no index.
 
 A query inside a body is answered in one of three ways:

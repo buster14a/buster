@@ -1489,7 +1489,8 @@ struct CAstStatementStatistics
 // how each root-conditional query inside an indexed body ended. An answer is
 // a root `?:` the tree reported; a negative is a range holding no `?`; a
 // fallback went to the token scan. Steps are the nodes and parentheses the
-// index build visited, a work count that must stay linear in the input.
+// index build's walks and widening visited, a work count that must stay linear
+// in the input; it leaves out the memo's binary-search comparisons.
 typedef struct CAstLowerStatistics CAstLowerStatistics;
 struct CAstLowerStatistics
 {

@@ -40031,8 +40031,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArgumen
     return result;
 }
 
-// The root-conditional index's build work stays linear in the input
-// (CAstLowerStatistics.steps; GitHub #3102). Each chain shape is compiled at
+// The root-conditional index build's walks and widening stay linear in the
+// input (CAstLowerStatistics.steps, which leaves out the memo's binary-search
+// comparisons; GitHub #3102). Each chain shape is compiled at
 // depth n and 2n, with and without -fc-ast-pilot. The objects must match, and
 // doubling the depth may at most double the steps, plus a constant for the
 // function around the chain. Without the memo, a left-nested chain walked its
