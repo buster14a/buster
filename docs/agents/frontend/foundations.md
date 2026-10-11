@@ -2021,3 +2021,29 @@ The existing capacity and translation-unit lifetime are unchanged. Raw table
 readers must prove token kind and direction; a closer row is now populated.
 The registered position-index regression checks both directions, clipped ranges,
 malformed streams, dirty storage, scalar/shape parity and 64/4096 boundaries.
+
+## Logical-chain cast and reference work
+
+Label-address cast proofs reuse the matching-opener index. Before classifying a
+group's type words, `c_parse_label_address_group_may_be_type` rejects interiors
+containing an indexed `&& identifier`: that punctuator is forbidden by the
+restricted word proof. The scoped typedef-aware proof additionally recognizes
+a leading typeof specifier (after qualifiers), whose balanced operand may
+contain a conjunction. Only that prefix is exempted; left-nested logical groups
+begin with a parenthesis and retain the indexed negative. Prefix probes join
+the same counted-work metric. Its search reads the existing sorted position population. A miss keeps
+the complete proof; absent indexes and unmatched groups retain the scan fallback.
+The population rejects nested logical groups in logarithmic probes per group,
+rather than re-reading their growing prefix of parentheses.
+
+Checked lowering records whether any prepared callee has started at a `(`
+token. Every call-chain lookup still receives its independent reference check.
+When no callee has done so, publication proves that no row can have the source
+call's opening parenthesis as its key. Otherwise the full reference scan remains.
+The fact stays true across typeof rollback; a removed callee can cause extra
+checking, never a missed candidate. Release call-chain selection is unchanged.
+
+`c_test_logical_chain_work_growth` bounds counted work across all six shapes at
+three depths, includes a named label to exercise the semantic cast proof, and
+checks that a returned-function call retains the positive reference scan.
+The original deep lowering and runtime-order fixtures remain separate.

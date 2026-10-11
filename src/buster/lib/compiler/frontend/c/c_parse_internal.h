@@ -167,6 +167,9 @@ BUSTER_F_DECL void c_test_set_literal_query_machine_only(bool machine_only);
 // compiled with and without interned rows and the objects compared.
 BUSTER_F_DECL void c_test_set_type_interning_off(bool off);
 
+// Cast-proof token visits and logical-position probes on the calling thread.
+BUSTER_F_DECL u64 c_test_logical_label_type_work(void);
+
 // Direct member alignment queries must leave the published model, including
 // spare rows and the type-map input counts/pointers, byte-for-byte unchanged.
 typedef struct CTestMemberAlignmentQuery CTestMemberAlignmentQuery;

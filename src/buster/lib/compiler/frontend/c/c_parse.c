@@ -133,6 +133,8 @@
 //   c_parse_label_address_prefix_proven, _at       opener-based label proof
 //   c_parse_label_address_prefix_proven_indexed    indexed label proof
 //   c_parse_label_address_prefix_with_typedef, _at typedef-aware label proof
+//   c_parse_label_address_group_may_be_type         indexed logical rejection
+//   c_parse_label_address_group_starts_typeof       scoped operand exception
 //   c_parse_statement_end                          goto, label addresses
 //   c_parse_statement_plan_build,                 the statement plan read from
 //   c_parse_bind_plan_segment,                    the syntax tree, its
@@ -25283,6 +25285,14 @@ BUSTER_C_INTERNAL void c_parse_bind_function_static_asserts(CTypeParseMachine* m
 BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                             CScopeId root_scope, u32 start, u32 end, bool is_file_scope);
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_logical_label_type_work;
+u64 c_test_logical_label_type_work(void)
+{
+    return c_logical_label_type_work;
+}
+#endif
+
 BUSTER_C_INTERNAL bool c_parse_label_address_prefix_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 open)
 {
     if (body_start >= preprocess->token_count || index >= preprocess->token_count ||
@@ -25352,6 +25362,9 @@ BUSTER_C_INTERNAL bool c_parse_label_address_prefix_proven_at(CPreprocessResult 
             bool tag_name = false;
             for (u32 scan = open + 1; scan < index - 1; scan += 1)
             {
+#if BUSTER_INCLUDE_TESTS
+                c_logical_label_type_work += 1;
+#endif
                 CToken candidate = preprocess->tokens[scan];
                 if (candidate.kind == C_TOKEN_IDENTIFIER)
                 {
@@ -25409,10 +25422,75 @@ BUSTER_C_INTERNAL u32 c_parse_label_address_opener(CParseResult* result, CPrepro
     return open;
 }
 
+// An interior containing a recorded `&& identifier` cannot pass either
+// cast proof: both admit only identifiers, stars and parentheses. This
+// immutable position population rejects left-nested logical operands without
+// walking their growing prefix of parentheses. An absent index stays on the
+// existing proof; a population miss is not proof that a group is a type.
+BUSTER_GLOBAL_LOCAL bool c_parse_label_address_group_may_be_type(CParseResult* result, u32 open, u32 close)
+{
+    bool possible = true;
+    if (result && result->position_index && open < close)
+    {
+        CTokenPositionIndex* positions = result->position_index;
+        u32 low = 0;
+        u32 high = positions->label_address_count;
+        while (low < high)
+        {
+#if BUSTER_INCLUDE_TESTS
+            c_logical_label_type_work += 1;
+#endif
+            u32 middle = low + (high - low) / 2;
+            if (positions->label_address_positions[middle] <= open)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+        possible = low == positions->label_address_count || positions->label_address_positions[low] >= close;
+    }
+    return possible;
+}
+
+// Only a genuine leading typeof specifier can hide a conjunction inside
+// its operand. Qualifier prefixes are bounded by this group's spelling;
+// a left-nested logical group starts with '(' and fails in constant work.
+BUSTER_GLOBAL_LOCAL bool c_parse_label_address_group_starts_typeof(CParseResult* result, CPreprocessResult const* preprocess,
+                                                                   CScopeId scope, u32 open, u32 close)
+{
+    bool found = false;
+    if (open < close && close <= preprocess->token_count)
+    {
+#if BUSTER_INCLUDE_TESTS
+        c_logical_label_type_work += 1;
+#endif
+        u32 cursor = open + 1;
+        bool scanning = true;
+        while (scanning && cursor < close && preprocess->tokens[cursor].kind == C_TOKEN_IDENTIFIER)
+        {
+#if BUSTER_INCLUDE_TESTS
+            c_logical_label_type_work += 1;
+#endif
+            CToken token = preprocess->tokens[cursor];
+            u16 words = c_parse_word_bits_token(*preprocess, token);
+            bool typeof_specifier = (words & C_WORD_TYPEOF) ||
+                                    (c_preprocess_dialect_is_c23(preprocess->dialect) && (words & C_WORD_TYPEOF_UNQUAL));
+            found = typeof_specifier && c_parse_type_start_token(result, *preprocess, scope, token);
+            scanning = !found && (words & C_WORD_QUALIFIER_ANY);
+            cursor += 1;
+        }
+    }
+    return found;
+}
+
 BUSTER_C_INTERNAL bool c_parse_label_address_prefix_proven_indexed(CParseResult* result, CPreprocessResult const* preprocess, u32 body_start, u32 index)
 {
     u32 open = c_parse_label_address_opener(result, preprocess, body_start, index);
-    return c_parse_label_address_prefix_proven_at(preprocess, body_start, index, open);
+    return c_parse_label_address_group_may_be_type(result, open, index - 1) &&
+           c_parse_label_address_prefix_proven_at(preprocess, body_start, index, open);
 }
 
 BUSTER_C_INTERNAL bool c_parse_label_address_prefix_with_typedef_at(CParseResult* result, CPreprocessResult const* preprocess, CScopeId scope,
@@ -25433,6 +25511,9 @@ BUSTER_C_INTERNAL bool c_parse_label_address_prefix_with_typedef_at(CParseResult
     {
         for (u32 scan = index - 1; scan >= body_start; scan -= 1)
         {
+#if BUSTER_INCLUDE_TESTS
+            c_logical_label_type_work += 1;
+#endif
             CToken token = preprocess->tokens[scan];
             if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
@@ -25470,6 +25551,9 @@ BUSTER_C_INTERNAL bool c_parse_label_address_prefix_with_typedef_at(CParseResult
     bool tag_name = false;
     for (u32 scan = open + 1; scan < index - 1; scan += 1)
     {
+#if BUSTER_INCLUDE_TESTS
+        c_logical_label_type_work += 1;
+#endif
         CToken token = preprocess->tokens[scan];
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
@@ -25520,7 +25604,9 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* res
                                                                     u32 body_start, u32 index)
 {
     u32 open = c_parse_label_address_opener(result, preprocess, body_start, index);
-    return c_parse_label_address_prefix_with_typedef_at(result, preprocess, scope, body_start, index, open);
+    bool possible = c_parse_label_address_group_may_be_type(result, open, index - 1) ||
+                    c_parse_label_address_group_starts_typeof(result, preprocess, scope, open, index - 1);
+    return possible && c_parse_label_address_prefix_with_typedef_at(result, preprocess, scope, body_start, index, open);
 }
 
 #if BUSTER_INCLUDE_TESTS
@@ -25528,10 +25614,12 @@ BUSTER_C_SHARED bool c_test_parse_label_address_prefix_paths_agree(CParseResult*
                                                                     CScopeId scope, u32 body_start, u32 index)
 {
     u32 open = c_parse_label_address_opener(result, preprocess, body_start, index);
+    bool possible = c_parse_label_address_group_may_be_type(result, open, index - 1);
     bool proven_agrees = c_parse_label_address_prefix_proven_at(preprocess, body_start, index, UINT32_MAX) ==
-                         c_parse_label_address_prefix_proven_at(preprocess, body_start, index, open);
+                         (possible && c_parse_label_address_prefix_proven_at(preprocess, body_start, index, open));
+    bool typedef_possible = possible || c_parse_label_address_group_starts_typeof(result, preprocess, scope, open, index - 1);
     bool typedef_agrees = c_parse_label_address_prefix_with_typedef_at(result, preprocess, scope, body_start, index, UINT32_MAX) ==
-                          c_parse_label_address_prefix_with_typedef_at(result, preprocess, scope, body_start, index, open);
+                          (typedef_possible && c_parse_label_address_prefix_with_typedef_at(result, preprocess, scope, body_start, index, open));
     return proven_agrees && typedef_agrees;
 }
 #endif
@@ -38566,10 +38654,17 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
 BUSTER_C_INTERNAL bool c_parse_label_address_cast_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 index)
 {
     bool label = false;
-    u32 depth = 1;
-    u32 open = index - 1;
+    u32 open = c_parse_label_address_opener(result, &preprocess, start, index);
+    u32 depth = open == UINT32_MAX ? 1u : 0u;
+    if (depth)
+    {
+        open = index - 1;
+    }
     while (open > start && depth)
     {
+#if BUSTER_INCLUDE_TESTS
+        c_logical_label_type_work += 1;
+#endif
         open -= 1;
         depth += c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_RIGHT_PARENTHESIS);
         depth -= c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_PARENTHESIS);
