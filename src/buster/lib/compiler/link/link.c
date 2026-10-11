@@ -7758,8 +7758,14 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
                     valid = false;
                     requires_position_independent_objects = true;
                 }
-                else if (zero && low12)
+                else if (zero && relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADR_PREL_LO21)
                 {
+                    // MOVZ #0 replaces the ADR, so no addend survives it.
+                    valid = valid && relocation->addend == 0;
+                }
+                else if (zero && (low12 || relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21))
+                {
+                    // MOVZ #0 replaces the ADRP; only an addend inside page zero survives.
                     valid = valid && relocation->addend >= 0 && relocation->addend <= 0xfff;
                 }
                 action = page ? LINK_ELF_PIC_ACTION_AARCH64_PAGE : LINK_ELF_PIC_ACTION_AARCH64_PREL;
