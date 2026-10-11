@@ -45,6 +45,8 @@ submodules are refused by this intake. Their upstream tests remain explicitly
 unsupported/skipped where upstream reports them; this is not an all-integration
 qualification. The controls' isolated Git fixture covers
 wrong pin, dirty tracked source, ignored/untracked inputs and hidden index flags.
+OpenSSL's independent verifier disables Git replacement objects; its fixture also
+rejects a replacement commit that would otherwise disguise changed source.
 Additional native controls reject wrong gitlink commits, unknown paths and
 populated optional integrations, while accepting absent and empty directories.
 

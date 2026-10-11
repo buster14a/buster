@@ -131,14 +131,14 @@ BUSTER_GLOBAL_LOCAL bool openssl_gitlink_admitted(Arena* arena, String8 root, St
 
 BUSTER_GLOBAL_LOCAL bool openssl_git_verify(Arena* arena, String8 git, String8 source_directory, String8 expected_commit, bool* stopped)
 {
-    String8 root_arguments[] = {git, S8("-c"), S8("core.fsmonitor=false"), S8("rev-parse"), S8("--show-toplevel")};
+    String8 root_arguments[] = {git, S8("--no-replace-objects"), S8("-c"), S8("core.fsmonitor=false"), S8("rev-parse"), S8("--show-toplevel")};
     RaddebuggerCommandResult root = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(root_arguments), source_directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
     String8 reported_root = os_path_absolute(arena, compat_trim_ascii_space(root.output), true);
     bool valid = raddebugger_command_ok(root) && reported_root.length && string_equal(reported_root, source_directory);
     String8 commit = {0};
     if (valid)
     {
-        String8 head_arguments[] = {git, S8("-c"), S8("core.fsmonitor=false"), S8("rev-parse"), S8("HEAD")};
+        String8 head_arguments[] = {git, S8("--no-replace-objects"), S8("-c"), S8("core.fsmonitor=false"), S8("rev-parse"), S8("HEAD")};
         RaddebuggerCommandResult head = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), source_directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
         commit = compat_trim_ascii_space(head.output);
         valid = raddebugger_command_ok(head) && string_equal(commit, expected_commit);
@@ -147,13 +147,13 @@ BUSTER_GLOBAL_LOCAL bool openssl_git_verify(Arena* arena, String8 git, String8 s
     {
         // Ignored local headers can override upstream includes. Index flags
         // can conceal edited tracked files from status, so neither is accepted.
-        String8 status_arguments[] = {git, S8("-c"), S8("core.fsmonitor=false"), S8("status"), S8("--porcelain"), S8("--untracked-files=all"), S8("--ignored")};
+        String8 status_arguments[] = {git, S8("--no-replace-objects"), S8("-c"), S8("core.fsmonitor=false"), S8("status"), S8("--porcelain"), S8("--untracked-files=all"), S8("--ignored")};
         RaddebuggerCommandResult status = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_arguments), source_directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
         valid = raddebugger_command_ok(status) && !status.output.length;
     }
     if (valid)
     {
-        String8 index_arguments[] = {git, S8("-c"), S8("core.fsmonitor=false"), S8("ls-files"), S8("-v"), S8("--stage"), S8("-z")};
+        String8 index_arguments[] = {git, S8("--no-replace-objects"), S8("-c"), S8("core.fsmonitor=false"), S8("ls-files"), S8("-v"), S8("--stage"), S8("-z")};
         RaddebuggerCommandResult index = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(index_arguments), source_directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
         valid = raddebugger_command_ok(index) && index.output.length;
         for (u64 offset = 0; valid && offset < index.output.length;)
@@ -173,7 +173,7 @@ BUSTER_GLOBAL_LOCAL bool openssl_git_verify(Arena* arena, String8 git, String8 s
     }
     if (valid)
     {
-        String8 sparse_arguments[] = {git, S8("config"), S8("--bool"), S8("--default=false"), S8("--get"), S8("core.sparseCheckout")};
+        String8 sparse_arguments[] = {git, S8("--no-replace-objects"), S8("config"), S8("--bool"), S8("--default=false"), S8("--get"), S8("core.sparseCheckout")};
         RaddebuggerCommandResult sparse = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(sparse_arguments), source_directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
         valid = raddebugger_command_ok(sparse) && string_equal(compat_trim_ascii_space(sparse.output), S8("false"));
     }
@@ -351,7 +351,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult openssl_main(Arena* arena, SliceString8 argume
         string8_list_push(arena, &summary, S8("cell\tconfigure\tbuild\ttests\n"));
         if (claimed)
         {
-            String8 inventory_args[] = {git, S8("ls-tree"), S8("-r"), S8("--full-tree"), S8(BUSTER_OPENSSL_COMMIT)};
+            String8 inventory_args[] = {git, S8("--no-replace-objects"), S8("ls-tree"), S8("-r"), S8("--full-tree"), S8(BUSTER_OPENSSL_COMMIT)};
             valid = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(inventory_args), source,
                                                               path_join(arena, output, S8("source-inventory")), RADDEBUGGER_ENVIRONMENT_GIT, &stopped)) && valid;
             String8 versions[] = {clang, S8("--version")};
