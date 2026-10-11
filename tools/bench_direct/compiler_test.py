@@ -3988,5 +3988,308 @@ class ProductionProfileTest(unittest.TestCase):
             self.assertEqual((record["status"], record["build_exit"], record["exit"]), ("failed", 0, 3))
             self.assertTrue(any("corpus" in error for error in record["errors"]), record["errors"])
 
+
+ZEN5 = "AMD Ryzen 7 9700X 8-Core Processor"
+
+
+def frontend_selector_evidence() -> tuple[dict, dict]:
+    """A complete synthetic frontend-selector-v1 record and its exported bundle on BINARIES."""
+    profile = compiler_receipt.FRONTEND_SELECTOR_PROFILE
+    scaling, selection, bench_profile = profile["frontend_scaling"], profile["selection"], profile["ide_bench"]
+    hashes = {"baseline": A256, "candidate": B256}
+    provenance = {"binary_sha256": dict(hashes), "suite": "all", "warmups": scaling["warmups"],
+                  "repetitions": scaling["repetitions"], "cpu": profile["cpu"], "affinity": [profile["cpu"]],
+                  "cpu_model": ZEN5, "complete": True}
+    results = []
+    for kind, count, mode in compiler_receipt.frontend_scaling_population():
+        row = {"kind": kind, "count": count, "mode": mode, "source_bytes": 10, "source_sha256": "5" * 64,
+               "compilers": {role: {"command": [role], "wall_seconds": [0.01] * scaling["repetitions"],
+                                    "cpu_seconds": [0.0] * scaling["repetitions"], "wall_median": 0.01, "cpu_median": 0.0}
+                             for role in hashes}}
+        if mode == "object":
+            row["object_sha256"] = "6" * 64
+        results.append(row)
+    def sample(name: str) -> dict:
+        metrics = {"version": 1, "iterations": 30, "functions": 3, "fallback_functions": 0, "ir_instructions": 40,
+                   "mir_instructions": 50, "min_ns": 900, "median_ns": 1000, "prepare_median_ns": 10,
+                   "total_median_ns": 1100, "arena_bytes": 100, "peak_arena_bytes": 90, "module_bytes": 80}
+        return {"selection": metrics, "target": "BENCH_SELECT_TARGET arch=x86_64",
+                "objects": {allocator: {"wall_ns": 2000, "sha256": hashlib.sha256((name + allocator).encode()).hexdigest(),
+                                        "bytes": 64} for allocator in selection["allocators"]}}
+    report = {"schema_version": 1, "build_description": profile["name"],
+              "host": {"system": "Linux", "cpu": ZEN5, "affinity": [profile["cpu"]]},
+              "compilers": {role: {"path": f"/bin/{role}", "sha256": digest} for role, digest in hashes.items()},
+              "workloads": [{"path": f"/work/selection-sources/{name}", "sha256": "4" * 64, "bytes": 1,
+                             "samples": {role: [sample(name) for _ in range(selection["samples"])] for role in hashes},
+                             "summary": {role: {"selection_median_ns": 1000, "selection_ns_per_mir": 20.0,
+                                                "compile_median_ns": {"fast": 2000, "quality": 2000}} for role in hashes}}
+                            for name in selection["workloads"]]}
+    line = ("BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=30 bytes=4096 min_ns=900 median_ns=1000 "
+            "throughput_mb_s=4")
+    runs = [{"role": role, "exit": 0, "line": line} for pair in range(bench_profile["pairs"])
+            for role in (("baseline", "candidate") if pair % 2 == 0 else ("candidate", "baseline"))]
+    bench = {"schema": compiler_receipt.FRONTEND_SELECTOR_SCHEMA, "cpu": profile["cpu"], "cpu_model": ZEN5,
+             "binaries": dict(hashes), "runs": runs}
+    bundle = {"provenance": provenance, "results": results, "report": report, "bench": bench}
+    record = {"requested": True, "request_line": compiler_receipt.FRONTEND_SELECTOR_REQUEST_LINE,
+              "profile": copy.deepcopy(profile), "status": "complete", "errors": [],
+              "exits": {"frontend_scaling": 0, "selection": 0},
+              "cells": compiler_receipt.frontend_selector_digest(results, report, bench)}
+    return record, bundle
+
+
+class FrontendSelectorTest(unittest.TestCase):
+    """#2761: the fixed frontend-selector-v1 probes on the pull-compare route."""
+
+    def validate(self, bundle: dict, scaling_status: object = 0, selection_status: object = 0,
+                 binaries: dict = BINARIES) -> list[str]:
+        return compiler_receipt.validate_frontend_selector(scaling_status, bundle["provenance"], bundle["results"],
+                                                           selection_status, bundle["report"], bundle["bench"], binaries)
+
+    def test_profile_is_frozen_report_only_and_fits_the_job(self) -> None:
+        profile = compiler_receipt.FRONTEND_SELECTOR_PROFILE
+        self.assertEqual(profile["name"], "frontend-selector-v1")
+        self.assertEqual(compiler_receipt.FRONTEND_SELECTOR_REQUEST_LINE, "profile: " + profile["name"])
+        self.assertIs(profile["report_only"], True)
+        for leg in ("frontend_scaling", "selection"):
+            arguments = profile[leg]["arguments"]
+            self.assertEqual(arguments[arguments.index("--cpu") + 1], str(profile["cpu"]))
+        self.assertIn("--check", profile["selection"]["arguments"])
+        self.assertEqual(len(compiler_receipt.frontend_scaling_population()), 54)
+        # Each tool's bound plus the ordinary comparison stays inside the unchanged 90-minute compare-pull job.
+        self.assertLessEqual(compiler_compare.FRONTEND_SCALING_TIMEOUT_SECONDS + compiler_compare.SELECTION_TIMEOUT_SECONDS
+                             + 2 * profile["ide_bench"]["pairs"] * compiler_compare.IDE_BENCH_TIMEOUT_SECONDS, 75 * 60)
+
+    def test_population_matches_the_frontend_scaling_tool(self) -> None:
+        """The real tool, on stand-in compilers, emits exactly the frozen population and a complete provenance."""
+        root_dir = Path(__file__).resolve().parents[2]
+        profile = compiler_receipt.FRONTEND_SELECTOR_PROFILE
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            compilers = {}
+            for role in ("baseline", "candidate"):
+                compilers[role] = root / role
+                compilers[role].write_text("#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = -o ]; then "
+                                           "printf object > \"$2\"; fi; shift; done\n", encoding="utf-8")
+                compilers[role].chmod(0o755)
+            arguments = list(profile["frontend_scaling"]["arguments"])
+            del arguments[arguments.index("--cpu"):arguments.index("--cpu") + 2]
+            subprocess.run([sys.executable, "-B", str(root_dir / "tools/benchmark_frontend_scaling.py"),
+                            "--baseline", str(compilers["baseline"]), "--candidate", str(compilers["candidate"]),
+                            "--out", str(root / "out"), *arguments], check=True, capture_output=True)
+            provenance = json.loads((root / "out/provenance.json").read_text(encoding="utf-8"))
+            results = json.loads((root / "out/results.json").read_text(encoding="utf-8"))
+        self.assertIs(provenance["complete"], True)
+        provenance.update(cpu=profile["cpu"], affinity=[profile["cpu"]], cpu_model=ZEN5)
+        unused_record, bundle = frontend_selector_evidence()
+        binaries = {role: {"sha256": digest} for role, digest in provenance["binary_sha256"].items()}
+        bundle.update(provenance=provenance, results=results)
+        problems = [problem for problem in self.validate(bundle, binaries=binaries) if problem.startswith("frontend")]
+        self.assertEqual(problems, [])
+
+    def test_complete_evidence_validates_and_every_gap_fails(self) -> None:
+        unused_record, bundle = frontend_selector_evidence()
+        self.assertEqual(self.validate(bundle), [])
+        def change(key: str, mutate) -> dict:
+            changed = copy.deepcopy(bundle)
+            mutate(changed[key])
+            return changed
+        def drop(container: dict, key: str):
+            container.pop(key)
+        def first_sample(report: dict) -> dict:
+            return report["workloads"][0]["samples"]["candidate"][0]
+        cases = {
+            "failed frontend scaling": (bundle, {"scaling_status": 1}),
+            "cancelled frontend scaling": (bundle, {"scaling_status": None}),
+            "failed selection": (bundle, {"selection_status": 1}),
+            "cancelled selection": (bundle, {"selection_status": 124}),
+            "stale baseline": (bundle, {"binaries": {"baseline": {"sha256": "3" * 64}, "candidate": {"sha256": B256}}}),
+            "no binaries": (bundle, {"binaries": {}}),
+            "missing provenance": (dict(bundle, provenance=None), {}),
+            "incomplete provenance": (change("provenance", lambda value: value.update(complete=False)), {}),
+            "other suite": (change("provenance", lambda value: value.update(suite="legacy")), {}),
+            "fewer repetitions": (change("provenance", lambda value: value.update(repetitions=3)), {}),
+            "unpinned frontend": (change("provenance", lambda value: value.update(affinity=[0, 1, 2, 3])), {}),
+            "frontend not on Zen 5": (change("provenance", lambda value: value.update(cpu_model="Intel Xeon")), {}),
+            "frontend other binary": (change("provenance", lambda value: value["binary_sha256"].update(candidate=A256)), {}),
+            "missing results": (dict(bundle, results=None), {}),
+            "partial results": (change("results", lambda value: value.pop()), {}),
+            "reordered results": (change("results", lambda value: value.reverse()), {}),
+            "short samples": (change("results", lambda value: value[3]["compilers"]["candidate"]["wall_seconds"].pop()), {}),
+            "zero wall": (change("results", lambda value: value[0]["compilers"]["baseline"]["wall_seconds"].__setitem__(0, 0)), {}),
+            "object without hash": (change("results", lambda value: drop(value[1], "object_sha256")), {}),
+            "missing report": (dict(bundle, report=None), {}),
+            "selection not on Zen 5": (change("report", lambda value: value["host"].update(cpu="AMD EPYC 7763")), {}),
+            "unpinned selection": (change("report", lambda value: value["host"].update(affinity=None)), {}),
+            "selection other binary": (change("report", lambda value: value["compilers"]["candidate"].update(sha256=A256)), {}),
+            "missing workload": (change("report", lambda value: value["workloads"].pop()), {}),
+            "short selection": (change("report", lambda value: value["workloads"][1]["samples"]["baseline"].pop()), {}),
+            "fallback selection": (change("report", lambda value: first_sample(value)["selection"].update(
+                fallback_functions=1)), {}),
+            "changed work": (change("report", lambda value: first_sample(value)["selection"].update(mir_instructions=51)), {}),
+            "changed target": (change("report", lambda value: first_sample(value).update(target="other")), {}),
+            "different object": (change("report", lambda value: first_sample(value)["objects"]["fast"].update(
+                sha256="9" * 64)), {}),
+            "missing allocator": (change("report", lambda value: drop(first_sample(value)["objects"], "quality")), {}),
+            "missing bench": (dict(bundle, bench=None), {}),
+            "bench not on Zen 5": (change("bench", lambda value: value.update(cpu_model="NA")), {}),
+            "bench changed binary": (change("bench", lambda value: value.update(binaries=None)), {}),
+            "partial bench": (change("bench", lambda value: value["runs"].pop()), {}),
+            "failed bench run": (change("bench", lambda value: value["runs"][4].update(exit=1)), {}),
+            "unreported bench run": (change("bench", lambda value: value["runs"][5].update(line=None)), {}),
+            "other bench source": (change("bench", lambda value: value["runs"][2].update(
+                line=value["runs"][2]["line"].replace("bytes=4096", "bytes=4097"))), {}),
+            "debug bench": (change("bench", lambda value: value["runs"][2].update(
+                line=value["runs"][2]["line"].replace("iterations=30", "iterations=5"))), {}),
+            "unpaired bench": (change("bench", lambda value: value["runs"].__setitem__(1, dict(value["runs"][0]))), {}),
+        }
+        for name, (changed, options) in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(self.validate(changed, **options), name)
+
+    def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
+        record, bundle = frontend_selector_evidence()
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["frontend_selector"] = record
+        values = {"expected": dict(EXPECTED, mode="pull"), "authorized": True, "compare_result": "success",
+                  "receipt": pull, "summary": summary(), "policy_value": "",
+                  "throughput": dict(corpus(), frontend_selector_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        failed = dict(copy.deepcopy(record), status="failed", exits={"frontend_scaling": 1, "selection": 0})
+        stale = copy.deepcopy(record)
+        stale["cells"][0]["values"] = [1.0, 0.1]
+        widened = copy.deepcopy(record)
+        widened["profile"]["selection"]["samples"] = 3
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "partial bundle": {"throughput": dict(corpus(), frontend_selector_bundle={
+                key: value for key, value in bundle.items() if key != "bench"})},
+            "failed run": {"receipt": dict(pull, frontend_selector=failed)},
+            "stale cells": {"receipt": dict(pull, frontend_selector=stale)},
+            "changed profile": {"receipt": dict(pull, frontend_selector=widened)},
+            "not a request": {"receipt": dict(pull, frontend_selector=dict(record, requested=False))},
+            "with production profile": {"receipt": dict(pull, production_profile=production_profile_evidence()[0]),
+                                        "throughput": dict(corpus(), frontend_selector_bundle=bundle,
+                                                           production_profile_bundle=production_profile_evidence()[1])},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("Frontend and selector probes (frontend-selector-v1): complete", report)
+        self.assertIn("| frontend small-1/syntax | 10.0 ms | 10.0 ms | 1.0000 |", report)
+        self.assertIn("| ide bench | 1.0 us | 1.0 us | 1.0000 |", report)
+
+    def test_read_evidence_requires_every_bundle_member(self) -> None:
+        record, bundle = frontend_selector_evidence()
+        pull = dict(receipt(), mode="pull", frontend_selector=record)
+        files = compiler_publish.FRONTEND_SELECTOR_BUNDLE_FILES
+        complete = {"receipt.json": json.dumps(pull), "lab/summary.json": json.dumps(summary()),
+                    "throughput/summary.json": json.dumps(corpus()["summary"]),
+                    "throughput/metadata.json": json.dumps(corpus()["metadata"]),
+                    **{path: json.dumps(bundle[key]) for key, path in files.items()}}
+        got = compiler_publish.read_evidence(FakeApi(archive(complete)), "92", "buster-9700x-compiler-x-1")
+        self.assertEqual((got[2], got[4]["frontend_selector_bundle"]), ("", bundle))
+        for key, path in files.items():
+            for name, members in (("missing", {member: value for member, value in complete.items() if member != path}),
+                                  ("malformed", dict(complete, **{path: "{not json"})),
+                                  ("duplicate key", dict(complete, **{path: '{"a": 1, "a": 2}'}))):
+                with self.subTest(member=key, case=name):
+                    got = compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+                    self.assertIn(path, got[2])
+                    self.assertIsNone(got[4]["frontend_selector_bundle"])
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Frontend Selector Test")
+            fixture_git(repo, "config", "user.email", "frontend-selector@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            fixture_git(repo, "add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            fixture_git(repo, "commit", "-qm", "seed")
+            line = compiler_receipt.FRONTEND_SELECTOR_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                fixture_git(repo, "commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.frontend_selector_request_selection(
+                        repo, fixture_git(repo, "rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            fixture_git(repo, "commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.frontend_selector_request_selection(
+                repo, fixture_git(repo, "rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.FRONTEND_SELECTOR_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", frontend_selector=frontend_selector_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("frontend_selector")
+        self.assertIn("no frontend-selector record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+        self.assertEqual(verify(Api(1, 0), expected, dict(plain, state="superseded"), {}), "")
+
+    def test_compare_leg_records_tool_failures_and_missing_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("work", "evidence", "bin", "candidate"):
+                (root / name).mkdir()
+            for name, content in (("ide-base", b"base"), ("ide-cand", b"cand")):
+                (root / "bin" / name).write_bytes(content)
+            binaries = {"baseline": {"sha256": hashlib.sha256(b"base").hexdigest()},
+                        "candidate": {"sha256": hashlib.sha256(b"cand").hexdigest()}}
+            def leg(run_status) -> tuple[dict, mock.MagicMock]:
+                receipt_value = {"timings": {}, "binaries": binaries,
+                                 "frontend_selector": {"requested": True, "status": "pending"}}
+                with mock.patch.object(compiler_compare, "run", side_effect=run_status) as run:
+                    compiler_compare.measure_frontend_selector(root / "candidate", root / "bin", root / "work",
+                                                               root / "evidence", receipt_value)
+                return receipt_value["frontend_selector"], run
+            record, run = leg(lambda argv, cwd, log, timeout: 2)
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(commands[0][2], "tools/benchmark_frontend_scaling.py")
+            self.assertEqual(commands[1][2], "tools/selection_benchmark.py")
+            self.assertEqual(len(commands), 2 + 2 * compiler_receipt.FRONTEND_SELECTOR_PROFILE["ide_bench"]["pairs"])
+            self.assertEqual(commands[2][:3], ["taskset", "-c", "2"])
+            self.assertEqual([command[3] for command in commands[2:6]],
+                             [str(root / "bin" / name) for name in ("ide-base", "ide-cand", "ide-cand", "ide-base")])
+            self.assertEqual(record["status"], "failed")
+            self.assertEqual(record["exits"], {"frontend_scaling": 2, "selection": 2})
+            self.assertTrue(any("frontend scaling exited 2" in error for error in record["errors"]), record["errors"])
+            self.assertTrue(any("ide bench run 0" in error for error in record["errors"]), record["errors"])
+            self.assertTrue((root / "evidence" / "frontend_selector" / "ide_bench" / "ide-bench.json").is_file())
+
 if __name__ == "__main__":
     unittest.main()

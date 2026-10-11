@@ -147,8 +147,10 @@ def check_failures(compiler: Path, directory: Path, timeout: float) -> None:
         "empty": "",
         "syntax": "int f( {",
         "declarations": "int external(void);",
-        "fallback": "int too_many(" + ", ".join(f"int a{i}" for i in range(25)) + "){return a0 + a24;}",
     }
+    # No source reliably falls back since stack-only code generation was removed
+    # (a 25-parameter function now selects); parse_report still refuses any
+    # report with fallback_functions above zero.
     for name, source in bad.items():
         path = directory / f"reject-{name}.c"
         path.write_text(source, encoding="utf-8")

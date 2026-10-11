@@ -44,6 +44,8 @@ Map (searchable symbols):
         throughput_real_source_digest                      real-source throughput (#2761)
     PRODUCTION_PROFILE_PROFILE, validate_production_profile,
         production_profile_fields                          PGO/LTO production profile (#2761)
+    FRONTEND_SELECTOR_PROFILE, validate_frontend_selector,
+        frontend_selector_digest                           frontend and selector probes (#2761)
     REGRESSION_POLICIES, regression_policy                 report-only switch
     range_label                                            main baseline relation
     render                                                 readable report
@@ -273,6 +275,61 @@ PRODUCTION_PROFILE_PROFILE = {
     # The production compiler must emit the Release compiler's exact objects.
     "arguments": [*THROUGHPUT_PROFILE["arguments"], "--require-identical-output"],
     "decision": "report-only: the corpus decisions are reported and never gate",
+    "report_only": True,
+}
+# Issue #2761: the Zen 5 route for frontend and selector claims. One fresh
+# exact line in ANALYZER_REQUEST_PATH selects it on the pull-compare route.
+# After the corpus leg, the base revision's tools/benchmark_frontend_scaling.py
+# and tools/selection_benchmark.py run on the matched baseline/candidate
+# binaries, then the harness itself runs `ide bench` in alternating fresh
+# processes of both binaries from the base checkout. Arguments, populations and
+# the pinned CPU are frozen here; changing any value needs a new name. It is
+# report-only: every timing is reported and never gates, but each tool's own
+# correctness check (identical objects, identical work counts) must hold.
+FRONTEND_SELECTOR_REQUEST_LINE = "profile: frontend-selector-v1"
+FRONTEND_SELECTOR_SCHEMA = "buster-frontend-selector-v1"
+# benchmark_frontend_scaling.py --suite all: (kind, counts, modes) in run order.
+FRONTEND_SCALING_CASES = (
+    ("small", (1,), ("syntax", "object")),
+    *((order, (count,), ("syntax", "object")) for count in (8192, 16384, 32768)
+      for order in ("positional", "ascending", "descending", "range")),
+    ("scopes", (512, 1024, 2048, 4096, 8192), ("syntax",)),
+    ("deep-scopes", (16, 64, 256), ("syntax",)),
+    ("fresh-bindings", (0, 1, 4, 16, 64, 256, 1024, 4096, 16384, 65536), ("syntax", "object")),
+)
+SELECTION_WORK_FIELDS = ("functions", "fallback_functions", "ir_instructions", "mir_instructions")
+IDE_BENCH = re.compile(r"BENCH_C_FRONTEND path=(\S+) iterations=(\d+) bytes=(\d+) min_ns=(\d+) median_ns=(\d+) "
+                       r"throughput_mb_s=(\d+)")
+FRONTEND_SELECTOR_PROFILE = {
+    "name": "frontend-selector-v1",
+    "harness": "tools/benchmark_frontend_scaling.py and tools/selection_benchmark.py at the base revision; "
+               "`ide bench` driven by compiler_compare from the base checkout",
+    "cpu": 2,
+    "frontend_scaling": {
+        "workload": "--suite all: generated pointer tables, scopes, deep scopes and fresh bindings; "
+                    "-fsyntax-only and -c cells, fresh process per sample",
+        "arguments": ["--suite", "all", "--warmups", "1", "--repetitions", "11", "--cpu", "2"],
+        "suite": "all", "warmups": 1, "repetitions": 11,
+        "correctness": "byte-identical -c objects from both binaries; unchanged sources and binaries",
+    },
+    "selection": {
+        "workload": "the tool's three generated workloads: bench-select replay plus fresh-process -O2 -c "
+                    "under both register allocators, programs executed once and failure paths checked",
+        "arguments": ["--samples", "15", "--allocators", "fast", "quality", "--check", "--cpu", "2",
+                      "--timeout", "120", "--build-description", "frontend-selector-v1"],
+        "samples": 15, "allocators": ["fast", "quality"],
+        "workloads": ["many-small.c", "one-large.c", "abi-and-memory.c"],
+        "correctness": "identical target and selected work counts, zero fallback functions and identical object "
+                       "bytes per allocator across every sample of both binaries",
+    },
+    "ide_bench": {
+        "workload": "`ide bench`: preprocess, parse and analyze tests/basic_c_operations.c of the base checkout, "
+                    "one warm-up and 30 timed in-process iterations per run",
+        "source": "tests/basic_c_operations.c", "iterations": 30, "pairs": 20,
+        "pairing": "fresh process per run; pair p runs baseline first when p is even, candidate first when odd",
+        "correctness": "every run exits 0 with exactly one BENCH_C_FRONTEND line for the same source and bytes",
+    },
+    "decision": "report-only: medians are reported and never gate",
     "report_only": True,
 }
 SCALING_SCHEMA = "buster-throughput-scaling-v1"
@@ -648,6 +705,186 @@ def validate_production_profile(build_status: object, summary_text: object, ledg
         problems.append(f"{label} release and pgo-lto compilers are the same binary")
     problems.extend(f"{label} corpus: {reason}" for reason in classify_throughput_exit(status, summary, metadata, binaries))
     return problems
+
+
+def frontend_scaling_population() -> list[tuple[str, int, str]]:
+    """(kind, count, mode) of every FRONTEND_SELECTOR_PROFILE frontend-scaling record, in run order."""
+    return [(kind, count, mode) for kind, counts, modes in FRONTEND_SCALING_CASES for count in counts for mode in modes]
+
+
+def ide_bench_fields(line: object) -> dict | None:
+    """The parsed BENCH_C_FRONTEND line, or None when it is not exactly one well-formed line."""
+    match = IDE_BENCH.fullmatch(line) if isinstance(line, str) else None
+    fields = None
+    if match:
+        fields = {"path": match.group(1), **{key: int(match.group(index)) for index, key in
+                                            enumerate(("iterations", "bytes", "min_ns", "median_ns", "throughput_mb_s"), 2)}}
+    return fields
+
+
+def _samples(values: object, count: int, positive: bool) -> bool:
+    return isinstance(values, list) and len(values) == count and \
+        all(type(value) in (int, float) and math.isfinite(value) and (value > 0 if positive else value >= 0)
+            for value in values)
+
+
+def validate_frontend_selector(scaling_status: object, provenance: object, results: object, selection_status: object,
+                               report: object, bench: object, binaries: object) -> list[str]:
+    """Reasons the evidence is not one complete FRONTEND_SELECTOR_PROFILE run on these binaries and host.
+
+    scaling_status/selection_status are the two tools' exits, provenance/results the frontend-scaling
+    provenance.json and results.json, report the selection report.json, bench the harness's ide-bench.json
+    and binaries the measured baseline/candidate records.
+    """
+    profile = FRONTEND_SELECTOR_PROFILE
+    cpu = profile["cpu"]
+    binaries = binaries if isinstance(binaries, dict) else {}
+    hashes = {role: (binaries.get(role) or {}).get("sha256") if isinstance(binaries.get(role), dict) else None
+              for role in ("baseline", "candidate")}
+    problems: list[str] = []
+    if not all(isinstance(value, str) and SHA256.fullmatch(value) for value in hashes.values()):
+        problems.append("frontend-selector measured binaries are not both recorded")
+    # Frontend scaling.
+    label = "frontend scaling"
+    scaling = profile["frontend_scaling"]
+    if type(scaling_status) is not int or scaling_status != 0:
+        problems.append(f"{label} exited {scaling_status!r}, not 0")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    for key, wanted in (("suite", scaling["suite"]), ("warmups", scaling["warmups"]),
+                        ("repetitions", scaling["repetitions"]), ("cpu", cpu), ("affinity", [cpu]), ("complete", True),
+                        ("binary_sha256", hashes)):
+        if type(provenance.get(key)) is not type(wanted) or provenance.get(key) != wanted:
+            problems.append(f"{label} provenance {key} {provenance.get(key)!r} is not {wanted!r}")
+    if not (isinstance(provenance.get("cpu_model"), str) and APPROVED_HOST.search(provenance["cpu_model"])):
+        problems.append(f"{label} observed CPU {provenance.get('cpu_model')!r} is not the approved Zen 5 host "
+                        "(AMD Ryzen 7 9700X)")
+    records = results if isinstance(results, list) else []
+    population = [(row.get("kind"), row.get("count"), row.get("mode")) if isinstance(row, dict) else None for row in records]
+    if population != frontend_scaling_population():
+        problems.append(f"{label} records are not exactly the {len(frontend_scaling_population())} profile cells")
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        name = f"{row.get('kind')}-{row.get('count')}/{row.get('mode')}"
+        compilers = row.get("compilers") if isinstance(row.get("compilers"), dict) else {}
+        if sorted(compilers) != ["baseline", "candidate"] or not all(
+                isinstance(item, dict) and _samples(item.get("wall_seconds"), scaling["repetitions"], True) and
+                _samples(item.get("cpu_seconds"), scaling["repetitions"], False) for item in compilers.values()):
+            problems.append(f"{label} cell {name} does not have {scaling['repetitions']} complete samples per binary")
+        if row.get("mode") == "object" and not (isinstance(row.get("object_sha256"), str) and
+                                                SHA256.fullmatch(row["object_sha256"])):
+            problems.append(f"{label} cell {name} has no identical-object hash")
+    # Selection.
+    label = "selection benchmark"
+    selection = profile["selection"]
+    if type(selection_status) is not int or selection_status != 0:
+        problems.append(f"{label} exited {selection_status!r}, not 0")
+    report = report if isinstance(report, dict) else {}
+    host = report.get("host") if isinstance(report.get("host"), dict) else {}
+    compilers = report.get("compilers") if isinstance(report.get("compilers"), dict) else {}
+    if report.get("schema_version") != 1 or report.get("build_description") != profile["name"]:
+        problems.append(f"{label} report is not a schema-1 {profile['name']} report")
+    if {role: (compilers.get(role) or {}).get("sha256") if isinstance(compilers.get(role), dict) else None
+            for role in ("baseline", "candidate")} != hashes or sorted(compilers) != ["baseline", "candidate"]:
+        problems.append(f"{label} compilers are not the measured baseline and candidate binaries")
+    if not (isinstance(host.get("cpu"), str) and APPROVED_HOST.search(host["cpu"])):
+        problems.append(f"{label} observed CPU {host.get('cpu')!r} is not the approved Zen 5 host (AMD Ryzen 7 9700X)")
+    if host.get("affinity") != [cpu]:
+        problems.append(f"{label} affinity {host.get('affinity')!r} is not [{cpu}]")
+    workloads = report.get("workloads") if isinstance(report.get("workloads"), list) else []
+    if [Path(row.get("path", "")).name if isinstance(row, dict) and isinstance(row.get("path"), str) else None
+            for row in workloads] != selection["workloads"]:
+        problems.append(f"{label} workloads are not exactly {selection['workloads']!r}")
+    for row in workloads:
+        if not isinstance(row, dict):
+            continue
+        name = Path(str(row.get("path"))).name
+        samples = row.get("samples") if isinstance(row.get("samples"), dict) else {}
+        flat = [sample for role in ("baseline", "candidate") for sample in
+                (samples.get(role) if isinstance(samples.get(role), list) else [])]
+        if sorted(samples) != ["baseline", "candidate"] or any(
+                not isinstance(samples[role], list) or len(samples[role]) != selection["samples"] for role in samples):
+            problems.append(f"{label} workload {name} does not have {selection['samples']} samples per binary")
+        identities, objects = set(), {allocator: set() for allocator in selection["allocators"]}
+        complete = True
+        for sample in flat:
+            metrics = sample.get("selection") if isinstance(sample, dict) and isinstance(sample.get("selection"), dict) else {}
+            built = sample.get("objects") if isinstance(sample, dict) and isinstance(sample.get("objects"), dict) else {}
+            if sorted(built) != sorted(selection["allocators"]) or metrics.get("fallback_functions") != 0 or \
+                    not all(type(metrics.get(key)) is int and metrics[key] > 0
+                            for key in ("functions", "mir_instructions", "median_ns")) or \
+                    not all(isinstance(item, dict) and type(item.get("wall_ns")) is int and item["wall_ns"] > 0
+                            for item in built.values()):
+                complete = False
+                continue
+            identities.add((sample.get("target"), *(metrics.get(key) for key in SELECTION_WORK_FIELDS)))
+            for allocator, item in built.items():
+                objects[allocator].add(item.get("sha256"))
+        if not complete:
+            problems.append(f"{label} workload {name} has an incomplete or fallback sample")
+        if len(identities) > 1:
+            problems.append(f"{label} workload {name} selected different work or targets across samples")
+        if any(len(found) > 1 or not all(isinstance(value, str) and SHA256.fullmatch(value) for value in found)
+               for found in objects.values()):
+            problems.append(f"{label} workload {name} produced different or unhashed objects")
+    # ide bench.
+    label = "ide bench"
+    wanted = profile["ide_bench"]
+    bench = bench if isinstance(bench, dict) else {}
+    if bench.get("schema") != FRONTEND_SELECTOR_SCHEMA or bench.get("cpu") != cpu or bench.get("binaries") != hashes:
+        problems.append(f"{label} record is not a {FRONTEND_SELECTOR_SCHEMA} run on the measured binaries and CPU {cpu}")
+    if not (isinstance(bench.get("cpu_model"), str) and APPROVED_HOST.search(bench["cpu_model"])):
+        problems.append(f"{label} observed CPU {bench.get('cpu_model')!r} is not the approved Zen 5 host (AMD Ryzen 7 9700X)")
+    runs = bench.get("runs") if isinstance(bench.get("runs"), list) else []
+    order = [role for pair in range(wanted["pairs"]) for role in
+             (("baseline", "candidate") if pair % 2 == 0 else ("candidate", "baseline"))]
+    if [run.get("role") if isinstance(run, dict) else None for run in runs] != order:
+        problems.append(f"{label} runs are not the profile's {len(order)} alternating runs")
+    sizes = set()
+    for index, run in enumerate(runs):
+        fields = ide_bench_fields(run.get("line")) if isinstance(run, dict) else None
+        if not isinstance(run, dict) or run.get("exit") != 0 or fields is None or fields["path"] != wanted["source"] or \
+                fields["iterations"] != wanted["iterations"] or fields["bytes"] <= 0 or \
+                not 0 < fields["min_ns"] <= fields["median_ns"]:
+            problems.append(f"{label} run {index} did not report one complete {wanted['iterations']}-iteration line")
+        else:
+            sizes.add(fields["bytes"])
+    if len(sizes) > 1:
+        problems.append(f"{label} runs measured different source sizes")
+    return problems
+
+
+def frontend_selector_digest(results: object, report: object, bench: object) -> list[dict]:
+    """The report's view: baseline/candidate medians for each frontend, selection and ide bench cell."""
+    digest = []
+    for row in results if isinstance(results, list) else []:
+        compilers = row.get("compilers") if isinstance(row, dict) and isinstance(row.get("compilers"), dict) else {}
+        values = [compilers.get(role, {}).get("wall_median") if isinstance(compilers.get(role), dict) else None
+                  for role in ("baseline", "candidate")]
+        if isinstance(row, dict):
+            digest.append({"name": f"frontend {row.get('kind')}-{row.get('count')}/{row.get('mode')}",
+                           "unit": "s", "values": values})
+    for row in report.get("workloads", []) if isinstance(report, dict) and isinstance(report.get("workloads"), list) else []:
+        summary = row.get("summary") if isinstance(row, dict) and isinstance(row.get("summary"), dict) else {}
+        name = Path(str(row.get("path"))).name if isinstance(row, dict) else "NA"
+        roles = [summary.get(role) if isinstance(summary.get(role), dict) else {} for role in ("baseline", "candidate")]
+        digest.append({"name": f"selection {name}", "unit": "ns",
+                       "values": [role.get("selection_median_ns") for role in roles]})
+        for allocator in FRONTEND_SELECTOR_PROFILE["selection"]["allocators"]:
+            digest.append({"name": f"selection {name} -c {allocator}", "unit": "ns",
+                           "values": [role.get("compile_median_ns", {}).get(allocator)
+                                      if isinstance(role.get("compile_median_ns"), dict) else None for role in roles]})
+    runs = bench.get("runs") if isinstance(bench, dict) and isinstance(bench.get("runs"), list) else []
+    medians = {"baseline": [], "candidate": []}
+    for run in runs:
+        fields = ide_bench_fields(run.get("line")) if isinstance(run, dict) else None
+        if fields is not None and run.get("role") in medians:
+            medians[run["role"]].append(fields["median_ns"])
+    if runs:
+        digest.append({"name": "ide bench", "unit": "ns",
+                       "values": [statistics.median(medians[role]) if medians[role] else None
+                                  for role in ("baseline", "candidate")]})
+    return digest
 
 
 def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expected_candidate_sha: str | None = None) -> list[str]:
@@ -3331,6 +3568,24 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
         for key, title in (("build_exit", "build"), ("exit", "corpus")):
             if production.get(key) not in (None, 0):
                 lines.append(f"PGO/LTO production profile {title} exit: {production.get(key)}.")
+    probes = receipt.get("frontend_selector") if isinstance(receipt, dict) else None
+    if isinstance(probes, dict) and probes.get("requested"):
+        lines += ["", f"Frontend and selector probes ({FRONTEND_SELECTOR_PROFILE['name']}): {probes.get('status', 'NA')} "
+                  "(benchmark_frontend_scaling.py, selection_benchmark.py and `ide bench` on both binaries; medians; "
+                  "report-only).", "",
+                  "| Cell | Base | Head | Head / base |", "| --- | ---: | ---: | ---: |"]
+        for row in probes.get("cells") if isinstance(probes.get("cells"), list) else []:
+            values = row.get("values") if isinstance(row, dict) and isinstance(row.get("values"), list) else []
+            ok = len(values) == 2 and all(_finite_positive(value) for value in values)
+            scale, unit = (1000.0, "ms") if isinstance(row, dict) and row.get("unit") == "s" else (1e-3, "us")
+            lines.append("| %s | %s | %s | %s |" % (
+                row.get("name") if isinstance(row, dict) else "NA",
+                "%.1f %s" % (values[0] * scale, unit) if ok else "NA", "%.1f %s" % (values[1] * scale, unit) if ok else "NA",
+                "%.4f" % (values[1] / values[0]) if ok else "NA"))
+        exits = probes.get("exits") if isinstance(probes.get("exits"), dict) else {}
+        for key, value in exits.items():
+            if value not in (None, 0):
+                lines.append(f"Frontend-selector {key} exit: {value}.")
     reasons = receipt.get("reasons") if isinstance(receipt, dict) else None
     warnings = summary.get("warnings")
     for item in (*notes, *(reasons if isinstance(reasons, list) else ()),

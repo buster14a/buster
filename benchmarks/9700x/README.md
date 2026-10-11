@@ -269,6 +269,18 @@ real-source or ast-pilot profiles. The host needs `llvm-profdata`,
 cancelled leg fails the check. Its method is in
 [benchmarking.md](../../docs/agents/benchmarking.md).
 
+A fresh exact `profile: frontend-selector-v1` line, added once against every
+parent, adds the frontend and selector probes (#2761) after the corpus leg.
+The merge base's `tools/benchmark_frontend_scaling.py` and
+`tools/selection_benchmark.py` run on the same two binaries, pinned to
+CPU 2 and with frozen arguments. Then `ide bench` runs in 20 alternating
+pairs of fresh processes. Objects and selected work counts must match
+between the binaries; the timings are report-only. The profile cannot be
+combined with the other opt-in profiles. Its evidence is under
+`frontend_selector/` in the artifact, and a missing, partial, failed or
+cancelled leg fails the check. Its method is in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
 V1 preserves its historical fixed 182-row qualification and 135-execution,
 47-alias candidate profile. V2 independently derives the ordered Release
 inventory and analyzer argument projection from the exact retained candidate
