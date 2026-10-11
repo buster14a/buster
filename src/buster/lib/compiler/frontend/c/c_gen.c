@@ -3373,8 +3373,9 @@ struct CIrErrorAttributeCall
 // -fc-ast-pilot (CIRLowerOptions.syntax_tree) a function body gets a table of
 // its controlled substatements -- the then- and else-branches of `if`, and the
 // bodies of `while`, `for`, `switch` and `do` -- the first time lowering asks
-// for a controlled body range (c_ir_controlled_body_range). Each entry is
-// keyed by the substatement's first token and holds what the token walker
+// for a controlled body range (c_ir_controlled_body_range). Entries are in
+// token order of the substatement's first token, which a query searches for,
+// and hold what the token walker
 // (c_ir_statement_labels_end, c_ir_statement_end) would measure: the first
 // token past its label and attribute prefix, one past its end, and whether
 // the statement there is a compound statement. Only token indices are kept,
@@ -3385,6 +3386,7 @@ struct CIrErrorAttributeCall
 typedef struct CIrExtentEntry CIrExtentEntry;
 struct CIrExtentEntry
 {
+    u32 first;
     u32 statement;
     u32 end;
     bool compound;
@@ -3409,11 +3411,9 @@ struct CIrStatementExtents
     // its COMPOUND_STATEMENT node.
     u32* bodies;
     u32 body_count;
-    // The current body: its tokens between the braces, and per token the
-    // index + 1 of the entry that starts there (0 for none).
+    // The current body: its tokens between the braces, and its entries.
     u32 token_start;
     u32 token_count;
-    u32* slots_plus_one;
     CIrExtentEntry* entries;
     u32 entry_count;
     CIrExtentState state;
@@ -43236,6 +43236,7 @@ typedef enum CIrExtentOpener
     C_IR_EXTENT_OPENER_HEADER,
     C_IR_EXTENT_OPENER_ELSE,
     C_IR_EXTENT_OPENER_DO,
+    C_IR_EXTENT_OPENER_COUNT,
 } CIrExtentOpener;
 
 // Files the controlled substatement `child`, whose first token must follow
@@ -43260,7 +43261,8 @@ BUSTER_C_INTERNAL bool c_ir_statement_extents_file(CIrStatementExtents* extents,
                     : opener == C_IR_EXTENT_OPENER_DO
                         ? first == do_anchor + 1
                         : before.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess->spelling_base, before, C_SYMBOL_WELL_KNOWN_ELSE));
-        anchored = anchored && !extents->slots_plus_one[first - floor];
+        // Entries come in token order (c_ir_statement_extents_build).
+        anchored = anchored && (!extents->entry_count || extents->entries[extents->entry_count - 1].first < first);
     }
     // Peel the label and attribute prefix the walker skips.
     u32 inner = child;
@@ -43314,11 +43316,11 @@ BUSTER_C_INTERNAL bool c_ir_statement_extents_file(CIrStatementExtents* extents,
     if (anchored && last != UINT32_MAX)
     {
         extents->entries[extents->entry_count++] = (CIrExtentEntry){
+            .first = first,
             .statement = statement,
             .end = last + 1,
             .compound = ast->kinds[inner] == C_AST_COMPOUND_STATEMENT,
         };
-        extents->slots_plus_one[first - floor] = extents->entry_count;
         extents->statistics.entries += 1;
     }
     else if (anchored)
@@ -43328,9 +43330,50 @@ BUSTER_C_INTERNAL bool c_ir_statement_extents_file(CIrStatementExtents* extents,
     return anchored;
 }
 
+// How the table's walk treats a statement kind: a compound statement's items,
+// the statements whose children are controlled substatements, and the
+// labels whose statement may hold some. Every other kind holds none outside
+// an expression and is not visited.
+typedef enum CIrExtentClass
+{
+    C_IR_EXTENT_CLASS_NONE,
+    C_IR_EXTENT_CLASS_COMPOUND,
+    C_IR_EXTENT_CLASS_HEADER,
+    C_IR_EXTENT_CLASS_IF_ELSE,
+    C_IR_EXTENT_CLASS_DO,
+    C_IR_EXTENT_CLASS_LABEL,
+} CIrExtentClass;
+
+BUSTER_GLOBAL_LOCAL u8 const c_ir_extent_kind_class[C_AST_KIND_COUNT] = {
+    [C_AST_COMPOUND_STATEMENT] = C_IR_EXTENT_CLASS_COMPOUND,
+    [C_AST_IF] = C_IR_EXTENT_CLASS_HEADER,
+    [C_AST_WHILE] = C_IR_EXTENT_CLASS_HEADER,
+    [C_AST_SWITCH] = C_IR_EXTENT_CLASS_HEADER,
+    [C_AST_FOR] = C_IR_EXTENT_CLASS_HEADER,
+    [C_AST_IF_ELSE] = C_IR_EXTENT_CLASS_IF_ELSE,
+    [C_AST_DO_WHILE] = C_IR_EXTENT_CLASS_DO,
+    [C_AST_LABELED] = C_IR_EXTENT_CLASS_LABEL,
+    [C_AST_CASE] = C_IR_EXTENT_CLASS_LABEL,
+    [C_AST_CASE_RANGE] = C_IR_EXTENT_CLASS_LABEL,
+    [C_AST_DEFAULT] = C_IR_EXTENT_CLASS_LABEL,
+    [C_AST_ATTRIBUTED_STATEMENT] = C_IR_EXTENT_CLASS_LABEL,
+};
+
+// A statement the walk visits, and how it is controlled: `opener` names what
+// precedes it (C_IR_EXTENT_OPENER_COUNT when it is not a controlled
+// substatement), and `do_anchor` is its `do`.
+typedef struct CIrExtentVisit CIrExtentVisit;
+struct CIrExtentVisit
+{
+    u32 node;
+    u32 do_anchor;
+    u8 opener;
+};
+
 // The current body's table, by one preorder walk over its statements on an
-// explicit stack. Expressions are not entered, so a statement expression's
-// substatements get no entries.
+// explicit stack. Children are pushed last first, so statements are visited
+// and filed in token order. Expressions are not entered, so a statement
+// expression's substatements get no entries.
 BUSTER_C_INTERNAL void c_ir_statement_extents_build(CIrStatementExtents* extents, CPreprocessResult const* preprocess)
 {
     CAst const* ast = extents->ast;
@@ -43347,57 +43390,71 @@ BUSTER_C_INTERNAL void c_ir_statement_extents_build(CIrStatementExtents* extents
         u32 nodes = ast->extents[body];
         u32 begin = c_ast_subtree_begin(ast, body);
         u32* lasts = arena_allocate(extents->arena, u32, nodes);
-        u32* stack = arena_allocate(extents->arena, u32, nodes);
-        extents->slots_plus_one = arena_allocate(extents->arena, u32, (u64)extents->token_count + 1);
+        CIrExtentVisit* stack = arena_allocate(extents->arena, CIrExtentVisit, nodes);
         extents->entries = arena_allocate(extents->arena, CIrExtentEntry, nodes);
         memset(lasts, 0, sizeof(u32) * (u64)nodes);
-        memset(extents->slots_plus_one, 0, sizeof(u32) * ((u64)extents->token_count + 1));
         u32 depth = 0;
-        stack[depth++] = body;
+        stack[depth++] = (CIrExtentVisit){.node = body, .opener = C_IR_EXTENT_OPENER_COUNT};
         bool anchored = true;
         while (depth && anchored)
         {
-            u32 node = stack[--depth];
-            u32 kind = ast->kinds[node];
+            CIrExtentVisit visit = stack[--depth];
+            u32 node = visit.node;
             u32 anchor = ast->tokens[node];
-            bool header = kind == C_AST_IF || kind == C_AST_IF_ELSE || kind == C_AST_WHILE || kind == C_AST_SWITCH || kind == C_AST_FOR;
-            if (header)
+            u8 class = c_ir_extent_kind_class[ast->kinds[node]];
+            if (visit.opener != C_IR_EXTENT_OPENER_COUNT)
             {
-                anchored = anchor + 1 < limit && c_token_is_punctuator(&preprocess->tokens[anchor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+                anchored = c_ir_statement_extents_file(extents, preprocess, lasts, begin, node, (CIrExtentOpener)visit.opener, visit.do_anchor);
             }
-            if (kind == C_AST_COMPOUND_STATEMENT)
+            if (class == C_IR_EXTENT_CLASS_HEADER || class == C_IR_EXTENT_CLASS_IF_ELSE)
+            {
+                anchored = anchored && anchor + 1 < limit && c_token_is_punctuator(&preprocess->tokens[anchor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+            }
+            if (!anchored)
+            {
+                continue;
+            }
+            switch (class)
+            {
+            case C_IR_EXTENT_CLASS_COMPOUND:
             {
                 u32 floor = c_ast_subtree_begin(ast, node);
                 for (u32 cursor = node; cursor > floor; cursor = c_ast_subtree_begin(ast, cursor - 1))
                 {
-                    stack[depth++] = cursor - 1;
+                    if (c_ir_extent_kind_class[ast->kinds[cursor - 1]])
+                    {
+                        stack[depth++] = (CIrExtentVisit){.node = cursor - 1, .opener = C_IR_EXTENT_OPENER_COUNT};
+                    }
                 }
             }
-            else if (kind == C_AST_IF_ELSE && anchored)
+            break;
+            case C_IR_EXTENT_CLASS_HEADER:
+                stack[depth++] = (CIrExtentVisit){.node = node - 1, .opener = C_IR_EXTENT_OPENER_HEADER};
+                break;
+            case C_IR_EXTENT_CLASS_IF_ELSE:
             {
                 u32 else_branch = node - 1;
-                u32 then_branch = c_ast_subtree_begin(ast, else_branch) - 1;
-                anchored = c_ir_statement_extents_file(extents, preprocess, lasts, begin, then_branch, C_IR_EXTENT_OPENER_HEADER, 0) &&
-                           c_ir_statement_extents_file(extents, preprocess, lasts, begin, else_branch, C_IR_EXTENT_OPENER_ELSE, 0);
-                stack[depth++] = then_branch;
-                stack[depth++] = else_branch;
+                stack[depth++] = (CIrExtentVisit){.node = else_branch, .opener = C_IR_EXTENT_OPENER_ELSE};
+                stack[depth++] = (CIrExtentVisit){.node = c_ast_subtree_begin(ast, else_branch) - 1, .opener = C_IR_EXTENT_OPENER_HEADER};
             }
-            else if (header && anchored)
+            break;
+            case C_IR_EXTENT_CLASS_DO:
+                stack[depth++] = (CIrExtentVisit){.node = c_ast_subtree_begin(ast, node - 1) - 1, .do_anchor = anchor, .opener = C_IR_EXTENT_OPENER_DO};
+                break;
+            case C_IR_EXTENT_CLASS_LABEL:
             {
-                anchored = c_ir_statement_extents_file(extents, preprocess, lasts, begin, node - 1, C_IR_EXTENT_OPENER_HEADER, 0);
-                stack[depth++] = node - 1;
+                u32 kind = ast->kinds[node];
+                bool labelled = (kind == C_AST_LABELED && (ast->data[node] & 2)) || (kind == C_AST_DEFAULT && ast->extents[node] > 1) ||
+                                (kind == C_AST_CASE && ast->extents[node] > 1 && c_ast_subtree_begin(ast, node - 1) != c_ast_subtree_begin(ast, node)) ||
+                                (kind == C_AST_CASE_RANGE && c_ast_child_count(ast, node) == 3) || kind == C_AST_ATTRIBUTED_STATEMENT;
+                if (labelled && c_ir_extent_kind_class[ast->kinds[node - 1]])
+                {
+                    stack[depth++] = (CIrExtentVisit){.node = node - 1, .opener = C_IR_EXTENT_OPENER_COUNT};
+                }
             }
-            else if (kind == C_AST_DO_WHILE)
-            {
-                u32 do_body = c_ast_subtree_begin(ast, node - 1) - 1;
-                anchored = c_ir_statement_extents_file(extents, preprocess, lasts, begin, do_body, C_IR_EXTENT_OPENER_DO, anchor);
-                stack[depth++] = do_body;
-            }
-            else if ((kind == C_AST_LABELED && (ast->data[node] & 2)) || (kind == C_AST_DEFAULT && ast->extents[node] > 1) ||
-                     (kind == C_AST_CASE && ast->extents[node] > 1 && c_ast_subtree_begin(ast, node - 1) != c_ast_subtree_begin(ast, node)) ||
-                     (kind == C_AST_CASE_RANGE && c_ast_child_count(ast, node) == 3) || kind == C_AST_ATTRIBUTED_STATEMENT)
-            {
-                stack[depth++] = node - 1;
+            break;
+            default:
+                break;
             }
         }
         refusal = anchored ? C_AST_EXTENT_FALLBACK_NONE : C_AST_EXTENT_FALLBACK_ANCHOR;
@@ -43427,9 +43484,21 @@ BUSTER_C_INTERNAL CAstExtentFallback c_ir_statement_extents_answer(CIrStatementE
     CAstExtentFallback walked = extents->refusal;
     if (extents->state == C_IR_EXTENT_BUILT)
     {
-        u32 slot = start - extents->token_start;
-        u32 entry_index = start >= extents->token_start && slot < extents->token_count ? extents->slots_plus_one[slot] : 0;
-        CIrExtentEntry entry = entry_index ? extents->entries[entry_index - 1] : (CIrExtentEntry){.end = UINT32_MAX};
+        u32 low = 0;
+        u32 high = extents->entry_count;
+        while (low < high)
+        {
+            u32 middle = low + (high - low) / 2;
+            if (extents->entries[middle].first < start)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+        CIrExtentEntry entry = low < extents->entry_count && extents->entries[low].first == start ? extents->entries[low] : (CIrExtentEntry){.end = UINT32_MAX};
         walked = entry.end <= end ? C_AST_EXTENT_FALLBACK_NONE : C_AST_EXTENT_FALLBACK_SHAPE;
         if (!walked)
         {
