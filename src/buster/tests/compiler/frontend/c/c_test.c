@@ -38876,7 +38876,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_label_address(UnitTestArguments
                         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
                         {
                             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                            String8 output = buster_test_temporary_path(temporary.arena, S8("typeof-label-run"), S8(".exe"));
+                            String8 output = buster_test_temporary_unique_path(temporary.arena, S8("typeof-label-run"), S8(".exe"));
                             String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), standards[dialect], modes[mode], S8("-fverify-codegen"),
                                 form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-o"), output, path};
                             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
