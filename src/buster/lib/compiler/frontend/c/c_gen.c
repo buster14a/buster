@@ -141,6 +141,7 @@
 //   c_ir_lower_compound_literal_step              ordered evaluation and final
 //                                                 per-subobject initializer values
 //   c_ir_lower_expression_core_step               the expression evaluator
+//   c_ir_lower_condition_step                     depth-zero logical splits
 //   c_ir_lower_dispatch                           lowering-machine dispatch
 //   c_ir_tree_conditionals_build,                 root `?:` splits from the
 //   c_ir_tree_root_conditional                    tree's CONDITIONAL nodes
@@ -1786,6 +1787,8 @@ typedef enum CIrAttributeMarker
     // the canonical IR is diagnosed with the message. See
     // c_ir_check_error_attribute_calls.
     C_IR_ATTRIBUTE_MARKER_ERROR,
+    C_IR_ATTRIBUTE_MARKER_ALWAYS_INLINE,
+    C_IR_ATTRIBUTE_MARKER_NOINLINE,
 } CIrAttributeMarker;
 
 BUSTER_C_INTERNAL bool c_ir_attribute_marker_spelling(String8 spelling, CIrAttributeMarker marker)
@@ -1796,21 +1799,32 @@ BUSTER_C_INTERNAL bool c_ir_attribute_marker_spelling(String8 spelling, CIrAttri
         case C_IR_ATTRIBUTE_MARKER_NORETURN: result = c_ir_noreturn_spelling(spelling); break;
         case C_IR_ATTRIBUTE_MARKER_GNU_INLINE: result = string_equal(spelling, S8("gnu_inline")) || string_equal(spelling, S8("__gnu_inline__")); break;
         case C_IR_ATTRIBUTE_MARKER_ERROR: result = string_equal(spelling, S8("error")) || string_equal(spelling, S8("__error__")); break;
+        case C_IR_ATTRIBUTE_MARKER_ALWAYS_INLINE:
+            result = string_equal(spelling, S8("always_inline")) || string_equal(spelling, S8("__always_inline__"));
+            break;
+        case C_IR_ATTRIBUTE_MARKER_NOINLINE:
+            result = string_equal(spelling, S8("noinline")) || string_equal(spelling, S8("__noinline__"));
+            break;
     }
     return result;
 }
 
+/* C23 GNU attributes require an explicit GNU namespace. The scope token is
+   three slots before the name because `::` is two colon tokens. */
+BUSTER_C_INTERNAL bool c_ir_attribute_gnu_namespace_at(CPreprocessResult preprocess, u32 index)
+{
+    CToken const* tokens = preprocess.tokens;
+    String8 scope = index >= 3 && tokens[index - 3].kind == C_TOKEN_IDENTIFIER
+                        ? c_token_spelling(preprocess.spelling_base, tokens[index - 3])
+                        : (String8){0};
+    return index >= 3 && c_token_is_punctuator(&tokens[index - 1], C_PUNCTUATOR_COLON) &&
+           c_token_is_punctuator(&tokens[index - 2], C_PUNCTUATOR_COLON) &&
+           (string_equal(scope, S8("gnu")) || string_equal(scope, S8("__gnu__")));
+}
+
 /* `error` is an ordinary identifier even inside an attribute list -- the
-   operand of `cleanup(error)` is one -- so the marker counts only where an
-   attribute name stands and only with the string-literal argument the
-   attribute requires. c_ir_attribute_marker_find offers only the list's own
-   entries, never a token inside another attribute's balanced argument
-   payload, so neither `[[vendor::tag(gnu::error("m"))]]` nor
-   `__attribute__((tag(error("m"))))` names it. In a GNU `__attribute__` list the name follows the
-   list's '(' or a ','. In a C23 `[[...]]` list only the GNU namespace means
-   it: `gnu::error` or `__gnu__::error`, whose `::` lexes as two ':' tokens.
-   An unscoped `[[error(...)]]` or another vendor's `vendor::error` is an
-   attribute GCC does not know and ignores, so it is not this one. */
+   operand of `cleanup(error)` is one -- so it counts only as a top-level
+   attribute name with the required string-literal argument. */
 BUSTER_C_INTERNAL bool c_ir_attribute_error_marker_at(CPreprocessResult preprocess, u32 index, u32 end, bool bracketed)
 {
     CToken const* tokens = preprocess.tokens;
@@ -1909,8 +1923,18 @@ BUSTER_C_INTERNAL u32 c_ir_attribute_marker_find(CPreprocessResult preprocess, u
             CToken const* candidate = &preprocess.tokens[marker_index];
             bool matches = candidate->kind == C_TOKEN_IDENTIFIER &&
                            c_ir_attribute_marker_spelling(c_token_spelling(preprocess.spelling_base, *candidate), marker) &&
+                           nesting == entry_depth &&
+                           (!bracketed ||
+                            (marker == C_IR_ATTRIBUTE_MARKER_NORETURN
+                                 ? (marker_index < 3 ||
+                                    !c_token_is_punctuator(&preprocess.tokens[marker_index - 1], C_PUNCTUATOR_COLON) ||
+                                    !c_token_is_punctuator(&preprocess.tokens[marker_index - 2], C_PUNCTUATOR_COLON) ||
+                                    c_ir_attribute_gnu_namespace_at(preprocess, marker_index))
+                                 : ((marker != C_IR_ATTRIBUTE_MARKER_ERROR && marker != C_IR_ATTRIBUTE_MARKER_GNU_INLINE &&
+                                     marker != C_IR_ATTRIBUTE_MARKER_ALWAYS_INLINE && marker != C_IR_ATTRIBUTE_MARKER_NOINLINE) ||
+                                    c_ir_attribute_gnu_namespace_at(preprocess, marker_index)))) &&
                            (marker != C_IR_ATTRIBUTE_MARKER_ERROR ||
-                            (nesting == entry_depth && c_ir_attribute_error_marker_at(preprocess, marker_index, list_end, bracketed)));
+                            c_ir_attribute_error_marker_at(preprocess, marker_index, list_end, bracketed));
             result = matches ? marker_index : UINT32_MAX;
             bool opens = c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_BRACKET) ||
                          c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_BRACE);
@@ -2118,6 +2142,20 @@ BUSTER_C_INTERNAL u32 c_ir_declaration_attribute_marker(CPreprocessResult prepro
 BUSTER_C_SHARED bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, CDeclaration declaration)
 {
     return c_ir_declaration_attribute_marker(preprocess, declaration, C_IR_ATTRIBUTE_MARKER_NORETURN) != UINT32_MAX;
+}
+
+BUSTER_C_SHARED u32 c_ir_declaration_always_inline_attribute(CPreprocessResult preprocess, CDeclaration declaration)
+{
+    return declaration.kind == C_DECLARATION_FUNCTION
+               ? c_ir_declaration_attribute_marker(preprocess, declaration, C_IR_ATTRIBUTE_MARKER_ALWAYS_INLINE)
+               : UINT32_MAX;
+}
+
+BUSTER_C_SHARED u32 c_ir_declaration_noinline_attribute(CPreprocessResult preprocess, CDeclaration declaration)
+{
+    return declaration.kind == C_DECLARATION_FUNCTION
+               ? c_ir_declaration_attribute_marker(preprocess, declaration, C_IR_ATTRIBUTE_MARKER_NOINLINE)
+               : UINT32_MAX;
 }
 
 BUSTER_C_INTERNAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram* program, CIrPointerTypeCache* pointer_types,
@@ -16238,7 +16276,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_string_literal_range_shape(CPreprocess
     return result;
 }
 
-CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens)
+CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens, bool lengths_only)
 {
     u32 capacity = 1024;
     CStringLiteralMemo* memo = arena_allocate(arena, CStringLiteralMemo, 1);
@@ -16248,6 +16286,7 @@ CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tok
         // Reused arena bytes can be dirty; empty slots must be zeroed.
         .slots = arena_allocate_zeroed(arena, CStringLiteralMemoSlot, capacity),
         .capacity = capacity,
+        .lengths_only = lengths_only,
     };
     return memo;
 }
@@ -16278,7 +16317,8 @@ BUSTER_C_INTERNAL CStringLiteralMemoSlot const* c_string_literal_memo_find(CStri
     return result;
 }
 
-// Records a narrow fragment's decoded bytes. The table stays at most half
+// Records a narrow fragment's decoded bytes, or only its length when
+// `bytes.pointer` is null (a length-only memo). The table stays at most half
 // full, and a rebuild re-places every entry at the doubled capacity in the
 // same arena.
 BUSTER_C_INTERNAL void c_string_literal_memo_insert(CStringLiteralMemo* memo, u32 token_index, ByteSlice bytes)
@@ -16341,9 +16381,10 @@ BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
         {
             // A fragment semantic analysis recorded is read, not decoded again;
             // readers copy what they keep, so the shared buffer stays intact.
+            // A length-only record has no bytes to read and is decoded here.
             CStringLiteralMemoSlot const* recorded =
                 width == 1 ? c_string_literal_memo_find(memo, preprocess.tokens, start + fragment_index) : 0;
-            if (recorded)
+            if (recorded && recorded->bytes)
             {
                 C_CENSUS_PHASE_RECORD(STRING_MEMO_HITS, 1);
                 fragments[fragment_index] = (ByteSlice){
@@ -16423,7 +16464,10 @@ BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
 // (wide fragments, whose element width is the target's, are always decoded
 // and never recorded). On the stage-1 unity build semantic analysis sized,
 // typed and validated each literal four times and lowering then decoded it;
-// with the memo each narrow fragment is walked once, by this decode.
+// with the memo each narrow fragment is walked once, by this decode. When
+// nothing will lower the unit (CStringLiteralMemo.lengths_only) the bytes have
+// no reader, so that one walk is c_ir_count_quoted's and records the length
+// alone.
 BUSTER_C_SHARED bool c_ir_count_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target, u32 start, u32 end,
                                                                     CStringLiteralMemo* memo, CIrDecodedString* decoded_out)
 {
@@ -16448,8 +16492,16 @@ BUSTER_C_SHARED bool c_ir_count_string_literal_range_for_target(Arena* arena, CP
             ByteSlice fragment = {0};
             if (memoized)
             {
-                result = c_ir_decode_quoted(memo->arena, spelling, '"', &fragment);
-                fragment_elements = fragment.length;
+                if (memo->lengths_only)
+                {
+                    result = c_ir_count_quoted(spelling, '"', &fragment_elements);
+                    fragment.length = fragment_elements;
+                }
+                else
+                {
+                    result = c_ir_decode_quoted(memo->arena, spelling, '"', &fragment);
+                    fragment_elements = fragment.length;
+                }
                 if (result)
                 {
                     c_string_literal_memo_insert(memo, token_index, fragment);
@@ -24190,6 +24242,49 @@ BUSTER_C_INTERNAL u32 c_ir_va_arg_type_separator(CIntegerIrBuilder* builder, u32
     return separator;
 }
 
+// A callback can be selected by several adjacent subscripts. Consume the
+// complete suffix before requiring its named base; the member walk then
+// includes that base's owning object. The same rule applies to a subscripted
+// record before a callback member, such as slots[i][j].callback.
+BUSTER_C_INTERNAL u32 c_ir_subscript_callee_base(CIntegerIrBuilder* builder, u32 start, u32 last)
+{
+    u32 base = last;
+    bool valid = true;
+    while (valid && c_token_is_punctuator(&builder->preprocess.tokens[base], C_PUNCTUATOR_RIGHT_BRACKET))
+    {
+        u32 depth = 0;
+        u32 open = UINT32_MAX;
+        for (u32 cursor = base + 1; cursor > start;)
+        {
+            cursor -= 1;
+            CToken current = builder->preprocess.tokens[cursor];
+            if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET))
+            {
+                depth += 1;
+            }
+            else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                if (!depth)
+                {
+                    break;
+                }
+                depth -= 1;
+                if (!depth)
+                {
+                    open = cursor;
+                    break;
+                }
+            }
+        }
+        valid = open != UINT32_MAX && open > start;
+        if (valid)
+        {
+            base = open - 1;
+        }
+    }
+    return valid && builder->preprocess.tokens[base].kind == C_TOKEN_IDENTIFIER ? base : UINT32_MAX;
+}
+
 BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u32 start, u32 end, u32** emission_order_out,
                                                      u32* emission_count_out)
 {
@@ -24380,33 +24475,10 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         }
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
         {
-            u32 depth = 0;
-            u32 open = UINT32_MAX;
-            for (u32 cursor = index + 1; cursor > start;)
+            u32 base = c_ir_subscript_callee_base(builder, start, index);
+            if (base != UINT32_MAX)
             {
-                cursor -= 1;
-                CToken current = builder->preprocess.tokens[cursor];
-                if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET))
-                {
-                    depth += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    if (!depth)
-                    {
-                        break;
-                    }
-                    depth -= 1;
-                    if (!depth)
-                    {
-                        open = cursor;
-                        break;
-                    }
-                }
-            }
-            if (open != UINT32_MAX && open > start && builder->preprocess.tokens[open - 1].kind == C_TOKEN_IDENTIFIER)
-            {
-                callee_start = open - 1;
+                callee_start = base;
                 indexed_callee = true;
             }
         }
@@ -24470,38 +24542,12 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             {
                 break;
             }
-            u32 bracket_depth = 0;
-            u32 bracket_open = UINT32_MAX;
-            for (u32 cursor = base_last + 1; cursor > start;)
-            {
-                cursor -= 1;
-                CToken current = builder->preprocess.tokens[cursor];
-                if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET))
-                {
-                    bracket_depth += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    if (!bracket_depth)
-                    {
-                        break;
-                    }
-                    bracket_depth -= 1;
-                    if (!bracket_depth)
-                    {
-                        bracket_open = cursor;
-                        break;
-                    }
-                }
-            }
-            // The subscripted base has to be a name for the walk to continue;
-            // anything else (a call result, a parenthesized expression) keeps
-            // the callee where it is, as it does today.
-            if (bracket_open == UINT32_MAX || bracket_open <= start || builder->preprocess.tokens[bracket_open - 1].kind != C_TOKEN_IDENTIFIER)
+            u32 base = c_ir_subscript_callee_base(builder, start, base_last);
+            if (base == UINT32_MAX)
             {
                 break;
             }
-            callee_start = bracket_open - 1;
+            callee_start = base;
         }
         indirect |= callee_start != index || indexed_callee || parenthesized_callee;
         if ((!indexed_callee && !parenthesized_callee && token.kind != C_TOKEN_IDENTIFIER) ||
@@ -37984,65 +38030,134 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
         }
         u32 logical_or = UINT32_MAX;
         u32 logical_and = UINT32_MAX;
-        u32 parentheses = 0;
-        u32 brackets = 0;
-        u32 braces = 0;
-        for (u32 index = task.start; index < task.end; index += 1)
+        if (builder->group_facts_exact)
         {
-            CToken token = builder->preprocess.tokens[index];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            for (u32 index = task.start; index < task.end; index += 1)
             {
-                parentheses += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-            {
-                if (!parentheses)
+                CToken token = builder->preprocess.tokens[index];
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    u32 close = c_ir_matching_delimiter_cached(builder, index, task.end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                               C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                    if (close == UINT32_MAX)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    index = close;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                parentheses -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                brackets += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
-            {
-                if (!brackets)
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+                {
+                    u32 close = c_ir_matching_delimiter_cached(builder, index, task.end, C_PUNCTUATOR_LEFT_BRACKET,
+                                                               C_PUNCTUATOR_RIGHT_BRACKET);
+                    if (close == UINT32_MAX)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    index = close;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                brackets -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-            {
-                braces += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-            {
-                if (!braces)
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+                {
+                    u32 close = c_ir_matching_delimiter_cached(builder, index, task.end, C_PUNCTUATOR_LEFT_BRACE,
+                                                               C_PUNCTUATOR_RIGHT_BRACE);
+                    if (close == UINT32_MAX)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    index = close;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                braces -= 1;
-            }
-            else if (!parentheses && !brackets && !braces && logical_or == UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE))
-            {
-                logical_or = index;
-            }
-            else if (!parentheses && !brackets && !braces && logical_and == UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
-                     !c_ir_label_address_prefix(builder, task.start, index))
-            {
-                logical_and = index;
+                else if (logical_or == UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE))
+                {
+                    logical_or = index;
+                }
+                else if (logical_and == UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+                         !c_ir_label_address_prefix(builder, task.start, index))
+                {
+                    logical_and = index;
+                }
             }
         }
-        if (parentheses || brackets || braces)
+        else
         {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            u32 parentheses = 0;
+            u32 brackets = 0;
+            u32 braces = 0;
+            for (u32 index = task.start; index < task.end; index += 1)
+            {
+                CToken token = builder->preprocess.tokens[index];
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    parentheses += 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                {
+                    if (!parentheses)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    parentheses -= 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+                {
+                    brackets += 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+                {
+                    if (!brackets)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    brackets -= 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+                {
+                    braces += 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+                {
+                    if (!braces)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    braces -= 1;
+                }
+                else if (!parentheses && !brackets && !braces && logical_or == UINT32_MAX &&
+                         c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE))
+                {
+                    logical_or = index;
+                }
+                else if (!parentheses && !brackets && !braces && logical_and == UINT32_MAX &&
+                         c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+                         !c_ir_label_address_prefix(builder, task.start, index))
+                {
+                    logical_and = index;
+                }
+            }
+            if (parentheses || brackets || braces)
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
         }
         u32 operation = logical_or != UINT32_MAX ? logical_or : logical_and;
         if (operation != UINT32_MAX)
@@ -42420,6 +42535,8 @@ BUSTER_C_INTERNAL bool c_ir_cleanup_function_target(CIntegerIrBuilder* builder, 
                                                                .type = canonical_type,
                                                                .kind = IR_SYMBOL_FUNCTION,
                                                                .linkage = IR_LINKAGE_EXTERNAL,
+                                                               .always_inline = (entity->inline_hints & C_ENTITY_INLINE_HINT_ALWAYS) != 0,
+                                                               .noinline = (entity->inline_hints & C_ENTITY_INLINE_HINT_NOINLINE) != 0,
                                                            });
     }
     if (symbol.value == IR_ID_UNDERLYING_INVALID)
@@ -51421,14 +51538,22 @@ BUSTER_C_INTERNAL bool c_test_decoded_string_equal(CIrDecodedString left, CIrDec
 // grow past its initial capacity without losing a record, answer the second
 // pass entirely from records, and agree with the unmemoized walk each time --
 // counts and decoded bytes alike. A memo created for another token array must
-// record nothing.
+// record nothing. A length-only memo records the same fragments with no bytes,
+// and a decode through it still reproduces the walk's bytes.
 bool c_test_string_literal_memo_growth(Arena* arena, CPreprocessResult preprocess, u32* recorded_out)
 {
-    CStringLiteralMemo* memo = c_string_literal_memo_create(arena, preprocess.tokens);
-    CStringLiteralMemo* foreign = c_string_literal_memo_create(arena, preprocess.tokens + 1);
+    CStringLiteralMemo* memo = c_string_literal_memo_create(arena, preprocess.tokens, false);
+    CStringLiteralMemo* foreign = c_string_literal_memo_create(arena, preprocess.tokens + 1, false);
     bool result = preprocess.token_count <= UINT32_MAX;
-    for (u32 pass = 0; result && pass < 2; pass += 1)
+    u32 recorded_with_bytes = 0;
+    for (u32 pass = 0; result && pass < 4; pass += 1)
     {
+        if (pass == 2)
+        {
+            recorded_with_bytes = memo->count;
+            memo = c_string_literal_memo_create(arena, preprocess.tokens, true);
+            foreign = c_string_literal_memo_create(arena, preprocess.tokens + 1, true);
+        }
         u32 recorded = memo->count;
         for (u32 index = 0; result && index < preprocess.token_count; index += 1)
         {
@@ -51448,10 +51573,13 @@ bool c_test_string_literal_memo_growth(Arena* arena, CPreprocessResult preproces
                          c_test_decoded_string_equal(walked, memoized) && c_test_decoded_string_equal(walked, bypassed) &&
                          walked_bytes.bytes.length == memo_bytes.bytes.length &&
                          (!walked_bytes.bytes.length || !memcmp(walked_bytes.bytes.pointer, memo_bytes.bytes.pointer, walked_bytes.bytes.length));
+                CStringLiteralMemoSlot const* slot = c_string_literal_memo_find(memo, preprocess.tokens, index);
+                result = result && (!slot || (slot->bytes == 0) == memo->lengths_only);
             }
         }
-        result = result && (pass == 0 || memo->count == recorded) && memo->count <= memo->capacity / 2 && !foreign->count;
+        result = result && (pass % 2 == 0 || memo->count == recorded) && memo->count <= memo->capacity / 2 && !foreign->count;
     }
+    result = result && memo->count == recorded_with_bytes;
     *recorded_out = memo->count;
     return result;
 }
@@ -51475,7 +51603,7 @@ bool c_test_string_literal_range_paths_agree(Arena* arena, CPreprocessResult pre
     // The memoized count must agree with the walk both when it records a
     // fragment and when it answers from the record, and must record nothing
     // for a range the walk rejects.
-    CStringLiteralMemo* memo = c_string_literal_memo_create(arena, preprocess.tokens);
+    CStringLiteralMemo* memo = c_string_literal_memo_create(arena, preprocess.tokens, false);
     CIrDecodedString first_memoized = sentinel;
     CIrDecodedString second_memoized = sentinel;
     bool first_memoized_accepts = c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, memo, &first_memoized);
@@ -51485,9 +51613,32 @@ bool c_test_string_literal_range_paths_agree(Arena* arena, CPreprocessResult pre
     // that walked the spellings, byte for byte.
     CIrDecodedString memo_decoded = sentinel;
     bool memo_decoded_accepts = c_ir_decode_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, memo, &memo_decoded);
+    // The same through a length-only memo: identical counts, the same
+    // fragments recorded, and a decode that meets those records still walks
+    // the spellings to the same bytes.
+    CStringLiteralMemo* lengths = c_string_literal_memo_create(arena, preprocess.tokens, true);
+    CIrDecodedString first_length = sentinel;
+    CIrDecodedString second_length = sentinel;
+    bool first_length_accepts = c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, lengths, &first_length);
+    bool second_length_accepts = c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, lengths, &second_length);
+    CIrDecodedString length_decoded = sentinel;
+    bool length_decoded_accepts = c_ir_decode_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, lengths, &length_decoded);
     bool result = decoded_accepts == counted_accepts && first_memoized_accepts == counted_accepts && second_memoized_accepts == counted_accepts &&
                   memo_decoded_accepts == decoded_accepts && memo->count == recorded && (counted_accepts || !recorded) &&
-                  c_test_decoded_string_equal(first_memoized, counted) && c_test_decoded_string_equal(second_memoized, counted);
+                  c_test_decoded_string_equal(first_memoized, counted) && c_test_decoded_string_equal(second_memoized, counted) &&
+                  first_length_accepts == counted_accepts && second_length_accepts == counted_accepts && length_decoded_accepts == decoded_accepts &&
+                  lengths->count == recorded && c_test_decoded_string_equal(first_length, counted) && c_test_decoded_string_equal(second_length, counted);
+    if (result && decoded_accepts)
+    {
+        result = length_decoded.bytes.length == decoded.bytes.length && length_decoded.element_count == decoded.element_count &&
+                 length_decoded.element_width == decoded.element_width && length_decoded.element_kind == decoded.element_kind &&
+                 length_decoded.encoding == decoded.encoding &&
+                 (!decoded.bytes.length || !memcmp(length_decoded.bytes.pointer, decoded.bytes.pointer, decoded.bytes.length));
+    }
+    else if (result)
+    {
+        result = c_test_decoded_string_equal(length_decoded, sentinel);
+    }
     if (result && decoded_accepts)
     {
         result = memo_decoded.bytes.length == decoded.bytes.length && memo_decoded.element_count == decoded.element_count &&
@@ -61405,6 +61556,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     IrProgram* program = arena_allocate(arena, IrProgram, 1);
     u32 source_capacity = preprocess.file_count ? preprocess.file_count : 1;
     *program = ir_program_initialize(arena, 1, (u32)type_capacity, (u32)symbol_capacity, source_capacity);
+    program->external_function_definitions_interposable = target.os != OPERATING_SYSTEM_WINDOWS;
     if (options.sysv_unnamed_bitfields_integer)
     {
         IrAbiContext* context = program->abi_contexts + IR_ABI_CONVENTION_SYSTEMV_X86_64;
@@ -62960,6 +63112,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                           .is_definition = definition != 0 || aliases_target,
                                                                           .is_thread_local = is_thread_local,
                                                                           .is_weak = entity_weak[entity_index],
+                                                                          .always_inline = (entity->inline_hints & C_ENTITY_INLINE_HINT_ALWAYS) != 0,
+                                                                          .noinline = (entity->inline_hints & C_ENTITY_INLINE_HINT_NOINLINE) != 0,
                                                                           .is_hidden = c_entity_symbol_hidden(entity_visibility[entity_index], options.default_visibility,
                                                                                                               definition != 0 || aliases_target, internal),
                                                                       });
@@ -63138,6 +63292,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                                                               definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
                                                                                                               internal),
                                                                           .is_returns_twice = entity_returns_twice[entity_index],
+                                                                          .always_inline = (entity->inline_hints & C_ENTITY_INLINE_HINT_ALWAYS) != 0,
+                                                                          .noinline = (entity->inline_hints & C_ENTITY_INLINE_HINT_NOINLINE) != 0,
                                                                       });
     }
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
@@ -63191,6 +63347,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                                                               definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
                                                                                                               internal),
                                                                           .is_returns_twice = entity_returns_twice[entity_index],
+                                                                          .always_inline = (entity->inline_hints & C_ENTITY_INLINE_HINT_ALWAYS) != 0,
+                                                                          .noinline = (entity->inline_hints & C_ENTITY_INLINE_HINT_NOINLINE) != 0,
                                                                       });
     }
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
@@ -63757,6 +63915,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                      c_entity_symbol_hidden(entity_visibility[declaration.entity.value], options.default_visibility,
                                                                                             declaration.is_definition, internal),
                                                         .is_returns_twice = declaration.entity.value < parse.entity_count && entity_returns_twice[declaration.entity.value],
+                                                        .always_inline = declaration.entity.value < parse.entity_count &&
+                                                                         (parse.entities[declaration.entity.value].inline_hints & C_ENTITY_INLINE_HINT_ALWAYS) != 0,
+                                                        .noinline = declaration.entity.value < parse.entity_count &&
+                                                                    (parse.entities[declaration.entity.value].inline_hints & C_ENTITY_INLINE_HINT_NOINLINE) != 0,
                                                     });
             if (declaration.entity.value < parse.entity_count)
             {

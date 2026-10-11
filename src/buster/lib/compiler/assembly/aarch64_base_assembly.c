@@ -19,7 +19,8 @@
 //   `a64_base_float_immediate` (FMOV imm8).
 // - Mnemonics: `a64_base_mnemonics` maps each spelling to an
 //   `A64BaseFamily` plus family-specific bits; LSE atomics are decoded from
-//   their regular spelling by `a64_base_atomic_mnemonic`.
+//   their regular spelling by `a64_base_atomic_mnemonic`; SME ADDHA (ZA
+//   tile, merging predicates, Z vector) is parsed by `a64_base_sme_addha`.
 // - Families: one `a64_base_encode_*` function per instruction class, selected
 //   by the switch in `a64_base_encode`; `a64_base_feature` gates FP, NEON,
 //   FP16 and SVE/SME per entry, and `a64_base_system_register` names MRS/MSR
@@ -2833,6 +2834,94 @@ BUSTER_GLOBAL_LOCAL A64BaseAssemblyStatus a64_base_feature(Target target, A64Bas
     return status;
 }
 
+// SME ADDHA `za<t>.<T>, p<n>/m, p<m>/m, z<n>.<T>`: the .S form (FEAT_SME)
+// owns tiles za0-za3 and the .D form (FEAT_SME_I16I64) za0-za7; both
+// governing predicates are p0-p7 with merging qualifiers.
+#define A64_BASE_SME_ADDHA_S_WORD UINT32_C(0xc0900000)
+#define A64_BASE_SME_ADDHA_D_WORD UINT32_C(0xc0d00000)
+#define A64_BASE_SME_ADDHA_OPERANDS 4
+
+// `<prefix><n>.<size>` with n <= limit; the size letter is returned lowered.
+BUSTER_GLOBAL_LOCAL bool a64_base_sme_register(String8 text, String8 prefix, u8 limit, u8* number, char8* size)
+{
+    text = a64_base_trim(text);
+    u64 dot = prefix.length;
+    while (dot < text.length && text.pointer[dot] != '.')
+    {
+        dot += 1;
+    }
+    u8 value = 0;
+    bool valid = dot + 2 == text.length && a64_base_equal(string_slice(text, 0, prefix.length), prefix) &&
+                 a64_base_register_number(string_slice(text, prefix.length, dot), &value) && value <= limit;
+    if (valid)
+    {
+        *number = value;
+        *size = a64_base_lower(text.pointer[dot + 1]);
+    }
+    return valid;
+}
+
+// `p<n>/m` with n <= 7; spaces may surround the slash, as LLVM accepts.
+BUSTER_GLOBAL_LOCAL bool a64_base_sme_merging_predicate(String8 text, u8* number)
+{
+    text = a64_base_trim(text);
+    u64 slash = 1;
+    while (slash < text.length && text.pointer[slash] != '/')
+    {
+        slash += 1;
+    }
+    u8 value = 0;
+    bool valid = slash < text.length && a64_base_lower(text.pointer[0]) == 'p' && !a64_base_space(text.pointer[1]) &&
+                 a64_base_register_number(a64_base_trim(string_slice(text, 1, slash)), &value) && value <= 7 &&
+                 a64_base_equal(a64_base_trim(string_slice(text, slash + 1, text.length)), S8("m"));
+    if (valid)
+    {
+        *number = value;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL A64BaseAssemblyStatus a64_base_sme_addha(Target target, String8 text, u32* word)
+{
+    String8 fields[A64_BASE_SME_ADDHA_OPERANDS] = {0};
+    u32 field_count = 0;
+    u64 start = 0;
+    for (u64 index = 0; index <= text.length && field_count <= A64_BASE_SME_ADDHA_OPERANDS; index += 1)
+    {
+        if (index == text.length || text.pointer[index] == ',')
+        {
+            if (field_count < A64_BASE_SME_ADDHA_OPERANDS)
+            {
+                fields[field_count] = string_slice(text, start, index);
+            }
+            field_count += 1;
+            start = index + 1;
+        }
+    }
+    u8 tile = 0;
+    u8 pn = 0;
+    u8 pm = 0;
+    u8 zn = 0;
+    char8 tile_size = 0;
+    char8 vector_size = 0;
+    bool parsed = field_count == A64_BASE_SME_ADDHA_OPERANDS &&
+                  a64_base_sme_register(fields[0], S8("za"), 7, &tile, &tile_size) &&
+                  a64_base_sme_merging_predicate(fields[1], &pn) && a64_base_sme_merging_predicate(fields[2], &pm) &&
+                  a64_base_sme_register(fields[3], S8("z"), 31, &zn, &vector_size) && tile_size == vector_size &&
+                  ((tile_size == 's' && tile <= 3) || tile_size == 'd');
+    bool wide = tile_size == 'd';
+    A64BaseAssemblyStatus status = !parsed ? A64_BASE_ASSEMBLY_INVALID_OPERANDS
+        : !target_cpu_feature_has(target, TARGET_CPU_FEATURE_AARCH64_SME) ? A64_BASE_ASSEMBLY_REQUIRES_SME
+        : wide && !target_cpu_feature_has(target, TARGET_CPU_FEATURE_AARCH64_SME_I16I64) ? A64_BASE_ASSEMBLY_REQUIRES_SME_I16I64
+        : A64_BASE_ASSEMBLY_OK;
+    if (status == A64_BASE_ASSEMBLY_OK)
+    {
+        *word = (wide ? A64_BASE_SME_ADDHA_D_WORD : A64_BASE_SME_ADDHA_S_WORD) | ((u32)pm << 13) | ((u32)pn << 10) |
+                ((u32)zn << 5) | tile;
+    }
+    return status;
+}
+
 // Every table entry spelled like `mnemonic` is tried in table order; the first
 // one that encodes wins. A missing feature is reported only when no entry
 // encodes, so a scalar spelling never reports a vector form's feature.
@@ -2852,6 +2941,7 @@ A64BaseAssemblyStatus a64_base_assemble(Target target, String8 mnemonic, String8
         known = a64_base_equal(mnemonic, a64_base_mnemonics[index].name);
     }
     bool atomic = !known && a64_base_atomic_mnemonic(mnemonic, &atomic_opcode, &atomic_store, &atomic_acquire, &atomic_release, &atomic_size);
+    bool sme_addha = !known && !atomic && word && a64_base_equal(mnemonic, S8("addha"));
     A64BaseOperand operands[A64_BASE_MAX_OPERANDS] = {0};
     u32 count = 0;
     bool parsed = (known || atomic) && word && a64_base_operands_split(operands_text, operands, &count);
@@ -2859,6 +2949,10 @@ A64BaseAssemblyStatus a64_base_assemble(Target target, String8 mnemonic, String8
     if ((known || atomic) && word)
     {
         status = A64_BASE_ASSEMBLY_INVALID_OPERANDS;
+    }
+    if (sme_addha)
+    {
+        status = a64_base_sme_addha(target, operands_text, &encoded);
     }
     if (parsed && atomic)
     {

@@ -156,6 +156,21 @@ typedef enum TestOracleProbeDisposition
     TEST_ORACLE_PROBE_NOT_RUN,
     TEST_ORACLE_PROBE_INCOMPLETE,
 } TestOracleProbeDisposition;
+
+// A reference compiler identified by `--version`, `-dumpmachine` and a
+// header-free `-dM -E` profile, each run in the given captured environment
+// (callers pass LC_ALL=C). gcc_major is nonzero only for a native Linux GCC
+// whose version line and __GNUC__ agree and which does not define __clang__.
+// A failed, noisy or disagreeing query leaves it zero, so nothing qualifies.
+typedef struct TestReferenceIdentity TestReferenceIdentity;
+struct TestReferenceIdentity
+{
+    String8 version;
+    String8 target;
+    u32 gcc_major;
+    bool observed;
+    u8 reserved[3];
+};
 #endif
 
 typedef struct UnitTestResult UnitTestResult;
@@ -197,12 +212,15 @@ struct TestArenaScope
 BUSTER_F_DECL TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* arena, String8 name, bool module);
 BUSTER_F_DECL void buster_test_arena_end(UnitTestArguments* arguments, TestArenaScope scope, bool rewind);
 
-// Direct calls preserve normal test control flow and avoid callback dispatch.
+// The volatile function pointer keeps each fixture out of line in optimized builds.
+// Inlining every once-called fixture into one module dispatcher made sanitized
+// Clang spend minutes compiling it (#2816); call order, counts, and arena scopes are unchanged.
 #define BUSTER_TEST_FIXTURE(arguments, function) \
     do \
     { \
         TestArenaScope fixture_scope_ = buster_test_arena_begin((arguments), (arguments)->arena, S8(#function), false); \
-        UnitTestResult fixture_result_ = function(arguments); \
+        TestFunction* volatile fixture_function_ = function; \
+        UnitTestResult fixture_result_ = fixture_function_(arguments); \
         result.test_count += fixture_result_.test_count; \
         result.succeeded_test_count += fixture_result_.succeeded_test_count; \
         buster_test_arena_end((arguments), fixture_scope_, true); \
@@ -224,6 +242,11 @@ BUSTER_F_DECL bool buster_test_require_arguments(UnitTestArguments* arguments, U
 BUSTER_F_DECL bool buster_test_process_observation_matches(const TestProcessObservation* observation, ProcessResult expected);
 BUSTER_F_DECL bool buster_test_process_observation_expected_refusal(const TestProcessObservation* observation, String8 expected_diagnostic);
 BUSTER_F_DECL TestProcessEnvironment buster_test_process_environment_with_override(Arena* arena, String8 name, String8 value);
+BUSTER_F_DECL TestReferenceIdentity buster_test_reference_identity(Arena* arena, String8 compiler, const TestProcessEnvironment* environment);
+// The GNU C major of a native Linux, non-Clang GCC whose final `--version`
+// release token and __GNUC__ agree; zero for anything else. Every fixture that
+// authenticates a GCC release uses this one classifier.
+BUSTER_F_DECL u32 buster_test_reference_gcc_major(Arena* arena, String8 version, String8 target, String8 profile);
 BUSTER_F_DECL TestOracleProbeDisposition buster_test_oracle_probe_disposition(
     const TestProcessObservation* observation, bool profile_authenticated, bool healthy_control, bool success_artifact_valid,
     bool output_artifact_absent, const TestOracleProbeContract* contract, bool required);

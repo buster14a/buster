@@ -5,6 +5,7 @@
 // machine_test_a64_atomic_pair_updates pins pair-update payloads, clobbers,
 // both frontend forms, small/large frame expansion and the direct CAS oracle.
 // machine_test_a64_large_aggregate_copy covers pointer/frame copies beyond imm12.
+// machine_test_x64_narrow_call_results checks ABI-width RAX captures.
 // machine_test_boolean_i128_cast checks Boolean widening and its strict IR contract.
 // machine_test_frame_capacity guards checked placement and capacity diagnostics.
 // machine_test_sparse_local_state compares sparse and row-based local discovery.
@@ -4138,6 +4139,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_disconnected_dominance(UnitTestA
     }
     return result;
 }
+
+#include <buster/tests/compiler/codegen/x64_narrow_call_result_test_internal.h>
 
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_boolean_i128_cast(UnitTestArguments* arguments)
 {
@@ -10412,6 +10415,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_frame_address_rematerialization);
     BUSTER_TEST_FIXTURE(arguments, machine_test_recreated_edge_sources);
     BUSTER_TEST_FIXTURE(arguments, machine_test_boolean_i128_cast);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_narrow_call_results);
     BUSTER_TEST_FIXTURE(arguments, machine_test_i128_block_parameters);
     BUSTER_TEST_FIXTURE(arguments, machine_test_pointer_block_parameters);
     BUSTER_TEST_FIXTURE(arguments, machine_test_parameter_edge_split);
@@ -11751,6 +11755,37 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, payloads_ordered);
     BUSTER_TEST(arguments, machine_verify_function(&large).error == MACHINE_VERIFY_NONE);
+
+    // Selection finds a virtual register's row by index on every definition.
+    // Walking the chunk list for it was quadratic in one function's register
+    // count (#3569). Severing the links proves the lookup goes through the
+    // chunk index; a reintroduced walk loses every row past the first chunk.
+    MachineFunctionBuilder lookup_builder = machine_function_builder_begin(arguments->arena);
+    u32 lookup_capacity = lookup_builder.virtual_registers.chunk_capacity;
+    u32 lookup_count = lookup_capacity * 20 + 7;
+    for (u32 index = 0; index < lookup_count; index += 1)
+    {
+        machine_builder_virtual_register(&lookup_builder, (MachineVirtualRegister){
+                                                              .definition_point = MACHINE_POINT_INVALID,
+                                                              .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                              .typed_origin = index,
+                                                          });
+    }
+    BUSTER_TEST(arguments, lookup_builder.virtual_register_chunk_count == 21);
+    for (MachineBuilderChunk* chunk = lookup_builder.virtual_registers.first; chunk;)
+    {
+        MachineBuilderChunk* next = chunk->next;
+        chunk->next = 0;
+        chunk = next;
+    }
+    bool lookup_rows_ordered = true;
+    for (u32 index = 0; index < lookup_count; index += 1)
+    {
+        MachineVirtualRegister const* row = machine_builder_virtual_register_at(&lookup_builder, index);
+        lookup_rows_ordered &= row != 0 && row->typed_origin == index;
+    }
+    BUSTER_TEST(arguments, lookup_rows_ordered);
+    BUSTER_TEST(arguments, machine_builder_virtual_register_at(&lookup_builder, lookup_count) == 0);
 
     // A caller may deliberately finish into a different arena and release
     // the builder arena immediately. That path must copy even a one-chunk
