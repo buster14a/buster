@@ -27,6 +27,7 @@ static size_t used;
 static const char* evidence;
 static unsigned sequence;
 static FILE* summary;
+static const char* last_log;
 extern char** environ;
 
 static void fail(const char* message)
@@ -92,6 +93,7 @@ static double seconds(void)
 static int run_step(const char* name, const char* cwd, const char* command, unsigned limit)
 {
     const char* path = format("%s/%03u-%s.log", evidence, sequence++, name);
+    last_log = path;
     FILE* record = fopen(format("%s/commands.tsv", evidence), "a");
     if (!record) fail("command record");
     fprintf(record, "%s\t%s\t%s\t%s\n", name, cwd, command, path);
@@ -245,6 +247,100 @@ static const char* make_command(const char* self, const char* target)
         quote(self), quote("-O0 -g -Wall"), target);
 }
 
+static void write_text(const char* path, const char* text)
+{
+    FILE* file = fopen(path, "wb");
+    size_t n = strlen(text);
+    if (!file || fwrite(text, 1, n, file) != n || fclose(file)) fail("fixture write");
+}
+
+static int git_step(const char* name, const char* binary, const char* repository, const char* args, int expected)
+{
+    const char* command = format("%s -c maintenance.auto=false -c gc.auto=0 -c core.autocrlf=false -C %s %s",
+        quote(binary), quote(repository), args);
+    int status = run_step(name, ".", command, 60);
+    return status == expected;
+}
+
+static char* operation_witness(const char* variant, const char* work)
+{
+    const char* binary = format("%s/git", work);
+    const char* root = format("%s/%s-operations", evidence, variant);
+    const char* repo = format("%s/repository", root);
+    const char* bare = format("%s/remote.git", root);
+    const char* clone = format("%s/clone", root);
+    if (mkdir(root, 0700) || mkdir(repo, 0700) || mkdir(bare, 0700)) fail("operation directories");
+    if (setenv("GIT_EXEC_PATH", work, 1)) fail("Git exec path");
+    int ok = git_step(format("%s-init", variant), binary, repo, "init --initial-branch=main", 0);
+    if (ok)
+    {
+        write_text(format("%s/file", repo), "base\n");
+        ok = git_step(format("%s-add", variant), binary, repo, "add file", 0) &&
+             git_step(format("%s-commit-base", variant), binary, repo, "commit -m base", 0) &&
+             git_step(format("%s-branch", variant), binary, repo, "checkout -b side", 0);
+    }
+    if (ok)
+    {
+        write_text(format("%s/file", repo), "side\n");
+        ok = git_step(format("%s-commit-side", variant), binary, repo, "commit -am side", 0) &&
+             git_step(format("%s-checkout-main", variant), binary, repo, "checkout main", 0);
+    }
+    if (ok)
+    {
+        write_text(format("%s/file", repo), "main\n");
+        ok = git_step(format("%s-commit-main", variant), binary, repo, "commit -am main", 0) &&
+             git_step(format("%s-merge-conflict", variant), binary, repo, "merge side", 1) &&
+             git_step(format("%s-unmerged", variant), binary, repo, "ls-files -u", 0);
+        if (ok)
+        {
+            const char* unmerged = read_text(last_log);
+            unsigned lines = 0;
+            for (const char* p = unmerged; *p; ++p) if (*p == '\n') ++lines;
+            ok = lines == 3 && strstr(unmerged, " 1\tfile\n") &&
+                 strstr(unmerged, " 2\tfile\n") && strstr(unmerged, " 3\tfile\n");
+        }
+    }
+    if (ok)
+    {
+        write_text(format("%s/file", repo), "resolved\n");
+        ok = git_step(format("%s-resolve", variant), binary, repo, "add file", 0) &&
+             git_step(format("%s-commit-merge", variant), binary, repo, "commit -m resolve", 0) &&
+             git_step(format("%s-new-topic", variant), binary, repo, "checkout -b topic", 0);
+    }
+    if (ok)
+    {
+        write_text(format("%s/topic", repo), "topic\n");
+        ok = git_step(format("%s-topic-add", variant), binary, repo, "add topic", 0) &&
+             git_step(format("%s-topic-commit", variant), binary, repo, "commit -m topic", 0) &&
+             git_step(format("%s-main-again", variant), binary, repo, "checkout main", 0) &&
+             git_step(format("%s-merge-success", variant), binary, repo, "merge --no-ff -m merge topic", 0) &&
+             git_step(format("%s-init-bare", variant), binary, bare, "init --bare --initial-branch=main", 0) &&
+             git_step(format("%s-remote", variant), binary, repo, format("remote add origin %s", quote(bare)), 0) &&
+             git_step(format("%s-push", variant), binary, repo, "push -u origin main", 0) &&
+             git_step(format("%s-clone-local", variant), binary, root,
+                 format("clone --no-hardlinks %s %s", quote(bare), quote(clone)), 0);
+    }
+    if (ok)
+    {
+        write_text(format("%s/file", clone), "remote\n");
+        ok = git_step(format("%s-clone-commit", variant), binary, clone, "commit -am remote", 0) &&
+             git_step(format("%s-clone-push", variant), binary, clone, "push origin main", 0) &&
+             git_step(format("%s-fetch", variant), binary, repo, "fetch origin", 0) &&
+             git_step(format("%s-fast-forward", variant), binary, repo, "merge --ff-only origin/main", 0) &&
+             !strcmp(read_text(format("%s/file", repo)), "remote\n") &&
+             !strcmp(read_text(format("%s/topic", repo)), "topic\n") &&
+             git_step(format("%s-repack", variant), binary, repo, "repack -ad", 0) &&
+             git_step(format("%s-fsck", variant), binary, repo, "fsck --full --no-reflogs", 0) &&
+             git_step(format("%s-missing-ref", variant), binary, repo, "rev-parse --verify refs/heads/absent", 128) &&
+             git_step(format("%s-tree-witness", variant), binary, repo, "rev-parse HEAD 'HEAD^{tree}'", 0);
+    }
+    char* result = ok ? read_text(last_log) : NULL;
+    fprintf(summary, "%s-operations\t%s\t0\tindependent-content-and-status-assertions\n", variant, ok ? "PASS" : "FAIL");
+    fflush(summary);
+    unsetenv("GIT_EXEC_PATH");
+    return result;
+}
+
 static int campaign(const char* self, const char* source, const char* compiler, const char* oracle)
 {
     clean_environment();
@@ -262,6 +358,7 @@ static int campaign(const char* self, const char* source, const char* compiler, 
         quote(self), quote(compiler), quote(oracle), quote(oracle)), 60)) fail("identity capture");
     int failed = 0;
     const char* variants[] = {"clang", "buster"};
+    char* witnesses[2] = {NULL, NULL};
     for (unsigned v = 0; v < 2; ++v)
     {
         const char* variant = variants[v];
@@ -282,6 +379,8 @@ static int campaign(const char* self, const char* source, const char* compiler, 
                 "make -C t -k -j2 t0000-basic.sh t0001-init.sh t1500-rev-parse.sh "
                 "t2000-checkout-cache-clash.sh t5601-clone.sh t5300-pack-object.sh", 300);
             if (unit || tests) failed = 1;
+            witnesses[v] = operation_witness(variant, work);
+            if (!witnesses[v]) failed = 1;
         }
         else
         {
@@ -293,6 +392,13 @@ static int campaign(const char* self, const char* source, const char* compiler, 
             "\\( -name '*.o' -o -name '*.a' -o -name '*.d' -o -name 'GIT-BUILD-OPTIONS' -o -name 'GIT-CFLAGS' \\) "
             "-exec sha256sum {} +"), 60)) failed = 1;
     }
+    if (witnesses[0] && witnesses[1])
+    {
+        int equal = !strcmp(witnesses[0], witnesses[1]);
+        fprintf(summary, "paired-operation-objects\t%s\t0\tcommit-and-tree-identities\n", equal ? "PASS" : "FAIL");
+        if (!equal) failed = 1;
+    }
+    else fprintf(summary, "paired-operation-objects\tNOT_RUN\t0\tmissing-cell\n");
     pristine(source, "pristine-after");
     return failed;
 }
