@@ -3001,6 +3001,113 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_alignment(UnitTestArgument
     return result;
 }
 
+typedef struct AssemblyTestUnitStatementMeasurement AssemblyTestUnitStatementMeasurement;
+struct AssemblyTestUnitStatementMeasurement
+{
+    u64 arena_growth;
+    u64 section_byte_length;
+    u32 relocation_count;
+    u32 symbol_count;
+    u32 diagnostic_count;
+    bool arena_created;
+    bool arena_destroyed;
+};
+
+BUSTER_GLOBAL_LOCAL AssemblyTestUnitStatementMeasurement assembly_test_unit_statement_measure(
+    Arena* source_arena, u32 statement_count, bool calls, bool blank_lines)
+{
+    AssemblyTestUnitStatementMeasurement measurement = {0};
+    u64 source_capacity = 6 + (u64)statement_count * 16;
+    char8* source_pointer = arena_allocate(source_arena, char8, source_capacity);
+    memcpy(source_pointer, ".text\n", 6);
+    u64 source_length = 6;
+    for (u32 index = 0; index < statement_count; index += 1)
+    {
+        if (blank_lines)
+        {
+            source_pointer[source_length++] = '\n';
+        }
+        else if (calls)
+        {
+            static char8 const prefix[] = "call ext_";
+            memcpy(source_pointer + source_length, prefix, sizeof(prefix) - 1);
+            source_length += sizeof(prefix) - 1;
+            char8 digits[10];
+            u32 digit_count = 0;
+            u32 value = index;
+            do
+            {
+                digits[digit_count++] = (char8)('0' + value % 10);
+                value /= 10;
+            } while (value);
+            while (digit_count)
+            {
+                source_pointer[source_length++] = digits[--digit_count];
+            }
+            source_pointer[source_length++] = '\n';
+        }
+        else
+        {
+            memcpy(source_pointer + source_length, "nop\n", 4);
+            source_length += 4;
+        }
+    }
+    Arena* arena = arena_create((ArenaCreation){
+        .reserved_size = BUSTER_MB(32),
+        .initial_size = BUSTER_MB(1),
+        .flags = {.no_pool = true},
+    });
+    if (arena)
+    {
+        measurement.arena_created = true;
+        u64 start = arena->position;
+        AssemblyUnitResult unit = assembly_unit_encode(
+            arena, (String8){.pointer = source_pointer, .length = source_length},
+            (AssemblyEncodeOptions){.target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE,
+                                               .os = OPERATING_SYSTEM_LINUX}});
+        measurement.arena_growth = arena->position - start;
+        measurement.section_byte_length = unit.section_count ? unit.sections[0].data.length : 0;
+        measurement.relocation_count = unit.relocation_count;
+        measurement.symbol_count = unit.symbol_count;
+        measurement.diagnostic_count = unit.diagnostic_count;
+        measurement.arena_destroyed = arena_destroy(arena, 1);
+    }
+    return measurement;
+}
+
+// Guards #1919: per-statement assembly_encode results live in scratch; only bytes,
+// new symbol names, and the first diagnostic are retained.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_statement_retention(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { ASSEMBLY_TEST_UNIT_STATEMENT_COUNT = 4096 };
+    AssemblyTestUnitStatementMeasurement blank =
+        assembly_test_unit_statement_measure(arguments->arena, ASSEMBLY_TEST_UNIT_STATEMENT_COUNT, false, true);
+    AssemblyTestUnitStatementMeasurement nop =
+        assembly_test_unit_statement_measure(arguments->arena, ASSEMBLY_TEST_UNIT_STATEMENT_COUNT, false, false);
+    AssemblyTestUnitStatementMeasurement call =
+        assembly_test_unit_statement_measure(arguments->arena, ASSEMBLY_TEST_UNIT_STATEMENT_COUNT, true, false);
+    BUSTER_TEST(arguments, blank.arena_created && blank.arena_destroyed && nop.arena_created && nop.arena_destroyed &&
+                               call.arena_created && call.arena_destroyed);
+    BUSTER_TEST(arguments, blank.diagnostic_count == 0 && blank.section_byte_length == 0 &&
+                               nop.diagnostic_count == 0 && nop.section_byte_length == ASSEMBLY_TEST_UNIT_STATEMENT_COUNT &&
+                               nop.relocation_count == 0);
+    BUSTER_TEST(arguments, call.diagnostic_count == 0 &&
+                               call.section_byte_length == (u64)ASSEMBLY_TEST_UNIT_STATEMENT_COUNT * 5 &&
+                               call.relocation_count == ASSEMBLY_TEST_UNIT_STATEMENT_COUNT &&
+                               call.symbol_count == ASSEMBLY_TEST_UNIT_STATEMENT_COUNT);
+    bool growth_exceeds_blank = nop.arena_growth >= blank.arena_growth && call.arena_growth >= blank.arena_growth;
+    BUSTER_TEST(arguments, growth_exceeds_blank);
+    if (growth_exceeds_blank)
+    {
+        u64 nop_per_statement = (nop.arena_growth - blank.arena_growth) / ASSEMBLY_TEST_UNIT_STATEMENT_COUNT;
+        u64 call_per_statement = (call.arena_growth - blank.arena_growth) / ASSEMBLY_TEST_UNIT_STATEMENT_COUNT;
+        BUSTER_TEST(arguments, nop_per_statement <= 32);
+        BUSTER_TEST(arguments, call_per_statement <= 64);
+    }
+    return result;
+}
+
 // Data directives follow the target: AArch64 `.align N` is 2^N and `.word`
 // is 32 bits. Bytes, offsets and alignment are llvm-mc 18.1.3 output (GNU as
 // 2.42 agrees on x86-64); out-of-range constants are refused, as llvm-mc does.
@@ -5371,6 +5478,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_location_counter);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_interning);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_binding);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_statement_retention);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_statements);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_control_labels);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_current_address_branches);

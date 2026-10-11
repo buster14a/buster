@@ -67,6 +67,56 @@ explicitly; the existing portable write-failure tests still run. This is
 controlled failure-path coverage, not a real disk-failure or crash-durability
 claim. Run `ide test --module=compiler_diagnostic_tests --verbose=1 --ci=1`.
 
+## In-memory execution (`ide run`)
+
+Use `ide run <C compiler options and inputs> [-- <program arguments>]`.
+Arguments before the first literal `--` are compiler options and inputs;
+everything after it is passed to the program, and omitting the separator means
+there are no program arguments. The first input path becomes `argv[0]` exactly
+as spelled, including `-` for source read from standard input. The program is
+called as `int main(int, char **, char **)`, with the current process
+environment as `envp`; a returned `int` becomes the `ide` process exit status.
+Calling `exit()` instead terminates the `ide` process directly.
+
+The command runs the ordinary C frontend, canonical-IR lowering, native
+code-generation and `link_objects` merge, then passes the merged object to
+`jit_link_object`. It creates neither an intermediate object file nor an
+executable image. Included headers are still read from the filesystem. When
+the source input is `-`, `ide` consumes standard input to EOF before calling
+the program, so the program sees its standard input at EOF.
+
+Failures exit with status 1, print `run: error:` to stderr, and execute no
+program code. Execution requires an x86-64 Linux host and an x86-64 Linux
+target; other hosts report
+`run: error: ide run supports only x86-64 Linux hosts`, and a foreign target
+is named in its refusal. Queries, non-link actions (`-c`, `-S`, `-E`,
+`-fsyntax-only`), explicit `-o`, `-shared`, `-pie`, LLVM bitcode, GPU targets,
+and linker/library/framework options including `-l` are refused. `ide run`
+binds only its documented host imports and loads no libraries.
+
+With `BUSTER_LINK_LIBC` on the supported host, the only imported functions
+bound by the command are:
+
+```text
+puts, putchar, printf, sprintf, snprintf, vprintf, vsnprintf, getchar,
+strlen, strcmp, strncmp, strcpy, strncpy, strcat, strchr, strrchr, strstr,
+memcpy, memmove, memset, memcmp, malloc, calloc, realloc, free, atoi, atol,
+strtol, strtoul, strtod, abs, labs, qsort, rand, srand, exit, abort, write,
+read, __errno_location
+```
+
+Without `BUSTER_LINK_LIBC`, the binding table is empty. Data imports such as
+`stdout`, `stderr` and `environ` are unsupported, as are TLS references;
+nonempty initializer/finalizer arrays are refused. The underlying JIT's Apple
+Silicon implementation remains subject to its one-`MAP_JIT`-region
+restriction, although `ide run` itself is supported only on x86-64 Linux.
+This is in-process execution, not a sandbox: the program has the `ide`
+process's privileges and can affect it. After a returned `main`, the JIT
+program is released and its arena is destroyed; when the program calls
+`exit()`, the operating system reclaims them as the process terminates.
+Executed test coverage is x86-64 Linux only; shebang execution is not
+implemented.
+
 ## Opt-in native translation-unit lanes
 
 `-fcompile-jobs=N` accepts a positive 32-bit worker request. Omission (or
@@ -1804,9 +1854,19 @@ suffix to classify, so it needs `-x c` or `-x cpp-output`, or `-E`, which reads
 it as C source; without either, or under another language, the parser refuses
 it, and it may appear only once. The source text travels in
 `CompilerDriverInvocation.standard_input`: the `cc` command reads standard
-input to EOF into it after parsing, and embedding callers fill it themselves. A
-null pointer there fails the input as a read error. Diagnostics and `__FILE__`
-name the input `-`, and `-c` without `-o` writes `-.o`, as Clang does.
+input to EOF into it after parsing, and API callers fill it themselves. A null
+pointer there fails the input as a read error. Diagnostics and `__FILE__` name
+the input `-`, and `-c` without `-o` writes `-.o`, as Clang does.
+
+The embedding facade instead sets the API-only
+`CompilerDriverInvocation.input_source` for one C input. A non-null pointer
+means the bytes are used directly and `input_paths[0]` supplies only the
+virtual filename for diagnostics, `__FILE__`, and quoted-include lookup; the
+driver does not open that path and assigns no filesystem identity. An empty
+source is valid when its pointer is non-null. `retain_object` is another
+API-only field: for a single `-c` input it keeps `result.object` in the caller's
+arena and suppresses file output. The public embedding module owns the arena
+through object serialization or JIT release.
 `compiler_driver_test_probe_spellings` covers the admission rules, both routes
 and the `-static`/`-mtune` spellings (GitHub #2851).
 
