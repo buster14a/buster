@@ -171,6 +171,10 @@ jobs:
             --event "$EVENT_NAME" \
             --status-json "$RUNNER_TEMP/native-retirement-status.json" \
             | tee "$RUNNER_TEMP/native-retirement-admission.json"
+      - name: Build native maintenance discovery
+        working-directory: candidate
+        if: ${{ github.event_name == 'push' }}
+        run: clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/main_push_inventory.c -o tools/main_push_inventory
       - name: Reconcile stale trusted integrations after main advances
         if: ${{ github.event_name == 'push' }}
         working-directory: candidate
