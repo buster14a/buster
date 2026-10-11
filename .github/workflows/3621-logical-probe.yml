@@ -24,13 +24,21 @@ jobs:
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/buster-3621"
           git rev-parse HEAD
           lscpu
-      - name: Release counters and scaling
+      - name: Same-machine Release baseline then candidate
         run: |
+          git checkout --detach b6536b670b43715bb5a6e2dfaadbd8ea42707713
           "$RUNNER_TEMP/buster-3621" generate --cc clang --ci --config Release --linker DEFAULT
           "$RUNNER_TEMP/buster-3621" build --config Release -t ide -- -j2
           build/Release/ide test --module=c_frontend_tests --ci=1 --verbose=1
-      - name: Sanitized counters and scaling
+          git checkout --detach "$GITHUB_SHA"
+          "$RUNNER_TEMP/buster-3621" build --config Release -t ide -- -j2
+          build/Release/ide test --module=c_frontend_tests --ci=1 --verbose=1
+      - name: Same-machine sanitized baseline then candidate
         run: |
+          git checkout --detach b6536b670b43715bb5a6e2dfaadbd8ea42707713
           "$RUNNER_TEMP/buster-3621" generate --cc clang --ci --sanitize --fuzz --config Release --linker DEFAULT
+          "$RUNNER_TEMP/buster-3621" build --config Release -t ide -- -j2
+          build/Release/ide test --module=c_frontend_tests --ci=1 --verbose=1
+          git checkout --detach "$GITHUB_SHA"
           "$RUNNER_TEMP/buster-3621" build --config Release -t ide -- -j2
           build/Release/ide test --module=c_frontend_tests --ci=1 --verbose=1

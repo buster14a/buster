@@ -2220,6 +2220,157 @@ BUSTER_GLOBAL_LOCAL void c_test_append_logical_chain(char8* destination, u64 cap
     }
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_address_prefix_indexed_paths(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("typedef int T;\n"
+                        "struct s { int value; };\n"
+                        "int call(int);\n"
+                        "void *f(int a, int b)\n"
+                        "{\n"
+                        "    &&body_start;\n"
+                        "    (void)(call(a) && b);\n"
+                        "    (void)((int) &&cast_int);\n"
+                        "    (void)((void *) &&cast_void);\n"
+                        "    (void)((struct s *) &&cast_struct);\n"
+                        "    (void)((T) &&cast_typedef);\n"
+                        "    (void)(sizeof(a) && b);\n"
+                        "    (void)(_Alignof(int) && b);\n"
+                        "    (void)(((a)) && b);\n"
+                        "    (void)(a && b);\n"
+                        "    (void)((a) && (b));\n"
+                        "    switch (a) { case 0: &&case_label; break; }\n"
+                        "body_start:\n"
+                        "cast_int:\n"
+                        "cast_void:\n"
+                        "cast_struct:\n"
+                        "cast_typedef:\n"
+                        "case_label:\n"
+                        "return_label:\n"
+                        "    return &&return_label;\n"
+                        "}\n");
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    u32 body_start = UINT32_MAX;
+    CScopeId scope = C_SCOPE_ID_INVALID;
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    {
+        CDeclaration* declaration = &parse.declarations[declaration_index];
+        if (declaration->kind == C_DECLARATION_FUNCTION && string_equal(declaration->name, S8("f")))
+        {
+            body_start = declaration->body_start;
+            scope = declaration->scope;
+            break;
+        }
+    }
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    bool expected_label_address_prefix_results[] = {true, false, true, true, true, true, false, false, false, false, false, true, true};
+    CParseResult parse_without_position_index = parse;
+    parse_without_position_index.position_index = NULL;
+    if (BUSTER_REQUIRE(arguments, body_start != UINT32_MAX && parse.position_index))
+    {
+        u32 conjunction_count = 0;
+        for (u32 index = body_start; index < preprocess.token_count; index += 1)
+        {
+            if (preprocess.tokens[index].kind == C_TOKEN_PUNCTUATOR &&
+                preprocess.tokens[index].punctuator == C_PUNCTUATOR_AMPERSAND_AMPERSAND)
+            {
+                if (conjunction_count < BUSTER_ARRAY_LENGTH(expected_label_address_prefix_results))
+                {
+                    bool expected = expected_label_address_prefix_results[conjunction_count];
+                    BUSTER_TEST_RAW(arguments,
+                                    c_parse_label_address_prefix_with_typedef(&parse, &preprocess, scope, body_start, index) == expected,
+                                    string_format(temporary.arena, S8("indexed label-address proof differed at conjunction {u32}"), conjunction_count));
+                    BUSTER_TEST_RAW(arguments,
+                                    c_parse_label_address_prefix_with_typedef(&parse_without_position_index, &preprocess, scope, body_start, index) ==
+                                        expected,
+                                    string_format(temporary.arena, S8("unindexed label-address proof differed at conjunction {u32}"), conjunction_count));
+                }
+                else
+                {
+                    BUSTER_TEST_RAW(arguments, false, S8("more conjunctions than expected in label-address source"));
+                }
+                BUSTER_TEST_RAW(arguments, c_test_parse_label_address_prefix_paths_agree(&parse, &preprocess, scope, body_start, index),
+                                string_format(temporary.arena, S8("indexed and fallback label-address proofs differed at token {u32}"), index));
+                conjunction_count += 1;
+            }
+        }
+        BUSTER_TEST(arguments, conjunction_count == BUSTER_ARRAY_LENGTH(expected_label_address_prefix_results));
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
+// Count the production cast-proof and checked-call reference work, rather
+// than timing the fixture. Retain the original deep fixture separately.
+// The named label also exercises the semantic label-value cast proof.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_logical_chain_work_growth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 depths[] = {128, 256, 512};
+    u64 previous_label[C_TEST_LOGICAL_CHAIN_SHAPE_COUNT] = {0};
+    u64 previous_calls[C_TEST_LOGICAL_CHAIN_SHAPE_COUNT] = {0};
+    for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+    {
+        u32 depth = depths[depth_index];
+        for (u32 shape = 0; shape < C_TEST_LOGICAL_CHAIN_SHAPE_COUNT; shape += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u64 capacity = 3 * (u64)(depth + 1) * 13 + 256;
+            char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+            u64 length = 0;
+            c_test_append_source(bytes, capacity, &length, S8("int f0(void); int f1(void); int tall(int i){ int x = "));
+            c_test_append_logical_chain(bytes, capacity, &length, (CTestLogicalChainShape)shape, depth);
+            c_test_append_source(bytes, capacity, &length, S8("; if ("));
+            c_test_append_logical_chain(bytes, capacity, &length, (CTestLogicalChainShape)shape, depth);
+            c_test_append_source(bytes, capacity, &length, S8(") x += i; goto done; done: return !"));
+            c_test_append_logical_chain(bytes, capacity, &length, (CTestLogicalChainShape)shape, depth);
+            c_test_append_source(bytes, capacity, &length, S8("; }"));
+            u64 label_start = c_test_logical_label_type_work();
+            u64 call_start = c_test_logical_call_reference_work();
+            CPreprocessResult preprocess = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, (String8){.pointer = bytes, .length = length},
+                                                         S8("logical-work-growth.c"), target_native, &preprocess, &parse);
+            u64 label_work = c_test_logical_label_type_work() - label_start;
+            u64 call_work = c_test_logical_call_reference_work() - call_start;
+            BUSTER_TEST(arguments, lowered.canonical_ir_certified && lowered.diagnostic_count == 0);
+            // The position rejection is logarithmic per queried group; its
+            // population grows with depth. A depth doubling stays below 3x.
+            BUSTER_TEST(arguments, label_work <= 256 * (u64)depth);
+            BUSTER_TEST(arguments, call_work <= 64 * (u64)depth);
+            if (depth_index)
+            {
+                BUSTER_TEST(arguments, label_work <= 3 * previous_label[shape] + 64);
+                BUSTER_TEST(arguments, call_work <= 3 * previous_calls[shape] + 64);
+            }
+            previous_label[shape] = label_work;
+            previous_calls[shape] = call_work;
+            c_test_scratch_end(temporary);
+        }
+    }
+    // A real returned-function chain starts a prepared callee at '(': the
+    // independent publication fact must retain its full reference scan.
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = {0};
+    CParseResult parse = {0};
+    u64 call_start = c_test_logical_call_reference_rows();
+    CIRLowerResult lowered = c_test_lower_source(temporary.arena,
+        S8("typedef int (*F)(int); F get(void); int chained(void){ return get()(3); }"),
+        S8("logical-work-positive-chain.c"), target_native, &preprocess, &parse);
+    BUSTER_TEST(arguments, lowered.canonical_ir_certified && lowered.diagnostic_count == 0);
+#if BUSTER_REFERENCE_CHECKS
+    BUSTER_TEST(arguments, c_test_logical_call_reference_rows() > call_start);
+#else
+    BUSTER_TEST(arguments, c_test_logical_call_reference_rows() == call_start);
+#endif
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_parenthesized_logical_chains(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -62156,8 +62307,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_omitted_conditional(UnitTestArgume
 
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
-    return c_test_lowering_parenthesized_logical_chains(arguments);
     UnitTestResult result = {0};
+    C_TEST_FIXTURE(arguments, c_test_logical_chain_work_growth);
+    C_TEST_FIXTURE(arguments, c_test_lowering_parenthesized_logical_chains);
+    return result;
     BUSTER_TEST_FIXTURE(arguments, c_test_generic_work_and_scratch);
     BUSTER_TEST_FIXTURE(arguments, c_test_generic_large_function);
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
@@ -62380,6 +62533,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_ir_local_table_zero_scratch);
     C_TEST_FIXTURE(arguments, c_test_parse_large_static_initializers);
     C_TEST_FIXTURE(arguments, c_test_ir_row_streams);
+    C_TEST_FIXTURE(arguments, c_test_label_address_prefix_indexed_paths);
     C_TEST_FIXTURE(arguments, c_test_label_values_gate);
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_growth);
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_message_lifetime);
@@ -62398,6 +62552,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_local_static_aggregates);
     C_TEST_FIXTURE(arguments, c_test_local_tls);
     C_TEST_FIXTURE(arguments, c_test_local_typedef_for_declaration);
+    C_TEST_FIXTURE(arguments, c_test_logical_chain_work_growth);
     C_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
     C_TEST_FIXTURE(arguments, c_test_lowering_nested_calls_and_wide_switch);
     C_TEST_FIXTURE(arguments, c_test_switch_late_overlap);
