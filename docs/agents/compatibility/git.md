@@ -98,7 +98,7 @@ inventory through the normal upstream test Makefile:
 
 ```text
 t0000-basic.sh t0001-init.sh t1500-rev-parse.sh
-t2000-checkout-cache-clash.sh t5601-clone.sh t5300-pack-object.sh
+t2000-conflict-when-checking-files-out.sh t5601-clone.sh t5300-pack-object.sh
 ```
 
 Retain TAP logs and upstream `t/test-results/*.counts` for attempted,
