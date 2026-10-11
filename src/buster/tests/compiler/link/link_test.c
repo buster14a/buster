@@ -7520,9 +7520,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_version_scripts(UnitTestArgumen
     memset(huge.pointer, ' ', huge.length);
     BUSTER_TEST(arguments, file_write(script_path, huge));
     BUSTER_TEST(arguments, link_native_executable(arena, &object, options).error == LINK_ERROR_UNSUPPORTED_FEATURE);
-    os_delete_file(script_path);
+    os_file_delete(script_path);
     BUSTER_TEST(arguments, link_native_executable(arena, &object, options).error == LINK_ERROR_UNSUPPORTED_FEATURE);
-    os_delete_file(output);
+    os_file_delete(output);
     scratch_end(temporary);
 #else
     BUSTER_UNUSED(arguments);
