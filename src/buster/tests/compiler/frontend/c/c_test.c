@@ -2149,6 +2149,72 @@ BUSTER_GLOBAL_LOCAL void c_test_append_logical_chain(char8* destination, u64 cap
     }
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_address_prefix_indexed_paths(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("typedef int T;\n"
+                        "struct s { int value; };\n"
+                        "int call(int);\n"
+                        "void *f(int a, int b)\n"
+                        "{\n"
+                        "    &&body_start;\n"
+                        "    (void)(call(a) && b);\n"
+                        "    (void)((int) &&cast_int);\n"
+                        "    (void)((void *) &&cast_void);\n"
+                        "    (void)((struct s *) &&cast_struct);\n"
+                        "    (void)((T) &&cast_typedef);\n"
+                        "    (void)(sizeof(a) && b);\n"
+                        "    (void)(_Alignof(int) && b);\n"
+                        "    (void)(((a)) && b);\n"
+                        "    (void)(a && b);\n"
+                        "    (void)((a) && (b));\n"
+                        "    switch (a) { case 0: &&case_label; break; }\n"
+                        "body_start:\n"
+                        "cast_int:\n"
+                        "cast_void:\n"
+                        "cast_struct:\n"
+                        "cast_typedef:\n"
+                        "case_label:\n"
+                        "return_label:\n"
+                        "    return &&return_label;\n"
+                        "}\n");
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    u32 body_start = UINT32_MAX;
+    CScopeId scope = C_SCOPE_ID_INVALID;
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    {
+        CDeclaration* declaration = &parse.declarations[declaration_index];
+        if (declaration->kind == C_DECLARATION_FUNCTION && string_equal(declaration->name, S8("f")))
+        {
+            body_start = declaration->body_start;
+            scope = declaration->scope;
+            break;
+        }
+    }
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, body_start != UINT32_MAX && parse.position_index))
+    {
+        u32 conjunction_count = 0;
+        for (u32 index = body_start; index < preprocess.token_count; index += 1)
+        {
+            if (preprocess.tokens[index].kind == C_TOKEN_PUNCTUATOR &&
+                preprocess.tokens[index].punctuator == C_PUNCTUATOR_AMPERSAND_AMPERSAND)
+            {
+                conjunction_count += 1;
+                BUSTER_TEST_RAW(arguments, c_test_parse_label_address_prefix_paths_agree(&parse, &preprocess, scope, body_start, index),
+                                string_format(temporary.arena, S8("indexed label-address proof differed at token {u32}"), index));
+            }
+        }
+        BUSTER_TEST(arguments, conjunction_count == 13);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_parenthesized_logical_chains(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -62213,6 +62279,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_ir_query_scratch_growth);
     C_TEST_FIXTURE(arguments, c_test_ir_local_table_zero_scratch);
     C_TEST_FIXTURE(arguments, c_test_ir_row_streams);
+    C_TEST_FIXTURE(arguments, c_test_label_address_prefix_indexed_paths);
     C_TEST_FIXTURE(arguments, c_test_label_values_gate);
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_growth);
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_message_lifetime);
