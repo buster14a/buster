@@ -1189,16 +1189,13 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append(ObjectAssemblyBuffer* buffer, co
 {
     if (!buffer->error)
     {
-        if (count > buffer->capacity - buffer->count)
-        {
-            buffer->error = true;
-            return;
-        }
-        if (count)
+        // `count` is the logical output length even past capacity: an overrun
+        // is not an error, it only measures the exact size a retry reserves.
+        if (buffer->count <= buffer->capacity && count <= buffer->capacity - buffer->count && count)
         {
             memcpy(buffer->bytes + buffer->count, bytes, count);
-            buffer->count += count;
         }
+        buffer->count = count > UINT64_MAX - buffer->count ? UINT64_MAX : buffer->count + count;
     }
 }
 
@@ -4682,50 +4679,62 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
             valid = object_aarch64_elf_got_addend_valid(relocation->kind, relocation->addend);
         }
     }
-    if (valid)
+    for (u32 attempt = 0; attempt < 2 && valid; attempt += 1)
     {
+        u64 attempt_position = arena->position;
         ObjectAssemblyBuffer buffer = {.bytes = arena_allocate(arena, char8, capacity), .capacity = capacity, .arena = arena};
         if (buffer.bytes)
         {
-            // Reserve output first, then discard every index/label allocation
-            // on either success or failure without disturbing the returned bytes.
+            // The capacity estimate is a first guess; when emission overruns
+            // it, the logical count it still produced is the exact size the
+            // one retry reserves. Discard every index/label allocation on
+            // either success or failure without disturbing the returned bytes.
             u64 output_position = arena->position;
-            buffer.index = object_assembly_build_index(arena, object);
-            if (object->target.cpu_arch == CPU_ARCH_X86_64)
-            {
-                object_assembly_append_string(&buffer, S8("\t.intel_syntax noprefix\n"));
-            }
-            for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
-            {
-                ObjectSymbol* symbol = object->symbols + symbol_index;
-                if (symbol->section == OBJECT_SECTION_UNDEFINED)
+                valid = false;
+                buffer.index = object_assembly_build_index(arena, object);
+                if (object->target.cpu_arch == CPU_ARCH_X86_64)
                 {
-                    object_assembly_append_string(&buffer, symbol->weak && object_assembly_is_x86_64_elf(object->target) ? S8("\t.weak ") : S8("\t.extern "));
-                    object_assembly_append_assembly_symbol(&buffer, object->target, symbol->name);
-                    object_assembly_append_string(&buffer, S8("\n"));
-                    if (symbol->hidden && object_assembly_is_x86_64_elf(object->target))
+                    object_assembly_append_string(&buffer, S8("\t.intel_syntax noprefix\n"));
+                }
+                for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
+                {
+                    ObjectSymbol* symbol = object->symbols + symbol_index;
+                    if (symbol->section == OBJECT_SECTION_UNDEFINED)
                     {
-                        object_assembly_append_string(&buffer, S8("\t.hidden "));
+                        object_assembly_append_string(&buffer, symbol->weak && object_assembly_is_x86_64_elf(object->target) ? S8("\t.weak ") : S8("\t.extern "));
                         object_assembly_append_assembly_symbol(&buffer, object->target, symbol->name);
                         object_assembly_append_string(&buffer, S8("\n"));
+                        if (symbol->hidden && object_assembly_is_x86_64_elf(object->target))
+                        {
+                            object_assembly_append_string(&buffer, S8("\t.hidden "));
+                            object_assembly_append_assembly_symbol(&buffer, object->target, symbol->name);
+                            object_assembly_append_string(&buffer, S8("\n"));
+                        }
                     }
                 }
-            }
-            for (u32 section_index = 0; section_index < object->section_count && !buffer.error; section_index += 1)
-            {
-                u64 section_position = arena->position;
-                object_assembly_emit_section(&buffer, object, object->target, section_index);
-                buffer.internal_labels = 0;
-                buffer.internal_label_count = 0;
-                arena_set_position(arena, section_position);
-            }
-            if (object->target.os == OPERATING_SYSTEM_LINUX || object->target.os == OPERATING_SYSTEM_ANDROID)
-            {
-                object_assembly_append_string(&buffer, object->requires_executable_stack ? S8("\t.section .note.GNU-stack,\"x\",@progbits\n")
-                                                                                       : S8("\t.section .note.GNU-stack,\"\",@progbits\n"));
-            }
-            if (!buffer.error) result = (String8){.pointer = buffer.bytes, .length = buffer.count};
-            arena_set_position(arena, output_position);
+                for (u32 section_index = 0; section_index < object->section_count && !buffer.error; section_index += 1)
+                {
+                    u64 section_position = arena->position;
+                    object_assembly_emit_section(&buffer, object, object->target, section_index);
+                    buffer.internal_labels = 0;
+                    buffer.internal_label_count = 0;
+                    arena_set_position(arena, section_position);
+                }
+                if (object->target.os == OPERATING_SYSTEM_LINUX || object->target.os == OPERATING_SYSTEM_ANDROID)
+                {
+                    object_assembly_append_string(&buffer, object->requires_executable_stack ? S8("\t.section .note.GNU-stack,\"x\",@progbits\n")
+                                                                                           : S8("\t.section .note.GNU-stack,\"\",@progbits\n"));
+                }
+                if (!buffer.error && buffer.count <= buffer.capacity)
+                {
+                    result = (String8){.pointer = buffer.bytes, .length = buffer.count};
+                }
+                else if (!buffer.error && !attempt && buffer.count != UINT64_MAX)
+                {
+                    capacity = buffer.count;
+                    valid = true;
+                }
+                arena_set_position(arena, valid ? attempt_position : output_position);
         }
     }
     return result;
