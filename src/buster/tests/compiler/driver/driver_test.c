@@ -4977,32 +4977,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
     return result;
 }
 
-// Declarators wrapped in redundant parentheses (GitHub #3215). The split read
-// `int ((*pq))(int) = f;` as a function and `int (gd(int a)) { ... }` with
-// the declaration after it as one object, so both programs failed with an
-// undeclared name. Each compiles to the same object with and without
-// -fc-ast-pilot, which publishes the split from the tree for all but the
-// shapes it still refuses (an attribute list opening a group, a variadic list
-// inside one), and each program's main returns 0.
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_groups(UnitTestArguments* arguments)
+// One program per case, each with a main that returns 0: it compiles to the
+// same object with and without -fc-ast-pilot, the pilot publishes the split
+// from the tree exactly when `published` says so, and the linked program
+// exits with status 0.
+typedef struct CompilerDriverDeclaratorGroupCase CompilerDriverDeclaratorGroupCase;
+struct CompilerDriverDeclaratorGroupCase
+{
+    String8 source;
+    bool published;
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_declarator_group_cases(UnitTestArguments* arguments, CompilerDriverDeclaratorGroupCase const* cases,
+                                                                          u32 case_count)
 {
     UnitTestResult result = {0};
-    struct
-    {
-        String8 source;
-        bool published;
-    } const cases[] = {
-        {S8("int f(int x) { return x + 1; }\nint ((*pq))(int) = f;\nint main(void) { return pq(1) - 2; }\n"), true},
-        {S8("int (__attribute__((unused)) (*pq))(int) = 0;\nint main(void) { return pq != 0; }\n"), false},
-        {S8("int (gd(int a)) { return a; }\nint zz;\nint main(void) { return gd(0) + zz; }\n"), true},
-        {S8("int (x);\nint ((y))[3];\nvoid ((h))(void) {}\nint main(void) { h(); return x + y[2] + (int)sizeof(y) - 12; }\n"), true},
-        {S8("typedef int T;\nT ((t))[2];\nT ((*tp))(T);\nstatic T id(T v) { return v; }\n"
-            "int a, ((b)), (c)[2], ((*d))(void), (e(void)), (((*g)));\nint e(void) { return 0; }\n"
-            "int main(void) { tp = id; return a + b + c[1] + (d != 0) + e() + (g != 0) + t[1] + tp(0) + (int)sizeof(t) - 8; }\n"),
-         true},
-        {S8("int (gv(int a, ...)) { return a; }\nint main(void) { return gv(0, 1, 2); }\n"), false},
-    };
-    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    for (u32 case_index = 0; case_index < case_count; case_index += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         Arena* arena = temporary.arena;
@@ -5066,6 +5056,47 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_gro
         scratch_end(temporary);
     }
     return result;
+}
+
+// Declarators wrapped in redundant parentheses (GitHub #3215). The split read
+// `int ((*pq))(int) = f;` as a function and `int (gd(int a)) { ... }` with
+// the declaration after it as one object, so both programs failed with an
+// undeclared name. The pilot publishes the split from the tree for all but
+// the shapes it still refuses (an attribute list opening a group, a variadic
+// list inside one).
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_groups(UnitTestArguments* arguments)
+{
+    CompilerDriverDeclaratorGroupCase const cases[] = {
+        {S8("int f(int x) { return x + 1; }\nint ((*pq))(int) = f;\nint main(void) { return pq(1) - 2; }\n"), true},
+        {S8("int (__attribute__((unused)) (*pq))(int) = 0;\nint main(void) { return pq != 0; }\n"), false},
+        {S8("int (gd(int a)) { return a; }\nint zz;\nint main(void) { return gd(0) + zz; }\n"), true},
+        {S8("int (x);\nint ((y))[3];\nvoid ((h))(void) {}\nint main(void) { h(); return x + y[2] + (int)sizeof(y) - 12; }\n"), true},
+        {S8("typedef int T;\nT ((t))[2];\nT ((*tp))(T);\nstatic T id(T v) { return v; }\n"
+            "int a, ((b)), (c)[2], ((*d))(void), (e(void)), (((*g)));\nint e(void) { return 0; }\n"
+            "int main(void) { tp = id; return a + b + c[1] + (d != 0) + e() + (g != 0) + t[1] + tp(0) + (int)sizeof(t) - 8; }\n"),
+         true},
+        {S8("int (gv(int a, ...)) { return a; }\nint main(void) { return gv(0, 1, 2); }\n"), false},
+    };
+    return compiler_driver_declarator_group_cases(arguments, cases, BUSTER_ARRAY_LENGTH(cases));
+}
+
+// A single redundant group after a typedef or tag name (GitHub #3368). The
+// declaration scans read it as that name's parameter list, so `T (x);` and
+// `struct S (s2);` declared nothing and `T (tg(int a)) { ... }` declared a
+// function `T`: each program failed with an undeclared name. The pilot
+// publishes them all.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_name_declarator_groups(UnitTestArguments* arguments)
+{
+    CompilerDriverDeclaratorGroupCase const cases[] = {
+        {S8("typedef int T;\nT (x);\nint main(void) { return x; }\n"), true},
+        {S8("struct S { int a; };\nstruct S (s2);\nint main(void) { return s2.a; }\n"), true},
+        {S8("typedef int T;\nT (tg(int a)) { return a; }\nint main(void) { return tg(0); }\n"), true},
+        {S8("struct P { int a; };\nstruct P (pg(void)) { struct P r = {0}; return r; }\nint main(void) { return pg().a; }\n"), true},
+        {S8("typedef int T;\nstatic const T (y) = 2, (z)[2];\ntypedef T (U);\nU (u), (uf(U a));\nU uf(U a) { return a - y; }\n"
+            "union W { int a; } (w);\nenum E { E0 } (e);\nint main(void) { return uf(2) + z[1] + u + w.a + (int)e + (int)sizeof(z) - 8; }\n"),
+         true},
+    };
+    return compiler_driver_declarator_group_cases(arguments, cases, BUSTER_ARRAY_LENGTH(cases));
 }
 
 // Rejected wide escapes must leave both absent and existing output paths
@@ -30339,6 +30370,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_c_ast_pilot);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_redundant_declarator_groups);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_name_declarator_groups);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_void_function_pointer_roundtrip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_shared_ifunc_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_function_alignment_and_weakref);
