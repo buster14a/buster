@@ -459,7 +459,9 @@ branches through a computed goto. The proof is the walk's own test:
 the `(type)&&label` form, whose type name may be a typedef resolved in the
 token's scope. The scoped prefix proof treats a balanced `typeof (...)`
 specifier as one type-name component; its operand remains owned by expression
-or type-name semantics. The machineless cast reader falls back to that proof
+or type-name semantics. Operand matching uses the position index when present
+and the scalar delimiter reference when absent; the registered fixture checks
+both proof paths, including an ordinary conjunction inside the typeof operand. The machineless cast reader falls back to that proof
 for decorated types it cannot resolve. A preceding sizeof/alignof group is
 still an operand, and ordinary conjunctions still bind ordinary identifiers.
 `c_test_typeof_label_address` covers GNU17/GNU23, all six native target

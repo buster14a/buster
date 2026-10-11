@@ -38799,6 +38799,49 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_label_address(UnitTestArguments
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
         {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
     };
+    // The scoped cast proof also supports callers without a position index.
+    // Its typeof operand contains an ordinary conjunction before the label.
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena,
+            S8("int main(void) { int a=1,b=0; void *p=(__typeof__((a && b,(void*)0)))&&done; done: return p!=&&done; }"),
+            (CPreprocessOptions){.target = target_native, .dialect = dialects[dialect]});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count);
+        CScopeId scope = C_SCOPE_ID_INVALID;
+        u32 body_start = UINT32_MAX;
+        for (u32 index = 0; index < parsed.declaration_count; index += 1)
+        {
+            CDeclaration* declaration = parsed.declarations + index;
+            if (declaration->kind == C_DECLARATION_FUNCTION && string_equal(declaration->name, S8("main")))
+            {
+                scope = declaration->scope;
+                body_start = declaration->body_start;
+            }
+        }
+        CParseResult scalar = parsed;
+        scalar.position_index = NULL;
+        bool expected[] = {false, true, true};
+        u32 conjunction = 0;
+        if (BUSTER_REQUIRE(arguments, body_start != UINT32_MAX))
+        {
+            for (u32 index = body_start; index < tokens.token_count; index += 1)
+            {
+                if (c_token_is_punctuator(tokens.tokens + index, C_PUNCTUATOR_AMPERSAND_AMPERSAND))
+                {
+                    if (BUSTER_REQUIRE(arguments, conjunction < BUSTER_ARRAY_LENGTH(expected)))
+                    {
+                        BUSTER_TEST(arguments, c_parse_label_address_prefix_with_typedef(&parsed, &tokens, scope, body_start, index) == expected[conjunction]);
+                        BUSTER_TEST(arguments, c_parse_label_address_prefix_with_typedef(&scalar, &tokens, scope, body_start, index) == expected[conjunction]);
+                    }
+                    conjunction += 1;
+                }
+            }
+            BUSTER_TEST(arguments, conjunction == BUSTER_ARRAY_LENGTH(expected));
+        }
+        scratch_end(temporary);
+    }
     for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
     {
         String8 source = sources[source_index];
