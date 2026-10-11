@@ -41,7 +41,11 @@
 //   statement plan (c_parse_statement_plan_build): statement boundaries,
 //   block declaration ends and `for` header boundaries read from the tree's
 //   COMPOUND_STATEMENT items, and plain expression segments bound in one
-//   pass (c_parse_bind_plan_segment) instead of by its token loop.
+//   pass (c_parse_bind_plan_segment) instead of by its token loop. A block
+//   declaration's entry carries declarator hints (c_parse_plan_declarators):
+//   the split (c_parse_planned_local_declarations) takes each declarator's
+//   `,` and `=` from them, and binds a plain initializer with the use filter
+//   alone.
 //
 // Types and declarators are parsed by CTypeParseMachine (types in
 // c_internal.h), an explicit frame stack in place of recursion: each
@@ -120,14 +124,16 @@
 //                                                 entity lookup
 //   c_parse_scope_cursor_lookup                   post-binding lookups of the
 //                                                 lowering-constraint passes
-//   c_parse_local_declarations                    block-scope declarations,
-//                                                 auto inference, local
+//   c_parse_local_declarations_split,             block-scope declarations,
+//   c_parse_local_declarations                    auto inference, local
 //                                                 linkage redeclarations
 //   c_parse_label_address_prefix_proven,          statement boundaries, asm
 //   c_parse_statement_end                         goto, label addresses
 //   c_parse_statement_plan_build,                 the statement plan read from
-//   c_parse_bind_plan_segment                     the syntax tree, and its
-//                                                 one-pass segment binding
+//   c_parse_bind_plan_segment,                    the syntax tree, its
+//   c_parse_plan_declarators,                     one-pass segment binding,
+//   c_parse_planned_local_declarations            and the declarator hints of
+//                                                 its block declarations
 //   c_parse_bind_function_body                    binds body identifiers to
 //                                                 entities, indexes scopes
 //   c_parse_token_census_reference,               the token-shape census that
@@ -13754,7 +13760,7 @@ BUSTER_C_INTERNAL bool c_parse_type_definition_at(CPreprocessResult preprocess, 
 
 // A definition with attributes between its keyword and its body, which
 // c_parse_type_definition_at does not take: `enum __attribute__((packed)) {`.
-BUSTER_C_INTERNAL bool c_parse_attributed_definition_at(CPreprocessResult preprocess, u32 index, u32 end)
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_parse_attributed_definition_at(CPreprocessResult preprocess, u32 index, u32 end)
 {
     bool attributed = false;
     if (index + 1 < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
@@ -17852,7 +17858,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_list_complete(CTypeParseMachin
         frame->inner_parameter_start = frame->parameter_start;
         frame->inner_parameter_count = frame->written_parameter_count;
         frame->inner_variadic = frame->variadic;
-        frame->inner_unprototyped = c_parse_parameter_list_unprototyped(preprocess, list_close);
+        frame->inner_unprototyped = c_parse_parameter_list_unprototyped(preprocess, list_close) || list_close == machine->identifier_list_close;
         frame->has_inner_parameters = true;
         frame->scanning_inner_parameters = false;
         frame->variadic = false;
@@ -17869,7 +17875,8 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_list_complete(CTypeParseMachin
                                              .parameter_count = frame->written_parameter_count,
                                              .kind = C_TYPE_FUNCTION,
                                              .is_variadic = frame->variadic,
-                                             .is_unprototyped = c_parse_parameter_list_unprototyped(preprocess, list_close),
+                                             .is_unprototyped = c_parse_parameter_list_unprototyped(preprocess, list_close) ||
+                                                                list_close == machine->identifier_list_close,
                                          }) : C_TYPE_ID_INVALID;
     frame->has_function_suffix = true;
     frame->stage = C_TYPE_PARSE_STAGE_FINISH;
@@ -18118,6 +18125,23 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
                     c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
                     return;
                 }
+            }
+            else if (segment_count == 1 && frame->segment_start > machine->identifier_list_open && frame->scan_index <= machine->identifier_list_close)
+            {
+                // An old-style definition's identifier list names its
+                // parameters: each is an int until the declaration list binds
+                // it (c_parse_bind_identifier_list_parameter_declarations),
+                // as the unparenthesized path in
+                // c_parse_declaration_type_derive builds them (GitHub #3368).
+                CToken name = preprocess.tokens[frame->segment_start];
+                result->parameters[frame->parameter_start + frame->written_parameter_count] = (CParameter){
+                    .name = c_token_spelling(preprocess.spelling_base, name),
+                    .location = c_preprocess_token_site(&preprocess, name),
+                    .type = c_parse_expression_scalar_type(result, C_TYPE_INT),
+                    .entity = C_ENTITY_ID_INVALID,
+                    .symbol = name.symbol,
+                };
+                frame->written_parameter_count += 1;
             }
             else if (!(list_end && !frame->written_parameter_count && segment_count == 1 &&
                        string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[frame->segment_start]), S8("void"))))
@@ -19756,7 +19780,10 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult p
 // and is redundant otherwise. `(f)(int)`, `((h))(void)`, `(gd(int a))` and
 // `(*f(int))[3]` declare functions; `(*f)(int)`, `((*pq))(int)`, `(*(f))(int)`
 // and `((x))[3]` declare objects (GitHub #3215).
-BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_is_function(CPreprocessResult preprocess, u32 start, u32 end, u32* name_index)
+// `list_open` receives the `(` of the function's parameter list, inside the
+// group for `(k(a))` and after it for `(k)(a)`, which the whole-declaration
+// scan records as parameter_list_open for an old-style definition.
+BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_parameter_list(CPreprocessResult preprocess, u32 start, u32 end, u32* name_index, u32* list_open)
 {
     u32 depth = 0;
     u32 pointer_depth = 0;
@@ -19773,8 +19800,49 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_is_function(CPreprocessR
             depth -= walking;
             index += walking;
         }
+        *list_open = index;
     }
     return function;
+}
+
+BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_is_function(CPreprocessResult preprocess, u32 start, u32 end, u32* name_index)
+{
+    u32 list_open = 0;
+    return c_parse_parenthesized_declarator_parameter_list(preprocess, start, end, name_index, &list_open);
+}
+
+// Where an old-style declaration list may begin after a parameter list that
+// closes at `close` inside `depth` declarator groups: past the `)` of each
+// group and any suffix written after one, as the `(void)` of
+// `int (*k(a))(void) int a; {...}`. A group left open makes no list
+// (C_ID_UNDERLYING_INVALID).
+BUSTER_C_INTERNAL u32 c_parse_declarator_groups_end(CPreprocessResult preprocess, u32 close, u32 depth, u32 end)
+{
+    u32 index = close + 1;
+    bool walking = index < end;
+    while (walking)
+    {
+        CToken token = preprocess.tokens[index];
+        if (depth && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            depth -= 1;
+            index += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            index = c_parse_matching_delimiter(preprocess, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) + 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            index = c_parse_matching_delimiter(preprocess, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET) + 1;
+        }
+        else
+        {
+            walking = false;
+        }
+        walking = walking && index < end;
+    }
+    return depth ? C_ID_UNDERLYING_INVALID : index;
 }
 
 // Return the name of a parenthesized function declarator (`(f)(...)` or
@@ -20321,7 +20389,10 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
         // of its declarator.  Bound every declarator reader at the identifier
         // list's ')' and let the dedicated parameter pass consume the tokens
         // between it and the body.
-        end = declaration->identifier_list_start + declaration->identifier_list_token_count + 1;
+        // A parenthesized name, `int (k(a)) int a; {...}`, closes its
+        // groups after the list's ')', so the bound is where the declaration
+        // list (or the body) begins (GitHub #3368).
+        end = declaration->parameter_declaration_token_count ? declaration->parameter_declaration_start : declaration->body_start - 1;
     }
     u32 auto_declaration_end = declaration->body_start && !declaration->is_identifier_list_definition ? declaration->body_start - 1 : end;
     u32 auto_token_index = UINT32_MAX;
@@ -20559,9 +20630,22 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                 // it cannot parse; a typedef, prototype or extern declaration
                 // stays lenient, as c_parse_declaration_declares_no_storage says.
                 bool reports_parameter_types = !c_parse_declaration_declares_no_storage(preprocess, declaration);
+                if (declaration->is_identifier_list_definition && c_preprocess_dialect_is_c23(preprocess.dialect))
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[declaration->identifier_list_start]),
+                                       C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("identifier-list function definitions were removed in C23"));
+                    return;
+                }
                 machine->member_declarator_depth += reports_parameter_types;
+                if (declaration->is_identifier_list_definition)
+                {
+                    machine->identifier_list_open = declaration->identifier_list_start - 1;
+                    machine->identifier_list_close = declaration->identifier_list_start + declaration->identifier_list_token_count;
+                }
                 declaration->type =
                     c_parse_parenthesized_declaration_type(machine, result, preprocess, base, declarator_start, name_index, suffix_end, true);
+                machine->identifier_list_open = 0;
+                machine->identifier_list_close = 0;
                 machine->member_declarator_depth -= reports_parameter_types;
                 // The parenthesized declarator parser owns the parameter
                 // records it creates, but the declaration still needs to
@@ -24015,11 +24099,42 @@ BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range_core(CTypeParseMachin
                                                                    CScopeId scope, CTypeId type, u32 start, u32 count, u32* alignment_out,
                                                                    bool* request_out);
 
-BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess,
-                                                    CScopeId scope, u32 declaration_index, u32 start, u32 end, bool is_for_initializer)
+// What a body's statement plan (c_parse_statement_plan_build) states about
+// one declarator of a block declaration: its `,` or the declaration's `;`, its
+// `=` (UINT32_MAX for none), and whether its initializer is plain syntax --
+// no statement expression, type definition or attribute -- whose tokens the
+// split below binds with the use filter alone.
+typedef struct CParseDeclaratorHint CParseDeclaratorHint;
+struct CParseDeclaratorHint
+{
+    u32 end;
+    u32 assign;
+    bool plain;
+};
+
+// A block declaration's declarator hints, in source order, and whether its
+// specifiers hold no `auto` or `__auto_type` word, so it infers no type.
+typedef struct CParseDeclaratorHints CParseDeclaratorHints;
+struct CParseDeclaratorHints
+{
+    CParseDeclaratorHint const* declarators;
+    u32 count;
+    bool no_auto;
+    CAstStatementStatistics* statistics;
+};
+
+// The block-declaration split. `hints`, from the planned walk alone, replaces
+// the auto-inference scan, the `,` and `=` scans of each declarator it states
+// (each checked against the token there; a refused one returns the rest of
+// the declaration to the scans), and the per-token tests of a plain
+// initializer. Without hints it is the token split, and both callers below
+// compile it as one.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
+                                                                        CPreprocessResult preprocess, CScopeId scope, u32 declaration_index,
+                                                                        u32 start, u32 end, bool is_for_initializer, CParseDeclaratorHints const* hints)
 {
     CAutoDeclarationInfo auto_info = {0};
-    bool is_auto_type = c_parse_auto_declaration_info(result, preprocess, scope, start, end, &auto_info);
+    bool is_auto_type = hints && hints->no_auto ? false : c_parse_auto_declaration_info(result, preprocess, scope, start, end, &auto_info);
     if (is_auto_type && !c_parse_storage_classes_valid(result, preprocess, scope, start, end))
     {
         return false;
@@ -24257,11 +24372,28 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
     c_parse_cleanup_attribute_scan(preprocess, start, declarator_start, true, &declaration_cleanup);
     c_parse_publish_enum_members(result, preprocess, scope, declaration_index, enum_member_start, result->enum_member_count);
     u32 segment_start = declarator_start;
+    u32 hinted = hints ? hints->count : 0;
+    u32 hint_index = 0;
     while (segment_start < end)
     {
-        u32 segment_end = segment_start;
+        CParseDeclaratorHint const* declarator = hint_index < hinted ? hints->declarators + hint_index : 0;
+        if (declarator &&
+            !(declarator->end > segment_start && declarator->end <= end &&
+              (declarator->end == end || c_token_is_punctuator(&preprocess.tokens[declarator->end], C_PUNCTUATOR_COMMA)) &&
+              (declarator->assign == UINT32_MAX ||
+               (declarator->assign > segment_start && declarator->assign < declarator->end &&
+                c_token_is_punctuator(&preprocess.tokens[declarator->assign], C_PUNCTUATOR_ASSIGN)))))
+        {
+            if (hints->statistics)
+            {
+                hints->statistics->declarator_declines += 1;
+            }
+            declarator = 0;
+            hinted = 0;
+        }
+        u32 segment_end = declarator ? declarator->end : segment_start;
         u32 depth = 0;
-        for (; segment_end < end; segment_end += 1)
+        for (; !declarator && segment_end < end; segment_end += 1)
         {
             CToken token = preprocess.tokens[segment_end];
             if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
@@ -24282,9 +24414,9 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 break;
             }
         }
-        u32 suffix_end = segment_end;
+        u32 suffix_end = declarator && declarator->assign != UINT32_MAX ? declarator->assign : segment_end;
         u32 suffix_depth = 0;
-        for (u32 suffix_index = segment_start; suffix_index < segment_end; suffix_index += 1)
+        for (u32 suffix_index = segment_start; !declarator && suffix_index < segment_end; suffix_index += 1)
         {
             CToken token = preprocess.tokens[suffix_index];
             if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
@@ -24713,6 +24845,19 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         // its types on its own path.
         bool defines_types = !is_auto_type;
         u32 attribute_resume = UINT32_MAX;
+        // A plain initializer has no statement expression, type definition
+        // or attribute for the four tests below to find; __builtin_offsetof
+        // is a call in the tree, so its test stays.
+        bool plain_initializer = declarator && declarator->plain;
+        if (plain_initializer && hints->statistics)
+        {
+            hints->statistics->initializer_hints += 1;
+        }
+        if (declarator && hints->statistics)
+        {
+            hints->statistics->declarator_hints += 1;
+        }
+        hint_index += declarator != 0;
         for (u32 use_index = initializer_start; use_index < segment_end; use_index += 1)
         {
             CToken use = preprocess.tokens[use_index];
@@ -24723,7 +24868,8 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             u32 statement_body_start = 0;
             u32 statement_body_end = 0;
             u32 statement_group_end = 0;
-            if (c_parse_statement_expression_at(preprocess, use_index, segment_end, &statement_body_start, &statement_body_end, &statement_group_end))
+            if (!plain_initializer &&
+                c_parse_statement_expression_at(preprocess, use_index, segment_end, &statement_body_start, &statement_body_end, &statement_group_end))
             {
                 c_parse_bind_statement_expression_body(machine, arena, result, preprocess, scope, declaration_index, statement_body_start,
                                                        statement_body_end);
@@ -24737,7 +24883,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             // expression in a return statement compiled.
             u32 aggregate_open = 0;
             u32 aggregate_end = 0;
-            if (c_parse_type_definition_at(preprocess, use_index, segment_end, &aggregate_open, &aggregate_end))
+            if (!plain_initializer && c_parse_type_definition_at(preprocess, use_index, segment_end, &aggregate_open, &aggregate_end))
             {
                 // Its enumerators are in scope from here, before the operand
                 // and the next comma declarator, while earlier uses stay bound.
@@ -24749,7 +24895,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 use_index = aggregate_end;
                 continue;
             }
-            if (defines_types && c_parse_attributed_definition_at(preprocess, use_index, segment_end))
+            if (!plain_initializer && defines_types && c_parse_attributed_definition_at(preprocess, use_index, segment_end))
             {
                 // Reading its body as uses would bind an enumerator to an
                 // outer name of the same spelling, and the expression parser
@@ -24759,7 +24905,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 use_index = c_parse_skip_attributes(preprocess, use_index + 1, segment_end) - 1;
                 continue;
             }
-            u32 attribute_end = c_parse_gnu_attribute_names_end(preprocess, use_index, segment_end, &attribute_resume);
+            u32 attribute_end = plain_initializer ? use_index : c_parse_gnu_attribute_names_end(preprocess, use_index, segment_end, &attribute_resume);
             if (attribute_end != use_index)
             {
                 use_index = attribute_end - 1;
@@ -24836,6 +24982,13 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
     }
     return true;
 }
+
+BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess,
+                                                    CScopeId scope, u32 declaration_index, u32 start, u32 end, bool is_for_initializer)
+{
+    return c_parse_local_declarations_split(machine, arena, result, preprocess, scope, declaration_index, start, end, is_for_initializer, 0);
+}
+
 
 // Old-style parameter declarations use the same declarator grammar as block
 // object declarations.  Parse each row through that existing path, then turn
@@ -25742,7 +25895,11 @@ BUSTER_C_INTERNAL bool c_parse_controlling_expression_defines_tag(CTokenShape co
 //                scope, declare, or reach any other path of the loop.
 //   DECLARATION  a block declaration from its first token to its `;`, holding
 //                no statement expression: the loop's `;` scan and its GNU
-//                typeof statement-expression search are skipped.
+//                typeof statement-expression search are skipped. It carries
+//                a hint per declarator (CParseDeclaratorHint: its `,` or `;`,
+//                its `=`, a plain initializer) for the split
+//                (c_parse_planned_local_declarations), and whether its
+//                specifiers rule out type inference.
 //   LOOP         a `for`: its header's first `;` and `)`, and one past its
 //                body, in place of the loop's scans and c_parse_statement_end.
 // Every boundary comes from node anchors (c_ast.h): a statement's anchor
@@ -25771,10 +25928,13 @@ struct CParseStatementPlanEntry
     u32 start;
     // A segment's last token, a declaration's `;`, a loop header's `)`.
     u32 end;
-    // A loop's first header `;`, and one past its body.
+    // A loop's first header `;`, and one past its body. A declaration's
+    // first declarator hint (CParseStatementPlan.declarators) and their count.
     u32 separator;
     u32 loop_end;
     CParseStatementPlanKind kind;
+    // A declaration whose specifiers hold no `auto` or `__auto_type` word.
+    bool no_auto;
 };
 
 typedef struct CParseStatementPlan CParseStatementPlan;
@@ -25783,6 +25943,10 @@ struct CParseStatementPlan
     CParseStatementPlanEntry* entries;
     u32 count;
     u32 capacity;
+    // The declarator hints of every declaration entry, in token order.
+    CParseDeclaratorHint* declarators;
+    u32 declarator_count;
+    u32 declarator_capacity;
     CAstStatementStatistics* statistics;
     // The walk's place in the plan (c_parse_bind_block_statements): the next
     // entry, its first token (UINT32_MAX past the last), and the declaration
@@ -25793,13 +25957,39 @@ struct CParseStatementPlan
     u32 next;
 };
 
+// The split of a block declaration in a planned body, following its
+// statement-plan entry's declarator hints when it has one.
+BUSTER_GLOBAL_LOCAL bool c_parse_planned_local_declarations(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess,
+                                                            CScopeId scope, u32 declaration_index, u32 start, u32 end, CParseStatementPlan* plan,
+                                                            CParseStatementPlanEntry const* entry)
+{
+    CParseDeclaratorHints hints = {0};
+    if (entry)
+    {
+        hints = (CParseDeclaratorHints){
+            .declarators = plan->declarators + entry->separator,
+            .count = entry->loop_end,
+            .no_auto = entry->no_auto,
+            .statistics = plan->statistics,
+        };
+        if (entry->no_auto && plan->statistics)
+        {
+            plan->statistics->auto_skips += 1;
+        }
+    }
+    return c_parse_local_declarations_split(machine, arena, result, preprocess, scope, declaration_index, start, end, false, entry ? &hints : 0);
+}
+
 // Node classes. PLAIN: expression syntax, or a type name without a member or
 // enumerator list, attributes or braces. CONTAINER: a node whose tokens hold
 // a `;` of their own, so a scan for a terminator could stop inside it.
+// INITIALIZER: braces and designators, plain in a declarator's initializer,
+// whose split opens no scope at a brace.
 enum
 {
     C_PARSE_PLAN_PLAIN = 1 << 0,
     C_PARSE_PLAN_CONTAINER = 1 << 1,
+    C_PARSE_PLAN_INITIALIZER = 1 << 2,
 };
 
 BUSTER_GLOBAL_LOCAL u8 const c_parse_plan_kind_class[C_AST_KIND_COUNT] = {
@@ -25886,6 +26076,12 @@ BUSTER_GLOBAL_LOCAL u8 const c_parse_plan_kind_class[C_AST_KIND_COUNT] = {
     [C_AST_PARAMETER_LIST] = C_PARSE_PLAN_PLAIN,
     [C_AST_PARAMETER_LIST_VARIADIC] = C_PARSE_PLAN_PLAIN,
     [C_AST_PARAMETER] = C_PARSE_PLAN_PLAIN,
+    [C_AST_INITIALIZER_LIST] = C_PARSE_PLAN_INITIALIZER,
+    [C_AST_DESIGNATION] = C_PARSE_PLAN_INITIALIZER,
+    [C_AST_DESIGNATOR_MEMBER] = C_PARSE_PLAN_INITIALIZER,
+    [C_AST_DESIGNATOR_INDEX] = C_PARSE_PLAN_INITIALIZER,
+    [C_AST_DESIGNATOR_RANGE] = C_PARSE_PLAN_INITIALIZER,
+    [C_AST_COMPOUND_LITERAL] = C_PARSE_PLAN_INITIALIZER,
     [C_AST_MEMBER_LIST] = C_PARSE_PLAN_CONTAINER,
     [C_AST_ENUMERATOR_LIST] = C_PARSE_PLAN_CONTAINER,
     [C_AST_STATEMENT_EXPRESSION] = C_PARSE_PLAN_CONTAINER,
@@ -26094,6 +26290,61 @@ BUSTER_GLOBAL_LOCAL u32 c_parse_plan_expression_end(CAst const* ast, CPreprocess
     return end;
 }
 
+// Appends the declarator hints of the DECLARATION at `node`, whose `;` is
+// `terminator`, in source order: each INIT_DECLARATOR ends at the `,` (or,
+// the last, the `;`) past its greatest anchor's closers, and its `=` follows
+// the closers of the child before its initializer. A declaration any of whose
+// declarators those tokens do not confirm gets none, and is split from
+// tokens. Returns whether its specifiers hold no `auto` or `__auto_type`
+// word.
+BUSTER_GLOBAL_LOCAL bool c_parse_plan_declarators(CAst const* ast, CPreprocessResult const* preprocess, CParseDeclaratorHint* declarators,
+                                                  u32* declarator_count, u32 declarator_capacity, u32 node, u32 terminator, u32 limit)
+{
+    u32 floor = c_ast_subtree_begin(ast, node);
+    u32 count = 0;
+    u32 specifiers = node - 1;
+    while (specifiers > floor && ast->kinds[specifiers] == C_AST_INIT_DECLARATOR)
+    {
+        count += 1;
+        specifiers = c_ast_subtree_begin(ast, specifiers) - 1;
+    }
+    bool no_auto = ast->kinds[specifiers] == C_AST_DECL_SPECIFIERS;
+    for (u32 cursor = specifiers; no_auto && cursor > c_ast_subtree_begin(ast, specifiers); cursor = c_ast_subtree_begin(ast, cursor - 1))
+    {
+        no_auto = !(ast->kinds[cursor - 1] == C_AST_SPECIFIER_WORD &&
+                    (ast->data[cursor - 1] == C_AST_WORD_AUTO || ast->data[cursor - 1] == C_AST_WORD_AUTO_TYPE));
+    }
+    bool confirmed = ast->kinds[specifiers] == C_AST_DECL_SPECIFIERS && *declarator_count + count <= declarator_capacity;
+    u32 declarator = node - 1;
+    for (u32 slot = count; slot && confirmed; slot -= 1)
+    {
+        u32 end = c_parse_plan_after_closers(preprocess, c_parse_plan_last_anchor(ast, declarator), limit, true);
+        confirmed = slot == count ? end == terminator : c_parse_plan_punctuator_at(preprocess, end, limit, C_PUNCTUATOR_COMMA);
+        u32 assign = UINT32_MAX;
+        bool plain = false;
+        if (confirmed && (ast->data[declarator] & 4))
+        {
+            u32 initializer = declarator - 1;
+            u32 before = c_ast_subtree_begin(ast, initializer) - 1;
+            assign = c_parse_plan_after_closers(preprocess, c_parse_plan_last_anchor(ast, before), limit, false);
+            confirmed = before >= c_ast_subtree_begin(ast, declarator) && c_parse_plan_punctuator_at(preprocess, assign, limit, C_PUNCTUATOR_ASSIGN);
+            plain = true;
+            for (u32 cursor = c_ast_subtree_begin(ast, initializer); cursor <= initializer && plain; cursor += 1)
+            {
+                plain = (c_parse_plan_kind_class[ast->kinds[cursor]] & (C_PARSE_PLAN_PLAIN | C_PARSE_PLAN_INITIALIZER)) != 0;
+            }
+        }
+        declarators[*declarator_count + slot - 1] = (CParseDeclaratorHint){
+            .end = end,
+            .assign = assign,
+            .plain = plain,
+        };
+        declarator = c_ast_subtree_begin(ast, declarator) - 1;
+    }
+    *declarator_count += confirmed ? count : 0;
+    return no_auto;
+}
+
 // The `{` of every top-level function definition, ascending, paired with its
 // COMPOUND_STATEMENT node, in the phase arena (CTypeParseMachine).
 BUSTER_GLOBAL_LOCAL void c_parse_statement_bodies_prepare(CTypeParseMachine* machine, Arena* arena)
@@ -26173,6 +26424,8 @@ BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseM
         u32* lasts = arena_allocate_zeroed(arena, u32, compound + 1 - begin);
         plan.capacity = body_token_count + 2;
         plan.entries = arena_allocate(arena, CParseStatementPlanEntry, plan.capacity);
+        plan.declarator_capacity = body_token_count + 2;
+        plan.declarators = arena_allocate(arena, CParseDeclaratorHint, plan.declarator_capacity);
         u32 stack_count = 0;
         stack[stack_count] = compound;
         tags[stack_count++] = C_PARSE_PLAN_VISIT_STATEMENT;
@@ -26421,7 +26674,17 @@ BUSTER_GLOBAL_LOCAL CParseStatementPlan c_parse_statement_plan_build(CTypeParseM
                     u32 terminator = c_parse_plan_terminator(ast, &preprocess, node, limit);
                     if (terminator != UINT32_MAX)
                     {
-                        ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_DECLARATION, anchor, terminator, 0, 0);
+                        u32 first_declarator = plan.declarator_count;
+                        u32 declarator_count = first_declarator;
+                        bool no_auto = c_parse_plan_declarators(ast, &preprocess, plan.declarators, &declarator_count, plan.declarator_capacity, node,
+                                                                terminator, limit);
+                        plan.declarator_count = declarator_count;
+                        ordered = c_parse_plan_append(&plan, C_PARSE_STATEMENT_PLAN_DECLARATION, anchor, terminator, first_declarator,
+                                                      plan.declarator_count - first_declarator);
+                        if (ordered)
+                        {
+                            plan.entries[plan.count - 1].no_auto = no_auto;
+                        }
                     }
                     else
                     {
@@ -27186,10 +27449,17 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_parse_bind_block_walk(CTypeParseMachine
                 index = typeof_body_start - 1;
                 continue;
             }
+            // A planned declaration states its declarators, and whether its
+            // specifiers rule out inference, which both scans would find.
+            bool no_auto = planned_declaration && declaration_hint->no_auto;
             CAutoDeclarationInfo auto_declaration_info = {0};
-            bool auto_declaration = c_parse_auto_declaration_info(result, preprocess, scope_stack[scope_count - 1], index, end, &auto_declaration_info);
+            bool auto_declaration =
+                !no_auto && c_parse_auto_declaration_info(result, preprocess, scope_stack[scope_count - 1], index, end, &auto_declaration_info);
             if (end < body_end &&
-                c_parse_local_declarations(machine, result_arena, result, preprocess, scope_stack[scope_count - 1], declaration_index, index, end, false))
+                (plan ? c_parse_planned_local_declarations(machine, result_arena, result, preprocess, scope_stack[scope_count - 1], declaration_index,
+                                                           index, end, plan, planned_declaration ? declaration_hint : 0)
+                      : c_parse_local_declarations(machine, result_arena, result, preprocess, scope_stack[scope_count - 1], declaration_index, index,
+                                                   end, false)))
             {
                 index = end + 1;
                 statement_start = true;
@@ -29143,9 +29413,14 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                         {
                             name_token = parenthesized_name_token;
                             u32 function_name = 0;
-                            if (c_parse_parenthesized_declarator_is_function(preprocess, index, token_count, &function_name))
+                            u32 list_open = 0;
+                            if (c_parse_parenthesized_declarator_parameter_list(preprocess, index, token_count, &function_name, &list_open))
                             {
+                                // The name's own list opens the old-style
+                                // identifier list, inside the group or after
+                                // it: `int (k(a)) int a; {...}` (GitHub #3368).
                                 function_name_token = parenthesized_name_token;
+                                parameter_list_open = list_open;
                             }
                         }
                         else if (ordinary_function)
@@ -29240,15 +29515,16 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                     else
                     {
                         is_variadic |= c_parser_parameter_list_is_variadic(preprocess, index, delimiter_count, top_level_parenthesis);
-                        if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS && delimiter_count == 1 &&
-                            parameter_list_open != C_ID_UNDERLYING_INVALID && delimiter_stack[0] == parameter_list_open)
+                        if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS && parameter_list_open != C_ID_UNDERLYING_INVALID &&
+                            delimiter_stack[delimiter_count - 1] == parameter_list_open)
                         {
                             parameter_list_close = index;
                             identifier_list_start = parameter_list_open + 1;
                             identifier_list_token_count = index - identifier_list_start;
                             identifier_list_candidate = c_parser_identifier_list(
                                 preprocess, identifier_list_start, identifier_list_start + identifier_list_token_count);
-                            old_style_declaration_cursor = index + 1;
+                            old_style_declaration_cursor = delimiter_count == 1 ? index + 1
+                                                                                : c_parse_declarator_groups_end(preprocess, index, delimiter_count - 1, token_count);
                         }
                         delimiter_count -= 1;
                     }
@@ -29543,8 +29819,9 @@ struct CParserTreeDeclarator
     // its parameter or identifier list.
     u32 open;
     u32 list;
-    // The walker reads a function name; and reads it as `name (`, with no
-    // group around it, so that this list is its identifier list.
+    // The walker reads a function name, whose list is then its identifier
+    // list, inside a group or not (GitHub #3368); and no `(` is written
+    // before the name, so that the list closes on the declarator's last `)`.
     bool function;
     bool ordinary;
     // A function derivation stands outside every group. It is the last
@@ -29969,6 +30246,16 @@ BUSTER_C_INTERNAL bool c_parser_tree_declarator_end(CParserTreeSplit* split, CPa
     return shaped || c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_TOKENS, after);
 }
 
+// The `)` of a function declarator's own list: the token before `after`,
+// the token after the declarator, unless a group closes after the list, as
+// in `int (k(a))` (GitHub #3368).
+BUSTER_C_INTERNAL u32 c_parser_tree_list_close(CParserTreeSplit const* split, CParserTreeDeclarator const* declarator, u32 after)
+{
+    return declarator->ordinary ? after - 1
+                                : c_parse_matching_delimiter(split->preprocess, declarator->open, after, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                             C_PUNCTUATOR_RIGHT_PARENTHESIS);
+}
+
 // One DECLARATION: c_parse_ast_run's whole-declaration scan, then its split
 // into one record per declarator when a top-level comma separates them.
 BUSTER_C_INTERNAL bool c_parser_tree_declaration(CParserTreeSplit* split, u32 node, u32 start, u32 end)
@@ -30031,13 +30318,12 @@ BUSTER_C_INTERNAL bool c_parser_tree_declaration(CParserTreeSplit* split, u32 no
         }
         segment_starts[count] = end;
         // The walker's parameter_list_open: the first declarator whose
-        // function name it reads, before any `=`, and only when that name is
-        // read as `name (`.
+        // function name it reads, before any `=`.
         u32 list_owner = UINT32_MAX;
         bool list_closed = false;
         for (u32 index = 0; shaped && index < count && !list_closed; index += 1)
         {
-            list_owner = declarators[index].ordinary ? index : list_owner;
+            list_owner = declarators[index].function ? index : list_owner;
             list_closed = declarators[index].function || parts[index].initializer != C_AST_NODE_INVALID;
         }
         u32 identifier_list_start = 0;
@@ -30053,7 +30339,7 @@ BUSTER_C_INTERNAL bool c_parser_tree_declaration(CParserTreeSplit* split, u32 no
             if (shaped && index == list_owner)
             {
                 identifier_list_start = declarators[index].open + 1;
-                identifier_list_count = after - 1 - identifier_list_start;
+                identifier_list_count = c_parser_tree_list_close(split, &declarators[index], after) - identifier_list_start;
             }
         }
         bool split_list = count > 1;
@@ -30117,15 +30403,15 @@ BUSTER_C_INTERNAL bool c_parser_tree_definition(CParserTreeSplit* split, u32 nod
                   c_parser_tree_declarator_end(split, &declarator, brace);
     if (shaped)
     {
-        bool candidate = declarator.ordinary && c_parser_tree_identifier_list(split, declarator.list);
+        bool candidate = c_parser_tree_identifier_list(split, declarator.list);
         CParserDeclaration* declaration = arena_allocate(split->arena, CParserDeclaration, 1);
         *declaration = (CParserDeclaration){
             .token_start = start,
             .token_count = end - start,
             .body_start = brace + 1,
             .body_token_count = (end - 1) - (brace + 1),
-            .identifier_list_start = declarator.ordinary ? declarator.open + 1 : 0,
-            .identifier_list_token_count = declarator.ordinary ? (brace - 1) - (declarator.open + 1) : 0,
+            .identifier_list_start = declarator.open + 1,
+            .identifier_list_token_count = c_parser_tree_list_close(split, &declarator, brace) - (declarator.open + 1),
             .name_token = declarator.name,
             .function_name_token = declarator.name,
             .kind = specifiers.typedef_word ? C_PARSER_DECLARATION_TYPEDEF : C_PARSER_DECLARATION_FUNCTION,

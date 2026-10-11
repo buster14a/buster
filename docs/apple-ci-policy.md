@@ -35,8 +35,10 @@ The strict retirement workflow has five native hosts instead of six.
 
 All active GitHub workflows and their matrices are covered by the workflow
 policy regression. The inspected tree contains no Forgejo workflow definitions
-or reusable Intel Apple workflow. Other Apple-hosted auxiliaries use `macos-26`; the fake-tool mobile
-lifecycle lane retains its existing Apple Silicon `macos-15` label. No Rosetta, nightly replacement or opt-in Intel job is introduced.
+or reusable Intel Apple workflow. Apple-hosted auxiliaries use the explicit
+`macos-26` Apple Silicon runner, including mobile monitor `launch-trace`.
+The mobile `fake-tools` matrix retains the documented temporary `macos-15`
+exception below. No Rosetta, nightly replacement or opt-in Intel job is introduced.
 Unused Intel resource samplers, runner lint registration, iOS CI architecture
 selection and the Intel macOS Zig download pin are removed.
 
@@ -56,6 +58,66 @@ certify a live `CI complete` run.
 The merge-queue watcher's live step budgets match the five desktop release
 lanes. Its separate historical Intel budget preserves cancellation of old
 workflow revisions and the #1866 incident regression; it schedules no work.
+
+## Mobile monitor runner policy (#3489)
+
+[The mobile monitor workflow](../.github/workflows/ios-monitor-tests.yml) keeps
+three separate jobs:
+
+| Job | Runner selection | Job cap |
+|---|---|---|
+| `launch-trace` | `ubuntu-26.04`, `macos-26` | 5 minutes |
+| `fake-tools` | `ubuntu-26.04`, `macos-15` (temporary exception) | 10 minutes |
+| `native-probes` | `macos-26` | 30 minutes |
+
+The Linux siblings and Darwin controls remain required by their existing
+path-filtered pull-request/main-push workflow; it has no merge-group trigger.
+The iOS controls use `/bin/bash`; Android controls use Homebrew Bash and GNU
+coreutils on macOS. Both matrix jobs retain Python, system/selected Bash and
+the positively verified GNU timer path/version alongside checkout and machine
+records. Artifact names remain keyed by `matrix.os`, run ID and attempt.
+
+Runner migration qualification requires repeated hosted execution of both
+complete matrix suites on the recorded candidate/checkout, retaining every
+attempt's image, tools, results and artifacts. Passing native simulator probes
+alone does not qualify these different suites. The selected image does not
+establish a speedup or resolve the independent lifecycle failures in
+[#2684](https://github.com/buster14a/buster/issues/2684) or
+[#3479](https://github.com/buster14a/buster/issues/3479). All inner deadlines,
+child-process ownership/cleanup assertions and the 5/10/30-minute caps remain.
+The maintained workflow-policy regression covers both matrix selections,
+the native-probe runner, caps and artifact templates, including the single
+explicit exception below.
+
+### Temporary fake-tools version exception
+
+- **Purpose:** retain the existing Darwin lifecycle environment while full
+  macOS-26 migration qualification is blocked. This is a qualification hold,
+  not a macOS-15-only SDK or compatibility requirement.
+- **Evidence:** candidate `179c6520b87eab6d35502ff07ea2ab05c08bfc95`, actual
+  PR merge checkout `9f3ac93b519ec836f806aeb3e03a2890858d3a37`, image
+  `macos-26-arm64` / `20260907.0351.1` (macOS 26.6.2).
+  [Execution 1 passed](https://github.com/buster14a/buster/actions/runs/38136064255/job/114460058889);
+  [execution 2 failed](https://github.com/buster14a/buster/actions/runs/38136064255/job/114461666348)
+  with `attached_status=1`: `rejected-probes` returned 143 instead of 1
+  after the expected missing-marker diagnostics and simulator-shutdown message.
+  Its [retained failure artifact](https://github.com/buster14a/buster/actions/runs/38136064255/artifacts/11701860722)
+  records the full attempt. Android attribution/summary controls were skipped
+  because the attached group failed, so that execution is not a suite pass.
+- **Owner:** build-test mobile CI policy, tracked by
+  [#3489](https://github.com/buster14a/buster/issues/3489); the attached failure
+  diagnosis remains with [#3479](https://github.com/buster14a/buster/issues/3479)
+  and the separate job-cap diagnosis with #2684.
+- **Review condition:** re-evaluate after the attached lifecycle failure is
+  attributed/fixed, and whenever the monitor runner policy changes. Remove the
+  pin only after repeated complete hosted `fake-tools` executions pass on the
+  recorded macOS-26 candidate with unchanged controls, inner deadlines and
+  ten-minute cap. Preserve unsuccessful attempts; do not retry until green.
+
+The observed failure shape also occurs on macOS 15. Retaining that label
+does not certify the older image as reliable or blame the newer image.
+`launch-trace` has its own qualification and no version exception; neither
+the Linux sibling nor `native-probes` substitutes for the full lifecycle suite.
 
 ## Compiler and retirement boundaries
 

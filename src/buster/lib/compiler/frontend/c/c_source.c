@@ -9092,6 +9092,7 @@ struct CPreprocessSourceFrame
     u32 guard_symbol;
     u8 guard_state;
     bool line_start;
+    bool system_header;
     FileMapRead source_map;
     CIncludeSearchOrigin include_origin;
 };
@@ -9287,6 +9288,36 @@ BUSTER_C_INTERNAL CIncludeFileStatus c_include_file_entry(CIncludeFileTable* tab
 }
 
 #undef C_INCLUDE_FILE_SLOT_HASH
+
+BUSTER_C_INTERNAL void c_preprocess_dependency_record(Arena* arena, CPreprocessDetail* detail, CIncludeFileEntry* entry, String8 path,
+                                                       bool system, u32* capacity)
+{
+    if (entry->dependency_slot)
+    {
+        CPreprocessDependency* dependency = detail->dependencies + entry->dependency_slot - 1;
+        if (dependency->system && !system)
+        {
+            dependency->system = false;
+        }
+    }
+    else
+    {
+        if (detail->dependency_count == *capacity)
+        {
+            u32 next_capacity = *capacity ? (*capacity <= UINT32_MAX / 2 ? *capacity * 2 : UINT32_MAX) : 16;
+            CPreprocessDependency* dependencies = arena_allocate(arena, CPreprocessDependency, next_capacity);
+            if (detail->dependency_count)
+            {
+                memcpy(dependencies, detail->dependencies, (u64)detail->dependency_count * sizeof(*dependencies));
+            }
+            detail->dependencies = dependencies;
+            *capacity = next_capacity;
+        }
+        u32 index = detail->dependency_count++;
+        detail->dependencies[index] = (CPreprocessDependency){.path = path, .system = system};
+        entry->dependency_slot = index + 1;
+    }
+}
 
 // Whether an inclusion of `entry` produces no tokens: #pragma once, a repeated
 // #import (the root is entered before the table exists, so it is compared
@@ -12142,7 +12173,7 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrSourceRegion) == 80);
 // fields still follow the explicit rehoming rules below.
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSymbolTable) == 72);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CDiagnostic) == 48);
-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 632 + 32 * BUSTER_INCLUDE_TESTS);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 648 + 32 * BUSTER_INCLUDE_TESTS);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceFileMetrics) == 32);
 BUSTER_CT_CHECK(sizeof(CPragmaState) == 8);
 
@@ -12301,6 +12332,18 @@ BUSTER_C_INTERNAL void c_preprocess_seal(CPreprocessSeal* seal, CPreprocessResul
         {
             detail->lexed_files[index].path = c_preprocess_seal_string(seal, detail->lexed_files[index].path);
         }
+        detail->dependencies = c_preprocess_seal_typed(seal, detail->dependencies, CPreprocessDependency, detail->dependency_count);
+        for (u32 index = 0; index < detail->dependency_count; index += 1)
+        {
+            String8 path = detail->dependencies[index].path;
+            if (path.pointer)
+            {
+                detail->dependencies[index].path = string_duplicate_arena(seal->destination, path, false);
+                seal->metrics.references += 1;
+                seal->metrics.sealed_bytes += path.length;
+                seal->metrics.sealed_objects += 1;
+            }
+        }
         detail->macro_dump = c_preprocess_seal_string(seal, detail->macro_dump);
         result->detail = detail;
     }
@@ -12354,10 +12397,15 @@ u64 c_test_preprocess_references_range(CPreprocessResult const* result, void con
     if (result->detail)
     {
         count += c_test_pointer_in_range(result->detail->lexed_files, start, end) +
+                 c_test_pointer_in_range(result->detail->dependencies, start, end) +
                  c_test_pointer_in_range(result->detail->output_spacing, start, end);
         for (u32 index = 0; index < result->detail->lexed_file_count; index += 1)
         {
             count += c_test_pointer_in_range(result->detail->lexed_files[index].path.pointer, start, end);
+        }
+        for (u32 index = 0; index < result->detail->dependency_count; index += 1)
+        {
+            count += c_test_pointer_in_range(result->detail->dependencies[index].path.pointer, start, end);
         }
     }
     return count;
@@ -13455,6 +13503,20 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     CIncludeFileTable include_files = {
         .arena = arena,
     };
+    u32 dependency_capacity = 0;
+    if (options.record_dependencies && options.source_path.length && !string_equal(options.source_path, S8("-")))
+    {
+        CIncludeFileEntry* root_file = 0;
+        CIncludeFileStatus root_status = c_include_file_entry(&include_files, root_frame.identity, options.source_path, &root_file);
+        if (root_status == C_INCLUDE_FILE_OK)
+        {
+            c_preprocess_dependency_record(arena, result.detail, root_file, options.source_path, false, &dependency_capacity);
+        }
+        else
+        {
+            c_include_file_diagnostic(arena, &result, (CSourceLocation){.line = 1, .column = 1}, root_status, options.source_path);
+        }
+    }
     CIncludeProbeTable include_probes = {
         .arena = arena,
     };
@@ -13817,6 +13879,19 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                             }
                             else
                             {
+                                bool include_system = false;
+                                if (options.record_dependencies)
+                                {
+                                    include_system = source_frame->system_header ||
+                                                     include_origin.kind == C_INCLUDE_SEARCH_SYSTEM_PATH ||
+                                                     include_origin.kind == C_INCLUDE_SEARCH_BUILTIN;
+                                    if (include_origin.kind != C_INCLUDE_SEARCH_BUILTIN &&
+                                        !string_equal(include_path, S8("<command-line>")))
+                                    {
+                                        c_preprocess_dependency_record(arena, result.detail, include_file, include_path,
+                                                                      include_system, &dependency_capacity);
+                                    }
+                                }
                                 if (is_import)
                                 {
                                     // Mark before descending so a recursive
@@ -13859,6 +13934,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                                         .depth = source_frame->depth + 1,
                                         .line_start = true,
                                         .include_origin = include_origin,
+                                        .system_header = include_system,
                                     };
                                     include_frame->map_entry = map.count;
                                     c_source_map_append(&map, (IrSourceRegion){

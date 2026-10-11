@@ -158,15 +158,19 @@ of another name is ordinary data, as the host linkers leave it, and the
 assembler refuses a `@preinit_array` section of another name. A preinit entry
 in a `-shared` output is refused with a named diagnostic, as `ld` does.
 
-A dynamic executable (x86-64 fixed-address or `-pie`, AArch64, and the
-Android images staged through them) publishes its preinit entries through
+A dynamic executable (x86-64 fixed-address or `-pie`, AArch64, the x86-64
+Android PIE and the AArch64 Android image staged through them) publishes its
+preinit entries through
 `DT_PREINIT_ARRAY`/`DT_PREINIT_ARRAYSZ`, so the loader runs them with argc,
 argv and envp before the constructors of the shared objects it loads, as for
 `ld` and `lld` (#1243). `link_elf_preinit_array_split` moves the leading
 preinit run of the merged constructor array onto the end of the writable data
 with its relocations, so the entry stub calls only the constructors. A static
 executable has no loader and no dependency constructors; its entry stub still
-calls the preinit entries first. See the
+calls the preinit entries first. An x86-64 Android executable is always the
+PIE, so each array entry carries an `R_X86_64_RELATIVE`; the Android CI job
+executes one under bionic and checks the order (`android/runtime_order.sh`).
+See the
 [ELF initialization contract](https://gabi.xinuos.com/v42/elf/08-dynamic.html#initialization-and-termination-functions).
 
 The bounded refusal repair for #1243 rejects unsupported allocated section
