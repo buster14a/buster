@@ -378,6 +378,18 @@ fixture as well as compiling both architectures.
   constant or cast whose every use is such a cast is marked `fused_dead` and
   selects into nothing. Edge arguments count as uses, so a value reaching a
   block parameter keeps its row. AArch64 selection does not do this yet.
+- x86-64 selection folds a constant `INDEX` index into its base address
+  offset (`machine_x64_index_constant_offset`). When the index is a
+  `CONSTANT_INTEGER` whose value, read at the index's width and signedness, is
+  non-negative and whose scaled offset fits a 32-bit displacement, the element
+  address is selected through `machine_x64_select_place_address_offset`. A
+  direct frame array then gets one `LEA_FRAME`, which the frame-address recipe
+  above rematerializes; a pointer gets one `LEA_OFFSET`, or a copy at offset
+  zero. Otherwise the result is a mutable copy of the base plus a scaled index,
+  which no recipe covers. A constant that only such rows and constant-copying
+  casts read is `fused_dead`. A `GLOBAL` base folds like a pointer, so its
+  element address is not rematerialized. Negative indices and AArch64 keep the
+  computed form.
 - FAST/QUALITY start a join's or loop header's general block parameters in
   registers. `machine_fast_parameter_contract` gives each non-pinned,
   non-mutable general parameter a caller-saved (or already-saved) register
