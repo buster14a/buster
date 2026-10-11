@@ -1,0 +1,39 @@
+name: Executable cleanup CI evidence
+on:
+  push:
+    branches: [codex/3650-cleanup-ci-evidence]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  read-evidence:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Download exact completed Windows artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: '11717178726,11716299447,11717203919'
+          path: ${{ runner.temp }}/evidence
+          github-token: ${{ github.token }}
+          run-id: '38179528587'
+      - name: Inspect bounded textual test receipts
+        shell: bash
+        run: |
+          set -euo pipefail
+          find "$RUNNER_TEMP/evidence" -type f -name '*.tar.gz' >"$RUNNER_TEMP/archives"
+          while IFS= read -r archive; do
+            tar --no-same-owner --no-same-permissions -xzf "$archive" -C "$RUNNER_TEMP/evidence"
+          done <"$RUNNER_TEMP/archives"
+          if command -v rg >/dev/null 2>&1; then
+            rg --files "$RUNNER_TEMP/evidence" >"$RUNNER_TEMP/inventory"
+          else
+            find "$RUNNER_TEMP/evidence" -type f >"$RUNNER_TEMP/inventory"
+          fi
+          head -n 100 "$RUNNER_TEMP/inventory"
+          find "$RUNNER_TEMP/evidence" -type f \( -name '*.log' -o -name '*.json' -o -name '*.txt' \) >"$RUNNER_TEMP/text-files"
+          while IFS= read -r path; do
+            printf '\nEvidence file: %s\n' "$path"
+            grep -aE 'TEST_EXECUTABLE_CLEANUP|compiler_driver_test_executable_cleanup|module=compiler_driver_tests|Unit tests \(|test_all|tested_source_sha|checkout_sha|43e5023481672e4bc3cdbfb1024e1378aaafffd7|b91e4d50b95f338f20f95945dd83944f238b3496' "$path" >"$RUNNER_TEMP/matches" || true
+            head -c 32768 "$RUNNER_TEMP/matches"
+          done <"$RUNNER_TEMP/text-files"
