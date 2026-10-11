@@ -46,7 +46,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x64_narrow_call_results(
     bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source));
     BUSTER_TEST(arguments, written);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 host_source = S8(
+    String8 host_parts[] = {S8(
         "#if defined(__APPLE__)\n"
         "#define ABI_SYMBOL \"_\"\n"
         "#else\n"
@@ -95,7 +95,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x64_narrow_call_results(
         "__asm__(\".text\\n.p2align 4\\n.globl \" ABI_SYMBOL \"foreign_u64_value\\n\" ABI_SYMBOL \"foreign_u64_value:\\nmovabsq $0x5a96c3e17b428d01, %rax\\nret\\n\");\n"
         "extern unsigned long long foreign_u64_value(void);\n"
         "extern long long direct_u64_value(void);\n"
-        "extern long long indirect_u64_value(unsigned long long (*)(void));\n"
+        "extern long long indirect_u64_value(unsigned long long (*)(void));\n"), S8(
         "extern int direct_bool_branches(void);\n"
         "extern int indirect_bool_branches(_Bool (*)(void), _Bool (*)(void));\n"
         "int main(void)\n"
@@ -126,7 +126,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x64_narrow_call_results(
         "    bad |= direct_bool_branches() != 0;\n"
         "    bad |= indirect_bool_branches(foreign_bool_false, foreign_bool_true) != 0;\n"
         "    return bad;\n"
-        "}\n");
+        "}\n")};
+    String8 host_source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_parts), false);
     String8 host_input = buster_test_temporary_path(arguments->arena, S8("buster-x64-narrow-results-host"), S8(".c"));
     String8 host_object = buster_test_temporary_path(arguments->arena, S8("buster-x64-narrow-results-host"), S8(".o"));
     bool host_written = file_write(host_input, BUSTER_SLICE_TO_BYTE_SLICE(host_source));
