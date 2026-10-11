@@ -16156,6 +16156,14 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_f80(MachineX64Encoder* encoder, Machin
     }
 }
 
+// Publishes the frame event of the prologue instruction just emitted, at
+// its real end offset. A full event array fails the encode.
+BUSTER_GLOBAL_LOCAL void machine_x64_frame_event(MachineX64Encoder* encoder, CodegenFunctionDescriptor* frame, u32 capacity,
+                                                 CodegenUnwindActionKind kind, u8 register_index, u32 value)
+{
+    encoder->overflow |= !codegen_unwind_action_append(frame, capacity, encoder->count, kind, register_index, value);
+}
+
 MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement)
 {
     return machine_encode_x86_64_into(arena, function, placement, 0, 0);
@@ -16275,27 +16283,40 @@ MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* fu
     result.block_offsets = arena_allocate(arena, u32, function->block_count);
     result.row_offsets = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
     // Prologue: the frame base is RBP, matching the canonical path, and
-    // the placement's callee-saved registers push right after it in fixed
-    // RBX, R14, R15 order so the unwind actions can name exact offsets.
+    // the placement's callee-saved registers push right after it. Each frame
+    // instruction publishes its frame event at the encoder's real cursor.
     bool saves_first = function->target && function->target->saves_precede_frame_pointer;
     bool windows_dynamic_stack = saves_first && dynamic_stack;
     if (windows_dynamic_stack && placement->frame_size > INT32_MAX)
     {
         return result;
     }
+    // PUSH RBP, MOV RBP, every callee-saved PUSH, one allocation per probe
+    // page plus the partial one.
+    u32 frame_event_capacity = 3u + placement->frame_size / CODEGEN_X64_STACK_PROBE_PAGE;
+    for (u32 push_register = 0; push_register < MACHINE_X64_ZMM0; push_register += 1)
+    {
+        frame_event_capacity += (u32)((placement->callee_saved_mask >> push_register) & 1u);
+    }
+    CodegenFunctionDescriptor frame = {.unwind_actions = arena_allocate(arena, CodegenUnwindAction, frame_event_capacity)};
     machine_x64_emit_fixed_register(&encoder, MACHINE_X64_FIXED_TEMPLATE_PUSH + MACHINE_X64_RBP, S8("PUSH"), MACHINE_X64_RBP, 64);
+    machine_x64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_PUSH_REGISTER, MACHINE_X64_RBP, 0);
     if (!saves_first)
     {
         machine_x64_emit_fixed_registers(&encoder, MACHINE_X64_FIXED_TEMPLATE_MOV_RBP_RSP, S8("MOV"), MACHINE_X64_RBP, MACHINE_X64_RSP, 64);
+        machine_x64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, MACHINE_X64_RBP, 0);
     }
     // Ascending register order, which is RBX, R12-R15 under System V and
-    // gains RSI and RDI under Win64; the unwind actions walk the same mask
-    // the same way, so their offsets stay exact under either file.
+    // gains RSI and RDI under Win64. Win64 pushes them before establishing
+    // RBP: its unwind codes restore a pushed register off the stack pointer
+    // they are recovered with, which only holds while the pushes precede
+    // UWOP_SET_FPREG, and this path's calls move RSP in the body.
     for (u32 push_register = 0; push_register < MACHINE_X64_ZMM0; push_register += 1)
     {
         if (placement->callee_saved_mask & (1ull << push_register))
         {
             machine_x64_emit_fixed_register(&encoder, MACHINE_X64_FIXED_TEMPLATE_PUSH + push_register, S8("PUSH"), push_register, 64);
+            machine_x64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_PUSH_REGISTER, (u8)push_register, 0);
         }
     }
     if (saves_first && !windows_dynamic_stack)
@@ -16303,6 +16324,7 @@ MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* fu
         // The frame pointer lands below the saves, so they sit at its
         // positive offsets. Its fixed epilogue adds back the allocation.
         machine_x64_emit_fixed_registers(&encoder, MACHINE_X64_FIXED_TEMPLATE_MOV_RBP_RSP, S8("MOV"), MACHINE_X64_RBP, MACHINE_X64_RSP, 64);
+        machine_x64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, MACHINE_X64_RBP, 0);
     }
     // The stack allocation mirrors the canonical chunked form: at most a
     // page per subtract with a probe touch after each, so a frame larger
@@ -16312,12 +16334,12 @@ MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* fu
     {
         // Reuse the direct emitter's bounded Win64 probe. Its R10/R11
         // scratch does not disturb incoming integer, float or hidden-result
-        // arguments, and RSP changes only at the final allocation instruction.
+        // arguments, and RSP changes only at the final allocation instruction,
+        // whose event the probe publishes itself.
         CodegenBuffer probe = {.bytes = encoder.bytes, .count = encoder.count, .capacity = encoder.capacity};
-        (void)codegen_x64_emit_windows_stack_allocate(&probe, frame_remaining, 0, 0, 0);
+        (void)codegen_x64_emit_windows_stack_allocate(&probe, frame_remaining, &frame, frame_event_capacity, 0);
         encoder.count = (u32)probe.count;
         encoder.overflow |= probe.error != CODEGEN_ERROR_NONE;
-        result.frame_allocation_offset = encoder.count;
         frame_remaining = 0;
     }
     while (frame_remaining)
@@ -16331,6 +16353,7 @@ MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* fu
             (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("SUB"), MACHINE_X64_RSP, frame_chunk, 64,
                                                                frame_chunk_byte ? 8 : 32, 0);
         }
+        machine_x64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, frame_chunk);
         if (machine_x64_emit_fixed_template(&encoder, MACHINE_X64_FIXED_TEMPLATE_PROBE, 0) == MACHINE_X64_FIXED_TEMPLATE_UNPUBLISHED)
         {
             (void)machine_x64_emit_metadata_memory_immediate(&encoder, S8("TEST"), MACHINE_X64_RSP, 0, 0, 8, 8, 0);
@@ -16340,10 +16363,11 @@ MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* fu
     if (windows_dynamic_stack)
     {
         machine_x64_emit_fixed_registers(&encoder, MACHINE_X64_FIXED_TEMPLATE_MOV_RBP_RSP, S8("MOV"), MACHINE_X64_RBP, MACHINE_X64_RSP, 64);
-        BUSTER_CHECK(encoder.count <= UINT8_MAX);
-        result.frame_pointer_offset = (u8)encoder.count;
+        machine_x64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, MACHINE_X64_RBP, 0);
+        result.frame_pointer_after_allocation = true;
         encoder.frame_base_offset = placement->frame_size;
     }
+    u32 prologue_size = encoder.count;
     u32 edit_cursor = 0;
     MachineX64FlagsLiveness flags_liveness = {.arena = arena, .function = function};
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
@@ -17740,6 +17764,9 @@ MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* fu
         arena_allocate(arena, MachineInlineAssemblyRelocation, inline_assembly_relocations.total_count);
     result.inline_assembly_relocation_count = inline_assembly_relocations.total_count;
     machine_stream_flatten(&inline_assembly_relocations, result.inline_assembly_relocations);
+    result.frame_events = frame.unwind_actions;
+    result.frame_event_count = frame.unwind_action_count;
+    result.prologue_size = prologue_size;
     result.bytes = encoder.bytes;
     result.byte_count = encoder.count;
     result.valid = true;

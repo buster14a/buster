@@ -785,12 +785,21 @@ fixture as well as compiling both architectures.
   Smaller vectors and model-dependent register splitting retain their MIR
   representation and admission rules;
   unsupported shapes are refused without a direct fallback.
+- MIR prologue unwind actions are frame events the target encoder appends
+  right after emitting each frame instruction, at its real cursor
+  (`MachineEncodeResult.frame_events`, `prologue_size`). The shared Windows
+  probes publish their own event span through the same descriptor append.
+  Module codegen copies the finished stream into the function descriptor and
+  never re-derives instruction lengths, save masks or frame chunks; DWARF CFI
+  and PE serializers keep their format checks. A new prologue instruction
+  that changes SP, saves a register or establishes the frame pointer must
+  publish its event where it is emitted. The Windows AArch64 unwind format
+  needs an event for every prologue word, including no-effect ones (#1918).
 - Windows/UEFI x86-64 MIR frames larger than one page reuse
   `codegen_x64_emit_windows_stack_allocate`, the retained shared bounded
   R10/R11 probe loop. RSP stays unchanged until the final allocation, so a
-  large frame requires one allocation unwind action and a bounded prologue.
-  `MachineEncodeResult.frame_allocation_offset` supplies its actual byte offset
-  to unwind construction without widening the result on 64-bit hosts.
+  large frame requires one allocation unwind action and a bounded prologue;
+  the probe publishes that action at its actual end offset.
   Keep object creation and native Windows execution of
   `tests/basic_c_win64_large_frame.c` covered in every allocator mode; page
   probing must preserve all incoming argument registers and private copies.
@@ -888,8 +897,7 @@ fixture as well as compiling both architectures.
 - ELF/Mach-O AArch64 fixed frames are not limited by the scaled callee-save offset.
   Above that offset's reach, the prologue and each epilogue derive the compact
   save-area base from X29 in reserved X16, then use small unsigned offsets.
-  Module unwind construction counts both setup words and retains the actual
-  SP-relative save locations. Capacity planning includes large-offset body
+  Each save's frame event still names its SP-relative location. Capacity planning includes large-offset body
   transfers and aggregate-copy pieces; frame-size sums are checked before
   narrowing. Keep strict large-frame and packed-layout tests in all MIR modes.
 - AArch64 calls in functions containing dynamic stack allocations reserve
