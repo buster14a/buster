@@ -105,6 +105,10 @@ typedef struct NativeDynamicLibrary NativeDynamicLibrary;
 struct NativeDynamicLibrary
 {
     String8 name;
+    // Mach-O only: LC_LOAD_DYLIB versions. Zero retains the legacy 1.0.0
+    // value for API-created libraries that do not carry dylib metadata.
+    u32 mach_current_version;
+    u32 mach_compatibility_version;
     // PE only: the names the DLL's export directory lists.  The ELF export
     // list is `versioned_symbols`, which carries the same names and the
     // version each is published under, so ELF needs no second copy.

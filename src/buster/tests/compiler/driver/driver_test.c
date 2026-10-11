@@ -263,6 +263,185 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_test_store(u8* bytes, u64 offset, u64 v
     }
 }
 
+BUSTER_GLOBAL_LOCAL void compiler_driver_test_store_be(u8* bytes, u64 offset, u64 value, u32 size)
+{
+    for (u32 index = 0; index < size; index += 1)
+    {
+        bytes[offset + index] = (u8)(value >> ((size - index - 1) * 8));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL u32 compiler_driver_test_mach_read_u32(ByteSlice bytes, u64 offset)
+{
+    u32 result = 0;
+    if (bytes.pointer && offset <= bytes.length && sizeof(u32) <= bytes.length - offset)
+    {
+        result = (u32)bytes.pointer[offset] | ((u32)bytes.pointer[offset + 1] << 8) | ((u32)bytes.pointer[offset + 2] << 16) |
+                 ((u32)bytes.pointer[offset + 3] << 24);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_mach_dylib(Arena* arena, u32 cputype, u32 filetype, String8 install_name,
+                                                               u32 current_version, u32 compatibility_version)
+{
+    u32 command_size = (u32)align_forward(24 + install_name.length + 1, 8);
+    u64 length = 32 + command_size;
+    u8* bytes = arena_allocate(arena, u8, length);
+    memset(bytes, 0, length);
+    compiler_driver_test_store(bytes, 0, 0xfeedfacf, 4);
+    compiler_driver_test_store(bytes, 4, cputype, 4);
+    compiler_driver_test_store(bytes, 12, filetype, 4);
+    compiler_driver_test_store(bytes, 16, 1, 4);
+    compiler_driver_test_store(bytes, 20, command_size, 4);
+    compiler_driver_test_store(bytes, 32, 0xd, 4);
+    compiler_driver_test_store(bytes, 36, command_size, 4);
+    compiler_driver_test_store(bytes, 40, 24, 4);
+    compiler_driver_test_store(bytes, 48, current_version, 4);
+    compiler_driver_test_store(bytes, 52, compatibility_version, 4);
+    memcpy(bytes + 56, install_name.pointer, install_name.length);
+    return (ByteSlice){.pointer = bytes, .length = length};
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_mach_fat(Arena* arena, ByteSlice const* slices, u32 const* cputypes, u32 slice_count,
+                                                              bool wide)
+{
+    u64 entry_size = wide ? 32 : 20;
+    u64 slice_offset = align_forward(8 + (u64)slice_count * entry_size, 8);
+    u64 length = slice_offset;
+    for (u32 index = 0; index < slice_count; index += 1)
+    {
+        length = align_forward(length, 8) + slices[index].length;
+    }
+    u8* bytes = arena_allocate(arena, u8, length);
+    memset(bytes, 0, length);
+    compiler_driver_test_store_be(bytes, 0, wide ? 0xcafebabf : 0xcafebabe, 4);
+    compiler_driver_test_store_be(bytes, 4, slice_count, 4);
+    u64 next_slice = slice_offset;
+    for (u32 index = 0; index < slice_count; index += 1)
+    {
+        u64 entry = 8 + (u64)index * entry_size;
+        next_slice = align_forward(next_slice, 8);
+        compiler_driver_test_store_be(bytes, entry, cputypes[index], 4);
+        if (wide)
+        {
+            compiler_driver_test_store_be(bytes, entry + 8, next_slice, 8);
+            compiler_driver_test_store_be(bytes, entry + 16, slices[index].length, 8);
+            compiler_driver_test_store_be(bytes, entry + 24, 3, 4);
+        }
+        else
+        {
+            compiler_driver_test_store_be(bytes, entry + 8, next_slice, 4);
+            compiler_driver_test_store_be(bytes, entry + 12, slices[index].length, 4);
+            compiler_driver_test_store_be(bytes, entry + 16, 3, 4);
+        }
+        memcpy(bytes + next_slice, slices[index].pointer, slices[index].length);
+        next_slice += slices[index].length;
+    }
+    return (ByteSlice){.pointer = bytes, .length = length};
+}
+
+typedef struct CompilerDriverTestMachLoadCommand
+{
+    String8 name;
+    u32 current_version;
+    u32 compatibility_version;
+} CompilerDriverTestMachLoadCommand;
+
+typedef struct CompilerDriverTestMachLoadCommands
+{
+    CompilerDriverTestMachLoadCommand commands[32];
+    u32 count;
+    bool valid;
+} CompilerDriverTestMachLoadCommands;
+
+BUSTER_GLOBAL_LOCAL CompilerDriverTestMachLoadCommands compiler_driver_test_mach_load_commands(ByteSlice image)
+{
+    CompilerDriverTestMachLoadCommands result = {0};
+    if (image.pointer && image.length >= 32)
+    {
+        u32 command_count = compiler_driver_test_mach_read_u32(image, 16);
+        u32 command_bytes = compiler_driver_test_mach_read_u32(image, 20);
+        u64 cursor = 32;
+        u64 end = cursor + command_bytes;
+        bool valid = end <= image.length;
+        for (u32 index = 0; index < command_count && valid; index += 1)
+        {
+            u32 command = compiler_driver_test_mach_read_u32(image, cursor);
+            u32 command_size = compiler_driver_test_mach_read_u32(image, cursor + 4);
+            valid = cursor <= end && end - cursor >= 8 && command_size >= 8 && command_size <= end - cursor;
+            if (valid && command == 0xc)
+            {
+                u32 name_offset = compiler_driver_test_mach_read_u32(image, cursor + 8);
+                valid = command_size >= 24 && name_offset >= 24 && name_offset < command_size && result.count < BUSTER_ARRAY_LENGTH(result.commands);
+                if (valid)
+                {
+                    u8 const* name = image.pointer + cursor + name_offset;
+                    u8 const* terminator = memchr(name, 0, command_size - name_offset);
+                    valid = terminator != 0;
+                    if (valid)
+                    {
+                        result.commands[result.count++] = (CompilerDriverTestMachLoadCommand){
+                            .name = {.pointer = (char8*)name, .length = (u64)(terminator - name)},
+                            .current_version = compiler_driver_test_mach_read_u32(image, cursor + 16),
+                            .compatibility_version = compiler_driver_test_mach_read_u32(image, cursor + 20),
+                        };
+                    }
+                }
+            }
+            cursor += command_size;
+        }
+        result.valid = valid && cursor == end;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_test_mach_link(Arena* arena, String8 target, String8 source, String8 output,
+                                                                         String8 const* options, u32 option_count)
+{
+    String8 command[32];
+    u32 count = 0;
+    command[count++] = S8("-target");
+    command[count++] = target;
+    command[count++] = S8("-g0");
+    command[count++] = S8("-o");
+    command[count++] = output;
+    command[count++] = source;
+    for (u32 index = 0; index < option_count; index += 1)
+    {
+        command[count++] = options[index];
+    }
+    CompilerDriverInvocation invocation =
+        compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command, .length = count});
+    return compiler_driver_execute_invocation(arena, invocation);
+}
+
+BUSTER_GLOBAL_LOCAL u32 compiler_driver_test_mach_extra_library_count(CompilerDriverTestMachLoadCommands commands)
+{
+    u32 result = 0;
+    for (u32 index = 0; index < commands.count; index += 1)
+    {
+        if (!string_equal(commands.commands[index].name, S8("/usr/lib/libSystem.B.dylib")))
+        {
+            result += 1;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_mach_has_library(CompilerDriverTestMachLoadCommands commands, String8 name, u32 current_version,
+                                                               u32 compatibility_version)
+{
+    bool result = false;
+    for (u32 index = 0; index < commands.count && !result; index += 1)
+    {
+        CompilerDriverTestMachLoadCommand command = commands.commands[index];
+        result = string_equal(command.name, name) && command.current_version == current_version &&
+                 command.compatibility_version == compatibility_version;
+    }
+    return result;
+}
+
 // A minimal ELF shared object for `machine` whose .dynsym defines each name in
 // `names` as a global function: enough for the driver's export scan to treat
 // it as a readable libc without a target sysroot on the host.
@@ -14504,6 +14683,357 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_elf_helper_version(Arena* are
     compiler_driver_test_store(bytes, header + 44, 1, 4);
     compiler_driver_test_store(bytes, header + 48, 4, 8);
     return (ByteSlice){.pointer = bytes, .length = length};
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    Target aarch64 = target_parse_triple(S8("aarch64-apple-macos")).target;
+    Target x86_64 = target_parse_triple(S8("x86_64-apple-macos")).target;
+    ByteSlice arm_dylib = compiler_driver_test_mach_dylib(arena, 0x0100000c, 6, S8("@rpath/libarm.dylib"), 0x10203, 0x10000);
+    ByteSlice x86_dylib = compiler_driver_test_mach_dylib(arena, 0x01000007, 6, S8("@rpath/libx86.dylib"), 0x20304, 0x10000);
+    CompilerDriverMachDylibIdentity identity = {0};
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(arm_dylib, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("@rpath/libarm.dylib"));
+    BUSTER_TEST(arguments, identity.current_version == 0x10203 && identity.compatibility_version == 0x10000);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(x86_dylib, x86_64, &identity) == COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("@rpath/libx86.dylib"));
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(arm_dylib, x86_64, &identity) == COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    u8 bytes32[4] = {0xce, 0xfa, 0xed, 0xfe};
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity((ByteSlice){.pointer = bytes32, .length = sizeof(bytes32)}, aarch64,
+                                                               &identity) == COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    ByteSlice executable_dylib = compiler_driver_test_mach_dylib(arena, 0x0100000c, 2, S8("@rpath/not-a-dylib"), 0, 0);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(executable_dylib, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity((ByteSlice){.pointer = arm_dylib.pointer, .length = 31}, aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    ByteSlice malformed = {.pointer = arena_allocate(arena, u8, arm_dylib.length), .length = arm_dylib.length};
+    memcpy(malformed.pointer, arm_dylib.pointer, arm_dylib.length);
+    compiler_driver_test_store(malformed.pointer, 20, 8, 4);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(malformed, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    memcpy(malformed.pointer, arm_dylib.pointer, arm_dylib.length);
+    compiler_driver_test_store(malformed.pointer, 36, 4, 4);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(malformed, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    memcpy(malformed.pointer, arm_dylib.pointer, arm_dylib.length);
+    compiler_driver_test_store(malformed.pointer, 40, compiler_driver_test_mach_read_u32(arm_dylib, 36), 4);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(malformed, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    memcpy(malformed.pointer, arm_dylib.pointer, arm_dylib.length);
+    for (u64 index = 56; index < malformed.length; index += 1)
+    {
+        malformed.pointer[index] = 'x';
+    }
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(malformed, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    memcpy(malformed.pointer, arm_dylib.pointer, arm_dylib.length);
+    compiler_driver_test_store(malformed.pointer, 32, 2, 4);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(malformed, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+
+    ByteSlice fat_slices[] = {arm_dylib, x86_dylib};
+    u32 fat_cputypes[] = {0x0100000c, 0x01000007};
+    ByteSlice fat = compiler_driver_test_mach_fat(arena, fat_slices, fat_cputypes, BUSTER_ARRAY_LENGTH(fat_slices), false);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(fat, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("@rpath/libarm.dylib"));
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(fat, x86_64, &identity) == COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("@rpath/libx86.dylib"));
+    ByteSlice fat_x86_slices[] = {x86_dylib};
+    ByteSlice fat_x86 = compiler_driver_test_mach_fat(arena, fat_x86_slices, fat_cputypes + 1, 1, false);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(fat_x86, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    ByteSlice bad_fat = {.pointer = arena_allocate(arena, u8, fat.length), .length = fat.length};
+    memcpy(bad_fat.pointer, fat.pointer, fat.length);
+    compiler_driver_test_store_be(bad_fat.pointer, 16, fat.length - 1, 4);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(bad_fat, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    ByteSlice fat64 = compiler_driver_test_mach_fat(arena, fat_slices, fat_cputypes, 2, true);
+    BUSTER_TEST(arguments, compiler_driver_mach_dylib_identity(fat64, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("@rpath/libarm.dylib"));
+
+    String8 tbd_v4 = S8("--- !tapi-tbd-v4\n"
+                        "tbd-version: 4\n"
+                        "targets: [\n"
+                        "  arm64-macos,\n"
+                        "  x86_64-ios-simulator\n"
+                        "]\n"
+                        "install-name: \"@rpath/libquoted.dylib\"  \r\n"
+                        "current-version: \"1.2.12\"\n"
+                        "compatibility-version: '1'\n"
+                        "...\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_v4), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("@rpath/libquoted.dylib"));
+    BUSTER_TEST(arguments, identity.current_version == 0x1020c && identity.compatibility_version == 0x10000);
+    String8 tbd_arm64e = S8("--- !tapi-tbd-v4\n"
+                            "targets: [ arm64e-macos ]\n"
+                            "install-name: /usr/lib/libarm64e.dylib\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_arm64e), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE);
+    String8 tbd_v3 = S8("--- !tapi-tbd-v3\n"
+                        "archs: [ x86_64 ]\n"
+                        "install-name: /usr/lib/libplain.dylib\n"
+                        "current-version: 1.2.12\n"
+                        "compatibility-version: 1\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_v3), x86_64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_STRING_TEST(arguments, identity.install_name, S8("/usr/lib/libplain.dylib"));
+    BUSTER_TEST(arguments, identity.current_version == 0x1020c && identity.compatibility_version == 0x10000);
+    String8 tbd_missing_name = S8("--- !tapi-tbd-v4\ntargets: [ arm64-macos ]\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_missing_name), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    String8 tbd_second_document = S8("--- !tapi-tbd-v4\ntargets: [ arm64-macos ]\n"
+                                     "--- !tapi-tbd-v4\ninstall-name: /usr/lib/libsecond.dylib\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_second_document), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    String8 tbd_v5_json = S8("{\"tbd-version\":5,\"install-name\":\"/usr/lib/libv5.dylib\"}");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_v5_json), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity((ByteSlice){0}, aarch64, &identity) == COMPILER_DRIVER_MACH_DYLIB_UNUSABLE);
+    String8 tbd_bad_version = S8("--- !tapi-tbd-v3\ninstall-name: /usr/lib/libversion.dylib\ncurrent-version: 1.999\n");
+    BUSTER_TEST(arguments, compiler_driver_mach_tbd_identity(BUSTER_SLICE_TO_BYTE_SLICE(tbd_bad_version), aarch64, &identity) ==
+                               COMPILER_DRIVER_MACH_DYLIB_USABLE);
+    BUSTER_TEST(arguments, identity.current_version == 0);
+
+    static String8 const target_names[] = {
+        S8_INITIALIZER("aarch64-apple-macos"),
+        S8_INITIALIZER("x86_64-apple-macos"),
+        S8_INITIALIZER("aarch64-apple-ios"),
+    };
+    static u32 const target_cputypes[] = {0x0100000c, 0x01000007, 0x0100000c};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_names); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        arena = temporary.arena;
+        String8 base = buster_test_temporary_path(arena, string_format(arena, S8("buster-mach-library-search-{u32}"), target_index), S8(""));
+        String8 source = string_format_z(arena, S8("{S8}/main.c"), base);
+        BUSTER_TEST(arguments, os_make_directory_attempt(base));
+        BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int bar(void); int main(void) { return bar(); }\n"))));
+        u32 output_index = 0;
+        for (u32 scenario = 0; scenario < 16; scenario += 1)
+        {
+            String8 directory = string_format_z(arena, S8("{S8}/scenario-{u32}"), base, scenario);
+            String8 first = string_format_z(arena, S8("{S8}/first"), directory);
+            String8 second = string_format_z(arena, S8("{S8}/second"), directory);
+            String8 sysroot = string_format_z(arena, S8("{S8}/sdk"), directory);
+            String8 sysroot_usr = string_format_z(arena, S8("{S8}/usr"), sysroot);
+            String8 sysroot_lib = string_format_z(arena, S8("{S8}/lib"), sysroot_usr);
+            BUSTER_TEST(arguments, os_make_directory_attempt(directory));
+            String8 options[8];
+            u32 option_count = 0;
+            String8 expected_name = {0};
+            u32 expected_current_version = 0x10000;
+            u32 expected_compatibility_version = 0x10000;
+            bool expected_success = scenario != 0 && scenario != 4 && scenario != 12 && scenario != 15;
+            switch (scenario)
+            {
+                case 0:
+                    options[option_count++] = S8("-lnosuchlib");
+                    break;
+                case 1:
+                case 2:
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), directory),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index], 6, S8("@rpath/libbar_custom.dylib"),
+                                                        0x30405, 0x10200)));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = directory;
+                    options[option_count++] = S8("-lbar");
+                    if (scenario == 2)
+                    {
+                        options[option_count++] = S8("-lbar");
+                    }
+                    expected_name = S8("@rpath/libbar_custom.dylib");
+                    expected_current_version = 0x30405;
+                    expected_compatibility_version = 0x10200;
+                    break;
+                case 3:
+                    BUSTER_TEST(arguments, os_make_directory_attempt(first));
+                    BUSTER_TEST(arguments, os_make_directory_attempt(second));
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), first),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index] == 0x0100000c ? 0x01000007 : 0x0100000c,
+                                                        6, S8("@rpath/libbar_wrong.dylib"), 0x10000, 0x10000)));
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), second),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index], 6, S8("@rpath/libbar_later.dylib"),
+                                                        0x20200, 0x10000)));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = first;
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = second;
+                    options[option_count++] = S8("-lbar");
+                    expected_name = S8("@rpath/libbar_later.dylib");
+                    expected_current_version = 0x20200;
+                    break;
+                case 4:
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), directory),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index] == 0x0100000c ? 0x01000007 : 0x0100000c,
+                                                        6, S8("@rpath/libbar_wrong.dylib"), 0x10000, 0x10000)));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = directory;
+                    options[option_count++] = S8("-lbar");
+                    break;
+                case 5:
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), directory),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index], 6, S8("@rpath/libbar_dylib.dylib"),
+                                                        0x10000, 0x10000)));
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.tbd"), directory),
+                        BUSTER_SLICE_TO_BYTE_SLICE(S8("--- !tapi-tbd-v4\n"
+                                                      "targets: [ arm64-macos, x86_64-macos ]\n"
+                                                      "install-name: \"@rpath/libbar_tbd.dylib\"\n"
+                                                      "current-version: 4.5.6\n"
+                                                      "compatibility-version: 2.3\n"))));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = directory;
+                    options[option_count++] = S8("-lbar");
+                    expected_name = S8("@rpath/libbar_tbd.dylib");
+                    expected_current_version = 0x40506;
+                    expected_compatibility_version = 0x20300;
+                    break;
+                case 6:
+                    BUSTER_TEST(arguments, os_make_directory_attempt(first));
+                    BUSTER_TEST(arguments, os_make_directory_attempt(second));
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), first),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index], 6, S8("@rpath/libbar_first.dylib"),
+                                                        0x10000, 0x10000)));
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.tbd"), second),
+                        BUSTER_SLICE_TO_BYTE_SLICE(S8("--- !tapi-tbd-v4\ninstall-name: @rpath/libbar_second.dylib\n"))));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = first;
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = second;
+                    options[option_count++] = S8("-lbar");
+                    expected_name = S8("@rpath/libbar_first.dylib");
+                    break;
+                case 7:
+                case 8:
+                    BUSTER_TEST(arguments, os_make_directory_attempt(sysroot));
+                    BUSTER_TEST(arguments, os_make_directory_attempt(sysroot_usr));
+                    BUSTER_TEST(arguments, os_make_directory_attempt(sysroot_lib));
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libsys.tbd"), sysroot_lib),
+                        BUSTER_SLICE_TO_BYTE_SLICE(S8("--- !tapi-tbd-v3\narchs: [ arm64, x86_64 ]\n"
+                                                      "install-name: @rpath/libsysroot.tbd\n"
+                                                      "current-version: 1.2.12\ncompatibility-version: 1\n"))));
+                    options[option_count++] = S8("--sysroot");
+                    options[option_count++] = sysroot;
+                    if (scenario == 8)
+                    {
+                        BUSTER_TEST(arguments, os_make_directory_attempt(first));
+                        BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libsys.dylib"), first),
+                            compiler_driver_test_mach_dylib(arena, target_cputypes[target_index], 6, S8("@rpath/libsys_explicit.dylib"),
+                                                            0x20100, 0x10000)));
+                        options[option_count++] = S8("-L");
+                        options[option_count++] = first;
+                        expected_name = S8("@rpath/libsys_explicit.dylib");
+                        expected_current_version = 0x20100;
+                    }
+                    else
+                    {
+                        expected_name = S8("@rpath/libsysroot.tbd");
+                        expected_current_version = 0x1020c;
+                    }
+                    options[option_count++] = S8("-lsys");
+                    break;
+                case 9:
+                    options[option_count++] = S8("-lz");
+                    expected_name = S8("/usr/lib/libz.dylib");
+                    break;
+                case 10:
+                    options[option_count++] = S8("-lm");
+                    expected_success = true;
+                    break;
+                case 11:
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libexact.dylib"), directory),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index], 6, S8("@rpath/libexact-custom.dylib"),
+                                                        0x20304, 0x10000)));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = directory;
+                    options[option_count++] = S8("-l:libexact.dylib");
+                    expected_name = S8("@rpath/libexact-custom.dylib");
+                    expected_current_version = 0x20304;
+                    break;
+                case 12:
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = directory;
+                    options[option_count++] = S8("-l:libmissing.dylib");
+                    break;
+                case 13:
+                    {
+                        ByteSlice slices[] = {
+                            compiler_driver_test_mach_dylib(arena, 0x0100000c, 6, S8("@rpath/libfat_arm.dylib"), 0x30001, 0x10000),
+                            compiler_driver_test_mach_dylib(arena, 0x01000007, 6, S8("@rpath/libfat_target.dylib"), 0x30002, 0x10000),
+                        };
+                        u32 cputypes[] = {0x0100000c, 0x01000007};
+                        ByteSlice fat_library = compiler_driver_test_mach_fat(arena, slices, cputypes, 2, false);
+                        BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libbar.dylib"), directory), fat_library));
+                        expected_name = target_cputypes[target_index] == 0x0100000c ? S8("@rpath/libfat_arm.dylib")
+                                                                                    : S8("@rpath/libfat_target.dylib");
+                        expected_current_version = target_cputypes[target_index] == 0x0100000c ? 0x30001 : 0x30002;
+                        options[option_count++] = S8("-L");
+                        options[option_count++] = directory;
+                        options[option_count++] = S8("-lbar");
+                    }
+                    break;
+                case 14:
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libq.dylib"), directory),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index], 6, S8("@rpath/libq.dylib"),
+                                                        0x10203, 0x10000)));
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libq.a"), directory),
+                        BUSTER_SLICE_TO_BYTE_SLICE(S8("not an archive"))));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = directory;
+                    options[option_count++] = S8("-lq");
+                    expected_name = S8("@rpath/libq.dylib");
+                    expected_current_version = 0x10203;
+                    break;
+                case 15:
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libq.dylib"), directory),
+                        compiler_driver_test_mach_dylib(arena, target_cputypes[target_index] == 0x0100000c ? 0x01000007 : 0x0100000c,
+                                                        6, S8("@rpath/libq_wrong.dylib"), 0x10000, 0x10000)));
+                    BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/libq.a"), directory),
+                        BUSTER_SLICE_TO_BYTE_SLICE(S8("not an archive"))));
+                    options[option_count++] = S8("-L");
+                    options[option_count++] = directory;
+                    options[option_count++] = S8("-lq");
+                    break;
+            }
+            String8 output = string_format_z(arena, S8("{S8}/output-{u32}.macho"), directory, output_index++);
+            String8 sentinel = S8("preserve Mach-O output");
+            if (!expected_success)
+            {
+                BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+            }
+            CompilerDriverResult linked = compiler_driver_test_mach_link(arena, target_names[target_index], source, output, options, option_count);
+            CompilerDriverError expected_error = expected_success ? COMPILER_DRIVER_ERROR_NONE
+                                               : scenario == 15  ? COMPILER_DRIVER_ERROR_OBJECT
+                                                                 : COMPILER_DRIVER_ERROR_LINK;
+            BUSTER_TEST_RAW(arguments, linked.error == expected_error,
+                            string_format(arena, S8("Mach-O target={S8} scenario={u32}: {S8}"), target_names[target_index], scenario,
+                                          linked.diagnostic));
+            if (!expected_success)
+            {
+                if (scenario == 15)
+                {
+                    BUSTER_TEST(arguments, string_first_sequence(linked.diagnostic, S8("could not read archive")) != BUSTER_STRING_NO_MATCH);
+                }
+                else
+                {
+                    String8 expected_diagnostic = scenario == 0 ? S8("cannot find -lnosuchlib")
+                                                  : scenario == 12 ? S8("cannot find -l:libmissing.dylib")
+                                                                   : S8("cannot find -lbar");
+                    BUSTER_STRING_TEST(arguments, linked.diagnostic, expected_diagnostic);
+                }
+                ByteSlice preserved = file_read(arena, output, (FileReadOptions){0});
+                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, preserved), sentinel);
+            }
+            else
+            {
+                ByteSlice image = file_read(arena, output, (FileReadOptions){0});
+                CompilerDriverTestMachLoadCommands commands = compiler_driver_test_mach_load_commands(image);
+                BUSTER_TEST(arguments, commands.valid);
+                BUSTER_TEST(arguments, compiler_driver_test_mach_extra_library_count(commands) == (scenario == 10 ? 0u : 1u));
+                if (expected_name.length)
+                {
+                    BUSTER_TEST(arguments, compiler_driver_test_mach_has_library(commands, expected_name, expected_current_version,
+                                                                                  expected_compatibility_version));
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
 }
 
 // These literal GNU script spellings come from the documented command grammar,
@@ -30777,6 +31307,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_linker_scripts);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_library_search);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocessed_c_input);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_source_cache_replay);
