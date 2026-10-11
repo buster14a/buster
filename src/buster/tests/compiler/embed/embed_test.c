@@ -3,9 +3,12 @@
 #include <buster/lib/system_headers.h>
 
 #if BUSTER_INCLUDE_TESTS
+#define EMBED_TEST_EXECUTES ((BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_SANITIZE && !BUSTER_IOS && !BUSTER_ANDROID)
+
 typedef long long EmbedTestHostFunction(long long, long long);
 typedef long long EmbedTestRunFunction(long long);
 
+#if EMBED_TEST_EXECUTES
 BUSTER_GLOBAL_LOCAL long long embed_test_host_add(long long left, long long right)
 {
     return left + right;
@@ -44,11 +47,12 @@ BUSTER_GLOBAL_LOCAL bool embed_test_contains(BusterEmbedString string, char cons
     }
     return result;
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_execution(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_SANITIZE && !BUSTER_IOS && !BUSTER_ANDROID
+#if EMBED_TEST_EXECUTES
     BusterEmbedCompiler* compiler = 0;
     BUSTER_TEST(arguments, buster_embed_compiler_create(&compiler) == BUSTER_EMBED_STATUS_OK);
     if (compiler)
@@ -77,11 +81,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_execution(UnitTestArguments* argum
             BUSTER_TEST(arguments, buster_embed_module_symbol(
                                       modules[index], (BusterEmbedString){"run", 3}, &address) == BUSTER_EMBED_STATUS_NOT_LOADED);
 #if !(BUSTER_CPU_ARCH_AARCH64 && !defined(__APPLE__))
-            if (index == 0)
-            {
-                BusterEmbedStatus unresolved = buster_embed_module_load(modules[index], 0, 0);
-                BUSTER_TEST(arguments, unresolved == BUSTER_EMBED_STATUS_UNRESOLVED_IMPORT);
-            }
             BusterEmbedStatus load_status = buster_embed_module_load(modules[index], imports[index], 2);
             BUSTER_TEST(arguments, load_status == BUSTER_EMBED_STATUS_OK);
 #else
@@ -126,7 +125,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_execution(UnitTestArguments* argum
 BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_unresolved_function(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_SANITIZE && !BUSTER_IOS && !BUSTER_ANDROID
+#if EMBED_TEST_EXECUTES
     BusterEmbedCompiler* compiler = 0;
     BUSTER_TEST(arguments, buster_embed_compiler_create(&compiler) == BUSTER_EMBED_STATUS_OK);
     if (compiler)
@@ -141,9 +140,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_unresolved_function(UnitTestArgume
         BUSTER_TEST(arguments, buster_embed_compile(
                                   compiler, (BusterEmbedString){source, sizeof(source) - 1}, &options, &module) ==
                                   BUSTER_EMBED_STATUS_OK);
-        BusterEmbedStatus unresolved = buster_embed_module_load(module, 0, 0);
-        BUSTER_TEST(arguments, unresolved == BUSTER_EMBED_STATUS_UNRESOLVED_IMPORT);
-        BUSTER_TEST(arguments, embed_test_contains(buster_embed_module_message(module), "host_add"));
+        void* invalid_symbol = 0;
+        BUSTER_TEST(arguments, buster_embed_module_symbol(
+                                  module, (BusterEmbedString){.pointer = 0, .length = 1}, &invalid_symbol) ==
+                                  BUSTER_EMBED_STATUS_INVALID_ARGUMENT);
         EmbedTestHostFunction* function = &embed_test_host_add;
         void* address = 0;
         BUSTER_CT_CHECK(sizeof(function) == sizeof(address));
@@ -153,6 +153,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_unresolved_function(UnitTestArgume
             .address = address,
             .kind = BUSTER_EMBED_SYMBOL_FUNCTION,
         };
+        BusterEmbedImport invalid_import = import;
+        invalid_import.name = (BusterEmbedString){.pointer = 0, .length = 1};
+        BUSTER_TEST(arguments, buster_embed_module_load(module, &invalid_import, 1) == BUSTER_EMBED_STATUS_INVALID_ARGUMENT);
+        BusterEmbedStatus unresolved = buster_embed_module_load(module, 0, 0);
+        BUSTER_TEST(arguments, unresolved == BUSTER_EMBED_STATUS_UNRESOLVED_IMPORT);
+        BUSTER_TEST(arguments, embed_test_contains(buster_embed_module_message(module), "host_add"));
         BUSTER_TEST(arguments, buster_embed_module_load(module, &import, 1) == BUSTER_EMBED_STATUS_OK);
         void* symbol = 0;
         BusterEmbedStatus symbol_status = buster_embed_module_symbol(module, (BusterEmbedString){"run", 3}, &symbol);
@@ -176,7 +182,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_unresolved_function(UnitTestArgume
 BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_direct_data_refusal(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE && !BUSTER_IOS && !BUSTER_ANDROID
+#if EMBED_TEST_EXECUTES && BUSTER_CPU_ARCH_X86_64
     BusterEmbedCompiler* compiler = 0;
     BUSTER_TEST(arguments, buster_embed_compiler_create(&compiler) == BUSTER_EMBED_STATUS_OK);
     if (compiler)
@@ -238,7 +244,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_failures_and_lifetimes(UnitTestArg
             BusterEmbedBytes object = {0};
             BUSTER_TEST(arguments, buster_embed_module_object(module, &object) == BUSTER_EMBED_STATUS_OK);
             BUSTER_TEST(arguments, object.length != 0);
-#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_SANITIZE && !BUSTER_IOS && !BUSTER_ANDROID
+#if EMBED_TEST_EXECUTES
             BUSTER_TEST(arguments, buster_embed_module_load(module, 0, 0) == BUSTER_EMBED_STATUS_OK);
             void* address = 0;
             BusterEmbedStatus symbol_status = buster_embed_module_symbol(
@@ -271,6 +277,48 @@ BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_failures_and_lifetimes(UnitTestArg
             BUSTER_TEST(arguments, buster_embed_module_object(invalid, &object) == BUSTER_EMBED_STATUS_NOT_COMPILED);
             BUSTER_TEST(arguments, buster_embed_compiler_destroy(compiler) == BUSTER_EMBED_STATUS_BUSY);
             buster_embed_module_release(invalid);
+        }
+        BusterEmbedString invalid_string = {.pointer = 0, .length = 1};
+        char const valid_source[] = "int valid(void) { return 1; }\n";
+        BusterEmbedString invalid_include_paths[] = {invalid_string};
+        BusterEmbedString invalid_definitions[] = {invalid_string};
+        BusterEmbedString invalid_arguments[] = {invalid_string};
+        BusterEmbedCompileOptions invalid_compile_options[] = {
+            {.source_name = invalid_string},
+            {.target = invalid_string},
+            {.dialect = invalid_string},
+            {.include_paths = invalid_include_paths, .include_path_count = 1},
+            {.include_path_count = 1},
+            {.definitions = invalid_definitions, .definition_count = 1},
+            {.definition_count = 1},
+            {.arguments = invalid_arguments, .argument_count = 1},
+            {.argument_count = 1},
+        };
+        BusterEmbedModule* invalid_source_module = 0;
+        BUSTER_TEST(arguments, buster_embed_compile(
+                                  compiler, invalid_string, 0, &invalid_source_module) == BUSTER_EMBED_STATUS_INVALID_ARGUMENT);
+        BUSTER_TEST(arguments, invalid_source_module != 0);
+        BUSTER_TEST(arguments, invalid_source_module && buster_embed_module_message(invalid_source_module).length != 0);
+        BUSTER_TEST(arguments, invalid_source_module && buster_embed_module_diagnostic_count(invalid_source_module) != 0);
+        buster_embed_module_release(invalid_source_module);
+        u32 invalid_option_count = (u32)(sizeof(invalid_compile_options) / sizeof(invalid_compile_options[0]));
+        for (u32 index = 0; index < invalid_option_count; index += 1)
+        {
+            BusterEmbedModule* invalid_module = 0;
+            BusterEmbedStatus invalid_status = buster_embed_compile(
+                compiler, (BusterEmbedString){.pointer = valid_source, .length = sizeof(valid_source) - 1},
+                &invalid_compile_options[index], &invalid_module);
+            BUSTER_TEST(arguments, invalid_status == BUSTER_EMBED_STATUS_INVALID_ARGUMENT);
+            BUSTER_TEST(arguments, invalid_module != 0);
+            BUSTER_TEST(arguments, invalid_module && buster_embed_module_message(invalid_module).length != 0);
+            BUSTER_TEST(arguments, invalid_module && buster_embed_module_diagnostic_count(invalid_module) != 0);
+            if (!index && invalid_module)
+            {
+                BusterEmbedDiagnostic diagnostic = buster_embed_module_diagnostic(invalid_module, 0);
+                BUSTER_TEST(arguments, diagnostic.path.pointer && diagnostic.path.length == 7 &&
+                                           memcmp(diagnostic.path.pointer, "input.c", 7) == 0);
+            }
+            buster_embed_module_release(invalid_module);
         }
         BusterEmbedString bad_action = {.pointer = "-E", .length = 2};
         BusterEmbedCompileOptions bad_options = {.arguments = &bad_action, .argument_count = 1};

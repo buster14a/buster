@@ -582,32 +582,45 @@ BusterEmbedStatus buster_embed_compile(
             if (module)
             {
                 *out_module = module;
-                BusterEmbedString source_name = options ? options->source_name : compiler_embed_empty_string();
-                if (!source_name.length)
+                BusterEmbedString requested_source_name = options ? options->source_name : compiler_embed_empty_string();
+                bool valid = compiler_embed_string_valid(source) && compiler_embed_string_valid(requested_source_name);
+                u64 argument_count = 3;
+                if (valid && options)
                 {
-                    source_name = (BusterEmbedString){.pointer = "input.c", .length = 7};
-                }
-                module->source_name = compiler_embed_copy_string(module, compiler_embed_internal_string(source_name));
-                bool valid = compiler_embed_string_valid(source) && compiler_embed_string_valid(source_name);
-                if (options)
-                {
-                    valid = valid && (!options->include_path_count || options->include_paths) &&
+                    valid = compiler_embed_string_valid(options->target) && compiler_embed_string_valid(options->dialect) &&
+                            (!options->include_path_count || options->include_paths) &&
                             (!options->definition_count || options->definitions) &&
                             (!options->argument_count || options->arguments);
                 }
-                u64 argument_count = 3;
-                if (options)
+                if (valid && options)
                 {
                     argument_count += options->target.length != 0;
                     argument_count += options->dialect.length != 0;
                     argument_count += options->include_path_count;
                     argument_count += options->definition_count;
                     argument_count += options->argument_count;
+                    valid = argument_count <= UINT32_MAX;
                 }
-                if (argument_count > UINT32_MAX)
+                for (u32 index = 0; valid && options && index < options->include_path_count; index += 1)
                 {
-                    valid = false;
+                    BusterEmbedString include_path = options->include_paths[index];
+                    valid = compiler_embed_string_valid(include_path) && include_path.length != 0;
                 }
+                for (u32 index = 0; valid && options && index < options->definition_count; index += 1)
+                {
+                    BusterEmbedString definition = options->definitions[index];
+                    valid = compiler_embed_string_valid(definition) && definition.length != 0;
+                }
+                for (u32 index = 0; valid && options && index < options->argument_count; index += 1)
+                {
+                    valid = compiler_embed_string_valid(options->arguments[index]);
+                }
+                BusterEmbedString source_name = {.pointer = "input.c", .length = 7};
+                if (valid && requested_source_name.length)
+                {
+                    source_name = requested_source_name;
+                }
+                module->source_name = compiler_embed_copy_string(module, compiler_embed_internal_string(source_name));
                 String8* arguments = valid ? arena_allocate(module->arena, String8, argument_count) : 0;
                 u64 count = 0;
                 if (valid && arguments)
@@ -632,11 +645,12 @@ BusterEmbedStatus buster_embed_compile(
                     for (u32 index = 0; options && index < options->argument_count && valid; index += 1)
                     {
                         BusterEmbedString argument = options->arguments[index];
-                        valid = compiler_embed_string_valid(argument) &&
-                                compiler_embed_append_argument(module->arena, arguments, &count, compiler_embed_internal_string(argument));
+                        valid = compiler_embed_append_argument(
+                            module->arena, arguments, &count, compiler_embed_internal_string(argument));
                     }
                     valid = valid && compiler_embed_append_argument(module->arena, arguments, &count, S8("--"));
-                    valid = valid && compiler_embed_append_argument(module->arena, arguments, &count, compiler_embed_internal_string(source_name));
+                    valid = valid && compiler_embed_append_argument(
+                        module->arena, arguments, &count, compiler_embed_internal_string(source_name));
                 }
                 if (!valid || !arguments)
                 {

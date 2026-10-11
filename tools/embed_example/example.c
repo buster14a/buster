@@ -73,6 +73,19 @@ int main(void)
             putchar('\n');
         }
         buster_embed_module_release(invalid);
+
+        char const valid_source[] = "int value;\n";
+        BusterEmbedCompileOptions invalid_options = {.source_name = {.pointer = NULL, .length = 1}};
+        BusterEmbedModule* invalid_option_module = NULL;
+        status = buster_embed_compile(
+            compiler, (BusterEmbedString){valid_source, sizeof(valid_source) - 1}, &invalid_options, &invalid_option_module);
+        BusterEmbedString invalid_option_message = buster_embed_module_message(invalid_option_module);
+        if (status != BUSTER_EMBED_STATUS_INVALID_ARGUMENT || !invalid_option_module || !invalid_option_message.length)
+        {
+            success = 0;
+        }
+        buster_embed_module_release(invalid_option_module);
+
         if (buster_embed_compiler_destroy(compiler) != BUSTER_EMBED_STATUS_OK)
         {
             success = 0;

@@ -58,4 +58,5 @@ jobs:
             -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/compiler-sdk" -DCMAKE_BUILD_TYPE=Release
           cmake --build "$RUNNER_TEMP/embed-example" --config Release
       - name: Run external client
-        run: "$RUNNER_TEMP/embed-example/buster_embed_example"
+        run: |
+          "$RUNNER_TEMP/embed-example/buster_embed_example"
