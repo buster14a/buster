@@ -283,6 +283,25 @@ publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
 the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
 not predefined at any level. `-mattr` overrides still refine the level.
 The psABI's LAHF-SAHF has no target feature and is implied by long mode.
+Without `-march`/`-mcpu` the CPU is the build host's. An invocation with no
+`-target`, or with `-target native`, starts from `target_native`
+(`compiler_driver_parse_arguments`), whose model and features
+`cpu_detect_model` probes at start-up. In effect this is `-march=native`: the
+feature set is the same, though `-v` prints the detected model name (for
+example `cpu=emeraldrapids`) where `-march=native` prints `cpu=native`. Clang
+and GCC differ here; their default is the portable `x86-64` baseline. Any
+other `-target`/`--target` triple starts from `baseline`
+(`target_parse_triple`), even one that names the host; `-target x86_64-linux`
+alone gives `cpu=baseline features=sse2`. Without a pinned CPU, three things
+follow the machine: object bytes, the predefined feature macros (`__AVX2__`,
+`__AVX512F__`, ...), and therefore which `#if`-guarded regions are compiled
+at all. Such output may use instructions that another machine lacks. For
+portable or cross-machine-comparable output, pass `-march=baseline`, a psABI
+level, or a named model. Tools that compare outputs across machines pin one:
+the native-retirement census uses `baseline` and the work ledger uses
+`znver3`. The host default is deliberate. It matches the
+`BUSTER_NATIVE_TARGET=native` host build and the compiler-throughput priority
+(GitHub #1557).
 `-mtune=<model>` is accepted with any nonempty value, `native` included, and
 ignored: it selects only a scheduling model, and instruction selection here has
 no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
@@ -1152,6 +1171,26 @@ or name libgcc_s. This uses an installed target runtime; it installs or embeds
 none. Apple, Windows, Android and freestanding runtime provisioning remain
 separate #1272 work.
 
+Native x86-64 Linux links also supply GCC's CPU-feature runtime (GitHub
+#3399). GCC and Clang `target_clones` resolvers and `__builtin_cpu_init`,
+`__builtin_cpu_supports` and `__builtin_cpu_is` call `__cpu_indicator_init`
+and read `__cpu_model` / `__cpu_features2`. Those are hidden definitions in
+the static `libgcc.a` (`cpuinfo.o`, with its own `.init_array` constructor),
+which the host compiler driver links implicitly as `-lgcc`. After objects,
+explicit archives and the ELF runtime object are selected, a remaining strong
+undefined reference to one of these names that no selected object defines
+makes `compiler_driver_elf_cpu_runtime` read `libgcc.a`: first from the `-L`
+directories, then the newest `usr/lib/gcc`, `usr/lib64/gcc` or Debian
+`usr/lib/gcc-cross` `<triple>/<version>/` directory under the sysroot, or the
+host without one (`compiler_driver_elf_libgcc_path`). Only the members that
+define those names are selected; libgcc.a is not otherwise added to the link,
+so the libgcc_s helper policy above is unchanged. Links without such a
+reference, including weak ones, do not read or name libgcc.a. A missing
+archive, or one that does not define the name, fails the link with the archive
+and symbol named, before replacing the output. AArch64 (`__aarch64_cpu_features`,
+`__init_cpu_features_resolver`, outline atomics) and non-Linux targets remain
+out of scope.
+
 `compiler_driver_elf_dynamic_symbols` walks that table once and produces two
 things.
 
@@ -1236,6 +1275,16 @@ syntax-only and assembly/prebuilt-only input routes retain their behavior.
 Mach-O and COFF keep their existing target models; Wasm/eBPF compatibility
 behavior is unchanged. LLVM-bitcode and direct backend model requests remain
 an audit residual of issue #1289.
+On x86-64 Android every executable link is a PIE, with or without `-pie`
+(`-no-pie` cannot select another image there): the kernel places bionic's
+executable at a load bias, so a fixed-address image marked `ET_DYN` would run
+its preinit entries, IFUNC runner and every data pointer unrelocated. The same
+writer names `/system/bin/linker64` and `libc.so`, and its entry stub does not
+register RDX as a loader finalizer, because bionic's `linker64` leaves RDX
+unspecified at the entry point. `-shared` stays refused for Android, and
+Android AArch64 still stages a fixed-address image. `android/runtime_order.sh`
+executes an x86-64 image on the CI emulator (see the Android CI notes in
+[testing.md](testing.md)).
 On any other target a link that asks for either image is refused as an
 unsupported option, while a compile-only invocation ignores the link option,
 as GCC does.
@@ -1248,8 +1297,8 @@ value are argument errors, and a GPU target ignores the option. The bit
 reaches `st_other` on ELF only; Mach-O and COFF objects do not record it.
 
 The default fixed-address dynamic executable
-(`link_native_executable_elf64_x86_64_dynamic`, which the AArch64 and Android
-dynamic writers also build on) is hardened the way GNU ld's default is
+(`link_native_executable_elf64_x86_64_dynamic`, which the AArch64 Linux and
+Android dynamic writers also build on) is hardened the way GNU ld's default is
 (#2720). It has three loads: R (headers, `.interp`, `.dynstr`/`.dynsym`/
 `.hash`/version tables, `.rela.plt`/`.rela.dyn`, `.rodata`, `.eh_frame_hdr`,
 `.eh_frame`), R+X (the entry stub, `.text`, `.plt`) and RW. The RW load starts
@@ -1558,21 +1607,23 @@ With `-g`, named scalar locals that need more than one defining instruction to
 describe stay in distinct frame slots, so their location lists follow stores
 through reassignment and control-flow joins. A frame location starts after its
 first entry-block store. A local first stored on a later control-flow path
-gets per-block ranges from a forward must-initialized pass over the published
-CFG (`machine_debug_initialized_build`): the whole of each reachable block
-that every incoming path has written, else the rest of a block after its own
-first write. A write on only some paths therefore never reaches the join, and
-uninitialized frame bytes are never exposed. Ranges are produced in machine
-layout order, and `codegen_canonical_location_append` merges a seed into the
-previous one when it continues the same local with the same whole location,
-so back-to-back blocks become one location-list entry or CodeView
-`S_DEFRANGE_*` record. Past `MACHINE_DEBUG_INITIALIZED_CELL_LIMIT` block-local
-cells, or once a function's deferred ranges would exceed
-`MACHINE_DEBUG_INITIALIZED_RANGE_LIMIT`, the remaining locals stay
-unavailable. The CodeView symbol reserve counts every location range
-(`CODEVIEW_DEFRANGE_RECORD_BYTES`), and a range longer than the 16-bit
-`S_DEFRANGE_*` length is emitted as consecutive records of at most
-`CODEVIEW_DEFRANGE_MAX_LENGTH` bytes rather than clamped. Regressions:
+gets must-initialized ranges from the published CFG
+(`machine_debug_initialized_build`): the whole of each reachable block that
+every incoming path has written, else the rest of a block after its own first
+write. A write on only some paths therefore never reaches the join, and
+uninitialized frame bytes are never exposed. These per-block ranges are
+organized in machine layout order and emitted as one debug value for each
+layout-adjacent run; a partial-start block starts a new run. Machine blocks
+are published in selection layout order, with each block's line marks forming
+a contiguous row group, so adjacent block spans meet at a row boundary.
+Replaying the run therefore preserves the same seeds as separate block
+replay followed by `codegen_canonical_location_append`. Past
+`MACHINE_DEBUG_INITIALIZED_CELL_LIMIT` block-local cells, or once the
+per-block range budget `MACHINE_DEBUG_INITIALIZED_RANGE_LIMIT` is exceeded,
+the remaining locals stay unavailable. The CodeView symbol reserve counts
+every location range (`CODEVIEW_DEFRANGE_RECORD_BYTES`), and a range longer
+than the 16-bit `S_DEFRANGE_*` length is emitted as consecutive records of at
+most `CODEVIEW_DEFRANGE_MAX_LENGTH` bytes rather than clamped. Regressions:
 `codegen_test_debug_local_seed_coverage`,
 `machine_test_debug_value_initialized_blocks`,
 `machine_test_debug_value_initialized_budget`,
@@ -1633,6 +1684,18 @@ aborts with an arena validation failure from 230,000 (#3254). The mobile
 builds of the driver fixture use smaller counts to keep their deadlines. A reservation that cannot be carved
 is a positioned `initializer working storage exceeds the scratch reservation`
 or `initializer nesting exceeds its capacity` diagnostic and a failed result.
+
+Automatic aggregate initializers lower through the nested compound-literal
+machine, which zero-fills each brace-enclosed element before storing its
+members. Its scratch is per element and released with it: the zero-value task
+stack grows with the widest path through the type (`c_ir_emit_zero_value`),
+the cursor stack follows the type's nesting depth, and the unit-lifetime query
+stack gets its own mapping when it would leave lowering less than half of the
+thread scratch. `c_test_ir_local_table_zero_scratch` lowers a 20,000-entry
+local table that previously exhausted the scratch (#2527); generating machine
+code for a function that large still aborts in the fast register allocator
+(#3413). A task stack that cannot grow is the diagnostic
+`aggregate zero-initializer exceeds the lowering scratch reservation`.
 
 ## ELF TLS companion lookup
 
