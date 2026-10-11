@@ -377,7 +377,10 @@ fixture as well as compiling both architectures.
   a cast is selected as `MOV_RI` of that immediate instead of `MOV_RR`. A
   constant or cast whose every use is such a cast is marked `fused_dead` and
   selects into nothing. Edge arguments count as uses, so a value reaching a
-  block parameter keeps its row. AArch64 selection does not do this yet.
+  block parameter keeps its row. AArch64 selection applies the same rule
+  through `machine_a64_cast_copies_constant` and `MACHINE_A64_MOV_RI`; its
+  classification pass counts the copy-cast reads and the marking runs after
+  branch fusion against the same use counts, edge arguments included.
 - FAST/QUALITY start a join's or loop header's general block parameters in
   registers. `machine_fast_parameter_contract` gives each non-pinned,
   non-mutable general parameter a caller-saved (or already-saved) register
