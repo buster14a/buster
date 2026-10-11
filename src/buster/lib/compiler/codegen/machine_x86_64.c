@@ -21,6 +21,9 @@
 // condition identity; serial prewarm refuses mismatched condition bindings.
 // machine_x64_plan_call reuses selector-owned variadic shape/placement rows;
 // machine_x64_select_call consumes their active prefix before the next call.
+// machine_x64_cast_copies_constant lets a register-copy cast of an integer
+// constant (a C null pointer) define itself with MOV_RI, which the allocators
+// rematerialize; constants only such casts read are marked fused_dead.
 
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_internal.h>
@@ -2877,13 +2880,64 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_float_to_integer(MachineX64Sele
     return selected;
 }
 
+// A register-copy cast changes no bits, so a chain of them over an integer
+// constant still holds that constant. Such a cast defines its own register
+// with MOV_RI, which the allocator rematerializes instead of spilling: a C
+// null pointer is CAST(INTEGER_TO_POINTER) of zero. Both ends must be
+// general-register scalars, which keeps floats and 128-bit integers out.
+#define MACHINE_X64_COPY_CAST_CHAIN_LIMIT 4u
+BUSTER_GLOBAL_LOCAL bool machine_x64_cast_copies_constant(MachineX64Selector* selector, IrInstruction const* cast, u64* immediate)
+{
+    IrFunction* function = selector->function;
+    bool found = false;
+    bool searching = cast->result.value < function->value_count &&
+                     (machine_x64_type_class(selector, function->values[cast->result.value].canonical_type).flags & MACHINE_TYPE_CLASS_SCALAR_REGISTER);
+    IrInstruction const* row = cast;
+    for (u32 step = 0; searching && step < MACHINE_X64_COPY_CAST_CHAIN_LIMIT; step += 1)
+    {
+        searching = false;
+        if (row->opcode == IR_OPCODE_CAST && row->operand_count == 1 && row->operands[0].value < function->value_count &&
+            (row->conversion_operation == IR_CONVERSION_INTEGER_TO_POINTER || row->conversion_operation == IR_CONVERSION_POINTER_REINTERPRET ||
+             row->conversion_operation == IR_CONVERSION_INTEGER_REINTERPRET) &&
+            (machine_x64_type_class(selector, function->values[row->operands[0].value].canonical_type).flags & MACHINE_TYPE_CLASS_SCALAR_REGISTER))
+        {
+            IrInstructionId definition = function->values[row->operands[0].value].definition;
+            if (definition.value < function->instruction_count)
+            {
+                row = function->instructions + definition.value;
+                if (row->opcode == IR_OPCODE_CONSTANT_INTEGER && row->immediate_count == 1 && row->immediates)
+                {
+                    *immediate = row->immediate_is_negative ? 0 - row->immediates[0] : row->immediates[0];
+                    found = true;
+                }
+                else
+                {
+                    searching = true;
+                }
+            }
+        }
+    }
+    return found;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
     IrFunction* function = selector->function;
 
     bool selected = false;
-    if (instruction->operands[0].value < function->value_count)
+    u64 constant = 0;
+    if (result_register != UINT32_MAX && machine_x64_cast_copies_constant(selector, instruction, &constant))
+    {
+        u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                    machine_ref_make(MACHINE_REF_IMMEDIATE, machine_x64_append_immediate(selector, constant))},
+                                                       .opcode = MACHINE_X64_MOV_RI,
+                                                   });
+        machine_x64_define(selector, result_register, row);
+        selected = true;
+    }
+    else if (instruction->operands[0].value < function->value_count)
     {
         IrTypeId source_type_id = function->values[instruction->operands[0].value].canonical_type;
         MachineTypeClass source_class = machine_x64_type_class(selector, source_type_id);
@@ -8941,6 +8995,39 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             }
         }
         fusion_candidate_base += block_candidate_count;
+    }
+    // A cast that copies a constant materializes it itself, so a value every
+    // use of which is such a cast selects into nothing. The reads are
+    // counted over the same rows as use_count; edge arguments are uses no
+    // cast accounts for, so a value reaching a block parameter stays live.
+    u32* copy_cast_reads = arena_allocate(arena, u32, value_capacity);
+    memset(copy_cast_reads, 0, sizeof(u32) * value_capacity);
+    u64 copied_constant = 0;
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        IrBlock* block = function->blocks + block_index;
+        for (IrInstructionId id = block->first_instruction; id.value <= block->last_instruction.value; id.value += 1)
+        {
+            IrInstruction* instruction = function->instructions + id.value;
+            if (instruction->opcode == IR_OPCODE_CAST && instruction->result.value < function->value_count &&
+                selector.value_virtual_registers[instruction->result.value] != UINT32_MAX &&
+                machine_x64_cast_copies_constant(&selector, instruction, &copied_constant))
+            {
+                copy_cast_reads[instruction->operands[0].value] += 1;
+            }
+        }
+    }
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        IrBlock* block = function->blocks + block_index;
+        for (IrInstructionId id = block->first_instruction; id.value <= block->last_instruction.value; id.value += 1)
+        {
+            u32 value = function->instructions[id.value].result.value;
+            if (value < function->value_count && copy_cast_reads[value] && copy_cast_reads[value] == value_uses[value].use_count)
+            {
+                selector.fused_dead[value] = 1;
+            }
+        }
     }
     selector.virtual_register_count = selector.builder.virtual_registers.total_count;
     selector.classification_registers =
