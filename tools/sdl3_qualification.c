@@ -1,0 +1,343 @@
+// Opt-in Linux SDL3 intake. main dispatches the C compiler adapter or campaign.
+// sdl_run owns bounded, lossless argv capture. sdl_pristine rejects dirty/wrong
+// upstream inputs. CMake probes are never seeded or replaced.
+// This first gate does not establish hardware or performance qualification.
+#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
+#include <errno.h>
+#include <fcntl.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#define BUSTER_SDL_PIN "7f3ae3d57459e59943a4ecfefc8f6277ec6bf540"
+#define BUSTER_SDL_PATH 4096
+#define BUSTER_SDL_ARGS 512
+#define BUSTER_SDL_TEXT (4 * 1024 * 1024)
+
+static char sdl_text[BUSTER_SDL_TEXT];
+static const char* sdl_out;
+static unsigned sdl_sequence;
+
+static void sdl_path(char out[BUSTER_SDL_PATH], const char* root, const char* name)
+{
+    int length = snprintf(out, BUSTER_SDL_PATH, "%s/%s", root, name);
+    if (length < 0 || length >= BUSTER_SDL_PATH)
+    {
+        fprintf(stderr, "SDL path exceeds admitted bound\n");
+        exit(2);
+    }
+}
+
+static bool sdl_read(const char* path)
+{
+    FILE* file = fopen(path, "rb");
+    bool ok = file != NULL;
+    size_t count = 0;
+    if (ok)
+    {
+        count = fread(sdl_text, 1, sizeof(sdl_text) - 1, file);
+        ok = !ferror(file) && feof(file);
+        ok = fclose(file) == 0 && ok;
+    }
+    sdl_text[count] = 0;
+    return ok;
+}
+
+static bool sdl_argv(FILE* file, char* const args[])
+{
+    char directory[BUSTER_SDL_PATH];
+    bool ok = getcwd(directory, sizeof(directory)) != NULL;
+    if (ok)
+    {
+        ok = fprintf(file, "cwd-bytes=%zu\n%s\n", strlen(directory), directory) >= 0;
+    }
+    for (unsigned i = 0; ok && args[i]; i += 1)
+    {
+        ok = fprintf(file, "arg[%u]-bytes=%zu\n%s\n", i, strlen(args[i]), args[i]) >= 0;
+    }
+    return ok;
+}
+
+// GNU timeout is an external process supervisor; execvp keeps argv unchanged.
+static int sdl_run(const char* role, char* const args[], const char* seconds)
+{
+    char name[128], prefix[BUSTER_SDL_PATH], path[BUSTER_SDL_PATH];
+    int n = snprintf(name, sizeof(name), "%03u-%s", sdl_sequence++, role);
+    if (n < 0 || n >= (int)sizeof(name))
+    {
+        exit(2);
+    }
+    sdl_path(prefix, sdl_out, name);
+    n = snprintf(path, sizeof(path), "%s.argv", prefix);
+    FILE* argv_file = n >= 0 && n < (int)sizeof(path) ? fopen(path, "wx") : NULL;
+    bool ok = argv_file != NULL;
+    if (ok)
+    {
+        ok = sdl_argv(argv_file, args);
+        ok = fclose(argv_file) == 0 && ok;
+    }
+    char* supervised[BUSTER_SDL_ARGS];
+    unsigned count = 0;
+    supervised[count++] = "timeout";
+    supervised[count++] = "--signal=TERM";
+    supervised[count++] = "--kill-after=5";
+    supervised[count++] = (char*)seconds;
+    for (unsigned i = 0; args[i] && ok; i += 1)
+    {
+        ok = count + 1 < BUSTER_SDL_ARGS;
+        if (ok)
+        {
+            supervised[count++] = args[i];
+        }
+    }
+    supervised[count] = NULL;
+    int status = 125;
+    struct rusage usage = {0};
+    pid_t child = ok ? fork() : -1;
+    if (child == 0)
+    {
+        char log_path[BUSTER_SDL_PATH];
+        n = snprintf(log_path, sizeof(log_path), "%s.log", prefix);
+        if (n < 0 || n >= (int)sizeof(log_path))
+        {
+            _exit(125);
+        }
+        int fd = open(log_path, O_CREAT | O_EXCL | O_WRONLY, 0600);
+        if (fd < 0 || dup2(fd, STDOUT_FILENO) < 0 || dup2(fd, STDERR_FILENO) < 0)
+        {
+            _exit(125);
+        }
+        close(fd);
+        execvp(supervised[0], supervised);
+        _exit(127);
+    }
+    else if (child > 0)
+    {
+        int native_status = 0;
+        pid_t waited;
+        do
+        {
+            waited = wait4(child, &native_status, 0, &usage);
+        } while (waited < 0 && errno == EINTR);
+        if (waited == child && WIFEXITED(native_status))
+        {
+            status = WEXITSTATUS(native_status);
+        }
+        else if (waited == child && WIFSIGNALED(native_status))
+        {
+            status = 128 + WTERMSIG(native_status);
+        }
+    }
+    n = snprintf(path, sizeof(path), "%s.status", prefix);
+    FILE* report = n >= 0 && n < (int)sizeof(path) ? fopen(path, "wx") : NULL;
+    if (report)
+    {
+        int written = fprintf(report, "status=%d\nmaxrss_kib=%ld\nmeasurement=hosted-child-tree-high-water-diagnostic\n", status, usage.ru_maxrss);
+        if (fclose(report) != 0 || written < 0)
+        {
+            status = 125;
+        }
+    }
+    else
+    {
+        status = 125;
+    }
+    printf("SDL_STAGE %s status=%d log=%s.log\n", role, status, prefix);
+    return status;
+}
+
+static bool sdl_pristine(const char* source)
+{
+    char* identity[] = {"git", "-C", (char*)source, "rev-parse", "HEAD", NULL};
+    unsigned sequence = sdl_sequence;
+    bool ok = sdl_run("source-pin", identity, "20") == 0;
+    char name[128], path[BUSTER_SDL_PATH];
+    snprintf(name, sizeof(name), "%03u-source-pin.log", sequence);
+    sdl_path(path, sdl_out, name);
+    if (ok)
+    {
+        ok = sdl_read(path) && !strcmp(sdl_text, BUSTER_SDL_PIN "\n");
+    }
+    if (ok)
+    {
+        char* dirty[] = {"git", "-C", (char*)source, "status", "--porcelain=v1", "--untracked-files=all", NULL};
+        sequence = sdl_sequence;
+        ok = sdl_run("source-pristine", dirty, "20") == 0;
+        snprintf(name, sizeof(name), "%03u-source-pristine.log", sequence);
+        sdl_path(path, sdl_out, name);
+        ok = ok && sdl_read(path) && !sdl_text[0];
+    }
+    if (!ok)
+    {
+        fprintf(stderr, "SDL_INPUT_REFUSED expected=%s source=%s\n", BUSTER_SDL_PIN, source);
+    }
+    return ok;
+}
+
+static int sdl_compiler(int argc, char** argv)
+{
+    const char* ide = getenv("BUSTER_SDL_IDE");
+    const char* logs = getenv("BUSTER_SDL_CC_LOG");
+    bool ok = ide && logs && argc + 2 < BUSTER_SDL_ARGS;
+    char* args[BUSTER_SDL_ARGS];
+    unsigned count = 0;
+    if (ok)
+    {
+        args[count++] = (char*)ide;
+        args[count++] = "cc";
+        for (int i = 2; i < argc; i += 1)
+        {
+            args[count++] = argv[i];
+        }
+        args[count] = NULL;
+    }
+    char name[80], path[BUSTER_SDL_PATH];
+    snprintf(name, sizeof(name), "invocation-%ld.argv", (long)getpid());
+    if (ok)
+    {
+        sdl_path(path, logs, name);
+        FILE* file = fopen(path, "wx");
+        ok = file != NULL;
+        if (ok)
+        {
+            ok = sdl_argv(file, args);
+            ok = fclose(file) == 0 && ok;
+        }
+    }
+    int result = 125;
+    if (ok)
+    {
+        // Never replace a failed Buster compilation with trusted C objects.
+        execv(ide, args);
+        perror("exec Buster C compiler");
+        result = 127;
+    }
+    return result;
+}
+
+static int sdl_configure(const char* source, const char* output, const char* compiler, bool candidate)
+{
+    char cc[BUSTER_SDL_PATH + 64];
+    int length = snprintf(cc, sizeof(cc), "-DCMAKE_C_COMPILER=%s", compiler);
+    bool ok = length >= 0 && length < (int)sizeof(cc);
+    char* args[] = {
+        "cmake", "-S", (char*)source, "-B", (char*)output, "-G", "Ninja", cc,
+        "-DCMAKE_BUILD_TYPE=Debug", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        "-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON",
+        "-DCMAKE_C_FLAGS=-fwrapv -fno-strict-aliasing -funsigned-char",
+        "-DSDL_SHARED=ON", "-DSDL_STATIC=OFF", "-DSDL_TEST_LIBRARY=ON", "-DSDL_TESTS=ON",
+        "-DSDL_TESTS_LINK_SHARED=ON", "-DSDL_INSTALL=OFF",
+        "-DSDL_ASSEMBLY=OFF", "-DSDL_X11=ON", "-DSDL_X11_SHARED=OFF",
+        "-DSDL_PULSEAUDIO=ON", "-DSDL_PULSEAUDIO_SHARED=OFF",
+        "-DSDL_ALSA=OFF", "-DSDL_PIPEWIRE=OFF", "-DSDL_JACK=OFF", "-DSDL_SNDIO=OFF", "-DSDL_OSS=OFF",
+        "-DSDL_WAYLAND=OFF", "-DSDL_KMSDRM=OFF", "-DSDL_OFFSCREEN=OFF",
+        "-DSDL_OPENGL=OFF", "-DSDL_OPENGLES=OFF", "-DSDL_VULKAN=OFF", "-DSDL_GPU=OFF",
+        "-DSDL_CAMERA=OFF", "-DSDL_JOYSTICK=OFF", "-DSDL_HAPTIC=OFF", "-DSDL_SENSOR=OFF",
+        "-DSDL_LIBUDEV=OFF", "-DSDL_LIBURING=OFF", "-DSDL_DBUS=OFF", "-DSDL_IBUS=OFF",
+        candidate ? "-DCMAKE_C_COMPILER_ARG1=--cc" : "-DCMAKE_C_COMPILER_ARG1=",
+        NULL
+    };
+    int result = ok ? sdl_run(candidate ? "candidate-configure" : "reference-configure", args, "300") : 125;
+    return result;
+}
+
+static int sdl_build(const char* output, const char* role)
+{
+    char* args[] = {"cmake", "--build", (char*)output, "--parallel", "2", "--target", "SDL3-shared", "testautomation", "testatomic", "testthread", "testsem", "testerror", "--", "-k", "0", "-v", NULL};
+    int result = sdl_run(role, args, "600");
+    return result;
+}
+
+static int sdl_tests(const char* output, const char* role)
+{
+    char* args[] = {"ctest", "--test-dir", (char*)output, "--output-on-failure", "--no-tests=error",
+        "--timeout", "150", "-R", "^(testautomation|testatomic|testthread|testsem|testerror)$", NULL};
+    int result = sdl_run(role, args, "300");
+    return result;
+}
+
+int main(int argc, char** argv)
+{
+    int result = 2;
+    if (argc >= 2 && !strcmp(argv[1], "--cc"))
+    {
+        result = sdl_compiler(argc, argv);
+    }
+    else if (argc == 4)
+    {
+        char source[BUSTER_SDL_PATH], self[BUSTER_SDL_PATH], output[BUSTER_SDL_PATH];
+        bool checking = !strcmp(argv[1], "--check");
+        const char* input = checking ? argv[2] : argv[1];
+        bool ok = realpath(input, source) && realpath(argv[0], self) && mkdir(argv[3], 0700) == 0 && realpath(argv[3], output);
+        sdl_out = output;
+        if (ok)
+        {
+            ok = sdl_pristine(source);
+        }
+        if (checking)
+        {
+            result = ok ? 0 : 1;
+        }
+        else if (ok)
+        {
+            char compiler[BUSTER_SDL_PATH], cc_logs[BUSTER_SDL_PATH], reference[BUSTER_SDL_PATH], candidate[BUSTER_SDL_PATH];
+            ok = realpath(argv[2], compiler) != NULL;
+            sdl_path(cc_logs, output, "c-commands");
+            sdl_path(reference, output, "reference");
+            sdl_path(candidate, output, "candidate");
+            ok = ok && mkdir(cc_logs, 0700) == 0 && setenv("BUSTER_SDL_IDE", compiler, 1) == 0 && setenv("BUSTER_SDL_CC_LOG", cc_logs, 1) == 0;
+            char* versions[] = {"clang", "--version", NULL};
+            char* hashes[] = {"sha256sum", compiler, self, "tools/sdl3_qualification.c", "LICENSES/README.md", NULL};
+            char* packages[] = {"dpkg-query", "-W", NULL};
+            char* inputs[] = {"git", "-C", source, "ls-tree", "-r", "HEAD", NULL};
+            if (ok)
+            {
+                ok = sdl_run("reference-tool", versions, "20") == 0 &&
+                     sdl_run("compiler-identities", hashes, "30") == 0 &&
+                     sdl_run("dependency-inventory", packages, "30") == 0 &&
+                     sdl_run("upstream-inputs", inputs, "30") == 0;
+            }
+            int reference_config = ok ? sdl_configure(source, reference, "clang", false) : 125;
+            int reference_build = reference_config == 0 ? sdl_build(reference, "reference-build") : 125;
+            int reference_tests = reference_build == 0 ? sdl_tests(reference, "reference-tests") : 125;
+            int candidate_config = ok ? sdl_configure(source, candidate, self, true) : 125;
+            int candidate_build = candidate_config == 0 ? sdl_build(candidate, "candidate-build") : 125;
+            int candidate_tests = candidate_build == 0 ? sdl_tests(candidate, "candidate-tests") : 125;
+            bool pristine_after = ok && sdl_pristine(source);
+            char path[BUSTER_SDL_PATH];
+            sdl_path(path, output, "qualification.txt");
+            FILE* report = fopen(path, "wx");
+            bool saved = report != NULL;
+            if (saved)
+            {
+                int n = fprintf(report,
+                    "upstream=%s\nreference_configure=%d\nreference_build=%d\nreference_tests=%d\n"
+                    "candidate_configure=%d\ncandidate_build=%d\ncandidate_tests=%d\n"
+                    "pristine_after=%d\nnot_executed_status=125\n"
+                    "native_fixture=pending\ncross_abi=pending\n"
+                    "gpu=pending\naudible_device=pending\nperformance_9700x=pending\n",
+                    BUSTER_SDL_PIN, reference_config, reference_build, reference_tests,
+                    candidate_config, candidate_build, candidate_tests, pristine_after);
+                saved = fclose(report) == 0 && n >= 0;
+            }
+            result = ok && saved && pristine_after && reference_config == 0 && reference_build == 0 &&
+                     reference_tests == 0 && candidate_config == 0 && candidate_build == 0 && candidate_tests == 0 ? 0 : 1;
+        }
+        else
+        {
+            result = 1;
+        }
+    }
+    else
+    {
+        fprintf(stderr, "usage: sdl3_qualification UPSTREAM IDE FRESH_EVIDENCE\n       sdl3_qualification --check UPSTREAM FRESH_EVIDENCE\n");
+    }
+    return result;
+}
