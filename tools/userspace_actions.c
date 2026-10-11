@@ -97,7 +97,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
                 string8_list_push(arena, &command, arg);
             }
         }
-        if (link)
+        if (link && !host)
         {
             string8_list_push(arena, &command, S8("-Wl,--start-group"));
             string8_list_push(arena, &command, path_join(arena, musl_output, S8("libc-clang.a")));
