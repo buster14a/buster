@@ -177,4 +177,5 @@ jobs:
           printf '%s  %s\n' ce863f7d7aef6a2eda40a5e5c47233c9f33db91c4b3a6869b917072bc590a8bf "$archive" | sha256sum --check
           unzip -p "$archive" 'sdl3-evidence/qualification.txt'
           unzip -p "$archive" '*CMakeConfigureLog.yaml' > "$RUNNER_TEMP/3476-configure.log"
-          rg -n -C 8 -- 'unsupported option|version-script|-MD|no input files|error:' "$RUNNER_TEMP/3476-configure.log" || true
+          command -v grep
+          grep -En -C 8 -- 'unsupported option|version-script|-MD|no input files|error:' "$RUNNER_TEMP/3476-configure.log" || true
