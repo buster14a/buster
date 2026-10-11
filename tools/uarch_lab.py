@@ -162,8 +162,19 @@ import threading
 import time
 
 STEPS = ("env", "timed", "topdown", "timeline", "sampling", "ibs", "threads", "micro")
-DEFAULT_COMPILE = ["cc", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
+# The driver default is baseline since #1557; the compiler-compare workload
+# stays the host-native compile it was before that default.
+DEFAULT_COMPILE = ["cc", "-march=native", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
                    "-DBUSTER_INCLUDE_TESTS=0", "-g", "src/buster/apps/ide/ide.c", "-lm"]
+# The fixed issue #3397 -fc-ast-pilot acceptance cells (compare
+# --ast-pilot-pair CELL): the same unity source at -g0 with no link, A
+# omitting AST_PILOT_FLAG and B passing it. Every run keeps the compile's
+# stdout and stderr in `<output>.diagnostics`; a syntax-only cell writes no
+# object, so that transcript is also its compared output.
+AST_PILOT_COMPILE = ["cc", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
+                     "-DBUSTER_INCLUDE_TESTS=0", "-g0", "src/buster/apps/ide/ide.c"]
+AST_PILOT_CELLS = {"syntax-only": "-fsyntax-only", "object": "-c"}
+AST_PILOT_FLAG = "-fc-ast-pilot"
 # No duration_time: perf 7.2.4 reads it as 0 whenever it shares the event
 # list with another event; wall time is the harness span (see step_timed).
 TIMED_EVENTS = ["task-clock", "cycles:u", "instructions:u", "branch-misses:u",
@@ -933,7 +944,8 @@ def attribute_intervals(intervals, spans):
 # ---------------------------------------------------------------- execution
 
 class Lab:
-    def __init__(self, output, perf="perf", cpu=None, ide=None, repo_root=".", extra=(), sudo=False, fresh_copy=False):
+    def __init__(self, output, perf="perf", cpu=None, ide=None, repo_root=".", extra=(), sudo=False, fresh_copy=False,
+                 compile_command=None, writes_output=True, transcripts=False):
         self.output = os.path.abspath(output)
         self.perf = perf
         self.cpu = cpu
@@ -943,6 +955,11 @@ class Lab:
         self.binary = None
         self.repo_root = os.path.abspath(repo_root)
         self.extra = list(extra)
+        self.compile = list(compile_command) if compile_command is not None else list(DEFAULT_COMPILE)
+        # A cell that writes no object (-fsyntax-only) passes no -o; with
+        # transcripts, run_workload keeps each compile's stdout and stderr.
+        self.writes_output = writes_output
+        self.transcripts = transcripts
         self.sudo = sudo
         self.environment = dict(os.environ, LC_ALL="C", LANG="C")
         self.meta = load_meta(self.output)
@@ -968,7 +985,25 @@ class Lab:
         return ["taskset", "-c", str(self.cpu)] if self.cpu is not None else []
 
     def workload(self, output_path, flags=()):
-        return [self.binary or self.ide] + DEFAULT_COMPILE + self.extra + list(flags) + ["-o", output_path]
+        argv = [self.binary or self.ide] + self.compile + self.extra + list(flags)
+        return argv + ["-o", output_path] if self.writes_output else argv
+
+    def run_workload(self, prefix, output_path, flags=(), log=None):
+        """run_command(prefix + workload).  With transcripts, the compile's
+        stdout and stderr go to output_path + ".diagnostics" after the timed
+        span, and also to output_path itself when the cell writes no object."""
+        transcript = output_path + ".diagnostics"
+        if self.transcripts:
+            for stale in (transcript,) if self.writes_output else (transcript, output_path):
+                if os.path.isfile(stale):
+                    os.remove(stale)
+        status, out_text, err_text = self.run_command(list(prefix) + self.workload(output_path, flags), log=log)
+        if self.transcripts:
+            text = "--- stdout\n%s--- stderr\n%s" % (out_text, err_text)
+            write_text(transcript, text)
+            if not self.writes_output and status == 0:
+                write_text(output_path, text)
+        return status, out_text, err_text
 
     def record_options(self):
         """Extra `perf record` options: a fresh copy's unique path would add one
@@ -1385,14 +1420,14 @@ def probe_workload(lab, directory, out):
     capabilities["wrapper_rss_bytes"] = lab.last_maxrss if status == 0 else None
     # Work denominators (and the -fsource-metrics probe) from a separate run.
     source = os.path.join(directory, "source.metrics")
-    status, _, _ = lab.run_command(lab.pin() + lab.workload(out, ["-fsource-metrics=" + source]), log=os.path.join(directory, "source-run.log"))
+    status, _, _ = lab.run_workload(lab.pin(), out, ["-fsource-metrics=" + source], log=os.path.join(directory, "source-run.log"))
     capabilities["source_metrics"] = status == 0 and os.path.exists(source)
     if status != 0:
-        status, _, err = lab.run_command(lab.pin() + lab.workload(out), log=os.path.join(directory, "plain-run.log"))
+        status, _, err = lab.run_workload(lab.pin(), out, log=os.path.join(directory, "plain-run.log"))
         if status != 0:
             raise RuntimeError("workload fails: " + err.strip()[-400:])
     probe = os.path.join(directory, "probe.ccmetrics")
-    status, _, _ = lab.run_command(lab.pin() + lab.workload(out, ["-fmetrics-out=" + probe]), log=os.path.join(directory, "metrics-probe.log"))
+    status, _, _ = lab.run_workload(lab.pin(), out, ["-fmetrics-out=" + probe], log=os.path.join(directory, "metrics-probe.log"))
     capabilities["metrics_out"] = status == 0 and os.path.exists(probe)
     capabilities["metrics_out_measured"] = bool(capabilities["metrics_out"] and measured_input(parse_cc_metrics(read_text(probe) or "")))
     lab.save_meta()
@@ -2906,15 +2941,23 @@ def compare_labs(arguments, output, cpu, extra):
     """{variant key: Lab} with each variant's directory DIR/a, DIR/b."""
     labs = {}
     canonical_inline_pair = getattr(arguments, "canonical_inline_pair", False)
+    ast_cell = getattr(arguments, "ast_pilot_pair", None)
     for key, role in VARIANTS:
         ide = os.path.abspath(getattr(arguments, role))
         if not os.path.isfile(ide):
             sys.exit("uarch_lab: no %s binary at %s" % (role, ide))
         variant_extra = (["-fcanonical-inline"] if canonical_inline_pair and key == "b" else
-                         [] if canonical_inline_pair else extra)
-        lab = Lab(os.path.join(output, key), arguments.perf, cpu, ide, arguments.repo_root, variant_extra, arguments.sudo, arguments.fresh_copy)
+                         [] if canonical_inline_pair else
+                         [AST_PILOT_FLAG] if ast_cell and key == "b" else [] if ast_cell else extra)
+        if ast_cell:
+            lab = Lab(os.path.join(output, key), arguments.perf, cpu, ide, arguments.repo_root, variant_extra, arguments.sudo, arguments.fresh_copy,
+                      compile_command=AST_PILOT_COMPILE + [AST_PILOT_CELLS[ast_cell]], writes_output=ast_cell != "syntax-only", transcripts=True)
+        else:
+            lab = Lab(os.path.join(output, key), arguments.perf, cpu, ide, arguments.repo_root, variant_extra, arguments.sudo, arguments.fresh_copy)
         lab.meta["config"] = {"command": shell_join(lab.workload("OUT")), "cpu": cpu, "perf": arguments.perf, "repo_root": lab.repo_root,
                               "ide": ide, "role": role, "extra": variant_extra, "fresh_copy": arguments.fresh_copy}
+        if ast_cell:
+            lab.meta["config"]["ast_pilot_cell"] = ast_cell
         lab.save_meta()
         labs[key] = lab
     return labs
@@ -2926,28 +2969,34 @@ def prepare_variant(lab, warmups):
     warm-ups, compile a reference under that policy separately from probes."""
     out = os.path.join(lab.output, "out.exe")
     if warmups == 0:
-        status, _, err = lab.run_command(lab.pin() + lab.workload(out, compile_flags(lab, os.path.join(lab.output, "reference.ccmetrics"))),
-                                         log=os.path.join(lab.output, "reference-run.log"))
+        status, _, err = lab.run_workload(lab.pin(), out, compile_flags(lab, os.path.join(lab.output, "reference.ccmetrics")),
+                                          log=os.path.join(lab.output, "reference-run.log"))
         if status != 0:
             raise RuntimeError("reference compile failed: " + err.strip()[-400:])
     for index in range(warmups):
-        status, _, err = lab.run_command(lab.pin() + lab.workload(out, compile_flags(lab, os.path.join(lab.output, "warmup.ccmetrics"))),
-                                         log=os.path.join(lab.output, "warmup-%d.log" % index))
+        status, _, err = lab.run_workload(lab.pin(), out, compile_flags(lab, os.path.join(lab.output, "warmup.ccmetrics")),
+                                          log=os.path.join(lab.output, "warmup-%d.log" % index))
         if status != 0:
             raise RuntimeError("warm-up failed: " + err.strip()[-400:])
         print("[compare] %s warm-up %.2f s" % (lab.meta["config"]["role"], lab.last_elapsed), flush=True)
-    shutil.copyfile(out, os.path.join(lab.output, "reference.exe"))
+    reference = os.path.join(lab.output, "reference.exe")
+    shutil.copyfile(out, reference)
+    # Stage-two self-hosting executes this exact output; retain its permissions.
+    shutil.copymode(out, reference)
+    if lab.transcripts:
+        shutil.copyfile(out + ".diagnostics", os.path.join(lab.output, "reference.diagnostics"))
 
 
 def run_pair_member(lab, directory, pair, key):
     base = os.path.join(directory, "pairs", "%04d-%s" % (pair, key))
     out = os.path.join(lab.output, "out.exe")
     with lab.instance():
-        status, out_text, err = lab.run_command(timed_command(lab, base + ".csv") + lab.workload(out, compile_flags(lab, base + ".ccmetrics")))
+        status, out_text, err = lab.run_workload(timed_command(lab, base + ".csv"), out, compile_flags(lab, base + ".ccmetrics"))
     span = lab.last_elapsed
     if status != 0:
         write_text(base + ".err", out_text[-20000:] + err[-20000:])
-    identical = status == 0 and filecmp.cmp(os.path.join(lab.output, "reference.exe"), out, shallow=False)
+    identical = status == 0 and filecmp.cmp(os.path.join(lab.output, "reference.exe"), out, shallow=False) and \
+        (not lab.transcripts or filecmp.cmp(os.path.join(lab.output, "reference.diagnostics"), out + ".diagnostics", shallow=False))
     return {"pair": pair, "order": abba_order(pair), "variant": key, "exit": status, "identical": identical, "span_s": round(span, 6),
             "maxrss_bytes": lab.last_maxrss, "harness_rss_bytes": lab.last_harness_rss,
             "wrapper_rss_bytes": lab.meta["capabilities"].get("wrapper_rss_bytes"),
@@ -3005,6 +3054,9 @@ def command_compare(arguments):
     extra = arguments.extra[1:] if arguments.extra[:1] == ["--"] else arguments.extra
     if arguments.canonical_inline_pair and extra:
         sys.exit("uarch_lab: --canonical-inline-pair does not accept extra compile arguments")
+    ast_cell = getattr(arguments, "ast_pilot_pair", None)
+    if ast_cell and (extra or arguments.canonical_inline_pair or arguments.profile_steps or arguments.sudo):
+        sys.exit("uarch_lab: --ast-pilot-pair accepts no extra compile arguments, other fixed pair or profile steps")
     steps = [step for step in (arguments.profile_steps or "").replace(" ", "").split(",") if step]
     if arguments.sudo and "ibs" not in steps:
         steps.append("ibs")
@@ -3025,16 +3077,21 @@ def command_compare(arguments):
         if os.path.exists(os.path.join(directory, stale)):
             os.remove(os.path.join(directory, stale))
     labs = compare_labs(arguments, directory, cpu, extra)
+    command = (["IDE"] + AST_PILOT_COMPILE + [AST_PILOT_CELLS[ast_cell]] + (["-o", "OUT"] if ast_cell == "object" else []) if ast_cell else
+               ["IDE"] + DEFAULT_COMPILE + extra + ["-o", "OUT"])
     meta = {"version": 1, "mode": "compare", "steps": {}, "plan": None,
-            "config": {"command": shell_join(["IDE"] + DEFAULT_COMPILE + extra + ["-o", "OUT"]), "repo_root": os.path.abspath(arguments.repo_root),
+            "config": {"command": shell_join(command), "repo_root": os.path.abspath(arguments.repo_root),
                        "cpu": cpu, "perf": arguments.perf, "pairs": arguments.pairs, "target_minutes": arguments.target_minutes,
                        "warmups": arguments.warmups, "seed": arguments.seed, "profile_steps": steps, "sudo": arguments.sudo,
                        "require_identical_output": arguments.require_identical_output, "extra": extra,
                        "canonical_inline_pair": arguments.canonical_inline_pair,
-                       "extra_by_variant": {"a": [], "b": ["-fcanonical-inline"]} if arguments.canonical_inline_pair else {"a": extra, "b": extra},
+                       "extra_by_variant": {"a": [], "b": ["-fcanonical-inline"]} if arguments.canonical_inline_pair else
+                                           {"a": [], "b": [AST_PILOT_FLAG]} if ast_cell else {"a": extra, "b": extra},
                        "fresh_copy": arguments.fresh_copy, "min_effect_percent": arguments.min_effect},
             "variants": {key: {"role": role, "ide": labs[key].ide, "sha256": sha256_file(labs[key].ide),
                                "size_bytes": os.path.getsize(labs[key].ide)} for key, role in VARIANTS}}
+    if ast_cell:
+        meta["config"]["ast_pilot_pair"] = ast_cell
     save_compare_meta(directory, meta)
     print("uarch_lab: compare output %s; %s" % (directory, "%d pairs (--pairs)" % arguments.pairs if arguments.pairs is not None else
                                                 "pair count chosen after %d pilot pairs to land near %g min" % (PILOT_PAIRS, arguments.target_minutes)), flush=True)
@@ -3322,7 +3379,11 @@ def compare_summary(directory):
     verdict = compare_verdict(metrics, phases, min_effect)
     code = code_bytes_summary(references)
     counters = compare_counters(directory)
-    return {"schema": COMPARE_SCHEMA, "directory": directory, "command": config.get("command"), "repo_root": config.get("repo_root"),
+    extension = {}
+    if config.get("ast_pilot_pair"):
+        transcripts = [os.path.join(directory, key, "reference.diagnostics") for key, _ in VARIANTS]
+        extension["diagnostics_identical"] = filecmp.cmp(*transcripts, shallow=False) if all(map(os.path.isfile, transcripts)) else None
+    return {**extension, "schema": COMPARE_SCHEMA, "directory": directory, "command": config.get("command"), "repo_root": config.get("repo_root"),
             "cpu": config.get("cpu"), "host": host_facts(os.path.join(directory, "a")),
             "baseline": variants["baseline"], "candidate": variants["candidate"], "outputs_identical": outputs_identical,
             "phase_metrics": meta.get("phase_metrics", {"enabled": None, "reason": "collection policy not recorded (older comparison)"}),
@@ -3999,6 +4060,8 @@ def main(argv=None):
                          help="run each binary in place instead of a fresh copy per run (the setting that showed a 0.5%% A/A bias in LAB3)")
     compare.add_argument("--canonical-inline-pair", action="store_true",
                          help="fixed issue #48 acceptance pair: A omits -fcanonical-inline, B passes it")
+    compare.add_argument("--ast-pilot-pair", choices=sorted(AST_PILOT_CELLS), default=None,
+                         help="fixed issue #3397 acceptance cell: A omits -fc-ast-pilot, B passes it, on the -g0 unity source")
     compare.add_argument("extra", nargs=argparse.REMAINDER, help="-- extra compile arguments")
     retire = commands.add_parser("retirement", help="historical #512 native-retirement v1 gate (archived compilers required): compare per allocator mode plus generated-program "
                                  "runtime, judged against the #511 limits (retirement.md, retirement.json)")

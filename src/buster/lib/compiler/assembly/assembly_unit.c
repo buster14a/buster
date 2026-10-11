@@ -1,16 +1,18 @@
 // The assembly translation unit: assembly_unit_encode at the bottom takes the
 // complete text of a `.s` file and returns sections, symbols, relocations, and
 // diagnostics. assembly.c's assembly_encode is the instruction layer beneath
-// it and is called once per instruction statement; everything a whole file has that
-// a single statement does not lives here.
+// it and is called once per instruction statement; its result lives in
+// per-statement scratch and only bytes, newly inserted symbol names, and the
+// first diagnostic are retained. Everything a whole file has that a single
+// statement does not lives here.
 //
 // Three passes over an AssemblyUnitBuilder sized from the statement count:
 //   assembly_unit_collect_numeric_labels  local `1:` definitions in source
 //                                         order, so `1f`/`1b` can name one
 //   assembly_unit_parse                   labels, directives, and one
-//                                         assembly_encode call per
-//                                         instruction statement, each producing a
-//                                         piece of bytes in a section
+//                                         assembly_encode call per instruction
+//                                         statement, with only retained data
+//                                         copied out of its per-statement scratch
 //   assembly_unit_materialize             pieces concatenated per section and
 //                                         binding-invariant same-section
 //                                         PC-relative fixups resolved in place
@@ -18,12 +20,12 @@
 // Layout, in file order; each anchor is a definition to search for:
 //   assembly_unit_space ..                 text plumbing shared by the passes
 //   assembly_unit_diagnostic
-//   assembly_unit_symbol_intern ..         symbol and section tables
+//   assembly_unit_symbol_slot ..           indexed symbol lookup, insertion, and section tables
 //   assembly_unit_section_select
 //   assembly_unit_evaluate                 section-relative directive expressions
 //   assembly_unit_materialize_integers     final-label data evaluation
 //   assembly_unit_directive_*              the directive vocabulary
-//   assembly_unit_instruction              the assembly_encode call
+//   assembly_unit_instruction              scratch-backed assembly_encode call
 //   assembly_unit_statement                target comments/separators and positions
 //   assembly_unit_aarch64_control_fixup     checked final-label control fixups
 //   assembly_unit_define_section_starts    a bare section name is its offset 0
@@ -124,6 +126,13 @@ struct AssemblyUnitBuilder
     // whole unit has been read, so it is applied by
     // assembly_unit_resolve_weak_definitions.
     u32* symbol_weak_definition_line;
+    // Name-keyed open-addressing index over result.symbols: each slot holds a
+    // symbol index plus one, zero when empty, and a name keeps the first
+    // symbol that carried it. Sized from symbol_capacity, so it stays under
+    // half full. The final symbol compaction in assembly_unit_materialize
+    // does not maintain it; nothing interns after that.
+    u32* symbol_slots;
+    u64 symbol_slot_mask;
     u32 integer_count;
     u32 integer_capacity;
     u32 alias_count;
@@ -227,26 +236,59 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_diagnostic_format(AssemblyUnitBuilder* bu
 
 // ---------------------------------------------------------------- symbols
 
+BUSTER_GLOBAL_LOCAL u32* assembly_unit_symbol_slot(AssemblyUnitBuilder* builder, String8 name)
+{
+    u64 hash = 1469598103934665603ull;
+    for (u64 index = 0; index < name.length; index += 1)
+    {
+        hash ^= name.pointer[index];
+        hash *= 1099511628211ull;
+    }
+    u64 slot_index = hash & builder->symbol_slot_mask;
+    u32* slot = builder->symbol_slots + slot_index;
+    while (*slot && !string_equal(builder->result.symbols[*slot - 1].name, name))
+    {
+        slot_index = (slot_index + 1) & builder->symbol_slot_mask;
+        slot = builder->symbol_slots + slot_index;
+    }
+    return slot;
+}
+
+BUSTER_GLOBAL_LOCAL u32 assembly_unit_symbol_intern_name(AssemblyUnitBuilder* builder, String8 name, bool duplicate_name)
+{
+    u32* slot = assembly_unit_symbol_slot(builder, name);
+    u32 result = UINT32_MAX;
+    if (*slot)
+    {
+        result = *slot - 1;
+    }
+    else if (builder->result.symbol_count >= builder->symbol_capacity)
+    {
+        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                 S8("too many symbols in one assembly unit"));
+    }
+    else
+    {
+        result = builder->result.symbol_count++;
+        builder->result.symbols[result] = (AssemblyUnitSymbol){
+            .name = duplicate_name ? string_duplicate_arena(builder->arena, name, false) : name,
+            .section = ASSEMBLY_UNIT_SECTION_UNDEFINED,
+        };
+        *slot = result + 1;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL u32 assembly_unit_symbol_intern(AssemblyUnitBuilder* builder, String8 name)
 {
-    for (u32 index = 0; index < builder->result.symbol_count; index += 1)
-    {
-        if (string_equal(builder->result.symbols[index].name, name))
-        {
-            return index;
-        }
-    }
-    if (builder->result.symbol_count >= builder->symbol_capacity)
-    {
-        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("too many symbols in one assembly unit"));
-        return UINT32_MAX;
-    }
-    u32 index = builder->result.symbol_count++;
-    builder->result.symbols[index] = (AssemblyUnitSymbol){
-        .name = name,
-        .section = ASSEMBLY_UNIT_SECTION_UNDEFINED,
-    };
-    return index;
+    return assembly_unit_symbol_intern_name(builder, name, false);
+}
+
+// Statement-path names live in per-statement scratch; a newly inserted one is
+// copied into the unit arena before the symbol (and its index slot) retains it.
+BUSTER_GLOBAL_LOCAL u32 assembly_unit_symbol_intern_statement(AssemblyUnitBuilder* builder, String8 name)
+{
+    return assembly_unit_symbol_intern_name(builder, name, true);
 }
 
 // --------------------------------------------------------------- sections
@@ -281,6 +323,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_section_kind_for_name(String8 name, Assem
         {S8_INITIALIZER(".fini_array"), ASSEMBLY_UNIT_SECTION_FINI_ARRAY, true},
         {S8_INITIALIZER(".tdata"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA, true},
         {S8_INITIALIZER(".tbss"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO, true},
+        // PE thread-local data: one initialized template (object_coff_place_tls).
+        {S8_INITIALIZER(".tls$"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA, false},
         {S8_INITIALIZER(".debug_info"), ASSEMBLY_UNIT_SECTION_DEBUG_INFO, false},
         {S8_INITIALIZER(".debug_abbrev"), ASSEMBLY_UNIT_SECTION_DEBUG_ABBREV, false},
         {S8_INITIALIZER(".debug_line"), ASSEMBLY_UNIT_SECTION_DEBUG_LINE, false},
@@ -612,6 +656,75 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_section_switch(AssemblyUnitBuilder* build
     builder->current_stack_note = false;
 }
 
+// Mach-O segment/section pairs the object model and -S printer represent.
+// Normalize them to the model's names, so .text and __TEXT,__text reopen the
+// same section and unwind expressions referring to .text retain that identity.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_mach_section(AssemblyUnitBuilder* builder, String8* parts, u32 count,
+                                                     String8 directive, String8* name, AssemblyUnitSectionKind* kind)
+{
+    static const struct
+    {
+        String8 segment;
+        String8 section;
+        String8 name;
+        String8 type;
+        String8 attributes;
+        AssemblyUnitSectionKind kind;
+    } rows[] = {
+        {S8_INITIALIZER("__TEXT"), S8_INITIALIZER("__text"), S8_INITIALIZER(".text"), S8_INITIALIZER("regular"),
+         S8_INITIALIZER("pure_instructions"), ASSEMBLY_UNIT_SECTION_TEXT},
+        {S8_INITIALIZER("__TEXT"), S8_INITIALIZER("__const"), S8_INITIALIZER(".rodata"), S8_INITIALIZER("regular"),
+         {0}, ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA},
+        {S8_INITIALIZER("__DATA"), S8_INITIALIZER("__data"), S8_INITIALIZER(".data"), S8_INITIALIZER("regular"),
+         {0}, ASSEMBLY_UNIT_SECTION_DATA},
+        {S8_INITIALIZER("__DATA"), S8_INITIALIZER("__bss"), S8_INITIALIZER(".bss"), S8_INITIALIZER("zerofill"),
+         {0}, ASSEMBLY_UNIT_SECTION_ZERO},
+        {S8_INITIALIZER("__DATA"), S8_INITIALIZER("__thread_data"), S8_INITIALIZER(".tdata"), S8_INITIALIZER("thread_local_regular"),
+         {0}, ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA},
+        {S8_INITIALIZER("__DATA"), S8_INITIALIZER("__thread_bss"), S8_INITIALIZER(".tbss"), S8_INITIALIZER("thread_local_zerofill"),
+         {0}, ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO},
+        {S8_INITIALIZER("__DATA"), S8_INITIALIZER("__mod_init_func"), S8_INITIALIZER(".init_array"), S8_INITIALIZER("mod_init_funcs"),
+         {0}, ASSEMBLY_UNIT_SECTION_INIT_ARRAY},
+        {S8_INITIALIZER("__DATA"), S8_INITIALIZER("__mod_term_func"), S8_INITIALIZER(".fini_array"), S8_INITIALIZER("mod_term_funcs"),
+         {0}, ASSEMBLY_UNIT_SECTION_FINI_ARRAY},
+        {S8_INITIALIZER("__TEXT"), S8_INITIALIZER("__eh_frame"), S8_INITIALIZER(".eh_frame"), S8_INITIALIZER("coalesced"),
+         S8_INITIALIZER("no_toc+strip_static_syms+live_support"), ASSEMBLY_UNIT_SECTION_UNWIND},
+    };
+    bool matched = false;
+    bool valid = false;
+    String8 segment = assembly_unit_unquote(parts[0]);
+    String8 section = assembly_unit_unquote(parts[1]);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rows) && !matched; index += 1)
+    {
+        matched = string_equal(segment, rows[index].segment) && string_equal(section, rows[index].section);
+        if (matched)
+        {
+            valid = (count < 3 || string_equal(parts[2], rows[index].type)) &&
+                    (count < 4 || (rows[index].attributes.length && string_equal(parts[3], rows[index].attributes)));
+            if (valid)
+            {
+                *name = rows[index].name;
+                *kind = rows[index].kind;
+            }
+        }
+    }
+    if (!matched && string_equal(segment, S8("__DWARF")) && string_starts_with_sequence(section, S8("__debug_")))
+    {
+        String8 dwarf = string_equal(section, S8("__debug_str_offs")) ? S8(".debug_str_offsets")
+                         : string_format(builder->arena, S8(".{S8}"), string_slice(section, 2, section.length));
+        valid = assembly_unit_section_kind_for_name(dwarf, kind) && *kind >= ASSEMBLY_UNIT_SECTION_DEBUG_INFO &&
+                *kind <= ASSEMBLY_UNIT_SECTION_DEBUG_LOCLISTS && (count < 3 || string_equal(parts[2], S8("regular"))) &&
+                (count < 4 || string_equal(parts[3], S8("debug")));
+        if (valid) *name = dwarf;
+    }
+    if (!valid)
+    {
+        assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                        S8("unsupported Mach-O segment, section, type or attributes in the '{S8}' directive"), directive);
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section_regular(AssemblyUnitBuilder* builder, String8 operands, bool push)
 {
     String8 parts[4] = {0};
@@ -625,7 +738,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section_regular(AssemblyUnitBui
     bool classified = false;
     bool flags_valid = true;
     String8 directive = push ? S8(".pushsection") : S8(".section");
-    if (part_count > 1 && parts[1].length >= 2 && parts[1].pointer[0] == '"')
+    bool macho = builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS;
+    if (macho && part_count > 1 && string_starts_with_sequence(name, S8("__")))
+    {
+        flags_valid = assembly_unit_mach_section(builder, parts, part_count, directive, &name, &kind);
+        classified = flags_valid;
+    }
+    else if (part_count > 1 && parts[1].length >= 2 && parts[1].pointer[0] == '"')
     {
         String8 flags = string_slice(parts[1], 1, parts[1].length - 1);
         bool writable = false;
@@ -1060,6 +1179,13 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_location_symbol(AssemblyUnitBuilder* build
             builder->result.symbols[builder->result.symbol_count++] = (AssemblyUnitSymbol){
                 .name = builder->result.sections[builder->current_section].name, .section = builder->current_section, .defined = true,
             };
+            // A later intern of this name finds it unless an earlier symbol
+            // already owns the name, the first-match rule interning keeps.
+            u32* slot = assembly_unit_symbol_slot(builder, builder->result.symbols[symbol].name);
+            if (!*slot)
+            {
+                *slot = symbol + 1;
+            }
         }
         else
         {
@@ -1606,9 +1732,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder
             if (reference && assembly_unit_parse_number(string_slice(line, index, digits_end), &value))
             {
                 String8 name = {0};
-                for (u32 label = 0; label < builder->numeric_label_count; label += 1)
+                // Labels are collected in statement order, so the scan ends at
+                // the first label past this statement for `b`, or the first
+                // matching one past it for `f`.
+                bool past = false;
+                for (u32 label = 0; label < builder->numeric_label_count && !(past && (direction == 'b' || name.length)); label += 1)
                 {
                     AssemblyUnitNumericLabel candidate = builder->numeric_labels[label];
+                    past = candidate.statement > builder->statement;
                     if (candidate.value != value)
                     {
                         continue;
@@ -1646,15 +1777,17 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder
         }
         if (code_unit == '@' && builder->target.cpu_arch == CPU_ARCH_AARCH64)
         {
-            // Mach-O's `sym@PAGE` and `sym@PAGEOFF` belong to the instruction
-            // layer, which turns them into page relocations (#2933).
+            // Mach-O page and TLVP modifiers belong to the instruction
+            // layer, which turns them into page relocations (#2933, #3593).
             u64 suffix_end = index + 1;
             while (suffix_end < line.length && assembly_unit_name_character(line.pointer[suffix_end]))
             {
                 suffix_end += 1;
             }
             String8 suffix = string_slice(line, index + 1, suffix_end);
-            if (string_equal(suffix, S8("PAGE")) || string_equal(suffix, S8("PAGEOFF")))
+            if (string_equal(suffix, S8("PAGE")) || string_equal(suffix, S8("PAGEOFF")) ||
+                string_equal(suffix, S8("TLVPPAGE")) || string_equal(suffix, S8("TLVPPAGEOFF")) ||
+                string_equal(suffix, S8("GOTPAGE")) || string_equal(suffix, S8("GOTPAGEOFF")))
             {
                 text[length++] = code_unit;
                 index += 1;
@@ -1741,74 +1874,95 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_statement_address_symbol(AssemblyUnitBuild
 
 BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder, String8 line)
 {
+    TemporalArena statement = scratch_begin(&builder->arena, 1);
     String8 rewritten = {0};
     String8 plt_symbol = {0};
-    if (!assembly_unit_rewrite_line(builder, line, &rewritten, &plt_symbol))
+    bool result = false;
+    if (assembly_unit_rewrite_line(builder, line, &rewritten, &plt_symbol) && assembly_unit_section_current(builder))
     {
-        return false;
-    }
-    if (!assembly_unit_section_current(builder))
-    {
-        return false;
-    }
-    if (assembly_unit_section_kind_is_zero_fill(builder->result.sections[builder->current_section].kind))
-    {
-        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT, S8("an instruction cannot be emitted into a zero-fill section"));
-        return false;
-    }
-    // A64 instructions are four-byte words, and every object consumer demands
-    // a four-byte section alignment before it accepts a relocation on one.
-    // llvm-mc raises the section's alignment the same way (no padding is added).
-    if (builder->target.cpu_arch == CPU_ARCH_AARCH64 && builder->result.sections[builder->current_section].alignment < 4)
-    {
-        builder->result.sections[builder->current_section].alignment = 4;
-    }
-    AssemblyEncodeResult encoded = assembly_encode(builder->arena, rewritten,
-                                                   (AssemblyEncodeOptions){
-                                                       .target = builder->target,
-                                                       .syntax = builder->syntax,
-                                                       .unit_control_relocations = true,
-                                                   });
-    if (encoded.diagnostic_count)
-    {
-        assembly_unit_diagnostic(builder, encoded.diagnostics[0].kind, encoded.diagnostics[0].message);
-        return false;
-    }
-    u64 base = builder->section_offsets[builder->current_section];
-    bool plt_matched = !plt_symbol.length;
-    for (u32 index = 0; index < encoded.relocation_count; index += 1)
-    {
-        AssemblyRelocation relocation = encoded.relocations[index];
-        if (relocation.symbol >= encoded.symbol_count)
+        if (assembly_unit_section_kind_is_zero_fill(builder->result.sections[builder->current_section].kind))
         {
-            return false;
+            assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT,
+                                     S8("an instruction cannot be emitted into a zero-fill section"));
         }
-        String8 relocation_name = encoded.symbols[relocation.symbol].name;
-        u32 symbol = string_equal(relocation_name, S8(".")) ? assembly_unit_statement_address_symbol(builder, base)
-                                                           : assembly_unit_symbol_intern(builder, relocation_name);
-        if (symbol == UINT32_MAX || !assembly_unit_relocation_append(builder, symbol, base + relocation.offset, relocation.addend, relocation.kind))
+        else
         {
-            return false;
+            // A64 instructions are four-byte words, and every object consumer demands
+            // a four-byte section alignment before it accepts a relocation on one.
+            // llvm-mc raises the section's alignment the same way (no padding is added).
+            if (builder->target.cpu_arch == CPU_ARCH_AARCH64 && builder->result.sections[builder->current_section].alignment < 4)
+            {
+                builder->result.sections[builder->current_section].alignment = 4;
+            }
+            AssemblyEncodeResult encoded = assembly_encode(statement.arena, rewritten,
+                                                           (AssemblyEncodeOptions){
+                                                               .target = builder->target,
+                                                               .syntax = builder->syntax,
+                                                               .unit_control_relocations = true,
+                                                           });
+            if (encoded.diagnostic_count)
+            {
+                String8 message = string_duplicate_arena(builder->arena, encoded.diagnostics[0].message, false);
+                assembly_unit_diagnostic(builder, encoded.diagnostics[0].kind, message);
+            }
+            else
+            {
+                u64 base = builder->section_offsets[builder->current_section];
+                bool plt_matched = !plt_symbol.length;
+                bool valid = true;
+                for (u32 index = 0; index < encoded.relocation_count && valid; index += 1)
+                {
+                    AssemblyRelocation relocation = encoded.relocations[index];
+                    if (relocation.symbol >= encoded.symbol_count)
+                    {
+                        valid = false;
+                    }
+                    else
+                    {
+                        String8 relocation_name = encoded.symbols[relocation.symbol].name;
+                        u32 symbol = string_equal(relocation_name, S8("."))
+                                         ? assembly_unit_statement_address_symbol(builder, base)
+                                         : assembly_unit_symbol_intern_statement(builder, relocation_name);
+                        if (symbol == UINT32_MAX ||
+                            !assembly_unit_relocation_append(builder, symbol, base + relocation.offset,
+                                                             relocation.addend, relocation.kind))
+                        {
+                            valid = false;
+                        }
+                        else
+                        {
+                            bool direct_branch =
+                                relocation.kind == ASSEMBLY_RELOCATION_X86_PC32 && relocation.offset &&
+                                (encoded.bytes.pointer[relocation.offset - 1] == 0xe8 ||
+                                 encoded.bytes.pointer[relocation.offset - 1] == 0xe9);
+                            builder->result.relocations[builder->result.relocation_count - 1].x86_branch = direct_branch;
+                            if (string_equal(encoded.symbols[relocation.symbol].name, plt_symbol))
+                            {
+                                plt_matched = direct_branch;
+                                builder->result.relocations[builder->result.relocation_count - 1].plt = direct_branch;
+                            }
+                        }
+                    }
+                }
+                if (valid && plt_matched)
+                {
+                    u8* bytes = 0;
+                    if (encoded.bytes.length)
+                    {
+                        bytes = arena_allocate(builder->arena, u8, encoded.bytes.length);
+                        memcpy(bytes, encoded.bytes.pointer, encoded.bytes.length);
+                    }
+                    result = assembly_unit_append(builder, bytes, encoded.bytes.length);
+                }
+                else if (valid)
+                {
+                    assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                             S8("@PLT requires a direct x86 call or jump with a 32-bit displacement"));
+                }
+            }
         }
-        bool direct_branch = relocation.kind == ASSEMBLY_RELOCATION_X86_PC32 && relocation.offset &&
-                             (encoded.bytes.pointer[relocation.offset - 1] == 0xe8 || encoded.bytes.pointer[relocation.offset - 1] == 0xe9);
-        builder->result.relocations[builder->result.relocation_count - 1].x86_branch = direct_branch;
-        if (string_equal(encoded.symbols[relocation.symbol].name, plt_symbol))
-        {
-            plt_matched = direct_branch;
-            builder->result.relocations[builder->result.relocation_count - 1].plt = direct_branch;
-        }
     }
-    bool result;
-    if (plt_matched)
-    {
-        result = assembly_unit_append(builder, encoded.bytes.pointer, encoded.bytes.length);
-    }
-    else
-    {
-        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("@PLT requires a direct x86 call or jump with a 32-bit displacement"));
-        result = false;
-    }
+    scratch_end(statement);
     return result;
 }
 
@@ -2418,6 +2572,13 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     builder.symbol_local = arena_allocate_zeroed(arena, bool, builder.symbol_capacity);
     builder.symbol_section_start = arena_allocate_zeroed(arena, bool, builder.symbol_capacity);
     builder.symbol_weak_definition_line = arena_allocate_zeroed(arena, u32, builder.symbol_capacity);
+    u64 symbol_slot_capacity = 16;
+    while (symbol_slot_capacity < (u64)builder.symbol_capacity * 2 + 1)
+    {
+        symbol_slot_capacity <<= 1;
+    }
+    builder.symbol_slots = arena_allocate_zeroed(arena, u32, symbol_slot_capacity);
+    builder.symbol_slot_mask = symbol_slot_capacity - 1;
 
     assembly_unit_collect_numeric_labels(&builder, blanked);
     assembly_unit_parse(&builder, blanked);

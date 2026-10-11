@@ -231,8 +231,13 @@ The merge gate admits exactly that head. `catch_up_main_admissible` in
 reads the live policy. The publication step applies it through `catch-up-main`
 at both of its `main` checks. Any other movement still exits 75. Ordinary,
 trust-transition and manually dispatched requests still need exact current
-`main` at every check. A lease failure while `main` differs from the base is
-still reported as main movement. Trusted job outputs carry those outcomes
+`main` at every check. A leased-push failure while the PR head is unchanged
+and `main` differs from the base is reported as main movement only when that
+movement is not admissible: for an automatic catch-up the failure branch calls
+`catch-up-main` with the live `main`, and an admissible movement exits 1, since
+`main` did not cause the failure and a superseded label would hide a real
+publication failure behind a fresh retry. Other requests keep exit 75 for any
+such movement. Trusted job outputs carry those outcomes
 into a separate read-only result job. Its fixed `Superseded request` marker is
 accepted only from the verified writer's exact attempt; candidate test logs or
 artifacts cannot supply that decision. The first failed stage decides the

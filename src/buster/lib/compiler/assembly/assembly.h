@@ -89,6 +89,17 @@ typedef enum AssemblyRelocationKind
     ASSEMBLY_RELOCATION_AARCH64_LDST32_LO12,
     ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12,
     ASSEMBLY_RELOCATION_AARCH64_LDST128_LO12,
+    // GOT page addressing (#3192): `adrp Xd, :got:sym` and
+    // `ldr Xt, [Xn, :got_lo12:sym]`. ELF only; the driver spells them
+    // R_AARCH64_ADR_GOT_PAGE / R_AARCH64_LD64_GOT_LO12_NC. Both take a
+    // symbol with an exactly zero addend and are never folded by a unit.
+    ASSEMBLY_RELOCATION_AARCH64_GOT_PAGE21,
+    ASSEMBLY_RELOCATION_AARCH64_GOT_LD64_LO12,
+    // Darwin thread-local descriptor page and 64-bit descriptor load (#3593).
+    ASSEMBLY_RELOCATION_AARCH64_MACH_TLVP_PAGE21,
+    ASSEMBLY_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12,
+    ASSEMBLY_RELOCATION_AARCH64_MACH_GOT_PAGE21,
+    ASSEMBLY_RELOCATION_AARCH64_MACH_GOT_PAGEOFF12,
     ASSEMBLY_RELOCATION_COUNT,
 } AssemblyRelocationKind;
 
@@ -163,6 +174,17 @@ struct AssemblyEncodeResult
 // forms use the same instruction-local representation that generated ISA
 // tables extend without changing this public contract.
 BUSTER_F_DECL AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncodeOptions options);
+
+// True when an x86 PC32 relocation is the rel32 of a direct CALL, JMP or Jcc
+// in `bytes`, the encoded buffer it was reported against. Mach-O spells that
+// field X86_64_RELOC_BRANCH and every other rip-relative field
+// X86_64_RELOC_SIGNED, so producers record the distinction where the
+// instruction is still known instead of leaving the object writer to guess.
+// `bytes` holds only instructions the assembler encoded (data directives never
+// reach it), so the byte before a field is that instruction's own: a
+// rip-relative memory field always follows a ModRM byte with mod=00 and rm=101
+// (0x05/0x0d/.../0x3d), which can be neither E8, E9 nor the 8x of 0F 8x.
+BUSTER_F_DECL bool assembly_x86_relocation_is_branch(ByteSlice bytes, AssemblyRelocation relocation);
 
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL bool assembly_test_aarch64_expand_private_short_branch(AssemblyRelocationKind kind, u32 word, u32 words[2]);

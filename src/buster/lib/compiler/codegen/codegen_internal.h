@@ -27,6 +27,11 @@ struct CodegenBuffer
     CodegenError error;
 };
 
+// Appends one frame event at a function-relative offset; false when the
+// descriptor's action array is full. Encoders publish their prologue through
+// a local descriptor with code_offset zero.
+BUSTER_F_DECL bool codegen_unwind_action_append(CodegenFunctionDescriptor* descriptor, u32 capacity, u32 code_offset,
+                                                CodegenUnwindActionKind kind, u8 register_index, u32 value);
 // Shared bounded AArch64 Windows probe. Returns false for a small or
 // misaligned request; a handled request reports emission errors in buffer.
 BUSTER_F_DECL bool codegen_a64_windows_large_stack_adjust(CodegenBuffer* buffer, u32 size, bool subtract,
@@ -111,6 +116,23 @@ BUSTER_F_DECL u32 codegen_canonical_a64_remainder_divide_instruction(bool signed
 BUSTER_F_DECL void a64_emit_load_pointer_offset(CodegenBuffer* buffer, u32 target, u32 address, u32 offset, u32 size);
 BUSTER_F_DECL void a64_emit_store_pointer_offset(CodegenBuffer* buffer, u32 source, u32 address, u32 offset, u32 size);
 #if BUSTER_INCLUDE_TESTS
+// What codegen_machine_scratch_begin chose for a function of these counts,
+// and whether codegen_machine_scratch_end put the thread's scratch back.
+typedef struct CodegenTestMachineScratch CodegenTestMachineScratch;
+struct CodegenTestMachineScratch
+{
+    u64 bound;
+    u64 scratch_reserved;
+    u64 nested_reserved;
+    bool fits;
+    bool replaced;
+    bool nested_distinct;
+    bool restored;
+};
+// A nonzero `other_remaining` first fills the other thread scratch arena to
+// that many free bytes, as a live outer allocation would.
+BUSTER_F_DECL CodegenTestMachineScratch codegen_test_machine_scratch(Arena* arena, u32 instruction_count, u32 value_count, u32 block_count,
+                                                                     u64 other_remaining);
 BUSTER_F_DECL bool codegen_test_canonical_block_offsets(u32* offsets, IrFunction* function, MachineSelectResult* selected,
                                                        MachineEncodeResult* encoded);
 BUSTER_F_DECL void codegen_test_emit_scalar(CodegenBuffer* buffer, u32 byte_count, u64 value);

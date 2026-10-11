@@ -26,13 +26,26 @@ sys.modules[SPEC.name] = integration
 SPEC.loader.exec_module(integration)
 
 
+# Disposable fixtures have no housekeeping worth doing. Git may detach automatic
+# gc/maintenance after commit, fetch or receive-pack, and that worker can write
+# under a repository while TemporaryDirectory cleanup removes it (#3361 pattern).
+QUIET_HOUSEKEEPING = (("maintenance.auto", "false"), ("gc.auto", "0"), ("receive.autogc", "false"))
+
+
 def git(repo: Path, *arguments: str, input_text: str | None = None) -> str:
-    command = ["git", "-c", "core.hooksPath=/dev/null", "-C", os.fspath(repo), *arguments]
+    quiet = [option for key, value in QUIET_HOUSEKEEPING for option in ("-c", key + "=" + value)]
+    command = ["git", "-c", "core.hooksPath=/dev/null", *quiet, "-C", os.fspath(repo), *arguments]
     result = subprocess.run(command, input=input_text, text=True, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE)
     if result.returncode != 0:
         raise AssertionError("git failed: " + " ".join(arguments) + "\n" + result.stderr)
     return result.stdout.strip()
+
+
+def quiet_housekeeping(repo: Path) -> None:
+    """Persist the suppression so the integration tool's own Git calls inherit it."""
+    for key, value in QUIET_HOUSEKEEPING:
+        git(repo, "config", key, value)
 
 
 class Repository:
@@ -42,6 +55,8 @@ class Repository:
         self.repo = root / "repo"
         git(root, "init", "--bare", os.fspath(self.remote))
         git(root, "init", "-b", "main", os.fspath(self.repo))
+        quiet_housekeeping(self.remote)
+        quiet_housekeeping(self.repo)
         git(self.repo, "config", "user.name", "Test User")
         git(self.repo, "config", "user.email", "test@example.invalid")
         git(self.repo, "remote", "add", "origin", os.fspath(self.remote))
@@ -446,6 +461,7 @@ class WriterEligibilityTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.repo = Path(temporary.name) / "repo"
         git(Path(temporary.name), "init", "-b", "main", os.fspath(self.repo))
+        quiet_housekeeping(self.repo)
         git(self.repo, "config", "user.name", "Test User")
         git(self.repo, "config", "user.email", "test@example.invalid")
         self.write({
@@ -746,6 +762,7 @@ class CatchUpPublicationTests(unittest.TestCase):
         # runner, so the predicate must fetch the live main it judges.
         self.main = self.root / "main"
         git(self.root, "clone", "-q", os.fspath(self.repository.remote), os.fspath(self.main))
+        quiet_housekeeping(self.main)
         git(self.main, "config", "user.name", "Test User")
         git(self.main, "config", "user.email", "test@example.invalid")
         self.later = self.advance(self.base, "README.md", "later\n")
@@ -811,6 +828,22 @@ class CatchUpPublicationTests(unittest.TestCase):
                     self.authorize(live_main)
                 self.assertEqual(self.catch_up_main(live_main), integration.STALE_MAIN_EXIT)
 
+    def test_live_main_fetch_leaves_no_housekeeping_writer_for_strict_cleanup(self):
+        # Tiny thresholds would otherwise launch gc/maintenance on every fetch;
+        # Trace2 records the child before any detachment, so this has no race.
+        repo = self.repository.repo
+        for key, value in (("gc.autoPackLimit", "1"), ("maintenance.loose-objects.enabled", "true"),
+                           ("maintenance.loose-objects.auto", "1")):
+            git(repo, "config", key, value)
+        trace = self.root / "git-trace.jsonl"
+        with mock.patch.dict(os.environ, {"GIT_TRACE2_EVENT": os.fspath(trace)}):
+            self.assertEqual(self.catch_up_main(self.fork), integration.STALE_MAIN_EXIT)
+        events = [json.loads(line) for line in trace.read_text().splitlines()]
+        self.assertTrue(any(event.get("event") == "child_start" for event in events))
+        housekeeping = [event["argv"] for event in events if event.get("event") == "child_start" and
+                        ("maintenance" in event.get("argv", []) or "gc" in event.get("argv", []))]
+        self.assertEqual(housekeeping, [])
+
     def test_non_catch_up_requests_still_need_exact_current_main(self):
         cases = (
             ("human owner", {"bot": False}),
@@ -859,6 +892,16 @@ class WorkflowPolicyTests(unittest.TestCase):
                       publish)
         self.assertIn("native_retirement_integration.py catch-up-main", publish)
         self.assertIn('test "$pull_remote" = "$head"', publish)
+        # A lease failure is main supersession only when main_admissible
+        # rejects the live base; an admissible catch-up movement exits 1.
+        lease_failure = publish.split('--force-with-lease="refs/heads/$head_ref:$head"', 1)[1]
+        lease_failure = lease_failure.split("\n          fi\n", 1)[0]
+        self.assertIn('main_admissible "$current_base" || lease_status=$?', lease_failure)
+        self.assertLess(lease_failure.index('main_admissible "$current_base"'),
+                        lease_failure.index("exit 75"))
+        self.assertIn('if [[ "$lease_status" == 75 ]]; then', lease_failure)
+        self.assertEqual(lease_failure.count("exit 75"), 1)
+        self.assertTrue(lease_failure.rstrip().endswith("exit 1"))
         self.assertLess(publish.index("Native retirement trusted integration"),
                         publish.index('--force-with-lease="refs/heads/$head_ref:$head"'))
         self.assertNotIn('"$commit:refs/heads/main"', publish)

@@ -255,7 +255,7 @@ Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `benc
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
 `test_timing_summary_self_test`, `musl_directory_self_test`, `generate_guard_self_test`,
-`compiler_discovery_self_test`,
+`compiler_discovery_self_test`, `compatibility_ide_selection_self_test`,
 `import_assembly_metadata`, `import_arm_a64_metadata`,
 `import_arm_a64_sysregs`, `test_self_host`, `test_mode_matrix`, `test_differential`,
 `native_retirement_census`,
@@ -309,6 +309,13 @@ and only after process-tree cleanup is proven; compiler exits, malformed output,
 identity rejection and cleanup uncertainty remain single-attempt failures.
 macOS also reports the actual unversioned `gcc` identity, independently of the
 selected versioned GCC row.
+
+`compatibility_ide_selection_self_test` checks the shared compiler selection
+of the compatibility harnesses (`compat_ide_select`) against inert files:
+every combination of Release, Debug and flat executables in its own root,
+crossed with an omitted, Debug and Release request. It runs in the
+combination-matrix preflight; see the
+[compatibility index](compatibility.md#compiler-selection) for the policy.
 
 `musl_directory_self_test` checks complete, unique directory inventories through
 two capacity growths, opposite creation orders, manifest sorting and architecture
@@ -414,8 +421,9 @@ serialization remains only for multi-test-tree local selections. Sanitized
 Clang CI trees and Windows AArch64 Release run `test_all` through the existing
 isolated-process runner (`BUSTER_TEST_PROCESS_PARTITIONS`), which splits a
 four-worker quota into two two-worker processes and runs the ordinary invocation
-below four. The `primary` group owns `c_frontend_tests` on Windows x86-64 and
-`compiler_driver_tests` elsewhere; `rest` owns every other enabled module.
+below four. The `primary` group owns `c_frontend_tests` on every partitioned
+tree except Windows AArch64, where it owns `compiler_driver_tests`; `rest`
+owns every other enabled module.
 The parent independently checks both complete inventories and their exact
 disjoint union. Windows AArch64 has no artifact-fanout consumer; supported
 canonical producers retain their standard configure arguments.
@@ -585,14 +593,16 @@ suite as the cwd and Apple architecture regressions.
 ## Incremental Android test assets
 
 The Android `apk` graph in `cmake/AndroidApk.cmake` treats the active files under
-`tests/` as package inputs, not compiler sources. After configuring the normal
-Android tree, `cmake --build build/android-ci-x86_64 --config Debug --target apk`
-repackages fixture edits, additions, renames and deletions without requiring a
-C source rebuild or another destructive `generate`. Release uses the same
-contract. An unchanged build does not repackage. A content-stable inventory
-handles removals and newly added files whose timestamps predate the APK;
-`CONFIGURE_DEPENDS` refreshes that inventory with the supported Ninja generators.
-The preserved `.bbb` corpus is excluded before Android asset packaging.
+`tests/` and the SPIR-V, codegen and driver fixture directories under
+`src/buster/tests/compiler/` as package inputs, not compiler sources. After
+configuring the normal Android tree, `cmake --build build/android-ci-x86_64
+--config Debug --target apk` repackages fixture edits, additions, renames and
+deletions without requiring a C source rebuild or another destructive
+`generate`. Release uses the same contract. An unchanged build does not
+repackage. A content-stable inventory handles removals and newly added files
+whose timestamps predate the APK; `CONFIGURE_DEPENDS` refreshes that inventory
+with the supported Ninja generators. The preserved `.bbb` corpus is excluded
+before Android asset packaging.
 
 `python3 tests/android_apk_assets_test.py` exercises that same production graph
 through real CMake and Ninja Multi-Config, in Debug and Release, with isolated
@@ -600,6 +610,8 @@ fixtures and controlled packaging-tool stand-ins. It checks package contents,
 fixture-only invalidation, stale-file removal, no-op behavior, and the retained
 native-library/manifest/sign-script dependencies. It requires the existing
 CMake, Ninja, Python and Bash prerequisites, not an Android SDK or a compiler.
+`python3 tools/mobile_driver_fixture_assets_test.py` covers staging of the
+source-tree driver fixtures.
 The existing `tests/mobile_ci_scripts_test.sh` suite and mobile lifecycle CI run
 it on Linux and macOS. This is build-graph evidence, not Android compilation,
 signing or device execution; those remain the regular Android mobile CI gates.
@@ -608,10 +620,11 @@ the existing APK and staging paths are shared.
 
 ## Incremental iOS test assets
 
-The iOS `ide` target stages active files under `tests/` through
+The iOS `ide` target stages active files under `tests/` and the SPIR-V, codegen
+and driver fixture directories under `src/buster/tests/compiler/` through
 `cmake/IOSBundleAssets.cmake`. Its filtered, content-stable inventory makes
 fixture edits, additions, renames and removals update the configuration's app
-bundle without relinking the native executable. The owned `tests` subtree is
+bundle without relinking the native executable. The owned fixture subtrees are
 rebuilt on a real input change, so deleted files cannot survive; preserved
 `.bbb` inputs are excluded and do not invalidate the graph. Debug and Release
 use separate stamps and bundles, and an unchanged build does not rewrite either.
@@ -620,8 +633,9 @@ use separate stamps and bundles, and an unchanged build does not rewrite either.
 with Ninja Multi-Config in paths containing spaces. It covers both configurations,
 stale-file removal, old-timestamp additions, dormant/empty inventories, native
 target stability, no-op builds and command failure propagation without requiring
-an Apple SDK. Actual iOS compilation, bundle validation and simulator execution
-remain in `ios/test_ci.sh` and the mobile CI lanes.
+an Apple SDK. `python3 tools/mobile_driver_fixture_assets_test.py` covers staging
+of the source-tree driver fixtures. Actual iOS compilation, bundle validation
+and simulator execution remain in `ios/test_ci.sh` and the mobile CI lanes.
 
 The Clang/GCC build-driver binary now leaves the existing lane implementation
 available for opt-in `test_differential --jobs N`. The default remains one case

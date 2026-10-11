@@ -68,11 +68,13 @@ pass timings for diagnostic use.
 ## Order and ownership
 
 `ir_prepare_canonical_module` receives the frontend's completed CFG. It checks
-uncertified input, runs the existing shared local-promotion oracle when needed,
-then runs selected FAST transforms on each lowered function in this order:
+uncertified input, expands requested canonical direct calls under #48's bounded
+policy, then runs the shared local-promotion oracle and selected FAST transforms
+on each lowered function in this order:
 
 | Stage | Algorithm and preserved boundary |
 | --- | --- |
+| Direct-call inlining | `ir_inline_module` consumes the canonical argument values already evaluated by the caller, retains callable callee definitions and source line ranges, and checks transformed IR before FAST cleanup. Optional tiny selection and mandatory source directives are independent of the register allocator. |
 | Local promotion / frontend SSA | Existing frontend construction and `ir_promote_function`; the existing `-fno-frontend-ssa` and `-fno-canonical-local-promotion` controls remain independent. |
 | `fold` | One forward scan; path-compressed value replacements; integer constants up to 64 bits, integer identities, same-type pure casts, integer truncation/extension. No floating-point folding, division/remainder folding, branch deletion or iterative global propagation. Operand decoding and arithmetic are the shared `ir_integer_*` semantics (`ir_integer.c`); a row whose kernel result carries a shift-count, division or unsupported fault is left for run time. |
 | `address` | One scan collapses `&*pointer` and `*&place` only when type, category, alignment and all value qualifier facts agree. Shared selector address facts in #44 own deeper offset/index analysis. |
@@ -93,7 +95,7 @@ preparation markers and revoking the caller's input certificate. Repeated
 untrusted preparation still validates. Published CFG/address facts must be
 invalidated before mutation and rebuilt after these transforms (#38/#44).
 Producer-certified modules that do not yet satisfy the stricter canonical
-validator are left unchanged as a unit and increment `validation_skips`.
+validator skip optional FAST as a unit and increment `validation_skips`.
 Optional transformation must never turn an otherwise accepted legacy source
 shape into a new diagnostic.
 
@@ -194,3 +196,97 @@ Wasm64, eBPF and LLVM bitcode. The bounded existing eBPF VM executes four inputs
 including unsigned wraparound. Wasm and bitcode magic checks establish artifact
 production, not engine execution; stronger engine/external-compiler checks are
 recorded separately when available.
+
+## Bounded direct-call inlining (#48)
+
+Source `always_inline`/`__always_inline__` and
+`noinline`/`__noinline__` directives survive declaration merging as canonical
+symbol facts. Windows `__forceinline` retains its force-inline meaning and
+ordinary C inline linkage. Contradictory directives are source errors.
+A direct mandatory call that cannot be expanded produces a structured
+`ir.inline-required` diagnostic rather than silently keeping the call.
+Indirect calls preserve their ordinary runtime dispatch.
+
+Tiny-call expansion is opt-in: `-fcanonical-inline` selects it and
+`-fno-canonical-inline` clears it, the last of the two winning; optimization
+levels never change it (see `docs/agents/driver.md` for the measurement behind
+that default). Source `always_inline` requests remain independent of that
+selection.
+
+Optional candidates are same-module, noninterposable single-block leaves with
+compatible fixed-prototype signatures. Target-aware C lowering permits strong
+external definitions on Windows COFF, while default-visible ELF definitions
+remain interposable and weak/bodyless symbols remain ineligible. Canonical IR
+embedders start with the conservative interposition policy.
+Mandatory candidates can contain
+multiple blocks, local storage, ordinary calls and aggregate returns.
+The iterative mandatory-call graph processes callees before callers and
+rejects cycles. Dynamic stack lifetime operations, computed labels,
+variadic bodies, returns-twice calls and unsupported ABI shapes are refused.
+Unsupported candidates remain calls when optional and diagnose when mandatory.
+Arguments are evaluated once before the splice. Expansion remaps canonical
+values, blocks, locals, debug scopes, source ranges, instruction extras and incoming edges.
+Expansion retains the original out-of-line definition, including when its
+address is observed. Cloned instruction ranges preserve supported source line
+information; the debug model does not gain inline call-stack records.
+
+Positive decimal limits are configurable through
+`-fcanonical-inline-max-callee=N` (default 16 canonical instructions),
+`-fcanonical-inline-function-growth=N` (default 2048 copied rows per caller),
+`-fcanonical-inline-module-growth=N` (default 4096 copied rows per module), and
+`-fcanonical-inline-call-sites=N` (default 64 sites per caller).
+The caller default is twice the 64-site times 16-row tiny-body budget. This leaves
+headroom for larger mandatory checked-arithmetic expansions; the module, work
+and storage guards still independently bound expansion.
+Zero numeric fields in embedding options normalize to those defaults.
+Mandatory calls are processed before optional tiny candidates across the module;
+both phases share the same row-growth, call-site and per-caller limits. Mandatory
+planning and splicing share one module-wide work and retained-storage budget.
+Optional selection, like FAST, bounds work and retained storage per caller:
+splicing into a caller copies its exactly sized tables, so module-wide byte or
+work totals let the first few large callers starve every later one. Optional
+expansion across the module stays bounded by the module row-growth limit, which
+is the binding limit for the production unity source at default budgets.
+The mandatory graph captures
+call sites in one bounded scan rather than
+rescanning every instruction to build reverse edges. Planning storage includes
+function metadata, captured edge chunks and reverse-edge arrays. Caller planning counts block tails and phi metadata, with instruction prefixes
+recorded during the candidate scan. Splices preserve existing IDs and repair block
+chains directly, so no full caller compaction is required. Each caller has one
+splice reservation: the first splice that adds locals, debug locals or debug scopes
+widens every block snapshot and the caller's place/debug arrays once to the
+planned final counts, later splices write in place, and predecessor lists are
+rebuilt once after the caller's last splice. Planning charges a site the increase
+in that reservation's bytes and work, plus the callee payload, instead of the
+caller-wide widening per site. Other repeated splice work stays charged per site. Predecessor work uses original and projected target
+counts rather than unrelated instruction/value payload counts; call membership
+checks stop when they reach the call. Growing table storage is charged from the caller's actual
+capacities through projected appends, including geometric growth floors and
+alignment. Callee payloads and clone maps remain charged per splice.
+Tiny bodies are screened before payload scans. Mandatory expansion is still
+subject to resource guards,
+including bounded planning work and retained cloning storage. Expansion checks
+strict canonical validity per function, never by a module-wide scan: each
+candidate's caller and callee once before they are read, and each spliced caller
+again after its last splice (an output failure reports the `inlining output`
+boundary). A mandatory call whose caller or callee is a legacy producer-certified
+shape that fails that check is diagnosed; an optional one stays a call. Rewritten
+callers pass the same check, so a module the input scan already proved stays proven
+and the FAST input guard described above still pays the only module-wide scan on a
+producer-certified default compile. The verbose
+`IR_INLINE` record reports candidates, accepted/mandatory calls, copied rows,
+growth, rejection categories and visits. These counts are diagnostics, not a
+performance result. Mandatory budget refusals additionally report the first
+resource category, requested amount and applicable limit in the source diagnostic.
+
+Performance validation is incomplete until the applicable exact candidate,
+workloads and configurations execute on the approved Ryzen 7 9700X. The
+existing compiler comparison request measures default-path compile time,
+available retired-instruction counters and ELF executable-section bytes.
+A matched two-stage tiny-off/on generated-self-host comparison is required to
+qualify optional tiny inlining. Each generated compiler executes the same source
+workload and must reproduce its corresponding first-stage executable bytes.
+Existing competitor
+reports are diagnostic and do not isolate an inliner benefit. Default adoption
+requires the existing throughput/memory acceptance policy and self-hosting,
+platform, canonical-validation and backend correctness gates.

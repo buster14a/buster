@@ -669,8 +669,8 @@ captures (#2741).
     same checkout path, one after the other: an `-O3` unity compile of `ide.c`
     takes about 5 GiB, and parallel builds can be OOM-killed. Run each workload
     with the same command line and working directory, and pin `ide cc`'s own
-    output target (for example `-march=znver3`), since it defaults to the host
-    CPU. A stage-1 self-compile takes about 10 minutes per profile;
+    output target (for example `-march=znver3`), since it defaults to the
+    portable baseline. A stage-1 self-compile takes about 10 minutes per profile;
     `--cache-sim=yes --branch-sim=yes` roughly doubles that.
   - **Read the numbers as diagnostics, never as acceptance evidence.**
     `-march=x86-64-v3` compiles out `BUSTER_SIMD_512` kernels such as
@@ -800,13 +800,43 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    the same candidate-HEAD unity source. Stage 1 uses the exact same candidate
    compiler binary for A and B, with A omitting `-fcanonical-inline` and B
    passing it. Stage 2 uses those two stage-1 outputs as compilers with the
-   same respective modes. Each stage is 12 ABBA pairs after one warmup. The
-   report records wall time, retired instructions when perf can count them,
+   same respective modes. Saved stage-1 references retain the produced
+   compiler's bytes and permissions; missing execute permission or a failed
+   permission copy remains a failure. Each stage is 12 ABBA pairs after one
+   warmup. The report records wall time, retired instructions when perf can
+   count them,
    peak RSS and executable-section code bytes; unavailable hardware counters
    remain NA. Each mode must reproduce its own stage-1 compiler byte-for-byte
    in stage 2; off/on outputs do not need to match one another. A failed or
    incomplete profile makes the requested evidence incomplete, while a
    slower result remains report-only.
+
+   **Issue #3397 opt-in `-fc-ast-pilot` adoption profile.** The same route
+   accepts one fresh exact line `profile: ast-pilot-acceptance-v1` in
+   `benchmarks/9700x/compiler-compare.request`. Like the analyzer selectors,
+   it is selected only when the head adds it exactly once against every
+   parent; a historical occurrence does not replay it, and it cannot be
+   combined with an analyzer profile. `ast_pilot_acceptance.py` runs it after
+   the tests-off candidate build, on the same frozen candidate-HEAD tree
+   (`src/` and `build/generated` hashed before and after). It times the one
+   candidate binary as both A (default) and B (`-fc-ast-pilot`) with
+   `uarch_lab.py compare --ast-pilot-pair CELL` on the unity source at `-g0`
+   without linking: a `-fsyntax-only` cell, then a `-c` cell, each 20 ABBA
+   pairs after one warmup on CPU 2 with fresh copies. It records wall time with
+   its 95% CI, retired instructions when perf can count them (NA needs a
+   recorded reason), peak RSS, and the tree's `retained_bytes` from an untimed
+   `-v` syntax-only run of B, which also proves A built no tree. Every run's
+   stdout and stderr must match its variant's reference, and A's and B's
+   diagnostics and `-c` objects must be identical. The verdict is the
+   `docs/agents/frontend/ast.md` stage-1 adoption budget
+   (`AST_PILOT_BUDGET`): `-fsyntax-only` B/A at most 0.99 in instructions and
+   in the median paired wall ratio, whose CI must also exclude 1; `-c` wall not
+   detectably slower (CI low bound at most 1); and in each cell B's median
+   peak RSS above A's by at most 1.05 times the retained bytes. It is
+   report-only. Request flags, pair counts and other compiler arguments are
+   not accepted; a different flag pair needs its own versioned profile.
+   `compiler_publish.py` re-validates every raw cell document, the tree probe
+   and the recomputed verdict on the 9700X evidence.
 
    **Without perf (#2768).** Before the first timed run the lab runs
    `perf stat -- true` once (`probe_counters`). If perf is missing, exits
