@@ -1187,9 +1187,35 @@ define those names are selected; libgcc.a is not otherwise added to the link,
 so the libgcc_s helper policy above is unchanged. Links without such a
 reference, including weak ones, do not read or name libgcc.a. A missing
 archive, or one that does not define the name, fails the link with the archive
-and symbol named, before replacing the output. AArch64 (`__aarch64_cpu_features`,
-`__init_cpu_features_resolver`, outline atomics) and non-Linux targets remain
-out of scope.
+and symbol named, before replacing the output.
+
+The same policy covers AArch64 Linux (GitHub #3508), with a target-keyed name
+set and GCC triple list (`aarch64-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`aarch64-redhat-linux`, `aarch64-suse-linux`); the x86-64 names and triples
+are unchanged. Every AArch64 name below is a hidden definition that only the
+static `libgcc.a` provides; `libgcc_s.so.1` exports none of them, so they
+belong here rather than in the libgcc_s helper policy:
+
+- GCC 10+ and Clang default to `-moutline-atomics`, so `__atomic_*` builtins
+  call `__aarch64_<op><bytes>_<order>` helpers: `cas` (1, 2, 4, 8 and 16
+  bytes) and `swp`, `ldadd`, `ldclr`, `ldeor`, `ldset` (1, 2, 4 and 8 bytes),
+  each with `relax`, `acq`, `rel`, `acq_rel` or `sync`
+  (`compiler_driver_elf_outline_atomic_symbol`). Each helper member references
+  `__aarch64_have_lse_atomics`, so `lse-init.o` and its `.init_array` LSE
+  probe are selected with it.
+- GCC 14+ and compiler-rt FMV resolvers use `__aarch64_cpu_features`,
+  `__init_cpu_features_resolver` and `__init_cpu_features` (`cpuinfo.o`, with
+  its own constructor). GCC 13 and older `libgcc.a` has no `cpuinfo.o`, so such
+  a link fails with the archive and symbol named, as the host link does.
+- `__builtin___clear_cache` calls `__aarch64_sync_cache_range`
+  (`sync-cache.o`).
+
+The selected members reference `getauxval` or `__getauxval`, which bind to
+glibc like any other import. `compiler_driver_elf_aarch64_cpu_runtime_tests`
+checks these links against the host link on AArch64 Linux hosts.
+`compiler_driver_elf_aarch64_cpu_runtime_selection_tests` covers selection,
+refusal, and per-target keying from any Linux host. SME runtime entry points,
+Android, and non-Linux targets remain out of scope.
 
 `compiler_driver_elf_dynamic_symbols` walks that table once and produces two
 things.
