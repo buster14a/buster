@@ -690,11 +690,11 @@ two cases:
    here states what it reads.** `CParserTreeFallback` names each case:
    - `specifiers`: a parenthesized specifier (`typeof`, `_Atomic(T)`,
      `_Alignas`, `_BitInt`), or an enum's fixed type;
-   - `declarator`: a redundant group after a typedef or tag name, or after a
-     keyword other than a type or qualifier word, where the walker reads the
-     group as a parameter list (it reads `T (x)` as a function `T`); attributes
-     on a pointer or opening a group; or a function returning a function or an
-     array;
+   - `declarator`: a redundant group after a decorated typedef name
+     (`__attribute__((a)) T (x)`), or after a keyword other than a type or
+     qualifier word, where the walker reads the group as a parameter list
+     (it reads that `T (x)` as a function `T`); attributes on a pointer or
+     opening a group; or a function returning a function or an array;
    - `old_style`: an old-style declaration list;
    - `tokens`: a comma operator in an initializer, where the walker splits a
      list, a token next to an anchor that is not the required one, or a
@@ -727,14 +727,28 @@ Now it walks out from the name instead
 and is redundant otherwise. A name whose own list sits inside the group,
 `(gd(int a))`, is a function, but only when the group follows a type or
 qualifier word, a punctuator or nothing (`c_parse_declarator_group_may_open`).
-After a typedef or tag name the walker still reads a single group as that
-name's parameter list, as before. The type parser
+After a typedef or tag name it is a group too
+([#3368](https://github.com/buster14a/buster/issues/3368)):
+`c_parser_type_name_before_group` answers for a tag after `struct`, `union`
+or `enum` (`c_parse_tag_name_before_group`), and for a typedef name in the
+type's position (`c_parse_typedef_name_position`: first in the declaration,
+or after storage-class, function-specifier and qualifier words only). The
+scans have no binding table, so `c_parse_ast_run` records each file-scope
+typedef record's name in `CParserTypedefNames`, a set it asks only in that
+position; at file scope a typedef name cannot be redeclared, and block-scope
+typedefs never reach these scans. `T (x);`, `struct S (s2);`,
+`T (tg(int a)) { ... }` and `struct P (pg(void)) { ... }` therefore declare
+`x`, `s2`, `tg` and `pg`. After a decoration, `__attribute__((a)) T (x)`, the
+walker still reads the group as `T`'s parameter list. The split reads the
+same position, with the grammar's `TYPEDEF_NAME` in place of the set, so its
+records match. The type parser
 (`c_type_parse_parenthesized_step`) nests a group that opens a group holding
 the name. The split publishes every redundant group the walker reads this way,
 and refuses the rest as above.
 
 `c_ast_test_split` runs one shape per fallback reason in every layout, and
-both #3215 inputs and the other redundant shapes on the published side. It
+both #3215 inputs, the #3368 shapes and the other redundant shapes on the
+published side. It
 requires the walker's result and the named reason. The [corpus differential](#corpus-differential) compares every
 record. On the self-host unity input the split publishes all 15,593 records
 and 33 body assertions, with no fallback. The fixtures that fall back are the
@@ -839,7 +853,9 @@ The redundant-parenthesis misreads it found
 ([#3215](https://github.com/buster14a/buster/issues/3215)) are agreement
 constructs too, beside the other redundant shapes: objects and functions in
 one or more groups, a definition whose list sits inside its group, groups in a
-declarator list, after a typedef name and in parameters.
+declarator list, after a typedef name and in parameters. The single groups
+after a typedef or tag name
+([#3368](https://github.com/buster14a/buster/issues/3368)) joined them.
 The tree also rejects syntax errors that today's `-fsyntax-only` accepts
 ([#3143](https://github.com/buster14a/buster/issues/3143)).
 

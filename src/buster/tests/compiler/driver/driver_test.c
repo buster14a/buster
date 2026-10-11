@@ -767,10 +767,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
 }
 
 // A fresh `cc` process registers the closed x86-64 shape set and resolves
-// each shape on its first serial lookup; this process resolves every shape
-// before compiling.  The two must write the same object bytes for code whose
+// each shape on its first serial lookup, and encodes each variable-memory
+// cell on its first read; this process prepares every shape and cell before
+// compiling.  The two must write the same object bytes for code whose
 // expansions reach the shape bridge (x87, division, atomics, conversions and
-// flag materialization), under every machine allocator.  -fno-machine-fallback turns
+// flag materialization) and for pointer loads and stores at zero, disp8 and
+// disp32 offsets, under every machine allocator.  -fno-machine-fallback turns
 // an unresolved shape into a failed compile instead of a silent canonical
 // fallback.  A child running the opt-in unit gang must resolve every shape
 // before its workers start, or its first worker lookup aborts; its linked
@@ -781,7 +783,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lazy_x86_shapes(UnitTest
 #if !BUSTER_ANDROID && !BUSTER_IOS
     Arena* arena = arguments->arena;
     u64 position = arena->position;
-    machine_x86_64_exact_prewarm_all_shapes();
+    machine_x86_64_exact_prewarm_all();
     String8 input = buster_test_temporary_path(arena, S8("lazy-x86-shapes"), S8(".c"));
     String8 local_output = buster_test_temporary_path(arena, S8("lazy-x86-shapes-local"), S8(".o"));
     String8 child_output = buster_test_temporary_path(arena, S8("lazy-x86-shapes-child"), S8(".o"));
@@ -798,7 +800,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lazy_x86_shapes(UnitTest
                         "{ __atomic_compare_exchange_n(p, &e, d, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return e; }\n"
                         "float integer_to_float(int x) { return (float)x; }\n"
                         "int double_less(double a, double b) { return a < b; }\n"
-                        "unsigned char nonzero(unsigned x) { return (unsigned char)(x != 0); }\n");
+                        "unsigned char nonzero(unsigned x) { return (unsigned char)(x != 0); }\n"
+                        "struct fields { char c; short s; int i; i64 l; char pad[300]; i64 far; };\n"
+                        "i64 copy_fields(struct fields* from, struct fields* to)\n"
+                        "{ to->c = from->c; to->s = from->s; to->i = from->i; to->far = from->l + from->far; return to->l + from->c; }\n");
     ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
                                    .use_process_environment = 1, .search_path = 1};
     // Only the machine allocators reach the shape bridge; the canonical
@@ -4170,6 +4175,114 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_alignment_and_w
     return result;
 }
 
+// __attribute__((ifunc("resolver"))) (issue 1243): an ELF target defines the
+// name as an STT_GNU_IFUNC symbol at its resolver's address, and every
+// ill-formed resolver, and every output without an indirect symbol, is a
+// named diagnostic that -fsyntax-only and -c agree on. The run-time
+// behaviour is compiler_driver_elf_ifunc_tests'.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_ifunc_attribute(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 resolver = S8("static int impl(int x) { return x; }\nstatic int (*resolve(void))(int) { return impl; }\n");
+    struct
+    {
+        String8 target;
+        String8 source;
+        String8 expected_diagnostic;
+    } cases[] = {
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((ifunc(\"resolve\")));\n")},
+        {S8("aarch64-unknown-linux-gnu"), S8("int f(int) __attribute__((__ifunc__(\"resolve\")));\nint g(int x) { return f(x); }\n")},
+        {S8("x86_64-unknown-linux-gnu"), S8("static int f(int) __attribute__((ifunc(\"resolve\")));\nint (*g(void))(int) { return f; }\n")},
+        {S8("x86_64-unknown-linux-gnu"), S8("static void *resolve_any(void) { return 0; }\nint f(int) __attribute__((ifunc(\"resolve_any\")));\n")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((ifunc(\"absent\")));\n"),
+         S8("ifunc resolver 'absent' is not declared in this translation unit")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int (*declared(void))(int);\nint f(int) __attribute__((ifunc(\"declared\")));\n"),
+         S8("ifunc 'f' names 'declared', which is not defined in this translation unit")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int (*object)(int);\nint f(int) __attribute__((ifunc(\"object\")));\n"),
+         S8("ifunc resolver 'object' for 'f' is not a function")},
+        {S8("x86_64-unknown-linux-gnu"), S8("static int scalar(void) { return 0; }\nint f(int) __attribute__((ifunc(\"scalar\")));\n"),
+         S8("ifunc resolver 'scalar' must return 'void *' or a pointer to a function compatible with 'f'")},
+        {S8("x86_64-unknown-linux-gnu"), S8("long f(long) __attribute__((ifunc(\"resolve\")));\n"),
+         S8("ifunc resolver 'resolve' must return 'void *' or a pointer to a function compatible with 'f'")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((ifunc));\n"), S8("ifunc attribute on 'f' must name a resolver")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int (*v)(int) __attribute__((ifunc(\"resolve\")));\n"),
+         S8("ifunc attribute on 'v' requires a function declaration")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((ifunc(\"resolve\")));\nint f(int x) { return x; }\n"),
+         S8("'f' is both defined here and an ifunc resolved by 'resolve'")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((ifunc(\"resolve\"), alias(\"impl\")));\n"),
+         S8("'f' cannot be both an ifunc and an alias")},
+        // The entity as a whole is checked, whichever declaration says it
+        // and in either order: the last alias target or resolver would
+        // otherwise win and keep the indirect bit.
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((ifunc(\"resolve\")));\nint f(int) __attribute__((alias(\"impl\")));\n"),
+         S8("'f' cannot be both an ifunc and an alias")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((alias(\"impl\")));\nint f(int) __attribute__((ifunc(\"resolve\")));\n"),
+         S8("'f' cannot be both an ifunc and an alias")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((weak, ifunc(\"resolve\")));\n"), S8("'f' cannot be both an ifunc and weak")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((weak));\nint f(int) __attribute__((ifunc(\"resolve\")));\n"),
+         S8("'f' cannot be both an ifunc and weak")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((ifunc(\"resolve\")));\nint f(int) __attribute__((weak));\n"),
+         S8("'f' cannot be both an ifunc and weak")},
+        {S8("x86_64-unknown-linux-gnu"),
+         S8("static int (*other(void))(int) { return impl; }\nint f(int) __attribute__((ifunc(\"resolve\")));\nint f(int) __attribute__((ifunc(\"other\")));\n"),
+         S8("ifunc 'f' names both 'resolve' and 'other' as its resolver")},
+        // Redeclaring an ifunc plainly, or with the same resolver, keeps it.
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int);\nint f(int) __attribute__((ifunc(\"resolve\")));\nint f(int) __attribute__((ifunc(\"resolve\")));\nint f(int);\n")},
+        // COFF and Mach-O have no indirect-function symbol to carry it.
+        {S8("x86_64-pc-windows"), S8("int f(int) __attribute__((ifunc(\"resolve\")));\n"),
+         S8("ifunc attribute on 'f' is not supported: COFF output has no indirect function symbol")},
+        {S8("aarch64-apple-macos"), S8("int f(int) __attribute__((ifunc(\"resolve\")));\n"),
+         S8("ifunc attribute on 'f' is not supported: Mach-O output has no indirect function symbol")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-ifunc-attribute"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-ifunc-attribute"), S8(".o"));
+        String8 source = string_format(arena, S8("{S8}{S8}"), resolver, cases[index].source);
+        bool valid = cases[index].expected_diagnostic.length == 0;
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 syntax_command[] = {S8("-target"), cases[index].target, S8("-nostdinc"), S8("-g0"), S8("-std=gnu17"), S8("-fsyntax-only"), input};
+            String8 object_command[] = {S8("-target"), cases[index].target, S8("-nostdinc"), S8("-g0"), S8("-std=gnu17"), S8("-c"), S8("-o"), output, input};
+            CompilerDriverResult syntax = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+            CompilerDriverResult object = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+            BUSTER_TEST_RAW(arguments, (syntax.error == COMPILER_DRIVER_ERROR_NONE) == valid,
+                            string_format(arena, S8("source={S8}\nsyntax={S8}"), source, syntax.diagnostic));
+            BUSTER_TEST_RAW(arguments, (object.error == COMPILER_DRIVER_ERROR_NONE) == valid,
+                            string_format(arena, S8("source={S8}\nobject={S8}"), source, object.diagnostic));
+            BUSTER_STRING_TEST(arguments, syntax.diagnostic, object.diagnostic);
+            if (!valid)
+            {
+                BUSTER_TEST_RAW(arguments, string_first_sequence(syntax.diagnostic, cases[index].expected_diagnostic) != BUSTER_STRING_NO_MATCH,
+                                string_format(arena, S8("source={S8}\ndiagnostic={S8}\nexpected={S8}"), source, syntax.diagnostic,
+                                              cases[index].expected_diagnostic));
+                BUSTER_TEST(arguments, !object.has_object);
+            }
+            else if (BUSTER_REQUIRE(arguments, object.has_object))
+            {
+                // The name is an STT_GNU_IFUNC at the resolver's address, with
+                // its own binding; the resolver keeps its own symbol.
+                String8 resolver_name = string_first_sequence(source, S8("resolve_any")) != BUSTER_STRING_NO_MATCH ? S8("resolve_any") : S8("resolve");
+                ObjectSymbol* indirect = compiler_driver_test_symbol_by_name(&object.object, S8("f"));
+                ObjectSymbol* resolved_by = compiler_driver_test_symbol_by_name(&object.object, resolver_name);
+                if (BUSTER_REQUIRE(arguments, indirect && resolved_by))
+                {
+                    bool is_static = string_first_sequence(cases[index].source, S8("static int f")) != BUSTER_STRING_NO_MATCH;
+                    BUSTER_TEST(arguments, indirect->indirect && !resolved_by->indirect);
+                    BUSTER_TEST(arguments, indirect->section == resolved_by->section && indirect->value == resolved_by->value);
+                    BUSTER_TEST(arguments, indirect->kind == OBJECT_SYMBOL_FUNCTION && indirect->global == !is_static);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equivalence(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4233,15 +4346,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("_Alignas(32) int f(void);\n"), false, true, S8("alignment specifier cannot be applied to a function")},
         {S8("_Alignas(32) __attribute__((aligned(64))) int f(void);\n"), false, true, S8("alignment specifier cannot be applied to a function")},
         {S8("int f(void) __attribute__((aligned(3)));\nint g(void) { return f(); }\n"), false, true, S8("not a power of two")},
-        // `weakref` makes a local name for a weak reference; `ifunc` has no
-        // lowering and says so rather than leaving an undefined symbol (#3042).
+        // `weakref` makes a local name for a weak reference (#3042); `ifunc`
+        // depends on the target, so compiler_driver_test_ifunc_attribute
+        // names one.
         {S8("static int wr(void) __attribute__((weakref(\"af\")));\nint g(void) { return wr(); }\n"), true, true},
         {S8("static int wr(void) __attribute__((weakref, alias(\"af\")));\nint g(void) { return wr(); }\n"), true, true},
         {S8("static int wo __attribute__((weakref(\"ao\")));\nint g(void) { return wo; }\n"), true, true},
         {S8("static int wr(void) __attribute__((weakref));\nint g(void) { return wr(); }\n"), false, true, S8("weakref attribute must name a target")},
-        {S8("int f(int) __attribute__((ifunc(\"resolve\")));\n"), false, true, S8("ifunc attribute is not supported")},
-        {S8("static int impl(int x) { return x; }\nstatic int (*resolve(void))(int) { return impl; }\nint f(int) __attribute__((ifunc(\"resolve\")));\n"), false, true,
-         S8("ifunc attribute is not supported")},
         {S8("int g(void) { int x; x = \"t\"; return x; }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int f(int); int g(void) { return f(\"u\"); }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int g(int n) { char *p = n; return p != 0; }\n"), false, false, S8("cannot convert from 'int' to 'char *'")},
@@ -4977,32 +5088,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
     return result;
 }
 
-// Declarators wrapped in redundant parentheses (GitHub #3215). The split read
-// `int ((*pq))(int) = f;` as a function and `int (gd(int a)) { ... }` with
-// the declaration after it as one object, so both programs failed with an
-// undeclared name. Each compiles to the same object with and without
-// -fc-ast-pilot, which publishes the split from the tree for all but the
-// shapes it still refuses (an attribute list opening a group, a variadic list
-// inside one), and each program's main returns 0.
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_groups(UnitTestArguments* arguments)
+// One program per case, each with a main that returns 0: it compiles to the
+// same object with and without -fc-ast-pilot, the pilot publishes the split
+// from the tree exactly when `published` says so, and the linked program
+// exits with status 0.
+typedef struct CompilerDriverDeclaratorGroupCase CompilerDriverDeclaratorGroupCase;
+struct CompilerDriverDeclaratorGroupCase
+{
+    String8 source;
+    bool published;
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_declarator_group_cases(UnitTestArguments* arguments, CompilerDriverDeclaratorGroupCase const* cases,
+                                                                          u32 case_count)
 {
     UnitTestResult result = {0};
-    struct
-    {
-        String8 source;
-        bool published;
-    } const cases[] = {
-        {S8("int f(int x) { return x + 1; }\nint ((*pq))(int) = f;\nint main(void) { return pq(1) - 2; }\n"), true},
-        {S8("int (__attribute__((unused)) (*pq))(int) = 0;\nint main(void) { return pq != 0; }\n"), false},
-        {S8("int (gd(int a)) { return a; }\nint zz;\nint main(void) { return gd(0) + zz; }\n"), true},
-        {S8("int (x);\nint ((y))[3];\nvoid ((h))(void) {}\nint main(void) { h(); return x + y[2] + (int)sizeof(y) - 12; }\n"), true},
-        {S8("typedef int T;\nT ((t))[2];\nT ((*tp))(T);\nstatic T id(T v) { return v; }\n"
-            "int a, ((b)), (c)[2], ((*d))(void), (e(void)), (((*g)));\nint e(void) { return 0; }\n"
-            "int main(void) { tp = id; return a + b + c[1] + (d != 0) + e() + (g != 0) + t[1] + tp(0) + (int)sizeof(t) - 8; }\n"),
-         true},
-        {S8("int (gv(int a, ...)) { return a; }\nint main(void) { return gv(0, 1, 2); }\n"), false},
-    };
-    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    for (u32 case_index = 0; case_index < case_count; case_index += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         Arena* arena = temporary.arena;
@@ -5066,6 +5167,47 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_gro
         scratch_end(temporary);
     }
     return result;
+}
+
+// Declarators wrapped in redundant parentheses (GitHub #3215). The split read
+// `int ((*pq))(int) = f;` as a function and `int (gd(int a)) { ... }` with
+// the declaration after it as one object, so both programs failed with an
+// undeclared name. The pilot publishes the split from the tree for all but
+// the shapes it still refuses (an attribute list opening a group, a variadic
+// list inside one).
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_groups(UnitTestArguments* arguments)
+{
+    CompilerDriverDeclaratorGroupCase const cases[] = {
+        {S8("int f(int x) { return x + 1; }\nint ((*pq))(int) = f;\nint main(void) { return pq(1) - 2; }\n"), true},
+        {S8("int (__attribute__((unused)) (*pq))(int) = 0;\nint main(void) { return pq != 0; }\n"), false},
+        {S8("int (gd(int a)) { return a; }\nint zz;\nint main(void) { return gd(0) + zz; }\n"), true},
+        {S8("int (x);\nint ((y))[3];\nvoid ((h))(void) {}\nint main(void) { h(); return x + y[2] + (int)sizeof(y) - 12; }\n"), true},
+        {S8("typedef int T;\nT ((t))[2];\nT ((*tp))(T);\nstatic T id(T v) { return v; }\n"
+            "int a, ((b)), (c)[2], ((*d))(void), (e(void)), (((*g)));\nint e(void) { return 0; }\n"
+            "int main(void) { tp = id; return a + b + c[1] + (d != 0) + e() + (g != 0) + t[1] + tp(0) + (int)sizeof(t) - 8; }\n"),
+         true},
+        {S8("int (gv(int a, ...)) { return a; }\nint main(void) { return gv(0, 1, 2); }\n"), false},
+    };
+    return compiler_driver_declarator_group_cases(arguments, cases, BUSTER_ARRAY_LENGTH(cases));
+}
+
+// A single redundant group after a typedef or tag name (GitHub #3368). The
+// declaration scans read it as that name's parameter list, so `T (x);` and
+// `struct S (s2);` declared nothing and `T (tg(int a)) { ... }` declared a
+// function `T`: each program failed with an undeclared name. The pilot
+// publishes them all.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_name_declarator_groups(UnitTestArguments* arguments)
+{
+    CompilerDriverDeclaratorGroupCase const cases[] = {
+        {S8("typedef int T;\nT (x);\nint main(void) { return x; }\n"), true},
+        {S8("struct S { int a; };\nstruct S (s2);\nint main(void) { return s2.a; }\n"), true},
+        {S8("typedef int T;\nT (tg(int a)) { return a; }\nint main(void) { return tg(0); }\n"), true},
+        {S8("struct P { int a; };\nstruct P (pg(void)) { struct P r = {0}; return r; }\nint main(void) { return pg().a; }\n"), true},
+        {S8("typedef int T;\nstatic const T (y) = 2, (z)[2];\ntypedef T (U);\nU (u), (uf(U a));\nU uf(U a) { return a - y; }\n"
+            "union W { int a; } (w);\nenum E { E0 } (e);\nint main(void) { return uf(2) + z[1] + u + w.a + (int)e + (int)sizeof(z) - 8; }\n"),
+         true},
+    };
+    return compiler_driver_declarator_group_cases(arguments, cases, BUSTER_ARRAY_LENGTH(cases));
 }
 
 // Rejected wide escapes must leave both absent and existing output paths
@@ -30144,6 +30286,42 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_llvm23_header_contracts(
     return result;
 }
 
+// The host default is documented in docs/agents/driver.md (#1557).
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_default_cpu_model(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 default_line[] = {S8("-c"), S8("source.c")};
+    CompilerDriverInvocation implicit_native = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(default_line));
+    BUSTER_TEST(arguments, implicit_native.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, implicit_native.target.cpu_arch == target_native.cpu_arch);
+    BUSTER_TEST(arguments, implicit_native.target.os == target_native.os);
+    BUSTER_TEST(arguments, implicit_native.target.cpu_model == target_native.cpu_model);
+    BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(implicit_native.target), target_cpu_features_effective(target_native)));
+    String8 native_line[] = {S8("--target=native"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation explicit_native = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(native_line));
+    BUSTER_TEST(arguments, explicit_native.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, explicit_native.target.cpu_arch == target_native.cpu_arch);
+    BUSTER_TEST(arguments, explicit_native.target.os == target_native.os);
+    BUSTER_TEST(arguments, explicit_native.target.cpu_model == target_native.cpu_model);
+    BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(explicit_native.target), target_cpu_features_effective(target_native)));
+    String8 x86_64_line[] = {S8("--target=x86_64-linux"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation x86_64 = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(x86_64_line));
+    BUSTER_TEST(arguments, x86_64.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, x86_64.target.cpu_model == CPU_MODEL_BASELINE);
+    String8 aarch64_line[] = {S8("--target=aarch64-linux"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation aarch64 = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(aarch64_line));
+    BUSTER_TEST(arguments, aarch64.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, aarch64.target.cpu_model == CPU_MODEL_BASELINE);
+    if (target_native.cpu_arch == CPU_ARCH_X86_64)
+    {
+        String8 march_native_line[] = {S8("--target=x86_64-linux"), S8("-march=native"), S8("-c"), S8("source.c")};
+        CompilerDriverInvocation march_native = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(march_native_line));
+        BUSTER_TEST(arguments, march_native.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(march_native.target), target_cpu_features_effective(target_native)));
+    }
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -30155,6 +30333,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_diagnostic_streams);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_warning_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_gcc_spellings);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_default_cpu_model);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_forced_include);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_pack_state);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_arguments);
@@ -30337,8 +30516,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_affinity_worker_clamp);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_ownership);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_ifunc_attribute);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_c_ast_pilot);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_redundant_declarator_groups);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_name_declarator_groups);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_void_function_pointer_roundtrip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_shared_ifunc_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_function_alignment_and_weakref);
@@ -34005,6 +34186,61 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, os_file_delete(literal_source));
         }
         scratch_end(literal_temporary);
+    }
+    // A GNU statement expression in a file-scope initializer (#3364) is
+    // rejected by the frontend at its `(`, as GCC and Clang do, so
+    // -fsyntax-only and -c report the same located diagnostic instead of -c
+    // failing first in the static-initializer folder. Statement expressions
+    // in function bodies still compile. The sources are temporary files, so
+    // the native-retirement inventory stays unchanged.
+    {
+        TemporalArena statement_temporary = arena_begin_temporal(arguments->arena);
+        Arena* statement_arena = statement_temporary.arena;
+        String8 statement_source = buster_test_temporary_path(statement_arena, S8("buster-c-file-scope-statement-expression"), S8(".c"));
+        String8 statement_object = buster_test_temporary_path(statement_arena, S8("buster-c-file-scope-statement-expression"), S8(".o"));
+        String8 statement_texts[] = {
+            S8("static int sx = ({ 1; });\n"
+               "int main(void) { return sx - 1; }\n"),
+            S8("static int sx = ({ typedef int T; T v = 1; v; });\n"
+               "int main(void) { return sx - 1; }\n"),
+            S8("static int sx = sizeof(({ 1; }));\n"
+               "int main(void) { return sx - 4; }\n"),
+            S8("int f(void) { return ({ int a = 2; a; }); }\n"
+               "int main(void) { int v = ({ typedef int T; T t = 1; t; }); return v - 1 + f() - 2; }\n"),
+        };
+        String8 statement_locations[] = {S8(":1:17: "), S8(":1:17: "), S8(":1:24: "), S8("")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(statement_texts); index += 1)
+        {
+            if (BUSTER_REQUIRE(arguments, file_write(statement_source, BUSTER_SLICE_TO_BYTE_SLICE(statement_texts[index]))))
+            {
+                bool rejected = statement_locations[index].length != 0;
+                String8 syntax_command[] = {S8("-std=gnu17"), S8("-fsyntax-only"), statement_source};
+                CompilerDriverResult checked = compiler_driver_execute_invocation(
+                    statement_arena, compiler_driver_parse_arguments(statement_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+                String8 object_command[] = {S8("-std=gnu17"), S8("-g0"), S8("-c"), S8("-o"), statement_object, statement_source};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    statement_arena, compiler_driver_parse_arguments(statement_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+                if (rejected)
+                {
+                    String8 expected = string_format(statement_arena, S8("{S8}statement expression not allowed at file scope"), statement_locations[index]);
+                    BUSTER_TEST_RAW(arguments, checked.error != COMPILER_DRIVER_ERROR_NONE, checked.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, string_first_sequence(checked.diagnostic, expected) != BUSTER_STRING_NO_MATCH, checked.diagnostic);
+                    BUSTER_TEST_RAW(arguments, string_equal(checked.diagnostic, compiled.diagnostic), compiled.diagnostic);
+                }
+                else
+                {
+                    BUSTER_TEST_RAW(arguments, checked.error == COMPILER_DRIVER_ERROR_NONE, checked.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, os_file_delete(statement_object));
+                    }
+                }
+            }
+        }
+        BUSTER_TEST(arguments, os_file_delete(statement_source));
+        scratch_end(statement_temporary);
     }
 #if BUSTER_LINUX
     buster_test_arena_end(arguments, driver_fixture, true);
