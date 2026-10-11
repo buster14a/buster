@@ -68,6 +68,35 @@ jobs:
       - name: Portable census and independent reference
         run: |
           "$RUNNER_TEMP/ffmpeg-driver" test_ffmpeg --portable "$GITHUB_WORKSPACE/external/ffmpeg" "$GITHUB_WORKSPACE/build/ffmpeg-census" "$GITHUB_WORKSPACE/build/Release/ide"
+      - name: Surface configure and FATE blockers
+        if: always() && steps.compiler.outcome == 'success'
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          root = Path("build/ffmpeg-census")
+          for side in ("reference", "buster"):
+              directory = root / side
+              print("DIAGNOSTIC_SIDE", side)
+              counts = directory / "fate-counts.tsv"
+              if counts.exists():
+                  for row in counts.read_text().splitlines():
+                      if not row.endswith("\tpass"):
+                          print("FATE_RESULT", row)
+                  for report in (directory / "tests/data/fate").glob("*.rep"):
+                      text = report.read_text()
+                      if ":0:" not in text.splitlines()[0]:
+                          print("FATE_FAILURE_REPORT", report.name, text[:4096])
+              config = directory / "ffbuild/config.log"
+              if config.exists():
+                  lines = config.read_text().splitlines()
+                  for term in ("check_mathfunc cbrt ", "check_func_headers stdlib.h getenv", "check_cflags -fblocks"):
+                      starts = [i for i, line in enumerate(lines) if line.startswith(term)]
+                      for start in starts[:1]:
+                          end = next((i for i in range(start + 1, len(lines))
+                                      if lines[i].startswith(("check_mathfunc ", "check_func_headers ", "check_cflags "))),
+                                     min(len(lines), start + 60))
+                          print("CONFIG_PROBE", term, "\n".join(lines[start:min(end, start + 60)]))
+          PY
       - name: Candidate source-size report
         if: always() && steps.compiler.outcome == 'success'
         run: |
