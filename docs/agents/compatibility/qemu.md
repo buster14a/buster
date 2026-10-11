@@ -23,7 +23,10 @@ The same explicit configure options are used for Clang and Buster:
 `--without-default-features --disable-download --disable-docs
 --disable-guest-agent --disable-tools --disable-fdt --disable-strip
 --disable-install-blobs --disable-rust --extra-cflags="-O0 -g"`.
-Normal target device configuration stays upstream-owned. Optional features are
+The matched `--firmwarepath=<pinned-qemu-source>/pc-bios` option supplies the
+unchanged upstream firmware resource directory for QTests; firmware file hashes
+and its pinned README are retained before either compiler runs. Normal target
+device configuration stays upstream-owned. Optional features are
 declared before either compiler runs; a failure must not trigger feature removal.
 QEMU's defaults include optimization; the final extra flags request a matched
 debug/debug census. Check the retained actual compiler arguments before making
@@ -122,9 +125,14 @@ package closure before describing complete license intake.
 
 Bundled firmware is separately licensed; see the pinned
 [pc-bios README](https://github.com/qemu/qemu/blob/b2995afed254e4804611df52210067a4d5dbdf0b/pc-bios/README).
-No guest fixture is supplied by this first stage. Individual QTests may consume
-bundled ROMs; their exact firmware/ROM usage, licenses and hashes remain
-unqualified until enumerated. A test pass cannot stand for that audit.
+No guest image fixture is supplied by this first stage. QTests consume the
+pinned PC BIOS/ROM directory; their exact firmware/ROM usage, licenses and hashes remain
+unqualified until enumerated. A test pass cannot stand for that audit. QEMU's recorded source links include
+[SeaBIOS LGPLv3 notice](https://github.com/coreboot/seabios/blob/a6ed6b701f0a57db0569ab98b0661c12a6ec3ff8/COPYING.LESSER),
+[iPXE target-dependent license policy](https://github.com/ipxe/ipxe/blob/4bd064de239dab2426b31c9789a1f4d78087dc63/COPYING),
+and the pinned [EDK2 combined notices](https://github.com/qemu/qemu/blob/b2995afed254e4804611df52210067a4d5dbdf0b/pc-bios/edk2-licenses.txt).
+These source notices do not establish the complete license/build closure of
+each prebuilt ROM; that mapping remains a qualification gate.
 
 Remaining #3185 gates include the complete actual C-action/object ledger,
 license/source/generated/system-header closure, applicable functional suite

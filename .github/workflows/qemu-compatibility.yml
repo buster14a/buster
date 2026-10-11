@@ -104,6 +104,9 @@ jobs:
           x86_64-linux-gnu-gcc --version > evidence/guest-gcc.txt
           pkg-config --modversion glib-2.0 pixman-1 zlib > evidence/library-versions.txt
           cp external/qemu/LICENSE external/qemu/COPYING external/qemu/COPYING.LIB evidence/
+          cp external/qemu/pc-bios/README evidence/firmware-README.txt
+          cp external/qemu/pc-bios/edk2-licenses.txt evidence/firmware-edk2-licenses.txt
+          find external/qemu/pc-bios -type f -print0 | sort -z | xargs -0 sha256sum > evidence/firmware-inputs.sha256
           cp external/qemu/subprojects/keycodemapdb/LICENSE.BSD evidence/keycodemapdb-LICENSE.BSD
           cp external/qemu/subprojects/berkeley-softfloat-3/COPYING.txt evidence/softfloat-COPYING.txt
           cp external/qemu/subprojects/berkeley-testfloat-3/COPYING.txt evidence/testfloat-COPYING.txt
