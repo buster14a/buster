@@ -34161,10 +34161,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                         buster_test_process_failure_show(arguments, &probe_run_observation);
                                     }
                                 }
-                                else
-                                {
-                                    buster_test_process_failure_show(arguments, &probe_observation);
-                                }
+                                // A failed compile is reported once the probe is classified: as NOT_RUN
+                                // evidence for the exact refusal, or as a failure for every other outcome.
                             }
                             FileReadResult probe_output_read = file_read_checked(temporary.arena, probe_output, (FileReadOptions){0});
                             FileStats probe_output_stats = os_file_replacement_target_stats(probe_output);
@@ -34198,9 +34196,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                             };
                             bool healthy_control = dialect == 0 || healthy_gnu17[reference][optimization];
                             bool profile_authenticated = dialect == 1 && reference == 0 && gcc13_native_profiles[reference];
+                            // GCC 13 lacks only the -std=gnu23 spelling (GCC 14 added it). That exact,
+                            // authenticated refusal is a reference-version limit, so it stays NOT_RUN even
+                            // under --ci=1 (#2579); every other probe outcome is still a failure.
                             TestOracleProbeDisposition probe_disposition = buster_test_oracle_probe_disposition(
                                 &probe_observation, profile_authenticated, healthy_control, probe_runtime_valid,
-                                probe_output_absent, &probe_contract, program_flag_get(PROGRAM_FLAG_CI));
+                                probe_output_absent, &probe_contract, false);
                             if (dialect == 0 && probe_disposition == TEST_ORACLE_PROBE_CAPABLE)
                             {
                                 healthy_gnu17[reference][optimization] = true;
@@ -34212,25 +34213,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                     "case={S8} status=CAPABLE tool={S8} version={S8} target={S8} normalization=LC_ALL:C,no_color=1,no_caret=1,wrap=0\n"),
                                     probe_case, compiler, reference_versions[reference], reference_targets[reference]);
                             }
-                            else if (probe_disposition == TEST_ORACLE_PROBE_NOT_RUN ||
-                                     probe_disposition == TEST_ORACLE_PROBE_INCOMPLETE)
+                            else if (probe_disposition == TEST_ORACLE_PROBE_NOT_RUN)
                             {
-                                bool required_reference = probe_disposition == TEST_ORACLE_PROBE_INCOMPLETE;
                                 arguments->show(arguments, S8("TEST_ORACLE_V1 suite=compiler-driver fixture=function-parameter-compatibility "
-                                    "case={S8} status={S8} required={u32} tool={S8} version={S8} target={S8} "
-                                    "normalization=LC_ALL:C,no_color=1,no_caret=1,wrap=0 reason=compiler rejected known-valid dialect option\n"),
-                                    probe_case, required_reference ? S8("INCOMPLETE") : S8("NOT_RUN"), (u32)required_reference,
-                                    compiler, reference_versions[reference], reference_targets[reference]);
+                                    "case={S8} status=NOT_RUN required=0 tool={S8} version={S8} target={S8} "
+                                    "normalization=LC_ALL:C,no_color=1,no_caret=1,wrap=0 reason=compiler rejected the requested -std= dialect spelling\n"),
+                                    probe_case, compiler, reference_versions[reference], reference_targets[reference]);
                                 for (u64 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(probe_command); argument_index += 1)
                                 {
                                     arguments->show(arguments, S8("oracle_probe_argv[{u64}]={S8}\n"), argument_index, probe_command[argument_index]);
                                 }
                                 arguments->show(arguments, S8("oracle_probe_platform_status={u32} elapsed_us={u64} stderr={S8}\n"),
                                     probe_observation.wait.platform_status, probe_observation.elapsed_us, probe_error);
-                                if (required_reference)
-                                {
-                                    BUSTER_TEST(arguments, false);
-                                }
                                 skip_reference_subject = true;
                             }
                             else

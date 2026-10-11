@@ -2288,9 +2288,77 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_ifunc_tests(UnitTestArgum
                 }
             }
         }
+        // `ide cc` compiles the same C itself: its frontend lowers the
+        // attribute to an indirect IrSymbolAlias, the object carries
+        // STT_GNU_IFUNC, and its image must behave as the host-built oracle
+        // above does, at both optimization levels. A static ifunc is a local
+        // indirect symbol, which the host oracle resolves the same way.
+        String8 local_source = string_format_z(arena, S8("{S8}/local.c"), root);
+        String8 local_object = string_format_z(arena, S8("{S8}/local.o"), root);
+        String8 local_oracle = string_format_z(arena, S8("{S8}/local-oracle"), root);
+        BUSTER_TEST(arguments, file_write(local_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "static int resolutions;\n"
+            "static int increment(int x) { return x + 1; }\n"
+            "static int (*resolve_bump(void))(int) { resolutions += 1; return increment; }\n"
+            "static int bump(int) __attribute__((ifunc(\"resolve_bump\")));\n"
+            "int (*volatile data_bump)(int) = bump;\n"
+            "int main(void)\n"
+            "{\n"
+            "    int (*local)(int) = bump;\n"
+            "    return !(bump(1) == 2 && local(2) == 3 && data_bump(3) == 4 && local == data_bump && resolutions == 1);\n"
+            "}\n"))));
+        String8 local_compile[] = {S8("-w"), S8("-O2"), S8("-fno-pie"), S8("-c"), local_source, S8("-o"), local_object};
+        String8 local_link[] = {S8("-no-pie"), local_object, S8("-o"), local_oracle};
+        bool local_linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(local_compile)) &&
+                            compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(local_link));
+        BUSTER_TEST(arguments, local_linked);
+        if (local_linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, local_oracle));
+        String8 levels[] = {S8("-O0"), S8("-O2")};
+        for (u32 index = 0; produced && index < 3; index += 1)
+        {
+            for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+            {
+                for (u32 level = 0; level < BUSTER_ARRAY_LENGTH(levels); level += 1)
+                {
+                    String8 name = index < 2 ? mains[index] : S8("local");
+                    String8 output = string_format_z(arena, S8("{S8}/{S8}{S8}{S8}-cc"), root, name, kinds[kind], levels[level]);
+                    // The local program is one translation unit.
+                    String8 command[6];
+                    u64 count = 0;
+                    command[count++] = kinds[kind];
+                    command[count++] = levels[level];
+                    command[count++] = index < 2 ? main_sources[index] : local_source;
+                    if (index < 2) command[count++] = library_source;
+                    command[count++] = S8("-o");
+                    command[count++] = output;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command, .length = count}));
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
+                }
+            }
+        }
 #if BUSTER_CPU_ARCH_X86_64
         if (produced)
         {
+            // A `-shared` library `ide cc` compiles from the same C publishes
+            // its IFUNC slot as R_X86_64_IRELATIVE, and a host-linked program
+            // binds to the exported thunk.
+            String8 cc_directory = string_format_z(arena, S8("{S8}/cc-shared"), root);
+            BUSTER_TEST(arguments, os_make_directory(cc_directory).error.v == 0);
+            String8 cc_library = string_format_z(arena, S8("{S8}/libbusterifunc.so"), cc_directory);
+            String8 cc_command[] = {S8("-shared"), S8("-fPIC"), S8("-O2"), library_source, S8("-o"), cc_library};
+            CompilerDriverResult cc_shared = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(cc_command)));
+            BUSTER_TEST_RAW(arguments, cc_shared.error == COMPILER_DRIVER_ERROR_NONE, cc_shared.diagnostic);
+            String8 cc_consumer = string_format_z(arena, S8("{S8}/shared-consumer"), cc_directory);
+            String8 cc_search = string_format_z(arena, S8("-L{S8}"), cc_directory);
+            String8 cc_link[] = {main_objects[1], cc_search, S8("-lbusterifunc"), S8("-o"), cc_consumer};
+            bool cc_linked = cc_shared.error == COMPILER_DRIVER_ERROR_NONE &&
+                             compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(cc_link));
+            BUSTER_TEST(arguments, cc_linked);
+            if (cc_linked) BUSTER_TEST(arguments, compiler_driver_tls_export_run(arguments, cc_consumer, cc_directory));
+
             // The shared object's slots are R_X86_64_IRELATIVE, and the
             // exported name is the thunk the host program binds to.
             String8 library = string_format_z(arena, S8("{S8}/libbusterifunc.so"), root);
