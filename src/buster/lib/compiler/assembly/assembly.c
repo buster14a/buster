@@ -13357,23 +13357,48 @@ typedef enum AssemblyAarch64ModifierResult
     ASSEMBLY_AARCH64_MODIFIER_REFUSED,
 } AssemblyAarch64ModifierResult;
 
+// The unquoted ELF modifier spellings the standalone unit recognizes.
+typedef enum AssemblyAarch64ColonModifier
+{
+    ASSEMBLY_AARCH64_COLON_MODIFIER_NONE,
+    ASSEMBLY_AARCH64_COLON_MODIFIER_GOT,
+    ASSEMBLY_AARCH64_COLON_MODIFIER_LO12,
+    ASSEMBLY_AARCH64_COLON_MODIFIER_GOT_LO12,
+} AssemblyAarch64ColonModifier;
+
+BUSTER_GLOBAL_LOCAL u64 assembly_aarch64_colon_modifier_length(AssemblyAarch64ColonModifier modifier)
+{
+    u64 length = modifier == ASSEMBLY_AARCH64_COLON_MODIFIER_GOT_LO12 ? S8(":got_lo12:").length
+                 : modifier == ASSEMBLY_AARCH64_COLON_MODIFIER_LO12   ? S8(":lo12:").length
+                 : modifier == ASSEMBLY_AARCH64_COLON_MODIFIER_GOT    ? S8(":got:").length
+                                                                      : 0;
+    return length;
+}
+
 // The index of an unquoted ELF `:lo12:`, `:got:` or `:got_lo12:` modifier in
-// the text, or its length when absent. `length` takes the matched modifier's
-// length; `:got_lo12:` is recognized before its `:got:` prefix.
-BUSTER_GLOBAL_LOCAL u64 assembly_aarch64_modifier_find(String8 text, u64* length)
+// the text, or its length when absent (`kind` is NONE then). `:got_lo12:` is
+// recognized before its `:got:` prefix.
+BUSTER_GLOBAL_LOCAL u64 assembly_aarch64_modifier_find(String8 text, AssemblyAarch64ColonModifier* kind)
 {
     u64 result = text.length;
+    u64 got_lo12_length = assembly_aarch64_colon_modifier_length(ASSEMBLY_AARCH64_COLON_MODIFIER_GOT_LO12);
+    u64 lo12_length = assembly_aarch64_colon_modifier_length(ASSEMBLY_AARCH64_COLON_MODIFIER_LO12);
+    u64 got_length = assembly_aarch64_colon_modifier_length(ASSEMBLY_AARCH64_COLON_MODIFIER_GOT);
     u64 colon = assembly_unquoted_character(text, 0, S8(":"));
     while (result == text.length && colon < text.length)
     {
-        u64 match = colon + 10 <= text.length && assembly_word_equal(string_slice(text, colon, colon + 10), S8(":got_lo12:")) ? 10
-                    : colon + 6 <= text.length && assembly_word_equal(string_slice(text, colon, colon + 6), S8(":lo12:"))   ? 6
-                    : colon + 5 <= text.length && assembly_word_equal(string_slice(text, colon, colon + 5), S8(":got:"))   ? 5
-                                                                                                                           : 0;
-        if (match)
+        AssemblyAarch64ColonModifier match =
+            colon + got_lo12_length <= text.length && assembly_word_equal(string_slice(text, colon, colon + got_lo12_length), S8(":got_lo12:"))
+                ? ASSEMBLY_AARCH64_COLON_MODIFIER_GOT_LO12
+            : colon + lo12_length <= text.length && assembly_word_equal(string_slice(text, colon, colon + lo12_length), S8(":lo12:"))
+                ? ASSEMBLY_AARCH64_COLON_MODIFIER_LO12
+            : colon + got_length <= text.length && assembly_word_equal(string_slice(text, colon, colon + got_length), S8(":got:"))
+                ? ASSEMBLY_AARCH64_COLON_MODIFIER_GOT
+                : ASSEMBLY_AARCH64_COLON_MODIFIER_NONE;
+        if (match != ASSEMBLY_AARCH64_COLON_MODIFIER_NONE)
         {
             result = colon;
-            *length = match;
+            *kind = match;
         }
         else
         {
@@ -13433,13 +13458,13 @@ BUSTER_GLOBAL_LOCAL String8 assembly_aarch64_modifier_strip(AssemblyBuilder* bui
     }
     else
     {
-        u64 modifier_length = 0;
-        if (assembly_aarch64_modifier_find(text, &modifier_length) == 0)
+        AssemblyAarch64ColonModifier modifier = ASSEMBLY_AARCH64_COLON_MODIFIER_NONE;
+        if (assembly_aarch64_modifier_find(text, &modifier) == 0)
         {
-            result = assembly_trim(string_slice(text, modifier_length, text.length));
+            result = assembly_trim(string_slice(text, assembly_aarch64_colon_modifier_length(modifier), text.length));
         }
     }
-    u64 leftover = 0;
+    AssemblyAarch64ColonModifier leftover = ASSEMBLY_AARCH64_COLON_MODIFIER_NONE;
     *valid = result.length != 0 && assembly_aarch64_modifier_find(result, &leftover) == result.length;
     return result;
 }
@@ -13462,7 +13487,7 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
     bool macho = builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS;
     bool coff = builder->target.os == OPERATING_SYSTEM_WINDOWS;
     bool page_offset = false;
-    u64 operands_modifier = 0;
+    AssemblyAarch64ColonModifier operands_modifier = ASSEMBLY_AARCH64_COLON_MODIFIER_NONE;
     bool has_colon = assembly_aarch64_modifier_find(operands, &operands_modifier) < operands.length;
     bool has_at = assembly_aarch64_at_modifier_find(operands, &page_offset) < operands.length;
     if (has_colon || has_at)
@@ -13472,7 +13497,7 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
         u32 token_count = 0;
         u32 modified = 0;
         u32 modified_count = 0;
-        u64 modified_modifier = 0;
+        AssemblyAarch64ColonModifier modified_modifier = ASSEMBLY_AARCH64_COLON_MODIFIER_NONE;
         bool split = true;
         u64 cursor = 0;
         while (split && cursor < operands.length)
@@ -13484,7 +13509,7 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
             {
                 tokens[token_count] = assembly_trim(token);
                 bool token_page_offset = false;
-                u64 token_modifier = 0;
+                AssemblyAarch64ColonModifier token_modifier = ASSEMBLY_AARCH64_COLON_MODIFIER_NONE;
                 if (assembly_aarch64_modifier_find(tokens[token_count], &token_modifier) < tokens[token_count].length ||
                     assembly_aarch64_at_modifier_find(tokens[token_count], &token_page_offset) < tokens[token_count].length)
                 {
@@ -13498,16 +13523,16 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
         bool adrp = assembly_word_equal(mnemonic, S8("adrp"));
         bool add = assembly_word_equal(mnemonic, S8("add"));
         bool ldr = assembly_word_equal(mnemonic, S8("ldr"));
-        // The modified token's ELF modifier kind: `:got:` 5, `:lo12:` 6,
-        // `:got_lo12:` 10, and 0 for a Mach-O @-modifier.
-        bool got_page = modified_modifier == 5;
-        bool got_lo12 = modified_modifier == 10;
+        // The modified token's ELF modifier kind, or NONE for a Mach-O
+        // @-modifier.
+        bool got_page = modified_modifier == ASSEMBLY_AARCH64_COLON_MODIFIER_GOT;
+        bool got_lo12 = modified_modifier == ASSEMBLY_AARCH64_COLON_MODIFIER_GOT_LO12;
         String8 symbol_text = {0};
         String8 replacement = {0};
         bool strip_valid = true;
         if (has_colon && macho)
         {
-            message = operands_modifier == 6 ? S8("':lo12:' is not a Mach-O modifier; write sym@PAGEOFF")
+            message = operands_modifier == ASSEMBLY_AARCH64_COLON_MODIFIER_LO12 ? S8("':lo12:' is not a Mach-O modifier; write sym@PAGEOFF")
                                              : S8("AArch64 ':got:' and ':got_lo12:' operand modifiers are ELF-only");
         }
         else if (has_at && !macho)
