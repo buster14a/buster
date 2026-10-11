@@ -4227,6 +4227,422 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_tbd_arch_list(ByteSlice bytes, u64
     return result;
 }
 
+// JSON values are validated with a fixed grammar stack; no input-dependent
+// recursion or allocation is needed. Identity strings borrow the mapped stub.
+enum { COMPILER_DRIVER_MACH_JSON_DEPTH = 64 };
+BUSTER_GLOBAL_LOCAL void compiler_driver_mach_json_space(ByteSlice bytes, u64* cursor)
+{
+    while (*cursor < bytes.length && (bytes.pointer[*cursor] == ' ' || bytes.pointer[*cursor] == '\t' ||
+                                      bytes.pointer[*cursor] == '\r' || bytes.pointer[*cursor] == '\n'))
+    {
+        *cursor += 1;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_string(ByteSlice bytes, u64* cursor)
+{
+    bool valid = *cursor < bytes.length && bytes.pointer[*cursor] == '"';
+    bool closed = false;
+    if (valid)
+    {
+        *cursor += 1;
+    }
+    while (valid && !closed && *cursor < bytes.length)
+    {
+        u8 byte = bytes.pointer[(*cursor)++];
+        if (byte == '"')
+        {
+            closed = true;
+        }
+        else if (byte < 0x20)
+        {
+            valid = false;
+        }
+        else if (byte >= 0x80)
+        {
+            u32 remaining = byte >= 0xc2 && byte <= 0xdf ? 1
+                            : byte >= 0xe0 && byte <= 0xef ? 2
+                            : byte >= 0xf0 && byte <= 0xf4 ? 3 : 0;
+            valid = remaining && remaining <= bytes.length - *cursor;
+            for (u32 continuation = 0; valid && continuation < remaining; continuation += 1)
+            {
+                u8 next = bytes.pointer[(*cursor)++];
+                valid = next >= 0x80 && next <= 0xbf;
+                if (!continuation)
+                {
+                    valid = valid && (byte != 0xe0 || next >= 0xa0) && (byte != 0xed || next < 0xa0) &&
+                            (byte != 0xf0 || next >= 0x90) && (byte != 0xf4 || next < 0x90);
+                }
+            }
+        }
+        else if (byte == '\\')
+        {
+            if (*cursor == bytes.length)
+            {
+                valid = false;
+            }
+            else
+            {
+                byte = bytes.pointer[(*cursor)++];
+                if (byte == 'u')
+                {
+                    for (u32 digit = 0; digit < 4 && valid; digit += 1)
+                    {
+                        if (*cursor == bytes.length)
+                        {
+                            valid = false;
+                        }
+                        else
+                        {
+                            u8 hex = bytes.pointer[(*cursor)++];
+                            valid = (hex >= '0' && hex <= '9') || (hex >= 'a' && hex <= 'f') || (hex >= 'A' && hex <= 'F');
+                        }
+                    }
+                }
+                else
+                {
+                    valid = byte == '"' || byte == '\\' || byte == '/' || byte == 'b' || byte == 'f' ||
+                            byte == 'n' || byte == 'r' || byte == 't';
+                }
+            }
+        }
+    }
+    return valid && closed;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_value(ByteSlice bytes, u64* cursor, String8* value)
+{
+    // States: root value/done, object first-key/key/colon/value/separator,
+    // array first-value/value/separator. A separator cannot accept a value.
+    u8 states[COMPILER_DRIVER_MACH_JSON_DEPTH] = {0};
+    u32 depth = 1;
+    bool valid = true;
+    compiler_driver_mach_json_space(bytes, cursor);
+    u64 start = *cursor;
+    while (valid && depth)
+    {
+        u8 state = states[depth - 1];
+        if (state != 1)
+        {
+            compiler_driver_mach_json_space(bytes, cursor);
+        }
+        if (state == 1)
+        {
+            depth -= 1;
+        }
+        else if (*cursor == bytes.length)
+        {
+            valid = false;
+        }
+        else
+        {
+            u8 byte = bytes.pointer[*cursor];
+            if ((state == 2 || state == 6) && byte == '}')
+            {
+                *cursor += 1;
+                depth -= 1;
+            }
+            else if ((state == 7 || state == 9) && byte == ']')
+            {
+                *cursor += 1;
+                depth -= 1;
+            }
+            else if (state == 2 || state == 3)
+            {
+                valid = compiler_driver_mach_json_string(bytes, cursor);
+                states[depth - 1] = 4;
+            }
+            else if (state == 4)
+            {
+                valid = byte == ':';
+                *cursor += 1;
+                states[depth - 1] = 5;
+            }
+            else if (state == 6 || state == 9)
+            {
+                valid = byte == ',';
+                *cursor += 1;
+                states[depth - 1] = state == 6 ? 3 : 8;
+            }
+            else
+            {
+                states[depth - 1] = state == 0 ? 1 : state == 5 ? 6 : 9;
+                if (byte == '{' || byte == '[')
+                {
+                    valid = depth < COMPILER_DRIVER_MACH_JSON_DEPTH;
+                    if (valid)
+                    {
+                        states[depth++] = byte == '{' ? 2 : 7;
+                        *cursor += 1;
+                    }
+                }
+                else if (byte == '"')
+                {
+                    valid = compiler_driver_mach_json_string(bytes, cursor);
+                }
+                else if (byte == 't' || byte == 'f' || byte == 'n')
+                {
+                    String8 literal = byte == 't' ? S8("true") : byte == 'f' ? S8("false") : S8("null");
+                    valid = literal.length <= bytes.length - *cursor &&
+                            !memcmp(bytes.pointer + *cursor, literal.pointer, literal.length);
+                    if (valid)
+                    {
+                        *cursor += literal.length;
+                    }
+                }
+                else
+                {
+                    if (byte == '-')
+                    {
+                        *cursor += 1;
+                    }
+                    valid = *cursor < bytes.length && bytes.pointer[*cursor] >= '0' && bytes.pointer[*cursor] <= '9';
+                    if (valid)
+                    {
+                        bool zero = bytes.pointer[*cursor] == '0';
+                        *cursor += 1;
+                        while (!zero && *cursor < bytes.length && bytes.pointer[*cursor] >= '0' && bytes.pointer[*cursor] <= '9')
+                        {
+                            *cursor += 1;
+                        }
+                        if (*cursor < bytes.length && bytes.pointer[*cursor] == '.')
+                        {
+                            *cursor += 1;
+                            u64 digits = *cursor;
+                            while (*cursor < bytes.length && bytes.pointer[*cursor] >= '0' && bytes.pointer[*cursor] <= '9')
+                            {
+                                *cursor += 1;
+                            }
+                            valid = *cursor > digits;
+                        }
+                        if (*cursor < bytes.length && (bytes.pointer[*cursor] == 'e' || bytes.pointer[*cursor] == 'E'))
+                        {
+                            *cursor += 1;
+                            if (*cursor < bytes.length && (bytes.pointer[*cursor] == '+' || bytes.pointer[*cursor] == '-'))
+                            {
+                                *cursor += 1;
+                            }
+                            u64 digits = *cursor;
+                            while (*cursor < bytes.length && bytes.pointer[*cursor] >= '0' && bytes.pointer[*cursor] <= '9')
+                            {
+                                *cursor += 1;
+                            }
+                            valid = valid && *cursor > digits;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (valid)
+    {
+        *value = (String8){.pointer = (char8*)bytes.pointer + start, .length = *cursor - start};
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_plain(String8 value, String8* plain)
+{
+    value = compiler_driver_mach_tbd_trim(value);
+    bool valid = value.length >= 2 && value.pointer[0] == '"' && value.pointer[value.length - 1] == '"';
+    for (u64 index = 1; valid && index + 1 < value.length; index += 1)
+    {
+        // The identity API borrows bytes rather than allocating decoded strings.
+        valid = value.pointer[index] != '\\' && value.pointer[index] >= 0x20;
+    }
+    if (valid)
+    {
+        *plain = (String8){.pointer = value.pointer + 1, .length = value.length - 2};
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_field(String8 object, String8 key, String8* value)
+{
+    bool valid = object.length >= 2 && object.pointer[0] == '{';
+    bool seen = false;
+    *value = (String8){0};
+    ByteSlice bytes = BUSTER_SLICE_TO_BYTE_SLICE(object);
+    u64 cursor = 1;
+    compiler_driver_mach_json_space(bytes, &cursor);
+    while (valid && cursor < bytes.length && bytes.pointer[cursor] != '}')
+    {
+        u64 start = cursor;
+        String8 name = {0};
+        String8 member = {0};
+        valid = compiler_driver_mach_json_string(bytes, &cursor);
+        if (valid)
+        {
+            valid = compiler_driver_mach_json_plain(
+                (String8){.pointer = object.pointer + start, .length = cursor - start}, &name);
+        }
+        compiler_driver_mach_json_space(bytes, &cursor);
+        valid = valid && cursor < bytes.length && bytes.pointer[cursor] == ':';
+        if (valid)
+        {
+            cursor += 1;
+            valid = compiler_driver_mach_json_value(bytes, &cursor, &member);
+        }
+        if (valid && string_equal(name, key))
+        {
+            valid = !seen;
+            seen = true;
+            *value = member;
+        }
+        compiler_driver_mach_json_space(bytes, &cursor);
+        if (valid && cursor < bytes.length && bytes.pointer[cursor] == ',')
+        {
+            cursor += 1;
+            compiler_driver_mach_json_space(bytes, &cursor);
+        }
+        else
+        {
+            break;
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_array_next(String8 array, u64* cursor, String8* value, bool* valid)
+{
+    ByteSlice bytes = BUSTER_SLICE_TO_BYTE_SLICE(array);
+    compiler_driver_mach_json_space(bytes, cursor);
+    bool present = *cursor < bytes.length && bytes.pointer[*cursor] != ']';
+    if (present)
+    {
+        *valid = compiler_driver_mach_json_value(bytes, cursor, value);
+        compiler_driver_mach_json_space(bytes, cursor);
+        if (*valid && *cursor < bytes.length && bytes.pointer[*cursor] == ',')
+        {
+            *cursor += 1;
+        }
+    }
+    return present && *valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_target(String8 value, Target target)
+{
+    String8 expected = target.cpu_arch == CPU_ARCH_AARCH64
+                           ? (target.os == OPERATING_SYSTEM_IOS ? S8("arm64-ios") : S8("arm64-macos"))
+                           : (target.os == OPERATING_SYSTEM_IOS ? S8("x86_64-ios") : S8("x86_64-macos"));
+    return (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS) &&
+           (target.cpu_arch == CPU_ARCH_AARCH64 || target.cpu_arch == CPU_ARCH_X86_64) && string_equal(value, expected);
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_targets(String8 entry, Target target, bool* matches)
+{
+    String8 targets = {0};
+    bool valid = compiler_driver_mach_json_field(entry, S8("targets"), &targets);
+    *matches = !targets.length;
+    if (valid && targets.length)
+    {
+        valid = targets.pointer[0] == '[';
+        u64 cursor = 1;
+        String8 value = {0};
+        while (valid && compiler_driver_mach_json_array_next(targets, &cursor, &value, &valid))
+        {
+            String8 plain = {0};
+            valid = compiler_driver_mach_json_plain(value, &plain);
+            *matches |= valid && compiler_driver_mach_json_target(plain, target);
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerDriverMachDylibStatus compiler_driver_mach_tbd_v5_identity(ByteSlice bytes, Target target,
+                                                                                      CompilerDriverMachDylibIdentity* identity)
+{
+    CompilerDriverMachDylibStatus result = COMPILER_DRIVER_MACH_DYLIB_UNUSABLE;
+    CompilerDriverMachDylibIdentity parsed = {.current_version = 0x10000, .compatibility_version = 0x10000};
+    u64 cursor = 0;
+    String8 document = {0};
+    String8 version = {0};
+    String8 library = {0};
+    String8 targets = {0};
+    bool valid = compiler_driver_mach_json_value(bytes, &cursor, &document);
+    compiler_driver_mach_json_space(bytes, &cursor);
+    valid = valid && cursor == bytes.length && compiler_driver_mach_json_field(document, S8("tapi_tbd_version"), &version) &&
+            string_equal(compiler_driver_mach_tbd_trim(version), S8("5")) &&
+            compiler_driver_mach_json_field(document, S8("main_library"), &library) &&
+            compiler_driver_mach_json_field(library, S8("target_info"), &targets) && targets.length && targets.pointer[0] == '[';
+    bool compatible = false;
+    bool target_seen = false;
+    cursor = 1;
+    String8 entry = {0};
+    while (valid && compiler_driver_mach_json_array_next(targets, &cursor, &entry, &valid))
+    {
+        String8 value = {0};
+        String8 plain = {0};
+        valid = compiler_driver_mach_json_field(entry, S8("target"), &value) &&
+                compiler_driver_mach_json_plain(value, &plain) && plain.length;
+        target_seen = true;
+        compatible |= valid && compiler_driver_mach_json_target(plain, target);
+    }
+    valid = valid && target_seen;
+    String8 keys[] = {S8("install_names"), S8("current_versions"), S8("compatibility_versions")};
+    for (u32 field = 0; valid && field < BUSTER_ARRAY_LENGTH(keys); field += 1)
+    {
+        String8 array = {0};
+        valid = compiler_driver_mach_json_field(library, keys[field], &array) && (field || array.length);
+        if (valid && array.length)
+        {
+            valid = array.pointer[0] == '[';
+            bool selected = false;
+            bool seen = false;
+            cursor = 1;
+            while (valid && compiler_driver_mach_json_array_next(array, &cursor, &entry, &valid))
+            {
+                String8 value = {0};
+                String8 plain = {0};
+                bool matches = false;
+                u32 packed = 0;
+                valid = compiler_driver_mach_json_field(entry, field ? S8("version") : S8("name"), &value) &&
+                        compiler_driver_mach_json_plain(value, &plain) && plain.length &&
+                        compiler_driver_mach_json_targets(entry, target, &matches);
+                if (valid && field)
+                {
+                    valid = compiler_driver_mach_tbd_version(plain, &packed);
+                }
+                seen = true;
+                if (valid && matches)
+                {
+                    valid = !selected;
+                    selected = true;
+                    if (!field)
+                    {
+                        parsed.install_name = plain;
+                    }
+                    else if (field == 1)
+                    {
+                        parsed.current_version = packed;
+                    }
+                    else
+                    {
+                        parsed.compatibility_version = packed;
+                    }
+                }
+            }
+            valid = valid && seen;
+        }
+    }
+    if (valid)
+    {
+        if (!compatible)
+        {
+            result = COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE;
+        }
+        else if (parsed.install_name.length)
+        {
+            result = COMPILER_DRIVER_MACH_DYLIB_USABLE;
+            if (identity)
+            {
+                *identity = parsed;
+            }
+        }
+    }
+    return result;
+}
+
 CompilerDriverMachDylibStatus compiler_driver_mach_tbd_identity(ByteSlice bytes, Target target, CompilerDriverMachDylibIdentity* identity)
 {
     CompilerDriverMachDylibStatus result = COMPILER_DRIVER_MACH_DYLIB_UNUSABLE;
@@ -4235,7 +4651,16 @@ CompilerDriverMachDylibStatus compiler_driver_mach_tbd_identity(ByteSlice bytes,
     {
         *identity = (CompilerDriverMachDylibIdentity){0};
     }
-    if (bytes.pointer && bytes.length)
+    u64 json_cursor = 0;
+    if (bytes.pointer)
+    {
+        compiler_driver_mach_json_space(bytes, &json_cursor);
+    }
+    if (bytes.pointer && json_cursor < bytes.length && bytes.pointer[json_cursor] == '{')
+    {
+        result = compiler_driver_mach_tbd_v5_identity(bytes, target, identity);
+    }
+    else if (bytes.pointer && bytes.length)
     {
         u64 cursor = 0;
         String8 line = {0};

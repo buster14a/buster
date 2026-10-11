@@ -1215,7 +1215,7 @@ On macOS and iOS, `-lNAME` searches explicit `-L` roots in order, probing
 `libNAME.tbd` before `libNAME.dylib` within each root, then
 `<sysroot>/usr/lib` when a sysroot was supplied. A compatible thin or fat
 Mach-O dylib contributes its `LC_ID_DYLIB` install name and current and
-compatibility versions to `LC_LOAD_DYLIB`; TAPI YAML TBD v1-v4 stubs provide
+compatibility versions to `LC_LOAD_DYLIB`; TAPI YAML TBD v1-v4 and JSON TBD v5 stubs provide
 the same metadata, and wrong-CPU or wrong-platform candidates are skipped.
 Mach-O dylib platforms come from `LC_BUILD_VERSION` and `LC_VERSION_MIN_*`;
 TBD v4 `targets:` entries must match both architecture and platform suffix,
@@ -1225,8 +1225,15 @@ including zero; absent TBD current/compatibility versions default to 1.0.0,
 while a present malformed version makes the stub unusable. `-lc` and `-lm` keep
 their existing implicit behavior. Without a located candidate, only the
 allowlisted Apple system libraries retain the legacy `/usr/lib/libNAME.dylib`
-fallback; other requests fail with `cannot find -l<request>`. TBD v5 JSON is
-unsupported. `compiler_driver_test_mach_library_search` covers parser bounds,
+fallback; other requests fail with `cannot find -l<request>`. TBD v5 reads only
+`main_library`: `target_info[].target` must match both CPU and platform, and
+`install_names`, `current_versions` and `compatibility_versions` honor their
+optional `targets` lists. Inlined `libraries` do not supply the identity.
+The JSON scan validates the complete document with a fixed 64-frame stack;
+malformed/truncated input and deeper nesting are unusable. Identity strings
+and field names must be unescaped because the reader borrows mapped bytes;
+unknown values can contain JSON escapes. Ambiguous duplicate identity fields
+and overlapping target-specific metadata are refused. `compiler_driver_test_mach_library_search` covers parser bounds,
 architecture selection, search order, versions, fallback, refusal and archive
 interaction on every host without running the cross-linked image.
 
