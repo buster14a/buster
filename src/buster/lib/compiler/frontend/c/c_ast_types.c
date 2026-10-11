@@ -97,6 +97,18 @@
 // typedef name in the subtree resolves by spelling in the query's scope as
 // the binder bound it (c_ast_types_lookups_agree).
 //
+// Name checks. Repeating those lookups per query cost about 50 M Ir on the
+// unity self-host, so a region settles its marks once
+// (c_ast_types_lookups_settled). A mark whose symbol no entity outside the
+// file scope has (c_ast_types_locals_build) finds nothing in any scope before
+// the file scope, so from any query scope whose chain reaches the file scope
+// it resolves as it does from the file scope, where the settlement checks it
+// once against its binding. The settlement holds while the lookup generation
+// (c_parse_lookup_generation: entities added, rollbacks that take entities,
+// scopes or uses away) and the identifier use count are unchanged. A query
+// over a mark that a parameter or local also spells, or made after the
+// settlement stopped holding, walks its subtree as before.
+//
 // Accepted kinds and why each is exact (the machine paths are in c_parse.c;
 // the operator rules are the machine's own functions, shared through
 // c_internal.h, applied to operand types already held):
@@ -201,6 +213,9 @@
 //   c_ast_types_address
 //   c_ast_types_locate, c_ast_types_answer       query lookup and the decision
 //   c_ast_types_lookups_agree                    query-scope name checks
+//   c_ast_types_locals_build,                    the settled name checks
+//   c_ast_types_mark_resolves_at_file,
+//   c_ast_types_lookups_settled
 //   c_ast_types_publish                          machine state after an answer
 //   c_ast_types_verify_*, c_test_*               the differential (tests builds),
 //                                                c_ast_types_verify_hold_replay

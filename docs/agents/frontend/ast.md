@@ -383,6 +383,26 @@ unchanged.
     the subtree resolves to an entity other than the one the binder bound, or,
     in an initializer, an unbound name resolves to an entity other than the one
     the pass found (`c_ast_types_lookups_agree`).
+- **How the name check stays cheap.** Repeating every lookup per query cost
+  about 50 M Ir on the unity self-host. Almost every marked name there has a
+  symbol that no parameter, local or other non-file-scope entity shares. Such
+  a name finds nothing in any scope before the file scope, so from any query
+  scope whose chain reaches the file scope it resolves as it does from the
+  file scope.
+  - A region settles its marks once, at its first query that needs the check
+    (`c_ast_types_lookups_settled`). Each mark is checked at the file scope
+    against its binding, which must be a file-scope entity or none.
+  - Up to 16 marks per region that a non-file-scope entity also spells are
+    recorded. A query over one of them walks its subtree as before. A region
+    with more walks for every query.
+  - The settlement holds while the lookup generation
+    (`c_parse_lookup_generation`) and the identifier use count are unchanged.
+    The generation lives on the scope cursor. It moves with every entity added
+    and every rollback that takes entities, scopes or identifier uses away.
+    After that, queries walk.
+  - The symbol table and a table of the scopes whose chain reaches the file
+    scope are built once per generation, and are rebuilt only once the nodes
+    settled since the last build reach the entity count.
 - **What it accepts.** Each answer is a row that already exists: an entity's,
   member's, element's, return or typedef type, an operand's own row, an
   immutable scalar row, or an interned primitive or pointer row (see
