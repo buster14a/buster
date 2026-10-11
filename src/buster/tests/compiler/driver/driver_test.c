@@ -23918,6 +23918,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_probe_spellings(UnitTest
                                string_ends_with_sequence(drive_relative, S8("\\drive.c")));
     String8 rooted = working_host.input_paths[3];
     BUSTER_TEST(arguments, rooted.length > 2 && rooted.pointer[1] == ':' && string_ends_with_sequence(rooted, S8(":\\rooted.c")));
+    // Drive and UNC directory roots, resolved without touching the filesystem.
+    String8 resolve_cases[][3] = {
+        {S8("C:\\work\\sub"), S8("\\rooted.c"), S8("C:\\rooted.c")},
+        {S8("C:\\work\\sub"), S8("D:drive.c"), S8("D:\\work\\sub\\drive.c")},
+        {S8("\\\\server\\share\\sub"), S8("\\rooted.c"), S8("\\\\server\\rooted.c")},
+        {S8("\\\\server\\share\\sub"), S8("C:drive.c"), S8("C:\\share\\sub\\drive.c")},
+        {S8("\\\\server\\share\\sub"), S8("plain.c"), S8("\\\\server\\share\\sub\\plain.c")},
+        {S8("\\\\server\\share\\sub"), S8("\\\\other\\share\\unc.c"), S8("\\\\other\\share\\unc.c")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(resolve_cases); index += 1)
+    {
+        BUSTER_STRING_TEST(arguments, compiler_driver_working_directory_path(arena, resolve_cases[index][0], resolve_cases[index][1]), resolve_cases[index][2]);
+    }
 #else
     // A backslash or a colon is an ordinary POSIX filename byte, including at
     // the end of the working directory.
@@ -23929,6 +23942,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_probe_spellings(UnitTest
     BUSTER_STRING_TEST(arguments, working_host.input_paths[1], S8("/input.c"));
     BUSTER_STRING_TEST(arguments, working_host.input_paths[2], S8("/x:y.c"));
     BUSTER_STRING_TEST(arguments, working_host.input_paths[3], S8("/\\name.c"));
+    BUSTER_STRING_TEST(arguments, compiler_driver_working_directory_path(arena, S8("\\\\server\\share"), S8("C:x.c")), S8("\\\\server\\share/C:x.c"));
     String8 backslash_directory = buster_test_temporary_path(arena, S8("driver-wd\\"), S8(""));
     if (BUSTER_REQUIRE(arguments, os_make_directory_attempt(backslash_directory)))
     {

@@ -353,8 +353,8 @@ compiler resource directory (`stddef.h` and the other freestanding headers);
 `-nostdinc` drops both. `-working-directory=DIR` and `-working-directory DIR`
 resolve relative input paths against `DIR` with host path rules (on POSIX only
 a leading `/` is absolute and `\` and `:` are ordinary filename bytes; on
-Windows `\x.c` takes the drive of `DIR` and `C:x.c` its directory, as in LLVM's
-`make_absolute`). Output paths and `-I` directories stay relative to the process
+Windows `\x.c` takes the root name of `DIR` (`C:` or UNC `\\server`) and
+`C:x.c` its root-relative directory, as in LLVM's `make_absolute`). Output paths and `-I` directories stay relative to the process
 directory, and a `DIR` that is not a directory is rejected with
 `unable to set working directory: DIR`.
 Windows targets implement the MSVC ABI only, so the MinGW spellings

@@ -602,6 +602,12 @@ BUSTER_F_DECL String8 compiler_driver_c_ast_pilot_name(CompilerDriverCAstPilot p
 // is the one the C frontend presents in __clang_major__/__clang_minor__/
 // __clang_patchlevel__; the machine is the invocation's effective target.
 BUSTER_F_DECL String8 compiler_driver_query_text(Arena* arena, CompilerDriverInvocation const* invocation);
+// Resolves an input against -working-directory with the host's path rules, as
+// LLVM's make_absolute does. On Windows a rooted path without a drive ("\\x.c")
+// takes the root name ("C:" or "\\\\server") of the absolute directory, and a
+// drive-relative "C:x.c" takes its root-relative part. Empty when the
+// directory has no root name.
+String8 compiler_driver_working_directory_path(Arena* arena, String8 directory, String8 input);
 BUSTER_F_DECL CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation);
 // The -fmetrics-out record text; docs/agents/driver.md is the schema.
 BUSTER_F_DECL String8 compiler_driver_metrics_format(Arena* arena, CompilerDriverInvocation const* invocation, CompilerDriverResult const* result,
