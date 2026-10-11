@@ -10725,6 +10725,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_contract_carry
 // read every memory source (into its target, or through the tile) before it
 // writes the first home. Every AArch64 target takes both read forms under
 // FAST and QUALITY; x86-64 FAST loads targets directly and QUALITY takes both.
+// Those three functions never put a home store before a reload of the same
+// home on x86-64, so `swap_spilled` covers it there: twelve values swap in
+// pairs across a call that ends the body, and the loop counter's next value
+// is computed before the call, so every source is in memory, a register
+// stays free for the parallel move, and parameters left in homes swap with
+// each other. Under FAST and QUALITY and both frontend forms, x86-64 then exits
+// with its check (10) if the publication stores a home before reading it.
 // Every target must select without fallback, and the host runs the program
 // under both allocators and frontend forms; the expected values were
 // cross-checked with host GCC and Clang.
@@ -10861,13 +10868,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parallel_edge_moves(Unit
         "    }\n"
         "    return v0 * 1 + v1 * 3 + v2 * 5 + v3 * 7;\n"
         "}\n"
+        "static __attribute__((noinline)) long long swap_spilled(int n)\n"
+        "{\n"
+        "    long long a = opaque, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8, k = 9, l = 10, m = 11, o = 12;\n"
+        "    for (int i = 0; i < n;)\n"
+        "    {\n"
+        "        int next = i + 1;\n"
+        "        long long t;\n"
+        "        t = a; a = b; b = t ^ i;\n"
+        "        t = c; c = d; d = t;\n"
+        "        t = e; e = f * 3 % 1009; f = t;\n"
+        "        t = g; g = h; h = t;\n"
+        "        t = k; k = l; l = t;\n"
+        "        t = m; m = o; o = t + 1;\n"
+        "        bump(i);\n"
+        "        i = next;\n"
+        "    }\n"
+        "    return a + b * 2 + c * 3 + d * 5 + e * 7 + f * 11 + g * 13 + h * 17 + k * 19 + l * 23 + m * 29 + o * 31;\n"
+        "}\n"
         "int main(void)\n"
         "{\n"
         "    long long swapped = swap_loop(37), rotated3 = rotate3(41), rotated4 = rotate4_fanout(43), mixed = mixed_sources(47), wider = wide(53);\n"
         "    double classes = mixed_class(29);\n"
-        "    long long homes = rotate_homes(57), swaps = swap_homes(31), calls = rotate_calls(59);\n"
+        "    long long homes = rotate_homes(57), swaps = swap_homes(31), calls = rotate_calls(59), spilled = swap_spilled(61);\n"
         "    return swapped != 1819ll ? 1 : rotated3 != 60318ll ? 2 : rotated4 != 122175ll ? 3 : mixed != 34865ll ? 4 : wider != 38176ll ? 5 :\n"
-        "           classes != 0x1.1a12e82p+11 ? 6 : homes != 45328ll ? 7 : swaps != 6724610ll ? 8 : calls != 6346ll ? 9 : sink != 6550 ? 10 : 0;\n"
+        "           classes != 0x1.1a12e82p+11 ? 6 : homes != 45328ll ? 7 : swaps != 6724610ll ? 8 : calls != 6346ll ? 9 :\n"
+        "           spilled != 13569ll ? 10 : sink != 8380 ? 11 : 0;\n"
         "}\n");
     String8 source = string_format(arguments->arena, S8("{S8}{S8}"), loops, homed);
     String8 input = buster_test_temporary_path(arguments->arena, S8("buster-parallel-edge-moves"), S8(".c"));
