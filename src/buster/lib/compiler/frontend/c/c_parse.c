@@ -35122,6 +35122,26 @@ BUSTER_C_INTERNAL String8 c_parse_unknown_member_designator_message(CParseResult
     return message;
 }
 
+// The `(` of the first GNU statement expression `({` in a file-scope
+// initializer [start, end), or end. GCC and Clang allow a statement expression
+// only inside a function body (#3364); left to the static-initializer folder it
+// passed -fsyntax-only and failed only when -c lowered it.
+BUSTER_C_INTERNAL u32 c_parse_file_scope_statement_expression(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
+{
+    u32 found = end;
+    CParseCandidates groups = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_STATEMENT_EXPRESSIONS, C_PARSE_POPULATION_NONE, start + 1);
+    for (u32 index = c_parse_candidates_next(&groups, start + 1, end); found == end && index < end;
+         index = c_parse_candidates_next(&groups, index + 1, end))
+    {
+        if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE) &&
+            c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            found = index - 1;
+        }
+    }
+    return found;
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                              CPreprocessResult preprocess)
 {
@@ -35143,9 +35163,15 @@ BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* m
             u64 region_end = machine->scratch_arena->position;
             String8 conversion_message = {0};
             bool braced = start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE);
-            bool incompatible = !braced &&
+            u32 statement_expression = c_parse_file_scope_statement_expression(result, preprocess, start, end);
+            bool incompatible = statement_expression == end && !braced &&
                 c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, declaration.type, start, end, true, &conversion_message);
-            if (incompatible)
+            if (statement_expression < end)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[statement_expression]),
+                                   C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("statement expression not allowed at file scope"));
+            }
+            else if (incompatible)
             {
                 c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
                                    conversion_message.length ? conversion_message : S8("initializer has an incompatible type"));

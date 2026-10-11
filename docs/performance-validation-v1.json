@@ -114,6 +114,17 @@
       }
     },
     {
+      "id": "uarch_lab:compare@ast-pilot-acceptance",
+      "kind": "lab-mode",
+      "validation": "performance",
+      "measures": "issue #3397 fixed ast-pilot-acceptance-v1: one candidate-HEAD ide without and with -fc-ast-pilot on the -g0 unity self-host input, -fsyntax-only and -c cells of 20 ABBA pairs each, wall time with 95% CI, available retired instructions, peak RSS, the tree's retained bytes, byte-identical objects and identical diagnostics, and the report-only ast.md stage-1 adoption verdict",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
       "id": "uarch_lab:retirement",
       "kind": "lab-mode",
       "validation": "performance",
