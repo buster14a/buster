@@ -402,6 +402,9 @@ unchanged.
       reads is already interned, so its machine run appends nothing at any
       task level. A row the body's own queries mint after the eager pass is
       found at the query instead ([Late rows](#late-rows)).
+    - a call of an unbound void `__builtin_` with no arguments
+      (`__builtin_debugtrap()`, `__builtin_unreachable()`), whose answer is
+      the published `void` row (`c_ast_types_builtin_call`).
 - **What it declines.** Every shape whose machine answer appends a row stays
   with the machine:
   - a qualified member or array element;
@@ -413,12 +416,11 @@ unchanged.
     declarator. Their readers append rows that are not interned.
   - `&` or a type name whose interned rows do not exist yet when it is
     queried ([Late rows](#late-rows));
-  - a string literal. Its array row is not interned, because lowering gives
-    each array row its own IR array type and `-g` describes every IR type.
-    A query on one costs the machine little: the unity self-host makes about
-    6,650, against 2.19 million queries. A literal path that answered them
-    before the machine saved about 1 million instructions there, and its
-    check on every query cost more than that, so it was dropped.
+  - a string literal as an operand. Its array row is not interned, because
+    lowering gives each array row its own IR array type and `-g` describes
+    every IR type. A query of one string-literal token alone is answered by
+    replaying the machine's leaf instead (below), and a run of several tokens
+    stays with the machine.
 
   An operand the machine scans but does not type (a cast's operand without
   constraint checks, a `sizeof` expression) must therefore hold no type name
@@ -434,6 +436,21 @@ unchanged.
   miss, calls the machine's string leaf, which appends the same row. The node
   is never constraint-safe for its parents, whose machine runs would type the
   literal too. An operand of several literal tokens is not replayed.
+
+  A query of one string-literal token alone, perhaps parenthesized, is
+  replayed the same way. `S8()`'s length spells it `(("text"))[0]` inside
+  `BUSTER_ARRAY_LENGTH`. The eager pass flags the node
+  (`C_AST_TYPE_FLAG_STRING`) without accepting it, so every parent declines.
+  `c_ast_types_answer` reports it from its decline branch as
+  `C_AST_TYPE_STRING`, off the path ordinary answers take.
+  `c_parse_expression_tree_string_answer` then makes the machine's root task:
+  - it strips the parentheses;
+  - it probes the memo for the token and, on a miss, calls the string leaf;
+  - it rewinds the machine's scratch arena, which the leaf uses here, as in
+    the cast replay.
+
+  The replayed row is the answer. A leaf that fails is undone, and the query
+  runs the machine.
 - **Constraint checks.** A checked query is answered only from a node whose
   operands are safe and whose own checked-mode rule cannot fire. For the
   binary operators that is the machine's operand rule. The cases it settles by
@@ -441,6 +458,17 @@ unchanged.
   for two pointers to one unqualified element row. A cast whose conversion
   rule is clean is safe, and so is a conditional whose condition is a safe
   scalar.
+- **Failing operands.** The machine types a few nodes to nothing, with no row
+  and no constraint: `__func__`, `__FUNCTION__` and `__PRETTY_FUNCTION__`,
+  which name no entity, and an unbound `__builtin_expect(...)` call, which no
+  leaf rule types. Such a node is never accepted, but it carries
+  `C_AST_TYPE_FLAG_FAILS`. The machine's checked cast tests its conversion
+  only when the operand has a type, and its conditional tests the condition
+  only when that has a type. So a cast over a failing operand is safe, and so
+  is a conditional with a failing condition, such as `BUSTER_CHECK`'s
+  `(void)(__builtin_expect(!(ok), 0) ? (…, 0) : 0)`. The query repeats the
+  name's lookup in its own scope (`c_ast_types_lookups_agree`), and that
+  lookup must find nothing.
 - **Authority.** The machine remains the only producer of diagnostics. A query
   the typer declines, misses or leaves alone runs the machine as before.
 - **Designator probes.** Nearly every miss was one of two designator probes
@@ -593,10 +621,13 @@ fixed number of node and token reads; nothing recurses.
 - **Names.** A record's name is its declarator's `DECLARATOR_NAME`. The
   record is a function when the first derivation above that name is a
   `DECLARATOR_FUNCTION`; its parameter list then gives the identifier-list
-  range, when the name stands in no group. Group boundaries are where a suffix
-  derivation's inner declarator is a pointer. A declaration without a
-  declarator takes the last name outside every delimiter, else the first name
-  inside one, which is what the walker does.
+  range, when no `(` is written before the name. Group boundaries are where a
+  suffix derivation's inner declarator is a pointer. Redundant parentheses
+  leave no node, so the split counts the `(` written before the name; more
+  than the boundaries is a redundant group, which the walker reads the same
+  way (below). A declaration without a declarator takes the last name outside
+  every delimiter, else the first name inside one, which is what the walker
+  does.
 - **Punctuation.** The `)` before a body's `{`, the `,` before a later
   declarator, the `=` before an initializer and the final `;` have no nodes.
   Each is read as the token next to an anchor, and that read also checks that
@@ -615,38 +646,65 @@ two cases:
    validators over every token: integer spelling, type-specifier runs and the
    missing return operand. It reads the shape sidecar in 64-token windows. The
    walker validates a subset of those tokens, so a clean probe means a clean
-   walk.
+   walk. An identifier lane is classified as a type word or `return` from its
+   interned id, with one bound compare and one `word_bits` read. A specifier
+   run of at most four interned type words, with no tag keyword, is checked
+   only of the run's own tokens, so its verdict depends on its ids alone. A
+   run spelled like one that already validated clean is skipped.
 2. **The walker would read a shape differently from the grammar, or no rule
    here states what it reads.** `CParserTreeFallback` names each case:
    - `specifiers`: a parenthesized specifier (`typeof`, `_Atomic(T)`,
      `_Alignas`, `_BitInt`), or an enum's fixed type;
-   - `declarator`: redundant parentheses, which is
-     [#3215](https://github.com/buster14a/buster/issues/3215)'s family and
-     where the walker misreads; attributes on a pointer or opening a group; or
-     a function returning a function or an array;
+   - `declarator`: a redundant group after a typedef or tag name, or after a
+     keyword other than a type or qualifier word, where the walker reads the
+     group as a parameter list (it reads `T (x)` as a function `T`); attributes
+     on a pointer or opening a group; or a function returning a function or an
+     array;
    - `old_style`: an old-style declaration list;
    - `tokens`: a comma operator in an initializer, where the walker splits a
-     list, or a token next to an anchor that is not the required one;
+     list, a token next to an anchor that is not the required one, or a
+     variadic list inside a redundant group (`int (gv(int, ...))`), since the
+     walker reads `...` only before the declarator's last `)`;
    - `assertion`: a file-scope assertion whose condition holds a comma or an
      initializer list, or a body assertion with no message or behind an
      attribute list.
 
 A fallback discards everything derived and returns `c_parse_ast`'s result, so
-the records, the diagnostics and #3215's rejections are always the walker's.
-Neither #3215 nor #3143 is changed by this split. Where the walker's reading
-is wrong but the split can state it, the split reproduces it instead. For
-example, a `typedef` or `constexpr` word anywhere outside the body marks the
-whole declaration ([#3310](https://github.com/buster14a/buster/issues/3310)).
-The `typedef` and `constexpr` words are collected once per unit, so only a
-declaration that holds one outside its top-level specifiers is scanned whole.
+the records and the diagnostics are always the walker's, and #3143 is not
+changed by this split. Where the walker's reading is wrong but the split can
+state it, the split reproduces it instead.
+A declaration is a typedef or constexpr only through its own top-level
+specifiers. The walker counts a `typedef` or `constexpr` word only outside
+every delimiter and before the first top-level `=` or `,`. The split counts a
+`SPECIFIER_WORD` item of the declaration's `DECL_SPECIFIERS`. A word inside an
+initializer, such as a statement expression's `typedef` or a C23 constexpr
+compound literal, marks neither the declaration nor its later declarators
+([#3310](https://github.com/buster14a/buster/issues/3310)).
 
-`c_ast_test_split` runs one shape per fallback reason, both #3215 inputs
-included, in every layout. It requires the walker's result and the named
-reason. The [corpus differential](#corpus-differential) compares every
-record. On the self-host unity input the split publishes all 15,476 records
+**Redundant groups ([#3215](https://github.com/buster14a/buster/issues/3215)).**
+The walker used to classify a parenthesized declarator by the token after its
+outermost group and to require a `*` before a nested one. So it read
+`int ((*pq))(int) = f;` as a function, merged `int (gd(int a)) { ... } int zz;`
+into one object, and dropped `int ((x))[3];` and `void ((h))(void) {}`.
+Now it walks out from the name instead
+(`c_parse_parenthesized_declarator_is_function`): a `(` makes a function, a
+`[` an array, and a `)` closes a group that is a pointer when it holds a `*`
+and is redundant otherwise. A name whose own list sits inside the group,
+`(gd(int a))`, is a function, but only when the group follows a type or
+qualifier word, a punctuator or nothing (`c_parse_declarator_group_may_open`).
+After a typedef or tag name the walker still reads a single group as that
+name's parameter list, as before. The type parser
+(`c_type_parse_parenthesized_step`) nests a group that opens a group holding
+the name. The split publishes every redundant group the walker reads this way,
+and refuses the rest as above.
+
+`c_ast_test_split` runs one shape per fallback reason in every layout, and
+both #3215 inputs and the other redundant shapes on the published side. It
+requires the walker's result and the named reason. The [corpus differential](#corpus-differential) compares every
+record. On the self-host unity input the split publishes all 15,593 records
 and 33 body assertions, with no fallback. The fixtures that fall back are the
-parenthesized specifiers, the fixed-type enums and a few attributed or
-redundant declarators.
+parenthesized specifiers, the fixed-type enums and a few attributed
+declarators.
 
 ## Corpus differential
 
@@ -670,6 +728,11 @@ declaration-split misreads the differential found
 [#3156](https://github.com/buster14a/buster/pull/3156) and are agreement
 constructs now: a file-scope plain `asm("...")`, attribute lists before or
 opening a parenthesized pointer declarator, and a C23 opaque `enum E : T;`.
+The redundant-parenthesis misreads it found
+([#3215](https://github.com/buster14a/buster/issues/3215)) are agreement
+constructs too, beside the other redundant shapes: objects and functions in
+one or more groups, a definition whose list sits inside its group, groups in a
+declarator list, after a typedef name and in parameters.
 The tree also rejects syntax errors that today's `-fsyntax-only` accepts
 ([#3143](https://github.com/buster14a/buster/issues/3143)).
 
@@ -1085,5 +1148,123 @@ the same way and diagnostic only:
   (5.2%) slower, with 4 of 15 pairs favouring fusion, and a repeat agreed. The
   A/A control itself exceeded its ±0.5% bound.
 - **Decision.** Fusion does not ship. The token array and the array build stay.
+
+For the split's [diagnostic probe](#declaration-split-from-the-tree)
+(`c_parser_tree_probe`), these budgets were declared before its measured runs.
+The probe classifies identifier lanes from their interned ids instead of
+asking the word table and the `return` id through the token predicates. The
+input and flags are the same as for the declaration split, and the four
+Callgrind arms (`--cache-sim=no --branch-sim=no`) are counted on tests-off
+`-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `f86d65f9`, which the candidate branches from. The budgets:
+- correctness:
+  - the probe stays a superset of the tokens the walker validates, so
+    `c_ast_split_cases` still reaches its `diagnostic` fallbacks (`0x`,
+    `long long long`) and the corpus differential keeps 0 differences above
+    its floors;
+  - the self-host unity input still takes the split whole, with no fallback;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- the probe's own effect (C against B): `c_parser_tree_probe`'s call-site
+  inclusive cost falls by at least 25%, and the whole compile costs fewer
+  instructions.
+- the default path (D against A): the probe does not run there, so the
+  difference stays within ±0.05% Ir.
+- adoption of the hook as the default: unchanged from stage 1, with
+  acceptance on the Zen 5 route (#2761).
+
+The probe's hosted census is
+[`2026-10-10T175428Z`](../../performance-audits/2026-10-10T175428Z.md), taken
+the same way and diagnostic only:
+- Every budget passes except adoption. Objects are byte-identical across the
+  four arms, and the self-host unit takes the split whole.
+- The probe falls from 125.5 M to 81.6 M Ir (−35.0%), and the whole compile by
+  44.1 M (−0.46%, C against B). The id classification alone gives −14.0%; the
+  memo cuts the validated specifier runs from 29,649 to 3,299.
+- The default path is −0.0037%.
+- Acceptance stays with Zen 5 (#2761), so the default stays off.
+
+For the typer's [failing operands](#tree-expression-typer), these budgets
+were declared before the measured runs. The input and flags are those of
+stage 2 (`-g0 -fsyntax-only`, plus `-c` for the default path), and four
+Callgrind arms are counted on tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `f38a7716`, which the candidate branches from. The budgets:
+- correctness: no verify mismatch over the corpus, and identical diagnostics
+  and type-table sizes with and without the tree. `-c` objects (`-g0` and
+  `-g`) must be byte-identical across the four arms.
+- coverage: a throwaway census build, not committed, counts the checked casts
+  the typer declines over a declined or unsafe operand. On the base it counts
+  577 declined and 296 unsafe, plus 13 with an unclean conversion. On the
+  candidate the first two together must fall by at least 600.
+- the change's own effect (C against B): fewer instructions in the whole
+  compile, with the larger eager pass and the extra lookups charged, and
+  fewer machine runs from queries.
+- the default path (D against A): the typer runs only with the tree, so the
+  difference stays within ±0.05% Ir on `-fsyntax-only` and on `-c`.
+- performance acceptance: the hosted counts are diagnostic. Zen 5 validation
+  (#2761) stays incomplete, and the hook stays opt-in.
+
+The failing-operand rule's hosted census is
+[`2026-10-10T193402Z`](../../performance-audits/2026-10-10T193402Z.md). It
+was taken the same way and is diagnostic only. Every hosted budget passes:
+- 0 verify mismatches, and byte-identical objects across the four arms.
+- The declined and unsafe checked casts fall from 873 to 236. `__func__`
+  casts and `os.h`'s failure macros made up 637 of them.
+- The pilot's instructions fall by 0.076%, with 719 fewer machine runs from
+  queries.
+- The default path moves by at most +0.0011%.
+- Most of what remains is declined in the operand itself: members, string
+  runs and `&`.
+
+For the typer's string-literal queries (a bare string literal or run of them,
+perhaps parenthesized, that the tree declines today), these budgets were
+declared before any measured run. The input and flags are stage 3's; the four
+Callgrind arms (A base default, B base with `-fc-ast-pilot`, C candidate with
+it, D candidate default) are counted on tests-off `-march=x86-64-v3` builds,
+with the base at main `f38a7716`, which carries the `S8()` replay.
+- **Census first.** A throwaway build of the base counts the declined
+  string-literal queries on the self-host by shape (one token, parenthesized,
+  a run of several tokens) and charges their machine runs' inclusive Ir. If
+  that total is below 1 M Ir, no candidate is built and the negative result
+  is recorded.
+- **Correctness.** No verify mismatch over the corpus; every replayed answer's
+  rows are taken back and the machine appends the same rows again. Identical
+  diagnostics and type-table sizes with and without the tree, and
+  byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **Default path (D against A).** Within ±0.05% Ir on `-fsyntax-only` and on
+  `-c` (`-g0`). The answer must add no check to queries outside the typer.
+- **The gain that ships it (C against B).** At least 1 M fewer instructions
+  (about 0.01% of the pilot compile), with the eager pass, the answer and the
+  replay charged, and fewer machine runs from queries. A smaller gain, or a
+  loss, is recorded as a negative result and the code does not ship.
+- **Acceptance.** Hosted counts are diagnostic; Zen 5 validation (#2761)
+  stays incomplete and the hook stays opt-in.
+
+The string-literal queries' hosted census is
+[`2026-10-10T200424Z`](../../performance-audits/2026-10-10T200424Z.md),
+diagnostic only:
+- **Census.** 17,765 queries at 43.2 M Ir, not the 6,650 and 1 M the old
+  literal path saw. 10,230 are `S8()`'s parenthesized length operand, and
+  26 M of the 43.2 M is the literal's decode, which a replay must repeat.
+- **Correctness.** 0 verify mismatches. Objects are byte-identical at `-g0`
+  and `-g` across the four arms.
+- **Ship.** C against B is −11.17 M (−0.118%). Machine runs from validation
+  queries fall from 55,593 to 38,724.
+- **Default path.** −0.041% on `-fsyntax-only` and −0.015% on `-c`. A version
+  that added a parameter to the query's tree turn missed the band at −0.062%;
+  the work was unchanged, but the query function compiled differently, so the
+  shipped version keeps base's signature.
+- **History.** The first two versions lost instructions: tests on the path
+  every answer takes cost more than the replay saves. The shipped version
+  keeps the string case off that path.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.

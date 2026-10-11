@@ -2368,6 +2368,17 @@ BUSTER_GLOBAL_LOCAL CAstCorpusConstruct const c_ast_corpus_constructs[] = {
     {S8_INITIALIZER("int a, __attribute__((x)) b __attribute__((y)); int c, __attribute__((x)) d __attribute__((y)) = 1, __attribute__((z)) *e;"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("int (__attribute__((unused)) pa); int (__attribute__((x)) pf)(void); int (__attribute__((x)) pr)[3]; int (__attribute__((x)) (pq))(int);"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("int (__attribute__((x)) fd)(void) { return 0; } int pt, (__attribute__((y)) pu) = 1;"), C_PREPROCESS_DIALECT_GNU17},
+    // #3215: declarators in redundant groups, which the walker walks out of
+    // to the derivation nearest the name: objects, functions, a definition
+    // whose list sits inside the group, groups in a list and after a typedef
+    // name, and pointers inside and outside the groups.
+    {S8_INITIALIZER("int f(int x) { return x + 1; } int ((*pq))(int) = f; int (gd(int a)) { return a; } int zz;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int (x); int ((x2))[3]; void ((h))(void) {} void ((h2))(void); int ((x3)) = 1; int (((*p3)))(int); int (*(f3))(int);"),
+     C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int a, ((b)), (c)[2], ((*d))(void), (e(void)), (((*g))); int (gd2(int a)), zz2; int (*(g3(int a)))(void) { return 0; }"),
+     C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("typedef int T; T ((t))[2]; T ((*tp))(T); T (*(tq))(int); void pf(int ((a))[3], int ((*cb))(int)) { } void pg(T (a)) { }"),
+     C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("typedef int (__attribute__((x)) TF)(int); TF tf; typedef int (__attribute__((x)) TA)[2]; TA ta; void (*(__attribute__((x)) hf))(void);"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("struct S5 { int a, __attribute__((x)) b __attribute__((y)); int c : 2, __attribute__((x)) d : 3 __attribute__((y)); int (__attribute__((x)) m)[2]; };"), C_PREPROCESS_DIALECT_GNU17},
     // Body _Static_assert notes (c_parse_ast_from_tree): noted when the
@@ -3590,6 +3601,10 @@ struct CAstTypeCase
     // With constraint checks the answer replays the machine's typing of a
     // cast's string-literal operand.
     bool replayed;
+    // The range is one string-literal token, perhaps parenthesized: with or
+    // without constraint checks the answer is the row its replay appends, so
+    // the probe, which does not replay, reports no type.
+    bool replay_answer;
     // Every body case is also asked over a body typed before its queries
     // minted the interned rows (CAstTypeLate).
     CAstTypeLate late;
@@ -3660,11 +3675,11 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     // their rows: `&` and a cast to primitive specifier words or a typedef
     // name under plain `*`s (CTypeInterning).
     {S8_INITIALIZER("int* f(int a) { return &a; }"), S8_INITIALIZER("&"), 0, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER, false,
-     C_TYPE_INVALID, false, C_AST_TYPE_LATE_ANSWERED},
+     C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_ANSWERED},
     {S8_INITIALIZER("struct S { int a; }; int* f(struct S* p) { return &p->a; }"), S8_INITIALIZER("&"), 0, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
-     C_TYPE_POINTER, false, C_TYPE_INVALID, false, C_AST_TYPE_LATE_ANSWERED},
+     C_TYPE_POINTER, false, C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_ANSWERED},
     {S8_INITIALIZER("int f(int* p) { return *&p[1]; }"), S8_INITIALIZER("*"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT, false, C_TYPE_INVALID,
-     false, C_AST_TYPE_LATE_DECLINED},
+     false, false, C_AST_TYPE_LATE_DECLINED},
     {S8_INITIALIZER("long f(int a) { return (long)a; }"), S8_INITIALIZER("("), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
     {S8_INITIALIZER("unsigned char f(int a) { return (unsigned char)a; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER,
      C_TYPE_UNSIGNED_CHAR},
@@ -3678,24 +3693,24 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     // dereference and a comparison decline, and a cast over one is safe
     // under constraint checks only when the operand is.
     {S8_INITIALIZER("int** f(int* a) { int** q = &a; return &a; }"), S8_INITIALIZER("&"), 1, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER, false,
-     C_TYPE_INVALID, false, C_AST_TYPE_LATE_ANSWERED},
+     C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_ANSWERED},
     {S8_INITIALIZER("char** f(void* p) { char** q = (char**)p; return (char**)p; }"), S8_INITIALIZER("("), 2, 6, C_TEST_AST_TYPE_PROBE_ANSWER,
-     C_TYPE_POINTER, false, C_TYPE_INVALID, false, C_AST_TYPE_LATE_ANSWERED},
+     C_TYPE_POINTER, false, C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_ANSWERED},
     {S8_INITIALIZER("short f(void* p) { return *(short*)p; }"), S8_INITIALIZER("*"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_SHORT, false,
-     C_TYPE_INVALID, false, C_AST_TYPE_LATE_DECLINED},
+     C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_DECLINED},
     {S8_INITIALIZER("int f(int a) { return *&a; }"), S8_INITIALIZER("*"), 0, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT, false, C_TYPE_INVALID,
-     false, C_AST_TYPE_LATE_DECLINED},
+     false, false, C_AST_TYPE_LATE_DECLINED},
     {S8_INITIALIZER("void* f(int a) { return (void*)&a; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER, false,
-     C_TYPE_INVALID, false, C_AST_TYPE_LATE_CHECKED_DECLINED},
+     C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_CHECKED_DECLINED},
     {S8_INITIALIZER("int f(int a, int b) { return &a == &b; }"), S8_INITIALIZER("&"), 0, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT, false,
-     C_TYPE_INVALID, false, C_AST_TYPE_LATE_DECLINED},
+     C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_DECLINED},
     {S8_INITIALIZER("long f(int a) { return a + (long)a; }"), S8_INITIALIZER("a"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, false,
-     C_TYPE_INVALID, false, C_AST_TYPE_LATE_DECLINED},
+     C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_DECLINED},
     {S8_INITIALIZER("int f(void) { return (int){7}; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("typedef long L; L f(int a) { return (L)&a; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, false,
-     C_TYPE_INVALID, false, C_AST_TYPE_LATE_CHECKED_DECLINED},
+     C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_CHECKED_DECLINED},
     {S8_INITIALIZER("int f(int* p, int a) { return &p ? a : 0; }"), S8_INITIALIZER("&"), 0, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT, false,
-     C_TYPE_INVALID, false, C_AST_TYPE_LATE_CHECKED_DECLINED},
+     C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_CHECKED_DECLINED},
     // A cast of one string literal: with constraint checks the machine types
     // the literal too, appending its array row, so the answer replays that.
     {S8_INITIALIZER("typedef char C; C* f(void) { return (C*)\"text\"; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER,
@@ -3707,6 +3722,24 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
      C_TYPE_INVALID, true},
     {S8_INITIALIZER("char* f(void) { return (char*)((\"a\")); }"), S8_INITIALIZER("("), 1, 9, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER, false,
      C_TYPE_INVALID, true},
+    // Operands the machine types to nothing: `__func__` and its GNU spellings
+    // name no entity, and an unbound `__builtin_expect` call reaches no typed
+    // leaf. A checked cast skips its conversion rule over them, and a
+    // conditional its scalar-condition rule, so both are answered with
+    // constraint checks too. A void builtin called with no arguments is the
+    // void row. The last case is BUSTER_CHECK's shape.
+    {S8_INITIALIZER("char* f(void) { return (char*)__func__; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("char* f(void) { return (char*)(__PRETTY_FUNCTION__); }"), S8_INITIALIZER("("), 1, 7, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_POINTER},
+    {S8_INITIALIZER("long f(void) { return (long)__FUNCTION__; }"), S8_INITIALIZER("("), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    {S8_INITIALIZER("int f(int x) { return (int)__builtin_expect(x, 0); }"), S8_INITIALIZER("("), 1, 9, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("int f(int x) { return __builtin_expect(x, 0) ? 1 : 2; }"), S8_INITIALIZER("__builtin_expect"), 0, 10,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("int f(void) { return (__builtin_unreachable(), 0); }"), S8_INITIALIZER("__builtin_unreachable"), 0, 3,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_VOID},
+    {S8_INITIALIZER("int f(void) { return (__builtin_debugtrap(), 0); }"), S8_INITIALIZER("("), 1, 7, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("void f(int x) { (void)(__builtin_expect(!x, 0) ? (__builtin_debugtrap(), 0) : 0); }"), S8_INITIALIZER("("), 1, 22,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_VOID},
     // Answered without constraint checks only. With them the machine also
     // types a cast's operand -- here several string tokens, which no replay
     // covers -- and it decides whether two pointers may be subtracted by
@@ -3717,16 +3750,25 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
      C_TYPE_LONG_LONG},
     {S8_INITIALIZER("char* f(void) { return (char*)\"a\" \"b\"; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER,
      true},
+    // One string-literal token alone, bare or parenthesized (`S8()`'s
+    // `BUSTER_ARRAY_LENGTH` subscripts `(("text"))[0]`): the answer is the
+    // array row the replay of the machine's leaf appends.
+    {S8_INITIALIZER("char const* f(void) { return \"text\"; }"), S8_INITIALIZER("\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID,
+     false, C_TYPE_INVALID, false, true},
+    {S8_INITIALIZER("char const* f(void) { return ((\"text\")); }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID,
+     false, C_TYPE_INVALID, false, true},
+    {S8_INITIALIZER("unsigned short const* f(void) { return u\"text\"; }"), S8_INITIALIZER("u\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
     // Declined: whatever would make the machine append a type row (a
     // qualified member, a string, a cast to a type name with a qualified
     // typedef, a tag, a qualified or restrict pointer or a declarator other
     // than `*`, an array operand of `+`, a pointer conditional), a builtin
     // call, a parenthesized callee, and a conditional whose middle operand
     // holds an assignment, which the machine splits there instead. A string
-    // literal is answered by the literal path, not the tree.
+    // literal of several tokens is left to the machine.
     {S8_INITIALIZER("struct S { int a; }; int f(struct S const* p) { return p->a; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_DECLINE,
      C_TYPE_INVALID},
-    {S8_INITIALIZER("char const* f(void) { return \"text\"; }"), S8_INITIALIZER("\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("char const* f(void) { return \"te\" \"xt\"; }"), S8_INITIALIZER("\"te\""), 0, 2, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
     {S8_INITIALIZER("typedef int T; T const* f(void* p) { return (const T*)p; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_DECLINE,
      C_TYPE_INVALID},
     {S8_INITIALIZER("struct S; struct S* f(void* p) { return (struct S*)p; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_DECLINE,
@@ -3740,6 +3782,8 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     {S8_INITIALIZER("long f(void) { return __builtin_expect(1, 1); }"), S8_INITIALIZER("__builtin_expect"), 0, 6, C_TEST_AST_TYPE_PROBE_DECLINE,
      C_TYPE_INVALID},
     {S8_INITIALIZER("int g(int); int f(void) { return (g)(1); }"), S8_INITIALIZER("("), 2, 6, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("void f(int* p) { __builtin_prefetch(p); }"), S8_INITIALIZER("__builtin_prefetch"), 0, 4, C_TEST_AST_TYPE_PROBE_DECLINE,
+     C_TYPE_INVALID},
     // A designator is not member access, and a declaration is not an
     // expression.
     {S8_INITIALIZER("struct S { int field; }; void f(void) { struct S s = {.field = 1}; }"), S8_INITIALIZER("."), 0, 2, C_TEST_AST_TYPE_PROBE_MISS,
@@ -3758,10 +3802,11 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     {S8_INITIALIZER("typedef struct P { int x; } P; P f = (P){1};"), S8_INITIALIZER("("), 0, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_STRUCT},
     {S8_INITIALIZER("struct S { int a; int b; } f = { .a = 1, .b = sizeof(int) };"), S8_INITIALIZER("sizeof"), 0, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
      C_TYPE_UNSIGNED_LONG, false, C_TYPE_UNSIGNED_LONG_LONG},
-    // Declined or missed there as in a body: `&` and a string literal append
-    // rows, and a designator is no expression.
+    // Declined or missed there as in a body: `&` appends a row, and a
+    // designator is no expression. A lone string literal is replayed.
     {S8_INITIALIZER("int g; int* f = &g;"), S8_INITIALIZER("&"), 0, 2, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
-    {S8_INITIALIZER("char const* f = \"text\";"), S8_INITIALIZER("\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("char const* f = \"text\";"), S8_INITIALIZER("\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID, false,
+     C_TYPE_INVALID, false, true},
     {S8_INITIALIZER("struct S { int a; } f = { .a = 1 };"), S8_INITIALIZER("."), 0, 2, C_TEST_AST_TYPE_PROBE_MISS, C_TYPE_INVALID},
 };
 
@@ -3804,8 +3849,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
                 bool llp64 = target_uses_llp64_data_model(preprocess.target) && type_case->llp64_kind != C_TYPE_INVALID;
                 u32 status = declined ? C_TEST_AST_TYPE_PROBE_DECLINE : type_case->status;
                 CTypeKind kind = declined ? C_TYPE_INVALID : llp64 ? type_case->llp64_kind : type_case->kind;
-                bool replay = checked && type_case->replayed;
-                BUSTER_TEST_RAW(arguments, probe.status == status && probe.kind == kind && probe.nodes_typed > 0 && probe.replay == replay,
+                bool replay = (checked && type_case->replayed) || type_case->replay_answer;
+                BUSTER_TEST_RAW(arguments, probe.status == status && probe.kind == kind && probe.nodes_typed > 0 && probe.replay == replay &&
+                                               probe.replay_answer == type_case->replay_answer,
                                 string_format(temporary.arena,
                                               S8("{S8} (checked {u32}): status {u32} kind {u32} replay {u32}, expected status {u32} kind {u32} replay {u32}"),
                                               type_case->source, checked, probe.status, (u32)probe.kind, (u32)probe.replay, status, (u32)kind,
@@ -3886,9 +3932,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
 
 // c_parse_ast_from_tree on one shape per fallback reason, and on shapes it
 // publishes itself, in every layout: the result is always c_parse_ast's, and
-// the statistics name the reason. Both #3215 shapes are among them: the
-// walker misreads their redundant parentheses, so the split leaves them to it
-// rather than publishing the grammar's reading.
+// the statistics name the reason. The #3215 shapes are among the published
+// ones; a redundant group after a tag or typedef name is not, because the
+// walker still reads it as that name's parameter list.
 typedef struct CAstSplitCase CAstSplitCase;
 struct CAstSplitCase
 {
@@ -3897,30 +3943,47 @@ struct CAstSplitCase
     CParserTreeFallback reason;
     // Body _Static_assert ranges the split publishes, when it publishes.
     u32 assertions;
+    // Records the walker marks typedef and constexpr (#3310).
+    u32 typedef_records;
+    u32 constexpr_records;
 };
 
 BUSTER_GLOBAL_LOCAL CAstSplitCase const c_ast_split_cases[] = {
     {S8_INITIALIZER("int a, *b, f(int), (*g)(int, ...); struct S { int x; }; enum { A, B }; _Static_assert(1, \"m\"); asm(\"nop\"); ; "
                     "int h(int x) { _Static_assert(1, \"n\"); struct T { _Static_assert(2, \"o\"); int a; } t = {x}; return t.a; }"),
      C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 2},
-    // `typedef` and `constexpr` words the walker reads outside the top-level
-    // specifiers make it record the whole declaration as a typedef or as
-    // constexpr (#3310). The split matches it by scanning such a declaration
-    // whole.
+    // Only the top-level specifiers' `typedef` and `constexpr` words mark a
+    // declaration (#3310): a statement expression's typedef and a constexpr
+    // compound literal in an initializer leave `sx`, `sy`, `cy` and `cz`
+    // ordinary objects, while `q9` and `cw` keep their own words.
     {S8_INITIALIZER("int sx = ({ typedef int T9; T9 t = 1; t; }), sy; struct Q9 { int a; } typedef q9;"), C_PREPROCESS_DIALECT_GNU17,
-     C_PARSER_TREE_FALLBACK_NONE, 0},
-    {S8_INITIALIZER("int cy = (constexpr int){3}, cz; constexpr int cw = 2;"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_NONE, 0},
+     C_PARSER_TREE_FALLBACK_NONE, 0, 1, 0},
+    {S8_INITIALIZER("int cy = (constexpr int){3}, cz; constexpr int cw = 2;"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_NONE, 0, 0, 1},
     {S8_INITIALIZER("int x = 0x;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DIAGNOSTIC},
     {S8_INITIALIZER("long long long y;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DIAGNOSTIC},
+    // The probe skips a specifier run spelled like one that already
+    // validated clean, so a repeated run must not hide a later invalid one,
+    // whether keyed or too long to key.
+    {S8_INITIALIZER("long long a; long long b; long long long c;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DIAGNOSTIC},
+    {S8_INITIALIZER("unsigned int a; unsigned int b; unsigned unsigned c;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DIAGNOSTIC},
+    {S8_INITIALIZER("static const volatile unsigned long long int a; static const volatile long long long int b;"), C_PREPROCESS_DIALECT_GNU17,
+     C_PARSER_TREE_FALLBACK_DIAGNOSTIC},
+    {S8_INITIALIZER("int a; int b; static const int c; static const int d; struct S { int x; } s; struct S t;"), C_PREPROCESS_DIALECT_GNU17,
+     C_PARSER_TREE_FALLBACK_NONE, 0},
     {S8_INITIALIZER("_Alignas(8) int a;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_SPECIFIERS},
     {S8_INITIALIZER("__typeof__(1) t;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_SPECIFIERS},
     {S8_INITIALIZER("enum E : int { A };"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_SPECIFIERS},
-    // #3215: c_parse_ast reads the first as a function declaration and the
-    // second as one object declaration over both lines.
-    {S8_INITIALIZER("int f(int x) { return x + 1; } int ((*pq))(int) = f;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DECLARATOR},
-    {S8_INITIALIZER("int (gd(int a)) { return a; } int zz;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DECLARATOR},
-    {S8_INITIALIZER("int (x);"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DECLARATOR},
+    // #3215: redundant groups, published since the walker walks out of them.
+    {S8_INITIALIZER("int f(int x) { return x + 1; } int ((*pq))(int) = f;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 0},
+    {S8_INITIALIZER("int (gd(int a)) { return a; } int zz;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 0},
+    {S8_INITIALIZER("int (x); int ((y))[3]; void ((h))(void) {}"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 0},
+    // After a tag or typedef name the walker reads a redundant group that
+    // does not open on `*` or `(` as that name's parameter list (#3368).
+    {S8_INITIALIZER("struct P { int a; }; struct P (pg(void)) { struct P r = {0}; return r; }"), C_PREPROCESS_DIALECT_GNU17,
+     C_PARSER_TREE_FALLBACK_DECLARATOR},
     {S8_INITIALIZER("int * __attribute__((x)) p;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DECLARATOR},
+    // The walker reads `...` only before the declarator's last `)`.
+    {S8_INITIALIZER("int (gv(int a, ...)) { return a; }"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_TOKENS},
     {S8_INITIALIZER("int k(a) int a; { return a; }"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_OLD_STYLE},
     {S8_INITIALIZER("int e = (1, 2);"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_TOKENS},
     {S8_INITIALIZER("int h8(void) [[deprecated]];"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_TOKENS},
@@ -3954,6 +4017,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_split(UnitTestArguments* arguments
                                 label);
                 BUSTER_TEST_RAW(arguments, !published || (statistics.records == syntax.declaration_count && statistics.assertions == split_case->assertions),
                                 label);
+                u32 typedef_records = 0;
+                u32 constexpr_records = 0;
+                for (CParserDeclaration const* declaration = syntax.first_declaration; declaration; declaration = declaration->next)
+                {
+                    typedef_records += declaration->is_typedef;
+                    constexpr_records += declaration->is_constexpr;
+                }
+                BUSTER_TEST_RAW(arguments, typedef_records == split_case->typedef_records && constexpr_records == split_case->constexpr_records, label);
             }
             c_ast_release(&built.ast);
             scratch_end(temporary);

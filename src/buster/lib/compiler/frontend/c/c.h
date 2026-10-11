@@ -886,6 +886,9 @@ typedef enum CTypeKind
     C_TYPE_STRUCT,
     C_TYPE_UNION,
     C_TYPE_ENUM,
+    // Header admission only: bare __fp16 in __builtin_bit_cast's type slot.
+    // Keep its storage identity distinct; reachable lowering is refused.
+    C_TYPE_FP16_STORAGE,
     C_TYPE_COUNT,
 } CTypeKind;
 
@@ -1755,6 +1758,12 @@ struct CParseResult
     // Lazy worklist of typed BF16 target-builtin calls, checked before unused
     // definitions can disappear. Other translation units allocate no storage.
     u32* bfloat16_builtin_calls;
+    // Per-token semantic facts for storage-half expressions and generic calls.
+    // Null in ordinary translation units.
+    u8* storage_half_cast_calls;
+    u8* storage_half_bitcast_calls;
+    u8* storage_half_convertvector_calls;
+    bool storage_half_spelling_present;
     // Children of each scope in ascending token-interval order, built by
     // c_parse_index_scope_children once scopes are final; zero when absent.
     // c_parse_scope_for_token descends this index instead of scanning every
@@ -2030,8 +2039,9 @@ typedef enum CParserTreeFallback
     // A parenthesized specifier (typeof, _Atomic(T), _Alignas, _BitInt) or
     // an enum's fixed underlying type.
     C_PARSER_TREE_FALLBACK_SPECIFIERS,
-    // Redundant parentheses (#3215's family), attributes inside the
-    // declarator, a function derivation followed by a suffix, or no name.
+    // Redundant parentheses after a typedef or tag name (#3215's family),
+    // attributes inside the declarator, a function derivation followed by a
+    // suffix, or no name.
     C_PARSER_TREE_FALLBACK_DECLARATOR,
     // An old-style definition with a declaration list.
     C_PARSER_TREE_FALLBACK_OLD_STYLE,

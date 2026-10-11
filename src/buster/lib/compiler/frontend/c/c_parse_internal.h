@@ -71,8 +71,11 @@ struct CTestAstTypeProbe
     // The CAstKind of the node the range mapped to.
     u32 node_kind;
     bool nonplace_projection;
-    // The answer replays a checked cast's string-literal operand.
+    // The answer replays a string-literal token: a checked cast's operand,
+    // or with replay_answer the queried literal (C_AST_TYPE_STRING), whose
+    // row is the answer.
     bool replay;
+    bool replay_answer;
     // The same query over a body typed while the interning log was hidden, as
     // if none of the body's rows had been minted yet, and answered after it
     // was restored (C_AST_TYPE_FLAG_LATE): its status, kind and replay, and

@@ -18,9 +18,14 @@ struct CiNoCodeDiff
 // manifests, audits/evidence and arbitrary new Markdown paths are not exempt.
 BUSTER_GLOBAL_LOCAL String8 ci_no_code_prose_paths[] = {
     S8_INITIALIZER("README.md"),
+    S8_INITIALIZER("docs/byte-writer.md"),
+    S8_INITIALIZER("docs/canonical-cfg-publication.md"),
+    S8_INITIALIZER("docs/canonical-fast-pipeline.md"),
     S8_INITIALIZER("docs/compiler-lifetime.md"),
     S8_INITIALIZER("docs/diagnostics.md"),
     S8_INITIALIZER("docs/incremental-compilation.md"),
+    S8_INITIALIZER("docs/ir-validation-boundaries.md"),
+    S8_INITIALIZER("docs/object-emission.md"),
 };
 
 BUSTER_GLOBAL_LOCAL bool ci_no_code_sha(String8 value)
@@ -146,7 +151,8 @@ BUSTER_GLOBAL_LOCAL bool ci_no_code_self_test(Arena* arena)
     String8 new = S8("2222222222222222222222222222222222222222");
     String8 zero = S8("0000000000000000000000000000000000000000");
     bool result = ci_no_code_diff((String8){0}).prose_only;
-    String8 paths[] = {S8("README.md"), S8("docs/compiler-lifetime.md"), S8("src/a.c"), S8("src/a.h"),
+    String8 paths[] = {S8("README.md"), S8("docs/compiler-lifetime.md"), S8("docs/object-emission.md"),
+        S8("docs/compiler-pipeline.md"), S8("docs/object-emission.md.orig"), S8("src/a.c"), S8("src/a.h"),
         S8("tests/a.md"), S8("tests/a.data"), S8("docs/native-retirement-dependencies-v1.json"),
         S8("docs/native-retirement-rebinding.md"), S8("docs/unknown.md"), S8("build.c"),
         S8(".github/workflows/ci.yml"), S8("tools/ci_no_code.c"), S8("README.md\nother.c"), S8("readme.md")};
@@ -159,7 +165,7 @@ BUSTER_GLOBAL_LOCAL bool ci_no_code_self_test(Arena* arena)
                 modes[mode], modes[mode], old, new, 0, paths[i], 0);
             CiNoCodeDiff parsed = ci_no_code_diff(raw);
             result = result && parsed.valid && parsed.changes == 1 &&
-                parsed.prose_only == (i < 2 && mode == 0);
+                parsed.prose_only == (i < 3 && mode == 0);
         }
     }
     String8 added = string_format(arena, S8(":000000 100644 {S8} {S8} A{char8}README.md{char8}"), zero, new, 0, 0);
