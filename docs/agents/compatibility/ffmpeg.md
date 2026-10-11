@@ -22,7 +22,10 @@ declares LGPL-2.1-or-later for the default combination. It separately identifies
 MIT/X11/BSD-style components, IJG notices in JPEG-derived files, optional GPL
 parts and GPL-covered testing tools including `tests/checkasm/*`,
 `tests/tiny_ssim.c` and `libswresample/tests/swresample.c`.
-The pin\'s [libavutil/libm.h](https://github.com/FFmpeg/FFmpeg/blob/f46e514491172d15bd74b4abb1814cd2f05a763e/libavutil/libm.h) additionally retains a BSL-1.0 notice for its Boost-derived erf algorithm.\nGPL-covered external FATE helper tools keep their separate terms even when\nthe selected media libraries disable GPL components.\nThe portable configuration disables GPL, nonfree, version3 and external
+The pin's [libavutil/libm.h](https://github.com/FFmpeg/FFmpeg/blob/f46e514491172d15bd74b4abb1814cd2f05a763e/libavutil/libm.h) additionally retains a BSL-1.0 notice for its Boost-derived erf algorithm.
+GPL-covered external FATE helper tools keep their separate terms even when
+the selected media libraries disable GPL components.
+The portable configuration disables GPL, nonfree, version3 and external
 autodetection. This is license intake, not a complete enabled-file or test-tool
 license audit. External FATE samples have no qualified license/hash inventory
 yet and are not downloaded or executed by this action. No external source or
@@ -90,8 +93,12 @@ workflow against an independent fixture, not only agreement between compilers.
 It does not yet validate H.264/HEVC clips, seeking, frame extraction, lossy
 tolerances or cross-decoding reference/candidate outputs.
 
-The action retains upstream `fate-list`, runs `make fate` without external
-samples, plus the pin\'s `fate-hw` target, and preserves test reports. At this pin\n`fate-list` includes the hardware-context API test although default `fate` does\nnot depend on it; the explicit target keeps the list denominator intact.\nHardware acceleration stays disabled; this is no physical-GPU validation. This is the applicable no-sample subset of
+The action prepares upstream's `tests/pixfmts.mak` through normal generation
+before retaining `fate-list`, then runs `make fate` without external
+samples, plus the pin's `fate-hw` target, and preserves test reports. At this pin
+`fate-list` includes the hardware-context API test although default `fate` does
+not depend on it; the explicit target keeps the list denominator intact.
+Hardware acceleration is disabled; device validation remains pending. These tests form the applicable no-sample subset of
 the declared configuration. The native count ledger joins every declared no-sample test to its report,
 records attempted/pass/fail/not-run/skip counts, and fails missing reports.
 The complete licensed/pinned sample subset is still required before acceptance. A reference failure remains a failure, not expected output to

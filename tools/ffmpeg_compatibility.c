@@ -223,6 +223,7 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_fate_counts(Arena* arena, String8 directory, Str
                                                           "not-run\t{u64}\nskip\t0\nsample-tests\tunqualified\n"), declared, attempted, passed, failed, missing));
     bool written = clang_suite_write(arena, path_join(arena, directory, S8("fate-counts.tsv")), string_join_arena(arena, string8_list_to_slice(arena, rows), false));
     valid = written && declared != 0 && attempted == declared && passed == declared && !failed && !missing && fate_passed && valid;
+    if (!valid) { string_print(S8("FFMPEG_FATE_COUNTS_INVALID list-begin\n{S8}list-end\n"), list); }
     return valid;
 }
 
@@ -405,8 +406,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
                     // The denominator is only upstream's no-external-sample
                     // tests for this declared configuration. Sample FATE stays pending.
                     String8 list_arguments[] = {S8("make"), S8("SAMPLES="), S8("IGNORE_TESTS="), S8("GEN=no"), S8("TARGET_EXEC="), S8("fate-list")};
+                    // Generate the pin's pixel-format make fragment before capturing the list.
+                    // Otherwise its normal GEN progress row contaminates list stdout.
+                    bool prepared = ffmpeg_make(arena, directories[i], S8("tests/pixfmts.mak"), S8("fate-list-prerequisites"));
                     FfmpegCommand list = ffmpeg_run(arena, directories[i], path_join(arena, directories[i], S8("fate-list")), (SliceString8)BUSTER_ARRAY_TO_SLICE(list_arguments), BUSTER_FFMPEG_CC_SECONDS);
-                    bool ran = ffmpeg_ok(list) && ffmpeg_make(arena, directories[i], S8("fate"), S8("fate"));
+                    bool ran = prepared && ffmpeg_ok(list) && ffmpeg_make(arena, directories[i], S8("fate"), S8("fate"));
                     fate[i] = ffmpeg_fate_counts(arena, directories[i], list.output, ran);
                 }
             }

@@ -89,6 +89,18 @@ jobs:
                           error = report.with_suffix(".err")
                           if error.exists():
                               print("FATE_FAILURE_STDERR", "\n".join(error.read_text().splitlines()[-15:]))
+              errors = set()
+              for capture in (directory / "compiler-actions").glob("*.stderr"):
+                  for line in capture.read_text().splitlines():
+                      if line.startswith("cc: error:"):
+                          errors.add(line)
+              for error in sorted(errors):
+                  print("CANDIDATE_CC_FAILURE", error)
+              listing = directory / "fate-list.stdout"
+              if listing.exists():
+                  for line in listing.read_text().splitlines():
+                      if line and not line.startswith("fate-"):
+                          print("FATE_LIST_NON_TARGET", line)
               config = directory / "ffbuild/config.log"
               if config.exists():
                   lines = config.read_text().splitlines()
