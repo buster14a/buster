@@ -6,14 +6,22 @@
 // SOURCE_SIZE_FALLBACK_CATEGORY. source_size_baseline_format and
 // source_size_baseline_parse own the committed SOURCE_SIZE_BASELINE_PATH
 // snapshot, which source_size_baseline_read takes from the measured revision
-// rather than the working tree. source_size_verdict is the ratchet decision;
+// rather than the working tree. Growth past the limit is acknowledged by the
+// per-change files under SOURCE_SIZE_ACK_DIRECTORY: source_size_ack_paths_added
+// finds the ones a change adds, source_size_ack_parse checks one and
+// source_size_acks_read sums them. source_size_verdict is the ratchet decision;
 // source_size_report prints the human tables and the SOURCE_SIZE_*_V1
 // records; source_size_self_test covers the pure pieces without running Git.
 // docs/source-size.md holds the policy and how growth is acknowledged.
 #define SOURCE_SIZE_BASELINE_PATH "docs/source-size-baseline.txt"
 #define SOURCE_SIZE_BASELINE_SCHEMA "buster-source-size-baseline-v1"
-// Growth one change may add to a ratcheted category without refreshing the
-// baseline. docs/source-size.md records the calibration.
+// One file per acknowledging change, so independent changes never edit the
+// same file (#3516 conflicted four times on the shared baseline rows).
+#define SOURCE_SIZE_ACK_DIRECTORY "docs/source-size/acks/"
+#define SOURCE_SIZE_ACK_SUFFIX ".txt"
+#define SOURCE_SIZE_ACK_SCHEMA "buster-source-size-ack-v1"
+// Growth one change may add to a ratcheted category without an
+// acknowledgement. docs/source-size.md records the calibration.
 #define SOURCE_SIZE_CHANGE_LIMIT_BYTES (32ull * 1024)
 #define SOURCE_SIZE_LARGEST_FILES 10
 #define SOURCE_SIZE_CHANGED_FILES 40
@@ -129,6 +137,15 @@ struct SourceSizeBaseline
     String8 commit;
     SourceSizeTotals totals;
     bool present;
+};
+
+// The sum of the acknowledgement files one change adds.
+typedef struct SourceSizeAcks SourceSizeAcks;
+struct SourceSizeAcks
+{
+    String8* paths;
+    u64 count;
+    u64 bytes[SOURCE_SIZE_CATEGORY_COUNT];
 };
 
 typedef struct SourceSizeChange SourceSizeChange;
@@ -474,18 +491,133 @@ BUSTER_GLOBAL_LOCAL bool source_size_baseline_read(Arena* arena, SourceSizeInven
     return result;
 }
 
-// A change may grow a ratcheted category by SOURCE_SIZE_CHANGE_LIMIT_BYTES.
-// Beyond that it must also change that category's committed baseline row,
-// which is the reviewable acknowledgement. Comparing rows rather than exact
-// totals keeps the acknowledgement valid after a rebase or a merge-queue
-// merge. A base without a baseline predates the ratchet and acknowledges.
-BUSTER_GLOBAL_LOCAL SourceSizeVerdict source_size_verdict(u64 base_bytes, u64 head_bytes, SourceSizeBaseline base_baseline, SourceSizeBaseline head_baseline,
-                                                         SourceSizeCategory category)
+// An acknowledgement is a file directly under SOURCE_SIZE_ACK_DIRECTORY whose
+// name ends in SOURCE_SIZE_ACK_SUFFIX and otherwise uses only lowercase
+// letters, digits, '-', '_' and '.', so it prints as one record value.
+// Anything else there, such as a README, is ordinary documentation.
+BUSTER_GLOBAL_LOCAL bool source_size_ack_path(String8 path)
 {
-    bool acknowledged = !base_baseline.present || base_baseline.totals.bytes[category] != head_baseline.totals.bytes[category] ||
-        base_baseline.totals.files[category] != head_baseline.totals.files[category];
+    String8 directory = S8(SOURCE_SIZE_ACK_DIRECTORY);
+    String8 suffix = S8(SOURCE_SIZE_ACK_SUFFIX);
+    bool result = path.length > directory.length + suffix.length && string_starts_with_sequence(path, directory) &&
+        string_ends_with_sequence(path, suffix);
+    for (u64 i = directory.length; result && i < path.length; i += 1)
+    {
+        char8 c = path.pointer[i];
+        result = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
+    }
+    return result;
+}
+
+// Merges two bytewise-ordered inventories into the acknowledgement paths the
+// head adds. Only an added file acknowledges, so an acknowledgement covers
+// the one change that introduced it and is inert in every later one.
+BUSTER_GLOBAL_LOCAL u64 source_size_ack_paths_added(Arena* arena, SourceSizeInventory* base, SourceSizeInventory* head, String8** paths)
+{
+    *paths = arena_allocate(arena, String8, head->count + 1);
+    u64 count = 0;
+    u64 base_index = 0;
+    for (u64 head_index = 0; head_index < head->count; head_index += 1)
+    {
+        String8 path = head->entries[head_index].path;
+        while (base_index < base->count && source_size_path_compare(base->entries[base_index].path, path) < 0)
+        {
+            base_index += 1;
+        }
+        bool existed = base_index < base->count && string_equal(base->entries[base_index].path, path);
+        if (!existed && source_size_ack_path(path))
+        {
+            (*paths)[count] = path;
+            count += 1;
+        }
+    }
+    return count;
+}
+
+// "schema", one "reason <text>" line and at least one "<category> <bytes>"
+// row naming a distinct ratcheted category with nonzero growth. Blank lines
+// and '#' comments are ignored. Rows add to `bytes`.
+BUSTER_GLOBAL_LOCAL bool source_size_ack_parse(String8 text, u64* bytes)
+{
+    u64 parsed[SOURCE_SIZE_CATEGORY_COUNT] = {0};
+    bool schema = false;
+    bool reason = false;
+    u64 rows = 0;
+    bool result = text.length && text.pointer[text.length - 1] == '\n';
+    u64 start = 0;
+    for (u64 i = 0; result && i < text.length; i += 1)
+    {
+        if (text.pointer[i] == '\n')
+        {
+            String8 line = string_slice(text, start, i);
+            start = i + 1;
+            String8 fields[3];
+            u64 count = line.length && line.pointer[0] != '#' ? source_size_split(line, ' ', fields, BUSTER_ARRAY_LENGTH(fields)) : 0;
+            if (count && string_equal(fields[0], S8("reason")))
+            {
+                result = !reason && count >= 2;
+                reason = true;
+            }
+            else if (count == 2 && string_equal(fields[0], S8("schema")))
+            {
+                result = !schema && string_equal(fields[1], S8(SOURCE_SIZE_ACK_SCHEMA));
+                schema = true;
+            }
+            else if (count == 2)
+            {
+                u64 category = 0;
+                while (category < SOURCE_SIZE_CATEGORY_COUNT && !string_equal(fields[0], source_size_category_names[category]))
+                {
+                    category += 1;
+                }
+                result = category < SOURCE_SIZE_CATEGORY_COUNT && source_size_ratcheted((SourceSizeCategory)category) && !parsed[category] &&
+                    source_size_parse_u64(fields[1], &parsed[category]) && parsed[category];
+                rows += 1;
+            }
+            else
+            {
+                result = count == 0;
+            }
+        }
+    }
+    result = result && schema && reason && rows;
+    for (u64 category = 0; result && category < SOURCE_SIZE_CATEGORY_COUNT; category += 1)
+    {
+        bytes[category] += parsed[category];
+    }
+    return result;
+}
+
+// Reads every acknowledgement the head adds relative to the base from the head
+// revision. A malformed one fails the report rather than being ignored.
+BUSTER_GLOBAL_LOCAL bool source_size_acks_read(Arena* arena, SourceSizeInventory* base, SourceSizeInventory* head, SourceSizeAcks* acks)
+{
+    *acks = (SourceSizeAcks){0};
+    acks->count = source_size_ack_paths_added(arena, base, head, &acks->paths);
+    bool result = true;
+    for (u64 i = 0; result && i < acks->count; i += 1)
+    {
+        String8 text = {0};
+        String8 arguments[] = {S8("git"), S8("cat-file"), S8("blob"), string_format(arena, S8("{S8}:{S8}"), head->commit, acks->paths[i])};
+        result = source_size_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), &text) && source_size_ack_parse(text, acks->bytes);
+        if (!result)
+        {
+            string_print(S8("error: source_size: acknowledgement {S8} at {S8} is malformed; see docs/source-size.md\n"), acks->paths[i], head->commit);
+        }
+    }
+    return result;
+}
+
+// A change may grow a ratcheted category by SOURCE_SIZE_CHANGE_LIMIT_BYTES
+// plus the bytes the acknowledgements it adds name for that category. The
+// limit stays as slack, so growth from an unacknowledged small change merged
+// in the same group, or a later revision that grows a little, still passes.
+// A base without a baseline predates the ratchet and acknowledges.
+BUSTER_GLOBAL_LOCAL SourceSizeVerdict source_size_verdict(u64 base_bytes, u64 head_bytes, bool base_has_baseline, u64 acknowledged_bytes)
+{
     SourceSizeVerdict result = head_bytes <= base_bytes + SOURCE_SIZE_CHANGE_LIMIT_BYTES ? SOURCE_SIZE_VERDICT_WITHIN_LIMIT
-        : acknowledged ? SOURCE_SIZE_VERDICT_ACKNOWLEDGED : SOURCE_SIZE_VERDICT_UNACKNOWLEDGED;
+        : !base_has_baseline || head_bytes - base_bytes - SOURCE_SIZE_CHANGE_LIMIT_BYTES <= acknowledged_bytes ? SOURCE_SIZE_VERDICT_ACKNOWLEDGED
+        : SOURCE_SIZE_VERDICT_UNACKNOWLEDGED;
     return result;
 }
 
@@ -574,9 +706,10 @@ BUSTER_GLOBAL_LOCAL void source_size_row(Arena* arena, String8 name, String8 rat
 }
 
 // Prints the report and returns whether every ratcheted category passes. A
-// null base prints totals only and evaluates no ratchet.
+// null base prints totals only and evaluates no ratchet; `acks` holds what
+// the head adds relative to a non-null base.
 BUSTER_GLOBAL_LOCAL bool source_size_report(Arena* arena, SourceSizeInventory* head, SourceSizeInventory* base, SourceSizeBaseline baseline,
-                                            SourceSizeBaseline base_baseline)
+                                            SourceSizeBaseline base_baseline, SourceSizeAcks* acks)
 {
     SourceSizeTotals empty = {0};
     SourceSizeTotals* before = base ? &base->totals : &empty;
@@ -646,13 +779,19 @@ BUSTER_GLOBAL_LOCAL bool source_size_report(Arena* arena, SourceSizeInventory* h
             string_print(S8("  ... and {u64} smaller changes\n"), change_count - shown_count);
         }
 
+        string_print(S8("\nAcknowledgements added from base: {u64}\n"), acks->count);
+        for (u64 i = 0; i < acks->count; i += 1)
+        {
+            string_print(S8("  {S8}\n"), acks->paths[i]);
+        }
+
         string_print(S8("\n"));
         for (u64 category = 0; category < SOURCE_SIZE_CATEGORY_COUNT; category += 1)
         {
             if (source_size_ratcheted((SourceSizeCategory)category))
             {
                 u64 bytes = head->totals.bytes[category];
-                verdicts[category] = source_size_verdict(before->bytes[category], bytes, base_baseline, baseline, (SourceSizeCategory)category);
+                verdicts[category] = source_size_verdict(before->bytes[category], bytes, base_baseline.present, acks->bytes[category]);
                 String8 name = source_size_category_names[category];
                 String8 growth = source_size_signed(arena, bytes, before->bytes[category]);
                 switch (verdicts[category])
@@ -662,13 +801,15 @@ BUSTER_GLOBAL_LOCAL bool source_size_report(Arena* arena, SourceSizeInventory* h
                     break;
                 case SOURCE_SIZE_VERDICT_ACKNOWLEDGED:
                     string_print(S8("{S8}: {S8} bytes from base exceeds the {u64}-byte change limit; acknowledged {S8}\n"), name, growth,
-                        SOURCE_SIZE_CHANGE_LIMIT_BYTES, base_baseline.present ? S8("by this change's baseline row") : S8("because the base has no baseline"));
+                        SOURCE_SIZE_CHANGE_LIMIT_BYTES, base_baseline.present ? string_format(arena, S8("for {u64} bytes by this change's acknowledgements"),
+                                                                                    acks->bytes[category])
+                                                                              : S8("because the base has no baseline"));
                     break;
                 case SOURCE_SIZE_VERDICT_UNACKNOWLEDGED:
-                    string_print(S8("error: {S8}: {S8} bytes from base exceeds the {u64}-byte change limit and its baseline row is unchanged.\n"
-                                    "  Acknowledge it: run ./build.sh source_size --write-baseline, commit " SOURCE_SIZE_BASELINE_PATH ",\n"
-                                    "  and explain the growth in the change description (docs/source-size.md).\n"),
-                        name, growth, SOURCE_SIZE_CHANGE_LIMIT_BYTES);
+                    string_print(S8("error: {S8}: {S8} bytes from base exceeds the {u64}-byte change limit plus the {u64} bytes acknowledged.\n"
+                                    "  Acknowledge it: add " SOURCE_SIZE_ACK_DIRECTORY "<id>" SOURCE_SIZE_ACK_SUFFIX " naming the category, its growth\n"
+                                    "  and the reason, then commit it with the change (docs/source-size.md).\n"),
+                        name, growth, SOURCE_SIZE_CHANGE_LIMIT_BYTES, acks->bytes[category]);
                     result = false;
                     break;
                 case SOURCE_SIZE_VERDICT_COUNT:
@@ -688,13 +829,17 @@ BUSTER_GLOBAL_LOCAL bool source_size_report(Arena* arena, SourceSizeInventory* h
             head->totals.bytes[category], base ? string_format(arena, S8("{u64}"), before->files[category]) : S8("-"),
             base ? string_format(arena, S8("{u64}"), before->bytes[category]) : S8("-"), baseline.totals.files[category], baseline.totals.bytes[category]);
     }
+    for (u64 i = 0; base && i < acks->count; i += 1)
+    {
+        string_print(S8("SOURCE_SIZE_ACK_V1 path={S8}\n"), acks->paths[i]);
+    }
     for (u64 category = 0; base && category < SOURCE_SIZE_CATEGORY_COUNT; category += 1)
     {
         if (source_size_ratcheted((SourceSizeCategory)category))
         {
-            string_print(S8("SOURCE_SIZE_RATCHET_V1 category={S8} growth={S8} limit={u64} verdict={S8}\n"), source_size_category_names[category],
-                source_size_signed(arena, head->totals.bytes[category], before->bytes[category]), SOURCE_SIZE_CHANGE_LIMIT_BYTES,
-                source_size_verdict_names[verdicts[category]]);
+            string_print(S8("SOURCE_SIZE_RATCHET_V1 category={S8} growth={S8} limit={u64} acknowledged={u64} verdict={S8}\n"),
+                source_size_category_names[category], source_size_signed(arena, head->totals.bytes[category], before->bytes[category]),
+                SOURCE_SIZE_CHANGE_LIMIT_BYTES, acks->bytes[category], source_size_verdict_names[verdicts[category]]);
         }
     }
     string_print(S8("SOURCE_SIZE_RESULT_V1 revision={S8} base={S8} baseline_commit={S8} status={S8}\n"), head->commit, base_commit, baseline.commit,
@@ -829,24 +974,94 @@ BUSTER_GLOBAL_LOCAL bool source_size_self_test(Arena* arena)
             string_format(arena, S8("baseline:invalid-{u64}"), i), &checks, &failures);
     }
 
-    SourceSizeBaseline recorded = {.present = true, .totals = totals};
-    SourceSizeBaseline refreshed = recorded;
-    refreshed.totals.bytes[SOURCE_SIZE_CATEGORY_BUILD] += 1;
-    SourceSizeBaseline absent = {0};
     u64 base_bytes = 5000;
     u64 over = base_bytes + SOURCE_SIZE_CHANGE_LIMIT_BYTES + 1;
-    source_size_expect(source_size_verdict(base_bytes, base_bytes + SOURCE_SIZE_CHANGE_LIMIT_BYTES, recorded, recorded, SOURCE_SIZE_CATEGORY_BUILD) ==
-        SOURCE_SIZE_VERDICT_WITHIN_LIMIT, S8("verdict:at-limit"), &checks, &failures);
-    source_size_expect(source_size_verdict(base_bytes, 1, recorded, recorded, SOURCE_SIZE_CATEGORY_BUILD) == SOURCE_SIZE_VERDICT_WITHIN_LIMIT,
-        S8("verdict:shrink"), &checks, &failures);
-    source_size_expect(source_size_verdict(base_bytes, over, recorded, recorded, SOURCE_SIZE_CATEGORY_BUILD) == SOURCE_SIZE_VERDICT_UNACKNOWLEDGED,
-        S8("verdict:over-limit"), &checks, &failures);
-    source_size_expect(source_size_verdict(base_bytes, over, recorded, refreshed, SOURCE_SIZE_CATEGORY_PRODUCTION) == SOURCE_SIZE_VERDICT_UNACKNOWLEDGED,
-        S8("verdict:other-row-refreshed"), &checks, &failures);
-    source_size_expect(source_size_verdict(base_bytes, over, recorded, refreshed, SOURCE_SIZE_CATEGORY_BUILD) == SOURCE_SIZE_VERDICT_ACKNOWLEDGED,
-        S8("verdict:row-refreshed"), &checks, &failures);
-    source_size_expect(source_size_verdict(base_bytes, over, absent, recorded, SOURCE_SIZE_CATEGORY_BUILD) == SOURCE_SIZE_VERDICT_ACKNOWLEDGED,
-        S8("verdict:no-base-baseline"), &checks, &failures);
+    source_size_expect(source_size_verdict(base_bytes, base_bytes + SOURCE_SIZE_CHANGE_LIMIT_BYTES, true, 0) == SOURCE_SIZE_VERDICT_WITHIN_LIMIT,
+        S8("verdict:at-limit"), &checks, &failures);
+    source_size_expect(source_size_verdict(base_bytes, 1, true, 0) == SOURCE_SIZE_VERDICT_WITHIN_LIMIT, S8("verdict:shrink"), &checks, &failures);
+    source_size_expect(source_size_verdict(base_bytes, over, true, 0) == SOURCE_SIZE_VERDICT_UNACKNOWLEDGED, S8("verdict:over-limit"), &checks, &failures);
+    source_size_expect(source_size_verdict(base_bytes, over, true, 1) == SOURCE_SIZE_VERDICT_ACKNOWLEDGED, S8("verdict:acknowledged"), &checks, &failures);
+    source_size_expect(source_size_verdict(base_bytes, over + 1, true, 1) == SOURCE_SIZE_VERDICT_UNACKNOWLEDGED, S8("verdict:under-acknowledged"), &checks,
+        &failures);
+    source_size_expect(source_size_verdict(base_bytes, over, false, 0) == SOURCE_SIZE_VERDICT_ACKNOWLEDGED, S8("verdict:no-base-baseline"), &checks,
+        &failures);
+
+    SourceSizeClassification ack_paths[] = {
+        {S8_INITIALIZER(SOURCE_SIZE_ACK_DIRECTORY "3516-c-gen-ledger.txt"), SOURCE_SIZE_CATEGORY_DOCS},
+        {S8_INITIALIZER(SOURCE_SIZE_ACK_DIRECTORY "README.md"), SOURCE_SIZE_CATEGORY_COUNT},
+        {S8_INITIALIZER(SOURCE_SIZE_ACK_DIRECTORY ".txt"), SOURCE_SIZE_CATEGORY_COUNT},
+        {S8_INITIALIZER(SOURCE_SIZE_ACK_DIRECTORY "old/3516.txt"), SOURCE_SIZE_CATEGORY_COUNT},
+        {S8_INITIALIZER(SOURCE_SIZE_ACK_DIRECTORY "has space.txt"), SOURCE_SIZE_CATEGORY_COUNT},
+        {S8_INITIALIZER("docs/source-size/3516.txt"), SOURCE_SIZE_CATEGORY_COUNT},
+    };
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(ack_paths); i += 1)
+    {
+        bool expected = ack_paths[i].category != SOURCE_SIZE_CATEGORY_COUNT;
+        source_size_expect(source_size_ack_path(ack_paths[i].path) == expected &&
+            (!expected || source_size_classify(ack_paths[i].path) == ack_paths[i].category),
+            string_format(arena, S8("ack-path:{S8}"), ack_paths[i].path), &checks, &failures);
+    }
+
+    String8 ack_schema = S8("schema " SOURCE_SIZE_ACK_SCHEMA "\n");
+    String8 ack_reason = S8("reason Adds the union state ledger (#3154).\n");
+    u64 ack_bytes[SOURCE_SIZE_CATEGORY_COUNT] = {0};
+    bool ack_parsed = source_size_ack_parse(string_format(arena, S8("# note\n\n{S8}production 40000\nbuild 7\n{S8}"), ack_schema, ack_reason), ack_bytes) &&
+        source_size_ack_parse(string_format(arena, S8("{S8}{S8}production 2\n"), ack_reason, ack_schema), ack_bytes);
+    source_size_expect(ack_parsed && ack_bytes[SOURCE_SIZE_CATEGORY_PRODUCTION] == 40002 && ack_bytes[SOURCE_SIZE_CATEGORY_BUILD] == 7 &&
+        !ack_bytes[SOURCE_SIZE_CATEGORY_TESTS], S8("ack:sum"), &checks, &failures);
+    String8 invalid_acks[] = {
+        string_format(arena, S8("{S8}production 1\n"), ack_schema),
+        string_format(arena, S8("{S8}production 1\n"), ack_reason),
+        string_format(arena, S8("{S8}{S8}"), ack_schema, ack_reason),
+        string_format(arena, S8("{S8}{S8}reason\nproduction 1\n"), ack_schema, S8("")),
+        string_format(arena, S8("{S8}{S8}{S8}production 1\n"), ack_schema, ack_reason, ack_reason),
+        string_format(arena, S8("schema buster-source-size-baseline-v1\n{S8}production 1\n"), ack_reason),
+        string_format(arena, S8("{S8}{S8}tests 1\n"), ack_schema, ack_reason),
+        string_format(arena, S8("{S8}{S8}vendored 1\n"), ack_schema, ack_reason),
+        string_format(arena, S8("{S8}{S8}production 0\n"), ack_schema, ack_reason),
+        string_format(arena, S8("{S8}{S8}production 1\nproduction 1\n"), ack_schema, ack_reason),
+        string_format(arena, S8("{S8}{S8}production 1 2\n"), ack_schema, ack_reason),
+        string_format(arena, S8("{S8}{S8}production x\n"), ack_schema, ack_reason),
+        string_format(arena, S8("{S8}{S8}production 1"), ack_schema, ack_reason),
+    };
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(invalid_acks); i += 1)
+    {
+        u64 ignored[SOURCE_SIZE_CATEGORY_COUNT] = {0};
+        source_size_expect(!source_size_ack_parse(invalid_acks[i], ignored), string_format(arena, S8("ack:invalid-{u64}"), i), &checks, &failures);
+    }
+
+    // Two independent changes over one base each add their own acknowledgement
+    // file; neither touches a file the other changes, and each, and both
+    // merged together, admit only the acknowledgements they add.
+    String8 ack_a = S8(SOURCE_SIZE_ACK_DIRECTORY "a.txt");
+    String8 ack_b = S8(SOURCE_SIZE_ACK_DIRECTORY "b.txt");
+    String8 ack_old = S8(SOURCE_SIZE_ACK_DIRECTORY "old.txt");
+    String8 ack_listings[] = {
+        string_format(arena, S8("100644 blob {S8} 1\t{S8}{S8}"), object, ack_old, S8("\0")),
+        string_format(arena, S8("100644 blob {S8} 1\t{S8}{S8}100644 blob {S8} 1\t{S8}{S8}"), object, ack_a, S8("\0"), object, ack_old, S8("\0")),
+        string_format(arena, S8("100644 blob {S8} 1\t{S8}{S8}100644 blob {S8} 1\t{S8}{S8}"), object, ack_b, S8("\0"), object, ack_old, S8("\0")),
+        string_format(arena, S8("100644 blob {S8} 1\t{S8}{S8}100644 blob {S8} 1\t{S8}{S8}100644 blob {S8} 1\t{S8}{S8}"), object, ack_a, S8("\0"), object,
+            ack_b, S8("\0"), object, ack_old, S8("\0")),
+    };
+    SourceSizeInventory ack_inventories[BUSTER_ARRAY_LENGTH(ack_listings)] = {0};
+    bool ack_listed = true;
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(ack_listings); i += 1)
+    {
+        ack_listed = ack_listed && source_size_inventory_parse(arena, ack_listings[i], &ack_inventories[i]);
+    }
+    String8* added = 0;
+    u64 added_base = ack_listed ? source_size_ack_paths_added(arena, &ack_inventories[0], &ack_inventories[0], &added) : 1;
+    u64 added_a = ack_listed ? source_size_ack_paths_added(arena, &ack_inventories[0], &ack_inventories[1], &added) : 0;
+    bool only_a = added_a == 1 && string_equal(added[0], ack_a);
+    u64 added_b = ack_listed ? source_size_ack_paths_added(arena, &ack_inventories[0], &ack_inventories[2], &added) : 0;
+    bool only_b = added_b == 1 && string_equal(added[0], ack_b);
+    u64 added_b_after_a = ack_listed ? source_size_ack_paths_added(arena, &ack_inventories[1], &ack_inventories[3], &added) : 0;
+    bool b_after_a = added_b_after_a == 1 && string_equal(added[0], ack_b);
+    u64 added_both = ack_listed ? source_size_ack_paths_added(arena, &ack_inventories[0], &ack_inventories[3], &added) : 0;
+    bool both = added_both == 2 && string_equal(added[0], ack_a) && string_equal(added[1], ack_b);
+    u64 added_removed = ack_listed ? source_size_ack_paths_added(arena, &ack_inventories[3], &ack_inventories[0], &added) : 1;
+    source_size_expect(ack_listed && added_base == 0 && only_a && only_b && b_after_a && both && added_removed == 0, S8("ack:independent-changes"), &checks,
+        &failures);
 
     SourceSizeInventory before = {0};
     SourceSizeInventory after = {0};
@@ -930,6 +1145,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult source_size_main(Arena* arena, SliceString8 ar
         SourceSizeInventory base = {0};
         SourceSizeBaseline baseline = {0};
         SourceSizeBaseline base_baseline = {0};
+        SourceSizeAcks acks = {0};
         bool passed = source_size_inventory(arena, revision, &head) && (!base_revision.length || source_size_inventory(arena, base_revision, &base));
         if (passed && write_baseline)
         {
@@ -963,8 +1179,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult source_size_main(Arena* arena, SliceString8 ar
             {
                 string_print(S8("note: source_size: the base's " SOURCE_SIZE_BASELINE_PATH " is malformed; treating it as absent\n"));
             }
+            passed = passed && (!base_revision.length || source_size_acks_read(arena, &base, &head, &acks));
         }
-        passed = passed && source_size_report(arena, &head, base_revision.length ? &base : 0, baseline, base_baseline);
+        passed = passed && source_size_report(arena, &head, base_revision.length ? &base : 0, baseline, base_baseline, &acks);
         result = passed ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
     }
     return result;
