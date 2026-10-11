@@ -283,6 +283,25 @@ publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
 the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
 not predefined at any level. `-mattr` overrides still refine the level.
 The psABI's LAHF-SAHF has no target feature and is implied by long mode.
+Without `-march`/`-mcpu` the CPU is the build host's. An invocation with no
+`-target`, or with `-target native`, starts from `target_native`
+(`compiler_driver_parse_arguments`), whose model and features
+`cpu_detect_model` probes at start-up. In effect this is `-march=native`: the
+feature set is the same, though `-v` prints the detected model name (for
+example `cpu=emeraldrapids`) where `-march=native` prints `cpu=native`. Clang
+and GCC differ here; their default is the portable `x86-64` baseline. Any
+other `-target`/`--target` triple starts from `baseline`
+(`target_parse_triple`), even one that names the host; `-target x86_64-linux`
+alone gives `cpu=baseline features=sse2`. Without a pinned CPU, three things
+follow the machine: object bytes, the predefined feature macros (`__AVX2__`,
+`__AVX512F__`, ...), and therefore which `#if`-guarded regions are compiled
+at all. Such output may use instructions that another machine lacks. For
+portable or cross-machine-comparable output, pass `-march=baseline`, a psABI
+level, or a named model. Tools that compare outputs across machines pin one:
+the native-retirement census uses `baseline` and the work ledger uses
+`znver3`. The host default is deliberate. It matches the
+`BUSTER_NATIVE_TARGET=native` host build and the compiler-throughput priority
+(GitHub #1557).
 `-mtune=<model>` is accepted with any nonempty value, `native` included, and
 ignored: it selects only a scheduling model, and instruction selection here has
 no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
@@ -1151,6 +1170,26 @@ runtime publishes. Ordinary links with no such unresolved helper do not read
 or name libgcc_s. This uses an installed target runtime; it installs or embeds
 none. Apple, Windows, Android and freestanding runtime provisioning remain
 separate #1272 work.
+
+Native x86-64 Linux links also supply GCC's CPU-feature runtime (GitHub
+#3399). GCC and Clang `target_clones` resolvers and `__builtin_cpu_init`,
+`__builtin_cpu_supports` and `__builtin_cpu_is` call `__cpu_indicator_init`
+and read `__cpu_model` / `__cpu_features2`. Those are hidden definitions in
+the static `libgcc.a` (`cpuinfo.o`, with its own `.init_array` constructor),
+which the host compiler driver links implicitly as `-lgcc`. After objects,
+explicit archives and the ELF runtime object are selected, a remaining strong
+undefined reference to one of these names that no selected object defines
+makes `compiler_driver_elf_cpu_runtime` read `libgcc.a`: first from the `-L`
+directories, then the newest `usr/lib/gcc`, `usr/lib64/gcc` or Debian
+`usr/lib/gcc-cross` `<triple>/<version>/` directory under the sysroot, or the
+host without one (`compiler_driver_elf_libgcc_path`). Only the members that
+define those names are selected; libgcc.a is not otherwise added to the link,
+so the libgcc_s helper policy above is unchanged. Links without such a
+reference, including weak ones, do not read or name libgcc.a. A missing
+archive, or one that does not define the name, fails the link with the archive
+and symbol named, before replacing the output. AArch64 (`__aarch64_cpu_features`,
+`__init_cpu_features_resolver`, outline atomics) and non-Linux targets remain
+out of scope.
 
 `compiler_driver_elf_dynamic_symbols` walks that table once and produces two
 things.
