@@ -1101,10 +1101,10 @@ def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, wor
         reasons.append("could not prove the inline acceptance selector count against every head parent")
     elif any(delta > 0 for delta in inline_selector_deltas):
         reasons.append(f"{selected_profile['name']} cannot be combined with the inline acceptance selector")
-    ast_selector_deltas = request_selector_parent_deltas(candidate, arguments.head, AST_PILOT_ACCEPTANCE_REQUEST_LINE)
-    if ast_selector_deltas is None:
-        reasons.append("could not prove the ast-pilot acceptance selector count against every head parent")
-    elif any(delta > 0 for delta in ast_selector_deltas):
+    ast_problem = getattr(arguments, "ast_pilot_request_problem", "")
+    if ast_problem:
+        reasons.append(ast_problem)
+    elif getattr(arguments, "ast_pilot_requested", False):
         reasons.append(f"{selected_profile['name']} cannot be combined with the ast-pilot acceptance selector")
     if scaling_requested(candidate, arguments.base, arguments.head):
         reasons.append(f"{selected_profile['name']} cannot be combined with a scaling.request profile")
@@ -1377,9 +1377,10 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         "request_line": INLINE_ACCEPTANCE_REQUEST_LINE if inline_requested else None,
         "profile": INLINE_ACCEPTANCE_PROFILE if inline_requested else None,
         "status": "pending" if inline_requested else "not requested"}
-    ast_requested, problem = (ast_pilot_request_selection(candidate, arguments.head) if arguments.mode == "pull"
-                              else (False, ""))
-    if problem:
+    # Selected in main() before any owned phase starts, so its git probes add no owned capture rows.
+    ast_requested = arguments.mode == "pull" and getattr(arguments, "ast_pilot_requested", False)
+    problem = getattr(arguments, "ast_pilot_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
         reasons.append(problem)
     if ast_requested:
         receipt["ast_pilot_acceptance"] = {"requested": True, "request_line": AST_PILOT_ACCEPTANCE_REQUEST_LINE,
@@ -1581,6 +1582,8 @@ def main(argv: list[str] | None = None) -> int:
     arguments.analyzer_profile_requested = analyzer_requested
     arguments.analyzer_request_line = analyzer_request_line
     arguments.analyzer_profile_request_problem = analyzer_request_problem
+    arguments.ast_pilot_requested, arguments.ast_pilot_request_problem = (
+        ast_pilot_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}
     utility = getattr(arguments, "utility_owned_phases", False)
     main_owned = getattr(arguments, "main_owned_phases", False)
