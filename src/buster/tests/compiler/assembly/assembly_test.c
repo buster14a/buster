@@ -4914,6 +4914,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbolic_page_relocations(
         {S8("add w1, w2, :lo12:object"), 0x11000041, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12, 0, S8("object")},
         {S8("ldr x1, [x0, #:lo12:object]"), 0xf9400001, ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12, 0, S8("object")},
         {S8("add x0, x0, :LO12:object"), 0x91000000, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12, 0, S8("object")},
+        // ELF GOT slot addressing (#3192): llvm-mc's words and kinds.
+        {S8("adrp x0, :got:sym"), 0x90000000, ASSEMBLY_RELOCATION_AARCH64_GOT_PAGE21, 0, S8("sym")},
+        {S8("ldr x0, [x0, :got_lo12:sym]"), 0xf9400000, ASSEMBLY_RELOCATION_AARCH64_GOT_LD64_LO12, 0, S8("sym")},
+        {S8("ldr x1, [x2, #:got_lo12:sym]"), 0xf9400041, ASSEMBLY_RELOCATION_AARCH64_GOT_LD64_LO12, 0, S8("sym")},
+        {S8("ldr x3, [x4, :GOT_LO12:sym]"), 0xf9400083, ASSEMBLY_RELOCATION_AARCH64_GOT_LD64_LO12, 0, S8("sym")},
     };
     String8 source = S8(".text\n");
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
@@ -4975,8 +4980,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbolic_page_relocations(
         S8("adrp x0, :lo12:sym"), S8("sub x0, x0, :lo12:sym"), S8("adds x0, x0, :lo12:sym"), S8("mov x0, :lo12:sym"),
         S8("add x0, x0, :lo12:sym, lsl #12"), S8("add x0, :lo12:sym, x0"), S8("ldr x0, [x1, :lo12:sym]!"), S8("ldr x0, [x1], :lo12:sym"),
         S8("ldur x0, [x1, :lo12:sym]"), S8("ldp x0, x1, [x2, :lo12:sym]"), S8("add x0, x0, :lo12:"),
-        S8("ldr x0, [x1, :got_lo12:sym]"), S8("adrp x0, :got:sym"), S8("add x0, x0, sym@PAGEOFF"), S8("adrp x0, sym@PAGE"),
+        S8("add x0, x0, sym@PAGEOFF"), S8("adrp x0, sym@PAGE"),
         S8("add x0, x0, :lo12:a, :lo12:b"), S8("ldr x0, [x1, :lo12:a+:lo12:b]"), S8("ldr x0, [:lo12:sym]"),
+        // GOT modifiers take a bare symbol on exactly their two instructions
+        // and carry no addend (#3192). llvm-mc accepts `d0`, `xzr` and the
+        // addend forms; the object relocation has no field for them, so the
+        // unit refuses them up front.
+        S8("adrp x0, :got:sym+8"), S8("adrp x0, :got:sym-8"), S8("ldr x0, [x1, :got_lo12:sym+8]"),
+        S8("ldr w0, [x1, :got_lo12:sym]"), S8("ldr d0, [x1, :got_lo12:sym]"), S8("ldr q0, [x1, :got_lo12:sym]"),
+        S8("ldrb w0, [x1, :got_lo12:sym]"), S8("str x0, [x1, :got_lo12:sym]"), S8("add x0, x0, :got_lo12:sym"),
+        S8("add x0, x0, :got:sym"), S8("ldr x0, [x1, :got:sym]"), S8("adrp x0, :got_lo12:sym"),
+        S8("ldr x0, [x1, :got_lo12:sym]!"), S8("ldr x0, [x1], :got_lo12:sym"), S8("ldr xzr, [x1, :got_lo12:sym]"),
+        S8("adrp x0, :got:5"), S8("ldr x0, [x1, :got_lo12:5]"), S8("ldr x0, [x1, :got_lo12:]"),
+        S8("ldur x0, [x1, :got_lo12:sym]"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
     {
@@ -4987,11 +5003,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbolic_page_relocations(
     String8 const macho_refused[] = {
         S8("add x0, x0, :lo12:sym"), S8("adrp x0, sym@PAGEOFF"), S8("add x0, x0, sym@PAGE"), S8("ldr x0, [x1, sym@PAGE]"),
         S8("sub x0, x0, sym@PAGEOFF"), S8("ldr x0, [x1, sym@PAGEOFF]!"),
+        S8("adrp x0, :got:sym"), S8("ldr x0, [x1, :got_lo12:sym]"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(macho_refused); index += 1)
     {
         String8 line = string_format(arguments->arena, S8(".text\n{S8}\n"), macho_refused[index]);
         AssemblyUnitResult unit_refused = assembly_unit_encode(arguments->arena, line, (AssemblyEncodeOptions){.target = macho});
+        BUSTER_TEST_RAW(arguments, unit_refused.diagnostic_count != 0, line);
+    }
+    String8 const coff_refused[] = {
+        S8("adrp x0, :got:sym"), S8("ldr x0, [x1, :got_lo12:sym]"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(coff_refused); index += 1)
+    {
+        String8 line = string_format(arguments->arena, S8(".text\n{S8}\n"), coff_refused[index]);
+        AssemblyUnitResult unit_refused = assembly_unit_encode(arguments->arena, line, (AssemblyEncodeOptions){.target = coff});
         BUSTER_TEST_RAW(arguments, unit_refused.diagnostic_count != 0, line);
     }
     return result;

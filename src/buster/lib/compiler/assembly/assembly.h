@@ -89,6 +89,12 @@ typedef enum AssemblyRelocationKind
     ASSEMBLY_RELOCATION_AARCH64_LDST32_LO12,
     ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12,
     ASSEMBLY_RELOCATION_AARCH64_LDST128_LO12,
+    // GOT page addressing (#3192): `adrp Xd, :got:sym` and
+    // `ldr Xt, [Xn, :got_lo12:sym]`. ELF only; the driver spells them
+    // R_AARCH64_ADR_GOT_PAGE / R_AARCH64_LD64_GOT_LO12_NC. Both take a
+    // symbol with an exactly zero addend and are never folded by a unit.
+    ASSEMBLY_RELOCATION_AARCH64_GOT_PAGE21,
+    ASSEMBLY_RELOCATION_AARCH64_GOT_LD64_LO12,
     ASSEMBLY_RELOCATION_COUNT,
 } AssemblyRelocationKind;
 

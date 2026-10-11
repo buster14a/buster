@@ -607,8 +607,13 @@ shifted ADD, writeback or post-index addressing, `@PAGE` off
 Mach-O, or an instruction the relocation cannot patch (LDUR, LDP) is a structured
 diagnostic naming the combination. Out-of-range pages and misaligned scaled offsets
 are link-time checks (`object_aarch64_elf_page_relocate` and the PE/Mach-O
-equivalents), as with any assembler. GOT, TLS and codegen-PIC expansion stay with
-their own owners and remain refused here. Numeric `:lo12:` expressions on ELF and COFF
+equivalents), as with any assembler. On ELF, `adrp Xd, :got:sym` and
+`ldr Xt, [Xn, :got_lo12:sym]` are also accepted (#3192), spelling
+`R_AARCH64_ADR_GOT_PAGE` and `R_AARCH64_LD64_GOT_LO12_NC` with an exactly zero
+addend; `:got:` on any other instruction, `:got_lo12:` on anything but a plain
+64-bit `ldr [base, offset]`, and either modifier on Mach-O or COFF are
+diagnosed. TLS and codegen-PIC expansion stay with their own owners and
+remain refused here. Numeric `:lo12:` expressions on ELF and COFF
 are absolute nonnegative immediates without a symbol or relocation. ADD accepts
 0 through 4095; load/store offsets must be aligned and fit the encoded 12-bit
 scaled field, so their byte offset may exceed 4095. Negative, misaligned and
@@ -835,8 +840,8 @@ destinations are the same register, are operand diagnostics, as in llvm-mc.
 Not in this vocabulary, and still refused unless another owner accepts them:
 
 - relocated operands other than the page-address forms documented with the unit
-  vocabulary (GOT, TLS and `:got_lo12:`-style modifiers; the control owner
-  handles label LDR);
+  vocabulary (TLS and further GOT-style modifiers; the control owner handles
+  label LDR, and ELF `:got:`/`:got_lo12:` are documented above);
 - CASP, LDAPR (RCPC), LDTR/STTR, CRC32 and pointer authentication;
 - AdvSIMD forms beyond the list above that the direct SIMD owner does not
   cover, such as by-element arithmetic (`fmla v0.4s, v1.4s, v2.s[0]`) and
