@@ -1,9 +1,10 @@
 // Canonical-IR-to-native-code orchestration: one call to
 // codegen_generate_canonical_module near the bottom of the file turns an
 // IrModule into a CodegenModule — code bytes, global data images,
-// relocations, unwind actions, debug locations, and statistics — for x86-64
-// and AArch64. Every public allocator spelling routes through machine
-// selection, placement, and metadata-backed emission. A machine failure is
+// relocations, unwind actions, debug locations (including layout-adjacent
+// initialized-local runs), and statistics — for x86-64 and AArch64. Every
+// public allocator spelling routes through machine selection, placement,
+// and metadata-backed emission. A machine failure is
 // returned to the caller and never rerouted to the direct canonical emitter.
 // Optional investigation_record snapshots one named function after a retained
 // machine encoding, before scratch release; ordinary options have no sink.
@@ -52,7 +53,8 @@
 //                                                differences written into the
 //                                                data images from them
 //   codegen_machine_debug_index_build,           MIR debug values to native
-//   codegen_machine_debug_reference_timeline,    location ranges, event-driven:
+//   codegen_machine_debug_span,                  layout-adjacent run spans;
+//   codegen_machine_debug_reference_timeline,    event-driven location ranges
 //   codegen_record_machine_locations             per-function indexes, one
 //                                                change-point timeline per
 //                                                referenced virtual register,
@@ -5168,23 +5170,24 @@ BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_mark_lower_bound(MachineFunction c
     return low;
 }
 
-// The value's IR instruction span, resolved to the MIR row range the line
-// marks place it in. Definition-to-end spans reach the end of the mark order
-// and answer from the suffix summaries; a block range answers from its own
-// slice of that order, which holds only the marks inside the block.
-BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_span(MachineFunction const* function, CodegenMachineDebugIndex const* index,
-                                                     MachineDebugValue const* value, u32* first_row, u32* end_row, bool* malformed)
+// The head and optional tail IR ranges map independently through line marks.
+// Machine blocks are published in selection layout order, and each block's
+// marks form a contiguous row group, so adjacent block spans meet at a row
+// boundary; replaying their union gives the same seeds as separate replay
+// followed by codegen_canonical_location_extend. PIECEWISE values are not
+// extended, so runs may emit fewer seeds for them.
+BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_span_range(MachineFunction const* function, CodegenMachineDebugIndex const* index,
+                                                           u32 first_instruction, u32 instruction_count, u32* first_row, u32* end_row,
+                                                           bool* malformed)
 {
-    bool result = value->first_instruction == UINT32_MAX;
-    *first_row = 0;
-    *end_row = function->instruction_count;
-    if (!result)
+    bool result = false;
+    bool rejected = first_instruction > UINT32_MAX - instruction_count || !index->marks_valid;
+    if (!rejected)
     {
-        bool rejected = value->first_instruction > UINT32_MAX - value->instruction_count || !index->marks_valid;
-        u32 instruction_end = rejected ? 0 : value->first_instruction + value->instruction_count;
-        u32 low = rejected ? 0 : codegen_machine_debug_mark_lower_bound(function, index, value->first_instruction);
-        u32 high = rejected ? 0 : codegen_machine_debug_mark_lower_bound(function, index, instruction_end);
-        if (!rejected && low < high)
+        u32 instruction_end = first_instruction + instruction_count;
+        u32 low = codegen_machine_debug_mark_lower_bound(function, index, first_instruction);
+        u32 high = codegen_machine_debug_mark_lower_bound(function, index, instruction_end);
+        if (low < high)
         {
             u32 first_mark = index->mark_suffix_first[low];
             u32 last_mark = index->mark_suffix_last[low];
@@ -5202,9 +5205,47 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_span(MachineFunction const* funct
             *end_row = last_mark + 1u < function->line_mark_count ? function->line_marks[last_mark + 1u].row : function->instruction_count;
             result = *first_row < *end_row;
         }
-        else
+    }
+    if (!result)
+    {
+        *malformed = true;
+    }
+    return result;
+}
+
+// Resolve definition-to-end spans from the mark-order suffix summaries; a
+// block range answers from its own slice of that order.
+BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_span(MachineFunction const* function, CodegenMachineDebugIndex const* index,
+                                                     MachineDebugValue const* value, u32* first_row, u32* end_row, bool* malformed)
+{
+    bool result = false;
+    *first_row = 0;
+    *end_row = function->instruction_count;
+    if (value->first_instruction == UINT32_MAX)
+    {
+        result = value->tail_instruction_count == 0;
+        *malformed = !result;
+    }
+    else
+    {
+        u32 head_first_row = 0;
+        u32 head_end_row = 0;
+        result = codegen_machine_debug_span_range(function, index, value->first_instruction, value->instruction_count,
+                                                  &head_first_row, &head_end_row, malformed);
+        if (result)
         {
-            *malformed = true;
+            *first_row = head_first_row;
+            *end_row = head_end_row;
+            if (value->tail_instruction_count)
+            {
+                u32 tail_first_row = 0;
+                u32 tail_end_row = 0;
+                result = codegen_machine_debug_span_range(function, index, value->tail_first_instruction,
+                                                          value->tail_instruction_count, &tail_first_row, &tail_end_row, malformed);
+                *end_row = tail_end_row;
+                result = result && *first_row < *end_row;
+                *malformed = *malformed || !result;
+            }
         }
     }
     return result;
@@ -5871,49 +5912,80 @@ BUSTER_GLOBAL_LOCAL bool codegen_record_machine_locations(Arena* arena, CodegenM
 }
 
 #if BUSTER_INCLUDE_TESTS
+// Dense line-mark lookup for one IR range; this deliberately scans every mark
+// as the reference for the indexed span lookup above.
+BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_span_dense_range(MachineFunction const* function, u32 first_instruction,
+                                                                 u32 instruction_count, u32* first_row, u32* end_row,
+                                                                 bool* malformed)
+{
+    bool result = false;
+    bool valid = first_instruction <= UINT32_MAX - instruction_count;
+    u32 instruction_end = valid ? first_instruction + instruction_count : 0;
+    u32 first_mark = UINT32_MAX;
+    u32 last_mark = UINT32_MAX;
+    for (u32 mark_index = 0; valid && mark_index < function->line_mark_count; mark_index += 1)
+    {
+        MachineLineMark mark = function->line_marks[mark_index];
+        if (mark.row > function->instruction_count || (mark_index && mark.row < function->line_marks[mark_index - 1].row))
+        {
+            *malformed = true;
+            valid = false;
+        }
+        else if (mark.instruction >= first_instruction && mark.instruction < instruction_end)
+        {
+            first_mark = BUSTER_MIN(first_mark, mark_index);
+            last_mark = mark_index;
+        }
+    }
+    if (valid && first_mark != UINT32_MAX)
+    {
+        *first_row = function->line_marks[first_mark].row;
+        *end_row = last_mark + 1u < function->line_mark_count ? function->line_marks[last_mark + 1u].row : function->instruction_count;
+        result = *first_row < *end_row;
+    }
+    if (!result)
+    {
+        *malformed = true;
+    }
+    return result;
+}
+
 // Whole-function reference recording, kept as the differential reference for
 // the event-driven routine above. Every debug value replays every row of the
 // function for each of its pieces; the event-driven routine must agree with it
 // seed for seed. Production never calls it.
-BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_span_dense(MachineFunction const* function, MachineDebugValue const* value, u32* first_row, u32* end_row,
-                                                     bool* malformed)
+BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_span_dense(MachineFunction const* function, MachineDebugValue const* value, u32* first_row,
+                                                           u32* end_row, bool* malformed)
 {
-    bool result = value->first_instruction == UINT32_MAX;
+    bool result = false;
     *first_row = 0;
     *end_row = function->instruction_count;
-    if (!result)
+    if (value->first_instruction == UINT32_MAX)
     {
-        if (value->first_instruction > UINT32_MAX - value->instruction_count)
+        result = value->tail_instruction_count == 0;
+        *malformed = !result;
+    }
+    else
+    {
+        u32 head_first_row = 0;
+        u32 head_end_row = 0;
+        result = codegen_machine_debug_span_dense_range(function, value->first_instruction, value->instruction_count,
+                                                        &head_first_row, &head_end_row, malformed);
+        if (result)
         {
-            *malformed = true;
-            return false;
-        }
-        u32 instruction_end = value->first_instruction + value->instruction_count;
-        u32 first_mark = UINT32_MAX;
-        u32 last_mark = UINT32_MAX;
-        for (u32 mark_index = 0; mark_index < function->line_mark_count; mark_index += 1)
-        {
-            MachineLineMark mark = function->line_marks[mark_index];
-            if (mark.row > function->instruction_count || (mark_index && mark.row < function->line_marks[mark_index - 1].row))
+            *first_row = head_first_row;
+            *end_row = head_end_row;
+            if (value->tail_instruction_count)
             {
-                *malformed = true;
-                return false;
+                u32 tail_first_row = 0;
+                u32 tail_end_row = 0;
+                result = codegen_machine_debug_span_dense_range(function, value->tail_first_instruction,
+                                                                value->tail_instruction_count, &tail_first_row, &tail_end_row,
+                                                                malformed);
+                *end_row = tail_end_row;
+                result = result && *first_row < *end_row;
+                *malformed = *malformed || !result;
             }
-            if (mark.instruction >= value->first_instruction && mark.instruction < instruction_end)
-            {
-                first_mark = BUSTER_MIN(first_mark, mark_index);
-                last_mark = mark_index;
-            }
-        }
-        if (first_mark != UINT32_MAX)
-        {
-            *first_row = function->line_marks[first_mark].row;
-            *end_row = last_mark + 1 < function->line_mark_count ? function->line_marks[last_mark + 1].row : function->instruction_count;
-            result = *first_row < *end_row;
-        }
-        else
-        {
-            *malformed = true;
         }
     }
     return result;
