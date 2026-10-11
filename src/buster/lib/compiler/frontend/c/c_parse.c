@@ -19907,17 +19907,45 @@ BUSTER_C_INTERNAL bool c_parse_tag_name_before_group(CPreprocessResult preproces
 // A typedef name needs binding state, which the caller supplies; this is the
 // position where one can stand as the type: the first word of [start, open),
 // or after storage-class, function-specifier and qualifier words only. After
-// a type word, `int T(x)`, the identifier is the declarator's name. A
-// decoration before it (`__attribute__((x)) T (y)`) ends the walk, and the
-// group stays that word's parameter list as before.
+// a type word, `int T(x)`, the identifier is the declarator's name.
+// Declaration decorations may sit among those words, `static
+// __attribute__((x)) T (y)` or `[[maybe_unused]] T (z)`. A decoration can only
+// be recognized from its head, so a backward walk that stops at the `)` or `]`
+// closing one walks the prefix again forwards from `start`, stepping over
+// each decoration. `int f(void)` stops at `int` and never walks forwards.
 BUSTER_C_INTERNAL bool c_parse_typedef_name_position(CPreprocessResult preprocess, u32 start, u32 open)
 {
-    u32 index = open > start ? open - 1 : start;
+    u32 name = open > start ? open - 1 : start;
+    u32 index = name;
     CType ignored = {0};
     while (index > start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
            c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[index - 1], &ignored))
     {
         index -= 1;
+    }
+    if (index > start && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                          c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_BRACKET)))
+    {
+        u32 forward = start;
+        bool walking = true;
+        while (walking && forward < name)
+        {
+            u32 after = c_parse_skip_declaration_decoration(preprocess, forward, name);
+            if (after != forward)
+            {
+                forward = after;
+            }
+            else if (preprocess.tokens[forward].kind == C_TOKEN_IDENTIFIER &&
+                     c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[forward], &ignored))
+            {
+                forward += 1;
+            }
+            else
+            {
+                walking = false;
+            }
+        }
+        index = forward == name ? start : index;
     }
     return open > start && index == start;
 }
@@ -29848,8 +29876,9 @@ BUSTER_C_INTERNAL bool c_parser_tree_declarator(CParserTreeSplit* split, u32 roo
         // A redundant group the walker does not read as a group is refused
         // (c_parse_declarator_group_may_open). After a tag or typedef name
         // the walker reads one where c_parser_type_name_before_group does:
-        // after `struct S`, or after a typedef name in the type's position.
-        // Elsewhere, `__attribute__((a)) T (x)`, it names a function `T`.
+        // after `struct S`, or after a typedef name in the type's position,
+        // which decorations such as `__attribute__((a)) T (x)` keep.
+        // Elsewhere, `int T (x)`, it names a function `T`.
         bool redundant = opens > boundaries;
         bool misread = redundant && c_parser_tree_punctuator_at(preprocess, index, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                        !c_parse_declarator_group_may_open(*preprocess, lower, index, (u32)preprocess->token_count) &&

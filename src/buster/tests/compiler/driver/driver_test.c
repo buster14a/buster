@@ -5259,8 +5259,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_gro
 // A single redundant group after a typedef or tag name (GitHub #3368). The
 // declaration scans read it as that name's parameter list, so `T (x);` and
 // `struct S (s2);` declared nothing and `T (tg(int a)) { ... }` declared a
-// function `T`: each program failed with an undeclared name. The pilot
-// publishes them all.
+// function `T`: each program failed with an undeclared name. A decoration
+// among the words before the typedef name, `__attribute__((unused)) T (x);`,
+// still left the group as `T`'s parameter list. The pilot publishes them all.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_name_declarator_groups(UnitTestArguments* arguments)
 {
     CompilerDriverDeclaratorGroupCase const cases[] = {
@@ -5270,6 +5271,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_name_declarator_gro
         {S8("struct P { int a; };\nstruct P (pg(void)) { struct P r = {0}; return r; }\nint main(void) { return pg().a; }\n"), true},
         {S8("typedef int T;\nstatic const T (y) = 2, (z)[2];\ntypedef T (U);\nU (u), (uf(U a));\nU uf(U a) { return a - y; }\n"
             "union W { int a; } (w);\nenum E { E0 } (e);\nint main(void) { return uf(2) + z[1] + u + w.a + (int)e + (int)sizeof(z) - 8; }\n"),
+         true},
+        {S8("typedef int T;\n__attribute__((unused)) T (x);\nint main(void) { return x; }\n"), true},
+        {S8("typedef int T;\nstatic __attribute__((unused)) const T (y), (z)[2];\n__attribute__((unused)) T (tg(int a)) { return a; }\n"
+            "__extension__ T (w);\n[[maybe_unused]] static T (v);\nint main(void) { return y + z[1] + tg(0) + w + v + (int)sizeof(z) - 8; }\n"),
          true},
     };
     return compiler_driver_declarator_group_cases(arguments, cases, BUSTER_ARRAY_LENGTH(cases));
