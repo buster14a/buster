@@ -9,9 +9,9 @@ concurrency:
   group: indexed-callback-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  baseline:
+  candidate:
     runs-on: ubuntu-26.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       BUSTER_TEST_JOBS: '2'
@@ -21,7 +21,7 @@ jobs:
           requested-runner: ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 8132c323e6dcd9abb29b994a454a9f449ddf76c4
+          ref: edfcf75737f74612663f0db7fc3caa524863cd35
           persist-credentials: false
           fetch-depth: 2
       - uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
@@ -48,25 +48,62 @@ jobs:
           "$RUNNER_TEMP/callback-gcc-o0"
           gcc -std=c17 -O2 -Wall -Wextra -Werror tests/basic_c_indexed_callback.c -o "$RUNNER_TEMP/callback-gcc-o2"
           "$RUNNER_TEMP/callback-gcc-o2"
-      - name: Require the baseline lowering refusal in both forms
+      - name: Registered full Release suite
         run: |
-          if build/Release/ide cc -std=c17 -target x86_64-linux -g0 -ffrontend-ssa tests/basic_c_indexed_callback.c -o "$RUNNER_TEMP/callback-baseline" > evidence/baseline-ssa.stdout 2> evidence/baseline-ssa.stderr; then
-            exit 1
-          fi
-          rg 'could not lower logical expression core' evidence/baseline-ssa.stderr
-          if build/Release/ide cc -std=c17 -target x86_64-linux -g0 -fno-frontend-ssa tests/basic_c_indexed_callback.c -o "$RUNNER_TEMP/callback-baseline" > evidence/baseline-memory.stdout 2> evidence/baseline-memory.stderr; then
-            exit 1
-          fi
-          rg 'could not lower logical expression core' evidence/baseline-memory.stderr
-      - name: Baseline fixed point
+          "$RUNNER_TEMP/callback-driver" build --config Release -t test_all > evidence/test-all.log 2>&1
+          cat evidence/test-all.log
+      - name: Candidate fixed point
         run: |
           "$RUNNER_TEMP/callback-driver" test_self_host --config Release > evidence/self-host.log 2>&1
           cat evidence/self-host.log
+      - name: Source-size and whitespace
+        run: |
+          "$RUNNER_TEMP/callback-driver" source_size --base 27aac48349c2da9c6c24bae660a0f893fa3da6d4 > evidence/source-size.log 2>&1
+          cat evidence/source-size.log
+          git diff --check 27aac48349c2da9c6c24bae660a0f893fa3da6d4 HEAD
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: FFmpeg/FFmpeg
+          ref: f46e514491172d15bd74b4abb1814cd2f05a763e
+          fetch-depth: 2
+          path: external/ffmpeg
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 9d6ae224aeff2a6256cd9cb7e8d9477cccf6109d
+          path: harness
+          persist-credentials: false
+      - name: Pristine owning FFmpeg census
+        id: ffmpeg
+        working-directory: harness
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/ffmpeg-driver"
+          "$RUNNER_TEMP/ffmpeg-driver" test_ffmpeg --self-test "$GITHUB_WORKSPACE/external/ffmpeg"
+          "$RUNNER_TEMP/ffmpeg-driver" test_ffmpeg --portable "$GITHUB_WORKSPACE/external/ffmpeg" "$GITHUB_WORKSPACE/evidence/ffmpeg-census" "$GITHUB_WORKSPACE/build/Release/ide" > "$GITHUB_WORKSPACE/evidence/ffmpeg.log" 2>&1
+      - name: Retain distinct FFmpeg blockers and HEVC status
+        if: always() && steps.ffmpeg.outcome != 'skipped'
+        run: |
+          cat evidence/ffmpeg.log
+          rg 'hevcdec|CANDIDATE|FAIL|error:' evidence/ffmpeg-census/buster/compiler-actions -g '*.stderr' || true
       - name: Retain diagnostic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: indexed-callback-baseline-${{ github.run_id }}-${{ github.run_attempt }}
-          path: evidence/
+          name: indexed-callback-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            evidence/*.txt
+            evidence/*.log
+            evidence/ffmpeg-census/**/*.tsv
+            evidence/ffmpeg-census/**/*.argv
+            evidence/ffmpeg-census/**/*.status
+            evidence/ffmpeg-census/**/*.stdout
+            evidence/ffmpeg-census/**/*.stderr
+            evidence/ffmpeg-census/**/config.h
+            evidence/ffmpeg-census/**/config_components.h
+            evidence/ffmpeg-census/**/config.mak
+            evidence/ffmpeg-census/**/config.log
+            evidence/ffmpeg-census/receipt.txt
+            evidence/ffmpeg-census/**/tests/data/fate/*.rep
+            evidence/ffmpeg-census/**/tests/data/fate/*.err
           if-no-files-found: error
           retention-days: 14
