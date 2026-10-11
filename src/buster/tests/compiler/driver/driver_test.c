@@ -1,5 +1,6 @@
 // Driver integration tests: compiler_driver_tests registers argument parsing,
 // artifact, link, runtime, and cross-mode checks.
+// compiler_driver_test_empty_dependency_names owns argv/API refusal and output preservation.
 // compiler_driver_test_mach_framework_search owns Apple framework file search/identity. compiler_driver_test_output_paths
 // owns stdout/output placement and publication refusal coverage.
 // compiler_driver_test_pic_arguments
@@ -16140,6 +16141,122 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
                                     string_format(arena, S8("Mach-O target={S8} scenario={u32} expected={S8} versions={u32}/{u32}"),
                                                   target_names[target_index], scenario, expected_name, expected_current_version,
                                                   expected_compatibility_version));
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// Empty dependency names must fail before source reads or output publication.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_empty_dependency_names(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    static String8 const targets[] = {S8_INITIALIZER("aarch64-apple-macos"), S8_INITIALIZER("aarch64-apple-ios")};
+    String8 const options[] = {S8("-l"), S8("-framework")};
+    String8 const diagnostics[] = {S8("empty dependency name after -l"), S8("empty dependency name after -framework")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 base = buster_test_temporary_path(arena, string_format(arena, S8("buster-empty-dependency-{u32}"), target_index), S8(""));
+        if (BUSTER_REQUIRE(arguments, os_make_directory_attempt(base)))
+        {
+            String8 source = string_format_z(arena, S8("{S8}/main.c"), base);
+            String8 other = string_format_z(arena, S8("{S8}/other.c"), base);
+            String8 output = string_format_z(arena, S8("{S8}/existing"), base);
+            String8 sentinel = S8("existing output must survive invalid dependency names");
+            if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))) &&
+                                          file_write(other, BUSTER_SLICE_TO_BYTE_SLICE(S8("int other(void) { return 1; }\n")))))
+            {
+                for (u32 option = 0; option < BUSTER_ARRAY_LENGTH(options); option += 1)
+                {
+                    for (u32 multi = 0; multi < 2; multi += 1)
+                    {
+                        for (u32 following = 0; following < 2; following += 1)
+                        {
+                            for (u32 api = 0; api < 2; api += 1)
+                            {
+                                String8 argv[16] = {S8("-target"), targets[target_index], S8("--sysroot"), base, source,
+                                                    S8("-o"), output};
+                                u32 count = 7;
+                                if (multi) { argv[count++] = other; }
+                                if (!api)
+                                {
+                                    argv[count++] = options[option];
+                                    argv[count++] = S8("");
+                                    if (following)
+                                    {
+                                        argv[count++] = options[option];
+                                        argv[count++] = S8("BusterMissing3643");
+                                    }
+                                }
+                                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){.pointer = argv, .length = count});
+                                String8 names[] = {S8(""), S8("BusterMissing3643")};
+                                if (api)
+                                {
+                                    BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+                                    if (option)
+                                    {
+                                        invocation.frameworks = names;
+                                        invocation.framework_count = 1 + following;
+                                    }
+                                    else
+                                    {
+                                        invocation.libraries = names;
+                                        invocation.library_count = 1 + following;
+                                    }
+                                }
+                                else
+                                {
+                                    BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                                    BUSTER_STRING_TEST(arguments, invocation.diagnostic, diagnostics[option]);
+                                }
+                                if (BUSTER_REQUIRE(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
+                                {
+                                    CompilerDriverResult executed = compiler_driver_execute_invocation(arena, invocation);
+                                    BUSTER_TEST_RAW(arguments, executed.error == COMPILER_DRIVER_ERROR_ARGUMENT,
+                                        string_format(arena, S8("empty dependency target={S8} option={S8} multi={u32} following={u32} api={u32} error={u32}: {S8}"),
+                                                      targets[target_index], options[option], multi, following, api, (u32)executed.error, executed.diagnostic));
+                                    BUSTER_STRING_TEST(arguments, executed.diagnostic, diagnostics[option]);
+                                    BUSTER_TEST(arguments, executed.output.length == 0);
+                                    BUSTER_TEST(arguments, executed.native_link.executable.length == 0);
+                                    BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, output, (FileReadOptions){0})), sentinel);
+                                }
+                            }
+                        }
+                    }
+                    String8 valid[] = {S8("-target"), targets[target_index], source, options[option], S8("BusterValid3643")};
+                    CompilerDriverInvocation accepted = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(valid));
+                    BUSTER_TEST(arguments, accepted.error == COMPILER_DRIVER_ERROR_NONE);
+                    BUSTER_TEST(arguments, (option ? accepted.framework_count : accepted.library_count) == 1);
+                    if (BUSTER_REQUIRE(arguments, accepted.error == COMPILER_DRIVER_ERROR_NONE &&
+                                                  (option ? accepted.framework_count : accepted.library_count) == 1))
+                    {
+                        BUSTER_STRING_TEST(arguments, option ? accepted.frameworks[0] : accepted.libraries[0], S8("BusterValid3643"));
+                    }
+                    String8 raw[] = {S8("-target"), targets[target_index], source, S8("-Xlinker"), options[option],
+                                     S8("-Xlinker"), S8("")};
+                    CompilerDriverInvocation raw_empty = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(raw));
+                    BUSTER_TEST(arguments, raw_empty.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                    String8 comma[] = {S8("-target"), targets[target_index], source,
+                                       option ? S8("-Wl,-framework,") : S8("-Wl,-l,")};
+                    CompilerDriverInvocation comma_empty = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(comma));
+                    BUSTER_TEST(arguments, comma_empty.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                    String8 missing[] = {S8("-target"), targets[target_index], source, options[option]};
+                    CompilerDriverInvocation absent = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing));
+                    BUSTER_TEST(arguments, absent.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                    BUSTER_STRING_TEST(arguments, absent.diagnostic, string_format(arena, S8("missing argument after {S8}"), options[option]));
+                    String8 response = string_format_z(arena, S8("{S8}/empty.rsp"), base);
+                    String8 contents = string_format(arena, S8("-target {S8} {S8} '' main.c"), targets[target_index], options[option]);
+                    if (BUSTER_REQUIRE(arguments, file_write(response, BUSTER_SLICE_TO_BYTE_SLICE(contents))))
+                    {
+                        String8 response_argv[] = {string_format(arena, S8("@{S8}"), response)};
+                        CompilerDriverInvocation expanded = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(response_argv));
+                        BUSTER_TEST(arguments, expanded.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                        BUSTER_STRING_TEST(arguments, expanded.diagnostic, diagnostics[option]);
+                    }
                 }
             }
         }
@@ -33808,6 +33925,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_include_population);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_empty_dependency_names);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_linker_scripts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_library_search);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_framework_search);

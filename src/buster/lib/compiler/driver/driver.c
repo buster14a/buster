@@ -1042,8 +1042,29 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_linker_query(CompilerDriverInv
     }
 }
 
+// Names must be nonempty independently of the missing-lookup name sentinel.
+// Embedding callers bypass argv parsing, so validate their lists here too.
+BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_names(Arena* arena, CompilerDriverInvocation* invocation)
+{
+    for (u32 index = 0; invocation->error == COMPILER_DRIVER_ERROR_NONE && index < invocation->library_count; index += 1)
+    {
+        if (!invocation->libraries[index].length)
+        {
+            compiler_driver_argument_error(arena, invocation, S8("empty dependency name after {S8}"), S8("-l"));
+        }
+    }
+    for (u32 index = 0; invocation->error == COMPILER_DRIVER_ERROR_NONE && index < invocation->framework_count; index += 1)
+    {
+        if (!invocation->frameworks[index].length)
+        {
+            compiler_driver_argument_error(arena, invocation, S8("empty dependency name after {S8}"), S8("-framework"));
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_request(Arena* arena, CompilerDriverInvocation* invocation)
 {
+    compiler_driver_validate_dependency_names(arena, invocation);
     if (invocation->error == COMPILER_DRIVER_ERROR_NONE && invocation->has_gpu_target)
     {
         compiler_driver_reject_gpu_native_options(arena, invocation, 0, 0);
@@ -2317,6 +2338,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 break;
             }
             String8 value = arguments.pointer[++argument_index];
+            if (!value.length && (string_equal(argument, S8("-l")) || string_equal(argument, S8("-framework"))))
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("empty dependency name after {S8}"), argument);
+                break;
+            }
             if (string_equal(argument, S8("-o")))
             {
                 invocation.output_path = value;

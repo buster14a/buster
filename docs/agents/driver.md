@@ -1305,6 +1305,15 @@ and overlapping target-specific metadata are refused. `compiler_driver_test_mach
 architecture selection, search order, versions, fallback, refusal and archive
 interaction on every host without running the cross-linked image.
 
+Dependency names passed through `-l NAME` or `-framework NAME` must be
+nonempty. An explicitly empty operand is a `driver.argument` error naming the
+option before any source is read or output is published; response files and
+embedding invocations follow the same rule. A missing operand retains its
+separate `missing argument after OPTION` diagnostic. Empty `-I`/`-L` path
+policy is independent. `compiler_driver_test_empty_dependency_names` covers
+macOS/iOS, single/multiple inputs, an empty request followed by a missing name,
+argv/response/API calls, and preservation of existing output.
+
 `-framework NAME` searches every explicit `-F` root in order, then
 `<sysroot>/System/Library/Frameworks`, or `/System/Library/Frameworks` when
 no sysroot is supplied. Within each root it probes `NAME.framework/NAME.tbd`
