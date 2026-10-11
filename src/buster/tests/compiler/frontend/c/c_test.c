@@ -1682,6 +1682,66 @@ BUSTER_GLOBAL_LOCAL void c_test_append_u32(char8* destination, u64 capacity, u64
     }
 }
 
+// One local table whose every brace-enclosed element zero-fills its record
+// before the listed members are stored: the shape of
+// assembly_test_gnu_compatible_spellings, scaled up. Each element's zero
+// value used to carve `layout.size * 8 + 64` task rows from the lowering
+// scratch and keep them until the function ended, so 20,000 elements of a
+// 40-byte record exhausted the 256 MiB scratch with an internal arena
+// validation failure (#2527). The task stack is now sized by the work and
+// released per element, so the whole table lowers.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_local_table_zero_scratch(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 const element_count = 20000;
+    String8 prefix = S8("typedef struct Text { const char* pointer; unsigned long length; } Text;\n"
+                        "struct Case { _Bool flag; Text text; unsigned char count; unsigned char bytes[12]; };\n"
+                        "int sink(struct Case const* cases, unsigned long count);\n"
+                        "int table(void)\n{\n    struct Case const cases[] = {\n");
+    String8 element_open = S8("        {1, (Text){\"c");
+    String8 element_middle = S8("\", 2}, 2, {");
+    String8 element_close = S8(", 7}},\n");
+    String8 suffix = S8("    };\n    return sink(cases, sizeof(cases) / sizeof(cases[0]));\n}\n");
+    Arena* persistent = arena_create((ArenaCreation){.reserved_size = BUSTER_GB(1), .flags = {.no_pool = true}});
+    BUSTER_TEST(arguments, persistent != 0);
+    if (persistent)
+    {
+        u64 source_capacity = prefix.length + (u64)element_count * (element_open.length + element_middle.length + element_close.length + 20) +
+                              suffix.length;
+        char8* source_bytes = arena_allocate(persistent, char8, source_capacity);
+        u64 source_length = 0;
+        c_test_append_source(source_bytes, source_capacity, &source_length, prefix);
+        for (u32 element = 0; element < element_count; element += 1)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length, element_open);
+            c_test_append_u32(source_bytes, source_capacity, &source_length, element % 10);
+            c_test_append_source(source_bytes, source_capacity, &source_length, element_middle);
+            c_test_append_u32(source_bytes, source_capacity, &source_length, element & 255);
+            c_test_append_source(source_bytes, source_capacity, &source_length, element_close);
+        }
+        c_test_append_source(source_bytes, source_capacity, &source_length, suffix);
+        String8 source = {.pointer = source_bytes, .length = source_length};
+        CPreprocessResult preprocess = c_preprocess(persistent, source, (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17,
+        });
+        CParseResult parse = c_parse(persistent, preprocess);
+        if (BUSTER_REQUIRE(arguments, !preprocess.diagnostic_count && !parse.diagnostic_count))
+        {
+            CIRLowerResult lowered = c_lower_to_ir(persistent, S8("local-table-zero-scratch.c"), preprocess, parse, target_native);
+            BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count && lowered.canonical_ir_certified,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("local table lowering was not certified"));
+            if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, module->lowered_function_count == 1 && module->rejected_function_count == 0);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+            }
+        }
+        BUSTER_TEST(arguments, arena_destroy(persistent, 1));
+    }
+    return result;
+}
+
 // Nested ?: inside sizeof builds one completed query per level, and every
 // request consults the completed-query memo. The memo is hash indexed; a linear
 // backward scan made this shape quadratic (issue #2666), so the depth here is
@@ -5174,6 +5234,91 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_empty_scalar_initializer_runtime(UnitT
         CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
         BUSTER_TEST(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE);
         c_test_scratch_end(temporary);
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// Nested local initializers keep a cursor per by-value container on the
+// current path. The cursors are sized from the initialized type's nesting
+// depth rather than the unit's type count (#2527), so cover the shapes that
+// walk deepest: brace elision through a six-level chain, a six-step
+// designator, designators that cross anonymous struct and union members,
+// GNU ranges in a nested array, and compound-literal members as S8 spells
+// them, then check every value at run time.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_initializer_cursor_depth_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_text = S8(
+        "typedef struct Text { const char* pointer; unsigned long length; } Text;\n"
+        "#define TEXT(s) ((Text){ s, sizeof(s) - 1 })\n"
+        "struct L5 { int v; };\n"
+        "struct L4 { struct L5 m; int w; };\n"
+        "struct L3 { struct L4 m; };\n"
+        "struct L2 { int pad; struct L3 m; };\n"
+        "struct L1 { struct L2 m; };\n"
+        "struct L0 { struct L1 m; int tail[3]; };\n"
+        "struct Anonymous { int head; union { struct { union { struct { int deep; int deeper; }; long wide; }; int side; }; double d; }; };\n"
+        "struct Case { _Bool flag; Text text; unsigned char count; unsigned char bytes[12]; };\n"
+        "int main(void)\n"
+        "{\n"
+        "    struct Case const cases[] = {\n"
+        "        {0, TEXT(\"first\"), 2, {0xb1, 0x80}},\n"
+        "        {1, TEXT(\"second\"), 0, {0}},\n"
+        "        {0, TEXT(\"third\"), 3, {0xc6, 0x07, 0x80}},\n"
+        "        [5] = {.text = TEXT(\"sixth\"), .bytes[11] = 9},\n"
+        "        {.count = 4, .bytes = {[1 ... 3] = 7}},\n"
+        "    };\n"
+        "    struct L0 elided[2] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};\n"
+        "    struct L0 designated = {.m.m.m.m.m.v = 11, .m.m.pad = 12, .m.m.m.m.w = 13, .tail[2] = 14};\n"
+        "    struct Anonymous anonymous[2] = {{.head = 1, .deeper = 2, .side = 3}, {4, 5, 6, 7}};\n"
+        "    int grid[2][3][2] = {{{1}, [2] = {2, 3}}, [1] = {[1 ... 2] = {4, 5}}};\n"
+        "    if (sizeof(cases) / sizeof(cases[0]) != 7) return 1;\n"
+        "    if (cases[0].text.length != 5 || cases[0].bytes[1] != 0x80 || cases[0].bytes[2] != 0) return 2;\n"
+        "    if (!cases[1].flag || cases[1].text.pointer[0] != 's' || cases[1].bytes[0] != 0) return 3;\n"
+        "    if (cases[2].count != 3 || cases[2].bytes[2] != 0x80) return 4;\n"
+        "    if (cases[3].text.pointer || cases[3].count || cases[4].bytes[11]) return 5;\n"
+        "    if (cases[5].text.length != 5 || cases[5].bytes[11] != 9 || cases[5].bytes[0]) return 6;\n"
+        "    if (cases[6].count != 4 || cases[6].bytes[0] || cases[6].bytes[1] != 7 || cases[6].bytes[3] != 7 || cases[6].bytes[4]) return 7;\n"
+        "    if (elided[0].m.m.pad != 1 || elided[0].m.m.m.m.m.v != 2 || elided[0].m.m.m.m.w != 3 || elided[0].tail[2] != 6) return 8;\n"
+        "    if (elided[1].m.m.pad != 7 || elided[1].m.m.m.m.m.v != 8 || elided[1].m.m.m.m.w != 9 || elided[1].tail[0] != 10) return 9;\n"
+        "    if (designated.m.m.m.m.m.v != 11 || designated.m.m.pad != 12 || designated.m.m.m.m.w != 13 || designated.tail[2] != 14 || designated.tail[0]) return 10;\n"
+        "    if (anonymous[0].head != 1 || anonymous[0].deeper != 2 || anonymous[0].side != 3 || anonymous[0].deep) return 11;\n"
+        "    if (anonymous[1].head != 4 || anonymous[1].deep != 5 || anonymous[1].deeper != 6 || anonymous[1].side != 7) return 12;\n"
+        "    if (grid[0][0][0] != 1 || grid[0][0][1] || grid[0][2][1] != 3 || grid[1][1][0] != 4 || grid[1][2][1] != 5 || grid[1][0][0]) return 13;\n"
+        "    return 0;\n"
+        "}\n");
+    String8 source = buster_test_temporary_path(arguments->arena, S8("nested-initializer-cursor-depth"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("nested-initializer-cursor-depth-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-o"), output, source};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                string_format(temporary.arena, S8("nested initializer cursor depth form={u32}: {S8}"), form, compiled.diagnostic));
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                        string_format(temporary.arena, S8("nested initializer cursor depth runtime form={u32}: status={u32} timed_out={u32}"),
+                            form, execution.platform_status, (u32)execution.timed_out));
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
     }
 #else
     BUSTER_UNUSED(arguments);
@@ -39957,6 +40102,163 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArgumen
     return result;
 }
 
+// Lowering's root-conditional splits read from the tree (-fc-ast-pilot,
+// GitHub #3102): every shape compiles to the same object as the token scan
+// gives, at `-g0` and `-g`. Debug and sanitized builds also check each tree
+// answer against the scan (BUSTER_REFERENCE_CHECKS). The shapes cover
+// conditions widened over parentheses, casts, prefix operators, calls and
+// label addresses; `:` before a parenthesized or cast else operand; chains in
+// either arm; GNU `?:`; and conditionals in calls, returns, initializers,
+// subscripts, statement expressions and `if` conditions. A conditional after a
+// root assignment or comma goes to the scan.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("int g(int v) { return v + 1; }\n"
+                        "int h(int a, int b) { return a - b; }\n"
+                        "int f(int a, int b, int *p, unsigned char c)\n"
+                        "{\n"
+                        "    int r = a ? b : c;\n"
+                        "    r += (a) ? (b) : (c);\n"
+                        "    r += ((a + b)) ? ((r)) : (int)c;\n"
+                        "    r += (int)c ? -a : !b;\n"
+                        "    r += -a ? ~b : a ? b : c ? 1 : 2;\n"
+                        "    r += a ? b ? 3 : 4 : 5;\n"
+                        "    r += g(a) ? h(a ? b : c, b ? a : 0) : p[a ? 0 : 1];\n"
+                        "    r += a ?: b;\n"
+                        "    r += (a ?: (b ?: c));\n"
+                        "    r = a, r = b ? r : 0;\n"
+                        "    r += (a, b) ? 1 : 2;\n"
+                        "    r += ({ int t = a ? b : c; t ? t : 1; });\n"
+                        "    r += sizeof(a ? b : c) ? (int)sizeof(char) : 0;\n"
+                        "    if (a ? b : c) r += 1;\n"
+                        "    while (r > 100 ? 1 : 0) r -= 1;\n"
+                        "    void *target = a ? &&one : &&two;\n"
+                        "    goto *target;\n"
+                        "one:\n"
+                        "    r += 1;\n"
+                        "two:\n"
+                        "    r += (p ? *p : 0) + (p != 0 ? p[0] : -1);\n"
+                        "    return a > b ? (r ? r : 1) : b > a ? -r : 0;\n"
+                        "}\n");
+    String8 debug[] = {S8("-g0"), S8("-g")};
+    TemporalArena temporary = scratch_begin(0, 0);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-tree-root-conditionals"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    for (u32 level = 0; level < BUSTER_ARRAY_LENGTH(debug); level += 1)
+    {
+        ByteSlice objects[2] = {0};
+        CompilerDriverResult compiled[2] = {0};
+        for (u32 pilot = 0; pilot < 2; pilot += 1)
+        {
+            String8 output = buster_test_temporary_path(arena, string_format(arena, S8("buster-tree-root-conditionals-{u32}-{u32}"), level, pilot),
+                                                        S8(".o"));
+            String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), debug[level], S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"),
+                                 output, input};
+            compiled[pilot] = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8){command + !pilot, BUSTER_ARRAY_LENGTH(command) - !pilot}));
+            BUSTER_TEST_RAW(arguments, compiled[pilot].error == COMPILER_DRIVER_ERROR_NONE, compiled[pilot].diagnostic);
+            objects[pilot] = compiled[pilot].error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
+        }
+        BUSTER_TEST_RAW(arguments,
+                        objects[0].length && objects[0].length == objects[1].length && memcmp(objects[0].pointer, objects[1].pointer, objects[0].length) == 0,
+                        string_format(arena, S8("{S8}: the pilot's object differs from the default's"), debug[level]));
+        CAstLowerStatistics lower = compiled[1].c_ast.lower;
+        BUSTER_TEST(arguments, compiled[0].c_ast.lower.bodies == 0 && compiled[0].c_ast.lower.answers == 0);
+        BUSTER_TEST(arguments, lower.bodies == 3);
+        BUSTER_TEST(arguments, lower.conditionals >= 30);
+        BUSTER_TEST(arguments, lower.answers >= 20);
+        BUSTER_TEST(arguments, lower.negatives > 0);
+        BUSTER_TEST(arguments, lower.fallbacks > 0);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// The root-conditional index build's walks and widening stay linear in the
+// input (CAstLowerStatistics.steps, which leaves out the memo's binary-search
+// comparisons; GitHub #3102). Each chain shape is compiled at
+// depth n and 2n, with and without -fc-ast-pilot. The objects must match, and
+// doubling the depth may at most double the steps, plus a constant for the
+// function around the chain. Without the memo, a left-nested chain walked its
+// shared leftmost paths and parentheses again for every level, and its steps
+// quadrupled.
+//   left:   ((a ? b : c) ? b : c) ...    every condition holds the previous one
+//   prefix: (-(-a ? b : c) ? b : c) ...  the same under a prefix operator
+//   right:  a ? b : a ? b : ... c        every else operand holds the next one
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditional_chains(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Per level the head, then the leaf, then per level the close.
+    String8 heads[] = {S8("("), S8("(-"), S8("a ? b : ")};
+    String8 leaves[] = {S8("a"), S8("a"), S8("c")};
+    String8 closes[] = {S8(" ? b : c)"), S8(" ? b : c)"), S8("")};
+    String8 shape_names[] = {S8("left"), S8("prefix"), S8("right")};
+    u32 depths[] = {128, 256};
+    String8 prefix = S8("int f(int a, int b, int c) { return ");
+    String8 suffix = S8("; }\n");
+    TemporalArena temporary = scratch_begin(0, 0);
+    Arena* arena = temporary.arena;
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(shape_names); shape += 1)
+    {
+        u64 steps[BUSTER_ARRAY_LENGTH(depths)] = {0};
+        for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+        {
+            u32 depth = depths[depth_index];
+            u64 length = prefix.length + leaves[shape].length + suffix.length + (u64)depth * (heads[shape].length + closes[shape].length);
+            char8* bytes = arena_allocate(arena, char8, length);
+            u64 cursor = 0;
+            memcpy(bytes + cursor, prefix.pointer, prefix.length);
+            cursor += prefix.length;
+            for (u32 level = 0; level < depth; level += 1)
+            {
+                memcpy(bytes + cursor, heads[shape].pointer, heads[shape].length);
+                cursor += heads[shape].length;
+            }
+            memcpy(bytes + cursor, leaves[shape].pointer, leaves[shape].length);
+            cursor += leaves[shape].length;
+            for (u32 level = 0; level < depth; level += 1)
+            {
+                memcpy(bytes + cursor, closes[shape].pointer, closes[shape].length);
+                cursor += closes[shape].length;
+            }
+            memcpy(bytes + cursor, suffix.pointer, suffix.length);
+            String8 source = {.pointer = bytes, .length = length};
+            String8 input = buster_test_temporary_path(arena, string_format(arena, S8("buster-tree-chain-{S8}-{u32}"), shape_names[shape], depth),
+                                                       S8(".c"));
+            BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+            ByteSlice objects[2] = {0};
+            for (u32 pilot = 0; pilot < 2; pilot += 1)
+            {
+                String8 output = buster_test_temporary_path(
+                    arena, string_format(arena, S8("buster-tree-chain-{S8}-{u32}-{u32}"), shape_names[shape], depth, pilot), S8(".o"));
+                String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), S8("-g0"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"),
+                                     output, input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8){command + !pilot, BUSTER_ARRAY_LENGTH(command) - !pilot}));
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                objects[pilot] = compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
+                if (pilot)
+                {
+                    steps[depth_index] = compiled.c_ast.lower.steps;
+                    BUSTER_TEST(arguments, compiled.c_ast.lower.conditionals == depth);
+                    BUSTER_TEST(arguments, compiled.c_ast.lower.answers > 0);
+                }
+            }
+            BUSTER_TEST_RAW(arguments,
+                            objects[0].length && objects[0].length == objects[1].length &&
+                                memcmp(objects[0].pointer, objects[1].pointer, objects[0].length) == 0,
+                            string_format(arena, S8("{S8} chain of {u32}: the pilot's object differs from the default's"), shape_names[shape], depth));
+        }
+        BUSTER_TEST_RAW(arguments, steps[0] > 0 && steps[1] <= 2 * steps[0] + 64,
+                        string_format(arena, S8("{S8} chain: {u64} index steps at depth {u32}, {u64} at depth {u32}"), shape_names[shape], steps[0],
+                                      depths[0], steps[1], depths[1]));
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_expression_frames(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -61785,6 +62087,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_dynamic_object_size);
     C_TEST_FIXTURE(arguments, c_test_redefinition_names_previous_site);
     C_TEST_FIXTURE(arguments, c_test_empty_scalar_initializer_runtime);
+    C_TEST_FIXTURE(arguments, c_test_nested_initializer_cursor_depth_runtime);
     C_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
     C_TEST_FIXTURE(arguments, c_test_enum_bool_conversion);
     C_TEST_FIXTURE(arguments, c_test_enum_lowering);
@@ -61891,6 +62194,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_ir_lower_capacity_plan);
     C_TEST_FIXTURE(arguments, c_test_ir_lower_scratch_capacity);
     C_TEST_FIXTURE(arguments, c_test_ir_query_scratch_growth);
+    C_TEST_FIXTURE(arguments, c_test_ir_local_table_zero_scratch);
     C_TEST_FIXTURE(arguments, c_test_ir_row_streams);
     C_TEST_FIXTURE(arguments, c_test_label_values_gate);
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_growth);
@@ -61900,6 +62204,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_line_filename_escapes);
     C_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
     C_TEST_FIXTURE(arguments, c_test_type_interning_objects);
+    C_TEST_FIXTURE(arguments, c_test_tree_root_conditionals);
+    C_TEST_FIXTURE(arguments, c_test_tree_root_conditional_chains);
     C_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
     C_TEST_FIXTURE(arguments, c_test_local_label_declarations);
     C_TEST_FIXTURE(arguments, c_test_local_labels);

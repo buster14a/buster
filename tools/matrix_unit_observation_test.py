@@ -22,10 +22,10 @@ FAKE_IDE = r'''
 #else
 #include <unistd.h>
 #endif
-#if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
-#define PRIMARY_MODULE "c_frontend_tests"
-#else
+#if defined(_WIN32) && (defined(_M_ARM64) || defined(__aarch64__))
 #define PRIMARY_MODULE "compiler_driver_tests"
+#else
+#define PRIMARY_MODULE "c_frontend_tests"
 #endif
 int main(int argc, char** argv)
 {

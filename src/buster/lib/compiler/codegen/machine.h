@@ -1256,7 +1256,9 @@ struct MachineInlineAssemblyRelocation
     u8 kind;
     u8 is_block;
     u8 is_control;
-    u8 reserved;
+    // The rel32 of a direct CALL, JMP or Jcc (assembly_x86_relocation_is_branch),
+    // which Mach-O spells X86_64_RELOC_BRANCH rather than SIGNED.
+    u8 is_branch;
 };
 
 typedef struct MachineInlineAssembly MachineInlineAssembly;
@@ -2209,6 +2211,10 @@ struct MachineX64ExactMapAudit
     u32 expansion_rows;
     u32 expansion_nonexact_rows;
     u32 dense_encoding_tables;
+    // Dense tables the complete preparation encoded, and how many of them
+    // the metadata authority refused.
+    u32 dense_encoding_ready_tables;
+    u32 dense_encoding_failed_tables;
     u32 immediate_patch_tables;
     u32 memory_base_tables;
     u32 displacement_patch_tables;
@@ -2221,6 +2227,8 @@ struct MachineX64ExactMapAudit
     // the metadata authority refused (those rows keep their metadata lane).
     u32 fixed_template_rows;
     u32 fixed_template_invalid_rows;
+    // Rows still pending after machine_x86_64_exact_prewarm_all.
+    u32 fixed_template_pending_rows;
     bool valid;
     u8 reserved[3];
 };
