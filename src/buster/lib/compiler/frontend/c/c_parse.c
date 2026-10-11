@@ -167,6 +167,9 @@
 #include "c_internal.h"
 #include <buster/lib/compiler/frontend/c/c_ast.h>
 #include <buster/lib/compiler/frontend/c/c_parse_internal.h>
+#if BUSTER_INCLUDE_TESTS
+#include <buster/lib/arena_internal.h>
+#endif
 
 BUSTER_C_INTERNAL bool c_declaration_keyword(String8 spelling)
 {
@@ -11085,6 +11088,64 @@ BUSTER_C_INTERNAL CMember* c_parse_initializer_member_at(CParseInitializerSlotCa
     return member;
 }
 
+// Expression typing can append more rows than the token-derived initial
+// table estimate. The member search's indexed visited set follows that live
+// count; its private arena survives scratch/phase rewinds until the next
+// growth or semantic teardown.
+BUSTER_C_INTERNAL bool c_parse_promoted_member_workspace(CTypeParseMachine* machine, CParseResult* result)
+{
+    bool available = machine->promoted_member_capacity && machine->promoted_member_work && machine->promoted_member_visited;
+    if (available && result->type_count > machine->promoted_member_capacity)
+    {
+        u64 doubled = (u64)machine->promoted_member_capacity * 2;
+        u32 capacity = doubled <= UINT32_MAX && doubled >= result->type_count ? (u32)doubled : result->type_count;
+        u64 size = arena_minimum_position;
+        bool sized = c_type_parse_buffer_size_add(&size, capacity, sizeof(CParsePromotedMemberWork), BUSTER_ALIGN_OF(CParsePromotedMemberWork)) &&
+                     c_type_parse_buffer_size_add(&size, capacity, sizeof(u32), BUSTER_ALIGN_OF(u32)) &&
+                     size <= ARENA_MAX_RESERVATION - (BUSTER_KB(64) - 1);
+        if (sized)
+        {
+            size = (size + BUSTER_KB(64) - 1) & ~(BUSTER_KB(64) - 1);
+        }
+        Arena* workspace = sized ? c_frontend_arena_create((ArenaCreation){
+            .reserved_size = size,
+            .granularity = BUSTER_KB(64),
+            .initial_size = size,
+            .flags = {.no_pool = true},
+        }, C_FRONTEND_RESERVATION_ANALYSIS) : 0;
+        available = workspace != 0;
+        if (available)
+        {
+            CParsePromotedMemberWork* work = arena_allocate(workspace, CParsePromotedMemberWork, capacity);
+            u32* visited = arena_allocate_zeroed(workspace, u32, capacity);
+            if (machine->promoted_member_arena)
+            {
+                BUSTER_VALIDATE(arena_destroy(machine->promoted_member_arena, 1));
+            }
+            machine->promoted_member_arena = workspace;
+            machine->promoted_member_work = work;
+            machine->promoted_member_visited = visited;
+            machine->promoted_member_capacity = capacity;
+            machine->promoted_member_generation = 0;
+        }
+        else
+        {
+            c_parse_diagnostic(result, (CSourceLocation){0}, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                sized ? S8("could not reserve C promoted-member workspace") : S8("C promoted-member workspace size overflow"));
+        }
+    }
+    return available;
+}
+
+BUSTER_C_INTERNAL void c_parse_promoted_member_workspace_release(CTypeParseMachine* machine)
+{
+    if (machine->promoted_member_arena)
+    {
+        BUSTER_VALIDATE(arena_destroy(machine->promoted_member_arena, 1));
+        machine->promoted_member_arena = 0;
+    }
+}
+
 // The search keeps its queue in the machine's promoted_member_work, and a
 // found member leaves in found_work_out/found_field_out the queue row that
 // declares it and that row's field index. The rows' parent/via_field links
@@ -11097,11 +11158,11 @@ BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, 
     {
         *ambiguous_out = false;
     }
-    u32 capacity = machine->promoted_member_capacity;
-    if (!capacity || result->type_count > capacity || !machine->promoted_member_work || !machine->promoted_member_visited)
+    if (!c_parse_promoted_member_workspace(machine, result))
     {
         return false;
     }
+    u32 capacity = machine->promoted_member_capacity;
     CParsePromotedMemberWork* work = machine->promoted_member_work;
     u32* visited = machine->promoted_member_visited;
     machine->promoted_member_generation += 1;
@@ -11194,6 +11255,65 @@ BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, 
     }
     return found && !ambiguous;
 }
+
+#if BUSTER_INCLUDE_TESTS
+CTestPromotedMemberWorkspace c_test_promoted_member_workspace(CParseResult* result, CTypeId root, String8 name)
+{
+    CTestPromotedMemberWorkspace report = {0};
+    u64 reserved_before = arena_test_live_reserved_bytes();
+    CParseResult probe = *result;
+    u32 symbol = result->symbols ? c_symbol_find(result->symbols, name) : 0;
+    CParsePromotedMemberWork initial_work[1] = {0};
+    u32 initial_visited[1] = {0};
+    CTypeParseMachine machine = {
+        .promoted_member_work = initial_work,
+        .promoted_member_visited = initial_visited,
+        .promoted_member_capacity = BUSTER_ARRAY_LENGTH(initial_work),
+    };
+    CTypeId member = C_TYPE_ID_INVALID;
+    u32 root_field = 0;
+    u32 found_work = 0;
+    u32 found_field = 0;
+    bool ambiguous = false;
+    report.initial_search = c_parse_promoted_member_type(&machine, &probe, root, symbol, name,
+        &member, &root_field, &ambiguous, &found_work, &found_field);
+    if (report.initial_search && machine.promoted_member_arena && probe.type_count == machine.promoted_member_capacity)
+    {
+        Arena* previous_arena = machine.promoted_member_arena;
+        CParsePromotedMemberWork* previous_work = machine.promoted_member_work;
+        u32* previous_visited = machine.promoted_member_visited;
+        u32 previous_capacity = machine.promoted_member_capacity;
+        u32 previous_generation = machine.promoted_member_generation;
+        CTypeId appended = c_parse_add_type(&probe, (CType){.kind = C_TYPE_INT});
+        if (appended.value < probe.type_count && probe.type_count > previous_capacity)
+        {
+            u32 diagnostics_before = probe.diagnostic_count;
+            u64 reserved_with_workspace = arena_test_live_reserved_bytes();
+            arena_test_fail_next_reserve();
+            bool found = c_parse_promoted_member_type(&machine, &probe, root, symbol, name,
+                &member, &root_field, &ambiguous, &found_work, &found_field);
+            report.failed_growth = !found;
+            report.fault_consumed = !arena_test_cancel_reserve_failure();
+            report.workspace_preserved = machine.promoted_member_arena == previous_arena &&
+                machine.promoted_member_work == previous_work && machine.promoted_member_visited == previous_visited &&
+                machine.promoted_member_capacity == previous_capacity && machine.promoted_member_generation == previous_generation &&
+                arena_test_live_reserved_bytes() == reserved_with_workspace;
+            report.structured_error = probe.diagnostic_count == diagnostics_before + 1 &&
+                probe.diagnostics[diagnostics_before].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
+                string_equal(probe.diagnostics[diagnostics_before].message, S8("could not reserve C promoted-member workspace"));
+            u64 previous_address = (u64)previous_arena;
+            report.recovered = c_parse_promoted_member_type(&machine, &probe, root, symbol, name,
+                &member, &root_field, &ambiguous, &found_work, &found_field);
+            report.member_type = member;
+            report.replacement = report.recovered && machine.promoted_member_capacity > previous_capacity &&
+                (u64)machine.promoted_member_arena != previous_address;
+        }
+    }
+    c_parse_promoted_member_workspace_release(&machine);
+    report.released = !machine.promoted_member_arena && arena_test_live_reserved_bytes() == reserved_before;
+    return report;
+}
+#endif
 
 BUSTER_C_INTERNAL bool c_parse_alignof_object_alignment(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                         CScopeId scope, u32 start, u32 end, u32* alignment);
@@ -35431,8 +35551,20 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_initializer_shape
             u64 count = 0;
             bool previous = machine->semantic_constant_queries;
             machine->semantic_constant_queries = true;
+            CTypeId aggregate = type;
+            if (value.kind == C_TYPE_ARRAY && value.array_bound < result->array_bound_count)
+            {
+                CArrayBound bound = result->array_bounds[value.array_bound];
+                // Failed inference leaves an omitted outer bound unresolved.
+                // Still walk its elements/designators with the existing
+                // unbounded-root mode; no inferred count is published here.
+                if (!bound.token_count && !bound.has_inferred_count)
+                {
+                    aggregate = C_TYPE_ID_INVALID;
+                }
+            }
             c_parse_infer_initializer_array_count_core(machine, result->arena, machine->scratch_arena, preprocess, result, scope,
-                                                       value.element_type, start, end, &count, type, &diagnostic);
+                                                       value.element_type, start, end, &count, aggregate, &diagnostic);
             machine->semantic_constant_queries = previous;
             arena_set_position(machine->scratch_arena, mark);
         }
@@ -41721,6 +41853,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     // The literal memo stays published: lowering reads the recorded bytes
     // and never records.
     scratch_end(machine_temporary);
+    c_parse_promoted_member_workspace_release(&machine);
     BUSTER_VALIDATE(arena_destroy(machine_buffer_arena, 1));
     if (phase_arena)
     {
