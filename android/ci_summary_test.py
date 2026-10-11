@@ -297,6 +297,11 @@ class AndroidSummaryTests(unittest.TestCase):
         self.assertEqual(workflow.count("- 'tools/ci_summary.py'"), 2)
         self.assertIn('python3 android/ci_summary_test.py -v 2>&1 | tee "$RUNNER_TEMP/android-summary.log"', workflow)
         self.assertIn("${{ runner.temp }}/android-summary.log", workflow)
+        self.assertEqual(workflow.count("- 'tools/mobile_driver_fixture_assets_test.py'"), 2)
+        self.assertIn(
+            'python3 tools/mobile_driver_fixture_assets_test.py -v 2>&1 | tee "$RUNNER_TEMP/mobile-driver-fixture-assets.log"',
+            workflow)
+        self.assertIn("${{ runner.temp }}/mobile-driver-fixture-assets.log", workflow)
 
 
 if __name__ == "__main__":
