@@ -24556,6 +24556,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_constant_short_circuit_v
 
 #include <buster/tests/compiler/driver/driver_fast_test.c>
 #include <buster/tests/compiler/driver/driver_pass_through_test.c>
+#include <buster/tests/compiler/driver/driver_dependency_test.c>
 #include <buster/tests/compiler/driver/preprocessed_input_test.c>
 #include <buster/tests/compiler/driver/source_cache_test.c>
 #include <buster/tests/compiler/driver/archive_test.c>
@@ -30162,6 +30163,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_shapes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_depfiles);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_dependency_files);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_images);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_include_population);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_tables);
