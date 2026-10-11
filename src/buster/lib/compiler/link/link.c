@@ -7317,7 +7317,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
 // a direct LEA where the psABI allows it and gets a RELATIVE slot otherwise.
 // On AArch64 Android, CALL26/JUMP26 imports use PLT thunks, direct page/PREL
 // references bind locally or through copy slots, and an imported function
-// address without a GOT cannot use a canonical PLT value.
+// address without a GOT cannot use a canonical PLT value. Zero-bound symbols
+// use a zero GOT slot or MOVZ #0, never a PC-relative value.
 //
 // Thread-local storage follows the image kind. A PIE is the initial
 // executable, so its block sits at a link-time offset from the thread pointer
@@ -7748,6 +7749,19 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
                 bool page = object_relocation_kind_is_aarch64_elf_page(relocation->kind);
                 valid = !is_thread_local && (!bound_elsewhere || (symbol_class & LINK_ELF_PIC_SYMBOL_COPIED));
                 requires_position_independent_objects = bound_elsewhere && symbol->kind == OBJECT_SYMBOL_FUNCTION;
+                bool zero = (symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) != 0;
+                bool low12 = relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12 ||
+                             (relocation->kind >= OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12 &&
+                              relocation->kind <= OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12);
+                if (zero && (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64))
+                {
+                    valid = false;
+                    requires_position_independent_objects = true;
+                }
+                else if (zero && low12)
+                {
+                    valid = valid && relocation->addend >= 0 && relocation->addend <= 0xfff;
+                }
                 action = page ? LINK_ELF_PIC_ACTION_AARCH64_PAGE : LINK_ELF_PIC_ACTION_AARCH64_PREL;
             }
             break;
@@ -7762,6 +7776,16 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
                     {
                         image->got_indices[relocation->symbol] =
                             link_elf_pic_got_slot(image, relocation->symbol, LINK_ELF_PIC_GOT_ADDRESS_SYMBOLIC);
+                    }
+                }
+                else if (valid && (symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) && !imported)
+                {
+                    action = relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 ? LINK_ELF_PIC_ACTION_AARCH64_GOT_PAGE
+                                                                                           : LINK_ELF_PIC_ACTION_AARCH64_GOT_LO12;
+                    if (image->got_indices[relocation->symbol] == UINT32_MAX)
+                    {
+                        image->got_indices[relocation->symbol] =
+                            link_elf_pic_got_slot(image, relocation->symbol, LINK_ELF_PIC_GOT_ADDRESS_ZERO);
                     }
                 }
                 else
@@ -8109,16 +8133,29 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_relocate(Arena* arena, LinkElfPicImage* im
         {
             u32 instruction = link_read_u32(section->data.pointer, relocation->offset);
             u32 patched = 0;
-            ObjectRelocationKind kind = relocation->kind;
-            if (action == LINK_ELF_PIC_ACTION_AARCH64_GOT_PAGE || action == LINK_ELF_PIC_ACTION_AARCH64_GOT_LO12)
+            if (action == LINK_ELF_PIC_ACTION_AARCH64_PAGE && (symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) &&
+                (relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 ||
+                 relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADR_PREL_LO21))
             {
-                u32 slot = image->got_indices[relocation->symbol];
-                valid = valid && slot < image->got_count;
-                target = got_offset + (u64)slot * sizeof(u64);
-                kind = action == LINK_ELF_PIC_ACTION_AARCH64_GOT_PAGE ? OBJECT_RELOCATION_AARCH64_ELF_PAGE21
-                                                                      : OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12;
+                A64MCInst decoded = {0};
+                valid = valid && a64_mc_decode(instruction, &decoded) &&
+                        (relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 ? decoded.opcode == A64_OPCODE_ADRP
+                                                                                   : decoded.opcode == A64_OPCODE_ADR);
+                patched = UINT32_C(0xd2800000) | (instruction & 31);
             }
-            valid = valid && object_aarch64_elf_page_relocate(kind, instruction, place, target, relocation->addend, &patched);
+            else
+            {
+                ObjectRelocationKind kind = relocation->kind;
+                if (action == LINK_ELF_PIC_ACTION_AARCH64_GOT_PAGE || action == LINK_ELF_PIC_ACTION_AARCH64_GOT_LO12)
+                {
+                    u32 slot = image->got_indices[relocation->symbol];
+                    valid = valid && slot < image->got_count;
+                    target = got_offset + (u64)slot * sizeof(u64);
+                    kind = action == LINK_ELF_PIC_ACTION_AARCH64_GOT_PAGE ? OBJECT_RELOCATION_AARCH64_ELF_PAGE21
+                                                                          : OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12;
+                }
+                valid = valid && object_aarch64_elf_page_relocate(kind, instruction, place, target, relocation->addend, &patched);
+            }
             if (valid) link_write_u32(bytes, place, patched);
         }
         break;

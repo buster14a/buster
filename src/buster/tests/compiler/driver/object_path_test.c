@@ -2890,6 +2890,219 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_android_address_offset(ByteSlice bytes,
     return found;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_android_weak_zero_evaluate(ByteSlice bytes, u64 main_address, u64 load_bias, u64* value,
+                                                                   u64* loaded_slot, u32* slot_relocation_type)
+{
+    if (value) *value = 0;
+    if (loaded_slot) *loaded_slot = 0;
+    if (slot_relocation_type) *slot_relocation_type = 0;
+    u64 program_table = 0;
+    u64 program_count = 0;
+    bool valid = value && bytes.length >= 64 &&
+                 compiler_driver_android_preinit_field(bytes, 32, 8, &program_table) &&
+                 compiler_driver_android_preinit_field(bytes, 56, 2, &program_count) &&
+                 program_table <= bytes.length && program_count <= (bytes.length - program_table) / 56;
+    u64 dynamic_offset = 0;
+    u64 dynamic_size = 0;
+    bool dynamic_found = false;
+    for (u64 header = 0; valid && !dynamic_found && header < program_count; header += 1)
+    {
+        u64 base = program_table + header * 56;
+        u64 type = 0;
+        valid = compiler_driver_android_preinit_field(bytes, base, 4, &type);
+        if (valid && type == 2)
+        {
+            dynamic_found = compiler_driver_android_preinit_field(bytes, base + 8, 8, &dynamic_offset) &&
+                            compiler_driver_android_preinit_field(bytes, base + 32, 8, &dynamic_size);
+        }
+    }
+    u64 rela_address = 0;
+    u64 rela_size = 0;
+    u64 rela_offset = 0;
+    bool has_rela_address = dynamic_found && compiler_driver_android_dynamic_value(bytes, dynamic_offset, dynamic_size, 7, &rela_address);
+    bool has_rela_size = dynamic_found && compiler_driver_android_dynamic_value(bytes, dynamic_offset, dynamic_size, 8, &rela_size);
+    valid = valid && dynamic_found && has_rela_address == has_rela_size;
+    if (valid && has_rela_address && rela_size)
+    {
+        valid = compiler_driver_android_address_offset(bytes, program_table, program_count, rela_address, &rela_offset);
+    }
+    u64 main_offset = 0;
+    valid = valid && compiler_driver_android_address_offset(bytes, program_table, program_count, main_address, &main_offset);
+    bool register_known[31] = {0};
+    u64 registers[31] = {0};
+    bool started = false;
+    bool done = false;
+    for (u32 instruction_index = 0; valid && !done && instruction_index < 32; instruction_index += 1)
+    {
+        u64 instruction_offset = main_offset + (u64)instruction_index * sizeof(u32);
+        u64 raw_instruction = 0;
+        valid = compiler_driver_android_preinit_field(bytes, instruction_offset, sizeof(u32), &raw_instruction);
+        u32 instruction = (u32)raw_instruction;
+        u32 opcode = 0;
+        if ((instruction & UINT32_C(0x9f000000)) == UINT32_C(0x90000000)) opcode = 1;
+        else if ((instruction & UINT32_C(0x9f000000)) == UINT32_C(0x10000000)) opcode = 2;
+        else if ((instruction & UINT32_C(0xff800000)) == UINT32_C(0xd2800000)) opcode = 3;
+        else if ((instruction & UINT32_C(0xff000000)) == UINT32_C(0x91000000)) opcode = 4;
+        else if ((instruction & UINT32_C(0xffc00000)) == UINT32_C(0xf9400000)) opcode = 5;
+        switch (opcode)
+        {
+        case 1:
+        case 2:
+        {
+            started = true;
+            u32 destination = instruction & 31;
+            u32 immediate = (((instruction >> 29) & 3) | (((instruction >> 5) & 0x7ffff) << 2));
+            s64 signed_immediate = immediate & (UINT32_C(1) << 20) ? (s64)immediate - (INT64_C(1) << 21) : immediate;
+            u64 place_offset = main_address + (u64)instruction_index * sizeof(u32);
+            bool address_valid = main_address <= UINT64_MAX - (u64)instruction_index * sizeof(u32) &&
+                                 load_bias <= UINT64_MAX - place_offset;
+            u64 place = address_valid ? load_bias + place_offset : 0;
+            u64 address = 0;
+            if (address_valid && opcode == 1)
+            {
+                u64 page = place & ~UINT64_C(0xfff);
+                s64 displacement = signed_immediate * 4096;
+                if (displacement < 0)
+                {
+                    u64 magnitude = (u64)-displacement;
+                    address_valid = page >= magnitude;
+                    if (address_valid) address = page - magnitude;
+                }
+                else
+                {
+                    address_valid = page <= UINT64_MAX - (u64)displacement;
+                    if (address_valid) address = page + (u64)displacement;
+                }
+            }
+            else if (address_valid)
+            {
+                if (signed_immediate < 0)
+                {
+                    u64 magnitude = (u64)-signed_immediate;
+                    address_valid = place >= magnitude;
+                    if (address_valid) address = place - magnitude;
+                }
+                else
+                {
+                    address_valid = place <= UINT64_MAX - (u64)signed_immediate;
+                    if (address_valid) address = place + (u64)signed_immediate;
+                }
+            }
+            valid = valid && address_valid;
+            if (destination < BUSTER_ARRAY_LENGTH(registers))
+            {
+                register_known[destination] = address_valid;
+                registers[destination] = address;
+            }
+        }
+        break;
+        case 3:
+        {
+            started = true;
+            u32 destination = instruction & 31;
+            if (destination < BUSTER_ARRAY_LENGTH(registers))
+            {
+                u32 shift = ((instruction >> 21) & 3) * 16;
+                register_known[destination] = true;
+                registers[destination] = (u64)((instruction >> 5) & 0xffff) << shift;
+            }
+        }
+        break;
+        case 4:
+        {
+            if (started)
+            {
+                u32 destination = instruction & 31;
+                u32 source = (instruction >> 5) & 31;
+                u32 shift = (instruction >> 22) & 1 ? 12 : 0;
+                u64 immediate = (u64)((instruction >> 10) & 0xfff) << shift;
+                bool known = source < BUSTER_ARRAY_LENGTH(registers) && register_known[source] &&
+                             registers[source] <= UINT64_MAX - immediate;
+                if (destination < BUSTER_ARRAY_LENGTH(registers))
+                {
+                    register_known[destination] = known;
+                    if (known) registers[destination] = registers[source] + immediate;
+                }
+            }
+        }
+        break;
+        case 5:
+        {
+            if (started)
+            {
+                u32 destination = instruction & 31;
+                u32 source = (instruction >> 5) & 31;
+                u64 immediate = (u64)((instruction >> 10) & 0xfff) * 8;
+                bool known = false;
+                u64 loaded_value = 0;
+                u64 slot_address = 0;
+                u32 relocation_type = 0;
+                bool source_known = source < BUSTER_ARRAY_LENGTH(registers) && register_known[source] &&
+                                   registers[source] <= UINT64_MAX - immediate;
+                if (source_known && registers[source] + immediate >= load_bias)
+                {
+                    slot_address = registers[source] + immediate - load_bias;
+                    bool relocation_found = false;
+                    for (u64 entry = 0; valid && !relocation_found && entry + 24 <= rela_size; entry += 24)
+                    {
+                        u64 relocation_address = 0;
+                        u64 information = 0;
+                        u64 addend = 0;
+                        valid = compiler_driver_android_preinit_field(bytes, rela_offset + entry, 8, &relocation_address) &&
+                                compiler_driver_android_preinit_field(bytes, rela_offset + entry + 8, 8, &information) &&
+                                compiler_driver_android_preinit_field(bytes, rela_offset + entry + 16, 8, &addend);
+                        if (valid && relocation_address == slot_address)
+                        {
+                            relocation_found = true;
+                            relocation_type = (u32)information;
+                            if (relocation_type == 1027)
+                            {
+                                s64 signed_addend = (s64)addend;
+                                if (signed_addend < 0)
+                                {
+                                    u64 magnitude = (u64)(-(signed_addend + 1)) + 1;
+                                    known = load_bias >= magnitude;
+                                    if (known) loaded_value = load_bias - magnitude;
+                                }
+                                else
+                                {
+                                    known = load_bias <= UINT64_MAX - (u64)signed_addend;
+                                    if (known) loaded_value = load_bias + (u64)signed_addend;
+                                }
+                            }
+                        }
+                    }
+                    if (valid && !relocation_found)
+                    {
+                        u64 slot_offset = 0;
+                        valid = compiler_driver_android_address_offset(bytes, program_table, program_count, slot_address, &slot_offset) &&
+                                compiler_driver_android_preinit_field(bytes, slot_offset, sizeof(u64), &loaded_value);
+                        known = valid;
+                    }
+                }
+                else if (source_known)
+                {
+                    valid = false;
+                }
+                if (loaded_slot) *loaded_slot = slot_address;
+                if (slot_relocation_type) *slot_relocation_type = relocation_type;
+                if (destination < BUSTER_ARRAY_LENGTH(registers))
+                {
+                    register_known[destination] = known;
+                    if (known) registers[destination] = loaded_value;
+                }
+            }
+        }
+        break;
+        default:
+            done = started;
+            break;
+        }
+    }
+    if (valid && register_known[0]) *value = registers[0];
+    return valid && started && register_known[0];
+}
+
 // Issue 1243: Android PIEs publish `.preinit_array` through DT_PREINIT_ARRAY
 // for the bionic linker. This link-only control checks the image itself on
 // every host: both tags are present, the array is one 8-byte entry inside a
@@ -3091,6 +3304,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTest
         }
     }
     BUSTER_TEST(arguments, relative_pointer);
+    String8 weak_source = buster_test_temporary_path(arena, S8("buster-android-weak-zero"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(weak_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+        "extern int absent __attribute__((weak,visibility(\"hidden\")));\n"
+        "int main(void) { return &absent != 0; }\n"))));
+    String8 weak_output = buster_test_temporary_path(arena, S8("buster-android-weak-zero"), S8(""));
+    String8 weak_command[] = {S8("-target"), S8("aarch64-linux-android"), S8("-nostdinc"), S8("-g0"), S8("-fPIC"), weak_source, S8("-o"), weak_output};
+    CompilerDriverResult weak_compiled =
+        compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(weak_command)));
+    BUSTER_TEST(arguments, weak_compiled.error == COMPILER_DRIVER_ERROR_NONE);
+    ByteSlice weak_bytes = weak_compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, weak_output, (FileReadOptions){0}) : (ByteSlice){0};
+    u64 weak_main = 0;
+    bool weak_main_found = compiler_driver_android_symbol_value(weak_bytes, S8("main"), &weak_main);
+    BUSTER_TEST(arguments, weak_main_found);
+    u64 weak_value_base = UINT64_MAX;
+    u64 weak_value_bias = UINT64_MAX;
+    u64 weak_slot = 0;
+    u32 weak_slot_relocation = 0;
+    bool weak_base_known = weak_main_found &&
+                           compiler_driver_android_weak_zero_evaluate(weak_bytes, weak_main, 0, &weak_value_base, &weak_slot, &weak_slot_relocation);
+    u64 weak_bias_slot = 0;
+    u32 weak_bias_relocation = 0;
+    bool weak_bias_known = weak_main_found && compiler_driver_android_weak_zero_evaluate(weak_bytes, weak_main, 0x10000, &weak_value_bias,
+                                                                                       &weak_bias_slot, &weak_bias_relocation);
+    BUSTER_TEST(arguments, weak_base_known && weak_value_base == 0 && weak_bias_known && weak_value_bias == 0);
+    String8 visible_weak_source = buster_test_temporary_path(arena, S8("buster-android-weak-visible"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(visible_weak_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+        "extern int present_weak __attribute__((weak));\n"
+        "int main(void) { return &present_weak != 0; }\n"))));
+    String8 visible_weak_output = buster_test_temporary_path(arena, S8("buster-android-weak-visible"), S8(""));
+    String8 visible_weak_command[] = {S8("-target"), S8("aarch64-linux-android"), S8("-nostdinc"), S8("-g0"), S8("-fPIC"),
+                                     visible_weak_source, S8("-o"), visible_weak_output};
+    CompilerDriverResult visible_weak_compiled = compiler_driver_execute_invocation(
+        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(visible_weak_command)));
+    BUSTER_TEST(arguments, visible_weak_compiled.error == COMPILER_DRIVER_ERROR_NONE);
+    ByteSlice visible_weak_bytes =
+        visible_weak_compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, visible_weak_output, (FileReadOptions){0}) : (ByteSlice){0};
+    u64 visible_weak_main = 0;
+    bool visible_weak_main_found = compiler_driver_android_symbol_value(visible_weak_bytes, S8("main"), &visible_weak_main);
+    BUSTER_TEST(arguments, visible_weak_main_found);
+    u64 visible_weak_value = 0;
+    u64 visible_weak_slot = 0;
+    u32 visible_weak_relocation = 0;
+    bool visible_weak_value_known =
+        visible_weak_main_found && compiler_driver_android_weak_zero_evaluate(visible_weak_bytes, visible_weak_main, 0, &visible_weak_value,
+                                                                              &visible_weak_slot, &visible_weak_relocation);
+    BUSTER_TEST(arguments, visible_weak_main_found && !visible_weak_value_known && visible_weak_slot && visible_weak_relocation == 1025);
     scratch_end(temporary);
     return result;
 }
