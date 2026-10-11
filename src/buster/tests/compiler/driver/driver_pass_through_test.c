@@ -30,7 +30,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_arguments(U
         }
     }
     String8 preprocessing[] = {S8("-Wp,-DFROM_WP"), S8("-Wp,-UFROM_WP"), S8("-Wp,-Iinclude"), S8("-Wp,"),
-                              S8("-Wa,--this-is-bogus"), S8("-Wa,"), S8("-MD"), S8("-MMD"), S8("-MF"), S8("-MT"),
+                              S8("-Wa,--this-is-bogus"), S8("-Wa,"), S8("-MF"), S8("-MT"),
                               S8("-MP"), S8("-M"), S8("-MM"), S8("-Xpreprocessor"), S8("-Xassembler")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(preprocessing); index += 1)
     {

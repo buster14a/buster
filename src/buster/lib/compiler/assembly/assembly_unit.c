@@ -124,6 +124,13 @@ struct AssemblyUnitBuilder
     // whole unit has been read, so it is applied by
     // assembly_unit_resolve_weak_definitions.
     u32* symbol_weak_definition_line;
+    // Name-keyed open-addressing index over result.symbols: each slot holds a
+    // symbol index plus one, zero when empty, and a name keeps the first
+    // symbol that carried it. Sized from symbol_capacity, so it stays under
+    // half full. The final symbol compaction in assembly_unit_materialize
+    // does not maintain it; nothing interns after that.
+    u32* symbol_slots;
+    u64 symbol_slot_mask;
     u32 integer_count;
     u32 integer_capacity;
     u32 alias_count;
@@ -227,26 +234,46 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_diagnostic_format(AssemblyUnitBuilder* bu
 
 // ---------------------------------------------------------------- symbols
 
+BUSTER_GLOBAL_LOCAL u32* assembly_unit_symbol_slot(AssemblyUnitBuilder* builder, String8 name)
+{
+    u64 hash = 1469598103934665603ull;
+    for (u64 index = 0; index < name.length; index += 1)
+    {
+        hash ^= name.pointer[index];
+        hash *= 1099511628211ull;
+    }
+    u64 slot_index = hash & builder->symbol_slot_mask;
+    u32* slot = builder->symbol_slots + slot_index;
+    while (*slot && !string_equal(builder->result.symbols[*slot - 1].name, name))
+    {
+        slot_index = (slot_index + 1) & builder->symbol_slot_mask;
+        slot = builder->symbol_slots + slot_index;
+    }
+    return slot;
+}
+
 BUSTER_GLOBAL_LOCAL u32 assembly_unit_symbol_intern(AssemblyUnitBuilder* builder, String8 name)
 {
-    for (u32 index = 0; index < builder->result.symbol_count; index += 1)
+    u32* slot = assembly_unit_symbol_slot(builder, name);
+    u32 result = UINT32_MAX;
+    if (*slot)
     {
-        if (string_equal(builder->result.symbols[index].name, name))
-        {
-            return index;
-        }
+        result = *slot - 1;
     }
-    if (builder->result.symbol_count >= builder->symbol_capacity)
+    else if (builder->result.symbol_count >= builder->symbol_capacity)
     {
         assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("too many symbols in one assembly unit"));
-        return UINT32_MAX;
     }
-    u32 index = builder->result.symbol_count++;
-    builder->result.symbols[index] = (AssemblyUnitSymbol){
-        .name = name,
-        .section = ASSEMBLY_UNIT_SECTION_UNDEFINED,
-    };
-    return index;
+    else
+    {
+        result = builder->result.symbol_count++;
+        builder->result.symbols[result] = (AssemblyUnitSymbol){
+            .name = name,
+            .section = ASSEMBLY_UNIT_SECTION_UNDEFINED,
+        };
+        *slot = result + 1;
+    }
+    return result;
 }
 
 // --------------------------------------------------------------- sections
@@ -1060,6 +1087,13 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_location_symbol(AssemblyUnitBuilder* build
             builder->result.symbols[builder->result.symbol_count++] = (AssemblyUnitSymbol){
                 .name = builder->result.sections[builder->current_section].name, .section = builder->current_section, .defined = true,
             };
+            // A later intern of this name finds it unless an earlier symbol
+            // already owns the name, the first-match rule interning keeps.
+            u32* slot = assembly_unit_symbol_slot(builder, builder->result.symbols[symbol].name);
+            if (!*slot)
+            {
+                *slot = symbol + 1;
+            }
         }
         else
         {
@@ -1606,9 +1640,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder
             if (reference && assembly_unit_parse_number(string_slice(line, index, digits_end), &value))
             {
                 String8 name = {0};
-                for (u32 label = 0; label < builder->numeric_label_count; label += 1)
+                // Labels are collected in statement order, so the scan ends at
+                // the first label past this statement for `b`, or the first
+                // matching one past it for `f`.
+                bool past = false;
+                for (u32 label = 0; label < builder->numeric_label_count && !(past && (direction == 'b' || name.length)); label += 1)
                 {
                     AssemblyUnitNumericLabel candidate = builder->numeric_labels[label];
+                    past = candidate.statement > builder->statement;
                     if (candidate.value != value)
                     {
                         continue;
@@ -2418,6 +2457,13 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     builder.symbol_local = arena_allocate_zeroed(arena, bool, builder.symbol_capacity);
     builder.symbol_section_start = arena_allocate_zeroed(arena, bool, builder.symbol_capacity);
     builder.symbol_weak_definition_line = arena_allocate_zeroed(arena, u32, builder.symbol_capacity);
+    u64 symbol_slot_capacity = 16;
+    while (symbol_slot_capacity < (u64)builder.symbol_capacity * 2 + 1)
+    {
+        symbol_slot_capacity <<= 1;
+    }
+    builder.symbol_slots = arena_allocate_zeroed(arena, u32, symbol_slot_capacity);
+    builder.symbol_slot_mask = symbol_slot_capacity - 1;
 
     assembly_unit_collect_numeric_labels(&builder, blanked);
     assembly_unit_parse(&builder, blanked);

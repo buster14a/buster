@@ -22,7 +22,12 @@ route cannot count as covered through a consumer that never checks hardware. Dia
 and policy rows are `not applicable` with a reason. The summary line reports
 how many performance entries are covered; the inventory never claims more.
 
-Map: discover, check_rows, main.
+Each owner-requested fixed profile on the pull-compare route (PROFILE_ROWS)
+needs its own covered `uarch_lab:compare@<profile>` row whose consumer
+validates that exact frozen profile, so a flag-pair profile cannot be added,
+or its validation dropped, without the inventory noticing.
+
+Map: discover, check_rows, check_profile_rows, main.
 """
 
 from __future__ import annotations
@@ -41,6 +46,12 @@ BUILD_COMMAND = re.compile(r"bench|throughput|^production_profile$|^compiler_pro
 TOOL = re.compile(r"bench|benchmark|scaling|survey|performance|^compiler_profile_qualification\.c$")
 HOST_CHECK = re.compile(r"\b(?:APPROVED_HOST|host_problem)\b")
 WORKFLOW = re.compile(r"bench|throughput|profile|lab\b|perf|708", re.IGNORECASE)
+RECEIPT = ROOT / "tools" / "bench_direct" / "compiler_receipt.py"
+# Inventory row -> the compiler_receipt profile constant its consumer must validate.
+PROFILE_ROWS = {
+    "uarch_lab:compare@canonical-inline-self-host": "INLINE_ACCEPTANCE_PROFILE",
+    "uarch_lab:compare@ast-pilot-acceptance": "AST_PILOT_ACCEPTANCE_PROFILE",
+}
 
 
 def discover(root: Path) -> set[str]:
@@ -116,6 +127,23 @@ def check_rows(data: object, discovered: set[str], bench_workflow: str) -> tuple
     return errors, counts
 
 
+def check_profile_rows(data: object, receipt: str, read_consumer) -> list[str]:
+    """Each PROFILE_ROWS profile is defined, and its row is covered on pull-compare by a consumer naming it."""
+    errors: list[str] = []
+    entries = data.get("entries") if isinstance(data, dict) else None
+    rows = {entry.get("id"): entry for entry in entries if isinstance(entry, dict)} if isinstance(entries, list) else {}
+    for name, constant in PROFILE_ROWS.items():
+        zen5 = rows.get(name, {}).get("zen5") if isinstance(rows.get(name, {}).get("zen5"), dict) else {}
+        consumer = zen5.get("consumer") if isinstance(zen5.get("consumer"), str) else ""
+        if not re.search(rf"^{constant} = ", receipt, re.MULTILINE):
+            errors.append(f"{name}: compiler_receipt defines no {constant}")
+        elif name not in rows or zen5.get("route") != "pull-compare" or zen5.get("status") != "covered":
+            errors.append(f"{name}: the fixed {constant} profile needs a covered pull-compare row")
+        elif not consumer or not re.search(rf"\b{constant}\b", read_consumer(consumer)):
+            errors.append(f"{name}: consumer {consumer or '(none)'} never validates {constant}")
+    return errors
+
+
 def main() -> int:
     errors: list[str] = []
     try:
@@ -127,6 +155,8 @@ def main() -> int:
     if data is not None:
         problems, counts = check_rows(data, discover(ROOT), BENCH_WORKFLOW.read_text(encoding="utf-8"))
         errors.extend(problems)
+        errors.extend(check_profile_rows(data, RECEIPT.read_text(encoding="utf-8"),
+                                         lambda path: (ROOT / path).read_text(encoding="utf-8") if (ROOT / path).is_file() else ""))
     # Self-checks of the rules on synthetic inventories.
     row = {"id": "tool:x.py", "validation": "performance", "measures": "m",
            "zen5": {"route": "pull-compare", "status": "covered", "consumer": "tools/bench_direct/compiler_publish.py"}}
@@ -147,6 +177,27 @@ def main() -> int:
          {"tool:x.py"}, False),
     ):
         if (not check_rows(inventory, found, bench)[0]) != expected:
+            errors.append("self-check failed: " + label)
+    profile_rows = [{"id": name, "validation": "performance", "measures": "m",
+                     "zen5": {"route": "pull-compare", "status": "covered", "consumer": "publisher.py"}}
+                    for name in PROFILE_ROWS]
+    constants = "".join(f"{constant} = {{}}\n" for constant in PROFILE_ROWS.values())
+    publisher = " ".join(PROFILE_ROWS.values())
+    ast_row = "uarch_lab:compare@ast-pilot-acceptance"
+    for label, rows, receipt, consumer, expected in (
+        ("every fixed profile row passes", profile_rows, constants, publisher, True),
+        ("a missing profile row fails", [row for row in profile_rows if row["id"] != ast_row], constants, publisher, False),
+        ("a profile row on another route fails",
+         [dict(row, zen5=dict(row["zen5"], route="main-compare")) if row["id"] == ast_row else row for row in profile_rows],
+         constants, publisher, False),
+        ("a NOT VALIDATED profile row fails",
+         [dict(row, zen5={"route": "none", "status": "NOT VALIDATED"}) if row["id"] == ast_row else row for row in profile_rows],
+         constants, publisher, False),
+        ("a consumer that ignores the profile fails", profile_rows, constants, "INLINE_ACCEPTANCE_PROFILE", False),
+        ("an undefined profile constant fails", profile_rows, "INLINE_ACCEPTANCE_PROFILE = {}\n", publisher, False),
+    ):
+        inventory = {"schema": "buster-performance-validation-v1", "entries": rows}
+        if (not check_profile_rows(inventory, receipt, lambda path: consumer)) != expected:
             errors.append("self-check failed: " + label)
     for error in errors:
         print("PERFORMANCE_INVENTORY_FAIL " + error, file=sys.stderr)

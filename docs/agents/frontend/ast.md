@@ -507,7 +507,10 @@ unchanged.
     the cast replay.
 
   The replayed row is the answer. A leaf that fails is undone, and the query
-  runs the machine.
+  runs the machine. The leaf's element count already comes through
+  `CParseResult.string_literals`, which decodes each narrow token once per
+  unit. A count fast path in front of it measured as a loss (see the
+  [measurement plan](#measurement-plan)).
 - **Constraint checks.** A checked query is answered only from a node whose
   operands are safe and whose own checked-mode rule cannot fire. For the
   binary operators that is the machine's operand rule. The cases it settles by
@@ -628,6 +631,141 @@ misses on a private machine, with and without constraint checks. The
 The default stays off: hosted measurements are diagnostic, and adoption needs
 the Zen 5 route ([measurement plan](#measurement-plan)).
 
+### Qualified member copies
+
+**Status: design only. Nothing here is implemented; it waits for the
+owner's decision on
+[#3102](https://github.com/buster14a/buster/issues/3102).**
+
+`.` and `->` on a const or volatile struct or union, such as
+`preprocess->tokens` with `preprocess` a pointer to const, is the largest
+shape the typer declines: about 57 M machine Ir in the decline census
+(audit `2026-10-11T093336Z`).
+- Each such step in `c_parse_direct_expression_postfix` ends with
+  `c_parse_add_qualified_type`. That appends a qualified copy of the member's
+  row, and a copy of the base's alignment record when it has one.
+- `c_ast_types_member` declines the node, because the row the machine would
+  answer does not exist yet.
+
+The measurements below are hosted Callgrind counts, diagnostic only, from
+audit [`2026-10-11T101621Z`](../../performance-audits/2026-10-11T101621Z.md),
+on main `4e5d563f`:
+- **Copies.** Inside the interning window the machine appends 13,889
+  qualified copies.
+  - 12,946 come from the member step, and 150 more from it inside
+    bit-field-width probes.
+  - They copy only 609 distinct rows. 11,926 repeat a row first made in an
+    earlier body or initializer.
+  - None would inherit an alignment record, and none is restrict or atomic.
+- **The memo.** The number of copies a run appends is not a function of the
+  node.
+  - A sub-range the per-body memo already holds appends nothing, and 881 runs
+    read one partway through.
+  - A bit-field-width probe re-types a member prefix outside the memo.
+  - A checked query cannot read an unchecked query's entry. Of the 1,326
+    ranges queried both ways in one body, 413 appended a different number of
+    copies on the two runs.
+
+The options:
+
+| | Exact answer by | Rows | Cost and risk |
+| --- | --- | --- | --- |
+| (a) replay | re-walking the subtree in the machine's task order, probing the memo per sub-range under the query's flags, re-running the width probes and checked-mode extras, and appending each copy | unchanged | It re-implements the machine's traversal for one shape, and any drift is a different row index. It removes machine Ir only (ceiling about 49.9 M), and every copy, about 392 Ir each, is still made. |
+| (b) intern under the pilot | sharing the copy, so a run over the subtree appends nothing whatever the memo holds | 13,836 copies become 609 shared rows | It adds new interned rows beside the primitive and pointer ones. Prototype: −74 M Ir (−0.80%) on `-fsyntax-only`, and −86 M on `-c`. |
+| (c) decline | — | unchanged | No change. |
+
+**Proposal: (b).** It is the only option that is exact by construction: once
+every copy a subtree needs exists, no memo state changes what a run appends.
+Its rules:
+- **Scope.**
+  - Only the member step's copy in `c_parse_direct_expression_postfix` is
+    shared, and only while `CTypeInterning.enabled` holds and `suspended` is
+    zero.
+  - Every other caller of `c_parse_add_qualified_type` still appends:
+    declarations, conditionals, `__real__`/`__imag__`, and subscripts of
+    qualified arrays.
+  - Outside the pilot nothing changes, because the interning header exists
+    only with the tree.
+- **Exclusions.** A copy that would inherit an alignment record, or that is
+  restrict or atomic, is appended and never shared.
+  - Lowering builds one aligned alias IR type per alignment record
+    (`aligned_alias_types`), so sharing a copy that carries one could change
+    the IR types.
+  - `c_type_parse_root_finish` checks `restrict` only on appended rows.
+- **Matching.** Shared copies keep their own log and slot table beside the
+  primitive and pointer ones.
+  - `c_parse_interned_row_matches` compares only kind, element and
+    qualifiers, so it would take a qualified pointer copy for a plain pointer
+    row.
+  - A copy matches only a row equal in every `CType` field.
+  - Its live count sits in `CParseResult` beside `interned_type_count`, so a
+    rollback forgets what it removes.
+- **The typer.** The member rule accepts a const or volatile aggregate when
+  the exact copy already exists. It looks the copy up without minting it.
+  Otherwise the node declines.
+  - A copy first made in its own body (1,679 runs, 9.7 M) stays with the
+    machine.
+  - That family is below the code-layout noise #3384 measured
+    ([PR #3384](https://github.com/buster14a/buster/pull/3384)), so the
+    proposal adds no re-check for it.
+
+**Why sharing stays unobservable.** The argument is the
+[interned rows](#interned-rows) argument, extended to the
+`has_unqualified_type` rows:
+- A copy is never mutated in place, and the exclusions above give it no
+  alignment record.
+- Lowering maps every row with `has_unqualified_type` through its unqualified
+  row:
+  - const maps to the same IR type;
+  - volatile goes through `c_ir_add_qualified_type`, which returns an
+    existing qualified IR type.
+
+  So a copy has no IR type, and no `-g` entry, of its own. Aggregate copies
+  are not laid out separately, and array copies share their base's bound
+  index.
+- The window opens after every declaration has its rows. So a shared copy
+  only ever replaces a later copy of itself, which maps in the same pass as
+  its unqualified row.
+
+**Prototype evidence.** The prototype is a throwaway patch, measured in the
+audit:
+- **Objects.** `-c` objects of the unity self-host are byte-identical at
+  `-g0` and at `-g`, base and prototype, with and without the pilot.
+- **Tests.**
+  - `c_test_type_interning_objects` passes.
+  - The corpus differential passes in verify mode.
+  - The only failures are the two forms of the `CAstTypeCase` probe that
+    expects `p->a` over `struct S const*` to decline.
+- **Counters.** Declines fall from 24,919 to 17,448.
+- **Where the saving comes from.** About half is the machine runs the tree
+  now answers (−39.4 M). The other half is fewer whole-table layout solves
+  over the smaller table (−39.0 M), and interning alone, with no typer
+  change, already gets that half.
+- **The default path** moves −0.0055%.
+
+**What an implementation must show.** These budgets go into the
+[measurement plan](#measurement-plan) before any measured run. The four arms
+are those of stage 2:
+- **Correctness.**
+  - byte-identical `-c` objects at `-g0` and `-g` across the four arms, and
+    with the window shut and open;
+  - `c_test_type_interning_objects` extended with sources that read members
+    through pointers to const and to volatile aggregates, nested aggregates,
+    array members and an aligned member typedef;
+  - no verify mismatch over the corpus, with a floor on qualified-member
+    answers;
+  - the decline probe for `struct S const*` turned into an answer probe,
+    with a late-row decline probe beside it;
+  - a mutation that shares a copy carrying an alignment record must fail a
+    test.
+- **The default path (D against A):** within ±0.05% Ir on `-fsyntax-only`
+  and on `-c` at `-g0`.
+- **The slice's effect (C against B):** fewer instructions on both
+  workloads, with the lookups and the eager pass charged, and fewer machine
+  runs from queries.
+- **Acceptance:** Zen 5 (#2761) stays incomplete unless the owner asks for a
+  9700X comparison, and the hook stays opt-in.
+
 ## Declaration split from the tree
 
 `c_parse_ast_from_tree` (`c_parse.c`, after `c_parse_ast`) publishes the
@@ -684,11 +822,11 @@ two cases:
    here states what it reads.** `CParserTreeFallback` names each case:
    - `specifiers`: a parenthesized specifier (`typeof`, `_Atomic(T)`,
      `_Alignas`, `_BitInt`), or an enum's fixed type;
-   - `declarator`: a redundant group after a typedef or tag name, or after a
-     keyword other than a type or qualifier word, where the walker reads the
-     group as a parameter list (it reads `T (x)` as a function `T`); attributes
-     on a pointer or opening a group; or a function returning a function or an
-     array;
+   - `declarator`: a redundant group after a decorated typedef name
+     (`__attribute__((a)) T (x)`), or after a keyword other than a type or
+     qualifier word, where the walker reads the group as a parameter list
+     (it reads that `T (x)` as a function `T`); attributes on a pointer or
+     opening a group; or a function returning a function or an array;
    - `old_style`: an old-style declaration list;
    - `tokens`: a comma operator in an initializer, where the walker splits a
      list, a token next to an anchor that is not the required one, or a
@@ -721,14 +859,28 @@ Now it walks out from the name instead
 and is redundant otherwise. A name whose own list sits inside the group,
 `(gd(int a))`, is a function, but only when the group follows a type or
 qualifier word, a punctuator or nothing (`c_parse_declarator_group_may_open`).
-After a typedef or tag name the walker still reads a single group as that
-name's parameter list, as before. The type parser
+After a typedef or tag name it is a group too
+([#3368](https://github.com/buster14a/buster/issues/3368)):
+`c_parser_type_name_before_group` answers for a tag after `struct`, `union`
+or `enum` (`c_parse_tag_name_before_group`), and for a typedef name in the
+type's position (`c_parse_typedef_name_position`: first in the declaration,
+or after storage-class, function-specifier and qualifier words only). The
+scans have no binding table, so `c_parse_ast_run` records each file-scope
+typedef record's name in `CParserTypedefNames`, a set it asks only in that
+position; at file scope a typedef name cannot be redeclared, and block-scope
+typedefs never reach these scans. `T (x);`, `struct S (s2);`,
+`T (tg(int a)) { ... }` and `struct P (pg(void)) { ... }` therefore declare
+`x`, `s2`, `tg` and `pg`. After a decoration, `__attribute__((a)) T (x)`, the
+walker still reads the group as `T`'s parameter list. The split reads the
+same position, with the grammar's `TYPEDEF_NAME` in place of the set, so its
+records match. The type parser
 (`c_type_parse_parenthesized_step`) nests a group that opens a group holding
 the name. The split publishes every redundant group the walker reads this way,
 and refuses the rest as above.
 
 `c_ast_test_split` runs one shape per fallback reason in every layout, and
-both #3215 inputs and the other redundant shapes on the published side. It
+both #3215 inputs, the #3368 shapes and the other redundant shapes on the
+published side. It
 requires the walker's result and the named reason. The [corpus differential](#corpus-differential) compares every
 record. On the self-host unity input the split publishes all 15,593 records
 and 33 body assertions, with no fallback. The fixtures that fall back are the
@@ -833,7 +985,9 @@ The redundant-parenthesis misreads it found
 ([#3215](https://github.com/buster14a/buster/issues/3215)) are agreement
 constructs too, beside the other redundant shapes: objects and functions in
 one or more groups, a definition whose list sits inside its group, groups in a
-declarator list, after a typedef name and in parameters.
+declarator list, after a typedef name and in parameters. The single groups
+after a typedef or tag name
+([#3368](https://github.com/buster14a/buster/issues/3368)) joined them.
 The tree also rejects syntax errors that today's `-fsyntax-only` accepts
 ([#3143](https://github.com/buster14a/buster/issues/3143)).
 
@@ -1025,7 +1179,9 @@ its measured runs, on the self-host unity input with `-g0`:
   the whole `-fsyntax-only` compile by at least 1% in both instructions and
   paired wall time, without `-c` getting slower, and peak RSS may grow by no
   more than the tree's retained bytes plus 5%. Only the Zen 5 route can
-  establish this.
+  establish this. That route is the owner-requested `ast-pilot-acceptance-v1`
+  profile (#3397) in [benchmarking.md](../benchmarking.md), which reads "plus
+  5%" as 1.05 times the retained bytes.
 
 The tree expression typer's first hosted census is
 [`2026-10-09T132356Z`](../../performance-audits/2026-10-09T132356Z.md). It was
@@ -1621,6 +1777,57 @@ diagnostic only, and its result is negative. No candidate was built:
 - The 17 constant-evaluation runs (3.22 M) are never the typer's.
 - 92% of the machine Ir still left under the pilot is declines and misses
   inside typed bodies.
+
+For a per-token cache of string literals' element counts in the machine's
+leaf (`c_parse_string_literal_expression_type`), these budgets were declared
+before the measured runs. Exploratory Callgrind runs of the base came first;
+the audit reports them as such. The base is main `a6705764`. The input and
+flags are stage 2's, and the four Callgrind arms are counted on tests-off
+`-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+What the leaf already reuses decides the bound. `CParseResult.string_literals`
+records each narrow fragment's decoded bytes per token, so a call that decodes
+is the first time any consumer sees that token, and lowering reads the same
+bytes. A count cache can remove only the repeat calls' range shape (trim, kind
+check, encoding scan) and memo probes. The budgets:
+- **Census first.** A throwaway build of the base splits the leaf's calls into
+  repeats, whose every fragment the memo already holds, and first sights. Each
+  half's count is charged inclusively. The repeat half bounds what a cache can
+  remove; the cache's own probe and insert are not yet charged. If that bound
+  is below 1 M Ir, the floor the string-literal replay used, no candidate is
+  built and the negative result is recorded.
+- **Correctness**, if a candidate is built:
+  - no verify mismatch over the corpus;
+  - the same leaf calls and the same appended array bounds and rows;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms;
+  - wide literals, per-target element kinds and concatenated runs covered by
+    focused tests.
+- **Default path (D against A).** It changes on purpose. The leaf's inclusive
+  instructions, with the cache charged, must fall by at least 1 M. The whole
+  compile may not grow by more than the 0.05% rebuild noise on
+  `-fsyntax-only` or on `-c` (`-g0`).
+- **Pilot (C against B).** The same leaf criterion, and the same 0.05% bound
+  on the whole compile.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761).
+
+The count cache's hosted census is
+[`2026-10-11T095929Z`](../../performance-audits/2026-10-11T095929Z.md), a
+negative result, diagnostic only:
+- **Census.** Of the leaf's 32,707 calls, 83% are the first time any consumer
+  sees the token. Their decode (38.4 M Ir) is the one lowering reuses. So
+  the 26 M decode in the string-literal replay's census above is first-sight
+  work that every design keeps, not a repeat. The 5,477 repeats cost 1.38 M,
+  so a candidate was built.
+- **Candidates.** A fast path answers a lone, recorded, unprefixed fragment
+  from the existing memo, with no second table. Objects are byte-identical at
+  `-g0` and `-g`, and the whole compile moves by at most +0.0035%.
+- **Leaf budget fails.** The leaf grows by 0.53 M, or by 0.25 M when a first
+  sight is probed only once. The code does not ship.
 
 For the first lowering slice, [root conditionals from the
 tree](#lowering-from-the-tree), these budgets were declared before its

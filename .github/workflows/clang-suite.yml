@@ -100,6 +100,9 @@ jobs:
           export BUSTER_CLANG_SUITE_CLANG
           export BUSTER_CLANG_SUITE_RESULTS="$RUNNER_TEMP/clang-suite-evidence"
           python3 tools/clang_suite_test.py -v 2>&1 | tee "$RUNNER_TEMP/clang-suite-evidence/controls.log"
+      - name: Exercise the catalogued Driver slice
+        run: |
+          "$RUNNER_TEMP/clang-suite-evidence/build-driver" test_clang_suite --driver "$GITHUB_WORKSPACE/.clang-suite-upstream" "$RUNNER_TEMP/clang-suite-evidence/driver" "$GITHUB_WORKSPACE/build/Release/ide" "$BUSTER_CI_LLVM_BIN/clang"
       - name: Exercise the public LZCNT intrinsic family
         run: |
           "$RUNNER_TEMP/clang-suite-evidence/build-driver" test_clang_suite --intrinsics "$GITHUB_WORKSPACE/.clang-suite-upstream" "$RUNNER_TEMP/clang-suite-evidence/intrinsics" "$GITHUB_WORKSPACE/build/Release/ide" "$BUSTER_CI_LLVM_BIN/clang"
