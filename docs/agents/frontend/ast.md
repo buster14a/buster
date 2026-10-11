@@ -1014,6 +1014,13 @@ the same way and diagnostic only:
   the query function's code layout moved by more than that. Re-typing the
   ancestors too cost 30 to 70 M in the eager loop for 171 more answers, so
   only the late node is re-checked.
+- On main `9516f631`, which carries #3377 (`FAILS`) and #3381 (`STRING`),
+  with the flags widened to `u16`: `-c` objects stay identical across the
+  four arms; the default path is +0.0018% (`-c` +0.0009%); late answers are
+  2,579; and C − B is +7.05 M (+0.074%). The query function's layout costs
+  +8.70 M self, and `c_ast_types_cast` and `c_ast_types_address` move out of
+  line (+6.89 M, against −5.06 M in the eager loop), for about 2 to 3 M less
+  machine work.
 - Zen 5 acceptance (#2761) stays incomplete, and the hook stays opt-in.
 
 For the in-place columns ([storage](#storage-and-lifetime)), these budgets were
