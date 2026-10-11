@@ -166,7 +166,10 @@ static bool sdl_graphics(SDL_Window* window, Display* display, Window native)
         for (int column = 0; ok && column < 2; column += 1)
         {
             unsigned red = 0, green = 0, blue = 0;
-            sdl_expected_pixel(column * 40, row * 30, &red, &green, &blue);
+            const Uint8 palette[4][3] = {{255, 0, 0}, {0, 255, 0}, {255, 0, 255}, {0, 255, 255}};
+            red = palette[row * 2 + column][0];
+            green = palette[row * 2 + column][1];
+            blue = palette[row * 2 + column][2];
             SDL_FRect rect = {(float)(column * 40), (float)(row * 30), 40.0f, 30.0f};
             ok = SDL_SetRenderDrawColor(renderer, (Uint8)red, (Uint8)green, (Uint8)blue, 255) &&
                  SDL_RenderFillRect(renderer, &rect);
@@ -283,26 +286,42 @@ static bool sdl_audio_sink(void)
 
 int main(void)
 {
+    fprintf(stderr, "SDL_PHASE init begin\n");
     SDL_SetMainReady();
     bool initialized = SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
     bool ok = initialized && !strcmp(SDL_GetCurrentVideoDriver(), "x11") &&
               !strcmp(SDL_GetCurrentAudioDriver(), "pulseaudio");
+    fprintf(stderr, "SDL_PHASE init end ok=%d\n", ok);
+    fprintf(stderr, "SDL_PHASE window begin\n");
     SDL_Window* window = ok ? SDL_CreateWindow("Buster SDL3 qualification", 64, 64, 0) : NULL;
     ok = ok && window;
     SDL_PropertiesID properties = window ? SDL_GetWindowProperties(window) : 0;
     Display* display = (Display*)SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, NULL);
     Window native = (Window)SDL_GetNumberProperty(properties, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
+    fprintf(stderr, "SDL_PHASE window end ok=%d display=%d native=%d\n", ok, display != NULL, native != 0);
+    fprintf(stderr, "SDL_PHASE graphics begin\n");
     bool graphics = ok && display && native && sdl_graphics(window, display, native);
+    fprintf(stderr, "SDL_PHASE graphics end ok=%d\n", graphics);
+    fprintf(stderr, "SDL_PHASE input begin\n");
     bool input = ok && display && native && sdl_input(window, display, native);
+    fprintf(stderr, "SDL_PHASE input end ok=%d\n", input);
+    fprintf(stderr, "SDL_PHASE threads begin\n");
     bool threads = ok && sdl_threads();
+    fprintf(stderr, "SDL_PHASE threads end ok=%d\n", threads);
+    fprintf(stderr, "SDL_PHASE audio_buffer begin\n");
     bool audio_buffer = ok && sdl_audio_buffer();
+    fprintf(stderr, "SDL_PHASE audio_buffer end ok=%d\n", audio_buffer);
+    fprintf(stderr, "SDL_PHASE audio_sink begin\n");
     bool audio_sink = ok && sdl_audio_sink();
+    fprintf(stderr, "SDL_PHASE audio_sink end ok=%d\n", audio_sink);
+    fprintf(stderr, "SDL_PHASE quit begin\n");
     SDL_DestroyWindow(window);
     if (initialized)
     {
         SDL_Quit();
     }
     bool quit = SDL_WasInit(0) == 0;
+    fprintf(stderr, "SDL_PHASE quit end ok=%d\n", quit);
     printf("SDL_FIXTURE x11_pixels=%d xtest_input=%d thread_exchange=%d audio_buffer=%d pulse_monitor=%d quit=%d\n",
         graphics, input, threads, audio_buffer, audio_sink, quit);
     if (!(graphics && input && threads && audio_buffer && audio_sink && quit))

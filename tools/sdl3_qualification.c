@@ -238,9 +238,45 @@ static int sdl_compiler(int argc, char** argv)
     if (ok)
     {
         // Never replace a failed Buster compilation with trusted C objects.
-        execv(ide, args);
-        perror("exec Buster C compiler");
-        result = 127;
+        pid_t child = fork();
+        if (child == 0)
+        {
+            execv(ide, args);
+            perror("exec Buster C compiler");
+            _exit(127);
+        }
+        else if (child > 0)
+        {
+            int status = 0;
+            pid_t waited;
+            do
+            {
+                waited = waitpid(child, &status, 0);
+            } while (waited < 0 && errno == EINTR);
+            if (waited == child && WIFEXITED(status))
+            {
+                result = WEXITSTATUS(status);
+            }
+            else if (waited == child && WIFSIGNALED(status))
+            {
+                result = 128 + WTERMSIG(status);
+            }
+            snprintf(name, sizeof(name), "invocation-%ld.status", (long)getpid());
+            sdl_path(path, logs, name);
+            FILE* status_file = fopen(path, "wx");
+            if (status_file)
+            {
+                int written = fprintf(status_file, "exit_or_signal_status=%d\n", result);
+                if (fclose(status_file) != 0 || written < 0)
+                {
+                    result = 125;
+                }
+            }
+            else
+            {
+                result = 125;
+            }
+        }
     }
     return result;
 }
@@ -262,7 +298,7 @@ static int sdl_configure(const char* source, const char* output, const char* com
         "-DSDL_ALSA=OFF", "-DSDL_PIPEWIRE=OFF", "-DSDL_JACK=OFF", "-DSDL_SNDIO=OFF", "-DSDL_OSS=OFF",
         "-DSDL_WAYLAND=OFF", "-DSDL_KMSDRM=OFF", "-DSDL_OFFSCREEN=OFF",
         "-DSDL_OPENGL=OFF", "-DSDL_OPENGLES=OFF", "-DSDL_VULKAN=OFF", "-DSDL_GPU=OFF",
-        "-DSDL_CAMERA=OFF", "-DSDL_JOYSTICK=OFF", "-DSDL_HAPTIC=OFF", "-DSDL_SENSOR=OFF",
+        "-DSDL_CAMERA=OFF", "-DSDL_JOYSTICK=ON", "-DSDL_HIDAPI=OFF", "-DSDL_HAPTIC=OFF", "-DSDL_SENSOR=OFF",
         "-DSDL_LIBUDEV=OFF", "-DSDL_LIBURING=OFF", "-DSDL_DBUS=OFF", "-DSDL_IBUS=OFF",
         candidate ? "-DCMAKE_C_COMPILER_ARG1=--cc" : "-DCMAKE_C_COMPILER_ARG1=",
         NULL
@@ -293,10 +329,10 @@ static int sdl_fixture_compile(const char* source, const char* compiler, bool ca
     sdl_path(object, sdl_out, candidate ? "fixture-buster.o" : "fixture-clang.o");
     char* trusted[] = {(char*)compiler, "-Wall", "-Wextra", "-Werror", "-g", "-O0",
         "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", include,
-        "-c", "tests/compat/sdl3_fixture.c", "-o", object, NULL};
+        "-c", "tools/fixtures/sdl3_fixture.c", "-o", object, NULL};
     char* buster[] = {(char*)compiler, "--cc", "-g", "-O0",
         "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", include,
-        "-c", "tests/compat/sdl3_fixture.c", "-o", object, NULL};
+        "-c", "tools/fixtures/sdl3_fixture.c", "-o", object, NULL};
     int result = n >= 0 && n < (int)sizeof(include) ?
         sdl_run(candidate ? "fixture-buster-compile" : "fixture-clang-compile", candidate ? buster : trusted, "60") : 125;
     return result;
@@ -314,7 +350,17 @@ static int sdl_fixture_run(const char* object, const char* library, const char* 
     if (result == 0)
     {
         char* run[] = {binary, NULL};
+        unsigned sequence = sdl_sequence;
         result = sdl_run(role, run, "60");
+        char name[128], path[BUSTER_SDL_PATH];
+        snprintf(name, sizeof(name), "%03u-%s.log", sequence, role);
+        sdl_path(path, sdl_out, name);
+        if (result == 0 && (!sdl_read(path) || !strstr(sdl_text,
+            "SDL_FIXTURE x11_pixels=1 xtest_input=1 thread_exchange=1 audio_buffer=1 pulse_monitor=1 quit=1\n")))
+        {
+            fprintf(stderr, "SDL_FIXTURE_VERDICT_MISSING role=%s\n", role);
+            result = 126;
+        }
     }
     return result;
 }
@@ -351,7 +397,7 @@ int main(int argc, char** argv)
             sdl_path(candidate, output, "candidate");
             ok = ok && mkdir(cc_logs, 0700) == 0 && setenv("BUSTER_SDL_IDE", compiler, 1) == 0 && setenv("BUSTER_SDL_CC_LOG", cc_logs, 1) == 0;
             char* versions[] = {"clang", "--version", NULL};
-            char* hashes[] = {"sha256sum", compiler, self, "tools/sdl3_qualification.c", "LICENSES/README.md", NULL};
+            char* hashes[] = {"sha256sum", compiler, self, "tools/sdl3_qualification.c", "tools/fixtures/sdl3_fixture.c", "LICENSES/README.md", NULL};
             char* packages[] = {"dpkg-query", "-W", NULL};
             char* inputs[] = {"git", "-C", source, "ls-tree", "-r", "HEAD", NULL};
             if (ok)

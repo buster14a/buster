@@ -5,7 +5,7 @@ on:
     branches: [codex/3188-sdl3-qualification]
     paths:
       - 'tools/sdl3_qualification.c'
-      - 'tests/compat/sdl3_fixture.c'
+      - 'tools/fixtures/sdl3_fixture.c'
       - '.github/workflows/sdl3-qualification.yml'
   workflow_dispatch:
 permissions:
