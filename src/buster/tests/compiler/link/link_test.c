@@ -6311,6 +6311,123 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_final_text_padding(UnitTestArgument
     return result;
 }
 
+// Stable insertion-sort reference for the unwind-header radix sort: order
+// carries the previous round's original indices and is resorted by this
+// round's keys, so equal keys keep their prior relative order.
+BUSTER_GLOBAL_LOCAL void link_test_eh_frame_reference_sort(u64 const* keys, u32* order, u32 count)
+{
+    for (u32 index = 1; index < count; index += 1)
+    {
+        u32 moving = order[index];
+        u32 slot = index;
+        while (slot && keys[order[slot - 1]] > keys[moving])
+        {
+            order[slot] = order[slot - 1];
+            slot -= 1;
+        }
+        order[slot] = moving;
+    }
+}
+
+// Issue 951: the ELF unwind-header sort skips radix bytes no address varies in
+// and every pass on an already ordered table. Each case pins the pass count
+// and the stable order against a reference, across rounds that reuse buffers
+// left by odd and even pass counts.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_eh_frame_sort(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    u64 const high = UINT64_C(1) << 63;
+    // Sorted, reversed and equal tables; one varying byte; varying bytes with
+    // holes between them; keys either side of 2^63 and at UINT64_MAX.
+    u64 empty[1] = {0};
+    u64 single[] = {UINT64_MAX};
+    u64 sorted[] = {0x1000, 0x1010, 0x1020, 0x2000, 0x2000, UINT64_MAX};
+    u64 equal[] = {0x40, 0x40, 0x40, 0x40};
+    u64 one_byte[] = {0x1030, 0x1010, 0x1020, 0x1010, 0x1000};
+    u64 holes[] = {UINT64_C(0x0100000000000005), 0x05, UINT64_C(0x0100000003000001), 0x03000005, 0x01, UINT64_C(0x0100000000000005)};
+    u64 sign[] = {high, high - 1, UINT64_MAX, 0, high + 1, high - 1, UINT64_MAX - 1};
+    u64 reversed[] = {0x5000, 0x4000, 0x3000, 0x2000, 0x1000};
+    // Rounds 1 and 2 of these run one pass each, leaving the result in the
+    // former scratch buffer before the next round starts from it.
+    u64 rounds[] = {
+        0x30, 0x10, 0x20, 0x10,
+        0x3100, 0x1100, 0x2100, 0x1001,
+        0x01, 0x01, 0x00, 0x02,
+        0x01, 0x01, 0x00, 0x02,
+    };
+    struct
+    {
+        u64 const* addresses;
+        u32 count;
+        u32 round_count;
+        u32 passes[4];
+    } cases[] = {
+        {empty, 0, 1, {0}},
+        {single, 1, 1, {0}},
+        {sorted, BUSTER_ARRAY_LENGTH(sorted), 1, {0}},
+        {equal, BUSTER_ARRAY_LENGTH(equal), 1, {0}},
+        {one_byte, BUSTER_ARRAY_LENGTH(one_byte), 1, {1}},
+        {holes, BUSTER_ARRAY_LENGTH(holes), 1, {3}},
+        {sign, BUSTER_ARRAY_LENGTH(sign), 1, {8}},
+        {reversed, BUSTER_ARRAY_LENGTH(reversed), 1, {1}},
+        {rounds, 4, 4, {1, 2, 1, 0}},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        u32 count = cases[case_index].count;
+        u32 round_count = cases[case_index].round_count;
+        u32 order[8] = {0};
+        u32 expected[8] = {0};
+        u32 passes[4] = {0};
+        for (u32 index = 0; index < count; index += 1)
+        {
+            expected[index] = index;
+        }
+        for (u32 round = 0; round < round_count; round += 1)
+        {
+            link_test_eh_frame_reference_sort(cases[case_index].addresses + (u64)round * count, expected, count);
+        }
+        bool distinct = link_elf_eh_frame_sort_test(arena, cases[case_index].addresses, count, round_count, order, passes);
+        BUSTER_TEST(arguments, distinct);
+        BUSTER_TEST(arguments, memcmp(order, expected, sizeof(order)) == 0);
+        BUSTER_TEST(arguments, memcmp(passes, cases[case_index].passes, sizeof(passes)) == 0);
+    }
+    // Pseudo-random keys with duplicates, alternating between two pairs of
+    // varying bytes, over several rounds; every round runs exactly two passes
+    // and the final order must match the stable reference.
+    u32 const random_count = 97;
+    u32 const random_rounds = 5;
+    u64* keys = arena_allocate(arena, u64, (u64)random_count * random_rounds);
+    u32* order = arena_allocate(arena, u32, random_count);
+    u32* expected = arena_allocate(arena, u32, random_count);
+    u32 passes[5] = {0};
+    u64 state = UINT64_C(0x9e3779b97f4a7c15);
+    for (u32 index = 0; index < random_count * random_rounds; index += 1)
+    {
+        state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+        u64 mask = (index / random_count) & 1 ? UINT64_C(0xff000000000000ff) : UINT64_C(0x0000ff0000000f00);
+        keys[index] = (state >> 7) & mask;
+    }
+    for (u32 index = 0; index < random_count; index += 1)
+    {
+        expected[index] = index;
+    }
+    for (u32 round = 0; round < random_rounds; round += 1)
+    {
+        link_test_eh_frame_reference_sort(keys + (u64)round * random_count, expected, random_count);
+    }
+    BUSTER_TEST(arguments, link_elf_eh_frame_sort_test(arena, keys, random_count, random_rounds, order, passes));
+    BUSTER_TEST(arguments, memcmp(order, expected, sizeof(u32) * random_count) == 0);
+    for (u32 round = 0; round < random_rounds; round += 1)
+    {
+        BUSTER_TEST(arguments, passes[round] == 2);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_function_addresses(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6538,6 +6655,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult initializer_array_symbol = link_test_elf_initializer_array_symbol(arguments);
     result.succeeded_test_count += initializer_array_symbol.succeeded_test_count;
     result.test_count += initializer_array_symbol.test_count;
+    BUSTER_TEST_FIXTURE(arguments, link_test_elf_eh_frame_sort);
     BUSTER_TEST_FIXTURE(arguments, link_test_elf_function_addresses);
     BUSTER_TEST_FIXTURE(arguments, link_test_elf_weak_unwind);
     UnitTestResult merged_symbol_table = link_test_elf_merged_symbol_table(arguments);

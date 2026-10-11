@@ -8,7 +8,9 @@
 // hosted PE64, imports-free UEFI PE64, Mach-O, and Android ELF. The
 // writers share the helpers above them — AArch64 branch range checks and
 // veneers, ELF .eh_frame table construction (duplicate initial locations are
-// refused by link_elf_eh_frame_header_write), PE export/import plumbing,
+// refused by link_elf_eh_frame_header_write; link_elf_eh_frame_entries_sort
+// skips radix bytes no address varies in and already ordered tables),
+// PE export/import plumbing,
 // CodeView/PDB resolution (link_pe_resolved_codeview), SHA-256 for build
 // ids — but each owns its image layout whole, because the formats agree
 // on almost nothing. A position-independent image (NativeImageKind SHARED
@@ -285,6 +287,19 @@ struct LinkElfEhFrameTable
     u32 count;
     bool valid;
     u8 reserved[3];
+};
+
+// Summary of function addresses in current table order, gathered while they
+// are produced: bytes that never vary cannot reorder a stable radix pass, and
+// a table without an inversion is already in final order (issue 951).
+typedef struct LinkElfEhFrameOrder LinkElfEhFrameOrder;
+struct LinkElfEhFrameOrder
+{
+    u64 first_address;
+    u64 previous_address;
+    u64 varying_bits;
+    bool inverted;
+    u8 reserved[7];
 };
 
 BUSTER_GLOBAL_LOCAL String8 link_string_copy(Arena* arena, String8 source)
@@ -4057,6 +4072,63 @@ BUSTER_GLOBAL_LOCAL bool link_elf_signed_difference(u64 left, u64 right, s32* ou
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL void link_elf_eh_frame_order_note(LinkElfEhFrameOrder* order, u64 address, u32 entry_index)
+{
+    if (entry_index)
+    {
+        order->varying_bits |= address ^ order->first_address;
+        order->inverted |= order->previous_address > address;
+    }
+    else
+    {
+        order->first_address = address;
+    }
+    order->previous_address = address;
+}
+
+// Stable least-significant-digit radix sort by function_address. Only bytes
+// some address varies in are scattered, and an uninverted table moves no
+// records; an odd pass count leaves the result in the former scratch buffer,
+// so both pointers are swapped and never alias. Returns the passes run.
+BUSTER_GLOBAL_LOCAL u32 link_elf_eh_frame_entries_sort(LinkElfEhFrameTable* table, LinkElfEhFrameOrder order)
+{
+    LinkElfEhFrameEntry* source = table->entries;
+    LinkElfEhFrameEntry* destination = table->scratch;
+    u32 pass_count = 0;
+    u64 varying_bits = order.inverted ? order.varying_bits : 0;
+    for (u32 byte_index = 0; byte_index < 8; byte_index += 1)
+    {
+        u32 shift = byte_index * 8;
+        if ((varying_bits >> shift) & 0xff)
+        {
+            u32 counts[256] = {0};
+            u32 offsets[256];
+            for (u32 entry_index = 0; entry_index < table->count; entry_index += 1)
+            {
+                counts[(source[entry_index].function_address >> shift) & 0xff] += 1;
+            }
+            u32 offset = 0;
+            for (u32 bucket = 0; bucket < BUSTER_ARRAY_LENGTH(counts); bucket += 1)
+            {
+                offsets[bucket] = offset;
+                offset += counts[bucket];
+            }
+            for (u32 entry_index = 0; entry_index < table->count; entry_index += 1)
+            {
+                u32 bucket = (source[entry_index].function_address >> shift) & 0xff;
+                destination[offsets[bucket]++] = source[entry_index];
+            }
+            LinkElfEhFrameEntry* swap = source;
+            source = destination;
+            destination = swap;
+            pass_count += 1;
+        }
+    }
+    table->entries = source;
+    table->scratch = destination;
+    return pass_count;
+}
+
 BUSTER_GLOBAL_LOCAL bool link_elf_eh_frame_header_write(u8* bytes, u64 byte_count, LinkElfEhFrameTable* table, ObjectFile* object, u64 image_base,
                                                         u64 const* section_offsets, u64 header_offset)
 {
@@ -4066,6 +4138,7 @@ BUSTER_GLOBAL_LOCAL bool link_elf_eh_frame_header_write(u8* bytes, u64 byte_coun
         return !header_size && table->valid;
     }
     u64 header_address = image_base + header_offset;
+    LinkElfEhFrameOrder order = {0};
     for (u32 entry_index = 0; entry_index < table->count; entry_index += 1)
     {
         LinkElfEhFrameEntry* entry = table->entries + entry_index;
@@ -4082,34 +4155,9 @@ BUSTER_GLOBAL_LOCAL bool link_elf_eh_frame_header_write(u8* bytes, u64 byte_coun
             return false;
         }
         entry->function_address = address;
+        link_elf_eh_frame_order_note(&order, address, entry_index);
     }
-    LinkElfEhFrameEntry* source = table->entries;
-    LinkElfEhFrameEntry* destination = table->scratch;
-    for (u32 byte_index = 0; byte_index < 8; byte_index += 1)
-    {
-        u32 counts[256] = {0};
-        u32 offsets[256];
-        u32 shift = byte_index * 8;
-        for (u32 entry_index = 0; entry_index < table->count; entry_index += 1)
-        {
-            counts[(source[entry_index].function_address >> shift) & 0xff] += 1;
-        }
-        u32 offset = 0;
-        for (u32 bucket = 0; bucket < BUSTER_ARRAY_LENGTH(counts); bucket += 1)
-        {
-            offsets[bucket] = offset;
-            offset += counts[bucket];
-        }
-        for (u32 entry_index = 0; entry_index < table->count; entry_index += 1)
-        {
-            u32 bucket = (source[entry_index].function_address >> shift) & 0xff;
-            destination[offsets[bucket]++] = source[entry_index];
-        }
-        LinkElfEhFrameEntry* swap = source;
-        source = destination;
-        destination = swap;
-    }
-    table->entries = source;
+    link_elf_eh_frame_entries_sort(table, order);
     bytes[header_offset] = 1;
     bytes[header_offset + 1] = 0x1b;
     bytes[header_offset + 2] = 0x03;
@@ -15699,6 +15747,38 @@ NativeExecutableLinkResult link_elf_test_executable(Arena* arena, Arena* tempora
     TemporalArena scope = arena_begin_temporal(temporary);
     NativeExecutableLinkResult result = link_native_executable_with_scratch(arena, temporary, object, options);
     scratch_end(scope);
+    return result;
+}
+
+bool link_elf_eh_frame_sort_test(Arena* arena, u64 const* addresses, u32 count, u32 round_count, u32* order, u32* pass_counts)
+{
+    LinkElfEhFrameTable table = {
+        .entries = arena_allocate(arena, LinkElfEhFrameEntry, BUSTER_MAX(count, 1u)),
+        .scratch = arena_allocate(arena, LinkElfEhFrameEntry, BUSTER_MAX(count, 1u)),
+        .count = count,
+        .valid = true,
+    };
+    for (u32 entry_index = 0; entry_index < count; entry_index += 1)
+    {
+        table.entries[entry_index] = (LinkElfEhFrameEntry){.fde_offset = entry_index, .relocation = entry_index};
+    }
+    bool result = true;
+    for (u32 round = 0; round < round_count; round += 1)
+    {
+        LinkElfEhFrameOrder summary = {0};
+        for (u32 entry_index = 0; entry_index < count; entry_index += 1)
+        {
+            LinkElfEhFrameEntry* entry = table.entries + entry_index;
+            entry->function_address = addresses[(u64)round * count + entry->fde_offset];
+            link_elf_eh_frame_order_note(&summary, entry->function_address, entry_index);
+        }
+        pass_counts[round] = link_elf_eh_frame_entries_sort(&table, summary);
+        result &= table.entries != table.scratch;
+    }
+    for (u32 entry_index = 0; entry_index < count; entry_index += 1)
+    {
+        order[entry_index] = (u32)table.entries[entry_index].fde_offset;
+    }
     return result;
 }
 
