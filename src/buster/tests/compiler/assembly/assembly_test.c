@@ -4442,7 +4442,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_statements(UnitTestArgumen
         AssemblyUnitResult labels = assembly_unit_encode(arguments->arena,
             S8(".text\n1: nop; loop 1b; jmp 1f; 1: nop; loop 1b; ret\n"),
             (AssemblyEncodeOptions){.target = target});
-        u8 const label_bytes[] = {0x90, 0xe2, 0xfd, 0xe9, 0, 0, 0, 0, 0x90, 0xe2, 0xfd, 0xc3};
+        u8 const label_bytes[] = {0x90, 0xe2, 0xfd, 0xeb, 0, 0x90, 0xe2, 0xfd, 0xc3};
         BUSTER_TEST(arguments, !labels.diagnostic_count && !labels.symbol_count && !labels.relocation_count &&
             labels.section_count == 1 && assembly_test_bytes_equal(labels.sections[0].data, label_bytes, sizeof(label_bytes)));
         AssemblyUnitResult diagnostic = assembly_unit_encode(arguments->arena, S8(".text\nnop; bogus\n"),
@@ -5010,15 +5010,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_current_address_branches(U
     String8 const x86_sources[] = {S8(".text\nnop\njmp .\nret\n"), S8(".text\nnop\ncall .\nret\n"),
                                    S8(".text\nnop\njmp .+5\nret\n")};
     u8 const x86_expected[][8] = {
-        {0x90, 0xe9, 0xfb, 0xff, 0xff, 0xff, 0xc3, 0},
+        {0x90, 0xeb, 0xfe, 0xc3, 0, 0, 0, 0},
         {0x90, 0xe8, 0xfb, 0xff, 0xff, 0xff, 0xc3, 0},
-        {0x90, 0xe9, 0x00, 0x00, 0x00, 0x00, 0xc3, 0},
+        {0x90, 0xeb, 0x03, 0xc3, 0, 0, 0, 0},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(x86_sources); index += 1)
     {
         AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, x86_sources[index], (AssemblyEncodeOptions){.target = x86_64});
         BUSTER_TEST_RAW(arguments, !unit.diagnostic_count && !unit.relocation_count && !unit.symbol_count && unit.section_count == 1 &&
-            assembly_test_bytes_equal(unit.sections[0].data, x86_expected[index], 7), x86_sources[index]);
+            assembly_test_bytes_equal(unit.sections[0].data, x86_expected[index], index == 1 ? 7 : 4), x86_sources[index]);
     }
     return result;
 }
