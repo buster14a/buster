@@ -5976,6 +5976,162 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_tls_membership(UnitTestArguments* a
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_android_zero_got_slot(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 text_words[] = {UINT32_C(0x90000000), UINT32_C(0xf9400000), UINT32_C(0xd65f03c0)};
+    ObjectSymbol symbols[] = {
+        {.name = S8("main"), .size = sizeof(text_words), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("absent"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true, .weak = true, .hidden = true},
+    };
+    ObjectRelocation relocations[] = {
+        {.offset = 0, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21},
+        {.offset = 4, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12},
+    };
+    ObjectFile object = link_test_object_make(arguments->arena,
+                                              (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_ANDROID},
+                                              (ByteSlice){.pointer = (u8*)text_words, .length = sizeof(text_words)}, symbols, BUSTER_ARRAY_LENGTH(symbols),
+                                              relocations, BUSTER_ARRAY_LENGTH(relocations));
+    NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &object,
+                                                               (NativeExecutableLinkOptions){
+                                                                   .entry_symbol = S8("main"),
+                                                                   .image_kind = NATIVE_IMAGE_PIE,
+                                                               });
+    BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
+    LinkTestElfSymbol main_symbol = {0};
+    u64 text_header = 0;
+    bool main_found = linked.error == LINK_ERROR_NONE &&
+                      link_test_elf_symbol(linked.executable, S8("main"), &main_symbol) &&
+                      link_test_elf_section_find(linked.executable, S8(".text"), 0, &text_header);
+    BUSTER_TEST(arguments, main_found);
+    if (main_found)
+    {
+        u64 text_address = link_read_u64(linked.executable.pointer, text_header + 16);
+        u64 text_offset = link_read_u64(linked.executable.pointer, text_header + 24);
+        u64 text_size = link_read_u64(linked.executable.pointer, text_header + 32);
+        u64 main_delta = main_symbol.value >= text_address ? main_symbol.value - text_address : UINT64_MAX;
+        bool main_range = main_delta <= text_size && sizeof(text_words) <= text_size - main_delta &&
+                          text_offset <= linked.executable.length && main_delta <= linked.executable.length - text_offset &&
+                          sizeof(text_words) <= linked.executable.length - (text_offset + main_delta);
+        BUSTER_TEST(arguments, main_range);
+        if (main_range)
+        {
+            u64 main_offset = text_offset + main_delta;
+            u32 adrp_word = link_read_u32(linked.executable.pointer, main_offset);
+            u32 ldr_word = link_read_u32(linked.executable.pointer, main_offset + 4);
+            A64MCInst adrp = {0};
+            bool adrp_valid = a64_mc_decode(adrp_word, &adrp) && adrp.opcode == A64_OPCODE_ADRP && (adrp_word & 31) == 0;
+            bool ldr_valid = (ldr_word & UINT32_C(0xffc00000)) == UINT32_C(0xf9400000) &&
+                             (ldr_word & 31) == 0 && ((ldr_word >> 5) & 31) == 0;
+            bool sequence_valid = adrp_valid && ldr_valid && link_read_u32(linked.executable.pointer, main_offset + 8) == UINT32_C(0xd65f03c0);
+            BUSTER_TEST(arguments, sequence_valid);
+            if (sequence_valid)
+            {
+                s64 page_displacement = adrp.operands[1].value;
+                u64 load_biases[] = {0, UINT64_C(0x10000)};
+                u64 slot_addresses[BUSTER_ARRAY_LENGTH(load_biases)] = {0};
+                bool slot_addresses_valid = true;
+                u64 ldr_offset = (u64)((ldr_word >> 10) & 0xfff) * sizeof(u64);
+                for (u32 bias_index = 0; bias_index < BUSTER_ARRAY_LENGTH(load_biases); bias_index += 1)
+                {
+                    u64 load_bias = load_biases[bias_index];
+                    bool place_valid = load_bias <= UINT64_MAX - main_symbol.value;
+                    u64 place = place_valid ? load_bias + main_symbol.value : 0;
+                    u64 page = place & ~UINT64_C(0xfff);
+                    u64 slot_page = 0;
+                    if (place_valid && page_displacement < 0)
+                    {
+                        u64 magnitude = (u64)-page_displacement;
+                        place_valid = page >= magnitude;
+                        if (place_valid) slot_page = page - magnitude;
+                    }
+                    else if (place_valid)
+                    {
+                        place_valid = page <= UINT64_MAX - (u64)page_displacement;
+                        if (place_valid) slot_page = page + (u64)page_displacement;
+                    }
+                    place_valid = place_valid && slot_page <= UINT64_MAX - ldr_offset;
+                    if (place_valid)
+                    {
+                        u64 slot = slot_page + ldr_offset;
+                        place_valid = slot >= load_bias;
+                        if (place_valid) slot_addresses[bias_index] = slot - load_bias;
+                    }
+                    slot_addresses_valid = slot_addresses_valid && place_valid;
+                }
+                BUSTER_TEST(arguments, slot_addresses_valid && slot_addresses[0] == slot_addresses[1]);
+                if (slot_addresses_valid && slot_addresses[0] == slot_addresses[1])
+                {
+                    u64 slot = slot_addresses[0];
+                    bool writable = false;
+                    bool file_backed = false;
+                    u64 slot_file_offset = 0;
+                    for (u32 load_index = 0; ; load_index += 1)
+                    {
+                        u64 load_header = link_test_elf_program_header(linked.executable, 1, load_index);
+                        if (!load_header) break;
+                        u64 load_address = link_read_u64(linked.executable.pointer, load_header + 16);
+                        u64 file_offset = link_read_u64(linked.executable.pointer, load_header + 8);
+                        u64 file_size = link_read_u64(linked.executable.pointer, load_header + 32);
+                        u64 memory_size = link_read_u64(linked.executable.pointer, load_header + 40);
+                        if (slot >= load_address)
+                        {
+                            u64 relative = slot - load_address;
+                            bool in_memory = relative <= memory_size && sizeof(u64) <= memory_size - relative;
+                            bool in_file = relative <= file_size && sizeof(u64) <= file_size - relative &&
+                                           file_offset <= linked.executable.length && relative <= linked.executable.length - file_offset &&
+                                           sizeof(u64) <= linked.executable.length - (file_offset + relative);
+                            if ((link_read_u32(linked.executable.pointer, load_header + 4) & 2) && in_memory)
+                            {
+                                writable = true;
+                                if (in_file)
+                                {
+                                    file_backed = true;
+                                    slot_file_offset = file_offset + relative;
+                                }
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, writable && file_backed);
+                    if (file_backed) BUSTER_TEST(arguments, link_read_u64(linked.executable.pointer, slot_file_offset) == 0);
+                    u64 rela_address = 0;
+                    u64 rela_size = 0;
+                    bool no_slot_relocation = true;
+                    if (link_test_elf_dynamic_entry(linked.executable, 7, &rela_address))
+                    {
+                        u64 rela_header = 0;
+                        u64 rela_section_size = 0;
+                        bool rela_valid = link_test_elf_dynamic_entry(linked.executable, 8, &rela_size);
+                        if (rela_valid && rela_size)
+                        {
+                            rela_valid = link_test_elf_section_find(linked.executable, S8(".rela.dyn"), 0, &rela_header);
+                            if (rela_valid)
+                            {
+                                rela_valid = link_read_u64(linked.executable.pointer, rela_header + 16) == rela_address;
+                                rela_section_size = link_read_u64(linked.executable.pointer, rela_header + 32);
+                                rela_valid = rela_valid && rela_size <= rela_section_size && rela_size % 24 == 0 &&
+                                             link_read_u64(linked.executable.pointer, rela_header + 24) <= linked.executable.length &&
+                                             rela_size <= linked.executable.length - link_read_u64(linked.executable.pointer, rela_header + 24);
+                            }
+                        }
+                        BUSTER_TEST(arguments, rela_valid);
+                        if (rela_valid && rela_size)
+                        {
+                            u64 rela_offset = link_read_u64(linked.executable.pointer, rela_header + 24);
+                            for (u64 entry = 0; entry < rela_size; entry += 24)
+                            {
+                                no_slot_relocation = no_slot_relocation && link_read_u64(linked.executable.pointer, rela_offset + entry) != slot;
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, no_slot_relocation);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_shared_local_initial_exec_tls_addend(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6730,6 +6886,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult aarch64_ldst = link_test_aarch64_elf_ldst(arguments);
     result.succeeded_test_count += aarch64_ldst.succeeded_test_count;
     result.test_count += aarch64_ldst.test_count;
+    BUSTER_TEST_FIXTURE(arguments, link_test_aarch64_android_zero_got_slot);
     UnitTestResult single_input_alias = link_test_single_input_alias(arguments);
     result.succeeded_test_count += single_input_alias.succeeded_test_count;
     result.test_count += single_input_alias.test_count;
