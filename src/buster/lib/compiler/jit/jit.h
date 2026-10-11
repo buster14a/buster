@@ -73,6 +73,13 @@ struct JitProgram
     JitError error;
 };
 
+// Imported data ABSOLUTE64 references bind directly on x86-64 and AArch64.
+// Relative data references (x86-64 PC32, AArch64 PREL32 and Mach-O PAGE21)
+// constrain the image's placement to reach the actual host addresses. Hints
+// never replace existing mappings; no representable available placement is
+// reported as JIT_ERROR_CAPACITY. Host reads, writes and pointer identity are
+// preserved; the loader does not copy imported objects into its own image.
+//
 // Imported function PC32 references in text retain the call-thunk policy.
 // PC32 references in data/read-only sections use the explicit binding address,
 // like ABSOLUTE64 pointers, and fail with JIT_ERROR_CAPACITY when that signed

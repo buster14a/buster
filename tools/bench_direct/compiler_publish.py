@@ -76,6 +76,8 @@ from compiler_receipt import (validate_closure, ANALYZER_PROFILE, ANALYZER_PROFI
                               INLINE_ACCEPTANCE_REQUEST_LINE, INLINE_ACCEPTANCE_PROFILE,
                               AST_PILOT_ACCEPTANCE_REQUEST_LINE, AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_CELLS,
                               validate_ast_pilot_acceptance,
+                              THROUGHPUT_REAL_SOURCE_PROFILE, THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
+                              throughput_real_source_digest, validate_throughput_real_source,
                               MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
                               check_name, classify, classify_scaling, classify_throughput, host_problem, number,
                               range_label, regression_policy, render, SCALING_PROFILE, scaling_digest, validate_inline_acceptance,
@@ -210,6 +212,36 @@ def validate_ast_pilot_bundle(receipt_ast: object, bundle: object, head: str, ca
     return problems
 
 
+REAL_SOURCE_BUNDLE_FILES = {
+    "summary": "throughput_real_source/summary.json",
+    "metadata": "throughput_real_source/metadata.json",
+    "staging": "throughput_real_source/staging.json",
+    "cpuinfo": "throughput_real_source/cpuinfo.txt",
+}
+
+
+def validate_real_source_bundle(record: object, bundle: object, binaries: object) -> list[str]:
+    """Re-derive the requested #2761 real-source result from its exported summary, metadata, staging and host."""
+    if record is None:
+        return []
+    if not isinstance(record, dict) or record.get("requested") is not True:
+        return ["receipt real-source throughput record is present but not a request"]
+    problems: list[str] = []
+    if record.get("status") != "complete" or record.get("exit") != 0:
+        problems.append("receipt real-source throughput run did not complete successfully")
+    if record.get("request_line") != THROUGHPUT_REAL_SOURCE_REQUEST_LINE:
+        problems.append("receipt real-source request selector is not the exact supported line")
+    if record.get("profile") != THROUGHPUT_REAL_SOURCE_PROFILE:
+        problems.append("receipt real-source profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(REAL_SOURCE_BUNDLE_FILES):
+        return [*problems, "requested real-source throughput evidence bundle is incomplete"]
+    problems.extend(validate_throughput_real_source(record.get("exit"), bundle["summary"], bundle["metadata"],
+                                                    bundle["staging"], bundle["cpuinfo"], binaries))
+    if record.get("cells") != throughput_real_source_digest(bundle["summary"]):
+        problems.append("receipt real-source cells do not match the exported summary")
+    return problems
+
+
 def decide(expected: dict, authorized: bool, compare_result: str, receipt: object, summary: object,
            policy_value: str, throughput: object = None, require_throughput: bool = True,
            extra_reasons: list[str] | None = None, *,
@@ -289,6 +321,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.append(f"{selected_profile['name']} cannot be combined with issue #48 self-host acceptance")
                 if receipt.get("ast_pilot_acceptance") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with issue #3397 ast-pilot acceptance")
+                if receipt.get("throughput_real_source") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with real-source throughput")
                 reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
                 reasons.extend(validate_analyzer_bundle(receipt,
                                                         analyzer_bundle.get("summary") if isinstance(analyzer_bundle, dict) else None,
@@ -327,6 +361,12 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     candidate = (receipt.get("binaries") or {}).get("candidate") or {}
                     reasons.extend(validate_ast_pilot_bundle(receipt["ast_pilot_acceptance"], corpus.get("ast_pilot_bundle"),
                                                              expected.get("head", ""), candidate.get("sha256", "")))
+                if receipt.get("throughput_real_source") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("real-source throughput is valid only in pull mode")
+                    reasons.extend(validate_real_source_bundle(receipt["throughput_real_source"],
+                                                               corpus.get("real_source_bundle"), receipt.get("binaries")))
             if compare_result != "success":
                 reasons.append(f"compare job result is {compare_result!r}, not success")
             if problem:
@@ -674,7 +714,7 @@ def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
                         for operation in ("snapshot", "restore", "verify")})
     if receipt.get("throughput_profile") != THROUGHPUT_PROFILE or "scaling_profile" in receipt or \
             not isinstance(receipt.get("inline_acceptance"), dict) or receipt["inline_acceptance"].get("requested") is not False or \
-            "ast_pilot_acceptance" in receipt:
+            "ast_pilot_acceptance" in receipt or "throughput_real_source" in receipt:
         raise ValueError("owned ordinary Main evidence changed the complete original corpus recipe")
     identity = receipt.get("identity")
     if not isinstance(identity, dict) or identity.get("trusted_revision") != route["main_measurement_revision"]:
@@ -864,6 +904,23 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         problem = f"evidence member {member} is malformed JSON"
                         break
                 throughput["ast_pilot_bundle"] = bundle if not problem and len(bundle) == len(AST_PILOT_BUNDLE_FILES) else None
+            if isinstance(receipt, dict) and receipt.get("throughput_real_source") is not None and not problem:
+                bundle = {}
+                for key, member in REAL_SOURCE_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required real-source throughput evidence member {member} missing or oversized"
+                        break
+                    try:
+                        text = archive.read(info).decode("utf-8")
+                        bundle[key] = text if key == "cpuinfo" else json.loads(text, object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed"
+                        break
+                throughput["real_source_bundle"] = bundle if not problem and len(bundle) == len(REAL_SOURCE_BUNDLE_FILES) else None
     return receipt, summary, problem, artifact, throughput
 
 
@@ -929,9 +986,11 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     head_counts = {line: head_lines.count(line) for line in ANALYZER_REQUEST_LINES}
     head_inline_count = head_lines.count(INLINE_ACCEPTANCE_REQUEST_LINE)
     head_ast_count = head_lines.count(AST_PILOT_ACCEPTANCE_REQUEST_LINE)
+    head_real_count = head_lines.count(THROUGHPUT_REAL_SOURCE_REQUEST_LINE)
     parent_analyzer_deltas = {line: [] for line in ANALYZER_REQUEST_LINES}
     parent_inline_counts = []
     ast_deltas = []
+    real_deltas = []
     for parent in parent_shas:
         parent_bytes, problem = _github_file(api, parent)
         if problem:
@@ -944,12 +1003,19 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
             parent_analyzer_deltas[line].append(head_counts[line] - parent_lines.count(line))
         parent_inline_counts.append(parent_lines.count(INLINE_ACCEPTANCE_REQUEST_LINE))
         ast_deltas.append(head_ast_count - parent_lines.count(AST_PILOT_ACCEPTANCE_REQUEST_LINE))
+        real_deltas.append(head_real_count - parent_lines.count(THROUGHPUT_REAL_SOURCE_REQUEST_LINE))
     ast_record = receipt.get("ast_pilot_acceptance")
     if ast_record is not None and not all(delta == 1 for delta in ast_deltas):
         return ("the exact ast-pilot selector was not freshly added once at this head relative to every parent; "
                 "append one selector line for each explicit ast-pilot request")
     if ast_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in ast_deltas):
         return "a fresh ast-pilot selector has no ast-pilot acceptance record in the receipt"
+    real_record = receipt.get("throughput_real_source")
+    if real_record is not None and not all(delta == 1 for delta in real_deltas):
+        return ("the exact real-source throughput selector was not freshly added once at this head relative to every "
+                "parent; append one selector line for each explicit real-source request")
+    if real_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in real_deltas):
+        return "a fresh real-source throughput selector has no real-source record in the receipt"
     if analyzer_profile:
         selected_deltas = parent_analyzer_deltas[request_line]
         other_deltas = [delta for line, values in parent_analyzer_deltas.items() if line != request_line
@@ -1489,7 +1555,9 @@ def sampling_read_artifact(api: Api, authority: dict, *, retain_archive_identity
     # Construct the authenticated repository endpoint; never accept a download
     # host or executable path supplied by an artifact or request.
     payload = api.download(api.prefix + f"/actions/artifacts/{row['id']}/zip")
-    files = sampling_archive(payload)
+    # A packet retains about 3500 bounded data members (corpus logs and per-pair
+    # records); compiled outputs are pruned on the host and refused here.
+    files = sampling_archive(payload, member_limit=MAIN_ARCHIVE_FILE_LIMIT, require_nonexecutable=True)
     return files, campaign_artifact_identity(payload, row, files, retain_archive_identity)
 
 
@@ -2848,7 +2916,8 @@ def campaign_ingest_terminal(phase: str, packet: int, authority: dict, archive: 
         limit = ARTIFACT_LIMIT if sampling else PREPARATION_ARCHIVE_LIMIT
         if selected.get("expired") is not False or not isinstance(raw_zip, bytes) or not 0 < len(raw_zip) <= limit:
             raise ValueError("campaign terminal partial ZIP is expired, unavailable or oversized")
-        files = sampling_archive(raw_zip) if sampling else preparation_archive(raw_zip)
+        files = sampling_archive(raw_zip, member_limit=MAIN_ARCHIVE_FILE_LIMIT, require_nonexecutable=True) \
+            if sampling else preparation_archive(raw_zip)
         artifact = campaign_artifact_identity(raw_zip, selected, files, True)
     row, replay, manifest = campaign_terminal_data(phase, packet, authority, artifact)
     return {"schema": "buster-compiler-campaign-terminal-ingestion-v1", "phase": phase, "packet": packet,

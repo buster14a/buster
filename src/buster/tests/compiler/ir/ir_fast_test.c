@@ -353,6 +353,44 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
         }
         scratch_end(reuse_temporary);
     }
+    // Mandatory inlining of a certified module checks only the functions it
+    // reads or rewrites. It must add no module-wide strict scan: every scope
+    // scan is one preparation already counts (the FAST input/output guards),
+    // as a default compile without inlining would pay.
+    {
+        TemporalArena inline_temporary = arena_begin_temporal(arguments->arena);
+        CIRLowerResult inline_lowered = ir_promotion_lower(arguments->arena,
+            S8("static inline __attribute__((always_inline)) int add_one(int x){return x+1;}"
+               "int test(int c){return add_one(c)+add_one(c+2);}"), target_native);
+        BUSTER_TEST(arguments, inline_lowered.program && !inline_lowered.diagnostic_count);
+        if (inline_lowered.program && !inline_lowered.diagnostic_count)
+        {
+            IrProgram* inline_program = inline_lowered.program;
+            IrModule* inline_module = inline_program->modules;
+            inline_program->fast_passes = IR_FAST_ALL;
+#if BUSTER_BENCH_ALLOCATIONS
+            IrConstructionCounters before = ir_construction_counters();
+#endif
+            IrValidationResult inlined = ir_prepare_canonical_module(inline_program, inline_module, true);
+#if BUSTER_BENCH_ALLOCATIONS
+            IrConstructionCounters after = ir_construction_counters();
+#endif
+            BUSTER_TEST(arguments, inlined.error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, inline_module->inline_complete && inline_module->inlining.always_inlined == 2);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(inline_program, inline_module).error == IR_VALIDATION_NONE);
+#if BUSTER_BENCH_ALLOCATIONS
+            BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+#define IR_PREPARATION_DELTA(counter) (after.values[IR_CONSTRUCTION_##counter] - before.values[IR_CONSTRUCTION_##counter])
+            BUSTER_TEST(arguments, IR_PREPARATION_DELTA(PREPARATION_INPUT_VALIDATIONS) == 0);
+            BUSTER_TEST(arguments, IR_PREPARATION_DELTA(VALIDATION_CALLS) ==
+                                       IR_PREPARATION_DELTA(PREPARATION_PROMOTION_OUTPUT_VALIDATIONS) +
+                                       IR_PREPARATION_DELTA(PREPARATION_FAST_INPUT_VALIDATIONS) +
+                                       IR_PREPARATION_DELTA(PREPARATION_FAST_OUTPUT_VALIDATIONS));
+#undef IR_PREPARATION_DELTA
+#endif
+        }
+        scratch_end(inline_temporary);
+    }
     // A safely backed budget-control input: no instruction/block traversal and
     // no value storage. The guard must decline before allocating or touching
     // the advertised value population. This is not a valid-IR certification test.

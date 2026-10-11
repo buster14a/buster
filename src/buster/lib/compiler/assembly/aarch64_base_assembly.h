@@ -22,6 +22,8 @@ typedef enum A64BaseAssemblyStatus
     A64_BASE_ASSEMBLY_REQUIRES_NEON,
     A64_BASE_ASSEMBLY_REQUIRES_LSE,
     A64_BASE_ASSEMBLY_REQUIRES_SVE_OR_SME,
+    A64_BASE_ASSEMBLY_REQUIRES_SME,
+    A64_BASE_ASSEMBLY_REQUIRES_SME_I16I64,
 } A64BaseAssemblyStatus;
 
 BUSTER_F_DECL A64BaseAssemblyStatus a64_base_assemble(Target target, String8 mnemonic, String8 operands, u32* word);
