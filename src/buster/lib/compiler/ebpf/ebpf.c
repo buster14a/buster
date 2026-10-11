@@ -3640,6 +3640,14 @@ EbpfArtifact ebpf_emit_with_options(Arena* arena, IrProgram* program, IrModule* 
             context.error.instruction = validation.instruction;
             break;
         }
+        // The eBPF object carries no second name for a program or a map, and
+        // dropping the alias would silently lose its symbol (#1338).
+        if (modules[module_index].alias_count)
+        {
+            ebpf_fail(&context, EBPF_ERROR_UNRESOLVED_SYMBOL, ebpf_s8("eBPF output does not represent symbol aliases"), 0, 0, 0,
+                      modules[module_index].aliases[0].symbol);
+            break;
+        }
     }
 
     ByteSlice object = {0};

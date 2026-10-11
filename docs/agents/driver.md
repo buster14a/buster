@@ -383,14 +383,31 @@ left baseline code generation and no hint that the request was ignored.
 `-fno-strict-overflow` is accepted as `-fwrapv` (signed overflow already wraps;
 there is no `-fno-wrapv`, so `-fstrict-overflow` stays unsupported). `-w` is
 accepted and publishes no warning text or records and outranks every other
-warning option. `--version`, `-dumpversion` and
-`-dumpmachine` need no input and exit 0 (`compiler_driver_query_text`):
+warning option. `--version`, `-dumpversion`, `-dumpmachine` and
+`-print-target-triple`/`-print-effective-triple` need no input and exit 0
+(`compiler_driver_query_text`):
 `-dumpversion` prints `18.0.0`, the `__clang_major__`/`__clang_minor__`/
 `__clang_patchlevel__` triple (`__clang_version__` is `18.0.0 (buster)`);
 `-dumpmachine` prints the effective target as `arch-os[-environment]` with the
 `gnu` environment on Linux and `msvc` on Windows (for example
 `x86_64-linux-gnu`); `--version` prints `Buster clang version 18.0.0 (buster)`,
-`Target: <that triple>` and `Thread model: posix`.
+`Target: <that triple>` and `Thread model: posix`. `-print-target-triple` and
+`-print-effective-triple` print Clang's normalized `arch-vendor-os[-environment]`
+form, with the vendor `apple` on macOS/iOS and `unknown` elsewhere (for example
+`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-android`,
+`x86_64-unknown-windows-msvc`).
+`-trigraphs` and `-ftrigraphs` enable trigraph replacement and `-fno-trigraphs`
+disables it. A later `-std=` restores that dialect's default (on in strict C99
+to C17, off in GNU modes and C23), so the last of these options wins, as in
+Clang. `-nostdlibinc` drops the system include directories but keeps the
+compiler resource directory (`stddef.h` and the other freestanding headers);
+`-nostdinc` drops both. `-working-directory=DIR` and `-working-directory DIR`
+resolve relative input paths against `DIR` with host path rules (on POSIX only
+a leading `/` is absolute and `\` and `:` are ordinary filename bytes; on
+Windows `\x.c` takes the root name of `DIR` (`C:` or UNC `\\server`) and
+`C:x.c` its root-relative directory, as in LLVM's `make_absolute`). Output paths and `-I` directories stay relative to the process
+directory, and a `DIR` that is not a directory is rejected with
+`unable to set working directory: DIR`.
 Windows targets implement the MSVC ABI only, so the MinGW spellings
 (`*-mingw32`, and a `gnu`/`gnullvm` environment on Windows) are rejected with
 `unsupported target environment` instead of being aliased to MSVC (#1492);
@@ -486,9 +503,11 @@ unit's declaration records then come from the tree
 which hands any unit that `c_parse_ast` would diagnose or read differently
 back to `c_parse_ast`. Semantic analysis answers function-body
 expression-type queries from the tree where it can (the
-[tree expression typer](frontend/ast.md#tree-expression-typer)), and its body
+[tree expression typer](frontend/ast.md#tree-expression-typer)), its body
 binder follows each function body's
-[statement plan](frontend/ast.md#statement-plan-from-the-tree); no other
+[statement plan](frontend/ast.md#statement-plan-from-the-tree), and lowering
+answers its root-conditional splits from it
+([lowering from the tree](frontend/ast.md#lowering-from-the-tree)); no other
 stage reads it. Only under the flag does analysis share the primitive and
 pointer type rows those queries mint
 ([interned rows](frontend/ast.md#interned-rows)). With the flag the object
@@ -497,8 +516,8 @@ the unit with the parse error class and a located diagnostic published like
 `c_parse_ast`'s. It does nothing for `-E`, assembly inputs or the other
 languages. Any other layout value is an argument error
 (`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints
-`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT` and `C_AST_STATEMENTS`
-rows beside `C_TYPE_LAYOUT`.
+`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT`, `C_AST_STATEMENTS` and
+`C_AST_LOWER` rows beside `C_TYPE_LAYOUT`.
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
 nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`
@@ -663,8 +682,13 @@ shifted ADD, writeback or post-index addressing, `@PAGE` off
 Mach-O, or an instruction the relocation cannot patch (LDUR, LDP) is a structured
 diagnostic naming the combination. Out-of-range pages and misaligned scaled offsets
 are link-time checks (`object_aarch64_elf_page_relocate` and the PE/Mach-O
-equivalents), as with any assembler. GOT, TLS and codegen-PIC expansion stay with
-their own owners and remain refused here. Numeric `:lo12:` expressions on ELF and COFF
+equivalents), as with any assembler. On ELF, `adrp Xd, :got:sym` and
+`ldr Xt, [Xn, :got_lo12:sym]` are also accepted (#3192), spelling
+`R_AARCH64_ADR_GOT_PAGE` and `R_AARCH64_LD64_GOT_LO12_NC` with an exactly zero
+addend; `:got:` on any other instruction, `:got_lo12:` on anything but a plain
+64-bit `ldr [base, offset]`, and either modifier on Mach-O or COFF are
+diagnosed. TLS and codegen-PIC expansion stay with their own owners and
+remain refused here. Numeric `:lo12:` expressions on ELF and COFF
 are absolute nonnegative immediates without a symbol or relocation. ADD accepts
 0 through 4095; load/store offsets must be aligned and fit the encoded 12-bit
 scaled field, so their byte offset may exceed 4095. Negative, misaligned and
@@ -891,8 +915,8 @@ destinations are the same register, are operand diagnostics, as in llvm-mc.
 Not in this vocabulary, and still refused unless another owner accepts them:
 
 - relocated operands other than the page-address forms documented with the unit
-  vocabulary (GOT, TLS and `:got_lo12:`-style modifiers; the control owner
-  handles label LDR);
+  vocabulary (TLS and further GOT-style modifiers; the control owner handles
+  label LDR, and ELF `:got:`/`:got_lo12:` are documented above);
 - CASP, LDAPR (RCPC), LDTR/STTR, CRC32 and pointer authentication;
 - AdvSIMD forms beyond the list above that the direct SIMD owner does not
   cover, such as by-element arithmetic (`fmla v0.4s, v1.4s, v2.s[0]`) and
@@ -1243,9 +1267,35 @@ define those names are selected; libgcc.a is not otherwise added to the link,
 so the libgcc_s helper policy above is unchanged. Links without such a
 reference, including weak ones, do not read or name libgcc.a. A missing
 archive, or one that does not define the name, fails the link with the archive
-and symbol named, before replacing the output. AArch64 (`__aarch64_cpu_features`,
-`__init_cpu_features_resolver`, outline atomics) and non-Linux targets remain
-out of scope.
+and symbol named, before replacing the output.
+
+The same policy covers AArch64 Linux (GitHub #3508), with a target-keyed name
+set and GCC triple list (`aarch64-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`aarch64-redhat-linux`, `aarch64-suse-linux`); the x86-64 names and triples
+are unchanged. Every AArch64 name below is a hidden definition that only the
+static `libgcc.a` provides; `libgcc_s.so.1` exports none of them, so they
+belong here rather than in the libgcc_s helper policy:
+
+- GCC 10+ and Clang default to `-moutline-atomics`, so `__atomic_*` builtins
+  call `__aarch64_<op><bytes>_<order>` helpers: `cas` (1, 2, 4, 8 and 16
+  bytes) and `swp`, `ldadd`, `ldclr`, `ldeor`, `ldset` (1, 2, 4 and 8 bytes),
+  each with `relax`, `acq`, `rel`, `acq_rel` or `sync`
+  (`compiler_driver_elf_outline_atomic_symbol`). Each helper member references
+  `__aarch64_have_lse_atomics`, so `lse-init.o` and its `.init_array` LSE
+  probe are selected with it.
+- GCC 14+ and compiler-rt FMV resolvers use `__aarch64_cpu_features`,
+  `__init_cpu_features_resolver` and `__init_cpu_features` (`cpuinfo.o`, with
+  its own constructor). GCC 13 and older `libgcc.a` has no `cpuinfo.o`, so such
+  a link fails with the archive and symbol named, as the host link does.
+- `__builtin___clear_cache` calls `__aarch64_sync_cache_range`
+  (`sync-cache.o`).
+
+The selected members reference `getauxval` or `__getauxval`, which bind to
+glibc like any other import. `compiler_driver_elf_aarch64_cpu_runtime_tests`
+checks these links against the host link on AArch64 Linux hosts.
+`compiler_driver_elf_aarch64_cpu_runtime_selection_tests` covers selection,
+refusal, and per-target keying from any Linux host. SME runtime entry points,
+Android, and non-Linux targets remain out of scope.
 
 `compiler_driver_elf_dynamic_symbols` walks that table once and produces two
 things.
