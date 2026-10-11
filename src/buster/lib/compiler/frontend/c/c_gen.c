@@ -39440,6 +39440,20 @@ BUSTER_C_INTERNAL bool c_ir_tree_conditional_record(CAst const* ast, CPreprocess
     return valid;
 }
 
+// The CONDITIONAL and CONDITIONAL_OMITTED nodes in [begin, end): one compare
+// per kind byte and no branch, so the loop vectorizes, and the build skips a
+// body without any before it walks a node.
+BUSTER_C_INTERNAL u32 c_ir_tree_conditional_count(u8 const* kinds, u32 begin, u32 end)
+{
+    BUSTER_CT_CHECK(C_AST_CONDITIONAL_OMITTED == C_AST_CONDITIONAL + 1);
+    u32 count = 0;
+    for (u32 node = begin; node < end; node += 1)
+    {
+        count += (u8)(kinds[node] - C_AST_CONDITIONAL) < 2;
+    }
+    return count;
+}
+
 // The bytes c_ir_tree_conditionals_build carves for `ast`, with the counts it
 // needs. A tree that is not a complete translation unit counts nothing, and its
 // index is empty, so lowering runs every scan.
@@ -39458,19 +39472,15 @@ BUSTER_C_INTERNAL u64 c_ir_tree_conditionals_size(CAst const* ast, u32* body_cou
             body_count += ast->kinds[child] == C_AST_FUNCTION_DEFINITION && child && ast->kinds[child - 1] == C_AST_COMPOUND_STATEMENT;
             cursor = c_ast_subtree_begin(ast, child);
         }
-        for (u32 node = 0; node < ast->node_count; node += 1)
-        {
-            u8 kind = ast->kinds[node];
-            conditional_count += kind == C_AST_CONDITIONAL || kind == C_AST_CONDITIONAL_OMITTED;
-        }
+        conditional_count = c_ir_tree_conditional_count(ast->kinds, 0, ast->node_count);
     }
     *body_count_out = body_count;
     *conditional_count_out = conditional_count;
     // Braces and bodies per body; per conditional, its question, its kept and
-    // found records and two sort keys; one spare element and alignment slack
-    // for each of the seven arrays.
+    // found records and three sort keys; one spare element and alignment slack
+    // for each of the eight arrays.
     return (u64)(body_count + 1) * (sizeof(u32) + sizeof(CIrTreeConditionals)) +
-           (u64)(conditional_count + 1) * (sizeof(u32) + 2 * sizeof(CIrTreeConditional) + 2 * sizeof(u64)) + 7 * 16;
+           (u64)(conditional_count + 1) * (sizeof(u32) + 2 * sizeof(CIrTreeConditional) + 3 * sizeof(u64)) + 8 * 16;
 }
 
 // Indexes the conditional nodes of every top-level function body of `ast`
@@ -39485,6 +39495,7 @@ BUSTER_C_INTERNAL CIrTreeConditionalIndex c_ir_tree_conditionals_build(Arena* ar
     u32* questions = arena_allocate(arena, u32, conditional_count + 1);
     CIrTreeConditional* records = arena_allocate(arena, CIrTreeConditional, conditional_count + 1);
     u64* keys = arena_allocate(arena, u64, conditional_count + 1);
+    u64* question_keys = arena_allocate(arena, u64, conditional_count + 1);
     u64* scratch = arena_allocate(arena, u64, conditional_count + 1);
     CIrTreeConditional* found = arena_allocate(arena, CIrTreeConditional, conditional_count + 1);
     u32 slot = body_count;
@@ -39504,37 +39515,33 @@ BUSTER_C_INTERNAL CIrTreeConditionalIndex c_ir_tree_conditionals_build(Arena* ar
         }
         u32 body = child - 1;
         u32 body_start = ast->tokens[body] + 1;
-        u32 body_question_count = 0;
         u32 body_record_count = 0;
         u32 node_begin = c_ast_subtree_begin(ast, body);
-        for (u32 node = node_begin; node < body; node += 1)
+        u32 body_question_count = c_ir_tree_conditional_count(ast->kinds, node_begin, body);
+        question_end -= body_question_count;
+        // One walk records each conditional's `?` and, when its tokens are
+        // found, its record keyed by (start, position found).
+        u32 question_count = 0;
+        u32 found_count = 0;
+        for (u32 node = node_begin; node < body && question_count < body_question_count; node += 1)
         {
-            u8 kind = ast->kinds[node];
-            if (kind == C_AST_CONDITIONAL || kind == C_AST_CONDITIONAL_OMITTED)
+            if ((u8)(ast->kinds[node] - C_AST_CONDITIONAL) < 2)
             {
-                keys[body_question_count] = (u64)ast->tokens[node] << 32;
-                body_question_count += 1;
+                question_keys[question_count] = (u64)ast->tokens[node] << 32;
+                question_count += 1;
+                CIrTreeConditional record;
+                if (c_ir_tree_conditional_record(ast, preprocess, stream_matching_delimiters_plus_one, body_start, node, &record))
+                {
+                    found[found_count] = record;
+                    keys[found_count] = ((u64)record.start << 32) | found_count;
+                    found_count += 1;
+                }
             }
         }
-        question_end -= body_question_count;
-        c_ir_tree_sort_keys(keys, scratch, body_question_count);
+        c_ir_tree_sort_keys(question_keys, scratch, body_question_count);
         for (u32 key = 0; key < body_question_count; key += 1)
         {
-            questions[question_end + key] = (u32)(keys[key] >> 32);
-        }
-        // The records found, keyed by (start, position found).
-        u32 found_count = 0;
-        for (u32 node = node_begin; node < body && body_question_count; node += 1)
-        {
-            u8 kind = ast->kinds[node];
-            CIrTreeConditional record;
-            if ((kind == C_AST_CONDITIONAL || kind == C_AST_CONDITIONAL_OMITTED) &&
-                c_ir_tree_conditional_record(ast, preprocess, stream_matching_delimiters_plus_one, body_start, node, &record))
-            {
-                found[found_count] = record;
-                keys[found_count] = ((u64)record.start << 32) | found_count;
-                found_count += 1;
-            }
+            questions[question_end + key] = (u32)(question_keys[key] >> 32);
         }
         c_ir_tree_sort_keys(keys, scratch, found_count);
         for (u32 pass = 0; pass < 2; pass += 1)
@@ -39603,49 +39610,48 @@ BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u3
                                                     u32* expression_end)
 {
     CIrTreeConditionals const* tree = builder->tree_conditionals;
-    u32 stripped_start = start;
-    u32 stripped_end = end;
-    while (stripped_start < stripped_end && c_token_is_punctuator(&builder->preprocess.tokens[stripped_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-           !c_ir_group_is_statement_expression(builder, stripped_start, stripped_end) &&
-           c_ir_matching_delimiter_cached(builder, stripped_start, stripped_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) ==
-               stripped_end - 1)
-    {
-        stripped_start += 1;
-        stripped_end -= 1;
-    }
     CIrTreeRootVerdict verdict = C_IR_TREE_ROOT_UNKNOWN;
     CIrTreeConditional record = {0};
-    if (stripped_start < stripped_end && stripped_start >= builder->body_token_start &&
-        stripped_end - builder->body_token_start <= builder->body_token_count)
+    u32 stripped_start = start;
+    u32 stripped_end = end;
+    bool in_body = start < end && start >= builder->body_token_start && end - builder->body_token_start <= builder->body_token_count;
+    if (in_body)
     {
+        // Stripping parentheses only narrows the range, so a range with no
+        // `?` is decided before the strip.
         u32 low = 0;
         u32 high = tree->question_count;
         while (low < high)
         {
             u32 middle = low + (high - low) / 2;
-            low = tree->questions[middle] < stripped_start ? middle + 1 : low;
-            high = tree->questions[middle] < stripped_start ? high : middle;
+            low = tree->questions[middle] < start ? middle + 1 : low;
+            high = tree->questions[middle] < start ? high : middle;
         }
-        if (low == tree->question_count || tree->questions[low] >= stripped_end)
+        verdict = low == tree->question_count || tree->questions[low] >= end ? C_IR_TREE_ROOT_FALSE : C_IR_TREE_ROOT_UNKNOWN;
+    }
+    if (in_body && verdict == C_IR_TREE_ROOT_UNKNOWN)
+    {
+        while (stripped_start < stripped_end && c_token_is_punctuator(&builder->preprocess.tokens[stripped_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+               !c_ir_group_is_statement_expression(builder, stripped_start, stripped_end) &&
+               c_ir_matching_delimiter_cached(builder, stripped_start, stripped_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) ==
+                   stripped_end - 1)
         {
-            verdict = C_IR_TREE_ROOT_FALSE;
+            stripped_start += 1;
+            stripped_end -= 1;
         }
-        else
+        u32 low = 0;
+        u32 high = tree->record_count;
+        while (low < high)
         {
-            low = 0;
-            high = tree->record_count;
-            while (low < high)
-            {
-                u32 middle = low + (high - low) / 2;
-                low = tree->records[middle].start < stripped_start ? middle + 1 : low;
-                high = tree->records[middle].start < stripped_start ? high : middle;
-            }
-            if (low < tree->record_count && tree->records[low].start == stripped_start)
-            {
-                record = tree->records[low];
-                bool refused = record.colon == record.question + 1 && !c_preprocess_dialect_is_gnu(builder->preprocess.dialect);
-                verdict = record.colon + 1 < stripped_end && !refused ? C_IR_TREE_ROOT_TRUE : C_IR_TREE_ROOT_UNKNOWN;
-            }
+            u32 middle = low + (high - low) / 2;
+            low = tree->records[middle].start < stripped_start ? middle + 1 : low;
+            high = tree->records[middle].start < stripped_start ? high : middle;
+        }
+        if (stripped_start < stripped_end && low < tree->record_count && tree->records[low].start == stripped_start)
+        {
+            record = tree->records[low];
+            bool refused = record.colon == record.question + 1 && !c_preprocess_dialect_is_gnu(builder->preprocess.dialect);
+            verdict = record.colon + 1 < stripped_end && !refused ? C_IR_TREE_ROOT_TRUE : C_IR_TREE_ROOT_UNKNOWN;
         }
     }
     bool result;

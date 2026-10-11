@@ -801,8 +801,8 @@ A query inside a body is answered in one of three ways:
   assignment. Its `:` is the one the scan pairs with that `?`. So the scan
   returns the same four tokens.
 - **The token scan** for everything else: a range with a root comma or
-  assignment before the `?`, a nested function's body, and file-scope
-  initializers.
+  assignment before the `?`, a range outside the body being lowered, and
+  file-scope initializers.
 
 Debug and sanitized builds check every answer against the scan.
 `CAstLowerStatistics` counts the answers, and `-v` prints them as a
