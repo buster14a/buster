@@ -34752,12 +34752,23 @@ BUSTER_C_INTERNAL String8 c_ifunc_attribute_unsupported_output(Target target)
     return result;
 }
 
-// The diagnostic an `ifunc` declaration earns, or an empty string when its
-// resolver is acceptable. Checked in the order a reader would fix them: the
-// declaration itself, then the resolver's existence, kind, definition and
-// return type. The output comes first: no resolver fixes that.
+// What the declarations of one entity say between them, which an `ifunc`
+// has to be checked against as a whole: GCC and Clang refuse an ifunc that
+// another declaration makes an alias, a weak symbol or the ifunc of a second
+// resolver, and the lowering would otherwise let the last of them win.
+#define C_PARSE_ENTITY_ATTRIBUTE_WEAK  ((u8)1)
+#define C_PARSE_ENTITY_ATTRIBUTE_ALIAS ((u8)2)
+#define C_PARSE_ENTITY_ATTRIBUTE_IFUNC ((u8)4)
+
+// The diagnostic an entity's first `ifunc` declaration earns, or an empty
+// string when its resolver is acceptable. `entity_attributes` is what every
+// declaration of the entity says, and `other_resolver` a second resolver one
+// of them names. Checked in the order a reader would fix them: the output
+// (no resolver fixes that), the declaration and its entity, then the
+// resolver's existence, kind, definition and return type.
 BUSTER_C_INTERNAL String8 c_parse_ifunc_resolver_message(Arena* arena, CParseResult* result, CPreprocessResult preprocess,
-                                                        CDeclaration declaration, CDeclarationBinding binding)
+                                                        CDeclaration declaration, CDeclarationBinding binding, u8 entity_attributes,
+                                                        String8 other_resolver)
 {
     String8 message = {0};
     CEntityId resolver = binding.ifunc_resolver.length && result->scope_count
@@ -34778,9 +34789,18 @@ BUSTER_C_INTERNAL String8 c_parse_ifunc_resolver_message(Arena* arena, CParseRes
     {
         message = c_parse_message(arena, S8("ifunc attribute on '{S8}' must name a resolver"), declaration.name);
     }
-    else if (binding.is_weakref || binding.alias_target.length)
+    else if (other_resolver.length)
+    {
+        message = c_parse_message(arena, S8("ifunc '{S8}' names both '{S8}' and '{S8}' as its resolver"), declaration.name, binding.ifunc_resolver,
+                                  other_resolver);
+    }
+    else if (entity_attributes & C_PARSE_ENTITY_ATTRIBUTE_ALIAS)
     {
         message = c_parse_message(arena, S8("'{S8}' cannot be both an ifunc and an alias"), declaration.name);
+    }
+    else if (entity_attributes & C_PARSE_ENTITY_ATTRIBUTE_WEAK)
+    {
+        message = c_parse_message(arena, S8("'{S8}' cannot be both an ifunc and weak"), declaration.name);
     }
     else if (entity->is_definition)
     {
@@ -34820,6 +34840,14 @@ BUSTER_C_INTERNAL String8 c_parse_ifunc_resolver_message(Arena* arena, CParseRes
 
 BUSTER_C_INTERNAL void c_parse_validate_alias_targets(Arena* arena, CParseResult* result, CPreprocessResult preprocess)
 {
+    TemporalArena temporary = scratch_begin(&arena, 1);
+    u32 entity_capacity = result->entity_count ? result->entity_count : 1;
+    u8* entity_attributes = arena_allocate_zeroed(temporary.arena, u8, entity_capacity);
+    // The first `ifunc` declaration of each entity, and a second resolver
+    // another of its declarations names; read only for IFUNC entities.
+    u32* first_ifunc = arena_allocate(temporary.arena, u32, entity_capacity);
+    String8* other_resolver = arena_allocate_zeroed(temporary.arena, String8, entity_capacity);
+    bool any_ifunc = false;
     for (u32 index = 0; index < result->declaration_count; index += 1)
     {
         CDeclaration declaration = result->declarations[index];
@@ -34842,19 +34870,29 @@ BUSTER_C_INTERNAL void c_parse_validate_alias_targets(Arena* arena, CParseResult
                                    c_parse_message(arena, S8("visibility attribute on '{S8}' must name \"default\", \"hidden\", \"internal\" or \"protected\""),
                                                    declaration.name));
             }
-            // An `ifunc` names its resolver the way an alias names its target,
-            // so it obeys the same rules and one more: the resolver returns the
-            // implementation, so it must be a function returning `void *` or a
-            // pointer to a function compatible with the declared one -- what
-            // Clang requires, and what GCC warns about. A `weakref` names its
-            // target itself or through the GCC `alias` spelling, and either
-            // way it is not an alias definition to validate below.
+            // A `weakref` names its target itself or through the GCC `alias`
+            // spelling, and either way it is not an alias definition to
+            // validate below.
+            u32 entity = declaration.entity.value;
+            u8 attributes = entity_attributes[entity];
+            entity_attributes[entity] |= (binding.is_weak ? C_PARSE_ENTITY_ATTRIBUTE_WEAK : 0) |
+                                         (binding.is_weakref || binding.alias_target.length ? C_PARSE_ENTITY_ATTRIBUTE_ALIAS : 0) |
+                                         (binding.is_ifunc ? C_PARSE_ENTITY_ATTRIBUTE_IFUNC : 0);
+            // An ifunc is checked below, once every declaration of its entity
+            // has been seen; here it only records its first declaration and
+            // a second resolver a later one names.
             if (binding.is_ifunc)
             {
-                String8 message = c_parse_ifunc_resolver_message(arena, result, preprocess, declaration, binding);
-                if (message.length)
+                if (!(attributes & C_PARSE_ENTITY_ATTRIBUTE_IFUNC))
                 {
-                    c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration.location), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, message);
+                    first_ifunc[entity] = index;
+                    any_ifunc = true;
+                }
+                else if (!other_resolver[entity].length && binding.ifunc_resolver.length &&
+                         !string_equal(binding.ifunc_resolver,
+                                       c_declaration_binding(arena, preprocess, result->declarations[first_ifunc[entity]]).ifunc_resolver))
+                {
+                    other_resolver[entity] = binding.ifunc_resolver;
                 }
             }
             else if (binding.is_weakref)
@@ -34890,6 +34928,28 @@ BUSTER_C_INTERNAL void c_parse_validate_alias_targets(Arena* arena, CParseResult
             }
         }
     }
+    // An `ifunc` names its resolver the way an alias names its target, so it
+    // obeys the same rules and more: the resolver returns the implementation,
+    // so it must be a function returning `void *` or a pointer to a function
+    // compatible with the declared one -- what Clang requires, and what GCC
+    // warns about -- and no other declaration of the entity may make it weak,
+    // an alias or another resolver's ifunc. One diagnostic per entity, at its
+    // first ifunc declaration.
+    for (u32 entity = 0; any_ifunc && entity < result->entity_count; entity += 1)
+    {
+        if (entity_attributes[entity] & C_PARSE_ENTITY_ATTRIBUTE_IFUNC)
+        {
+            CDeclaration declaration = result->declarations[first_ifunc[entity]];
+            CDeclarationBinding binding = c_declaration_binding(arena, preprocess, declaration);
+            String8 message =
+                c_parse_ifunc_resolver_message(arena, result, preprocess, declaration, binding, entity_attributes[entity], other_resolver[entity]);
+            if (message.length)
+            {
+                c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration.location), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, message);
+            }
+        }
+    }
+    scratch_end(temporary);
 }
 
 BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* machine, Arena* arena, CParseResult* result,

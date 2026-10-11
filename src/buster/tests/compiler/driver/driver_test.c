@@ -4206,6 +4206,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_ifunc_attribute(UnitTest
          S8("'f' is both defined here and an ifunc resolved by 'resolve'")},
         {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((ifunc(\"resolve\"), alias(\"impl\")));\n"),
          S8("'f' cannot be both an ifunc and an alias")},
+        // The entity as a whole is checked, whichever declaration says it
+        // and in either order: the last alias target or resolver would
+        // otherwise win and keep the indirect bit.
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((ifunc(\"resolve\")));\nint f(int) __attribute__((alias(\"impl\")));\n"),
+         S8("'f' cannot be both an ifunc and an alias")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((alias(\"impl\")));\nint f(int) __attribute__((ifunc(\"resolve\")));\n"),
+         S8("'f' cannot be both an ifunc and an alias")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((weak, ifunc(\"resolve\")));\n"), S8("'f' cannot be both an ifunc and weak")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((weak));\nint f(int) __attribute__((ifunc(\"resolve\")));\n"),
+         S8("'f' cannot be both an ifunc and weak")},
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int) __attribute__((ifunc(\"resolve\")));\nint f(int) __attribute__((weak));\n"),
+         S8("'f' cannot be both an ifunc and weak")},
+        {S8("x86_64-unknown-linux-gnu"),
+         S8("static int (*other(void))(int) { return impl; }\nint f(int) __attribute__((ifunc(\"resolve\")));\nint f(int) __attribute__((ifunc(\"other\")));\n"),
+         S8("ifunc 'f' names both 'resolve' and 'other' as its resolver")},
+        // Redeclaring an ifunc plainly, or with the same resolver, keeps it.
+        {S8("x86_64-unknown-linux-gnu"), S8("int f(int);\nint f(int) __attribute__((ifunc(\"resolve\")));\nint f(int) __attribute__((ifunc(\"resolve\")));\nint f(int);\n")},
         // COFF and Mach-O have no indirect-function symbol to carry it.
         {S8("x86_64-pc-windows"), S8("int f(int) __attribute__((ifunc(\"resolve\")));\n"),
          S8("ifunc attribute on 'f' is not supported: COFF output has no indirect function symbol")},
