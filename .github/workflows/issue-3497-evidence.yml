@@ -1,0 +1,60 @@
+name: Issue 3497 hosted proof
+on:
+  push:
+    branches:
+      - codex/3497-nested-tag-evidence
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout evidence orchestration
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: evidence
+          persist-credentials: false
+      - name: Checkout unchanged baseline
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 674bc77660c8c588c815c21fcc9e148f83094de1
+          path: baseline
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout exact repair source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 5c9fa1af208f9a6c0fbcda6605bfc5c7f5de71df
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install diagnostic counter
+        run: sudo apt-get install -y valgrind
+      - name: Baseline compiler and fixed point
+        working-directory: baseline
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/driver-baseline"
+          "$RUNNER_TEMP/driver-baseline" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF -DBUSTER_NATIVE_TARGET=x86-64-v3
+          "$RUNNER_TEMP/driver-baseline" build --config Release -t ide
+          "$RUNNER_TEMP/driver-baseline" test_self_host --config Release
+      - name: Candidate compiler and focused regressions
+        working-directory: candidate
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/driver-candidate"
+          "$RUNNER_TEMP/driver-candidate" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF -DBUSTER_NATIVE_TARGET=x86-64-v3
+          "$RUNNER_TEMP/driver-candidate" build --config Release -t ide
+          build/Release/ide test --module=c_frontend_tests --verbose=1 --ci=1
+          "$RUNNER_TEMP/driver-candidate" test_self_host --config Release
+          "$RUNNER_TEMP/driver-candidate" source_size --base 674bc77660c8c588c815c21fcc9e148f83094de1
+      - name: Baseline and candidate instruction and object proof
+        run: |
+          clang -std=c11 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char evidence/tools/issue3497_evidence.c -o "$RUNNER_TEMP/issue3497-proof"
+          "$RUNNER_TEMP/issue3497-proof" "$GITHUB_WORKSPACE/baseline/build/Release/ide" "$GITHUB_WORKSPACE/candidate/build/Release/ide"
+      - name: Retain proof logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-3497-proof
+          path: proof-3497
+          if-no-files-found: warn
