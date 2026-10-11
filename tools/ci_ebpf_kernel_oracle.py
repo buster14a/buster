@@ -119,10 +119,14 @@ def read_probe(path):
 
 def probe_context(ide):
     """One line of kernel/capability context for an unavailable or failed run."""
-    try:
-        capability = os.getxattr(ide, "security.capability").hex()
-    except OSError:
-        capability = "absent"
+    getxattr = getattr(os, "getxattr", None)
+    if getxattr is None:
+        capability = "unsupported"
+    else:
+        try:
+            capability = getxattr(ide, "security.capability").hex()
+        except OSError:
+            capability = "absent"
     return (
         "probe:"
         f" platform.release={platform.release()}"

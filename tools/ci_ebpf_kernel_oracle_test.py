@@ -162,6 +162,8 @@ elif sys.argv[1] == "metamorphic":
     print("METAMORPHIC_SUMMARY cases=4 status=passed")
 """
 
+# The fixture ide is a Python script; only POSIX exec can run it directly.
+@unittest.skipIf(os.name == "nt", "fake ide script cannot exec on Windows")
 class MainEndToEndTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
