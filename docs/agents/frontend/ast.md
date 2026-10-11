@@ -1576,6 +1576,22 @@ the binding calls stay. The budgets:
 - **Adoption of the hook as the default.** Unchanged, with acceptance on the
   Zen 5 route (#2761).
 
+The braced segments' hosted census is
+[`2026-10-11T151745Z`](../../performance-audits/2026-10-11T151745Z.md), taken
+the same way and diagnostic only:
+- Correctness, object identity and coverage pass:
+  - 0 binding differences on the corpus, the frontend sources and the
+    self-host unity input;
+  - identical `-c` objects in the four arms;
+  - 9,627 statements planned braced, with the declines falling from 10,378 to
+    751, and no fallback or bail.
+- The body binder falls by 73.3 M (9.5%), and the whole compile by 73.2 M
+  (0.79%, C against B), with about 11 M of plan construction charged.
+- The default path meets work equivalence: the planless walk makes identical
+  calls, and D against A is +0.003%, all of it libc string comparison with
+  identical call counts.
+- Acceptance stays with Zen 5 (#2761), so the default stays off.
+
 For the split's [diagnostic probe](#declaration-split-from-the-tree)
 (`c_parser_tree_probe`), these budgets were declared before its measured runs.
 The probe classifies identifier lanes from their interned ids instead of
