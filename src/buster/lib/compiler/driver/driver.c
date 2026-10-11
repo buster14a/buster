@@ -2707,7 +2707,6 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 {
                     invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST;
                     invocation.optimization_level = levels[index].level;
-                    invocation.inline_options.tiny = levels[index].level > 0;
                     found = true;
                     break;
                 }

@@ -31213,11 +31213,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_canonical_inlining(UnitT
         CompilerDriverResult optimized_default = compiler_driver_execute_invocation(
             arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(optimized_default_command)));
         BUSTER_TEST_RAW(arguments, optimized_default.error == COMPILER_DRIVER_ERROR_NONE, optimized_default.diagnostic);
-        BUSTER_TEST(arguments, optimized_default.inlining.inlined != 0);
+        // Optimization levels do not select tiny expansion; only source
+        // directives are expanded without -fcanonical-inline.
+        BUSTER_TEST(arguments, optimized_default.inlining.inlined != 0 &&
+                               optimized_default.inlining.inlined == optimized_default.inlining.always_inlined);
         if (optimized_default.error == COMPILER_DRIVER_ERROR_NONE)
         {
             String8 assembly = BYTE_SLICE_TO_STRING(8, file_read(arena, listing_path, (FileReadOptions){0}));
-            BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("tiny_helper")));
+            BUSTER_TEST(arguments, compiler_driver_test_assembly_calls(assembly, S8("tiny_helper")));
             BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("discarded_return_helper")));
             BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("discarded_aggregate_return")));
         }
@@ -31254,8 +31257,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_canonical_inlining(UnitT
             BUSTER_TEST(arguments, !compiler_driver_test_assembly_calls(assembly, S8("discarded_aggregate_return")));
         }
 
+        // An optimization level after the explicit selection leaves it in force.
         String8 last_flag_enabled_command[] = {
-            S8("-target"), S8("x86_64-unknown-linux"), S8("-fno-canonical-inline"), S8("-O2"),
+            S8("-target"), S8("x86_64-unknown-linux"), S8("-fcanonical-inline"), S8("-O0"),
             S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-g0"), S8("-S"),
             source_path, S8("-o"), listing_path,
         };

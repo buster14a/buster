@@ -158,11 +158,11 @@ A direct mandatory call that cannot be expanded produces a structured
 `ir.inline-required` diagnostic rather than silently keeping the call.
 Indirect calls preserve their ordinary runtime dispatch.
 
-Tiny-call expansion is selected by positive `-O` levels or
-`-fcanonical-inline` and disabled by `-O0` or `-fno-canonical-inline`;
-the last selection wins. An invocation without an optimization-level or inline
-flag retains the existing optional-inlining default. Source `always_inline`
-requests remain independent of that selection.
+Tiny-call expansion is opt-in: `-fcanonical-inline` selects it and
+`-fno-canonical-inline` clears it, the last of the two winning; optimization
+levels never change it (see `docs/agents/driver.md` for the measurement behind
+that default). Source `always_inline` requests remain independent of that
+selection.
 
 Optional candidates are same-module, noninterposable single-block leaves with
 compatible fixed-prototype signatures. Target-aware C lowering permits strong

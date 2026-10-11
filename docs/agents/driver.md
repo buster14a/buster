@@ -486,11 +486,12 @@ The default `-fcanonical-fast` shared pipeline and independent
 (`-ftime-canonical-fast -v`); register allocation selection is unchanged.
 
 Canonical inlining is separate from register allocation. Tiny direct-call
-inlining defaults off when no optimization level is selected; an explicit
-`-O1`, `-O2`, `-O3`, `-Os`, or `-Oz` enables it, and `-O0` disables it.
-`-fcanonical-inline` enables tiny inlining and `-fno-canonical-inline`
-disables it. The last `-O*` or explicit inlining switch in argument order
-wins. The optimizer still enforces `always_inline` requirements when tiny
+inlining is opt-in at every optimization level: `-fcanonical-inline` enables
+it and `-fno-canonical-inline` disables it (the last of the two wins), and
+`-O*` levels never change it. The matched 9700X tiny-off/on self-host profile
+on #3111 measured no compiler-throughput gain from enabling it (stage-1
+compile wall +1.66%, generated compiler self-host wall +0.68%), so no level
+adopts it by default. The optimizer still enforces `always_inline` requirements when tiny
 inlining is disabled; an impossible requirement produces a source-mapped
 `ir.inline-required` error. Positive 32-bit per-invocation limits are set with
 `-fcanonical-inline-max-callee=N`,
