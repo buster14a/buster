@@ -785,6 +785,17 @@ request from assembly, an external ELF object or a selected archive member
 with a diagnostic naming that input; it publishes no image. Inputs with no
 note remain accepted as nonexecuting. See [object emission](../object-emission.md).
 
+Every section an assembly file declares is its own object section, in
+declaration order, on every format: thousands on ELF, up to 65,279 on COFF
+(`OBJECT_COFF_MAX_SECTIONS`) and 255 on Mach-O (`OBJECT_MACH_O_MAX_SECTIONS`).
+ELF and COFF keep each section's own name; the Mach-O writer spells each one
+by its kind (`__TEXT,__text`, `__TEXT,__const`, ...), so several sections may
+share a name there while keeping their own contents and relocations. Past a format's limit, `-c` refuses with the
+first section that does not fit (`section '.text$f255' is section 256 of 256;
+a mach-o64 object holds at most 255 sections`). Only a section whose kind is
+an initializer array takes COFF's `.CRT$XCU`/`.CRT$XTX` name.
+`compiler_driver_test_assembly_many_object_sections` covers this.
+
 The x86-64 instruction layer accepts the GNU spellings that GCC and Clang
 listings and Buster's own `-S` output use, encoding the same bytes as GNU as:
 register-immediate `movabs`/`movabsq`; AT&T `retq` and `callq`; `endbr32` and

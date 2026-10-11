@@ -13592,12 +13592,11 @@ BUSTER_GLOBAL_LOCAL void* object_writer_table_allocate_bytes(Arena* arena, u64 c
 
 #define object_writer_table_allocate(arena, T, count) ((T*)object_writer_table_allocate_bytes((arena), (count), sizeof(T), BUSTER_ALIGN_OF(T)))
 
-// Regular COFF reserves section numbers 0xff00 and above. Its long-name
-// references are slash plus decimal in an eight-byte field (PE/COFF section
-// table Name), so seven decimal digits is the largest reference we emit.
+// COFF long-name references are slash plus decimal in an eight-byte field
+// (PE/COFF section table Name), so seven decimal digits is the largest
+// reference we emit. OBJECT_COFF_MAX_SECTIONS is in object.h.
 enum
 {
-    OBJECT_COFF_MAX_SECTIONS = 65279,
     OBJECT_COFF_MAX_SECTION_NAME_OFFSET = 9999999,
 };
 
@@ -13617,7 +13616,7 @@ BUSTER_GLOBAL_LOCAL bool object_writer_32_capacity(ObjectFile* object, ObjectFor
         u64 relocation_reservation = coff ? OBJECT_WRITER_COFF_RELOCATION_RESERVATION : OBJECT_WRITER_MACH_RELOCATION_RESERVATION;
         u64 fixed = OBJECT_WRITER_RESERVATION_BASE + (u64)object->section_count * OBJECT_WRITER_SECTION_RESERVATION +
                     (u64)object->symbol_count * OBJECT_WRITER_SYMBOL_RESERVATION + (u64)object->relocation_count * relocation_reservation;
-        result = object->section_count <= (u32)(coff ? OBJECT_COFF_MAX_SECTIONS : UINT8_MAX) && fixed <= UINT32_MAX &&
+        result = object->section_count <= (u32)(coff ? OBJECT_COFF_MAX_SECTIONS : OBJECT_MACH_O_MAX_SECTIONS) && fixed <= UINT32_MAX &&
                  (!object->section_count || object->sections) && (!object->symbol_count || object->symbols);
     }
     u64 virtual_size = 0;
@@ -13757,11 +13756,17 @@ BUSTER_GLOBAL_LOCAL bool object_split_initializer_priorities(Arena* arena, Objec
     *split = *object;
     *moves = (ObjectInitializerSplit){0};
     u32 initializer_entries[2] = {0};
+    bool initializer_present[2] = {0};
     u32 group_count = 0;
     for (u32 slot = 0; slot < 2; slot += 1)
     {
+        // An assembled object's sections sit in declaration order, so the
+        // slot an array's kind names may hold any other section; only one of
+        // that kind is the array this renames and splits.
+        ObjectSectionKind kind = object_initializer_kinds[slot];
+        initializer_present[slot] = (u32)kind < object->section_count && object->sections[kind].kind == kind;
         u32* priorities = object->initializer_priorities[slot];
-        if (priorities && (u32)object_initializer_kinds[slot] < object->section_count)
+        if (priorities && initializer_present[slot])
         {
             initializer_entries[slot] = (u32)(object->sections[object_initializer_kinds[slot]].data.length / OBJECT_INITIALIZER_ENTRY_SIZE);
         }
@@ -13799,7 +13804,7 @@ BUSTER_GLOBAL_LOCAL bool object_split_initializer_priorities(Arena* arena, Objec
         for (u32 slot = 0; slot < 2; slot += 1)
         {
             ObjectSectionKind kind = object_initializer_kinds[slot];
-            if (rename_unprioritized && (u32)kind < object->section_count)
+            if (rename_unprioritized && initializer_present[slot])
             {
                 sections[kind].name = object_initializer_section_name(arena, format, kind, IR_INITIALIZER_PRIORITY_NONE);
             }
@@ -15616,7 +15621,7 @@ BUSTER_GLOBAL_LOCAL ObjectError object_mach_o_place_thread_variables(Arena* aren
     u32 added_symbols = variable_count + (bootstrap == UINT32_MAX);
     bool valid = !variable_count || ((u64)object->symbol_count + added_symbols <= 0x00ffffff &&
                                      (u64)object->relocation_count + 2 * (u64)variable_count <= UINT32_MAX &&
-                                     object->section_count < 255 && (u64)variable_count * OBJECT_MACH_THREAD_VARIABLE_SIZE <= UINT32_MAX);
+                                     object->section_count < OBJECT_MACH_O_MAX_SECTIONS && (u64)variable_count * OBJECT_MACH_THREAD_VARIABLE_SIZE <= UINT32_MAX);
     // Plan every allocation below, in order, before making any.
     u64 planned = arena->position;
     bool fits = !variable_count || !valid ||
@@ -15767,11 +15772,13 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
     {
         return result;
     }
-    // A section of its own name (issue 1276) is an ELF writer's alone; the
-    // COFF and Mach-O writers lay out one section per kind. A GNU IFUNC
-    // (ObjectSymbol.indirect, issue 1243) has no COFF or Mach-O form either.
-    if (format != OBJECT_FORMAT_ELF64 &&
-        (object->section_count > OBJECT_SECTION_COUNT || object->requires_executable_stack || object_symbols_have_indirect(object)))
+    // The COFF and Mach-O writers emit each section as it stands, whatever
+    // its index, so an assembled object's own sections reach them in any
+    // number; object_writer_32_capacity holds each format to its section
+    // limit. Codegen never hands them a section past OBJECT_SECTION_COUNT
+    // (object_named_section_plan refuses first). A GNU IFUNC
+    // (ObjectSymbol.indirect, issue 1243) has no COFF or Mach-O form.
+    if (format != OBJECT_FORMAT_ELF64 && (object->requires_executable_stack || object_symbols_have_indirect(object)))
     {
         result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
         return result;
