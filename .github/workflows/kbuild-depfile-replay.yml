@@ -34,7 +34,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-          ref: 37624aa598058865e7a4cf8a3ee85b0cc2c840c4
+          ref: e6f45731c0d3f93f3c97c7012bf7a11b72dc7d8d
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: buster14a/buster
