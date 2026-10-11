@@ -298,7 +298,7 @@ static int sdl_configure(const char* source, const char* output, const char* com
         "-DSDL_ALSA=OFF", "-DSDL_PIPEWIRE=OFF", "-DSDL_JACK=OFF", "-DSDL_SNDIO=OFF", "-DSDL_OSS=OFF",
         "-DSDL_WAYLAND=OFF", "-DSDL_KMSDRM=OFF", "-DSDL_OFFSCREEN=OFF",
         "-DSDL_OPENGL=OFF", "-DSDL_OPENGLES=OFF", "-DSDL_VULKAN=OFF", "-DSDL_GPU=OFF",
-        "-DSDL_CAMERA=OFF", "-DSDL_JOYSTICK=ON", "-DSDL_HIDAPI=OFF", "-DSDL_HAPTIC=OFF", "-DSDL_SENSOR=OFF",
+        "-DSDL_CAMERA=OFF", "-DSDL_JOYSTICK=ON", "-DSDL_HIDAPI=OFF", "-DSDL_HAPTIC=ON", "-DSDL_SENSOR=OFF",
         "-DSDL_LIBUDEV=OFF", "-DSDL_LIBURING=OFF", "-DSDL_DBUS=OFF", "-DSDL_IBUS=OFF",
         candidate ? "-DCMAKE_C_COMPILER_ARG1=--cc" : "-DCMAKE_C_COMPILER_ARG1=",
         NULL
@@ -319,6 +319,25 @@ static int sdl_tests(const char* output, const char* role)
     char* args[] = {"ctest", "--test-dir", (char*)output, "--output-on-failure", "--no-tests=error",
         "--timeout", "150", "-R", "^(testautomation|testatomic|testthread|testsem|testerror)$", NULL};
     int result = sdl_run(role, args, "300");
+    char path[BUSTER_SDL_PATH];
+    sdl_path(path, output, "Testing/Temporary/LastTest.log");
+    if (sdl_read(path))
+    {
+        char* line = sdl_text;
+        while (line && *line)
+        {
+            char* next = strchr(line, '\n');
+            if (next)
+            {
+                *next++ = 0;
+            }
+            if (strstr(line, "Failed") || strstr(line, "Skipped") || strstr(line, "Summary"))
+            {
+                printf("SDL_UPSTREAM_DETAIL %s %s\n", role, line);
+            }
+            line = next;
+        }
+    }
     return result;
 }
 
@@ -360,6 +379,14 @@ static int sdl_fixture_run(const char* object, const char* library, const char* 
         {
             fprintf(stderr, "SDL_FIXTURE_VERDICT_MISSING role=%s\n", role);
             result = 126;
+        }
+        if (result == 124 || result == 137)
+        {
+            char* debug[] = {"timeout", "--signal=INT", "--kill-after=5", "10",
+                "gdb", "--batch", "-ex", "set pagination off", "-ex", "set confirm off",
+                "-ex", "run", "-ex", "thread apply all bt", "-ex", "x/16i $pc", "--args", binary, NULL};
+            int diagnostic = sdl_run("fixture-timeout-stack-diagnostic", debug, "20");
+            fprintf(stderr, "SDL_DEBUGGER_DIAGNOSTIC status=%d primary_status=%d\n", diagnostic, result);
         }
     }
     return result;

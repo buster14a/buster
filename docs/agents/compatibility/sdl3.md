@@ -39,13 +39,13 @@ remains as recorded in [LICENSES/README.md](../../../LICENSES/README.md).
 
 The profile is declared before compilation and identical for both compilers:
 Debug, shared SDL3 and SDL3_test, X11 with directly linked system libraries,
-software rendering, PulseAudio, joysticks (without HIDAPI), POSIX threads, libc, no PCH, and portable
+software rendering, PulseAudio, joysticks (without HIDAPI), haptics, POSIX threads, libc, no PCH, and portable
 scalar routines (`SDL_ASSEMBLY=OFF`). It preserves `-fwrapv`,
 `-fno-strict-aliasing` and `-funsigned-char`.
 
 The predeclared exclusions are Wayland, KMS/DRM, offscreen video, OpenGL,
 OpenGL ES, Vulkan/GPU, ALSA, PipeWire, JACK, sndio, OSS, cameras, HIDAPI,
-haptics, sensors, udev, io_uring, D-Bus and IBus. These are outside the first
+sensors, udev, io_uring, D-Bus and IBus. These are outside the first
 configuration, not backends disabled in response to a failure. Dummy video
 and audio remain compiled as controls. Upstream CTest's own default dummy
 drivers form a separate control cell; the native fixture insists on X11 and
@@ -56,7 +56,13 @@ initial joystick-disabled reference profile built successfully but failed six
 upstream automation tests that require virtual joysticks or their subsystem
 dependencies (338 pass, 6 fail, 11 skip). That historical run is retained; its
 failure is not attributed to Buster. No hardware joystick claim follows from
-this correction.
+this correction. Profile revision 3 also enables haptics in both compilers:
+the unmodified `main_testInitQuitSubSystem` explicitly tests that subsystem.
+Every preceding failure remains recorded; tests are not filtered to hide it.
+
+A timed-out fixture retains its primary failure and runs a separately labelled,
+bounded GDB stack/instruction diagnostic. Debugger success does not repair the
+failed runtime cell.
 
 Declared upstream build targets are `SDL3-shared`, `testautomation`,
 `testatomic`, `testthread`, `testsem` and `testerror`.

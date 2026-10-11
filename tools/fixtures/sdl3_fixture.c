@@ -83,14 +83,18 @@ static bool sdl_watch(void* userdata, SDL_Event* event)
 static bool sdl_input(SDL_Window* window, Display* display, Window native)
 {
     unsigned callbacks = 0;
+    fprintf(stderr, "SDL_INPUT add_watch begin\n");
     bool ok = SDL_AddEventWatch(sdl_watch, &callbacks);
+    fprintf(stderr, "SDL_INPUT add_watch end ok=%d\n", ok);
     SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
     SDL_Event sent = {0};
     sent.type = SDL_EVENT_USER;
     sent.user.windowID = SDL_GetWindowID(window);
     sent.user.code = 3188;
     sent.user.data1 = &callbacks;
+    fprintf(stderr, "SDL_INPUT push begin\n");
     ok = ok && SDL_PushEvent(&sent);
+    fprintf(stderr, "SDL_INPUT push end ok=%d callbacks=%u\n", ok, callbacks);
     int event_base = 0, error_base = 0, major = 0, minor = 0;
     ok = ok && XTestQueryExtension(display, &event_base, &error_base, &major, &minor);
     KeyCode key = XKeysymToKeycode(display, XK_a);
@@ -101,6 +105,7 @@ static bool sdl_input(SDL_Window* window, Display* display, Window native)
              XTestFakeKeyEvent(display, key, False, CurrentTime);
         XSync(display, False);
     }
+    fprintf(stderr, "SDL_INPUT native_injection end ok=%d\n", ok);
     bool user_seen = false, key_seen = false;
     Uint64 deadline = SDL_GetTicks() + BUSTER_SDL_TIMEOUT;
     while (ok && !(user_seen && key_seen) && SDL_GetTicks() < deadline)
@@ -119,6 +124,7 @@ static bool sdl_input(SDL_Window* window, Display* display, Window native)
         }
         SDL_Delay(1);
     }
+    fprintf(stderr, "SDL_INPUT poll end user=%d key=%d\n", user_seen, key_seen);
     SDL_RemoveEventWatch(sdl_watch, &callbacks);
     ok = ok && user_seen && key_seen && callbacks == 1;
     unsigned before = callbacks;
