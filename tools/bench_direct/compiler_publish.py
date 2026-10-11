@@ -10,7 +10,9 @@ in the same attempt, requires the observed host to be the approved Zen 5 host,
 re-derives validity from the lab's own summary.json and the throughput
 corpus's own summary.json and metadata.json (#2761), and, when the receipt
 names the scaling profile (#424), each scaling bundle's own scaling.json and
-scaling-metadata.json, and completes the
+scaling-metadata.json, and, when the receipt holds an opt-in same-candidate
+flag-pair profile (#48 inline, #3397 ast-pilot), that profile's raw lab
+documents, and completes the
 attempt's check run named check_name(mode) with external ID attempt_marker(...)
 on the head. The checks are report-only; nothing gates merging on them.
 
@@ -39,7 +41,9 @@ re-derives a past main attempt's identity from GitHub's records
 evidence, and emits only the comment entry. It writes no check and runs no
 measurement; expired or unverifiable evidence is reported and not published.
 
-Map: decide (pure decision), read_evidence, queue_delay, links,
+Map: validate_inline_bundle and validate_ast_pilot_bundle (opt-in flag pairs),
+decide (pure decision), read_evidence, verify_analyzer_request_freshness
+(fresh request selectors), queue_delay, links,
 commit_report, recovered_identity, bind_request, report_check_url, main.
 Api lives in compiler_github.
 """
@@ -65,9 +69,13 @@ from authorize_compiler import verify as verify_main
 from compiler_github import (ARTIFACT_LIMIT, BENCH_WORKFLOW, COMPARE_JOBS, SERVER, TEXT_LIMIT, Api, complete_check,
                              owned_checks, parse_chain, run_url)
 from inline_acceptance import metrics as inline_metrics, validate_documents as validate_inline_documents
+from ast_pilot_acceptance import (cell_record as ast_pilot_cell_record, validate_documents as validate_ast_pilot_documents,
+                                  validate_probe as validate_ast_pilot_probe)
 from compiler_receipt import (validate_closure, ANALYZER_PROFILE, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUIRED_FILES,
                               ANALYZER_REQUEST_LINES, ANALYZER_REQUEST_PATH, DECIMAL, IDENTITY_KEYS,
                               INLINE_ACCEPTANCE_REQUEST_LINE, INLINE_ACCEPTANCE_PROFILE,
+                              AST_PILOT_ACCEPTANCE_REQUEST_LINE, AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_CELLS,
+                              validate_ast_pilot_acceptance,
                               MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
                               check_name, classify, classify_scaling, classify_throughput, host_problem, number,
                               range_label, regression_policy, render, SCALING_PROFILE, scaling_digest, validate_inline_acceptance,
@@ -159,6 +167,49 @@ def validate_inline_bundle(receipt_inline: object, bundle: object, head: str, ca
     return problems
 
 
+AST_PILOT_BUNDLE_FILES = {
+    "acceptance": "ast_pilot_acceptance/acceptance.json",
+    "probe": "ast_pilot_acceptance/probe/probe.json",
+    **{f"{cell}_{key}": f"ast_pilot_acceptance/{cell}/{member}" for cell in AST_PILOT_CELLS
+       for key, member in (("summary", "summary.json"), ("meta", "compare.json"), ("a", "a/lab.json"), ("b", "b/lab.json"))},
+}
+
+
+def validate_ast_pilot_bundle(receipt_ast: object, bundle: object, head: str, candidate_sha: str) -> list[str]:
+    """Re-derive the requested #3397 result from its raw cell summaries, configs and tree probe."""
+    if receipt_ast is None:
+        return []
+    problems: list[str] = []
+    if not isinstance(receipt_ast, dict) or receipt_ast.get("requested") is not True:
+        return ["receipt ast-pilot record is present but not a request"]
+    if receipt_ast.get("status") != "complete" or receipt_ast.get("exit") != 0:
+        problems.append("receipt issue #3397 ast-pilot run did not complete successfully")
+    if receipt_ast.get("request_line") != AST_PILOT_ACCEPTANCE_REQUEST_LINE:
+        problems.append("receipt ast-pilot request selector is not the exact supported line")
+    if receipt_ast.get("profile") != AST_PILOT_ACCEPTANCE_PROFILE:
+        problems.append("receipt ast-pilot profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(AST_PILOT_BUNDLE_FILES):
+        return [*problems, "requested issue #3397 raw evidence bundle is incomplete"]
+    acceptance = bundle.get("acceptance")
+    if not isinstance(acceptance, dict):
+        return [*problems, "raw issue #3397 acceptance document is missing"]
+    if receipt_ast.get("summary") != acceptance:
+        problems.append("receipt and raw ast-pilot acceptance documents differ")
+    problems.extend(validate_ast_pilot_acceptance(acceptance, head, candidate_sha))
+    try:
+        cells = acceptance.get("cells") if isinstance(acceptance.get("cells"), dict) else {}
+        for cell in AST_PILOT_CELLS:
+            raw = validate_ast_pilot_documents(cell, bundle[f"{cell}_summary"], bundle[f"{cell}_meta"],
+                                               {"a": bundle[f"{cell}_a"], "b": bundle[f"{cell}_b"]}, candidate_sha)
+            if cells.get(cell) != ast_pilot_cell_record(raw):
+                problems.append(f"ast-pilot {cell} acceptance metrics or identity results do not match its raw summary")
+        if acceptance.get("tree") != validate_ast_pilot_probe(bundle["probe"]):
+            problems.append("ast-pilot retained-bytes record does not match the raw tree probe")
+    except (RuntimeError, AttributeError, TypeError, KeyError) as error:
+        problems.append(f"raw issue #3397 profile is incomplete or mismatched: {error}")
+    return problems
+
+
 def decide(expected: dict, authorized: bool, compare_result: str, receipt: object, summary: object,
            policy_value: str, throughput: object = None, require_throughput: bool = True,
            extra_reasons: list[str] | None = None, *,
@@ -236,6 +287,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                 inline = receipt.get("inline_acceptance")
                 if isinstance(inline, dict) and inline.get("requested") is True:
                     reasons.append(f"{selected_profile['name']} cannot be combined with issue #48 self-host acceptance")
+                if receipt.get("ast_pilot_acceptance") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with issue #3397 ast-pilot acceptance")
                 reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
                 reasons.extend(validate_analyzer_bundle(receipt,
                                                         analyzer_bundle.get("summary") if isinstance(analyzer_bundle, dict) else None,
@@ -267,6 +320,13 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     candidate = (receipt.get("binaries") or {}).get("candidate") or {}
                     reasons.extend(validate_inline_bundle(inline, corpus.get("inline_bundle"),
                                                           expected.get("head", ""), candidate.get("sha256", "")))
+                if receipt.get("ast_pilot_acceptance") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("issue #3397 ast-pilot comparison is valid only in pull mode")
+                    candidate = (receipt.get("binaries") or {}).get("candidate") or {}
+                    reasons.extend(validate_ast_pilot_bundle(receipt["ast_pilot_acceptance"], corpus.get("ast_pilot_bundle"),
+                                                             expected.get("head", ""), candidate.get("sha256", "")))
             if compare_result != "success":
                 reasons.append(f"compare job result is {compare_result!r}, not success")
             if problem:
@@ -613,7 +673,8 @@ def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
         closure.update({operation: files.get(prefix + "closure-" + operation + ".json.manifest.tsv")
                         for operation in ("snapshot", "restore", "verify")})
     if receipt.get("throughput_profile") != THROUGHPUT_PROFILE or "scaling_profile" in receipt or \
-            not isinstance(receipt.get("inline_acceptance"), dict) or receipt["inline_acceptance"].get("requested") is not False:
+            not isinstance(receipt.get("inline_acceptance"), dict) or receipt["inline_acceptance"].get("requested") is not False or \
+            "ast_pilot_acceptance" in receipt:
         raise ValueError("owned ordinary Main evidence changed the complete original corpus recipe")
     identity = receipt.get("identity")
     if not isinstance(identity, dict) or identity.get("trusted_revision") != route["main_measurement_revision"]:
@@ -787,6 +848,22 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         problem = f"evidence member {member} is malformed JSON"
                         break
                 throughput["inline_bundle"] = bundle if not problem and len(bundle) == len(INLINE_BUNDLE_FILES) else None
+            if isinstance(receipt, dict) and receipt.get("ast_pilot_acceptance") is not None and not problem:
+                bundle = {}
+                for key, member in AST_PILOT_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required issue #3397 evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed JSON"
+                        break
+                throughput["ast_pilot_bundle"] = bundle if not problem and len(bundle) == len(AST_PILOT_BUNDLE_FILES) else None
     return receipt, summary, problem, artifact, throughput
 
 
@@ -851,8 +928,10 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
         return "authorized pull request profile file is not UTF-8"
     head_counts = {line: head_lines.count(line) for line in ANALYZER_REQUEST_LINES}
     head_inline_count = head_lines.count(INLINE_ACCEPTANCE_REQUEST_LINE)
+    head_ast_count = head_lines.count(AST_PILOT_ACCEPTANCE_REQUEST_LINE)
     parent_analyzer_deltas = {line: [] for line in ANALYZER_REQUEST_LINES}
     parent_inline_counts = []
+    ast_deltas = []
     for parent in parent_shas:
         parent_bytes, problem = _github_file(api, parent)
         if problem:
@@ -864,6 +943,13 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
         for line in ANALYZER_REQUEST_LINES:
             parent_analyzer_deltas[line].append(head_counts[line] - parent_lines.count(line))
         parent_inline_counts.append(parent_lines.count(INLINE_ACCEPTANCE_REQUEST_LINE))
+        ast_deltas.append(head_ast_count - parent_lines.count(AST_PILOT_ACCEPTANCE_REQUEST_LINE))
+    ast_record = receipt.get("ast_pilot_acceptance")
+    if ast_record is not None and not all(delta == 1 for delta in ast_deltas):
+        return ("the exact ast-pilot selector was not freshly added once at this head relative to every parent; "
+                "append one selector line for each explicit ast-pilot request")
+    if ast_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in ast_deltas):
+        return "a fresh ast-pilot selector has no ast-pilot acceptance record in the receipt"
     if analyzer_profile:
         selected_deltas = parent_analyzer_deltas[request_line]
         other_deltas = [delta for line, values in parent_analyzer_deltas.items() if line != request_line
