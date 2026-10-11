@@ -40,19 +40,49 @@ jobs:
           clang -std=c99 -O0 -fno-strict-aliasing "$RUNNER_TEMP/aggregate-reduction.c" -o "$RUNNER_TEMP/aggregate-reference"
           "$RUNNER_TEMP/aggregate-reference"
       - name: Buster reduction FAST
-        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
-          build/Release/ide cc -std=c99 -g0 -fregister-allocator=fast -fverify-codegen -fno-canonical-fast "$RUNNER_TEMP/aggregate-reduction.c" -o "$RUNNER_TEMP/aggregate-fast" 2>&1 | tee "$RUNNER_TEMP/aggregate-evidence/fast.log"
+          build/Release/ide cc -std=c99 -g0 -fregister-allocator=fast -fverify-codegen "$RUNNER_TEMP/aggregate-reduction.c" -o "$RUNNER_TEMP/aggregate-fast" 2>&1 | tee "$RUNNER_TEMP/aggregate-evidence/fast.log"
           "$RUNNER_TEMP/aggregate-fast"
       - name: Buster reduction QUALITY
-        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
-          build/Release/ide cc -std=c99 -g0 -fregister-allocator=quality -fverify-codegen -fno-canonical-fast "$RUNNER_TEMP/aggregate-reduction.c" -o "$RUNNER_TEMP/aggregate-quality" 2>&1 | tee "$RUNNER_TEMP/aggregate-evidence/quality.log"
+          build/Release/ide cc -std=c99 -g0 -fregister-allocator=quality -fverify-codegen "$RUNNER_TEMP/aggregate-reduction.c" -o "$RUNNER_TEMP/aggregate-quality" 2>&1 | tee "$RUNNER_TEMP/aggregate-evidence/quality.log"
           "$RUNNER_TEMP/aggregate-quality"
+      - name: Self-host fixed point
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/aggregate-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/aggregate-evidence/self-host.log"
+      - name: Registered suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/aggregate-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/aggregate-evidence/test-all.log"
+      - name: Provision AArch64 execution control
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user
+      - name: Mode matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/aggregate-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/aggregate-evidence/mode-matrix.log"
+      - name: Source size
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/aggregate-build" source_size --base 27aac48349c2da9c6c24bae660a0f893fa3da6d4 2>&1 | tee "$RUNNER_TEMP/aggregate-evidence/source-size.log"
+      - name: Full pristine musl manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://git.musl-libc.org/git/musl "$RUNNER_TEMP/aggregate-musl"
+          git -C "$RUNNER_TEMP/aggregate-musl" checkout --detach 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          "$RUNNER_TEMP/aggregate-build" test_musl --config Release "$RUNNER_TEMP/aggregate-musl" 2>&1 | tee "$RUNNER_TEMP/aggregate-evidence/musl.log"
       - name: Retain diagnostic evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -61,7 +91,7 @@ jobs:
           path: |
             ${{ runner.temp }}/aggregate-evidence/
             build/CMakeCache.txt
-            ${{ runner.temp }}/aggregate-reduction.c
+            build/musl*
           include-hidden-files: true
           retention-days: 7
           if-no-files-found: warn

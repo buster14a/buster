@@ -30,6 +30,17 @@ returns, partial eightbytes and tail fields with both frontend forms and
 both allocators; desktop lanes execute the native
 fixture as well as compiling both architectures.
 
+
+Zero-byte array members in an aggregate constructor require a resolved empty
+layout and a frame-backed captured value. The x86-64 member writer accepts
+that image without emitting a store, as it does for empty struct/union members.
+This includes omitted flexible-array tails; only the fixed header belongs to
+the local object's initialization or copy. The registered
+`compiler_driver_test_flexible_initializers` checks zero and designated local
+initializers, nested array fields, one evaluation and untouched tail storage
+on six native targets, both allocators and both frontend forms. Matching desktop
+hosts execute its independent expected-value fixture.
+
 ## Machine instruction selection and scheduling
 
 - Debug-location seed storage starts with a small arena-backed array and grows

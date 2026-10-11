@@ -808,9 +808,75 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_large_static_initializer
     return result;
 }
 
+
+#define BUSTER_FLEXIBLE_INITIALIZER_FIXTURE(...) BUSTER_GLOBAL_LOCAL char8 const compiler_driver_flexible_initializer_source[] = #__VA_ARGS__;
+#include <buster/tests/compiler/driver/fixtures/local_flexible_initializers.c>
+#undef BUSTER_FLEXIBLE_INITIALIZER_FIXTURE
+
+// #3444: omitted flexible-array members have an empty canonical array image.
+// Exercise both declaration reductions and an exact header copy into sentinel
+// storage through every native target, allocator and frontend SSA form.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_flexible_initializers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena scope = arena_begin_temporal(arguments->arena);
+    Arena* arena = scope.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-flexible-initializers"), S8(".c"));
+    String8 source = {compiler_driver_flexible_initializer_source, sizeof(compiler_driver_flexible_initializer_source) - 1};
+    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, written);
+    String8 targets[] = {S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows"),
+                         S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-windows")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 forms[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    for (u32 target = 0; written && target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("buster-flexible-initializers-object"), S8(".o"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=c99"), S8("-c"), S8("-g0"), S8("-target"), targets[target],
+                                     modes[mode], forms[form], S8("-fno-canonical-fast"), S8("-fverify-codegen"),
+                                     S8("-o"), output, input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object &&
+                    !compiled.codegen_statistics.fallback_function_count,
+                    string_format(temporary.arena, S8("flexible initializer {S8} {S8} {S8}: {S8}"), targets[target], modes[mode],
+                                  forms[form], compiled.diagnostic));
+#if (BUSTER_CPU_ARCH_AARCH64 || BUSTER_CPU_ARCH_X86_64) && !BUSTER_ANDROID && !BUSTER_IOS
+                bool native_target = (BUSTER_CPU_ARCH_AARCH64 && ((target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS) ||
+                                                                                (target == 2 && BUSTER_WINDOWS))) ||
+                                     (BUSTER_CPU_ARCH_X86_64 && ((target == 3 && BUSTER_LINUX) || (target == 4 && BUSTER_MACOS) ||
+                                                                                (target == 5 && BUSTER_WINDOWS)));
+                if (native_target && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-flexible-initializers-run"), S8(".exe"));
+                    String8 native_command[] = {S8("-nostdinc"), S8("-std=c99"), modes[mode], forms[form],
+                                               S8("-fno-canonical-fast"), S8("-fverify-codegen"), S8("-o"), executable, input};
+                    CompilerDriverResult linked = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command)));
+                    BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+                    if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+                    }
+                }
+#endif
+                scratch_end(temporary);
+            }
+        }
+    }
+    scratch_end(scope);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_flexible_initializers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_local_sizeof_static_asserts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_work_ledger);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_positional_languages);
