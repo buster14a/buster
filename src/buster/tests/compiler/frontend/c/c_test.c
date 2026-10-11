@@ -21114,6 +21114,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_fact_census(UnitTestArguments* 
         BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_MEMO_HITS) == 3);
         BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_LOWER, C_CENSUS_PHASE_STRING_MEMO_HITS) == 1);
         BUSTER_TEST(arguments, lower_decodes == 0);
+        // A unit nothing will lower (the driver's -fsyntax-only) counts the
+        // literal at its first sight instead of decoding it, and the other
+        // three consumers read the recorded length as before.
+        CParserResult unlowered = c_parse_ast(arguments->arena, preprocess);
+        unlowered.string_literal_lengths_only = true;
+        CCensusCounters unlowered_before = c_census_counters();
+        CAnalysisResult semantic = c_analyze_semantics_only(arguments->arena, preprocess, unlowered);
+        CCensusCounters unlowered_after = c_census_counters();
+        BUSTER_TEST(arguments, semantic.analysis_complete && semantic.diagnostic_count == 0 && !unlowered_after.overflowed);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&unlowered_before, &unlowered_after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_DECODES) == 0);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&unlowered_before, &unlowered_after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_COUNTS) ==
+                                   C_TEST_CENSUS_SEMANTIC_STRING_COUNTS + 1);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&unlowered_before, &unlowered_after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_MEMO_HITS) == 3);
     }
     return result;
 }

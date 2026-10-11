@@ -16180,7 +16180,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_string_literal_range_shape(CPreprocess
     return result;
 }
 
-CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens)
+CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens, bool lengths_only)
 {
     u32 capacity = 1024;
     CStringLiteralMemo* memo = arena_allocate(arena, CStringLiteralMemo, 1);
@@ -16190,6 +16190,7 @@ CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tok
         // Reused arena bytes can be dirty; empty slots must be zeroed.
         .slots = arena_allocate_zeroed(arena, CStringLiteralMemoSlot, capacity),
         .capacity = capacity,
+        .lengths_only = lengths_only,
     };
     return memo;
 }
@@ -16220,7 +16221,8 @@ BUSTER_C_INTERNAL CStringLiteralMemoSlot const* c_string_literal_memo_find(CStri
     return result;
 }
 
-// Records a narrow fragment's decoded bytes. The table stays at most half
+// Records a narrow fragment's decoded bytes, or only its length when
+// `bytes.pointer` is null (a length-only memo). The table stays at most half
 // full, and a rebuild re-places every entry at the doubled capacity in the
 // same arena.
 BUSTER_C_INTERNAL void c_string_literal_memo_insert(CStringLiteralMemo* memo, u32 token_index, ByteSlice bytes)
@@ -16283,9 +16285,10 @@ BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
         {
             // A fragment semantic analysis recorded is read, not decoded again;
             // readers copy what they keep, so the shared buffer stays intact.
+            // A length-only record has no bytes to read and is decoded here.
             CStringLiteralMemoSlot const* recorded =
                 width == 1 ? c_string_literal_memo_find(memo, preprocess.tokens, start + fragment_index) : 0;
-            if (recorded)
+            if (recorded && recorded->bytes)
             {
                 C_CENSUS_PHASE_RECORD(STRING_MEMO_HITS, 1);
                 fragments[fragment_index] = (ByteSlice){
@@ -16365,7 +16368,10 @@ BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
 // (wide fragments, whose element width is the target's, are always decoded
 // and never recorded). On the stage-1 unity build semantic analysis sized,
 // typed and validated each literal four times and lowering then decoded it;
-// with the memo each narrow fragment is walked once, by this decode.
+// with the memo each narrow fragment is walked once, by this decode. When
+// nothing will lower the unit (CStringLiteralMemo.lengths_only) the bytes have
+// no reader, so that one walk is c_ir_count_quoted's and records the length
+// alone.
 BUSTER_C_SHARED bool c_ir_count_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target, u32 start, u32 end,
                                                                     CStringLiteralMemo* memo, CIrDecodedString* decoded_out)
 {
@@ -16390,8 +16396,16 @@ BUSTER_C_SHARED bool c_ir_count_string_literal_range_for_target(Arena* arena, CP
             ByteSlice fragment = {0};
             if (memoized)
             {
-                result = c_ir_decode_quoted(memo->arena, spelling, '"', &fragment);
-                fragment_elements = fragment.length;
+                if (memo->lengths_only)
+                {
+                    result = c_ir_count_quoted(spelling, '"', &fragment_elements);
+                    fragment.length = fragment_elements;
+                }
+                else
+                {
+                    result = c_ir_decode_quoted(memo->arena, spelling, '"', &fragment);
+                    fragment_elements = fragment.length;
+                }
                 if (result)
                 {
                     c_string_literal_memo_insert(memo, token_index, fragment);
@@ -50823,14 +50837,22 @@ BUSTER_C_INTERNAL bool c_test_decoded_string_equal(CIrDecodedString left, CIrDec
 // grow past its initial capacity without losing a record, answer the second
 // pass entirely from records, and agree with the unmemoized walk each time --
 // counts and decoded bytes alike. A memo created for another token array must
-// record nothing.
+// record nothing. A length-only memo records the same fragments with no bytes,
+// and a decode through it still reproduces the walk's bytes.
 bool c_test_string_literal_memo_growth(Arena* arena, CPreprocessResult preprocess, u32* recorded_out)
 {
-    CStringLiteralMemo* memo = c_string_literal_memo_create(arena, preprocess.tokens);
-    CStringLiteralMemo* foreign = c_string_literal_memo_create(arena, preprocess.tokens + 1);
+    CStringLiteralMemo* memo = c_string_literal_memo_create(arena, preprocess.tokens, false);
+    CStringLiteralMemo* foreign = c_string_literal_memo_create(arena, preprocess.tokens + 1, false);
     bool result = preprocess.token_count <= UINT32_MAX;
-    for (u32 pass = 0; result && pass < 2; pass += 1)
+    u32 recorded_with_bytes = 0;
+    for (u32 pass = 0; result && pass < 4; pass += 1)
     {
+        if (pass == 2)
+        {
+            recorded_with_bytes = memo->count;
+            memo = c_string_literal_memo_create(arena, preprocess.tokens, true);
+            foreign = c_string_literal_memo_create(arena, preprocess.tokens + 1, true);
+        }
         u32 recorded = memo->count;
         for (u32 index = 0; result && index < preprocess.token_count; index += 1)
         {
@@ -50850,10 +50872,13 @@ bool c_test_string_literal_memo_growth(Arena* arena, CPreprocessResult preproces
                          c_test_decoded_string_equal(walked, memoized) && c_test_decoded_string_equal(walked, bypassed) &&
                          walked_bytes.bytes.length == memo_bytes.bytes.length &&
                          (!walked_bytes.bytes.length || !memcmp(walked_bytes.bytes.pointer, memo_bytes.bytes.pointer, walked_bytes.bytes.length));
+                CStringLiteralMemoSlot const* slot = c_string_literal_memo_find(memo, preprocess.tokens, index);
+                result = result && (!slot || (slot->bytes == 0) == memo->lengths_only);
             }
         }
-        result = result && (pass == 0 || memo->count == recorded) && memo->count <= memo->capacity / 2 && !foreign->count;
+        result = result && (pass % 2 == 0 || memo->count == recorded) && memo->count <= memo->capacity / 2 && !foreign->count;
     }
+    result = result && memo->count == recorded_with_bytes;
     *recorded_out = memo->count;
     return result;
 }
@@ -50877,7 +50902,7 @@ bool c_test_string_literal_range_paths_agree(Arena* arena, CPreprocessResult pre
     // The memoized count must agree with the walk both when it records a
     // fragment and when it answers from the record, and must record nothing
     // for a range the walk rejects.
-    CStringLiteralMemo* memo = c_string_literal_memo_create(arena, preprocess.tokens);
+    CStringLiteralMemo* memo = c_string_literal_memo_create(arena, preprocess.tokens, false);
     CIrDecodedString first_memoized = sentinel;
     CIrDecodedString second_memoized = sentinel;
     bool first_memoized_accepts = c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, memo, &first_memoized);
@@ -50887,9 +50912,32 @@ bool c_test_string_literal_range_paths_agree(Arena* arena, CPreprocessResult pre
     // that walked the spellings, byte for byte.
     CIrDecodedString memo_decoded = sentinel;
     bool memo_decoded_accepts = c_ir_decode_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, memo, &memo_decoded);
+    // The same through a length-only memo: identical counts, the same
+    // fragments recorded, and a decode that meets those records still walks
+    // the spellings to the same bytes.
+    CStringLiteralMemo* lengths = c_string_literal_memo_create(arena, preprocess.tokens, true);
+    CIrDecodedString first_length = sentinel;
+    CIrDecodedString second_length = sentinel;
+    bool first_length_accepts = c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, lengths, &first_length);
+    bool second_length_accepts = c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, lengths, &second_length);
+    CIrDecodedString length_decoded = sentinel;
+    bool length_decoded_accepts = c_ir_decode_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, lengths, &length_decoded);
     bool result = decoded_accepts == counted_accepts && first_memoized_accepts == counted_accepts && second_memoized_accepts == counted_accepts &&
                   memo_decoded_accepts == decoded_accepts && memo->count == recorded && (counted_accepts || !recorded) &&
-                  c_test_decoded_string_equal(first_memoized, counted) && c_test_decoded_string_equal(second_memoized, counted);
+                  c_test_decoded_string_equal(first_memoized, counted) && c_test_decoded_string_equal(second_memoized, counted) &&
+                  first_length_accepts == counted_accepts && second_length_accepts == counted_accepts && length_decoded_accepts == decoded_accepts &&
+                  lengths->count == recorded && c_test_decoded_string_equal(first_length, counted) && c_test_decoded_string_equal(second_length, counted);
+    if (result && decoded_accepts)
+    {
+        result = length_decoded.bytes.length == decoded.bytes.length && length_decoded.element_count == decoded.element_count &&
+                 length_decoded.element_width == decoded.element_width && length_decoded.element_kind == decoded.element_kind &&
+                 length_decoded.encoding == decoded.encoding &&
+                 (!decoded.bytes.length || !memcmp(length_decoded.bytes.pointer, decoded.bytes.pointer, decoded.bytes.length));
+    }
+    else if (result)
+    {
+        result = c_test_decoded_string_equal(length_decoded, sentinel);
+    }
     if (result && decoded_accepts)
     {
         result = memo_decoded.bytes.length == decoded.bytes.length && memo_decoded.element_count == decoded.element_count &&
