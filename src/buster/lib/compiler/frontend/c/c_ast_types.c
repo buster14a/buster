@@ -736,8 +736,10 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_types_decayed_row(CParseResult const* result, CTyp
 // - When that base is one identifier, the machine walks the postfix steps
 //   after it and fails at the first token that is no step. The steps it
 //   takes span an accepted INDEX, MEMBER or MEMBER_ARROW node here, so each
-//   reads an unqualified array or aggregate, as the machine's walk does, and
-//   appends no qualified copy (c_parse_direct_expression_postfix).
+//   reads an unqualified array or aggregate, or a qualified aggregate whose
+//   member copy is already shared, as the machine's walk does, and appends
+//   no qualified copy (c_parse_direct_expression_postfix,
+//   c_parse_intern_qualified_type).
 // - Any other base that holds no `,` or `{` outside parentheses is not
 //   descended into. One that starts with none of a string literal, `(` or a
 //   call's callee is typed to nothing by c_parse_direct_expression_base
