@@ -13,13 +13,18 @@
 // check the direct-SSA rows whose size only the body decides (c_ir_ssa_refuse
 // records the refusal). The remaining phase/state graph is in
 // docs/agents/compiler-phase-state.md.
-// There is no AST — lowering re-walks token ranges directly, resolving
-// identifiers through the parse result's scopes and answering structure
-// questions from a prebuilt matching-delimiter index
-// (c_ir_build_delimiter_index). The prepared control expressions of a function
-// are answered by token-indexed tables, not scans of their list:
-// c_ir_prepared_control_expression_find, _contains and _contains_range, kept
-// current by _begin, _end and _rollback (a typeof replay).
+// By default lowering has no syntax tree: it re-walks token ranges directly,
+// resolving identifiers through the parse result's scopes and answering
+// structure questions from a prebuilt matching-delimiter index
+// (c_ir_build_delimiter_index). Under -fc-ast-pilot the caller also passes the
+// implicit postorder tree (CIRLowerOptions.syntax_tree, GitHub #3102), and
+// c_ir_root_conditional answers from its conditional nodes through
+// c_ir_tree_conditionals_build / c_ir_tree_root_conditional; every other
+// question still reads tokens. No node id reaches the IR. The prepared control
+// expressions of a function are answered by token-indexed tables, not scans of
+// their list: c_ir_prepared_control_expression_find, _contains and
+// _contains_range, kept current by _begin, _end and _rollback (a typeof
+// replay).
 // c_ir_parameter_value_type and c_ir_emit_parameter keep callable values
 // separate from the declared qualification of parameter objects.
 // c_ir_windows_va_start_cursor_place bridges an addressed Windows CRT cursor
@@ -128,6 +133,8 @@
 //                                                 per-subobject initializer values
 //   c_ir_lower_expression_core_step               the expression evaluator
 //   c_ir_lower_dispatch                           lowering-machine dispatch
+//   c_ir_tree_conditionals_build,                 root `?:` splits from the
+//   c_ir_tree_root_conditional                    tree's CONDITIONAL nodes
 //   c_ir_cleanup_*                                __attribute__((cleanup))
 //   c_ir_inline_assembly_*                        GNU inline assembly
 //   c_ir_statement_end, c_ir_statement_end_find   memoized statement extents
@@ -159,6 +166,7 @@
 //   c_lower_to_ir                                 the driver
 
 #include "c_internal.h"
+#include <buster/lib/compiler/frontend/c/c_ast.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 
 BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out);
@@ -3365,6 +3373,41 @@ struct CIrErrorAttributeCall
     u32 attribute_token;
 };
 
+// One CONDITIONAL or CONDITIONAL_OMITTED node of a function body, by the three
+// tokens c_ir_root_conditional reports for it: the condition's first token,
+// the `?` and the `:` (c_ir_tree_conditionals_build, GitHub #3102).
+typedef struct CIrTreeConditional CIrTreeConditional;
+struct CIrTreeConditional
+{
+    u32 start;
+    u32 question;
+    u32 colon;
+};
+
+// The conditional nodes of one top-level function body: every `?` among them
+// in ascending order, and the records whose three tokens were all found, in
+// ascending start order. Two records never share a start; when two would,
+// neither is kept.
+typedef struct CIrTreeConditionals CIrTreeConditionals;
+struct CIrTreeConditionals
+{
+    u32 const* questions;
+    CIrTreeConditional const* records;
+    u32 question_count;
+    u32 record_count;
+};
+
+// Every top-level function body's CIrTreeConditionals, in body order, keyed by
+// the token of the body's `{`. Built once per lowering from the syntax tree
+// and read-only afterwards.
+typedef struct CIrTreeConditionalIndex CIrTreeConditionalIndex;
+struct CIrTreeConditionalIndex
+{
+    u32 const* braces;
+    CIrTreeConditionals const* bodies;
+    u32 body_count;
+};
+
 struct CIntegerIrBuilder
 {
     CIrDirectSsa* direct_ssa;
@@ -3514,6 +3557,12 @@ struct CIntegerIrBuilder
     // every brace-less nested `if` re-walked the rest of its chain.
     u32* statement_ends_plus_one;
     bool statement_ends_cleared;
+    // The conditional nodes of the body being lowered, read from the syntax
+    // tree (c_ir_tree_conditionals_build): c_ir_root_conditional answers from
+    // them where they decide the scan's answer. Null without a tree, and for
+    // a body the tree index does not hold (a nested function's).
+    CIrTreeConditionals const* tree_conditionals;
+    CAstLowerStatistics* ast_lower_statistics;
     CIrSignature* signatures;
     IrTypeId* c_type_ir_map;
     IrTypeId* scalar_types;
@@ -39157,8 +39206,8 @@ BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
     c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
 }
 
-BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
-                                               u32* expression_end)
+BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+                                                    u32* expression_end)
 {
     while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
            !c_ir_group_is_statement_expression(builder, start, end))
@@ -39236,6 +39285,411 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 sta
         }
     }
     return false;
+}
+
+// Root conditionals from the syntax tree (GitHub #3102; docs/agents/frontend/
+// ast.md, "Lowering from the tree"). c_ir_tree_conditionals_build indexes the
+// CONDITIONAL and CONDITIONAL_OMITTED nodes of every top-level function body
+// once per lowering, and c_ir_tree_root_conditional answers
+// c_ir_root_conditional from them where they decide the scan's answer:
+//   - no `?` in the range: false, because every `?` of a body is the anchor of
+//     one of its conditional nodes, so the scan finds none;
+//   - a record that starts at the range's start, with its `:` before the
+//     range's last token: true, with the record's `?` and `:`. A condition
+//     holds no unparenthesized `?` or assignment, so from that start the
+//     record's `?` is the scan's first root `?`, and its `:` the one the scan
+//     pairs with it.
+// Everything else runs the scan. Debug and sanitized builds check every answer
+// against it.
+typedef enum CIrTreeRootVerdict
+{
+    C_IR_TREE_ROOT_UNKNOWN,
+    C_IR_TREE_ROOT_FALSE,
+    C_IR_TREE_ROOT_TRUE,
+} CIrTreeRootVerdict;
+
+// The bodies at or below this many conditionals sort by insertion; larger
+// ones take four stable radix passes over the key's high 32 bits.
+#define C_IR_TREE_SORT_INSERTION_LIMIT 32u
+
+// Sorts keys ascending by their high 32 bits, keeping the order of equal ones.
+// `scratch` holds `count` keys.
+BUSTER_C_INTERNAL void c_ir_tree_sort_keys(u64* keys, u64* scratch, u32 count)
+{
+    if (count <= C_IR_TREE_SORT_INSERTION_LIMIT)
+    {
+        for (u32 index = 1; index < count; index += 1)
+        {
+            u64 key = keys[index];
+            u32 slot = index;
+            while (slot && (keys[slot - 1] >> 32) > (key >> 32))
+            {
+                keys[slot] = keys[slot - 1];
+                slot -= 1;
+            }
+            keys[slot] = key;
+        }
+    }
+    else
+    {
+        u64* source = keys;
+        u64* destination = scratch;
+        for (u32 shift = 32; shift < 64; shift += 8)
+        {
+            u32 offsets[256] = {0};
+            for (u32 index = 0; index < count; index += 1)
+            {
+                offsets[(source[index] >> shift) & 0xff] += 1;
+            }
+            u32 total = 0;
+            for (u32 digit = 0; digit < 256; digit += 1)
+            {
+                u32 digit_count = offsets[digit];
+                offsets[digit] = total;
+                total += digit_count;
+            }
+            for (u32 index = 0; index < count; index += 1)
+            {
+                destination[offsets[(source[index] >> shift) & 0xff]++] = source[index];
+            }
+            u64* swap = source;
+            source = destination;
+            destination = swap;
+        }
+        // Four passes leave the result where it began, in `keys`.
+    }
+}
+
+// The first token of the subtree at `node`. Each node's first token is either
+// its anchor or its first child's first token, and the anchor of a node whose
+// first token lies in its first child comes after that token, so the first
+// token is the smallest anchor on the leftmost path. A label address `&&l` is
+// anchored at its label. Parentheses have no node; the caller widens over them.
+BUSTER_C_INTERNAL u32 c_ir_tree_first_token(CAst const* ast, u32 node)
+{
+    u32 first = ast->tokens[node];
+    CAstKind first_kind = (CAstKind)ast->kinds[node];
+    u32 cursor = node;
+    while (ast->extents[cursor] > 1)
+    {
+        u32 begin = c_ast_subtree_begin(ast, cursor);
+        u32 child = cursor - 1;
+        while (child + 1 - ast->extents[child] > begin)
+        {
+            child -= ast->extents[child];
+        }
+        cursor = child;
+        if (ast->tokens[cursor] < first)
+        {
+            first = ast->tokens[cursor];
+            first_kind = (CAstKind)ast->kinds[cursor];
+        }
+    }
+    return first_kind == C_AST_LABEL_ADDRESS && first ? first - 1 : first;
+}
+
+// One past the `)` matching the `(` at `open` when it closes before `bound`,
+// else 0: the stream's delimiter array when the parse built one, else a scan
+// that stops at `bound`.
+BUSTER_C_INTERNAL u32 c_ir_tree_parenthesis_close(CPreprocessResult const* preprocess, u32 const* stream_matching_delimiters_plus_one, u32 open,
+                                                    u32 bound)
+{
+    u32 close = stream_matching_delimiters_plus_one ? stream_matching_delimiters_plus_one[open] - 1
+                                                    : c_ir_matching_delimiter(*preprocess, open, bound, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                                              C_PUNCTUATOR_RIGHT_PARENTHESIS);
+    bool closes = close < bound && c_token_is_punctuator(&preprocess->tokens[close], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+    return closes ? close + 1 : 0;
+}
+
+// The record of the conditional node `node` (CONDITIONAL or
+// CONDITIONAL_OMITTED), or false when one of its tokens cannot be found.
+BUSTER_C_INTERNAL bool c_ir_tree_conditional_record(CAst const* ast, CPreprocessResult const* preprocess, u32 const* stream_matching_delimiters_plus_one,
+                                                     u32 body_start, u32 node, CIrTreeConditional* record_out)
+{
+    CToken const* tokens = preprocess->tokens;
+    u32 question = ast->tokens[node];
+    u32 otherwise = node - 1;
+    u32 condition = otherwise - ast->extents[otherwise];
+    u32 colon = question + 1;
+    if (ast->kinds[node] == C_AST_CONDITIONAL)
+    {
+        u32 then = condition;
+        condition = then - ast->extents[then];
+        u32 else_first = c_ir_tree_first_token(ast, otherwise);
+        while (else_first > question + 1 && c_token_is_punctuator(&tokens[else_first - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            else_first -= 1;
+        }
+        colon = else_first - 1;
+    }
+    bool valid = colon > question && colon < preprocess->token_count && c_token_is_punctuator(&tokens[colon], C_PUNCTUATOR_COLON);
+    u32 start = c_ir_tree_first_token(ast, condition);
+    bool widening = valid;
+    while (widening)
+    {
+        widening = start > body_start && c_token_is_punctuator(&tokens[start - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                   c_ir_tree_parenthesis_close(preprocess, stream_matching_delimiters_plus_one, start - 1, question) != 0;
+        start -= widening;
+    }
+    valid = valid && start < question;
+    *record_out = (CIrTreeConditional){
+        .start = start,
+        .question = question,
+        .colon = colon,
+    };
+    return valid;
+}
+
+// The bytes c_ir_tree_conditionals_build carves for `ast`, with the counts it
+// needs. A tree that is not a complete translation unit counts nothing, and its
+// index is empty, so lowering runs every scan.
+BUSTER_C_INTERNAL u64 c_ir_tree_conditionals_size(CAst const* ast, u32* body_count_out, u32* conditional_count_out)
+{
+    u32 body_count = 0;
+    u32 conditional_count = 0;
+    bool complete = ast && ast->node_count && ast->root < ast->node_count && ast->kinds[ast->root] == C_AST_TRANSLATION_UNIT;
+    if (complete)
+    {
+        u32 floor = c_ast_subtree_begin(ast, ast->root);
+        u32 cursor = ast->root;
+        while (cursor > floor)
+        {
+            u32 child = cursor - 1;
+            body_count += ast->kinds[child] == C_AST_FUNCTION_DEFINITION && child && ast->kinds[child - 1] == C_AST_COMPOUND_STATEMENT;
+            cursor = c_ast_subtree_begin(ast, child);
+        }
+        for (u32 node = 0; node < ast->node_count; node += 1)
+        {
+            u8 kind = ast->kinds[node];
+            conditional_count += kind == C_AST_CONDITIONAL || kind == C_AST_CONDITIONAL_OMITTED;
+        }
+    }
+    *body_count_out = body_count;
+    *conditional_count_out = conditional_count;
+    // Braces and bodies per body; per conditional, its question, its kept and
+    // found records and two sort keys; one spare element and alignment slack
+    // for each of the seven arrays.
+    return (u64)(body_count + 1) * (sizeof(u32) + sizeof(CIrTreeConditionals)) +
+           (u64)(conditional_count + 1) * (sizeof(u32) + 2 * sizeof(CIrTreeConditional) + 2 * sizeof(u64)) + 7 * 16;
+}
+
+// Indexes the conditional nodes of every top-level function body of `ast`
+// (see above) in `arena`, sized by c_ir_tree_conditionals_size. A body nested
+// in another (a GNU nested function) is not indexed: its queries run the scan.
+BUSTER_C_INTERNAL CIrTreeConditionalIndex c_ir_tree_conditionals_build(Arena* arena, CAst const* ast, CPreprocessResult const* preprocess,
+                                                                        u32 const* stream_matching_delimiters_plus_one, u32 body_count,
+                                                                        u32 conditional_count, CAstLowerStatistics* statistics)
+{
+    u32* braces = arena_allocate(arena, u32, body_count + 1);
+    CIrTreeConditionals* bodies = arena_allocate(arena, CIrTreeConditionals, body_count + 1);
+    u32* questions = arena_allocate(arena, u32, conditional_count + 1);
+    CIrTreeConditional* records = arena_allocate(arena, CIrTreeConditional, conditional_count + 1);
+    u64* keys = arena_allocate(arena, u64, conditional_count + 1);
+    u64* scratch = arena_allocate(arena, u64, conditional_count + 1);
+    CIrTreeConditional* found = arena_allocate(arena, CIrTreeConditional, conditional_count + 1);
+    u32 slot = body_count;
+    u32 question_end = conditional_count;
+    u32 record_end = conditional_count;
+    u32 floor = body_count ? c_ast_subtree_begin(ast, ast->root) : 0;
+    u32 cursor = body_count ? ast->root : 0;
+    // The children are visited last to first, so each body's arrays are
+    // filled from the end of the shared ones down.
+    while (slot && cursor > floor)
+    {
+        u32 child = cursor - 1;
+        cursor = c_ast_subtree_begin(ast, child);
+        if (ast->kinds[child] != C_AST_FUNCTION_DEFINITION || !child || ast->kinds[child - 1] != C_AST_COMPOUND_STATEMENT)
+        {
+            continue;
+        }
+        u32 body = child - 1;
+        u32 body_start = ast->tokens[body] + 1;
+        u32 body_question_count = 0;
+        u32 body_record_count = 0;
+        u32 node_begin = c_ast_subtree_begin(ast, body);
+        for (u32 node = node_begin; node < body; node += 1)
+        {
+            u8 kind = ast->kinds[node];
+            if (kind == C_AST_CONDITIONAL || kind == C_AST_CONDITIONAL_OMITTED)
+            {
+                keys[body_question_count] = (u64)ast->tokens[node] << 32;
+                body_question_count += 1;
+            }
+        }
+        question_end -= body_question_count;
+        c_ir_tree_sort_keys(keys, scratch, body_question_count);
+        for (u32 key = 0; key < body_question_count; key += 1)
+        {
+            questions[question_end + key] = (u32)(keys[key] >> 32);
+        }
+        // The records found, keyed by (start, position found).
+        u32 found_count = 0;
+        for (u32 node = node_begin; node < body && body_question_count; node += 1)
+        {
+            u8 kind = ast->kinds[node];
+            CIrTreeConditional record;
+            if ((kind == C_AST_CONDITIONAL || kind == C_AST_CONDITIONAL_OMITTED) &&
+                c_ir_tree_conditional_record(ast, preprocess, stream_matching_delimiters_plus_one, body_start, node, &record))
+            {
+                found[found_count] = record;
+                keys[found_count] = ((u64)record.start << 32) | found_count;
+                found_count += 1;
+            }
+        }
+        c_ir_tree_sort_keys(keys, scratch, found_count);
+        for (u32 pass = 0; pass < 2; pass += 1)
+        {
+            // The first pass counts the records whose start no other record
+            // shares; the second writes them, ending at record_end.
+            u32 kept = 0;
+            for (u32 key = 0; key < found_count; key += 1)
+            {
+                u32 start = (u32)(keys[key] >> 32);
+                bool shared = (key && (u32)(keys[key - 1] >> 32) == start) || (key + 1 < found_count && (u32)(keys[key + 1] >> 32) == start);
+                if (!shared && pass)
+                {
+                    records[record_end - body_record_count + kept] = found[(u32)keys[key]];
+                }
+                kept += !shared;
+            }
+            body_record_count = kept;
+        }
+        CIrTreeConditional* body_records = records + (record_end - body_record_count);
+        record_end -= body_record_count;
+        slot -= 1;
+        braces[slot] = body_start - 1;
+        bodies[slot] = (CIrTreeConditionals){
+            .questions = questions + question_end,
+            .records = body_records,
+            .question_count = body_question_count,
+            .record_count = body_record_count,
+        };
+        if (statistics)
+        {
+            statistics->bodies += 1;
+            statistics->conditionals += body_question_count;
+        }
+    }
+    BUSTER_CHECK(!slot);
+    CIrTreeConditionalIndex index = {
+        .braces = braces,
+        .bodies = bodies,
+        .body_count = body_count,
+    };
+    return index;
+}
+
+// The index entry of the top-level body whose `{` is `brace`, or null.
+BUSTER_C_INTERNAL CIrTreeConditionals const* c_ir_tree_conditionals_find(CIrTreeConditionalIndex const* index, u32 brace)
+{
+    u32 low = 0;
+    u32 high = index->body_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (index->braces[middle] < brace)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low < index->body_count && index->braces[low] == brace ? index->bodies + low : 0;
+}
+
+BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+                                                    u32* expression_end)
+{
+    CIrTreeConditionals const* tree = builder->tree_conditionals;
+    u32 stripped_start = start;
+    u32 stripped_end = end;
+    while (stripped_start < stripped_end && c_token_is_punctuator(&builder->preprocess.tokens[stripped_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           !c_ir_group_is_statement_expression(builder, stripped_start, stripped_end) &&
+           c_ir_matching_delimiter_cached(builder, stripped_start, stripped_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) ==
+               stripped_end - 1)
+    {
+        stripped_start += 1;
+        stripped_end -= 1;
+    }
+    CIrTreeRootVerdict verdict = C_IR_TREE_ROOT_UNKNOWN;
+    CIrTreeConditional record = {0};
+    if (stripped_start < stripped_end && stripped_start >= builder->body_token_start &&
+        stripped_end - builder->body_token_start <= builder->body_token_count)
+    {
+        u32 low = 0;
+        u32 high = tree->question_count;
+        while (low < high)
+        {
+            u32 middle = low + (high - low) / 2;
+            low = tree->questions[middle] < stripped_start ? middle + 1 : low;
+            high = tree->questions[middle] < stripped_start ? high : middle;
+        }
+        if (low == tree->question_count || tree->questions[low] >= stripped_end)
+        {
+            verdict = C_IR_TREE_ROOT_FALSE;
+        }
+        else
+        {
+            low = 0;
+            high = tree->record_count;
+            while (low < high)
+            {
+                u32 middle = low + (high - low) / 2;
+                low = tree->records[middle].start < stripped_start ? middle + 1 : low;
+                high = tree->records[middle].start < stripped_start ? high : middle;
+            }
+            if (low < tree->record_count && tree->records[low].start == stripped_start)
+            {
+                record = tree->records[low];
+                bool refused = record.colon == record.question + 1 && !c_preprocess_dialect_is_gnu(builder->preprocess.dialect);
+                verdict = record.colon + 1 < stripped_end && !refused ? C_IR_TREE_ROOT_TRUE : C_IR_TREE_ROOT_UNKNOWN;
+            }
+        }
+    }
+    bool result;
+    if (verdict == C_IR_TREE_ROOT_UNKNOWN)
+    {
+        result = c_ir_root_conditional_scan(builder, start, end, expression_start, question, colon, expression_end);
+    }
+    else
+    {
+        result = verdict == C_IR_TREE_ROOT_TRUE;
+        if (result)
+        {
+            *expression_start = stripped_start;
+            *question = record.question;
+            *colon = record.colon;
+            *expression_end = stripped_end;
+        }
+#if BUSTER_REFERENCE_CHECKS
+        // The scan the tree replaces, kept as the reference.
+        u32 reference_start = 0;
+        u32 reference_question = 0;
+        u32 reference_colon = 0;
+        u32 reference_end = 0;
+        bool reference = c_ir_root_conditional_scan(builder, start, end, &reference_start, &reference_question, &reference_colon, &reference_end);
+        BUSTER_CHECK(reference == result);
+        BUSTER_CHECK(!result || (reference_start == stripped_start && reference_question == record.question && reference_colon == record.colon &&
+                                 reference_end == stripped_end));
+#endif
+    }
+    if (builder->ast_lower_statistics)
+    {
+        builder->ast_lower_statistics->answers += verdict == C_IR_TREE_ROOT_TRUE;
+        builder->ast_lower_statistics->negatives += verdict == C_IR_TREE_ROOT_FALSE;
+        builder->ast_lower_statistics->fallbacks += verdict == C_IR_TREE_ROOT_UNKNOWN;
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+                                               u32* expression_end)
+{
+    bool result = builder->tree_conditionals ? c_ir_tree_root_conditional(builder, start, end, expression_start, question, colon, expression_end)
+                                             : c_ir_root_conditional_scan(builder, start, end, expression_start, question, colon, expression_end);
+    return result;
 }
 
 BUSTER_C_INTERNAL void c_ir_expression_core_range(CIntegerIrBuilder* builder, u32* start_in_out, u32* end_in_out)
@@ -60645,7 +61099,8 @@ BUSTER_C_INTERNAL bool c_ir_function_scratch_tail_reservation(u64* position, u64
 
 BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
                                                              CIRLowerOptions options, CIrLowerCapacityPlan plan, Arena* temporary_arena,
-                                                             u64 function_reservation_limit)
+                                                             u64 function_reservation_limit, Arena* tree_arena, u32 tree_body_count,
+                                                             u32 tree_conditional_count)
 {
     CIRLowerResult result = {0};
     u32 type_capacity = plan.type_capacity;
@@ -60664,6 +61119,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     u32 label_candidate_count = label_candidates_valid ? parse.position_index->label_candidate_count : 0;
     u32 const* stream_matching_delimiters_plus_one =
         label_candidates_valid && parse.position_index->delimiter_mismatch_count == 0 ? parse.position_index->matching_delimiters_plus_one : 0;
+    CIrTreeConditionalIndex tree_conditionals = {0};
+    if (tree_arena)
+    {
+        tree_conditionals = c_ir_tree_conditionals_build(tree_arena, options.syntax_tree, &preprocess, stream_matching_delimiters_plus_one,
+                                                         tree_body_count, tree_conditional_count, options.ast_lower_statistics);
+    }
     CIrQueryMachine queries = {
         .frame_capacity = (u32)query_frame_capacity,
         .completed_capacity = (u32)query_frame_capacity,
@@ -63425,6 +63886,11 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .returns_void = signatures[declaration_index].returns_void,
             .returns_zero_at_end = signatures[declaration_index].returns_zero_at_end,
         };
+        if (tree_conditionals.body_count && declaration.body_start)
+        {
+            builder.tree_conditionals = c_ir_tree_conditionals_find(&tree_conditionals, declaration.body_start - 1);
+            builder.ast_lower_statistics = options.ast_lower_statistics;
+        }
         builder.lower_machine.frames = arena_allocate(lowering_temporary.arena, CIrLowerFrame, lower_frame_capacity);
         builder.locals = arena_allocate(lowering_temporary.arena, CIntegerIrLocal, local_array_capacity);
         builder.local_entities = arena_allocate(lowering_temporary.arena, u32, local_array_capacity);
@@ -63923,7 +64389,25 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         }
         if (fits)
         {
-            result = c_lower_to_ir_reserved_run(arena, source_path, preprocess, parse, target, options, plan, temporary_arena, function_reservation_limit);
+            // Under -fc-ast-pilot the tree's lowering index
+            // (c_ir_tree_conditionals_build) lives in an arena of its own for
+            // the call. Without a tree, or when that reservation is refused,
+            // lowering runs every scan.
+            u32 tree_body_count = 0;
+            u32 tree_conditional_count = 0;
+            u64 tree_size = options.syntax_tree ? c_ir_tree_conditionals_size(options.syntax_tree, &tree_body_count, &tree_conditional_count) : 0;
+            u64 tree_reservation = 0;
+            bool tree_sized = tree_body_count && align_forward_checked(arena_minimum_position + tree_size, BUSTER_KB(64), &tree_reservation);
+            Arena* tree_arena = tree_sized ? arena_create((ArenaCreation){.reserved_size = tree_reservation,
+                                                                          .initial_size = BUSTER_KB(64),
+                                                                          .flags = {.no_pool = true}})
+                                           : 0;
+            result = c_lower_to_ir_reserved_run(arena, source_path, preprocess, parse, target, options, plan, temporary_arena, function_reservation_limit,
+                                                tree_arena, tree_body_count, tree_conditional_count);
+            if (tree_arena)
+            {
+                arena_destroy(tree_arena, 1);
+            }
         }
         else
         {

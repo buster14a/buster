@@ -8,11 +8,13 @@ appends a complete syntax tree as it goes. The tree covers declarations and
 declarators, statements, expressions, initializers and designators,
 attributes, assembly and the supported GNU/C23 forms, function bodies
 included. **Status: pilot.** The default pipeline does not build it. The
-opt-in [driver hook](#driver-pilot-hook) builds it, and two consumers read it:
+opt-in [driver hook](#driver-pilot-hook) builds it, and three consumers read it:
 - the [declaration split](#declaration-split-from-the-tree) publishes
   `c_parse_ast`'s top-level records from its declaration nodes;
 - the [tree expression typer](#tree-expression-typer) answers function-body
-  and file-scope initializer expression-type queries during semantic analysis.
+  and file-scope initializer expression-type queries during semantic analysis;
+- [lowering](#lowering-from-the-tree) answers its root-conditional splits from
+  the conditional nodes.
 
 Otherwise `c_analyze_semantics_only` and `c_lower_to_ir_with_options` still
 rediscover syntax from token ranges, as described in the
@@ -274,7 +276,8 @@ which the unit releases when it ends. The driver then takes the unit's
 declaration records from `c_parse_ast_from_tree` in place of `c_parse_ast`
 ([declaration split](#declaration-split-from-the-tree)), and hands the tree to
 semantic analysis in `CParserResult.ast`, where the
-[tree expression typer](#tree-expression-typer) reads it; nothing else does.
+[tree expression typer](#tree-expression-typer) reads it, and to lowering in
+`CIRLowerOptions.syntax_tree` ([lowering from the tree](#lowering-from-the-tree)).
 With it the driver sets `CParserResult.type_interning`, which the typer's
 answers for casts and `&` need ([interned rows](#interned-rows)). The object,
 every diagnostic and every later stage are unchanged. The driver has no phase arena to lend (`c_preprocess` is not
@@ -283,7 +286,7 @@ not complete fails the unit with the parse error class; its diagnostic is
 published exactly as a `c_parse_ast` diagnostic is. `-E` and assembly inputs
 never reach the hook.
 
-Under `-v` the driver prints four rows with the other verbose counters:
+Under `-v` the driver prints five rows with the other verbose counters:
 
 - `C_AST nodes=<n> tokens=<parser tokens> build_ns=<c_ast_build wall time>
   retained_bytes=<> transient_high_water=<> column_copy_bytes=<>
@@ -303,9 +306,15 @@ Under `-v` the driver prints four rows with the other verbose counters:
   published> fallbacks=<units it handed to c_parse_ast's walker>
   reason=<CParserTreeFallback of the last fallback> fallback_token=<the first
   token of the declaration that caused it>`
+- `C_AST_LOWER bodies=<top-level function bodies lowering indexed>
+  conditionals=<conditional nodes in them> answers=<root-conditional queries
+  answered true from the tree> negatives=<queries answered false because the
+  range holds no `?`> fallbacks=<queries inside an indexed body handed to the
+  token scan>`
 
-The second row's passes run only under `-v`; they are diagnostic. The third
-and fourth rows count what the typer and the split did; they time nothing. Each feeds a
+The second row's passes run only under `-v`; they are diagnostic. The third,
+fourth and fifth rows count what the typer, the split and lowering did; they
+time nothing. The fifth is zero under `-fsyntax-only`, which does not lower. Each feeds a
 counter that is printed (`walk_steps`, `scan_calls`, `child_entries`), so the
 compiler cannot drop the measured loop. Both rows use the driver's own clock
 and are summed over the inputs of one invocation; the layout is the
@@ -812,7 +821,7 @@ differential tests pass.
 | `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Not migrated. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Not migrated. |
-| `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | Not migrated. |
+| `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | `c_ir_root_conditional` is read under `-fc-ast-pilot` ([lowering from the tree](#lowering-from-the-tree)); the rest is not migrated. |
 | `c_ir_predict_expression_type*`, `c_ir_query_*` | type-name probes, operand types over token ranges | `TYPE_NAME` / `CAST` / `SIZEOF_*` nodes plus retained semantic facts | Not migrated. |
 | `c_ir_build_delimiter_index`, `CTokenPositionIndex` matching delimiters | bracket matching for every structural query | subtree extents | Not migrated. |
 

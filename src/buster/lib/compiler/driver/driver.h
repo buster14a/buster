@@ -503,6 +503,9 @@ struct CompilerDriverCAstPilotResult
     // The declaration split read from the tree (c_parse_ast_from_tree):
     // records published, and units handed to the token walker and why.
     CParserTreeStatistics split;
+    // What lowering read from the tree (CAstLowerStatistics). Zero for
+    // -fsyntax-only and when lowering had no tree.
+    CAstLowerStatistics lower;
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;

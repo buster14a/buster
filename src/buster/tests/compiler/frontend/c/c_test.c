@@ -39963,6 +39963,86 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArgumen
     return result;
 }
 
+// Lowering's root-conditional splits read from the tree (-fc-ast-pilot,
+// GitHub #3102): every shape compiles to the same object as the token scan
+// gives, at `-g0` and `-g`. Debug and sanitized builds also check each tree
+// answer against the scan (BUSTER_REFERENCE_CHECKS). The shapes cover
+// conditions widened over parentheses, casts, prefix operators, calls and
+// label addresses; `:` before a parenthesized or cast else operand; chains in
+// either arm; GNU `?:`; and conditionals in calls, returns, initializers,
+// subscripts, statement expressions and `if` conditions. A conditional after a
+// root assignment or comma goes to the scan, and so does a nested function's
+// body, which the index does not hold.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("int g(int v) { return v + 1; }\n"
+                        "int h(int a, int b) { return a - b; }\n"
+                        "int f(int a, int b, int *p, unsigned char c)\n"
+                        "{\n"
+                        "    int r = a ? b : c;\n"
+                        "    r += (a) ? (b) : (c);\n"
+                        "    r += ((a + b)) ? ((r)) : (int)c;\n"
+                        "    r += (int)c ? -a : !b;\n"
+                        "    r += -a ? ~b : a ? b : c ? 1 : 2;\n"
+                        "    r += a ? b ? 3 : 4 : 5;\n"
+                        "    r += g(a) ? h(a ? b : c, b ? a : 0) : p[a ? 0 : 1];\n"
+                        "    r += a ?: b;\n"
+                        "    r += (a ?: (b ?: c));\n"
+                        "    r = a, r = b ? r : 0;\n"
+                        "    r += (a, b) ? 1 : 2;\n"
+                        "    r += ({ int t = a ? b : c; t ? t : 1; });\n"
+                        "    r += sizeof(a ? b : c) ? (int)sizeof(char) : 0;\n"
+                        "    if (a ? b : c) r += 1;\n"
+                        "    while (r > 100 ? 1 : 0) r -= 1;\n"
+                        "    void *target = a ? &&one : &&two;\n"
+                        "    goto *target;\n"
+                        "one:\n"
+                        "    r += 1;\n"
+                        "two:\n"
+                        "    r += (p ? *p : 0) + (p != 0 ? p[0] : -1);\n"
+                        "    {\n"
+                        "        int inner(int v) { return v ? v - 1 : (a ? b : 0); }\n"
+                        "        r += inner(a ? 1 : 0);\n"
+                        "    }\n"
+                        "    return a > b ? (r ? r : 1) : b > a ? -r : 0;\n"
+                        "}\n");
+    String8 debug[] = {S8("-g0"), S8("-g")};
+    TemporalArena temporary = scratch_begin(0, 0);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-tree-root-conditionals"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    for (u32 level = 0; level < BUSTER_ARRAY_LENGTH(debug); level += 1)
+    {
+        ByteSlice objects[2] = {0};
+        CompilerDriverResult compiled[2] = {0};
+        for (u32 pilot = 0; pilot < 2; pilot += 1)
+        {
+            String8 output = buster_test_temporary_path(arena, string_format(arena, S8("buster-tree-root-conditionals-{u32}-{u32}"), level, pilot),
+                                                        S8(".o"));
+            String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), debug[level], S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"),
+                                 output, input};
+            compiled[pilot] = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8){command + !pilot, BUSTER_ARRAY_LENGTH(command) - !pilot}));
+            BUSTER_TEST_RAW(arguments, compiled[pilot].error == COMPILER_DRIVER_ERROR_NONE, compiled[pilot].diagnostic);
+            objects[pilot] = compiled[pilot].error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
+        }
+        BUSTER_TEST_RAW(arguments,
+                        objects[0].length && objects[0].length == objects[1].length && memcmp(objects[0].pointer, objects[1].pointer, objects[0].length) == 0,
+                        string_format(arena, S8("{S8}: the pilot's object differs from the default's"), debug[level]));
+        CAstLowerStatistics lower = compiled[1].c_ast.lower;
+        BUSTER_TEST(arguments, compiled[0].c_ast.lower.bodies == 0 && compiled[0].c_ast.lower.answers == 0);
+        // g, h and f are indexed; inner is nested in f, so its own body is not.
+        BUSTER_TEST(arguments, lower.bodies == 3);
+        BUSTER_TEST(arguments, lower.conditionals >= 30);
+        BUSTER_TEST(arguments, lower.answers >= 20);
+        BUSTER_TEST(arguments, lower.negatives > 0);
+        BUSTER_TEST(arguments, lower.fallbacks > 0);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_expression_frames(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -61906,6 +61986,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_line_filename_escapes);
     C_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
     C_TEST_FIXTURE(arguments, c_test_type_interning_objects);
+    C_TEST_FIXTURE(arguments, c_test_tree_root_conditionals);
     C_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
     C_TEST_FIXTURE(arguments, c_test_local_label_declarations);
     C_TEST_FIXTURE(arguments, c_test_local_labels);
