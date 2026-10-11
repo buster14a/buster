@@ -12618,7 +12618,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                               });
     // Preprocessed input already completed phase one; synthesized spellings
     // and command definitions likewise lex with replacement disabled.
-    bool trigraphs = !options.already_preprocessed && c_translate_trigraphs_enabled(options.dialect);
+    bool trigraphs = !options.already_preprocessed && (options.trigraph_mode == C_TRIGRAPH_MODE_DIALECT ? c_translate_trigraphs_enabled(options.dialect)
+                                                                                                         : options.trigraph_mode == C_TRIGRAPH_MODE_ENABLED);
     CLexResult root_lex = c_source_cache_lex(arena, space, source, trigraphs, options.dialect, options.source_cache);
     CSourceMetricsFileSet metrics_files = {0};
     c_source_metrics_add(&result.detail->source_lexed, &root_lex.metrics);

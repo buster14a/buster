@@ -584,6 +584,15 @@ BUSTER_F_DECL void c_source_cache_clear(CSourceCache* cache);
 BUSTER_F_DECL void c_source_cache_destroy(CSourceCache* cache);
 BUSTER_F_DECL CSourceCacheStats c_source_cache_stats(CSourceCache const* cache);
 
+// Phase-one trigraph replacement: the dialect's default, or an explicit
+// -ftrigraphs/-fno-trigraphs override.
+typedef enum CTrigraphMode
+{
+    C_TRIGRAPH_MODE_DIALECT,
+    C_TRIGRAPH_MODE_ENABLED,
+    C_TRIGRAPH_MODE_DISABLED,
+} CTrigraphMode;
+
 typedef struct CPreprocessOptions CPreprocessOptions;
 struct CPreprocessOptions
 {
@@ -615,6 +624,7 @@ struct CPreprocessOptions
     u32 expansion_limit;
     u32 include_depth_limit;
     CPreprocessDialect dialect;
+    CTrigraphMode trigraph_mode;
     bool disable_external_includes;
     // GNU-as sources use `#` for line comments, so a `.S` run treats a `#`
     // line whose word is no known directive as a comment instead of an

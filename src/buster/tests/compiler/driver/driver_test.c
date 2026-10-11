@@ -1229,6 +1229,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
     BUSTER_TEST(arguments, dump_machine.error == COMPILER_DRIVER_ERROR_NONE && dump_machine.query == COMPILER_DRIVER_QUERY_DUMP_MACHINE);
     BUSTER_STRING_TEST(arguments, compiler_driver_query_text(arguments->arena, &dump_version), S8("18.0.0\n"));
     BUSTER_STRING_TEST(arguments, compiler_driver_query_text(arguments->arena, &dump_machine), S8("aarch64-linux-gnu\n"));
+    // -print-target-triple and -print-effective-triple print Clang's
+    // normalized spelling, with the vendor derived from the OS.
+    String8 triple_lines[][2] = {
+        {S8("-print-target-triple"), S8("--target=x86_64-linux-gnu")},
+        {S8("--target=aarch64-linux-android"), S8("-print-effective-triple")},
+        {S8("--target=x86_64-windows-msvc"), S8("-print-target-triple")},
+        {S8("--target=aarch64-apple-macos"), S8("-print-target-triple")},
+    };
+    String8 triple_texts[] = {S8("x86_64-unknown-linux-gnu\n"), S8("aarch64-unknown-linux-android\n"), S8("x86_64-unknown-windows-msvc\n"),
+                              S8("aarch64-apple-macos\n")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(triple_lines); index += 1)
+    {
+        CompilerDriverInvocation triple = compiler_driver_parse_arguments(arguments->arena, (SliceString8){.pointer = triple_lines[index], .length = 2});
+        BUSTER_TEST(arguments, triple.error == COMPILER_DRIVER_ERROR_NONE && triple.query == COMPILER_DRIVER_QUERY_TARGET_TRIPLE);
+        BUSTER_STRING_TEST(arguments, compiler_driver_query_text(arguments->arena, &triple), triple_texts[index]);
+    }
     String8 version_text = compiler_driver_query_text(arguments->arena, &version);
     BUSTER_TEST(arguments, string_starts_with_sequence(version_text, S8("Buster clang version 18.0.0")));
     BUSTER_TEST(arguments, string_first_sequence(version_text, S8("\nTarget: aarch64-linux-gnu\n")) != BUSTER_STRING_NO_MATCH);
@@ -1292,6 +1308,31 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
         BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(joined_language), &output, &error));
         BUSTER_TEST(arguments, string_first_sequence(output, S8("int avx = __AVX__;")) != BUSTER_STRING_NO_MATCH);
         (void)os_file_delete(source_path);
+    }
+    String8 trigraph_path = buster_test_temporary_path(arguments->arena, S8("driver-trigraphs"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(trigraph_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("x ?\?( y ?\?) z\n")))))
+    {
+        // The last of -std=, -trigraphs, -ftrigraphs and -fno-trigraphs wins,
+        // as in Clang's std-trigraph-override.c.
+        String8 trigraph_lines[][4] = {
+            {S8("-std=c99"), S8("-trigraphs"), S8("-std=gnu99"), S8("-E")},
+            {S8("-std=c99"), S8("-ftrigraphs"), S8("-std=gnu99"), S8("-E")},
+            {S8("-std=gnu99"), S8("-trigraphs"), S8("-E"), S8("-w")},
+            {S8("-std=c23"), S8("-ftrigraphs"), S8("-E"), S8("-w")},
+            {S8("-ftrigraphs"), S8("-std=c23"), S8("-E"), S8("-w")},
+            {S8("-std=c99"), S8("-fno-trigraphs"), S8("-E"), S8("-w")},
+            {S8("-fno-trigraphs"), S8("-std=c99"), S8("-E"), S8("-w")},
+        };
+        bool translated[] = {false, false, true, true, false, false, true};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(trigraph_lines); index += 1)
+        {
+            String8 command[] = {S8("-w"), trigraph_lines[index][0], trigraph_lines[index][1], trigraph_lines[index][2], trigraph_lines[index][3], trigraph_path};
+            String8 output = {0};
+            String8 error = {0};
+            BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(command), &output, &error));
+            BUSTER_TEST(arguments, string_first_sequence(output, translated[index] ? S8("x [ y ] z") : S8("x ?\?( y ?\?) z")) != BUSTER_STRING_NO_MATCH);
+        }
+        (void)os_file_delete(trigraph_path);
     }
 #endif
     return result;
@@ -23848,6 +23889,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_probe_spellings(UnitTest
     String8 nostdinc[] = {S8("-nostdinc"), S8("-nostdlib"), S8("-c"), S8("tests/basic_c_pic.c")};
     CompilerDriverInvocation nostdinc_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(nostdinc));
     BUSTER_TEST(arguments, nostdinc_invocation.error == COMPILER_DRIVER_ERROR_NONE && nostdinc_invocation.no_standard_includes);
+    // -nostdlibinc keeps at most the compiler resource directory.
+    String8 nostdlibinc[] = {S8("-nostdlibinc"), S8("-fsyntax-only"), S8("tests/basic_c_pic.c")};
+    CompilerDriverInvocation nostdlibinc_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(nostdlibinc));
+    BUSTER_TEST(arguments, nostdlibinc_invocation.error == COMPILER_DRIVER_ERROR_NONE && nostdlibinc_invocation.no_standard_library_includes);
+    BUSTER_TEST(arguments, nostdlibinc_invocation.system_include_path_count <= 1);
+    for (u32 index = 0; index < nostdlibinc_invocation.system_include_path_count; index += 1)
+    {
+        BUSTER_TEST(arguments, !string_equal(nostdlibinc_invocation.system_include_paths[index], S8("/usr/include")));
+    }
+    // -working-directory resolves relative inputs only; the last one wins and
+    // must name a directory.
+    String8 working_joined[] = {S8("-working-directory=/no/such/dir/"), S8("-working-directory=."), S8("-fsyntax-only"), S8("-x"), S8("c"), S8("basic_c_pic.c"), S8("-")};
+    CompilerDriverInvocation working = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(working_joined));
+    BUSTER_TEST(arguments, working.error == COMPILER_DRIVER_ERROR_NONE && working.input_count == 2);
+    BUSTER_STRING_TEST(arguments, working.input_paths[0], S8("./basic_c_pic.c"));
+    BUSTER_STRING_TEST(arguments, working.input_paths[1], S8("-"));
+    String8 working_separated[] = {S8("-working-directory"), S8("/"), S8("-fsyntax-only"), S8("/abs/input.c"), S8("input.c")};
+    CompilerDriverInvocation working_absolute = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(working_separated));
+    BUSTER_TEST(arguments, working_absolute.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_STRING_TEST(arguments, working_absolute.input_paths[0], S8("/abs/input.c"));
+    BUSTER_STRING_TEST(arguments, working_absolute.input_paths[1], S8("/input.c"));
+    String8 working_missing[] = {S8("-working-directory=/no/such/dir/"), S8("-fsyntax-only"), S8("tests/basic_c_pic.c")};
+    CompilerDriverInvocation missing_directory = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(working_missing));
+    BUSTER_TEST(arguments, missing_directory.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, missing_directory.diagnostic, S8("unable to set working directory: /no/such/dir/"));
+    String8 working_empty[] = {S8("-working-directory="), S8("tests/basic_c_pic.c")};
+    BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(working_empty)).error == COMPILER_DRIVER_ERROR_ARGUMENT);
 
     // The joined -x<lang> is the separated -x <lang>: same language names,
     // same positional effect, same refusal of an unknown one.

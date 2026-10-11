@@ -88,14 +88,16 @@ typedef enum CompilerDriverAction
     COMPILER_DRIVER_ACTION_COUNT,
 } CompilerDriverAction;
 
-// Informational queries answered without any input: --version, -dumpversion
-// and -dumpmachine. compiler_driver_query_text renders the text.
+// Informational queries answered without any input: --version, -dumpversion,
+// -dumpmachine and -print-target-triple/-print-effective-triple.
+// compiler_driver_query_text renders the text.
 typedef enum CompilerDriverQuery
 {
     COMPILER_DRIVER_QUERY_NONE,
     COMPILER_DRIVER_QUERY_VERSION,
     COMPILER_DRIVER_QUERY_DUMP_VERSION,
     COMPILER_DRIVER_QUERY_DUMP_MACHINE,
+    COMPILER_DRIVER_QUERY_TARGET_TRIPLE,
     COMPILER_DRIVER_QUERY_COUNT,
 } CompilerDriverQuery;
 
@@ -292,6 +294,12 @@ struct CompilerDriverInvocation
     CompilerDriverWarningPolicy warning_policy;
     CompilerDriverQuery query;
     bool no_standard_includes;
+    // -nostdlibinc keeps only the compiler resource include directory.
+    bool no_standard_library_includes;
+    // Last -std=, -trigraphs, -ftrigraphs or -fno-trigraphs wins.
+    CTrigraphMode trigraph_mode;
+    // -working-directory: relative input paths resolve against it.
+    String8 working_directory;
     bool debug_info;
     bool disable_direct_ssa;
     bool disable_local_promotion;
