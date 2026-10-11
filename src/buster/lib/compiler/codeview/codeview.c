@@ -17,12 +17,15 @@ enum
     // Match the MSVC/LLVM maximum including the four-byte record prefix.
     CODEVIEW_MAX_RECORD_SIZE = 0xff00,
     CODEVIEW_CONTINUATION_SIZE = 8,
-    // Largest S_DEFRANGE_* record emitted (S_DEFRANGE_SUBFIELD_REGISTER: the
-    // four-byte prefix plus 16 payload bytes), rounded up to a padded bound.
+    // Largest S_DEFRANGE_* record emitted (S_DEFRANGE_SUBFIELD_REGISTER and
+    // S_DEFRANGE_REGISTER_REL: the four-byte prefix plus 16 payload bytes),
+    // rounded up to a padded bound.
     CODEVIEW_DEFRANGE_RECORD_BYTES = 24,
     // S_DEFRANGE_* records carry a 16-bit range length; longer ranges are
     // emitted as consecutive records of at most this many bytes.
     CODEVIEW_DEFRANGE_MAX_LENGTH = 0xffff,
+    // S_DEFRANGE_REGISTER_REL keeps a member's offset in its parent in 12 bits.
+    CODEVIEW_REGISTER_REL_PARENT_LIMIT = 1u << 12,
 };
 
 enum
@@ -42,11 +45,10 @@ enum
     S_GDATA32 = 0x110d,
     S_OBJNAME = 0x1101,
     S_LOCAL = 0x113e,
-    S_DEFRANGE_SUBFIELD = 0x1140,
     S_LPROC32 = 0x110f,
     S_GPROC32 = 0x1110,
     S_DEFRANGE_REGISTER = 0x1141,
-    S_DEFRANGE_FRAMEPOINTER_REL = 0x1142,
+    S_DEFRANGE_REGISTER_REL = 0x1145,
     S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
     S_INLINESITE = 0x114d,
     S_INLINESITE_END = 0x114e,
@@ -370,6 +372,28 @@ BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_scope_variables(u64* c
     return true;
 }
 
+// FRAME offsets are normalized by codegen to RBP/X29, the same bases DWARF
+// uses. S_DEFRANGE_REGISTER_REL names that base explicitly: FRAMEPOINTER_REL
+// needs an S_FRAMEPROC record this producer does not emit, and DbgHelp and
+// RAD both drop it without one (#1440, #3411). `flags` carries the
+// spilledUdtMember bit and the 12-bit offset in the parent for a piece.
+BUSTER_GLOBAL_LOCAL void codeview_emit_frame_relative(ByteWriter* symbols, u16 machine, s32 frame_offset, u16 flags,
+                                                      CodeviewRelocation* relocations, u32* relocation_count, u64 relocation_capacity,
+                                                      u32 function_index, u32 start, u32 length)
+{
+    u64 record = codeview_record_begin(symbols, S_DEFRANGE_REGISTER_REL);
+    DebugRegister frame = machine == CODEVIEW_MACHINE_ARM64 ? DEBUG_REGISTER_AARCH64_X29 : DEBUG_REGISTER_X86_RBP;
+    u32 reg = debug_register_codeview_number((Target){.cpu_arch = (CpuArch)codeview_model_register_target(machine)}, frame);
+    symbols->overflow |= machine != CODEVIEW_MACHINE_X64 && machine != CODEVIEW_MACHINE_ARM64;
+    symbols->overflow |= reg == UINT32_MAX || reg > UINT16_MAX;
+    byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(reg, UINT16_MAX));
+    byte_writer_emit_u16_le(symbols, flags);
+    byte_writer_emit_u32_le(symbols, (u32)frame_offset);
+    codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, start);
+    byte_writer_emit_u16_le(symbols, (u16)length);
+    codeview_record_end(symbols, record);
+}
+
 BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(ByteWriter* symbols, DebugLocationRange* range, u32 function_offset, u16 machine,
                                                        u32 function_index, CodeviewRelocation* relocations, u32* relocation_count,
                                                        u64 relocation_capacity)
@@ -396,11 +420,8 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(ByteWriter* symbols, Debug
         }
         else if (range->location.kind == DEBUG_LOCATION_FRAME)
         {
-            u64 record = codeview_record_begin(symbols, S_DEFRANGE_FRAMEPOINTER_REL);
-            byte_writer_emit_u32_le(symbols, (u32)range->location.frame_offset);
-            codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, start);
-            byte_writer_emit_u16_le(symbols, (u16)length);
-            codeview_record_end(symbols, record);
+            codeview_emit_frame_relative(symbols, machine, range->location.frame_offset, 0, relocations, relocation_count,
+                                         relocation_capacity, function_index, start, length);
         }
         else if (range->location.kind == DEBUG_LOCATION_PIECEWISE)
         {
@@ -418,14 +439,13 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(ByteWriter* symbols, Debug
                     byte_writer_emit_u16_le(symbols, (u16)length);
                     codeview_record_end(symbols, record);
                 }
-                else if (piece->kind == DEBUG_LOCATION_FRAME)
+                else if (piece->kind == DEBUG_LOCATION_FRAME && piece->value_offset < CODEVIEW_REGISTER_REL_PARENT_LIMIT)
                 {
-                    u64 record = codeview_record_begin(symbols, S_DEFRANGE_SUBFIELD);
-                    byte_writer_emit_u32_le(symbols, 0);
-                    byte_writer_emit_u32_le(symbols, piece->value_offset);
-                    codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, start);
-                    byte_writer_emit_u16_le(symbols, (u16)length);
-                    codeview_record_end(symbols, record);
+                    // spilledUdtMember with the member's offset in its parent.
+                    // A member past the 12-bit field stays unavailable.
+                    u16 flags = (u16)(1u | piece->value_offset << 4);
+                    codeview_emit_frame_relative(symbols, machine, piece->frame_offset, flags, relocations, relocation_count,
+                                                 relocation_capacity, function_index, start, length);
                 }
             }
         }
@@ -786,9 +806,16 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(ByteWriter* types, DebugModel
         if (type->kind == DEBUG_TYPE_POINTER)
         {
             byte_writer_emit_u32_le(types, codeview_model_type_index(model, type->element_type));
-            // PointerKind 0x0c is the 64-bit near pointer used by both
-            // supported native CodeView targets.
-            byte_writer_emit_u32_le(types, 0x0c);
+            // PointerKind 0x0c is the near pointer used by both native
+            // targets; its six-bit size field preserves the model's bytes.
+            if (type->size && type->size <= 0x3f)
+            {
+                byte_writer_emit_u32_le(types, 0x0c | (u32)type->size << 13);
+            }
+            else
+            {
+                types->overflow = true;
+            }
         }
         else if (type->kind == DEBUG_TYPE_ARRAY || type->kind == DEBUG_TYPE_VECTOR)
         {
@@ -1091,14 +1118,19 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
                 byte_writer_emit_u32_le(&symbols, 0);
                 byte_writer_emit_u32_le(&symbols, 0);
                 u32 run_lines = 0;
+                u32 previous_line = 0;
                 while (line_cursor < input.line_count && input.lines[line_cursor].code_offset < function_end && input.lines[line_cursor].file == run_file)
                 {
                     DwarfLineEntry* entry = input.lines + line_cursor;
                     line_cursor += 1;
-                    if (!entry->line)
+                    // This contribution has no column table. Preserve one
+                    // range per contiguous file/line, rather than fragmenting
+                    // it when canonical source columns change within a line.
+                    if (!entry->line || entry->line == previous_line)
                     {
                         continue;
                     }
+                    previous_line = entry->line;
                     byte_writer_emit_u32_le(&symbols, entry->code_offset - function->code_offset);
                     byte_writer_emit_u32_le(&symbols, (entry->line & CODEVIEW_LINE_NUMBER_MASK) | CODEVIEW_LINE_STATEMENT);
                     run_lines += 1;

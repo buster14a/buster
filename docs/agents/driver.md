@@ -1762,6 +1762,18 @@ and a sparse type-index offset entry per 8 KiB of records. DbgHelp (cdb,
 WinDbg, `symchk`, `dbh`) faults with `0xc0000005` loading a PDB whose TPI
 stream names no hash stream (#3411). The regression is `pdb_test_tpi_hashes`.
 
+CodeView names a frame-resident location with `S_DEFRANGE_REGISTER_REL`
+against RBP (x86-64) or X29 (AArch64), the base codegen normalizes FRAME offsets
+to (`codeview_emit_frame_relative`). `S_DEFRANGE_FRAMEPOINTER_REL` is not used:
+it needs an `S_FRAMEPROC` record this producer does not emit, and cdb and RAD
+drop it without one. A frame-resident piece of a split variable uses the same
+record with the `spilledUdtMember` flag and its 12-bit offset in the parent; a
+piece past that offset stays unavailable. Consecutive line entries for one
+source line become one C13 row, so a `file:line` breakpoint resolves to a
+single range. Regressions: `codeview_test_long_location_range`,
+`codeview_test_line_ranges`, `codeview_test_pointer_sizes` and the CodeView
+consumer in `codegen_test_machine_debug_locations`.
+
 With `-g`, named scalar locals that need more than one defining instruction to
 describe stay in distinct frame slots, so their location lists follow stores
 through reassignment and control-flow joins. A frame location starts after its
